@@ -17,7 +17,10 @@ pub fn decode_tools(document: &Value) -> Result<Vec<Tool>, serde_json::Error> {
 ///
 /// # Errors
 /// Returns an error if serialization or SDK validation fails.
-pub fn structured_result(value: &Value, summary: &str) -> Result<CallToolResult, serde_json::Error> {
+pub fn structured_result(
+    value: &Value,
+    summary: &str,
+) -> Result<CallToolResult, serde_json::Error> {
     let mut result = CallToolResult::success(vec![ContentBlock::text(summary.to_owned())]);
     result.structured_content = Some(value.clone());
     Ok(result)
@@ -27,7 +30,9 @@ pub fn structured_result(value: &Value, summary: &str) -> Result<CallToolResult,
 ///
 /// # Errors
 /// Returns an SDK serialization error.
-pub fn error_result(error: &okf_jawn_contract::error::ApiError) -> Result<CallToolResult, serde_json::Error> {
+pub fn error_result(
+    error: &okf_jawn_contract::error::ApiError,
+) -> Result<CallToolResult, serde_json::Error> {
     let mut result = CallToolResult::error(vec![ContentBlock::text(error.message.clone())]);
     result.structured_content = Some(json!({"error":error}));
     Ok(result)

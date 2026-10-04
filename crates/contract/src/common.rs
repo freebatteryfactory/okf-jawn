@@ -7,8 +7,7 @@ use utoipa::ToSchema;
 /// An empty request object.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Empty {
-}
+pub struct Empty {}
 
 /// A bounded page request; the cursor is opaque and scoped to the query.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]

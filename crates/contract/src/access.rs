@@ -5,14 +5,17 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// How authenticated authority reached the application.
+///
+/// Local and hosted entry paths both resolve to one of these routes and share the same
+/// authorization rules; no route is granted authority because the connection is loopback.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessRoute {
-    /// Authenticated Explorer session.
+    /// Hosted Explorer session established through WorkOS AuthKit.
     BrowserSession,
-    /// Delegated external-agent connection.
+    /// External agent: a WorkOS Connect token when hosted, a local connector credential when local.
     McpDelegation,
-    /// Explicit trusted local-owner session.
+    /// The installation-local owner identity, authenticated through the local browser session.
     LocalOwner,
     /// Configured internal service identity.
     Service,
@@ -61,6 +64,71 @@ pub struct SessionResponse {
     pub principal: Principal,
     /// Browser writes require a same-origin anti-CSRF token.
     pub csrf_required: bool,
+}
+
+/// Issue a scoped credential for a local MCP client; read-only unless propose is enabled.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateConnectorRequest {
+    /// Owner-chosen name identifying the client, such as the host application.
+    pub label: String,
+    /// Workspaces the connector may read; each must already be accessible to the owner.
+    pub workspace_ids: Vec<crate::identity::WorkspaceId>,
+    /// Also grant proposal creation. Review and approval are never grantable to a connector.
+    pub allow_propose: bool,
+}
+
+/// A local MCP connector credential's scope, without its secret.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Connector {
+    /// Stable connector identity.
+    pub connector_id: crate::identity::ConnectorId,
+    /// Owner-chosen name.
+    pub label: String,
+    /// Workspaces the connector may access.
+    pub workspace_ids: Vec<crate::identity::WorkspaceId>,
+    /// Granted capabilities: `read`, plus `propose` only when enabled.
+    pub permissions: Vec<Permission>,
+    /// RFC 3339 issue time.
+    pub created_at: String,
+    /// RFC 3339 revocation time; a revoked connector authenticates nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<String>,
+}
+
+/// A newly issued connector and its secret, which is returned exactly once and never stored in plain text.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IssuedConnector {
+    /// The issued connector's scope.
+    pub connector: Connector,
+    /// Bearer secret for the MCP client's configuration.
+    pub secret: String,
+}
+
+/// List the installation's connector credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListConnectorsRequest {
+    /// Include revoked connectors for audit.
+    pub include_revoked: bool,
+}
+
+/// Connector scopes, without secrets.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListConnectorsResponse {
+    /// Matching connectors.
+    pub connectors: Vec<Connector>,
+}
+
+/// Revoke one connector credential immediately.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeConnectorRequest {
+    /// Connector to revoke.
+    pub connector_id: crate::identity::ConnectorId,
 }
 
 /// OAuth protected-resource metadata for external MCP clients.

@@ -9,13 +9,37 @@ use utoipa::ToSchema;
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Change {
     /// Create a note or View with retained properties.
-    Create { #[doc = "Path."] path: crate::identity::WorkspacePath, #[doc = "Type name."] type_name: String, #[doc = "Body."] body: String, #[doc = "Properties."] properties: std::collections::BTreeMap<String, serde_json::Value> },
+    Create {
+        #[doc = "Path."]
+        path: crate::identity::WorkspacePath,
+        #[doc = "Type name."]
+        type_name: String,
+        #[doc = "Body."]
+        body: String,
+        #[doc = "Properties."]
+        properties: std::collections::BTreeMap<String, serde_json::Value>,
+    },
     /// Replace authored content with preconditions.
-    Edit { #[doc = "Item id."] item_id: crate::identity::ItemId, #[doc = "Body."] body: String, #[doc = "Properties."] properties: std::collections::BTreeMap<String, serde_json::Value> },
+    Edit {
+        #[doc = "Item id."]
+        item_id: crate::identity::ItemId,
+        #[doc = "Body."]
+        body: String,
+        #[doc = "Properties."]
+        properties: std::collections::BTreeMap<String, serde_json::Value>,
+    },
     /// Move and rewrite links.
-    Move { #[doc = "Item id."] item_id: crate::identity::ItemId, #[doc = "Destination."] destination: crate::identity::WorkspacePath },
+    Move {
+        #[doc = "Item id."]
+        item_id: crate::identity::ItemId,
+        #[doc = "Destination."]
+        destination: crate::identity::WorkspacePath,
+    },
     /// Retire an item without deleting retained objects.
-    Archive { #[doc = "Item id."] item_id: crate::identity::ItemId },
+    Archive {
+        #[doc = "Item id."]
+        item_id: crate::identity::ItemId,
+    },
 }
 
 /// Lifecycle of a suggestion, not approval of a fact in it.

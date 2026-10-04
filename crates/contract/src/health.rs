@@ -7,8 +7,7 @@ use utoipa::ToSchema;
 /// Read liveness for a running process.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct HealthRequest {
-}
+pub struct HealthRequest {}
 
 /// Basic process metadata only.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -23,8 +22,7 @@ pub struct HealthResponse {
 /// Read configured dependency availability.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ReadinessRequest {
-}
+pub struct ReadinessRequest {}
 
 /// One configured dependency status.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]

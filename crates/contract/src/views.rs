@@ -128,8 +128,7 @@ pub struct ExportViewRequest {
 /// Read the approved component and action catalog for visual proposals.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct GetCatalogRequest {
-}
+pub struct GetCatalogRequest {}
 
 /// A renderer component with typed props and named supported actions.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]

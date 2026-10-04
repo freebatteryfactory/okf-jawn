@@ -8,19 +8,32 @@ use okf_jawn_contract::identity::WorkspaceId;
 ///
 /// # Errors
 /// Returns `Forbidden` for missing capabilities, inaccessible workspaces, or agent approval.
-pub fn authorize(principal: &Principal, permission: &Permission, workspace: Option<WorkspaceId>) -> Result<(), ApiError> {
+pub fn authorize(
+    principal: &Principal,
+    permission: &Permission,
+    workspace: Option<WorkspaceId>,
+) -> Result<(), ApiError> {
     let agent_overreach = principal.route == AccessRoute::McpDelegation
         && !matches!(permission, Permission::Read | Permission::Propose);
     let service_review = principal.route == AccessRoute::Service
         && matches!(permission, Permission::Approve | Permission::Review);
     if agent_overreach || service_review {
-        return Err(ApiError::new(ErrorCode::Forbidden, "This access route cannot perform the requested privileged action"));
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "This access route cannot perform the requested privileged action",
+        ));
     }
     if !principal.permissions.contains(permission) {
-        return Err(ApiError::new(ErrorCode::Forbidden, "Required capability is not granted"));
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "Required capability is not granted",
+        ));
     }
     if workspace.is_some_and(|id| !principal.workspace_ids.contains(&id)) {
-        return Err(ApiError::new(ErrorCode::NotFound, "Workspace is not available"));
+        return Err(ApiError::new(
+            ErrorCode::NotFound,
+            "Workspace is not available",
+        ));
     }
     Ok(())
 }

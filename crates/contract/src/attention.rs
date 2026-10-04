@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 pub enum AttentionKind {
     /// A reference does not resolve.
     BrokenLink,
-    /// stale_after requires checking.
+    /// `stale_after` requires checking.
     Stale,
     /// Agent-authored content has no covering review.
     Unreviewed,

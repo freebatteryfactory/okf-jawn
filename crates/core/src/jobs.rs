@@ -1,8 +1,12 @@
 //! Durable application work records are independent of queue delivery and telemetry.
 
-use okf_jawn_contract::{identity::{Digest, JobId, WorkspaceId}, import::Job,
-    review::Review, events::Receipt};
-use crate::ports::ApplicationFuture;
+use crate::ports::PortFuture;
+use okf_jawn_contract::{
+    events::Receipt,
+    identity::{Digest, JobId, WorkspaceId},
+    import::Job,
+    review::Review,
+};
 
 /// Lease identity prevents a late worker from completing a newer attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,26 +33,23 @@ pub struct JobCompletion {
 /// SQLite-backed non-rebuildable application records.
 pub trait RecordStore: Send + Sync {
     /// Insert work idempotently, conflicting if a key is reused with a different payload.
-    fn create_job<'a>(&'a self, job: Job, key: String, request_digest: Digest)
-        -> ApplicationFuture<'a, Job>;
+    fn create_job(&self, job: Job, key: String, request_digest: Digest) -> PortFuture<'_, Job>;
     /// Claim runnable work under a compare-and-set lease.
-    fn claim_job<'a>(&'a self, workspace: WorkspaceId, job: JobId)
-        -> ApplicationFuture<'a, Option<JobLease>>;
+    fn claim_job(&self, workspace: WorkspaceId, job: JobId) -> PortFuture<'_, Option<JobLease>>;
     /// Commit completion only for the current unexpired claim.
-    fn complete_job<'a>(&'a self, completion: JobCompletion) -> ApplicationFuture<'a, Job>;
+    fn complete_job(&self, completion: JobCompletion) -> PortFuture<'_, Job>;
     /// Keep the failure and retry eligibility for the current claim.
-    fn fail_job<'a>(&'a self, lease: JobLease, message: String, retryable: bool)
-        -> ApplicationFuture<'a, Job>;
+    fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job>;
     /// Enumerate unfinished records for queue reconciliation on restart.
-    fn pending_jobs<'a>(&'a self) -> ApplicationFuture<'a, Vec<Job>>;
+    fn pending_jobs(&self) -> PortFuture<'_, Vec<Job>>;
     /// Record exact reviewed content after application-level confirmation.
-    fn insert_review<'a>(&'a self, review: Review) -> ApplicationFuture<'a, Review>;
+    fn insert_review(&self, review: Review) -> PortFuture<'_, Review>;
     /// Persist what was returned, not merely a trace identifier.
-    fn insert_receipt<'a>(&'a self, receipt: Receipt) -> ApplicationFuture<'a, Receipt>;
+    fn insert_receipt(&self, receipt: Receipt) -> PortFuture<'_, Receipt>;
 }
 
-/// Delivery adapter; job truth remains in RecordStore.
+/// Delivery adapter; job truth remains in `RecordStore`.
 pub trait JobQueue: Send + Sync {
     /// Deliver an existing durable job identity, accepting possible duplicate delivery.
-    fn enqueue<'a>(&'a self, workspace: WorkspaceId, job: JobId) -> ApplicationFuture<'a, ()>;
+    fn enqueue(&self, workspace: WorkspaceId, job: JobId) -> PortFuture<'_, ()>;
 }

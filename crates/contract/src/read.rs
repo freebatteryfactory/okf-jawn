@@ -27,13 +27,25 @@ pub enum Selection {
     /// The complete source, subject to a visible response budget.
     All,
     /// Inclusive line range.
-    Lines { #[doc = "Range."] range: crate::common::TextRange },
+    Lines {
+        #[doc = "Range."]
+        range: crate::common::TextRange,
+    },
     /// Inclusive page range.
-    Pages { #[doc = "Range."] range: crate::common::PageRange },
+    Pages {
+        #[doc = "Range."]
+        range: crate::common::PageRange,
+    },
     /// Rectangular sheet range.
-    Cells { #[doc = "Range."] range: crate::common::CellRange },
+    Cells {
+        #[doc = "Range."]
+        range: crate::common::CellRange,
+    },
     /// An unambiguous heading identifier.
-    Section { #[doc = "Heading."] heading: String },
+    Section {
+        #[doc = "Heading."]
+        heading: String,
+    },
 }
 
 /// Read an item using an explicit representation and a single revision resolution.
@@ -51,8 +63,8 @@ pub struct ReadItemRequest {
     /// Section, range, or full source.
     pub selection: Selection,
     /// Response text budget; partial reads are marked and have continuation.
-    #[schemars(range(min = 256, max = 1048576))]
-    #[schema(minimum = 256, maximum = 1048576)]
+    #[schemars(range(min = 256, max = 1_048_576))]
+    #[schema(minimum = 256, maximum = 1_048_576)]
     pub max_bytes: u32,
     /// Maximum selected images.
     #[schemars(range(max = 16))]

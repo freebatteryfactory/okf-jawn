@@ -1,12 +1,11 @@
 //! Test-only response fixture for checking bindings; never linked into production.
 
-use std::collections::BTreeMap;
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_core::ports::{Application, PortFuture};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
-pub struct FixtureApplication { pub responses: BTreeMap<String, Value> }
 macro_rules! fixture_operations {
     ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal, $visibility:literal,
         $permission:ident, $ui:literal, $status:literal, $description:literal)),* $(,)?) => {
@@ -21,4 +20,9 @@ macro_rules! fixture_operations {
         }
     };
 }
+
+pub struct FixtureApplication {
+    pub responses: BTreeMap<String, Value>,
+}
+
 okf_jawn_contract::for_each_operation!(fixture_operations);

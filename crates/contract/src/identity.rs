@@ -13,20 +13,60 @@ use uuid::Uuid;
 macro_rules! uuid_id {
     ($name:ident, $description:literal) => {
         #[doc = $description]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema, ToSchema)]
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+            JsonSchema,
+            ToSchema,
+        )]
         #[serde(transparent)]
         pub struct $name(#[doc = "Underlying UUID."] pub Uuid);
     };
 }
-uuid_id!(WorkspaceId, "Stable application identity for one user-organized workspace.");
-uuid_id!(ItemId, "Stable item identity independent of its current relative path.");
-uuid_id!(UploadId, "Identity of one authenticated source upload occurrence.");
-uuid_id!(JobId, "Durable background work identity retained across retries.");
-uuid_id!(ProposalId, "Identity of a suggested change set, not a review.");
-uuid_id!(ReviewId, "Identity of an explicit revision-bound review action.");
-uuid_id!(ReceiptId, "Identity of a durable application operation record.");
-uuid_id!(ArtifactId, "Identity of a retained export or backup artifact.");
-
+uuid_id!(
+    WorkspaceId,
+    "Stable application identity for one user-organized workspace."
+);
+uuid_id!(
+    ItemId,
+    "Stable item identity independent of its current relative path."
+);
+uuid_id!(
+    UploadId,
+    "Identity of one authenticated source upload occurrence."
+);
+uuid_id!(
+    JobId,
+    "Durable background work identity retained across retries."
+);
+uuid_id!(
+    ProposalId,
+    "Identity of a suggested change set, not a review."
+);
+uuid_id!(
+    ReviewId,
+    "Identity of an explicit revision-bound review action."
+);
+uuid_id!(
+    ReceiptId,
+    "Identity of a durable application operation record."
+);
+uuid_id!(
+    ArtifactId,
+    "Identity of a retained export or backup artifact."
+);
+uuid_id!(
+    ConnectorId,
+    "Identity of one local MCP connector credential, never the owner's browser session."
+);
 
 /// A resolved Git commit, never a branch name or the string `latest`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema)]
@@ -64,19 +104,25 @@ pub enum At {
 pub struct IdentityError(pub &'static str);
 
 impl JsonSchema for Revision {
-    fn schema_name() -> std::borrow::Cow<'static, str> { "Revision".into() }
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Revision".into()
+    }
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({"type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"})
     }
 }
 impl JsonSchema for Digest {
-    fn schema_name() -> std::borrow::Cow<'static, str> { "Digest".into() }
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Digest".into()
+    }
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({"type": "string", "pattern": "^[0-9a-f]{64}$"})
     }
 }
 impl JsonSchema for WorkspacePath {
-    fn schema_name() -> std::borrow::Cow<'static, str> { "WorkspacePath".into() }
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "WorkspacePath".into()
+    }
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({"type": "string", "minLength": 1, "maxLength": 4096})
     }
@@ -84,17 +130,23 @@ impl JsonSchema for WorkspacePath {
 impl Revision {
     /// Return the canonical lower-case commit identifier.
     #[must_use]
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 impl Digest {
     /// Return the canonical lower-case SHA-256 identifier.
     #[must_use]
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 impl WorkspacePath {
     /// Return the validated slash-separated relative path.
     #[must_use]
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 impl TryFrom<String> for Revision {
     type Error = IdentityError;
@@ -102,7 +154,9 @@ impl TryFrom<String> for Revision {
         if matches!(value.len(), 40 | 64) && is_lower_hex(&value) {
             Ok(Self(value))
         } else {
-            Err(IdentityError("revision must be a complete lower-case Git commit hash"))
+            Err(IdentityError(
+                "revision must be a complete lower-case Git commit hash",
+            ))
         }
     }
 }
@@ -112,30 +166,77 @@ impl TryFrom<String> for Digest {
         if value.len() == 64 && is_lower_hex(&value) {
             Ok(Self(value))
         } else {
-            Err(IdentityError("digest must be 64 lower-case SHA-256 hex characters"))
+            Err(IdentityError(
+                "digest must be 64 lower-case SHA-256 hex characters",
+            ))
         }
     }
 }
 impl TryFrom<String> for WorkspacePath {
     type Error = IdentityError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        let invalid = value.is_empty() || value.len() > 4096 || value.contains('\\')
+        let invalid = value.is_empty()
+            || value.len() > 4096
+            || value.contains('\\')
             || value.chars().any(char::is_control)
-            || value.split('/').any(|part| part.is_empty() || part == "." || part == ".."
-                || part.eq_ignore_ascii_case(".git") || part.contains(':'));
-        if invalid { Err(IdentityError("path must be normalized, relative, and outside .git")) }
-        else { Ok(Self(value)) }
+            || value.split('/').any(|part| {
+                part.is_empty()
+                    || part == "."
+                    || part == ".."
+                    || part.eq_ignore_ascii_case(".git")
+                    || part.contains(':')
+            });
+        if invalid {
+            Err(IdentityError(
+                "path must be normalized, relative, and outside .git",
+            ))
+        } else {
+            Ok(Self(value))
+        }
     }
 }
-impl From<Revision> for String { fn from(value: Revision) -> Self { value.0 } }
-impl From<Digest> for String { fn from(value: Digest) -> Self { value.0 } }
-impl From<WorkspacePath> for String { fn from(value: WorkspacePath) -> Self { value.0 } }
-impl FromStr for Revision { type Err = IdentityError; fn from_str(value: &str) -> Result<Self, Self::Err> { Self::try_from(value.to_owned()) } }
-impl FromStr for Digest { type Err = IdentityError; fn from_str(value: &str) -> Result<Self, Self::Err> { Self::try_from(value.to_owned()) } }
-impl FromStr for WorkspacePath { type Err = IdentityError; fn from_str(value: &str) -> Result<Self, Self::Err> { Self::try_from(value.to_owned()) } }
-impl Display for IdentityError { fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) } }
+impl From<Revision> for String {
+    fn from(value: Revision) -> Self {
+        value.0
+    }
+}
+impl From<Digest> for String {
+    fn from(value: Digest) -> Self {
+        value.0
+    }
+}
+impl From<WorkspacePath> for String {
+    fn from(value: WorkspacePath) -> Self {
+        value.0
+    }
+}
+impl FromStr for Revision {
+    type Err = IdentityError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value.to_owned())
+    }
+}
+impl FromStr for Digest {
+    type Err = IdentityError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value.to_owned())
+    }
+}
+impl FromStr for WorkspacePath {
+    type Err = IdentityError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value.to_owned())
+    }
+}
+impl Display for IdentityError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
 impl std::error::Error for IdentityError {}
 
 fn is_lower_hex(value: &str) -> bool {
-    value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }

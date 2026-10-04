@@ -47,13 +47,20 @@ pub struct ApiError {
 }
 
 impl std::fmt::Display for ApiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.message) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 impl std::error::Error for ApiError {}
 impl ApiError {
     /// Construct a safe error without source-code details or credentials.
     #[must_use]
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), field: None, request_id: None }
+        Self {
+            code,
+            message: message.into(),
+            field: None,
+            request_id: None,
+        }
     }
 }

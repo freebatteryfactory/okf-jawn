@@ -25,7 +25,7 @@ pub struct Receipt {
     /// Optional diagnostic trace reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
-    /// agent_context or human_display; these are distinct.
+    /// `agent_context` or `human_display`; these are distinct.
     pub audience: String,
 }
 
@@ -47,7 +47,7 @@ pub struct Event {
     pub id: String,
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
-    /// Changed, imported, job_updated, reviewed, or proposal_updated.
+    /// Changed, imported, `job_updated`, reviewed, or `proposal_updated`.
     pub kind: String,
     /// Content revision when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]

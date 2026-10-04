@@ -4,11 +4,11 @@
 
 use std::sync::Arc;
 
-use axum::{Extension, Json, Router};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use axum::{Extension, Json, Router};
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_core::dispatch::dispatch;
@@ -44,11 +44,10 @@ fn error_response(error: ApiError) -> Response {
         ErrorCode::Unauthenticated => StatusCode::UNAUTHORIZED,
         ErrorCode::Forbidden => StatusCode::FORBIDDEN,
         ErrorCode::NotFound => StatusCode::NOT_FOUND,
-        ErrorCode::Conflict => StatusCode::CONFLICT,
+        ErrorCode::Conflict | ErrorCode::Cancelled => StatusCode::CONFLICT,
         ErrorCode::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         ErrorCode::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
         ErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-        ErrorCode::Cancelled => StatusCode::CONFLICT,
         ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, Json(error)).into_response()

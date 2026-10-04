@@ -1,9 +1,9 @@
 //! Semantic controls for serialization and validation; not whole-product acceptance.
 
-use std::error::Error;
 use okf_jawn_contract::identity::{At, Digest, Revision, WorkspacePath};
 use okf_jawn_contract::read::ReadItemRequest;
 use serde_json::json;
+use std::error::Error;
 
 #[test]
 fn revision_does_not_accept_a_selector() -> Result<(), Box<dyn Error>> {
@@ -18,10 +18,21 @@ fn revision_does_not_accept_a_selector() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn workspace_paths_reject_parent_and_git_traversal() -> Result<(), Box<dyn Error>> {
-    for path in ["../client", "/client", "a/../b", "a//b", "C:/docs", ".git/config", "a\\b"] {
+    for path in [
+        "../client",
+        "/client",
+        "a/../b",
+        "a//b",
+        "C:/docs",
+        ".git/config",
+        "a\\b",
+    ] {
         assert!(WorkspacePath::try_from(path.to_owned()).is_err(), "{path}");
     }
-    assert_eq!(WorkspacePath::try_from("Clients/one.md".to_owned())?.as_str(), "Clients/one.md");
+    assert_eq!(
+        WorkspacePath::try_from("Clients/one.md".to_owned())?.as_str(),
+        "Clients/one.md"
+    );
     Ok(())
 }
 
@@ -32,7 +43,10 @@ fn optional_cursor_is_omitted_or_null_without_changing_semantics() -> Result<(),
         "view":"text", "selection":{"kind":"all"}, "max_bytes":4096,"max_images":0});
     let missing: ReadItemRequest = serde_json::from_value(raw.clone())?;
     let mut explicit = raw;
-    explicit.as_object_mut().ok_or("fixture must be object")?.insert("cursor".to_owned(), serde_json::Value::Null);
+    explicit
+        .as_object_mut()
+        .ok_or("fixture must be object")?
+        .insert("cursor".to_owned(), serde_json::Value::Null);
     let nullable: ReadItemRequest = serde_json::from_value(explicit)?;
     assert_eq!(missing.cursor, nullable.cursor);
     assert!(serde_json::to_value(missing)?.get("cursor").is_none());

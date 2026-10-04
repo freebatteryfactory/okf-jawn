@@ -74,7 +74,7 @@ pub struct ListReviewsResponse {
 pub struct CreateConfirmationRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
-    /// review or accept_proposal; not an arbitrary method.
+    /// review or `accept_proposal`; not an arbitrary method.
     pub action: String,
     /// Item or proposal identity.
     pub target_id: String,

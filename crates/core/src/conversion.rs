@@ -1,9 +1,13 @@
 //! Conversion returns structural artifacts and locators while retaining original bytes.
 
+use crate::{ports::PortFuture, storage::LocalSource};
+use okf_jawn_contract::{
+    common::Warning,
+    identity::Digest,
+    read::{OutlineEntry, Selection},
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use okf_jawn_contract::{common::Warning, identity::Digest, read::{OutlineEntry, Selection}};
-use crate::{ports::ApplicationFuture, storage::LocalSource};
 
 /// Explicit converter settings participate in the derivative cache key.
 #[derive(Debug, Clone)]
@@ -49,5 +53,5 @@ pub struct ConversionResult {
 /// Bounded worker execution backed by the selected conversion library.
 pub trait Converter: Send + Sync {
     /// Convert with cancellation and resource bounds supplied by the worker supervisor.
-    fn convert<'a>(&'a self, request: ConversionRequest) -> ApplicationFuture<'a, ConversionResult>;
+    fn convert(&self, request: ConversionRequest) -> PortFuture<'_, ConversionResult>;
 }

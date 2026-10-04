@@ -18,3 +18,5 @@ disallowed-methods = [
 # Tests use ordinary assertions; application behavior must return structured errors.
 
 too-many-lines-threshold = 100
+# Product names written as prose; ".." keeps Clippy's default list. Code identifiers still need backticks.
+doc-valid-idents = ["WorkOS", "AuthKit", "OpenAPI", ".."]
