@@ -1,0 +1,12 @@
+/target/
+/node_modules/
+/ui/node_modules/
+/ui/dist/
+/ui/dist-apps/
+/.artifacts/
+/.env
+/.env.*
+!/.env.example
+/deploy/.env
+/data/
+*.log

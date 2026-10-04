@@ -1,0 +1,105 @@
+[workspace]
+resolver = "3"
+members = ["crates/contract", "crates/core", "crates/storage", "crates/ingest", "crates/server", "crates/mcp", "crates/cli", "xtask"]
+default-members = ["crates/contract", "crates/core", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.0"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+axum = { version = "=0.8.9" }
+tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "signal", "io-std", "io-util", "process", "time", "sync"] }
+tokio-util = { version = "=0.7.19" }
+tower = { version = "=0.5.3" }
+tower-http = { version = "=0.7.1" }
+utoipa = { version = "=6.0.0", features = ["uuid", "yaml"] }
+utoipa-axum = { version = "=0.3.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.151" }
+schemars = { version = "=1.2.2", features = ["uuid1"] }
+thiserror = { version = "=2.0.21" }
+rmcp = { version = "=3.5.0", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+okf = { version = "=0.2.7" }
+docling = { version = "=1.89.0" }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+rusqlite_migration = { version = "=2.6.0" }
+git2 = { version = "=0.21.0", default-features = false, features = ["vendored-libgit2"] }
+object_store = { version = "=0.14.2", default-features = false }
+bytes = { version = "=1.12.1" }
+uuid = { version = "=1.27.0", features = ["serde", "v4"] }
+time = { version = "=0.3.55" }
+url = { version = "=2.5.8" }
+workos = { version = "=3.3.0" }
+notify = { version = "=8.2.0" }
+directories = { version = "=6.0.0" }
+open = { version = "=5.4.4" }
+clap = { version = "=4.6.7", features = ["derive", "env", "string"] }
+unicode-normalization = { version = "=0.1.25" }
+convert_case = { version = "=0.12.0" }
+regex = { version = "=1.13.1" }
+yaml_serde = { version = "=0.10.7" }
+jsonschema = { version = "=0.58.5", default-features = false }
+zip = { version = "=8.6.0" }
+calamine = { version = "=0.36.1" }
+csv = { version = "=1.4.0" }
+cap-std = { version = "=4.0.3" }
+infer = { version = "=0.22.0" }
+tempfile = { version = "=3.27.0" }
+walkdir = { version = "=2.5.0" }
+tracing = { version = "=0.1.44" }
+tracing-subscriber = { version = "=0.3.23" }
+opentelemetry = { version = "=0.33.0" }
+opentelemetry_sdk = { version = "=0.33.0" }
+opentelemetry-otlp = { version = "=0.33.0" }
+tracing-opentelemetry = { version = "=0.34.0" }
+syn = { version = "=3.0.6", features = ["full", "visit"] }
+cargo_metadata = { version = "=0.23.1" }
+insta = { version = "=1.48.0" }
+proptest = { version = "=1.11.0" }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
+sha2 = { version = "=0.10.9" }
+base64 = { version = "=0.22.1" }
+
+clap_complete = "=4.6.11"
+clap_mangen = "=0.3.3"
+
+# Workspace fragment. Each authored member needs [lints] workspace = true.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+unused_must_use = "deny"
+unfulfilled_lint_expectations = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+arithmetic_side_effects = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+arbitrary_source_item_ordering = "deny"
+items_after_test_module = "deny"
+# Intentional: do not enable the entire restriction group.
+# The small AST policy check rejects allow/expect/cfg_attr suppression in authored source.
+# This is NOT a proof of no possible panics in dependencies or the runtime.
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+overflow-checks = true

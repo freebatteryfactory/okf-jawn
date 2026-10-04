@@ -1,0 +1,27 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+okf-jawn-contract = { path = "../crates/contract" }
+okf-jawn-cli = { path = "../crates/cli" }
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+utoipa.workspace = true
+yaml_serde.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+clap_mangen.workspace = true
+syn.workspace = true
+jsonschema.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

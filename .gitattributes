@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
+ui/src/api/generated/** linguist-generated=true
+ui/src/routeTree.gen.ts linguist-generated=true
+api/** linguist-generated=true

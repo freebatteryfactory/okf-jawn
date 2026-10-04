@@ -1,0 +1,48 @@
+name: Source and foundation diagnostics
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  source-tooling:
+    name: Dependency-free source tooling, not product acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.21.0
+      - run: node scripts/dev.mjs check-offline
+  foundation:
+    name: Actual pinned generators and consumers
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.21.0
+      - name: Select the exact toolchain
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+          npm install --global pnpm@12.8.1
+      - run: node scripts/dev.mjs bootstrap
+      - run: node scripts/dev.mjs foundation
+      - run: node scripts/dev.mjs check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: resolved-foundation
+          if-no-files-found: error
+          path: |
+            Cargo.lock
+            pnpm-lock.yaml
+            api/
+            generated/cli/
+            ui/src/api/generated/
+            ui/dist/
+            ui/dist-apps/

@@ -1,0 +1,33 @@
+[package]
+name = "okf-jawn-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+okf-jawn-contract = { path = "../contract" }
+okf-jawn-core = { path = "../core" }
+
+# Resolve the complete intended integration graph without making code generation
+# link native conversion/storage libraries. The runtime implementations are not present yet.
+git2 = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+rusqlite_migration = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
+okf = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+yaml_serde = { workspace = true, optional = true }
+cap-std = { workspace = true, optional = true }
+directories = { workspace = true, optional = true }
+
+[features]
+default = []
+runtime = ["dep:git2", "dep:rusqlite", "dep:rusqlite_migration", "dep:object_store", "dep:okf", "dep:sha2", "dep:bytes", "dep:tokio", "dep:serde_json", "dep:yaml_serde", "dep:cap-std", "dep:directories"]

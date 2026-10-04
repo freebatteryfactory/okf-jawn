@@ -1,0 +1,36 @@
+[package]
+name = "okf-jawn-ingest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+okf-jawn-contract = { path = "../contract" }
+okf-jawn-core = { path = "../core" }
+
+# Resolve the complete intended integration graph without making code generation
+# link native conversion/storage libraries. The runtime implementations are not present yet.
+docling = { workspace = true, optional = true }
+okf = { workspace = true, optional = true }
+calamine = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+csv = { workspace = true, optional = true }
+infer = { workspace = true, optional = true }
+unicode-normalization = { workspace = true, optional = true }
+convert_case = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+
+[features]
+default = []
+runtime = ["dep:docling", "dep:okf", "dep:calamine", "dep:zip", "dep:csv", "dep:infer", "dep:unicode-normalization", "dep:convert_case", "dep:regex", "dep:sha2", "dep:tokio", "dep:tokio-util", "dep:serde_json", "dep:tempfile", "dep:bytes"]

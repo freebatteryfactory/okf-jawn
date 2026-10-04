@@ -1,0 +1,30 @@
+# Deployment configuration for the completed server, not a currently runnable app.
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: application
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:?Set a digest-pinned Node image}
+        RUST_IMAGE: ${RUST_IMAGE:?Set a digest-pinned Rust image}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:?Set a qualified digest-pinned runtime image}
+    env_file: ../.env
+    environment:
+      OKF_BIND: 0.0.0.0:7711
+      OKF_DATA_DIR: /data
+      OKF_AUTH_MODE: workos
+      WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:?Configure WorkOS}
+      WORKOS_ISSUER: ${WORKOS_ISSUER:?Configure the WorkOS issuer}
+      WORKOS_MCP_RESOURCE: ${WORKOS_MCP_RESOURCE:?Configure the MCP Resource Indicator}
+      WORKOS_REDIRECT_URI: ${WORKOS_REDIRECT_URI:?Configure the browser callback}
+    ports:
+      - "127.0.0.1:7711:7711"
+    volumes:
+      - okf-data:/data
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  okf-data:

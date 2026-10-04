@@ -1,0 +1,784 @@
+{
+  "schema_version": 1,
+  "project": "okf-jawn",
+  "scope": "Offline navigation notes and exact lookup instructions, not a licensed mirror of vendor documentation or a compatibility certification.",
+  "context7_queries_executed": 3,
+  "vendors": [
+    {
+      "name": "utoipa",
+      "use_sites": [
+        "xtask/src/api.rs",
+        "crates/contract/src"
+      ],
+      "official_sources": [
+        "https://docs.rs/utoipa/6.0.0/utoipa/",
+        "https://github.com/juhaku/utoipa/blob/master/utoipa/README.md"
+      ],
+      "symbols": [
+        "ToSchema::schemas",
+        "PartialSchema::schema",
+        "OpenApiBuilder",
+        "ComponentsBuilder",
+        "PathItem"
+      ],
+      "context7_library_id": "/juhaku/utoipa",
+      "context7_query": "Construct a standalone OpenAPI document with OpenApiBuilder, PathsBuilder, OperationBuilder, RequestBodyBuilder, ContentBuilder and ComponentsBuilder; API generation independent of runtime handlers.",
+      "knowledge_source": "Context7 query and official API documentation",
+      "offline_notes": [
+        "API generation must compile independently of runtime storage and UI.",
+        "The canonical operation table is authored Rust. The generated OpenAPI is the public interchange artifact.",
+        "References collected from request and response types are checked for conflicting component names; do not silently replace them."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "schemars",
+      "use_sites": [
+        "xtask/src/api.rs",
+        "crates/core/src/dispatch.rs"
+      ],
+      "official_sources": [
+        "https://graham.cool/schemars/generating/",
+        "https://docs.rs/schemars/1.2.2/schemars/generate/struct.SchemaSettings.html"
+      ],
+      "symbols": [
+        "SchemaSettings::draft2020_12",
+        "SchemaSettings::draft07",
+        "SchemaSettings::for_serialize",
+        "into_root_schema_for"
+      ],
+      "context7_library_id": "/gresau/schemars",
+      "context7_query": "Generate serialization versus deserialization schemas, explicit dialects and Serde defaults using SchemaSettings and into_root_schema_for.",
+      "knowledge_source": "Context7 query and official API documentation",
+      "offline_notes": [
+        "Request schemas describe deserialization. Response schemas describe serialization.",
+        "Forms use Draft 7 for the default RJSF AJV adapter; protocol schemas use Draft 2020-12.",
+        "Serde defaults and omitted nullable fields need semantic fixtures, not text equality between schema generators."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "hey-api",
+      "use_sites": [
+        "ui/openapi-ts.config.ts",
+        "ui/src/api/generated"
+      ],
+      "official_sources": [
+        "https://heyapi.dev/openapi-ts/configuration/input",
+        "https://heyapi.dev/openapi-ts/configuration/parser",
+        "https://heyapi.dev/openapi-ts/plugins/tanstack-query",
+        "https://github.com/hey-api/hey-api"
+      ],
+      "symbols": [
+        "defineConfig",
+        "@hey-api/client-fetch",
+        "@hey-api/sdk",
+        "zod",
+        "parser.hooks.operations.getKind"
+      ],
+      "context7_library_id": "/hey-api/hey-api",
+      "context7_query": "Local OpenAPI input with Fetch SDK, Zod request/response validators, operationId naming and TanStack Query queryOptions/mutationOptions.",
+      "knowledge_source": "Context7 query and official API documentation",
+      "offline_notes": [
+        "Read-only JSON operations use POST. Classify query operations explicitly from generated permission metadata; HTTP method is not our semantics.",
+        "SDK functions use grouped body/path/query inputs; do not assume an ergonomic flat call signature.",
+        "The generator runs from the lockfile-installed package. Never hand-author generated client output."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "jsonschema",
+      "use_sites": [
+        "crates/core/src/dispatch.rs",
+        "xtask/tests"
+      ],
+      "official_sources": [
+        "https://docs.rs/jsonschema/0.58.5/jsonschema/"
+      ],
+      "symbols": [
+        "validator_for",
+        "Validator::validate"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Cache compiled validators for trusted generated schemas.",
+        "Custom user schemas must reject or constrain remote references before validation; do not allow arbitrary URL fetching.",
+        "Runtime cross-field semantics and workspace authorization remain application responsibilities."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "rmcp",
+      "use_sites": [
+        "crates/mcp/src",
+        "tests/integration/mcp-wire.mjs"
+      ],
+      "official_sources": [
+        "https://docs.rs/rmcp/3.5.0/rmcp/",
+        "https://docs.rs/rmcp/3.5.0/rmcp/model/struct.CallToolResult.html",
+        "https://github.com/modelcontextprotocol/rust-sdk"
+      ],
+      "symbols": [
+        "ServerHandler",
+        "CallToolResult::success",
+        "CallToolResult::error",
+        "CallToolResult::with_meta",
+        "CallToolResponse"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Use SDK result constructors; the selected release adds resultType handling.",
+        "The source currently contains tool/result adapters, not a completed MCP server.",
+        "Model-facing and app-only tools have separate visibility; server authorization still applies to both."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "mcp-apps",
+      "use_sites": [
+        "ui/src/mcp-apps",
+        "ui/scripts/bundle-app.mjs"
+      ],
+      "official_sources": [
+        "https://modelcontextprotocol.io/docs/extensions/apps",
+        "https://github.com/modelcontextprotocol/ext-apps",
+        "https://github.com/modelcontextprotocol/ext-apps/tree/main/examples/pdf-server"
+      ],
+      "symbols": [
+        "useApp",
+        "app.ontoolresult",
+        "app.callServerTool",
+        "ui://",
+        "_meta.ui.resourceUri"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Reuse the same feature components inside the Explorer and the host iframe.",
+        "Actual host support and visual behavior require tests in the chosen host; a returned HTML resource is not proof of rendering.",
+        "App-only read_object fetches are still workspace scoped; never assume a URI itself grants permission."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "json-render",
+      "use_sites": [
+        "ui/src/features/views",
+        "ui/scripts/catalog-entry.ts"
+      ],
+      "official_sources": [
+        "https://json-render.dev/docs/catalog",
+        "https://json-render.dev/docs/api/core",
+        "https://json-render.dev/docs/api/react",
+        "https://github.com/vercel-labs/json-render"
+      ],
+      "symbols": [
+        "defineCatalog",
+        "catalog.jsonSchema",
+        "catalog.validate",
+        "defineRegistry",
+        "Renderer"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "The catalog is authored once in TypeScript and exported by a real vendor-backed build.",
+        "Do not install @json-render/mcp automatically: its SDK dependency line was incompatible with the selected MCP Apps major during research.",
+        "Source components take binding keys, not model-authored quotes or authoritative numeric values."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "vega",
+      "use_sites": [
+        "ui/src/features/views/Chart.tsx"
+      ],
+      "official_sources": [
+        "https://vega.github.io/vega/usage/interpreter/",
+        "https://vega.github.io/vega-lite/docs/",
+        "https://github.com/vega/vega-embed"
+      ],
+      "symbols": [
+        "embed",
+        "expressionInterpreter",
+        "loader",
+        "result.finalize"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Use an expression interpreter under strict CSP rather than unsafe-eval.",
+        "Resolve named data through authenticated application bindings, prohibit external data URLs, and release views on unmount.",
+        "A saved view pins source revisions and digest identities; optional live mode reports every resolution."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "rjsf",
+      "use_sites": [
+        "ui/src/features/conventions/RulesForm.tsx"
+      ],
+      "official_sources": [
+        "https://rjsf-team.github.io/react-jsonschema-form/docs/",
+        "https://rjsf-team.github.io/react-jsonschema-form/docs/usage/validation/"
+      ],
+      "symbols": [
+        "Form",
+        "validator-ajv8",
+        "RJSFSchema"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Default AJV adapter expects Draft 7. Generated form schemas explicitly use that dialect.",
+        "The human form and YAML editor share NamingRules and server validation; neither becomes a second rule engine."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "vite-react",
+      "use_sites": [
+        "ui/vite.config.ts",
+        "ui/scripts"
+      ],
+      "official_sources": [
+        "https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react",
+        "https://vite.dev/guide/",
+        "https://react.dev/learn/react-compiler"
+      ],
+      "symbols": [
+        "reactCompilerPreset",
+        "@rolldown/plugin-babel",
+        "react",
+        "defineConfig"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Selected Vite 8 configuration uses the documented Rolldown Babel compiler preset.",
+        "Do not copy an old babel property into the React plugin without checking the selected major.",
+        "Node is a development/build dependency, not an application server runtime."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "tanstack",
+      "use_sites": [
+        "ui/src/routes",
+        "ui/src/api",
+        "ui/vite.config.ts"
+      ],
+      "official_sources": [
+        "https://tanstack.com/router/latest/docs/framework/react/guide/search-params",
+        "https://tanstack.com/query/latest/docs/framework/react/guides/query-keys"
+      ],
+      "symbols": [
+        "createFileRoute",
+        "TanStackRouterVite",
+        "QueryClient",
+        "queryOptions"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Router owns URL state; Query owns server cache; Zustand only ephemeral UI state.",
+        "Include source revision, representation and range in cache identity.",
+        "The route tree is generator output; feature routes remain authored."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "clap",
+      "use_sites": [
+        "crates/cli/src/lib.rs",
+        "xtask/src/main.rs"
+      ],
+      "official_sources": [
+        "https://docs.rs/clap/4.6.7/clap/",
+        "https://docs.rs/clap_complete/4.6.11/clap_complete/",
+        "https://docs.rs/clap_mangen/0.3.3/clap_mangen/"
+      ],
+      "symbols": [
+        "Command",
+        "try_get_matches",
+        "generate_to"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "CLI commands consume the same operation table and offer UI vocabulary as aliases.",
+        "Completions and man pages are emitted by vendor libraries through xtask, not handwritten.",
+        "The CLI is an HTTP client, not an independent mutable repository opener."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "rust-clippy",
+      "use_sites": [
+        "Cargo.toml",
+        "clippy.toml",
+        "xtask/src/source_policy.rs"
+      ],
+      "official_sources": [
+        "https://rust-lang.github.io/rust-clippy/stable/index.html",
+        "https://doc.rust-lang.org/cargo/reference/workspaces.html#the-lints-table"
+      ],
+      "symbols": [
+        "arbitrary_source_item_ordering",
+        "items_after_test_module",
+        "arithmetic_side_effects",
+        "workspace.lints"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Forbid authored unsafe code and suppression attributes.",
+        "Lint policies do not prove that dependencies cannot panic or that behavior is correct.",
+        "Do not change lints to make this uncompiled foundation green; fix actual diagnostics or seek a policy decision."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "axum",
+      "use_sites": [
+        "crates/server/src/lib.rs"
+      ],
+      "official_sources": [
+        "https://docs.rs/axum/0.8.9/axum/"
+      ],
+      "symbols": [
+        "Router",
+        "State",
+        "Extension",
+        "Json",
+        "DefaultBodyLimit"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Routes invoke an injected Application port; no storage instance is needed to construct the router.",
+        "Principal must be populated by authenticated middleware, never accepted from request JSON.",
+        "Raw uploads, downloads, SSE, OAuth routes and MCP require the explicit transport bindings in the contract."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "workos",
+      "use_sites": [
+        "crates/server/AGENTS.md",
+        "deploy/.env.example"
+      ],
+      "official_sources": [
+        "https://workos.com/docs/authkit/mcp",
+        "https://workos.com/docs/authkit/connect",
+        "https://workos.com/docs/authkit/sessions",
+        "https://docs.rs/workos/3.3.0/workos/"
+      ],
+      "symbols": [
+        "try_build",
+        "Resource Indicator",
+        "JWKS",
+        "Connect",
+        "AuthKit sessions"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "WorkOS handles identity and delegated authorization; the app verifies audience/issuer and enforces workspace permissions.",
+        "An agent token for a human subject does not establish a human review.",
+        "Browser sessions and delegated MCP credentials are distinct integrations; no Cloudflare fallback is part of this build."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "okf",
+      "use_sites": [
+        "crates/storage/AGENTS.md",
+        "crates/ingest/AGENTS.md"
+      ],
+      "official_sources": [
+        "https://github.com/GoogleCloudPlatform/open-knowledge-format",
+        "https://docs.rs/okf/0.2.7/okf/"
+      ],
+      "symbols": [
+        "bundle",
+        "relocate",
+        "link graph",
+        "index",
+        "semantic diff"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Use the selected crate for format operations after qualifying its exact API.",
+        "Preserve unknown frontmatter fields. Do not turn format conformance into factual approval.",
+        "Source occurrence identity is independent from blob content identity."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "docling",
+      "use_sites": [
+        "crates/ingest/AGENTS.md",
+        "crates/core/src/conversion.rs"
+      ],
+      "official_sources": [
+        "https://github.com/docling-project/docling.rs",
+        "https://docs.rs/docling/1.89.0/docling/"
+      ],
+      "symbols": [
+        "DocumentConverter",
+        "conversion options",
+        "page provenance",
+        "Markdown export"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Converter API and native/model assets still need an executed qualification.",
+        "Retain originals; record converter version/settings and keep human corrections separate.",
+        "Run heavy conversion with resource limits and cancellation; code must not download models silently during an ordinary read."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "git2",
+      "use_sites": [
+        "crates/storage/AGENTS.md",
+        "crates/core/src/storage.rs"
+      ],
+      "official_sources": [
+        "https://docs.rs/git2/0.21.0/git2/",
+        "https://libgit2.org/docs/reference/"
+      ],
+      "symbols": [
+        "Repository",
+        "Index",
+        "Commit",
+        "Tree",
+        "Diff",
+        "merge"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Storage implements core-owned version operations.",
+        "Restore creates a new snapshot without erasing history; merging document edits is not business-decision approval.",
+        "Handle conflicts and repository cleanup explicitly; do not expose raw conflict markers as finished content."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "sqlite",
+      "use_sites": [
+        "crates/storage/AGENTS.md",
+        "crates/core/src/jobs.rs"
+      ],
+      "official_sources": [
+        "https://docs.rs/rusqlite/0.40.2/rusqlite/",
+        "https://www.sqlite.org/transactional.html"
+      ],
+      "symbols": [
+        "Transaction",
+        "prepare_cached",
+        "FTS5",
+        "WAL"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Durable app records and rebuildable indexes have different lifetimes.",
+        "SQLite transactions do not atomically commit Git and blob writes.",
+        "Use idempotent import records and recovery reconciliation, not telemetry as a job ledger."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "object_store",
+      "use_sites": [
+        "crates/core/src/storage.rs",
+        "crates/storage/AGENTS.md"
+      ],
+      "official_sources": [
+        "https://docs.rs/object_store/0.14.2/object_store/"
+      ],
+      "symbols": [
+        "ObjectStore",
+        "LocalFileSystem",
+        "PutPayload",
+        "GetResult"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Local filesystem is the only configured backend in this build.",
+        "Hash-addressed objects are immutable and tenant-scoped; authorization checks source/workspace membership, not only hash possession.",
+        "Retained history references protect bytes from premature cleanup."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "iii",
+      "use_sites": [
+        "crates/core/src/jobs.rs",
+        ".agents/skills/qualify-iii/SKILL.md"
+      ],
+      "official_sources": [
+        "https://iii.dev/docs/creating-workers/functions",
+        "https://iii.dev/docs/creating-workers/channels",
+        "https://github.com/iii-hq/workers/tree/main/queue",
+        "https://github.com/iii-hq/iii/blob/main/engine/LICENSE"
+      ],
+      "symbols": [
+        "RegisterFunction",
+        "request_format",
+        "response_format",
+        "queue::define",
+        "durable:subscriber",
+        "channels"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Conditional runtime only. No iii SDK or daemon has been qualified in this delivery.",
+        "Registry schemas are metadata; typed deserialization and application validation still run.",
+        "Test crash immediately after acknowledgment with the exact worker/adapter/config; inspect ELv2 terms."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "pdfjs",
+      "use_sites": [
+        "ui/src/features/documents"
+      ],
+      "official_sources": [
+        "https://mozilla.github.io/pdf.js/examples/",
+        "https://github.com/mozilla/pdf.js"
+      ],
+      "symbols": [
+        "getDocument",
+        "PDFDocumentProxy",
+        "PDFPageProxy",
+        "GlobalWorkerOptions"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Worker and font/CMap assets must come from the pinned PDF.js distribution.",
+        "Display the original beside extraction without pretending textual order preserves every layout relation.",
+        "Release documents/page resources on cancellation or tab close."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "codemirror",
+      "use_sites": [
+        "ui/src/features/documents"
+      ],
+      "official_sources": [
+        "https://codemirror.net/docs/ref/",
+        "https://github.com/codemirror/merge"
+      ],
+      "symbols": [
+        "EditorView",
+        "EditorState",
+        "MergeView"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Reuse editor and merge behavior. Persisted changes still go through operations and revision preconditions."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "cytoscape",
+      "use_sites": [
+        "ui/src/features/graph"
+      ],
+      "official_sources": [
+        "https://js.cytoscape.org/"
+      ],
+      "symbols": [
+        "cytoscape",
+        "elements",
+        "layout",
+        "destroy"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Graph projects the same links as the tree/backlinks API. It is not a second knowledge store."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "uppy",
+      "use_sites": [
+        "ui/src/features/explorer"
+      ],
+      "official_sources": [
+        "https://uppy.io/docs/"
+      ],
+      "symbols": [
+        "Uppy",
+        "Dashboard",
+        "XHRUpload"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Upload UX is provided by the library. Server recovery and idempotency remain explicit.",
+        "XHR alone does not promise resumable browser-restart uploads."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "webmcp",
+      "use_sites": [
+        "ui/src/webmcp/register.ts"
+      ],
+      "official_sources": [
+        "https://webmachinelearning.github.io/webmcp/",
+        "https://github.com/webmachinelearning/webmcp"
+      ],
+      "symbols": [
+        "document.modelContext",
+        "registerTool",
+        "unregisterTool"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Capability-detect plus an app setting. Never rely on universal browser/host availability.",
+        "Expose a small page-specific tool set, never Verify/Approve.",
+        "Pin selection and revision at invocation; current page state must not silently change the requested source."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "telemetry",
+      "use_sites": [
+        "crates/server/AGENTS.md",
+        "crates/core/src/jobs.rs"
+      ],
+      "official_sources": [
+        "https://opentelemetry.io/docs/concepts/signals/traces/",
+        "https://docs.rs/tracing/latest/tracing/"
+      ],
+      "symbols": [
+        "traceparent",
+        "operationId",
+        "tracing spans"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Tracing is diagnostic, not durable application evidence.",
+        "Returned source receipts are application records; trace IDs link performance observations."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "agent-instructions",
+      "use_sites": [
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "official_sources": [
+        "https://agents.md/",
+        "https://docs.anthropic.com/en/docs/claude-code/memory"
+      ],
+      "symbols": [
+        "AGENTS.md",
+        "CLAUDE.md import"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Plain shell commands are the compatibility baseline. Native instruction/skill discovery differs by client.",
+        "CODEOWNERS only requests review when repository rules and owners are configured; it is not filesystem write protection."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "scalar",
+      "use_sites": [
+        "ui/scripts/bundle-docs.mjs"
+      ],
+      "official_sources": [
+        "https://github.com/scalar/scalar/tree/main/packages/api-reference",
+        "https://raw.githubusercontent.com/scalar/scalar/main/packages/api-reference/README.md"
+      ],
+      "symbols": [
+        "Scalar.createApiReference",
+        "package.json browser"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official package README and upstream manifest inspected",
+      "offline_notes": [
+        "Selected 1.72.4 observed in upstream package manifest; exact npm installation not executed.",
+        "Copy the installed standalone browser bundle locally. Do not use an external CDN or proxy in the application docs.",
+        "Static API documentation assets do not establish that endpoint implementations exist."
+      ],
+      "version_authority": "ui/package.json and resolved lockfile",
+      "qualification": "Source authored, package resolution and browser integration not executed"
+    }
+  ]
+}

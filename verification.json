@@ -1,0 +1,163 @@
+{
+  "project": "okf-jawn",
+  "delivery": "Full-scope executable foundation source; not a completed or qualified application",
+  "created_at_utc": "2026-10-04T03:15:41.384852+00:00",
+  "phase_0_qualified": false,
+  "application_implemented": false,
+  "generation_executed": false,
+  "lockfiles_resolved": false,
+  "rust_compiled": false,
+  "project_typescript_checked": false,
+  "checks": [
+    {
+      "command": [
+        "node",
+        "scripts/dev.mjs",
+        "check-offline"
+      ],
+      "exit_code": 0,
+      "status": "passed",
+      "log": ".artifacts/verification/offline-tests.log",
+      "expected_exit_code": 0
+    },
+    {
+      "command": [
+        "node",
+        "scripts/dev.mjs",
+        "doctor"
+      ],
+      "exit_code": 0,
+      "status": "passed",
+      "log": ".artifacts/verification/environment.log",
+      "expected_exit_code": 0
+    },
+    {
+      "command": [
+        "node",
+        "scripts/dev.mjs",
+        "vendor",
+        "schemars"
+      ],
+      "exit_code": 0,
+      "status": "passed",
+      "log": ".artifacts/verification/vendor-lookup.log",
+      "expected_exit_code": 0
+    },
+    {
+      "command": [
+        "node",
+        "scripts/dev.mjs",
+        "gen"
+      ],
+      "exit_code": 1,
+      "status": "expected_failure_observed",
+      "log": ".artifacts/verification/generation-refusal.log",
+      "expected_exit_code": 1,
+      "meaning": "Correctly refuses missing lockfiles. This is not successful generation."
+    },
+    {
+      "command": [
+        "node",
+        "scripts/dev.mjs",
+        "bootstrap"
+      ],
+      "exit_code": 1,
+      "status": "blocked",
+      "log": ".artifacts/verification/bootstrap-blocked.log",
+      "expected_exit_code": 1,
+      "meaning": "Environmental failure; no selected Rust/Node/pnpm combination is installed."
+    },
+    {
+      "command": [
+        "node",
+        "/mnt/data/okf-jawn-build/syntax-check.mjs"
+      ],
+      "exit_code": 0,
+      "status": "passed",
+      "log": ".artifacts/verification/typescript-syntax.log",
+      "expected_exit_code": 0,
+      "meaning": "21 TypeScript/TSX files parsed using installed TypeScript 5.8.3 transpileModule; no project type checking or dependency resolution."
+    }
+  ],
+  "node_syntax": {
+    "status": "passed",
+    "files": 19,
+    "paths": [
+      "scripts/dev.mjs",
+      "scripts/lib/files.mjs",
+      "scripts/lib/generation.mjs",
+      "scripts/lib/init.mjs",
+      "scripts/lib/process.mjs",
+      "scripts/lib/tree.mjs",
+      "tests/foundation/files.test.mjs",
+      "tests/foundation/generation.test.mjs",
+      "tests/foundation/harness.test.mjs",
+      "tests/foundation/init.test.mjs",
+      "tests/foundation/policy.test.mjs",
+      "tests/foundation/process.test.mjs",
+      "tests/foundation/vendor.test.mjs",
+      "tests/integration/acceptance.mjs",
+      "tests/integration/mcp-wire.mjs",
+      "tests/support/assertions.mjs",
+      "ui/scripts/bundle-app.mjs",
+      "ui/scripts/bundle-docs.mjs",
+      "ui/scripts/generate-catalog.mjs"
+    ]
+  },
+  "config_syntax": {
+    "status": "passed",
+    "counts": {
+      ".toml": 15,
+      ".json": 5,
+      ".yaml": 2,
+      ".yml": 3
+    },
+    "caveat": "Parser syntax checks, not each vendor configuration schema"
+  },
+  "offline_test_count": 28,
+  "offline_test_failures": 0,
+  "source_counts": {
+    "typed_json_operations": 62,
+    "transport_declarations": 13,
+    "explicit_public_contract_types": 150,
+    "vendor_entries": 29,
+    "context7_queries_executed": 3
+  },
+  "blocked_checks": [
+    "Rust build/fmt/Clippy/syn policy",
+    "Cargo/pnpm lockfile resolution",
+    "Utoipa and Schemars generation",
+    "Hey API SDK/Zod/Query generation",
+    "json-render catalog export",
+    "two real vendor generator passes",
+    "TypeScript 7 full type checking",
+    "MCP App and Scalar bundling",
+    "actual converter/native/model asset qualification",
+    "WorkOS integration and hosted authentication",
+    "iii restart/channel qualification",
+    "Claude/ChatGPT host rendering and WebMCP",
+    "complete app, raw transport routes, backup/export and UI journeys"
+  ],
+  "deliberately_not_fabricated": [
+    "Cargo.lock",
+    "pnpm-lock.yaml",
+    "api/openapi.yaml",
+    "api/mcp-tools.json",
+    "ui/src/api/generated/",
+    "ui/dist-apps/"
+  ],
+  "source_claims": [
+    "Generator integrations are implemented as executable source; they were not run with their absent dependencies.",
+    "Shared contracts cover the intended feature surface, but a declaration is not runtime behavior.",
+    "Test-only Application and HTTP fixtures never ship as production substitutes.",
+    "No repository was created or pushed on GitHub; no user account or deployment was connected."
+  ],
+  "known_incomplete_work": [
+    "Storage and ingestion crates reserve implementations via explicit core-owned ports; their runtime code is not present.",
+    "Server library binds typed JSON commands to an injected Application; executable startup, WorkOS middleware and raw transport bindings are not present.",
+    "MCP library has typed result/tool adapters; full ServerHandler, stdio and Streamable HTTP startup are not present.",
+    "Frontend includes representative source/history/naming/presentation components, not the complete Explorer, PDF viewer, graph/editor and review flows.",
+    "Presentation layout chart binding and full renderer-policy validation need completion and qualification.",
+    "Selected package/native/OCI artifacts still require actual resolution and compatibility validation."
+  ]
+}

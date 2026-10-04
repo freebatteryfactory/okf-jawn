@@ -1,0 +1,217 @@
+okf-jawn/
+├── .agents/
+│   └── skills/
+│       ├── qualify-converter/
+│       │   └── SKILL.md
+│       ├── qualify-iii/
+│       │   └── SKILL.md
+│       ├── qualify-mcp-apps/
+│       │   └── SKILL.md
+│       └── regenerate-api/
+│           └── SKILL.md
+├── .cargo/
+│   └── config.toml
+├── .dockerignore
+├── .editorconfig
+├── .gitattributes
+├── .github/
+│   ├── CODEOWNERS
+│   └── workflows/
+│       ├── ci.yml
+│       └── contract.yml
+├── .gitignore
+├── .node-version
+├── .npmrc
+├── AGENTS.md
+├── CLAUDE.md
+├── Cargo.toml
+├── LICENSE-APACHE
+├── LICENSE-MIT
+├── README.md
+├── REPOSITORY-TREE.txt
+├── SPEC.md
+├── cliff.toml
+├── clippy.toml
+├── crates/
+│   ├── cli/
+│   │   ├── AGENTS.md
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       └── main.rs
+│   ├── contract/
+│   │   ├── AGENTS.md
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── access.rs
+│   │   │   ├── attention.rs
+│   │   │   ├── common.rs
+│   │   │   ├── conventions.rs
+│   │   │   ├── error.rs
+│   │   │   ├── events.rs
+│   │   │   ├── health.rs
+│   │   │   ├── history.rs
+│   │   │   ├── identity.rs
+│   │   │   ├── import.rs
+│   │   │   ├── item.rs
+│   │   │   ├── labels.rs
+│   │   │   ├── lib.rs
+│   │   │   ├── metadata.rs
+│   │   │   ├── operations.rs
+│   │   │   ├── proposal.rs
+│   │   │   ├── read.rs
+│   │   │   ├── review.rs
+│   │   │   ├── search.rs
+│   │   │   ├── source.rs
+│   │   │   ├── transport.rs
+│   │   │   ├── views.rs
+│   │   │   └── workspace.rs
+│   │   └── tests/
+│   │       └── semantic.rs
+│   ├── core/
+│   │   ├── AGENTS.md
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── access.rs
+│   │   │   ├── conversion.rs
+│   │   │   ├── dispatch.rs
+│   │   │   ├── jobs.rs
+│   │   │   ├── lib.rs
+│   │   │   ├── ports.rs
+│   │   │   └── storage.rs
+│   │   └── tests/
+│   │       └── authorization.rs
+│   ├── ingest/
+│   │   ├── AGENTS.md
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       └── lib.rs
+│   ├── mcp/
+│   │   ├── AGENTS.md
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       └── lib.rs
+│   ├── server/
+│   │   ├── AGENTS.md
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── auth/
+│   │   │   ├── lib.rs
+│   │   │   └── routes/
+│   │   └── tests/
+│   │       └── bindings.rs
+│   └── storage/
+│       ├── AGENTS.md
+│       ├── Cargo.toml
+│       └── src/
+│           ├── db/
+│           ├── git/
+│           └── lib.rs
+├── deny.toml
+├── deploy/
+│   ├── .env.example
+│   ├── Dockerfile
+│   ├── compose.yaml
+│   └── galaxygate/
+│       └── AGENTS.md
+├── justfile
+├── lefthook.yml
+├── package.json
+├── pnpm-workspace.yaml
+├── rust-toolchain.toml
+├── rustfmt.toml
+├── samples/
+│   └── workshop/
+│       ├── crew-sheet.csv
+│       ├── index.md
+│       ├── old-poster.md
+│       ├── update/
+│       │   └── promoter-confirmation.md
+│       └── venue-proposal.md
+├── scripts/
+│   ├── dev.mjs
+│   └── lib/
+│       ├── files.mjs
+│       ├── generation.mjs
+│       ├── init.mjs
+│       ├── process.mjs
+│       └── tree.mjs
+├── tests/
+│   ├── fixtures/
+│   │   ├── documents/
+│   │   ├── expected/
+│   │   ├── okf/
+│   │   └── views/
+│   ├── foundation/
+│   │   ├── files.test.mjs
+│   │   ├── generation.test.mjs
+│   │   ├── harness.test.mjs
+│   │   ├── init.test.mjs
+│   │   ├── policy.test.mjs
+│   │   ├── process.test.mjs
+│   │   └── vendor.test.mjs
+│   ├── integration/
+│   │   ├── acceptance.mjs
+│   │   └── mcp-wire.mjs
+│   ├── requirements-ci.txt
+│   └── support/
+│       ├── application.rs
+│       └── assertions.mjs
+├── ui/
+│   ├── AGENTS.md
+│   ├── biome.json
+│   ├── index.html
+│   ├── openapi-ts.config.ts
+│   ├── package.json
+│   ├── playwright.config.ts
+│   ├── scripts/
+│   │   ├── bundle-app.mjs
+│   │   ├── bundle-docs.mjs
+│   │   ├── catalog-entry.ts
+│   │   └── generate-catalog.mjs
+│   ├── src/
+│   │   ├── features/
+│   │   │   ├── attention/
+│   │   │   ├── conventions/
+│   │   │   │   └── RulesForm.tsx
+│   │   │   ├── documents/
+│   │   │   │   ├── SourceExcerpt.tsx
+│   │   │   │   └── Sources.tsx
+│   │   │   ├── explorer/
+│   │   │   ├── graph/
+│   │   │   ├── history/
+│   │   │   │   ├── Changes.tsx
+│   │   │   │   └── Timeline.tsx
+│   │   │   ├── proposals/
+│   │   │   └── views/
+│   │   │       ├── AGENTS.md
+│   │   │       ├── Bindings.tsx
+│   │   │       ├── Chart.tsx
+│   │   │       ├── DataTable.tsx
+│   │   │       ├── Layout.tsx
+│   │   │       ├── PresentView.tsx
+│   │   │       └── catalog.ts
+│   │   ├── main.tsx
+│   │   ├── mcp-apps/
+│   │   │   ├── AGENTS.md
+│   │   │   └── main.tsx
+│   │   ├── routes/
+│   │   │   ├── __root.tsx
+│   │   │   └── index.tsx
+│   │   ├── styles.css
+│   │   └── webmcp/
+│   │       └── register.ts
+│   ├── tsconfig.json
+│   ├── vite.config.ts
+│   └── vitest.config.ts
+├── vendors.json
+├── verification.json
+└── xtask/
+    ├── AGENTS.md
+    ├── Cargo.toml
+    └── src/
+        ├── api.rs
+        ├── fixtures.rs
+        ├── main.rs
+        ├── output.rs
+        └── source_policy.rs

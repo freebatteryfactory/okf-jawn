@@ -1,0 +1,29 @@
+name: External contract qualification
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Disposable, reachable HTTPS test deployment
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  fuzz-read-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Require generated API rather than fabricate it
+        run: test -s api/openapi.yaml
+      - name: Python is confined to CI
+        run: python3 -m pip install --disable-pip-version-check -r tests/requirements-ci.txt
+      - name: Check read interfaces on a disposable deployment
+        env:
+          TEST_BASE_URL: ${{ inputs.base_url }}
+          TEST_TOKEN: ${{ secrets.OKF_TEST_AGENT_TOKEN }}
+        run: |
+          test -n "$TEST_TOKEN"
+          schemathesis run api/openapi.yaml --url "$TEST_BASE_URL" --header "Authorization: Bearer $TEST_TOKEN" --include-tag reads --include-tag search

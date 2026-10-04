@@ -1,0 +1,20 @@
+msrv = "1.99.0"
+source-item-ordering = ["module"]
+module-items-ordered-within-groupings = "none"
+module-item-order-groupings = [
+  ["external_declarations", ["extern_crate", "foreign_mod"]],
+  ["imports", ["use"]],
+  ["macros", ["macro", "global_asm"]],
+  ["types", ["ty_alias", "enum", "struct", "union", "trait", "trait_alias"]],
+  ["constants", ["static", "const"]],
+  ["implementations", ["impl"]],
+  ["functions", ["fn"]],
+  ["child_modules_and_tests", ["mod"]],
+]
+disallowed-methods = [
+  { path = "std::process::exit", reason = "Return ExitCode/Result from the entrypoint; preserve cleanup." },
+]
+# Not configured: a 60-line function cap or alphabetical ordering of fields/enum variants.
+# Tests use ordinary assertions; application behavior must return structured errors.
+
+too-many-lines-threshold = 100

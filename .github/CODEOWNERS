@@ -1,0 +1,12 @@
+# Enable branch protection and required review on the actual repository.
+# This file is a review routing template, not a local filesystem access boundary.
+# Replace OWNER with the confirmed GitHub handle/team before activating.
+# /crates/contract/ @OWNER
+# /xtask/ @OWNER
+# /api/ @OWNER
+# /Cargo.toml @OWNER
+# /Cargo.lock @OWNER
+# /pnpm-lock.yaml @OWNER
+# /tests/integration/ @OWNER
+# /ui/src/api/generated/ @OWNER
+# /deploy/ @OWNER
