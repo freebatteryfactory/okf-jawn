@@ -1,20 +1,90 @@
 @import "tailwindcss";
-:root { font-family: system-ui,sans-serif; color-scheme: light dark; }
-body { margin:0; background:Canvas; color:CanvasText; }
-.app-header { display:flex; gap:2rem; align-items:center; padding:1rem 2rem; border-bottom:1px solid GrayText; }
-.wordmark { font-weight:800; font-size:1.2rem; color:inherit; text-decoration:none; }
-main { max-width:90rem; margin:auto; padding:2rem; }
-.home { max-width:52rem; margin:3rem auto; }
-h1 { font-size:clamp(2rem,5vw,3.5rem); line-height:1.1; }
-.eyebrow { letter-spacing:.15em; font-size:.8rem; }
-.view-stack { display:grid; gap:1rem; }
-.view-columns { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,20rem),1fr)); gap:1rem; }
-.source-excerpt { border:1px solid GrayText; border-radius:.5rem; padding:1rem; overflow-wrap:anywhere; }
-.source-excerpt header { display:flex; flex-wrap:wrap; gap:.5rem; }
-pre { white-space:pre-wrap; overflow-wrap:anywhere; }
-code { font-size:.8rem; }
-table { width:100%; border-collapse:collapse; }
-th,td { padding:.4rem; border:1px solid GrayText; text-align:left; }
-[role=alert] { border-left:3px solid currentColor; padding:.75rem; }
-button { font:inherit; cursor:pointer; padding:.5rem .9rem; }
-:focus-visible { outline:3px solid Highlight; outline-offset:3px; }
+:root {
+  font-family: system-ui, sans-serif;
+  color-scheme: light dark;
+}
+body {
+  margin: 0;
+  background: Canvas;
+  color: CanvasText;
+}
+.app-header {
+  display: flex;
+  gap: 2rem;
+  align-items: center;
+  padding: 1rem 2rem;
+  border-bottom: 1px solid GrayText;
+}
+.wordmark {
+  font-weight: 800;
+  font-size: 1.2rem;
+  color: inherit;
+  text-decoration: none;
+}
+main {
+  max-width: 90rem;
+  margin: auto;
+  padding: 2rem;
+}
+.home {
+  max-width: 52rem;
+  margin: 3rem auto;
+}
+h1 {
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  line-height: 1.1;
+}
+.eyebrow {
+  letter-spacing: 0.15em;
+  font-size: 0.8rem;
+}
+.view-stack {
+  display: grid;
+  gap: 1rem;
+}
+.view-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: 1rem;
+}
+.source-excerpt {
+  border: 1px solid GrayText;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  overflow-wrap: anywhere;
+}
+.source-excerpt header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+code {
+  font-size: 0.8rem;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  padding: 0.4rem;
+  border: 1px solid GrayText;
+  text-align: left;
+}
+[role="alert"] {
+  border-left: 3px solid currentColor;
+  padding: 0.75rem;
+}
+button {
+  font: inherit;
+  cursor: pointer;
+  padding: 0.5rem 0.9rem;
+}
+:focus-visible {
+  outline: 3px solid Highlight;
+  outline-offset: 3px;
+}

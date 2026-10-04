@@ -1,0 +1,16 @@
+{
+  "//": "Generated-code policy for Hey API's client runtime (client/, core/) only. Strict, except exactOptionalPropertyTypes, which that runtime does not support yet (hey-api/openapi-ts#3157). Every other generated file passes the authored policy and stays under it: emitting inferred types without the rule widens optional properties to explicit undefined. Authored code consumes the runtime only through the declarations emitted here. tsconfig.generated-strict.json probes whether the exception can be removed.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "exactOptionalPropertyTypes": false,
+    "types": [],
+    "rootDir": "./src/api/generated",
+    "outDir": "./.tsbuild/generated",
+    "tsBuildInfoFile": "./.tsbuild/generated.tsbuildinfo"
+  },
+  "include": ["src/api/generated/client", "src/api/generated/core"],
+  "exclude": []
+}

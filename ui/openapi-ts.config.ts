@@ -8,7 +8,12 @@ const metadata: unknown = JSON.parse(readFileSync(join(dirname(input), 'operatio
 if (!Array.isArray(metadata)) throw new Error('Generated operation metadata must be an array');
 const readPaths = new Set<string>();
 for (const value of metadata) {
-  if (typeof value !== 'object' || value === null || !('path' in value) || !('permission' in value)) {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('path' in value) ||
+    !('permission' in value)
+  ) {
     throw new Error('Invalid generated operation metadata');
   }
   if (typeof value.path !== 'string') throw new Error('Operation path must be a string');
@@ -21,7 +26,7 @@ export default defineConfig({
   parser: {
     hooks: {
       operations: {
-        getKind: (operation) => readPaths.has(operation.path) ? ['query'] : undefined,
+        getKind: (operation) => (readPaths.has(operation.path) ? ['query'] : undefined),
       },
     },
   },

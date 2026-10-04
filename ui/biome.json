@@ -3,10 +3,11 @@
   "files": {
     "includes": [
       "**",
-      "!src/api/generated/**",
+      "!src/api/generated",
       "!src/routeTree.gen.ts",
-      "!dist/**",
-      "!dist-apps/**"
+      "!dist",
+      "!dist-apps",
+      "!.tsbuild"
     ]
   },
   "formatter": {
@@ -18,7 +19,7 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
       "suspicious": {
         "noExplicitAny": "error"
       }

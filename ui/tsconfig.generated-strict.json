@@ -1,0 +1,12 @@
+{
+  "//": "Non-blocking compatibility probe: the generated client under the authored exactOptionalPropertyTypes rule. When a pinned Hey API release passes this, remove the exception in tsconfig.generated.json.",
+  "extends": "./tsconfig.generated.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "tsBuildInfoFile": null,
+    "emitDeclarationOnly": false,
+    "noEmit": true,
+    "exactOptionalPropertyTypes": true
+  }
+}

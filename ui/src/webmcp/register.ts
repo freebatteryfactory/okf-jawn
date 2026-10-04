@@ -17,7 +17,11 @@ export function registerPageTools(tools: readonly PageTool[], enabled: boolean):
   const registered: string[] = [];
   for (const tool of tools) {
     if (!permitted.has(tool.name)) throw new Error(`Unsupported page tool: ${tool.name}`);
-    context.registerTool(tool, { signal: controller.signal }); registered.push(tool.name);
+    context.registerTool(tool, { signal: controller.signal });
+    registered.push(tool.name);
   }
-  return () => { controller.abort(); for (const name of registered) context.unregisterTool?.(name); };
+  return () => {
+    controller.abort();
+    for (const name of registered) context.unregisterTool?.(name);
+  };
 }

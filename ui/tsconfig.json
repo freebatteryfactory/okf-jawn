@@ -1,11 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": [
-      "ES2022",
-      "DOM",
-      "DOM.Iterable"
-    ],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
@@ -19,16 +15,12 @@
     "isolatedModules": true,
     "resolveJsonModule": true,
     "noEmit": true,
+    "skipLibCheck": true,
+    "tsBuildInfoFile": "./.tsbuild/app.tsbuildinfo",
     "allowImportingTsExtensions": true,
-    "types": [
-      "vite/client",
-      "vitest/globals"
-    ],
-    "baseUrl": ".",
+    "types": ["vite/client", "vitest/globals"],
     "paths": {
-      "@/*": [
-        "src/*"
-      ]
+      "@/*": ["./src/*"]
     }
   },
   "include": [
@@ -38,5 +30,7 @@
     "vitest.config.ts",
     "playwright.config.ts",
     "tests"
-  ]
+  ],
+  "exclude": ["src/api/generated/client", "src/api/generated/core"],
+  "references": [{ "path": "./tsconfig.generated.json" }]
 }
