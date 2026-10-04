@@ -16,6 +16,7 @@ okf-jawn-core = { path = "../core" }
 # Resolve the complete intended integration graph without making code generation
 # link native conversion/storage libraries. The runtime implementations are not present yet.
 docling = { workspace = true, optional = true }
+docling-core = { workspace = true, optional = true }
 okf = { workspace = true, optional = true }
 calamine = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
@@ -33,4 +34,4 @@ bytes = { workspace = true, optional = true }
 
 [features]
 default = []
-runtime = ["dep:docling", "dep:okf", "dep:calamine", "dep:zip", "dep:csv", "dep:infer", "dep:unicode-normalization", "dep:convert_case", "dep:regex", "dep:sha2", "dep:tokio", "dep:tokio-util", "dep:serde_json", "dep:tempfile", "dep:bytes"]
+runtime = ["dep:docling", "dep:docling-core", "dep:okf", "dep:calamine", "dep:zip", "dep:csv", "dep:infer", "dep:unicode-normalization", "dep:convert_case", "dep:regex", "dep:sha2", "dep:tokio", "dep:tokio-util", "dep:serde_json", "dep:tempfile", "dep:bytes"]

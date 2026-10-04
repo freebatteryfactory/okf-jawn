@@ -25,6 +25,9 @@ thiserror = { version = "=2.0.21" }
 rmcp = { version = "=3.5.0", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
 okf = { version = "=0.2.7" }
 docling = { version = "=1.89.0" }
+# docling 1.89.0 requires docling-core ^1.89.0, but docling-core 1.93 adds a field 1.89.0 does not
+# initialize. Holding core at the matching release keeps the selected Docling compiling.
+docling-core = { version = "=1.89.0" }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rusqlite_migration = { version = "=2.6.0" }
 git2 = { version = "=0.21.0", default-features = false, features = ["vendored-libgit2"] }
