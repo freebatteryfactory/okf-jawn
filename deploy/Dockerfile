@@ -1,19 +1,17 @@
 # The foundation target can build after resolution; the application target requires
 # the server lane to add the real okf-jawn-server binary. No dummy server is shipped.
 # Supply digest-pinned images rather than inventing registry hashes in this file.
-ARG NODE_IMAGE
+# BUN_IMAGE must be the oven/bun release selected by .bun-version; doctor rejects any other version.
+ARG BUN_IMAGE
 ARG RUST_IMAGE
 ARG RUNTIME_IMAGE
-FROM ${NODE_IMAGE} AS node-runtime
+FROM ${BUN_IMAGE} AS bun-runtime
 FROM ${RUST_IMAGE} AS foundation
-COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
-COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
-    npm install --global pnpm@12.8.1
+COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
 WORKDIR /workspace
 COPY . .
-RUN node scripts/dev.mjs bootstrap
-RUN node scripts/dev.mjs foundation
+RUN bun scripts/dev.mjs bootstrap
+RUN bun scripts/dev.mjs foundation
 FROM foundation AS application-build
 RUN cargo build --locked --release --package okf-jawn-server --bin okf-jawn-server
 FROM ${RUNTIME_IMAGE} AS application

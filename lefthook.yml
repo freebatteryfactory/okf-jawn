@@ -4,6 +4,6 @@ pre-commit:
     whitespace:
       run: git diff --cached --check
     foundation-source-check:
-      run: node --test tests/foundation/policy.test.mjs
+      run: bun test ./tests/foundation/policy.test.mjs
 # Heavy formatting, compilation, regeneration, and tests are explicit tasks/CI.
 # A hook never regenerates shared files or touches another worktree.

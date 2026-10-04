@@ -3,16 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.8.1",
-  "engines": {
-    "node": ">=24.21.0 <25"
-  },
+  "packageManager": "bun@1.4.2",
+  "workspaces": [
+    "ui"
+  ],
+  "trustedDependencies": [
+    "esbuild"
+  ],
   "scripts": {
-    "bootstrap": "node scripts/dev.mjs bootstrap",
-    "gen": "node scripts/dev.mjs gen",
-    "gen:check": "node scripts/dev.mjs gen-check",
-    "check:offline": "node --test tests/foundation/*.test.mjs",
-    "vendor": "node scripts/dev.mjs vendor",
-    "doctor": "node scripts/dev.mjs doctor"
+    "lock": "bun scripts/dev.mjs lock",
+    "bootstrap": "bun scripts/dev.mjs bootstrap",
+    "gen": "bun scripts/dev.mjs gen",
+    "gen:check": "bun scripts/dev.mjs gen-check",
+    "check:offline": "bun scripts/dev.mjs check-offline",
+    "vendor": "bun scripts/dev.mjs vendor",
+    "doctor": "bun scripts/dev.mjs doctor"
   }
 }

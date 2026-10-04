@@ -6,7 +6,7 @@ services:
       dockerfile: deploy/Dockerfile
       target: application
       args:
-        NODE_IMAGE: ${NODE_IMAGE:?Set a digest-pinned Node image}
+        BUN_IMAGE: ${BUN_IMAGE:?Set a digest-pinned oven/bun image matching .bun-version}
         RUST_IMAGE: ${RUST_IMAGE:?Set a digest-pinned Rust image}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:?Set a qualified digest-pinned runtime image}
     env_file: ../.env

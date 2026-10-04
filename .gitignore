@@ -3,10 +3,13 @@
 /ui/node_modules/
 /ui/dist/
 /ui/dist-apps/
+/ui/.tsbuild/
+/ui/src/routeTree.gen.ts
 /.artifacts/
 /.env
 /.env.*
 !/.env.example
 /deploy/.env
 /data/
+/.okf-jawn-data/
 *.log

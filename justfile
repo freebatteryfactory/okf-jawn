@@ -4,47 +4,51 @@ default:
     @just --list
 
 init:
-    node scripts/dev.mjs init
+    bun scripts/dev.mjs init
 
 # Source/config diagnostics that require no downloaded packages.
 doctor:
-    node scripts/dev.mjs doctor
+    bun scripts/dev.mjs doctor
 
-# Explicit first resolution. Does not invent a Cargo.lock or silently update a selected pin.
+# Explicit resolution with the selected Cargo and Bun. Never runs implicitly from another task.
+lock:
+    bun scripts/dev.mjs lock
+
+# Locked installation, generation, and consumer build. Missing lockfiles are an error.
 bootstrap:
-    node scripts/dev.mjs bootstrap
+    bun scripts/dev.mjs bootstrap
 
 gen:
-    node scripts/dev.mjs gen
+    bun scripts/dev.mjs gen
 
 gen-check:
-    node scripts/dev.mjs gen-check
+    bun scripts/dev.mjs gen-check
 
 check:
-    node scripts/dev.mjs check
+    bun scripts/dev.mjs check
 
 check-offline:
-    node scripts/dev.mjs check-offline
+    bun scripts/dev.mjs check-offline
 
 test:
-    node scripts/dev.mjs test
+    bun scripts/dev.mjs test
 
 # Query vendor locations and concrete symbols without requiring this conversation.
 vendor query="":
-    node scripts/dev.mjs vendor "{{query}}"
+    bun scripts/dev.mjs vendor "{{query}}"
 
 # Run generator + consumer checks twice and compare the complete generated file sets.
 foundation:
-    node scripts/dev.mjs foundation
+    bun scripts/dev.mjs foundation
 
 # Produce the complete actual repository tree.
 tree:
-    node scripts/dev.mjs tree
+    bun scripts/dev.mjs tree
 
 # Create isolated Git worktrees from an already committed foundation.
 lanes:
-    node scripts/dev.mjs lanes
+    bun scripts/dev.mjs lanes
 
 # Qualification uses a real implementation supplied by the corresponding lane.
 qualify case="":
-    node scripts/dev.mjs qualify "{{case}}"
+    bun scripts/dev.mjs qualify "{{case}}"

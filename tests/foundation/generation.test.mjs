@@ -10,10 +10,11 @@ test('generation refuses absent lockfiles and writes no substitute API', async t
  const root=await mkdtemp(join(tmpdir(),'okf-gen-test-')); t.after(()=>rm(root,{recursive:true,force:true}));
  await assert.rejects(generate(root),/Missing resolved Cargo.lock/); assert.deepEqual(await readdir(root),[]);
 });
-test('pnpm lock is required separately from Cargo lock',async t=>{
+test('bun lock is required separately from Cargo lock',async t=>{
  const root=await mkdtemp(join(tmpdir(),'okf-gen-test-'));t.after(()=>rm(root,{recursive:true,force:true}));
  await writeFile(join(root,'Cargo.lock'),'test-only marker, not a lockfile');
- await assert.rejects(generate(root),/Missing resolved pnpm-lock.yaml/);
+ await assert.rejects(generate(root),/Missing resolved bun\.lock/);
+ assert.deepEqual(await readdir(root),['Cargo.lock']);
 });
 test('generator actually invokes selected vendor tools and compares two full runs',async()=>{
  const source=await readFile(new URL('../../scripts/lib/generation.mjs',import.meta.url),'utf8');

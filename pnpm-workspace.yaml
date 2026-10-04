@@ -1,5 +1,0 @@
-packages:
-  - ui
-# Only explicit build dependencies may run lifecycle builds after dependency review.
-onlyBuiltDependencies:
-  - esbuild

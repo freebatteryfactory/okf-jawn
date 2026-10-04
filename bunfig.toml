@@ -1,0 +1,7 @@
+# Tooling must not silently inherit deployment configuration or credentials from .env.
+env = false
+
+# Bun has no equivalent of pnpm's strict-peer-dependencies; review peer warnings from `bun install`.
+[install]
+exact = true
+linker = "isolated"

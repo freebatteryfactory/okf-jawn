@@ -4,20 +4,26 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { run } from './process.mjs';
 import { exists, manifest, differences, replaceGenerated } from './files.mjs';
+import { bun } from './toolchain.mjs';
 
 async function onePass(root, output) {
   await run('cargo', ['run', '--frozen', '--package', 'xtask', '--', 'generate', '--out', output], { cwd: root });
-  await run('node', ['scripts/generate-catalog.mjs'], { cwd: join(root, 'ui'), env: { OKF_CATALOG_OUT: join(output, 'api', 'presentation') } });
+  await run(bun(), ['scripts/generate-catalog.mjs'], { cwd: join(root, 'ui'), env: { OKF_CATALOG_OUT: join(output, 'api', 'presentation') } });
   await mkdir(join(output, 'client'), { recursive: true });
-  await run('pnpm', ['exec', 'openapi-ts', '--file', 'openapi-ts.config.ts'], {
+  // `bun run <bin>` executes only the installed, locked binary; it never downloads a package.
+  await run(bun(), ['--bun', 'run', 'openapi-ts', '--file', 'openapi-ts.config.ts'], {
     cwd: join(root, 'ui'), env: { OKF_OPENAPI: join(output, 'api', 'openapi.yaml'), OKF_CLIENT_OUT: join(output, 'client') }
   });
 }
 
-export async function generate(root, check = false) {
-  for (const name of ['Cargo.lock', 'pnpm-lock.yaml']) {
-    if (!await exists(join(root, name))) throw new Error(`Missing resolved ${name}. Run bootstrap; do not fabricate lockfiles.`);
+export async function requireLockfiles(root) {
+  for (const name of ['Cargo.lock', 'bun.lock']) {
+    if (!await exists(join(root, name))) throw new Error(`Missing resolved ${name}. Run the explicit lock task; do not fabricate lockfiles.`);
   }
+}
+
+export async function generate(root, check = false) {
+  await requireLockfiles(root);
   const scratch = await mkdtemp(join(tmpdir(), 'okf-jawn-generate-'));
   try {
     const first = join(scratch, 'first'); const second = join(scratch, 'second');
