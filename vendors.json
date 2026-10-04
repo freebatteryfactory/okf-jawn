@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "project": "okf-jawn",
-  "scope": "Offline navigation notes and exact lookup instructions, not a licensed mirror of vendor documentation or a compatibility certification.",
+  "scope": "Offline navigation notes and exact lookup instructions, not a licensed mirror of vendor documentation or a compatibility certification. use_sites exist in the repository now; planned_use_sites are where a lane will integrate the library; generated_sites are written by gen. context7_queries_executed counts the lookups whose library and query are recorded here.",
   "context7_queries_executed": 3,
   "vendors": [
     {
@@ -62,7 +62,9 @@
     {
       "name": "hey-api",
       "use_sites": [
-        "ui/openapi-ts.config.ts",
+        "ui/openapi-ts.config.ts"
+      ],
+      "generated_sites": [
         "ui/src/api/generated"
       ],
       "official_sources": [
@@ -84,16 +86,19 @@
       "offline_notes": [
         "Read-only JSON operations use POST. Classify query operations explicitly from generated permission metadata; HTTP method is not our semantics.",
         "SDK functions use grouped body/path/query inputs; do not assume an ergonomic flat call signature.",
-        "The generator runs from the lockfile-installed package. Never hand-author generated client output."
+        "The generator runs from the lockfile-installed package. Never hand-author generated client output.",
+        "0.99.0 calls the TypeScript 5/6 compiler API (hey-api/hey-api#4235). The typescript package is npm:@typescript/typescript6 for that API; tsc is TypeScript 7 from @typescript/native.",
+        "The generated client runtime (client/, core/) fails exactOptionalPropertyTypes (hey-api/openapi-ts#3157). It is type checked by ui/tsconfig.generated.json with only that rule off; authored code consumes its emitted declarations. Remove the exception when typecheck:generated-strict passes on a pinned release.",
+        "The zod plugin emits .nullish() where the typescript plugin emits ?: T | null, so parsed values are not assignable to generated types under exactOptionalPropertyTypes."
       ],
-      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": "Executed locally at 0.99.0: two generation passes are byte-identical and published; the generated runtime passes its declared TS 7 policy. Generated client not yet exercised against a running server."
     },
     {
       "name": "jsonschema",
       "use_sites": [
         "crates/core/src/dispatch.rs",
-        "xtask/tests"
+        "xtask/src/api.rs"
       ],
       "official_sources": [
         "https://docs.rs/jsonschema/0.58.5/jsonschema/"
@@ -275,17 +280,60 @@
       "offline_notes": [
         "Selected Vite 8 configuration uses the documented Rolldown Babel compiler preset.",
         "Do not copy an old babel property into the React plugin without checking the selected major.",
-        "Node is a development/build dependency, not an application server runtime."
+        "Bun is the JavaScript package manager and build-tool runtime, not an application server runtime."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
       "qualification": "Not compiled or integrated in this environment"
     },
     {
+      "name": "bun",
+      "use_sites": [
+        "package.json",
+        ".bun-version",
+        "bunfig.toml",
+        "scripts/lib/toolchain.mjs",
+        ".github/workflows/ci.yml",
+        "deploy/Dockerfile"
+      ],
+      "official_sources": [
+        "https://bun.com/docs/install/workspaces",
+        "https://bun.com/docs/install/lockfile",
+        "https://bun.com/docs/install/lifecycle",
+        "https://bun.com/docs/runtime/bunfig",
+        "https://bun.com/docs/test/writing",
+        "https://github.com/oven-sh/setup-bun"
+      ],
+      "symbols": [
+        "packageManager",
+        "workspaces",
+        "trustedDependencies",
+        "bun install --frozen-lockfile",
+        "bun --bun run",
+        "bun test",
+        "bun-version-file"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation; Context7 /oven-sh/bun (bun-v1.4.2) was consulted during the Bun migration, but that lookup is not one of the recorded foundation queries",
+      "offline_notes": [
+        "One exact pin: packageManager, .bun-version, CI bun-version-file and the digest-pinned build image must agree; doctor compares the running process.versions.bun.",
+        "trustedDependencies replaces Bun's default trusted list. Add a package only after reading its install script and confirming the step is necessary.",
+        "bunfig env = false stops runtime .env loading; bun install still reads .env for registry settings.",
+        "Bun has no equivalent of pnpm strict-peer-dependencies; review peer warnings from install output.",
+        "Run installed CLIs with bun --bun run so Node-shebang entrypoints execute under Bun and nothing is downloaded. Bun transpiling TypeScript is not type checking; tsc remains separate."
+      ],
+      "version_authority": "package.json packageManager and .bun-version; bun.lock for resolved packages",
+      "qualification": "Installed and exercised locally at 1.4.2 (install, lockfile, bun test); CI and container use are not yet run"
+    },
+    {
       "name": "tanstack",
       "use_sites": [
         "ui/src/routes",
-        "ui/src/api",
+        "ui/src/main.tsx",
         "ui/vite.config.ts"
+      ],
+      "generated_sites": [
+        "ui/src/api/generated"
       ],
       "official_sources": [
         "https://tanstack.com/router/latest/docs/framework/react/guide/search-params",
@@ -589,7 +637,8 @@
     },
     {
       "name": "pdfjs",
-      "use_sites": [
+      "use_sites": [],
+      "planned_use_sites": [
         "ui/src/features/documents"
       ],
       "official_sources": [
@@ -615,7 +664,8 @@
     },
     {
       "name": "codemirror",
-      "use_sites": [
+      "use_sites": [],
+      "planned_use_sites": [
         "ui/src/features/documents"
       ],
       "official_sources": [
@@ -638,7 +688,8 @@
     },
     {
       "name": "cytoscape",
-      "use_sites": [
+      "use_sites": [],
+      "planned_use_sites": [
         "ui/src/features/graph"
       ],
       "official_sources": [
@@ -661,7 +712,8 @@
     },
     {
       "name": "uppy",
-      "use_sites": [
+      "use_sites": [],
+      "planned_use_sites": [
         "ui/src/features/explorer"
       ],
       "official_sources": [

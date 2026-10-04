@@ -1,163 +1,295 @@
 {
   "project": "okf-jawn",
   "delivery": "Full-scope executable foundation source; not a completed or qualified application",
-  "created_at_utc": "2026-10-04T03:15:41.384852+00:00",
   "phase_0_qualified": false,
   "application_implemented": false,
-  "generation_executed": false,
-  "lockfiles_resolved": false,
-  "rust_compiled": false,
-  "project_typescript_checked": false,
-  "checks": [
-    {
-      "command": [
-        "node",
-        "scripts/dev.mjs",
-        "check-offline"
-      ],
-      "exit_code": 0,
-      "status": "passed",
-      "log": ".artifacts/verification/offline-tests.log",
-      "expected_exit_code": 0
+  "current": {
+    "recorded_at_utc": "2026-10-04T23:05:11Z",
+    "base_commit": "0c9de08 with uncommitted foundation corrections",
+    "environment": {
+      "os": "Windows 10.0.26200 (developer workstation, not CI or the build container)",
+      "bun": "1.4.2 (process.versions.bun, C:\\Users\\eayou\\.bun\\bin\\bun.exe)",
+      "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
+      "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+      "git": "2.55.0.windows.2",
+      "typescript_checker": "7.0.2 (tsc, from @typescript/native = npm:typescript@7.0.2)",
+      "typescript_compiler_api": "6.0.3 (the typescript package = npm:@typescript/typescript6@6.0.2, consumed by Hey API openapi-ts 0.99.0)"
     },
-    {
-      "command": [
-        "node",
-        "scripts/dev.mjs",
-        "doctor"
-      ],
-      "exit_code": 0,
-      "status": "passed",
-      "log": ".artifacts/verification/environment.log",
-      "expected_exit_code": 0
+    "lockfiles_resolved": true,
+    "lockfile_provenance": "Cargo.lock from cargo generate-lockfile, cargo update --workspace and cargo update --precise for the docling-* 1.89.0 siblings; bun.lock from bun install. Neither is handwritten.",
+    "rust_compiled": true,
+    "rust_generator_executed": true,
+    "frontend_generation_executed": true,
+    "generation_deterministic": true,
+    "project_typescript_checked": true,
+    "project_typescript_passed": false,
+    "typescript_policy": {
+      "authored": "ui/tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes and the remaining checks on all authored source and on every generated file except the Hey API client runtime. skipLibCheck applies only to third-party .d.ts files; the repository has no authored declarations.",
+      "generated_client_runtime": "ui/tsconfig.generated.json: ui/src/api/generated/client and core only, strict with exactOptionalPropertyTypes false, built as a composite project. Authored code consumes its emitted declarations through a project reference. Reason: hey-api/openapi-ts#3157 (open). Removal signal: ui/tsconfig.generated-strict.json, run non-blockingly by foundation.",
+      "boundary_scope_reason": "Quarantining the whole generated directory was tried and rejected: declaration emit without the rule widens inferred optional properties to explicit undefined (for example TanStack queryFn), which broke strict consumers of generated files that pass the rule."
     },
-    {
-      "command": [
-        "node",
-        "scripts/dev.mjs",
-        "vendor",
-        "schemars"
-      ],
-      "exit_code": 0,
-      "status": "passed",
-      "log": ".artifacts/verification/vendor-lookup.log",
-      "expected_exit_code": 0
-    },
-    {
-      "command": [
-        "node",
-        "scripts/dev.mjs",
-        "gen"
-      ],
-      "exit_code": 1,
-      "status": "expected_failure_observed",
-      "log": ".artifacts/verification/generation-refusal.log",
-      "expected_exit_code": 1,
-      "meaning": "Correctly refuses missing lockfiles. This is not successful generation."
-    },
-    {
-      "command": [
-        "node",
-        "scripts/dev.mjs",
-        "bootstrap"
-      ],
-      "exit_code": 1,
-      "status": "blocked",
-      "log": ".artifacts/verification/bootstrap-blocked.log",
-      "expected_exit_code": 1,
-      "meaning": "Environmental failure; no selected Rust/Node/pnpm combination is installed."
-    },
-    {
-      "command": [
-        "node",
-        "/mnt/data/okf-jawn-build/syntax-check.mjs"
-      ],
-      "exit_code": 0,
-      "status": "passed",
-      "log": ".artifacts/verification/typescript-syntax.log",
-      "expected_exit_code": 0,
-      "meaning": "21 TypeScript/TSX files parsed using installed TypeScript 5.8.3 transpileModule; no project type checking or dependency resolution."
-    }
-  ],
-  "node_syntax": {
-    "status": "passed",
-    "files": 19,
-    "paths": [
-      "scripts/dev.mjs",
-      "scripts/lib/files.mjs",
-      "scripts/lib/generation.mjs",
-      "scripts/lib/init.mjs",
-      "scripts/lib/process.mjs",
-      "scripts/lib/tree.mjs",
-      "tests/foundation/files.test.mjs",
-      "tests/foundation/generation.test.mjs",
-      "tests/foundation/harness.test.mjs",
-      "tests/foundation/init.test.mjs",
-      "tests/foundation/policy.test.mjs",
-      "tests/foundation/process.test.mjs",
-      "tests/foundation/vendor.test.mjs",
-      "tests/integration/acceptance.mjs",
-      "tests/integration/mcp-wire.mjs",
-      "tests/support/assertions.mjs",
-      "ui/scripts/bundle-app.mjs",
-      "ui/scripts/bundle-docs.mjs",
-      "ui/scripts/generate-catalog.mjs"
+    "checks": [
+      {
+        "command": ["bun", "scripts/dev.mjs", "doctor"],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/doctor.log"
+      },
+      {
+        "command": ["bun", "scripts/dev.mjs", "check-offline"],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/check-offline.log",
+        "meaning": "37 bun test cases (the original 28 plus toolchain, connector, core-dependency, fixture-isolation, port and generated-directory-preservation checks). Not a Rust build, type check or generator run."
+      },
+      {
+        "command": ["bun", "scripts/dev.mjs", "gen-check"],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/gen-check.log",
+        "meaning": "Two independent generation passes (Rust xtask, Hey API, CLI, catalog) are byte-identical and match the published api/, generated/cli/ and ui/src/api/generated/."
+      },
+      {
+        "command": ["bun", "scripts/dev.mjs", "bootstrap"],
+        "exit_code": 1,
+        "status": "failed",
+        "log": ".artifacts/verification/bootstrap.log",
+        "meaning": "Frozen installs, xtask build, both generation passes, publication, Vite build, MCP App bundle and Scalar docs succeed; the final TS7 type check fails on the 8 authored errors listed under the ui typecheck entry."
+      },
+      {
+        "command": ["bun", "scripts/dev.mjs", "foundation"],
+        "exit_code": 1,
+        "status": "failed",
+        "log": ".artifacts/verification/foundation.log",
+        "meaning": "gen-check, contract/core/xtask cargo tests, UI build and the non-blocking probe complete; the TS7 type check fails on 8 authored errors, so its trailing offline checks did not run in this task (they pass separately above)."
+      },
+      {
+        "command": ["cargo", "fmt", "--all", "--check"],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/fmt.log"
+      },
+      {
+        "command": ["cargo", "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/clippy.log",
+        "meaning": "Default features only; runtime-feature code is compiled below but not linted."
+      },
+      {
+        "command": ["cargo", "xtask", "source-policy", "--root", "."],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/source-policy.log"
+      },
+      {
+        "command": ["cargo", "test", "--locked", "--workspace"],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/cargo-test.log",
+        "meaning": "8 tests, including the full Rust generator with jsonschema validation and the server binding test over the test-only fixture."
+      },
+      {
+        "command": ["cargo", "check", "--locked", "--workspace", "--all-targets", "--features", "okf-jawn-server/runtime,okf-jawn-storage/runtime,okf-jawn-ingest/runtime"],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/runtime-feature-check.log",
+        "meaning": "The declared runtime dependency graph compiles. The adapter implementations it will hold do not exist yet."
+      },
+      {
+        "command": ["bun", "--bun", "run", "lint"],
+        "cwd": "ui",
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/ui-lint.log",
+        "meaning": "Biome 2.5.15; 6 informational suggestions remain."
+      },
+      {
+        "command": ["bun", "--bun", "x", "tsc", "-b", "tsconfig.generated.json"],
+        "cwd": "ui",
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/ui-generated-runtime-typecheck.log",
+        "meaning": "The Hey API client runtime passes TS 7.0.2 under its declared generated-code policy and emits the declarations authored code consumes."
+      },
+      {
+        "command": ["bun", "--bun", "run", "typecheck"],
+        "cwd": "ui",
+        "exit_code": 1,
+        "status": "failed",
+        "log": ".artifacts/verification/ui-typecheck.log",
+        "meaning": "tsc -b with TS 7.0.2. All generated files other than the runtime pass the authored policy. 8 authored errors remain, owned by the UI/views lanes: mcp-apps/main.tsx:59-63 and features/views/PresentView.tsx:89 assign zod.gen parse output (.nullish() infers ?: T | null | undefined) to types.gen types (?: T | null); features/conventions/RulesForm.tsx:18 AJV8Validator generic; features/views/PresentView.tsx:111 json-render Spec."
+      },
+      {
+        "command": ["bun", "--bun", "run", "typecheck:generated-strict"],
+        "cwd": "ui",
+        "exit_code": 1,
+        "status": "expected failure (non-blocking probe)",
+        "log": ".artifacts/verification/ui-generated-strict-probe.log",
+        "meaning": "12 exactOptionalPropertyTypes errors in client/client.gen.ts, client/utils.gen.ts and core/{params,pathSerializer,serverSentEvents}.gen.ts, matching hey-api/openapi-ts#3157."
+      }
+    ],
+    "dependency_qualification_findings": [
+      "Hey API openapi-ts 0.99.0 requires the TypeScript 5/6 compiler API (hey-api/hey-api#4235); satisfied by the side-by-side TypeScript 6 API package while tsc remains 7.0.2.",
+      "Hey API client runtime does not satisfy exactOptionalPropertyTypes (hey-api/openapi-ts#3157, open draft); isolated in ui/tsconfig.generated.json with a removal probe.",
+      "Hey API zod plugin emits .nullish() where the TypeScript plugin emits ?: T | null; zod-parsed values are not assignable to the generated types under exactOptionalPropertyTypes. No 0.99.0 option found to align them.",
+      "Third-party declarations failing under TS 7 (covered by skipLibCheck, revisit when upstream converges): @hey-api/shared log typing and missing semver types; @rolldown/plugin-babel 0.2.4 and babel-plugin-react-compiler 1.0.0 against @babel/core 8.0.6, plus missing convert-source-map types; vega-lite 6.4.3 Axis interface; vega-embed missing fast-json-patch types.",
+      "docling 1.89.0 does not compile against docling-core 1.93; docling-core is held at =1.89.0.",
+      "Each single-file MCP App resource is about 1.8 MB (Vega, CodeMirror and React inlined); not yet measured against host limits."
+    ],
+    "foundation_fixes_this_pass": [
+      "scripts/lib/files.mjs publishes by moving entries instead of renaming the destination directory, which a Windows editor watcher holds open; guards and restore-on-failure kept.",
+      "ui/scripts/bundle-app.mjs bundles through Vite with the React compiler and Tailwind plugins; plain esbuild cannot compile Tailwind source.",
+      "scripts/dev.mjs runs the UI build (which writes routeTree.gen.ts) before the type check."
+    ],
+    "not_run": [
+      "deploy/Dockerfile build: Docker is not installed on this workstation",
+      "GitHub Actions CI: workflows edited but not executed",
+      "Vitest and Playwright suites",
+      "Strict Clippy with runtime features (only cargo check was run with them)",
+      "qualify mcp-wire / qualify application: no running deployment",
+      "Converter native/model asset qualification, WorkOS integration, executor restart check"
+    ],
+    "phase_0_blockers": [
+      "8 authored TS7 errors in the UI/views lanes (listed under the ui typecheck entry)"
     ]
   },
-  "config_syntax": {
-    "status": "passed",
-    "counts": {
-      ".toml": 15,
-      ".json": 5,
-      ".yaml": 2,
-      ".yml": 3
+  "historical_archive_record": {
+    "note": "Recorded when the archive was assembled in an environment without Rust, network access, pnpm or Docker, using Node and TypeScript 5.8.3 for syntax-only checks. Kept unchanged as history. Its toolchain (Node 24.21.0, pnpm 12.8.1) is superseded by Bun 1.4.2, and its counts (62 operations, 13 transports, 28 offline tests) by the current source. It is not current readiness.",
+    "created_at_utc": "2026-10-04T03:15:41.384852+00:00",
+    "phase_0_qualified": false,
+    "application_implemented": false,
+    "generation_executed": false,
+    "lockfiles_resolved": false,
+    "rust_compiled": false,
+    "project_typescript_checked": false,
+    "checks": [
+      {
+        "command": ["node", "scripts/dev.mjs", "check-offline"],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/offline-tests.log",
+        "expected_exit_code": 0
+      },
+      {
+        "command": ["node", "scripts/dev.mjs", "doctor"],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/environment.log",
+        "expected_exit_code": 0
+      },
+      {
+        "command": ["node", "scripts/dev.mjs", "vendor", "schemars"],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/vendor-lookup.log",
+        "expected_exit_code": 0
+      },
+      {
+        "command": ["node", "scripts/dev.mjs", "gen"],
+        "exit_code": 1,
+        "status": "expected_failure_observed",
+        "log": ".artifacts/verification/generation-refusal.log",
+        "expected_exit_code": 1,
+        "meaning": "Correctly refuses missing lockfiles. This is not successful generation."
+      },
+      {
+        "command": ["node", "scripts/dev.mjs", "bootstrap"],
+        "exit_code": 1,
+        "status": "blocked",
+        "log": ".artifacts/verification/bootstrap-blocked.log",
+        "expected_exit_code": 1,
+        "meaning": "Environmental failure; no selected Rust/Node/pnpm combination is installed."
+      },
+      {
+        "command": ["node", "/mnt/data/okf-jawn-build/syntax-check.mjs"],
+        "exit_code": 0,
+        "status": "passed",
+        "log": ".artifacts/verification/typescript-syntax.log",
+        "expected_exit_code": 0,
+        "meaning": "21 TypeScript/TSX files parsed using installed TypeScript 5.8.3 transpileModule; no project type checking or dependency resolution."
+      }
+    ],
+    "node_syntax": {
+      "status": "passed",
+      "files": 19,
+      "paths": [
+        "scripts/dev.mjs",
+        "scripts/lib/files.mjs",
+        "scripts/lib/generation.mjs",
+        "scripts/lib/init.mjs",
+        "scripts/lib/process.mjs",
+        "scripts/lib/tree.mjs",
+        "tests/foundation/files.test.mjs",
+        "tests/foundation/generation.test.mjs",
+        "tests/foundation/harness.test.mjs",
+        "tests/foundation/init.test.mjs",
+        "tests/foundation/policy.test.mjs",
+        "tests/foundation/process.test.mjs",
+        "tests/foundation/vendor.test.mjs",
+        "tests/integration/acceptance.mjs",
+        "tests/integration/mcp-wire.mjs",
+        "tests/support/assertions.mjs",
+        "ui/scripts/bundle-app.mjs",
+        "ui/scripts/bundle-docs.mjs",
+        "ui/scripts/generate-catalog.mjs"
+      ]
     },
-    "caveat": "Parser syntax checks, not each vendor configuration schema"
-  },
-  "offline_test_count": 28,
-  "offline_test_failures": 0,
-  "source_counts": {
-    "typed_json_operations": 62,
-    "transport_declarations": 13,
-    "explicit_public_contract_types": 150,
-    "vendor_entries": 29,
-    "context7_queries_executed": 3
-  },
-  "blocked_checks": [
-    "Rust build/fmt/Clippy/syn policy",
-    "Cargo/pnpm lockfile resolution",
-    "Utoipa and Schemars generation",
-    "Hey API SDK/Zod/Query generation",
-    "json-render catalog export",
-    "two real vendor generator passes",
-    "TypeScript 7 full type checking",
-    "MCP App and Scalar bundling",
-    "actual converter/native/model asset qualification",
-    "WorkOS integration and hosted authentication",
-    "iii restart/channel qualification",
-    "Claude/ChatGPT host rendering and WebMCP",
-    "complete app, raw transport routes, backup/export and UI journeys"
-  ],
-  "deliberately_not_fabricated": [
-    "Cargo.lock",
-    "pnpm-lock.yaml",
-    "api/openapi.yaml",
-    "api/mcp-tools.json",
-    "ui/src/api/generated/",
-    "ui/dist-apps/"
-  ],
-  "source_claims": [
-    "Generator integrations are implemented as executable source; they were not run with their absent dependencies.",
-    "Shared contracts cover the intended feature surface, but a declaration is not runtime behavior.",
-    "Test-only Application and HTTP fixtures never ship as production substitutes.",
-    "No repository was created or pushed on GitHub; no user account or deployment was connected."
-  ],
-  "known_incomplete_work": [
-    "Storage and ingestion crates reserve implementations via explicit core-owned ports; their runtime code is not present.",
-    "Server library binds typed JSON commands to an injected Application; executable startup, WorkOS middleware and raw transport bindings are not present.",
-    "MCP library has typed result/tool adapters; full ServerHandler, stdio and Streamable HTTP startup are not present.",
-    "Frontend includes representative source/history/naming/presentation components, not the complete Explorer, PDF viewer, graph/editor and review flows.",
-    "Presentation layout chart binding and full renderer-policy validation need completion and qualification.",
-    "Selected package/native/OCI artifacts still require actual resolution and compatibility validation."
-  ]
+    "config_syntax": {
+      "status": "passed",
+      "counts": {
+        ".toml": 15,
+        ".json": 5,
+        ".yaml": 2,
+        ".yml": 3
+      },
+      "caveat": "Parser syntax checks, not each vendor configuration schema"
+    },
+    "offline_test_count": 28,
+    "offline_test_failures": 0,
+    "source_counts": {
+      "typed_json_operations": 62,
+      "transport_declarations": 13,
+      "explicit_public_contract_types": 150,
+      "vendor_entries": 29,
+      "context7_queries_executed": 3
+    },
+    "blocked_checks": [
+      "Rust build/fmt/Clippy/syn policy",
+      "Cargo/pnpm lockfile resolution",
+      "Utoipa and Schemars generation",
+      "Hey API SDK/Zod/Query generation",
+      "json-render catalog export",
+      "two real vendor generator passes",
+      "TypeScript 7 full type checking",
+      "MCP App and Scalar bundling",
+      "actual converter/native/model asset qualification",
+      "WorkOS integration and hosted authentication",
+      "iii restart/channel qualification",
+      "Claude/ChatGPT host rendering and WebMCP",
+      "complete app, raw transport routes, backup/export and UI journeys"
+    ],
+    "deliberately_not_fabricated": [
+      "Cargo.lock",
+      "pnpm-lock.yaml",
+      "api/openapi.yaml",
+      "api/mcp-tools.json",
+      "ui/src/api/generated/",
+      "ui/dist-apps/"
+    ],
+    "source_claims": [
+      "Generator integrations are implemented as executable source; they were not run with their absent dependencies.",
+      "Shared contracts cover the intended feature surface, but a declaration is not runtime behavior.",
+      "Test-only Application and HTTP fixtures never ship as production substitutes.",
+      "No repository was created or pushed on GitHub; no user account or deployment was connected."
+    ],
+    "known_incomplete_work": [
+      "Storage and ingestion crates reserve implementations via explicit core-owned ports; their runtime code is not present.",
+      "Server library binds typed JSON commands to an injected Application; executable startup, WorkOS middleware and raw transport bindings are not present.",
+      "MCP library has typed result/tool adapters; full ServerHandler, stdio and Streamable HTTP startup are not present.",
+      "Frontend includes representative source/history/naming/presentation components, not the complete Explorer, PDF viewer, graph/editor and review flows.",
+      "Presentation layout chart binding and full renderer-policy validation need completion and qualification.",
+      "Selected package/native/OCI artifacts still require actual resolution and compatibility validation."
+    ]
+  }
 }

@@ -14,15 +14,19 @@ Keep the full human experience: folder navigation, search, tabs, resizable panes
 
 ## 2. Architecture and deployment
 
-The implementation is a Rust application service with TypeScript/React interfaces. One set of typed operations serves the browser, CLI and MCP adapter. The public OpenAPI document is generated from Rust declarations; generated clients and schemas consume it. UI components are composed with existing libraries, not generated automatically from endpoint shapes.
+The implementation is a Rust application service with TypeScript/React interfaces built with Vite. One set of typed operations serves the browser, CLI and MCP adapter. The public OpenAPI document is generated from Rust declarations; generated clients and schemas consume it. UI components are composed with existing libraries, not generated automatically from endpoint shapes.
+
+Bun is the JavaScript package manager and tooling runtime: one root workspace and bun.lock, package scripts, frontend generators, bundling and the tooling tests. The application server is Rust; Bun is not a server runtime and Node/pnpm are not project prerequisites. TypeScript 7 type checking remains a separate check, because executing or transpiling TypeScript is not type checking. The `tsc` checker is TypeScript 7; tools that call the compiler API (Hey API) use the side-by-side TypeScript 6 API package until they support TypeScript 7. Authored code is checked with `strict`, `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`; a generated-code exception exists only where a pinned generator's output cannot meet a rule, is declared in its own project, and carries a probe that signals when it can be removed.
+
+The production Application lives in core's application module and implements the operation interface over injected core-owned ports. Core never depends on a concrete storage, ingestion or transport crate. Server startup constructs the real adapters and injects them; startup wires dependencies and does not hold application behavior.
 
 Git versions notes and source cards. A local content-addressed store preserves source bytes and retained derived artifacts. SQLite preserves jobs, reviews and tool-result records; separate derived indexes are rebuildable. OpenTelemetry is diagnostics only and may link to app records. It is never the only evidence for a review or completed import.
 
-Run the same service locally in a browser and hosted in a container. The documented hosted path is WorkOS AuthKit/Connect plus GalaxyGate. No Cloudflare path is included. No built-in identity directory or passwords; local records reference authenticated subjects and application permissions. One hosted tenant may have many workspaces.
+Run the same service locally in a browser and hosted in a container; the two authentication entry paths are defined in section 11. The documented hosted path is WorkOS AuthKit/Connect plus GalaxyGate. No Cloudflare path is included. One hosted tenant may have many workspaces.
 
-Electrobun, BrowserPod, Forgejo/Gitea, S3 deployment, a hosted OTel stack, Windmill and desktop signing/installers are outside this iteration. This supersedes the supplied brief's older paragraphs that still mention them as active paths. Object storage interfaces must not dictate user folder organization.
+Electrobun, BrowserPod, Forgejo/Gitea, S3 deployment, a hosted OTel stack, Windmill and desktop signing/installers are outside this iteration. Removing the Electrobun desktop wrapper did not remove Bun as the JavaScript toolchain. Object storage interfaces must not dictate user folder organization.
 
-The browser service defaults to 127.0.0.1:7711 locally. Loopback binding alone is not authorization: use an unpredictable local session, origin checks, CSRF protection for browser writes, and constrained CORS/Host handling. Remote endpoints require HTTPS. The CLI and MCP adapters must not become independent uncoordinated repository writers.
+The service, CLI, browser tests and examples default to 127.0.0.1:7711 locally. Remote endpoints require HTTPS. The CLI and MCP adapters must not become independent uncoordinated repository writers.
 
 ## 3. Workspace, items and vocabulary
 
@@ -48,9 +52,11 @@ The local store is shared only within the appropriate local/tenant boundary, out
 
 Multi-file and folder upload preserves relative paths. Upload slots are authenticated, size-bounded and finalized against expected length/hash. The original is retained even when no extractor exists. Unsupported content is visible as unsupported, not silently empty or successfully converted.
 
-Import is durable work: status, attempts, cancellation, retry and reconciliation survive interruption. Queue acknowledgement is not automatically proof of durable application completion. Blob writes, SQLite transactions and Git commits need explicit recovery because they are not one transaction.
+Import is durable work: status, attempts, cancellation, retry and reconciliation survive interruption. RecordStore owns durable job state, and acceptance is persisted before it is reported. The initial executor is an in-process Tokio worker that claims those durable records through the existing lease, retry and recovery interfaces; an in-memory queue is only a wake-up mechanism, never the sole record of accepted work. Repeated execution of the same job must be safe. Queue acknowledgement is not proof of durable application completion. Blob writes, SQLite transactions and Git commits need explicit recovery because they are not one transaction. Crash durability is claimed only after the crash/restart check in section 12 passes.
 
-Use Docling's selected Rust implementation after actual qualification. Retain structured Markdown, images/captions, relevant page renders, source locators and converter/version/settings. Heavy conversion runs in bounded workers with time, memory and cancellation controls. Model assets and native libraries are checked deployment inputs, not magic downloads hidden in reads.
+Use the pinned Docling Rust implementation through its actual supported API; do not replace it merely because a newer release exists. Establish its real native library and model asset requirements, with verified download locations, versions, hashes and configured local paths; never invent a hash or call a missing asset qualified. Retain structured Markdown, images/captions, relevant page renders, source locators and converter/version/settings. Heavy conversion runs in bounded workers with time, memory and cancellation controls. Model assets and native libraries are checked deployment inputs, not magic downloads hidden in reads.
+
+Uploaded bytes are preserved while conversion is pending or after it fails, and the item shows that state accurately. "Bytes retained, extraction unsupported" is a fallback state, not completion of supported-format ingestion. No fake success, empty digest or text-only substitute may stand in for the converter.
 
 Generated extraction and human corrections remain distinguishable. Re-extraction must not erase corrections. AI enrichment occurs only when the user's external agent proposes it, with truthful origin labels. There is no model in the ingestion service.
 
@@ -74,6 +80,8 @@ Ordinary reads are not required to inline every image. Multimodal-capable client
 
 Search and folder lists return descriptions/snippets and identities rather than whole document dumps. Links/backlinks and a bounded graph derive from the same source state. Search results and graph nodes are scoped to caller access.
 
+Search, link and graph data are a rebuildable derived index behind core's SearchIndex port. Storage implements it with SQLite FTS, including index updates and rebuild mechanics. The Application owns authorization, workspace scoping, revision resolution and coordinating index updates and rebuilds with content changes. Reviews, jobs and retrieval receipts are not rebuildable; rebuilding search never removes durable application records.
+
 The human viewer includes Markdown, PDF, images, sandboxed HTML/artifacts and snapshots, Office extraction with original access, spreadsheet tables/ranges, plain text/code and editing. Original and digest may be compared side by side. Browser caching keys include workspace, source, revision, representation and selection.
 
 ## 8. History, proposals and review
@@ -84,7 +92,7 @@ A connected answerer is read-only. An explicitly allowed drafter may create prop
 
 An authorized person can accept or decline the exact proposal shown. Stale preconditions require reconciliation. A review covers the exact displayed content and revision. Later changes display previous coverage accurately instead of extending the badge. Imported human-looking metadata is not authenticated review evidence.
 
-WorkOS authentication answers who the request acts for. Human confirmation requires an explicit revision-bound browser action and application checks. Never infer review from a JWT email or from the string human: in a file. Browser automation/delegation is not made impossible by hiding an endpoint; do not promise otherwise.
+The authenticated principal (section 11) answers who the request acts for; it is not evidence of human review. Human confirmation requires an explicit revision-bound browser action and application checks. Never infer review from a token's email claim, a delegated user's identity, or the string human: in a file. Browser automation/delegation is not made impossible by hiding an endpoint; do not promise otherwise.
 
 ## 9. MCP, MCP Apps and WebMCP
 
@@ -108,7 +116,13 @@ The agent may present a candidate, propose it as a View, and have the person acc
 
 ## 11. Identity, isolation and safety
 
-Hosted browser sessions and MCP Connect tokens have distinct flows. Publish protected-resource metadata, configure the resource audience, validate JWKS signatures/issuer/audience/expiry and enforce workspace permissions. Subject and client identity are retained separately. No passwords, tokens or WorkOS keys in browser logs, vendor notes or source.
+There are two explicit authentication entry paths, selected by deployment configuration. Both produce the same internal Principal and pass through the same core authorization rules. There is no built-in identity directory, password or account platform in either path, and a missing or invalid hosted configuration never falls back to local authentication.
+
+Local: the installation has one persistent local identity, created on first use and stored in application-owned data; it owns the installation's local workspaces. WorkOS is not required. The browser authenticates through a local session: startup prints a single-use launch URL whose unpredictable token is exchanged for an HttpOnly, SameSite=Strict session cookie. Host and Origin checks, CSRF protection for cookie-authenticated mutations and constrained CORS still apply; loopback binding is never treated as authorization. Local MCP clients use separate connector credentials that the owner issues and revokes: read by default, propose only when enabled, never review or approve. An agent never receives the browser owner's session credential.
+
+Hosted: WorkOS AuthKit provides browser sessions and WorkOS Connect provides MCP delegation behind GalaxyGate. Publish protected-resource metadata, configure the resource audience, validate JWKS signatures/issuer/audience/expiry, and enforce workspace permissions in the application. Subject and client identity are retained separately. A delegated user's identity is not evidence of human review. No Cloudflare path.
+
+No passwords, tokens, connector secrets or WorkOS keys appear in browser logs, vendor notes or source.
 
 Uploaded HTML is hostile data until constrained by actual isolation. Use a sandboxed separate origin, no credentials or privileged APIs, restricted navigation/messages and explicit external-resource policy. Do not treat a normal browser iframe as automatically safe.
 
@@ -118,7 +132,7 @@ Receipt records identify exactly what this server returned, including revision a
 
 ## 12. Qualification and deployment obligations
 
-The iii engine/SDK/worker/adapter/configuration combination is an unqualified candidate. Qualification submits an import, kills execution immediately after acknowledgement, restarts and retries, then opens the same completed result without duplicate occurrence/commit or lost original. Exercise channels, scope separation and resource cost. Review ELv2 terms for the intended deployment. Do not prebuild two complete executors.
+The crash/restart check submits an import, kills execution immediately after acknowledgement, restarts and retries, then opens the same completed result without duplicate occurrence/commit or lost original. It applies first to the in-process Tokio worker described in section 5. The iii engine/SDK/worker/adapter/configuration combination is an unqualified candidate; it is adopted only after passing this same check against the same import and recovery behavior, plus channels, scope separation and resource cost, and a review of the ELv2 terms for the intended deployment. Do not build two complete execution systems.
 
 Portable export gathers references into an independently readable folder/archive. Full backup additionally preserves promised app records, retained objects and versions. Restore must be exercised. The container requires persistent mounts, health/readiness distinction, HTTPS ingress, explicit WorkOS configuration and restart behavior.
 
@@ -128,9 +142,9 @@ The workshop is a usage scenario, not app state. Compare representations without
 
 Phase 0 builds the real foundation. It is complete only after clean-checkout generation, repeat generation with no file-set or byte drift, compilation/exercise of representative consumers, semantic schema controls, and architecture-relevant external library/host qualification. Its green claims no finished product behavior.
 
-Generation must not depend on running storage, conversion or the UI, and may never require success-returning product stubs. A test fixture may live in tests/support; it must never ship or become runtime fallback behavior.
+Generation must not depend on running storage, conversion or the UI, and may never require success-returning product stubs. Synthetic API examples may ship with the API documentation. FixtureApplication and other tests/support implementations never ship as the production application, never seed real workspaces and never become runtime fallback behavior.
 
-The integration owner controls shared types, operation declarations, manifests/lockfiles, generation, deployment and independent acceptance. Seven lanes implement complete responsibilities in isolated worktrees. Builders run targeted tests and write regressions; they do not weaken acceptance, hand-edit generated files, suppress lints or silently substitute an imagined dependency.
+The integration owner controls shared types, operation declarations, manifests/lockfiles, generation, deployment and independent acceptance. Seven lanes implement complete responsibilities in isolated worktrees, in parallel against the shared interfaces once the generator foundation is qualified; construction is not a mandatory storage-then-UI sequence. Builders run targeted tests and write regressions; they do not weaken acceptance, hand-edit generated files, suppress lints or silently substitute an imagined dependency.
 
 Before repair distinguish an implementation defect, unfinished neighboring work, and a wrong shared assumption. Fix the defect, continue only genuinely independent work, or request a shared correction. Stop after repeated attempts with no new diagnosis. Budget exhaustion reports unfinished work rather than redefining complete.
 
@@ -146,6 +160,6 @@ Stable Rust, forbid authored unsafe, deny all/pedantic plus selected panic/unche
 
 Rust identities and descriptions are authoritative for wire semantics. The emitted OpenAPI, JSON Schemas, tool catalog, CLI metadata and vendor-generated client distribute them. API generation proves shape, not workflow correctness. Preserve unknown OKF extensions and test omitted/null, tagging, naming and resolved revisions semantically across boundaries.
 
-Root README, AGENTS and this SPEC are the canonical prose. vendors.json is lookup metadata, not another product specification. Local AGENTS files contain only lane differences. CLAUDE.md imports AGENTS.md. Plain task commands remain usable without vendor-specific agent discovery. CODEOWNERS is review routing only until owners and branch rules are configured.
+Root README, AGENTS and this SPEC are the canonical prose. vendors.json is lookup metadata, not another product specification. Local AGENTS files contain only lane differences. CLAUDE.md imports AGENTS.md. Plain task commands remain usable without vendor-specific agent discovery. Ownership is explicit in these documents and enforced locally by isolated worktrees. CODEOWNERS is review routing, not a local editing lock, and no required review exists until owners and branch protection are actually configured; local work does not wait for those settings.
 
 No documentation shadow implementation, new governance framework, custom workflow language or dependency library is introduced to build this product. Use the libraries' actual APIs. Report what was executed separately from what was authored.

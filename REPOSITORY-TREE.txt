@@ -9,6 +9,7 @@ okf-jawn/
 │       │   └── SKILL.md
 │       └── regenerate-api/
 │           └── SKILL.md
+├── .bun-version
 ├── .cargo/
 │   └── config.toml
 ├── .dockerignore
@@ -20,16 +21,166 @@ okf-jawn/
 │       ├── ci.yml
 │       └── contract.yml
 ├── .gitignore
-├── .node-version
-├── .npmrc
 ├── AGENTS.md
 ├── CLAUDE.md
+├── Cargo.lock
 ├── Cargo.toml
 ├── LICENSE-APACHE
 ├── LICENSE-MIT
 ├── README.md
 ├── REPOSITORY-TREE.txt
 ├── SPEC.md
+├── api/
+│   ├── examples/
+│   │   ├── create-workspace.json
+│   │   ├── list-items.json
+│   │   └── read-item.json
+│   ├── forms/
+│   │   ├── naming-rules.schema.json
+│   │   ├── type.schema.json
+│   │   └── view.schema.json
+│   ├── mcp-tools.json
+│   ├── openapi.json
+│   ├── openapi.yaml
+│   ├── operations.json
+│   ├── presentation/
+│   │   ├── catalog-components.json
+│   │   ├── catalog-prompt.txt
+│   │   └── catalog.schema.json
+│   ├── schemas/
+│   │   ├── accept_proposal.input.json
+│   │   ├── accept_proposal.output.json
+│   │   ├── add_comment.input.json
+│   │   ├── add_comment.output.json
+│   │   ├── apply_names.input.json
+│   │   ├── apply_names.output.json
+│   │   ├── archive_workspace.input.json
+│   │   ├── archive_workspace.output.json
+│   │   ├── backup_workspace.input.json
+│   │   ├── backup_workspace.output.json
+│   │   ├── blame_item.input.json
+│   │   ├── blame_item.output.json
+│   │   ├── cancel_job.input.json
+│   │   ├── cancel_job.output.json
+│   │   ├── commit_items.input.json
+│   │   ├── commit_items.output.json
+│   │   ├── complete_upload.input.json
+│   │   ├── complete_upload.output.json
+│   │   ├── correct_digest.input.json
+│   │   ├── correct_digest.output.json
+│   │   ├── create_confirmation.input.json
+│   │   ├── create_confirmation.output.json
+│   │   ├── create_connector.input.json
+│   │   ├── create_connector.output.json
+│   │   ├── create_folder.input.json
+│   │   ├── create_folder.output.json
+│   │   ├── create_item.input.json
+│   │   ├── create_item.output.json
+│   │   ├── create_review.input.json
+│   │   ├── create_review.output.json
+│   │   ├── create_upload.input.json
+│   │   ├── create_upload.output.json
+│   │   ├── create_workspace.input.json
+│   │   ├── create_workspace.output.json
+│   │   ├── decline_proposal.input.json
+│   │   ├── decline_proposal.output.json
+│   │   ├── delete_item.input.json
+│   │   ├── delete_item.output.json
+│   │   ├── diff_items.input.json
+│   │   ├── diff_items.output.json
+│   │   ├── export_view.input.json
+│   │   ├── export_view.output.json
+│   │   ├── export_workspace.input.json
+│   │   ├── export_workspace.output.json
+│   │   ├── get_attention.input.json
+│   │   ├── get_attention.output.json
+│   │   ├── get_catalog.input.json
+│   │   ├── get_catalog.output.json
+│   │   ├── get_graph.input.json
+│   │   ├── get_graph.output.json
+│   │   ├── get_health.input.json
+│   │   ├── get_health.output.json
+│   │   ├── get_item.input.json
+│   │   ├── get_item.output.json
+│   │   ├── get_job.input.json
+│   │   ├── get_job.output.json
+│   │   ├── get_links.input.json
+│   │   ├── get_links.output.json
+│   │   ├── get_object.input.json
+│   │   ├── get_object.output.json
+│   │   ├── get_proposal.input.json
+│   │   ├── get_proposal.output.json
+│   │   ├── get_readiness.input.json
+│   │   ├── get_readiness.output.json
+│   │   ├── get_receipt.input.json
+│   │   ├── get_receipt.output.json
+│   │   ├── get_rules.input.json
+│   │   ├── get_rules.output.json
+│   │   ├── get_session.input.json
+│   │   ├── get_session.output.json
+│   │   ├── get_sources.input.json
+│   │   ├── get_sources.output.json
+│   │   ├── get_view.input.json
+│   │   ├── get_view.output.json
+│   │   ├── list_connectors.input.json
+│   │   ├── list_connectors.output.json
+│   │   ├── list_events.input.json
+│   │   ├── list_events.output.json
+│   │   ├── list_items.input.json
+│   │   ├── list_items.output.json
+│   │   ├── list_jobs.input.json
+│   │   ├── list_jobs.output.json
+│   │   ├── list_proposals.input.json
+│   │   ├── list_proposals.output.json
+│   │   ├── list_reviews.input.json
+│   │   ├── list_reviews.output.json
+│   │   ├── list_types.input.json
+│   │   ├── list_types.output.json
+│   │   ├── list_workspaces.input.json
+│   │   ├── list_workspaces.output.json
+│   │   ├── log_items.input.json
+│   │   ├── log_items.output.json
+│   │   ├── move_item.input.json
+│   │   ├── move_item.output.json
+│   │   ├── open_proposal.input.json
+│   │   ├── open_proposal.output.json
+│   │   ├── open_workspace.input.json
+│   │   ├── open_workspace.output.json
+│   │   ├── present_view.input.json
+│   │   ├── present_view.output.json
+│   │   ├── preview_names.input.json
+│   │   ├── preview_names.output.json
+│   │   ├── read_item.input.json
+│   │   ├── read_item.output.json
+│   │   ├── rebuild_index.input.json
+│   │   ├── rebuild_index.output.json
+│   │   ├── redigest_item.input.json
+│   │   ├── redigest_item.output.json
+│   │   ├── resolve_view.input.json
+│   │   ├── resolve_view.output.json
+│   │   ├── restore_items.input.json
+│   │   ├── restore_items.output.json
+│   │   ├── retry_job.input.json
+│   │   ├── retry_job.output.json
+│   │   ├── revoke_connector.input.json
+│   │   ├── revoke_connector.output.json
+│   │   ├── search_items.input.json
+│   │   ├── search_items.output.json
+│   │   ├── set_lifecycle.input.json
+│   │   ├── set_lifecycle.output.json
+│   │   ├── set_rules.input.json
+│   │   ├── set_rules.output.json
+│   │   ├── set_type.input.json
+│   │   ├── set_type.output.json
+│   │   ├── start_import.input.json
+│   │   ├── start_import.output.json
+│   │   ├── update_item.input.json
+│   │   ├── update_item.output.json
+│   │   ├── update_workspace.input.json
+│   │   └── update_workspace.output.json
+│   └── transports.json
+├── bun.lock
+├── bunfig.toml
 ├── cliff.toml
 ├── clippy.toml
 ├── crates/
@@ -73,11 +224,14 @@ okf-jawn/
 │   │   ├── Cargo.toml
 │   │   ├── src/
 │   │   │   ├── access.rs
+│   │   │   ├── application/
+│   │   │   │   └── mod.rs
 │   │   │   ├── conversion.rs
 │   │   │   ├── dispatch.rs
 │   │   │   ├── jobs.rs
 │   │   │   ├── lib.rs
 │   │   │   ├── ports.rs
+│   │   │   ├── search.rs
 │   │   │   └── storage.rs
 │   │   └── tests/
 │   │       └── authorization.rs
@@ -114,10 +268,81 @@ okf-jawn/
 │   ├── compose.yaml
 │   └── galaxygate/
 │       └── AGENTS.md
+├── generated/
+│   └── cli/
+│       ├── _okf-jawn
+│       ├── _okf-jawn.ps1
+│       ├── okf-jawn-accept_proposal.1
+│       ├── okf-jawn-add_comment.1
+│       ├── okf-jawn-apply_names.1
+│       ├── okf-jawn-archive_workspace.1
+│       ├── okf-jawn-backup_workspace.1
+│       ├── okf-jawn-blame_item.1
+│       ├── okf-jawn-cancel_job.1
+│       ├── okf-jawn-commit_items.1
+│       ├── okf-jawn-complete_upload.1
+│       ├── okf-jawn-correct_digest.1
+│       ├── okf-jawn-create_confirmation.1
+│       ├── okf-jawn-create_connector.1
+│       ├── okf-jawn-create_folder.1
+│       ├── okf-jawn-create_item.1
+│       ├── okf-jawn-create_review.1
+│       ├── okf-jawn-create_upload.1
+│       ├── okf-jawn-create_workspace.1
+│       ├── okf-jawn-decline_proposal.1
+│       ├── okf-jawn-delete_item.1
+│       ├── okf-jawn-diff_items.1
+│       ├── okf-jawn-export_view.1
+│       ├── okf-jawn-export_workspace.1
+│       ├── okf-jawn-get_attention.1
+│       ├── okf-jawn-get_catalog.1
+│       ├── okf-jawn-get_graph.1
+│       ├── okf-jawn-get_health.1
+│       ├── okf-jawn-get_item.1
+│       ├── okf-jawn-get_job.1
+│       ├── okf-jawn-get_links.1
+│       ├── okf-jawn-get_object.1
+│       ├── okf-jawn-get_proposal.1
+│       ├── okf-jawn-get_readiness.1
+│       ├── okf-jawn-get_receipt.1
+│       ├── okf-jawn-get_rules.1
+│       ├── okf-jawn-get_session.1
+│       ├── okf-jawn-get_sources.1
+│       ├── okf-jawn-get_view.1
+│       ├── okf-jawn-list_connectors.1
+│       ├── okf-jawn-list_events.1
+│       ├── okf-jawn-list_items.1
+│       ├── okf-jawn-list_jobs.1
+│       ├── okf-jawn-list_proposals.1
+│       ├── okf-jawn-list_reviews.1
+│       ├── okf-jawn-list_types.1
+│       ├── okf-jawn-list_workspaces.1
+│       ├── okf-jawn-log_items.1
+│       ├── okf-jawn-move_item.1
+│       ├── okf-jawn-open_proposal.1
+│       ├── okf-jawn-open_workspace.1
+│       ├── okf-jawn-present_view.1
+│       ├── okf-jawn-preview_names.1
+│       ├── okf-jawn-read_item.1
+│       ├── okf-jawn-rebuild_index.1
+│       ├── okf-jawn-redigest_item.1
+│       ├── okf-jawn-resolve_view.1
+│       ├── okf-jawn-restore_items.1
+│       ├── okf-jawn-retry_job.1
+│       ├── okf-jawn-revoke_connector.1
+│       ├── okf-jawn-search_items.1
+│       ├── okf-jawn-set_lifecycle.1
+│       ├── okf-jawn-set_rules.1
+│       ├── okf-jawn-set_type.1
+│       ├── okf-jawn-start_import.1
+│       ├── okf-jawn-update_item.1
+│       ├── okf-jawn-update_workspace.1
+│       ├── okf-jawn.1
+│       ├── okf-jawn.bash
+│       └── okf-jawn.fish
 ├── justfile
 ├── lefthook.yml
 ├── package.json
-├── pnpm-workspace.yaml
 ├── rust-toolchain.toml
 ├── rustfmt.toml
 ├── samples/
@@ -135,6 +360,7 @@ okf-jawn/
 │       ├── generation.mjs
 │       ├── init.mjs
 │       ├── process.mjs
+│       ├── toolchain.mjs
 │       └── tree.mjs
 ├── tests/
 │   ├── fixtures/
@@ -149,6 +375,7 @@ okf-jawn/
 │   │   ├── init.test.mjs
 │   │   ├── policy.test.mjs
 │   │   ├── process.test.mjs
+│   │   ├── toolchain.test.mjs
 │   │   └── vendor.test.mjs
 │   ├── integration/
 │   │   ├── acceptance.mjs
@@ -158,6 +385,8 @@ okf-jawn/
 │       ├── application.rs
 │       └── assertions.mjs
 ├── ui/
+│   ├── .tanstack/
+│   │   └── tmp/
 │   ├── AGENTS.md
 │   ├── biome.json
 │   ├── index.html
@@ -170,6 +399,29 @@ okf-jawn/
 │   │   ├── catalog-entry.ts
 │   │   └── generate-catalog.mjs
 │   ├── src/
+│   │   ├── api/
+│   │   │   └── generated/
+│   │   │       ├── @tanstack/
+│   │   │       │   └── react-query.gen.ts
+│   │   │       ├── client/
+│   │   │       │   ├── client.gen.ts
+│   │   │       │   ├── index.ts
+│   │   │       │   ├── types.gen.ts
+│   │   │       │   └── utils.gen.ts
+│   │   │       ├── client.gen.ts
+│   │   │       ├── core/
+│   │   │       │   ├── auth.gen.ts
+│   │   │       │   ├── bodySerializer.gen.ts
+│   │   │       │   ├── params.gen.ts
+│   │   │       │   ├── pathSerializer.gen.ts
+│   │   │       │   ├── queryKeySerializer.gen.ts
+│   │   │       │   ├── serverSentEvents.gen.ts
+│   │   │       │   ├── types.gen.ts
+│   │   │       │   └── utils.gen.ts
+│   │   │       ├── index.ts
+│   │   │       ├── sdk.gen.ts
+│   │   │       ├── types.gen.ts
+│   │   │       └── zod.gen.ts
 │   │   ├── features/
 │   │   │   ├── attention/
 │   │   │   ├── conventions/
@@ -201,6 +453,8 @@ okf-jawn/
 │   │   ├── styles.css
 │   │   └── webmcp/
 │   │       └── register.ts
+│   ├── tsconfig.generated-strict.json
+│   ├── tsconfig.generated.json
 │   ├── tsconfig.json
 │   ├── vite.config.ts
 │   └── vitest.config.ts

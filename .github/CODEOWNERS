@@ -6,7 +6,9 @@
 # /api/ @OWNER
 # /Cargo.toml @OWNER
 # /Cargo.lock @OWNER
-# /pnpm-lock.yaml @OWNER
+# /bun.lock @OWNER
+# /package.json @OWNER
+# /ui/package.json @OWNER
 # /tests/integration/ @OWNER
 # /ui/src/api/generated/ @OWNER
 # /deploy/ @OWNER

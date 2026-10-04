@@ -1,7 +1,7 @@
 /** Render the actual source tree, including reserved empty directories, without traversing symlinks. */
 import { readdir } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-const excluded = new Set(['.git', 'target', 'node_modules', '.artifacts', 'dist', 'dist-apps', '.env']);
+const excluded = new Set(['.git', 'target', 'node_modules', '.artifacts', 'dist', 'dist-apps', '.tsbuild', 'routeTree.gen.ts', '.env']);
 export async function tree(root) {
   const lines = [`${basename(root)}/`];
   async function visit(directory, prefix) {
