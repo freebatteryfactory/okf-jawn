@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-create_review 1  "create_review " 
+.SH NAME
+okf\-jawn\-create_review \- Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.
+.SH SYNOPSIS
+\fBokf\-jawn create_review\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

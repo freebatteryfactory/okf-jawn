@@ -1,0 +1,11 @@
+{
+  "components": [
+    "Stack",
+    "Columns",
+    "SourceExcerpt",
+    "DataTable",
+    "Chart",
+    "SourceList"
+  ],
+  "actions": []
+}

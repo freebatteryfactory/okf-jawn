@@ -1,0 +1,23 @@
+{
+  "$defs": {
+    "ConnectorId": {
+      "description": "Identity of one local MCP connector credential, never the owner's browser session.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Revoke one connector credential immediately.",
+  "properties": {
+    "connector_id": {
+      "$ref": "#/$defs/ConnectorId",
+      "description": "Connector to revoke."
+    }
+  },
+  "required": [
+    "connector_id"
+  ],
+  "title": "RevokeConnectorRequest",
+  "type": "object"
+}

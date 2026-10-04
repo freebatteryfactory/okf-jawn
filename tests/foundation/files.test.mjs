@@ -1,7 +1,7 @@
 /** Unit tests of actual source tooling; these do not claim product acceptance. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { files, manifest, differences, replaceGenerated } from '../../scripts/lib/files.mjs';
@@ -26,6 +26,16 @@ test('publishing removes stale generated files but leaves authored siblings inta
   const output=join(root,'api'); await mkdir(output); await writeFile(join(output,'old.json'),'old'); await writeFile(join(root,'SPEC.md'),'keep');
   await replaceGenerated(source,output,root);
   assert.deepEqual(await files(output),['new.json']); assert.equal(await readFile(join(root,'SPEC.md'),'utf8'),'keep');
+});
+test('publishing keeps the watched destination directory and leaves no staging behind', async t => {
+  const root=await fixture(t); const source=join(root,'stage'); await mkdir(join(source,'nested'),{recursive:true});
+  await writeFile(join(source,'nested','types.ts'),'new');
+  const output=join(root,'generated','cli'); await mkdir(join(output,'stale'),{recursive:true}); await writeFile(join(output,'stale','x'),'old');
+  const before=(await stat(output)).ino;
+  await replaceGenerated(source,output,root);
+  assert.equal((await stat(output)).ino,before);
+  assert.deepEqual(await files(output),['nested/types.ts']);
+  assert.deepEqual(await readdir(join(root,'generated')),['cli']);
 });
 test('publishing to an authored directory is refused', async t => {
   const root=await fixture(t); await mkdir(join(root,'source')); await assert.rejects(replaceGenerated(join(root,'source'),join(root,'crates'),root),/non-generated/);

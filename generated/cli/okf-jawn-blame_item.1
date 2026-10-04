@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-blame_item 1  "blame_item " 
+.SH NAME
+okf\-jawn\-blame_item \- Show which commit last changed each selected line, not the origin of each fact.
+.SH SYNOPSIS
+\fBokf\-jawn blame_item\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Show which commit last changed each selected line, not the origin of each fact.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Edit content against its base revision, invalidating prior review coverage.",
+  "properties": {
+    "base_revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Exact revision on which this change is based; stale writes conflict."
+    },
+    "body": {
+      "description": "Replacement Markdown.",
+      "type": "string"
+    },
+    "item_id": {
+      "$ref": "#/$defs/ItemId",
+      "description": "Stable application item identity; paths remain the portable OKF identity."
+    },
+    "properties": {
+      "additionalProperties": true,
+      "description": "Complete preserved property map.",
+      "type": "object"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "item_id",
+    "base_revision",
+    "body",
+    "properties"
+  ],
+  "title": "UpdateItemRequest",
+  "type": "object"
+}

@@ -1,0 +1,261 @@
+{
+  "$defs": {
+    "Change": {
+      "description": "Permitted proposal mutations; no review or acceptance variants exist.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Create a note or View with retained properties.",
+          "properties": {
+            "body": {
+              "description": "Body.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "create",
+              "type": "string"
+            },
+            "path": {
+              "$ref": "#/$defs/WorkspacePath",
+              "description": "Path."
+            },
+            "properties": {
+              "additionalProperties": true,
+              "description": "Properties.",
+              "type": "object"
+            },
+            "type_name": {
+              "description": "Type name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "type_name",
+            "body",
+            "properties"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Replace authored content with preconditions.",
+          "properties": {
+            "body": {
+              "description": "Body.",
+              "type": "string"
+            },
+            "item_id": {
+              "$ref": "#/$defs/ItemId",
+              "description": "Item id."
+            },
+            "kind": {
+              "const": "edit",
+              "type": "string"
+            },
+            "properties": {
+              "additionalProperties": true,
+              "description": "Properties.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "item_id",
+            "body",
+            "properties"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Move and rewrite links.",
+          "properties": {
+            "destination": {
+              "$ref": "#/$defs/WorkspacePath",
+              "description": "Destination."
+            },
+            "item_id": {
+              "$ref": "#/$defs/ItemId",
+              "description": "Item id."
+            },
+            "kind": {
+              "const": "move",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "item_id",
+            "destination"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Retire an item without deleting retained objects.",
+          "properties": {
+            "item_id": {
+              "$ref": "#/$defs/ItemId",
+              "description": "Item id."
+            },
+            "kind": {
+              "const": "archive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "item_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Proposal": {
+      "additionalProperties": false,
+      "description": "A revision-bound proposed change set.",
+      "properties": {
+        "base_revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Base on which the proposal was drafted."
+        },
+        "changes": {
+          "description": "Proposed mutations.",
+          "items": {
+            "$ref": "#/$defs/Change"
+          },
+          "type": "array"
+        },
+        "content_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Server-computed digest of the exact displayed change set."
+        },
+        "created_at": {
+          "description": "RFC 3339 creation time.",
+          "type": "string"
+        },
+        "created_by": {
+          "description": "Server-recorded principal.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Rationale and limitations.",
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/ProposalId",
+          "description": "Proposal identity."
+        },
+        "proposal_revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Exact proposed content."
+        },
+        "status": {
+          "$ref": "#/$defs/ProposalStatus",
+          "description": "Current suggestion state."
+        },
+        "title": {
+          "description": "Human-readable reason.",
+          "type": "string"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/WorkspaceId",
+          "description": "Workspace whose permissions and storage scope apply."
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "base_revision",
+        "proposal_revision",
+        "content_digest",
+        "title",
+        "description",
+        "changes",
+        "status",
+        "created_by",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "ProposalId": {
+      "description": "Identity of a suggested change set, not a review.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ProposalStatus": {
+      "description": "Lifecycle of a suggestion, not approval of a fact in it.",
+      "oneOf": [
+        {
+          "const": "open",
+          "description": "Available for review.",
+          "type": "string"
+        },
+        {
+          "const": "accepted",
+          "description": "Merged by an authorized action.",
+          "type": "string"
+        },
+        {
+          "const": "declined",
+          "description": "Closed without applying changes.",
+          "type": "string"
+        },
+        {
+          "const": "conflict",
+          "description": "Base state changed; reconciliation required.",
+          "type": "string"
+        }
+      ]
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspacePath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Paged proposals.",
+  "properties": {
+    "items": {
+      "description": "Visible proposals.",
+      "items": {
+        "$ref": "#/$defs/Proposal"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Continuation cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "items"
+  ],
+  "title": "ListProposalsResponse",
+  "type": "object"
+}

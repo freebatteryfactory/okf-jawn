@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Basic process metadata only.",
+  "properties": {
+    "status": {
+      "description": "alive when the process can respond.",
+      "type": "string"
+    },
+    "version": {
+      "description": "Application build version.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "status",
+    "version"
+  ],
+  "title": "HealthResponse",
+  "type": "object"
+}

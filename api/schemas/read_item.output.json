@@ -1,0 +1,461 @@
+{
+  "$defs": {
+    "CellRange": {
+      "additionalProperties": false,
+      "description": "A one-based rectangular spreadsheet selection.",
+      "properties": {
+        "column_end": {
+          "description": "Last column, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "column_start": {
+          "description": "First column, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row_end": {
+          "description": "Last row, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row_start": {
+          "description": "First row, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sheet": {
+          "description": "Exact sheet name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sheet",
+        "row_start",
+        "row_end",
+        "column_start",
+        "column_end"
+      ],
+      "type": "object"
+    },
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "MediaReference": {
+      "additionalProperties": false,
+      "description": "An authorized image or artifact associated with a source range.",
+      "properties": {
+        "caption": {
+          "description": "Caption text; caption origin is separate.",
+          "type": "string"
+        },
+        "caption_origin": {
+          "description": "source, process, human, or agent.",
+          "type": "string"
+        },
+        "height": {
+          "description": "Pixel height.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "media_type": {
+          "description": "MIME type.",
+          "type": "string"
+        },
+        "object": {
+          "$ref": "#/$defs/Digest",
+          "description": "Retained image bytes."
+        },
+        "source": {
+          "$ref": "#/$defs/SourceReference",
+          "description": "Original source location."
+        },
+        "width": {
+          "description": "Pixel width.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "object",
+        "media_type",
+        "source",
+        "caption",
+        "caption_origin",
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "OutlineEntry": {
+      "additionalProperties": false,
+      "description": "A navigable structural element from a document.",
+      "properties": {
+        "kind": {
+          "description": "Heading, table, figure, page, or sheet.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Visible heading or media caption.",
+          "type": "string"
+        },
+        "level": {
+          "description": "Heading depth or zero for non-heading elements.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "selection": {
+          "$ref": "#/$defs/Selection",
+          "description": "Precise location to request next."
+        }
+      },
+      "required": [
+        "label",
+        "level",
+        "selection",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "PageRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive document page range.",
+      "properties": {
+        "end": {
+          "description": "Last page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "ReadView": {
+      "description": "Select a representation rather than silently truncating a source.",
+      "oneOf": [
+        {
+          "const": "outline",
+          "description": "Headings, pages, and media descriptions.",
+          "type": "string"
+        },
+        {
+          "const": "text",
+          "description": "Structured Markdown and source locators.",
+          "type": "string"
+        },
+        {
+          "const": "multimodal",
+          "description": "Markdown and selected images.",
+          "type": "string"
+        },
+        {
+          "const": "pages",
+          "description": "Selected rendered page images.",
+          "type": "string"
+        },
+        {
+          "const": "original",
+          "description": "Authorized access to original bytes.",
+          "type": "string"
+        }
+      ]
+    },
+    "ReceiptId": {
+      "description": "Identity of a durable application operation record.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Selection": {
+      "description": "Explicit bounded source selection.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The complete source, subject to a visible response budget.",
+          "properties": {
+            "kind": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Inclusive line range.",
+          "properties": {
+            "kind": {
+              "const": "lines",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/TextRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Inclusive page range.",
+          "properties": {
+            "kind": {
+              "const": "pages",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/PageRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Rectangular sheet range.",
+          "properties": {
+            "kind": {
+              "const": "cells",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/CellRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An unambiguous heading identifier.",
+          "properties": {
+            "heading": {
+              "description": "Heading.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "section",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "heading"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SourceReference": {
+      "additionalProperties": false,
+      "description": "A precise citation that can be reopened independently of current state.",
+      "properties": {
+        "digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact derived artifact hash."
+        },
+        "item_id": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Stable application item identity; paths remain the portable OKF identity."
+        },
+        "path": {
+          "$ref": "#/$defs/WorkspacePath",
+          "description": "Relative path at the resolved source revision."
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Resolved source revision."
+        },
+        "selection": {
+          "$ref": "#/$defs/Selection",
+          "description": "Resolved page, lines, cells, section, or entire source."
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/WorkspaceId",
+          "description": "Workspace whose permissions and storage scope apply."
+        }
+      },
+      "required": [
+        "workspace_id",
+        "item_id",
+        "path",
+        "revision",
+        "selection"
+      ],
+      "type": "object"
+    },
+    "TextRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive line range.",
+      "properties": {
+        "end": {
+          "description": "Last line, at least start.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First line, starting at one.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "Warning": {
+      "additionalProperties": false,
+      "description": "A diagnostic that does not silently discard usable input.",
+      "properties": {
+        "code": {
+          "description": "Stable diagnostic identifier.",
+          "type": "string"
+        },
+        "location": {
+          "description": "Page, cell, path, or field locator.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable explanation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspacePath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What the tool actually returned, not a claim about the host model context.",
+  "properties": {
+    "markdown": {
+      "description": "Text within the declared budget.",
+      "type": "string"
+    },
+    "media": {
+      "description": "Selected images or original-file references.",
+      "items": {
+        "$ref": "#/$defs/MediaReference"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Resume this exact resolved read.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outline": {
+      "description": "Structural navigation.",
+      "items": {
+        "$ref": "#/$defs/OutlineEntry"
+      },
+      "type": "array"
+    },
+    "receipt_id": {
+      "$ref": "#/$defs/ReceiptId",
+      "description": "Durable record of returned content."
+    },
+    "source": {
+      "$ref": "#/$defs/SourceReference",
+      "description": "Exact source resolution."
+    },
+    "truncated": {
+      "description": "True only when the response is partial.",
+      "type": "boolean"
+    },
+    "view": {
+      "$ref": "#/$defs/ReadView",
+      "description": "Representation returned."
+    },
+    "warnings": {
+      "description": "Extraction or selection warnings.",
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "source",
+    "view",
+    "markdown",
+    "outline",
+    "media",
+    "warnings",
+    "truncated",
+    "receipt_id"
+  ],
+  "title": "ReadItemResponse",
+  "type": "object"
+}

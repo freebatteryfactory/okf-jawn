@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Create a blank workspace without baked-in example content.",
+  "properties": {
+    "description": {
+      "description": "Purpose of this workspace.",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "description": "Caller-chosen retry identity.",
+      "type": "string"
+    },
+    "name": {
+      "description": "Display name.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "description",
+    "idempotency_key"
+  ],
+  "title": "CreateWorkspaceRequest",
+  "type": "object"
+}

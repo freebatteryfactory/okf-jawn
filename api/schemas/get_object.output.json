@@ -1,0 +1,47 @@
+{
+  "$defs": {
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An authorized bounded binary block.",
+  "properties": {
+    "data_base64": {
+      "description": "Bounded base64 block; large objects use the streaming route.",
+      "type": "string"
+    },
+    "has_more": {
+      "description": "Whether more bytes remain.",
+      "type": "boolean"
+    },
+    "media_type": {
+      "description": "Content type.",
+      "type": "string"
+    },
+    "offset": {
+      "description": "Actual byte offset.",
+      "type": "string"
+    },
+    "sha256": {
+      "$ref": "#/$defs/Digest",
+      "description": "Whole-object digest."
+    },
+    "total_size": {
+      "description": "Whole-object size.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "sha256",
+    "offset",
+    "total_size",
+    "media_type",
+    "data_base64",
+    "has_more"
+  ],
+  "title": "GetObjectResponse",
+  "type": "object"
+}

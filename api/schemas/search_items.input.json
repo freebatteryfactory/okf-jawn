@@ -1,0 +1,116 @@
+{
+  "$defs": {
+    "At": {
+      "description": "A requested version selector; resolved responses contain a `Revision` instead.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Resolve the current accepted workspace head exactly once.",
+          "properties": {
+            "kind": {
+              "const": "latest",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Read an explicitly identified historical snapshot.",
+          "properties": {
+            "kind": {
+              "const": "revision",
+              "type": "string"
+            },
+            "revision": {
+              "$ref": "#/$defs/Revision",
+              "description": "Exact resolved commit identity."
+            }
+          },
+          "required": [
+            "kind",
+            "revision"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PageRequest": {
+      "additionalProperties": false,
+      "description": "A bounded page request; the cursor is opaque and scoped to the query.",
+      "properties": {
+        "cursor": {
+          "description": "Opaque continuation cursor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Maximum results requested; server may return fewer.",
+          "format": "uint16",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "limit"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Search the workspace at one revision with explicit scope and pagination.",
+  "properties": {
+    "at": {
+      "$ref": "#/$defs/At",
+      "description": "Requested revision selector; latest is resolved once before reading."
+    },
+    "folder": {
+      "description": "Limit to a relative folder.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "include_archived": {
+      "description": "Include historical lifecycle items.",
+      "type": "boolean"
+    },
+    "page": {
+      "$ref": "#/$defs/PageRequest",
+      "description": "Bounded pagination with an opaque cursor."
+    },
+    "query": {
+      "description": "Search expression; not executable SQL.",
+      "type": "string"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "at",
+    "query",
+    "include_archived",
+    "page"
+  ],
+  "title": "SearchRequest",
+  "type": "object"
+}

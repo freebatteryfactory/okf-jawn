@@ -1,0 +1,69 @@
+{
+  "$defs": {
+    "Commit": {
+      "additionalProperties": false,
+      "description": "A content snapshot, not a complete application event log.",
+      "properties": {
+        "author": {
+          "description": "Git author label, not verified human identity.",
+          "type": "string"
+        },
+        "committed_at": {
+          "description": "RFC 3339 commit timestamp.",
+          "type": "string"
+        },
+        "message": {
+          "description": "Commit message.",
+          "type": "string"
+        },
+        "parents": {
+          "description": "Parent commits.",
+          "items": {
+            "$ref": "#/$defs/Revision"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Commit identity."
+        }
+      },
+      "required": [
+        "revision",
+        "parents",
+        "message",
+        "author",
+        "committed_at"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Version history with pagination.",
+  "properties": {
+    "commits": {
+      "description": "Content snapshots.",
+      "items": {
+        "$ref": "#/$defs/Commit"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Continuation cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "commits"
+  ],
+  "title": "LogResponse",
+  "type": "object"
+}

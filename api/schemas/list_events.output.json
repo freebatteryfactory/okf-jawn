@@ -1,0 +1,104 @@
+{
+  "$defs": {
+    "Event": {
+      "additionalProperties": false,
+      "description": "A resumable workspace change notification, not canonical content.",
+      "properties": {
+        "id": {
+          "description": "Opaque monotonic event cursor.",
+          "type": "string"
+        },
+        "item_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Affected item."
+        },
+        "job_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JobId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Affected job."
+        },
+        "kind": {
+          "description": "Changed, imported, `job_updated`, reviewed, or `proposal_updated`.",
+          "type": "string"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Revision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Content revision when applicable."
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/WorkspaceId",
+          "description": "Workspace whose permissions and storage scope apply."
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "JobId": {
+      "description": "Durable background work identity retained across retries.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Bounded change notifications.",
+  "properties": {
+    "events": {
+      "description": "New notifications.",
+      "items": {
+        "$ref": "#/$defs/Event"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Continuation cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "events"
+  ],
+  "title": "ListEventsResponse",
+  "type": "object"
+}

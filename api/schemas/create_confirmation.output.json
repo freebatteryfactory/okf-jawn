@@ -1,0 +1,32 @@
+{
+  "$defs": {
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A short-lived challenge; issuance alone is not a review.",
+  "properties": {
+    "expires_at": {
+      "description": "RFC 3339 expiration.",
+      "type": "string"
+    },
+    "id": {
+      "description": "Opaque session-bound challenge.",
+      "type": "string"
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Bound revision."
+    }
+  },
+  "required": [
+    "id",
+    "expires_at",
+    "revision"
+  ],
+  "title": "Confirmation",
+  "type": "object"
+}

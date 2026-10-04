@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-cancel_job 1  "cancel_job " 
+.SH NAME
+okf\-jawn\-cancel_job \- Cancel work while retaining completed uploads and recorded state.
+.SH SYNOPSIS
+\fBokf\-jawn cancel_job\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Cancel work while retaining completed uploads and recorded state.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

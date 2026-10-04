@@ -1,0 +1,220 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn 1  "okf-jawn 0.1.0" 
+.SH NAME
+okf\-jawn \- A document workspace for people and their AI tools
+.SH SYNOPSIS
+\fBokf\-jawn\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+.SH DESCRIPTION
+A document workspace for people and their AI tools
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+okf\-jawn\-list_workspaces(1)
+List only workspaces visible to the authenticated principal.
+.TP
+okf\-jawn\-create_workspace(1)
+Create a blank workspace; no example content is inserted.
+.TP
+okf\-jawn\-open_workspace(1)
+Open an existing authorized workspace.
+.TP
+okf\-jawn\-update_workspace(1)
+Update workspace metadata at the supplied base revision.
+.TP
+okf\-jawn\-archive_workspace(1)
+Archive without deleting historical content.
+.TP
+okf\-jawn\-export_workspace(1)
+Build a portable export with resolvable referenced assets.
+.TP
+okf\-jawn\-backup_workspace(1)
+Back up content and durable application records.
+.TP
+okf\-jawn\-list_items(1)
+List a folder with one\-line descriptions at one resolved revision.
+.TP
+okf\-jawn\-get_item(1)
+Read the editable Markdown and preserved properties of an item.
+.TP
+okf\-jawn\-create_item(1)
+Create authored content without modifying source bytes.
+.TP
+okf\-jawn\-update_item(1)
+Save content with a base revision precondition; obsolete reviews do not transfer.
+.TP
+okf\-jawn\-move_item(1)
+Move an item and rewrite references in one committed change.
+.TP
+okf\-jawn\-set_lifecycle(1)
+Change lifecycle without approving any claim in the document.
+.TP
+okf\-jawn\-delete_item(1)
+Remove the current reference while retaining historical source objects.
+.TP
+okf\-jawn\-create_folder(1)
+Create a user\-selected folder with a maintained index.
+.TP
+okf\-jawn\-list_types(1)
+List built\-in and user\-defined OKF property schemas.
+.TP
+okf\-jawn\-set_type(1)
+Persist a user\-defined type without dropping extension properties.
+.TP
+okf\-jawn\-read_item(1)
+Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.
+.TP
+okf\-jawn\-get_sources(1)
+Show supporting sources and occurrence\-specific provenance.
+.TP
+okf\-jawn\-get_object(1)
+Return a bounded binary block authorized through its source; knowing a hash never grants access.
+.TP
+okf\-jawn\-search_items(1)
+Search authorized content and return cited snippets, not whole\-document dumps.
+.TP
+okf\-jawn\-get_links(1)
+Read incoming or outgoing references at the selected revision.
+.TP
+okf\-jawn\-get_graph(1)
+Read a bounded graph projection using the same authorized source identities.
+.TP
+okf\-jawn\-log_items(1)
+Read content snapshots; Git history is not the complete application event log.
+.TP
+okf\-jawn\-diff_items(1)
+Compare two explicit versions and retain both references.
+.TP
+okf\-jawn\-commit_items(1)
+Name a snapshot from saved drafts against an unchanged base.
+.TP
+okf\-jawn\-restore_items(1)
+Restore selected historical content as a new commit without rewriting history.
+.TP
+okf\-jawn\-blame_item(1)
+Show which commit last changed each selected line, not the origin of each fact.
+.TP
+okf\-jawn\-open_proposal(1)
+Create a suggested change set without merging or marking anything reviewed.
+.TP
+okf\-jawn\-list_proposals(1)
+List visible suggested changes.
+.TP
+okf\-jawn\-get_proposal(1)
+Read the exact proposed content and base revision.
+.TP
+okf\-jawn\-accept_proposal(1)
+Accept exactly the confirmed proposal against the displayed head; never an agent tool.
+.TP
+okf\-jawn\-decline_proposal(1)
+Close a proposal without applying its content.
+.TP
+okf\-jawn\-add_comment(1)
+Add discussion without certifying content.
+.TP
+okf\-jawn\-create_confirmation(1)
+Create a session\-bound confirmation for explicit human action; issuance is not review.
+.TP
+okf\-jawn\-create_review(1)
+Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.
+.TP
+okf\-jawn\-list_reviews(1)
+Show review coverage and revisions without extending it to later edits.
+.TP
+okf\-jawn\-create_upload(1)
+Register a source occurrence before authenticated binary upload.
+.TP
+okf\-jawn\-complete_upload(1)
+Check expected bytes and digest before conversion.
+.TP
+okf\-jawn\-start_import(1)
+Durably register conversion and source creation, preserving originals.
+.TP
+okf\-jawn\-get_job(1)
+Read durable job progress; a receipt does not imply completion.
+.TP
+okf\-jawn\-list_jobs(1)
+List conversion, export, and maintenance work.
+.TP
+okf\-jawn\-retry_job(1)
+Retry the same durable work identity without duplicating completed effects.
+.TP
+okf\-jawn\-cancel_job(1)
+Cancel work while retaining completed uploads and recorded state.
+.TP
+okf\-jawn\-redigest_item(1)
+Re\-run extraction with declared settings; preserve prior digests and separate corrections.
+.TP
+okf\-jawn\-correct_digest(1)
+Save a correction separately from generated extraction.
+.TP
+okf\-jawn\-get_rules(1)
+Read the same naming conventions used by the form, YAML editor, and import process.
+.TP
+okf\-jawn\-set_rules(1)
+Save explicit rules as versioned context.
+.TP
+okf\-jawn\-preview_names(1)
+Compute before and after naming changes without mutating content.
+.TP
+okf\-jawn\-apply_names(1)
+Apply the checked preview and rewrite references in one versioned action.
+.TP
+okf\-jawn\-get_attention(1)
+Show actionable maintenance observations; an empty result is not a safety certificate.
+.TP
+okf\-jawn\-rebuild_index(1)
+Rebuild only derived search and link data; preserve reviews and receipts.
+.TP
+okf\-jawn\-get_view(1)
+Read a saved visual artifact and its precise source bindings.
+.TP
+okf\-jawn\-present_view(1)
+Render a validated candidate using approved components and real source bindings; does not save or approve it.
+.TP
+okf\-jawn\-resolve_view(1)
+Resolve pinned inputs or explicitly refresh a live view without silently modifying saved state.
+.TP
+okf\-jawn\-export_view(1)
+Export the spec, source references, data table and rendering.
+.TP
+okf\-jawn\-get_catalog(1)
+Describe the allowed visual components; the catalog never grants capabilities.
+.TP
+okf\-jawn\-get_receipt(1)
+Inspect the exact sources returned through this server, not an external model internal state.
+.TP
+okf\-jawn\-list_events(1)
+Read resumable notifications without treating them as authoritative document content.
+.TP
+okf\-jawn\-get_session(1)
+Read the current authenticated principal without exposing credentials.
+.TP
+okf\-jawn\-create_connector(1)
+Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect.
+.TP
+okf\-jawn\-list_connectors(1)
+List local connector credentials and their scopes without secrets. Local owner only.
+.TP
+okf\-jawn\-revoke_connector(1)
+Revoke a local connector credential immediately. Local owner only.
+.TP
+okf\-jawn\-get_health(1)
+Read process liveness, not feature qualification.
+.TP
+okf\-jawn\-get_readiness(1)
+Read configured dependency readiness.
+.SH VERSION
+v0.1.0

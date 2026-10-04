@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-read_item 1  "read_item " 
+.SH NAME
+okf\-jawn\-read_item \- Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.
+.SH SYNOPSIS
+\fBokf\-jawn read_item\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

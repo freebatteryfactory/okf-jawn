@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A server-attributed discussion entry.",
+  "properties": {
+    "author": {
+      "description": "Authenticated subject.",
+      "type": "string"
+    },
+    "created_at": {
+      "description": "RFC 3339 timestamp.",
+      "type": "string"
+    },
+    "id": {
+      "description": "Comment identity.",
+      "type": "string"
+    },
+    "text": {
+      "description": "Discussion text.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "author",
+    "text",
+    "created_at"
+  ],
+  "title": "Comment",
+  "type": "object"
+}

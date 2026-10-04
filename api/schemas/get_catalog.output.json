@@ -1,0 +1,63 @@
+{
+  "$defs": {
+    "CatalogComponent": {
+      "additionalProperties": false,
+      "description": "A renderer component with typed props and named supported actions.",
+      "properties": {
+        "actions": {
+          "description": "Allowed existing operations.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "description": "When to use it.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Canonical component name.",
+          "type": "string"
+        },
+        "properties_schema": {
+          "description": "JSON Schema for props."
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "properties_schema",
+        "actions"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The presentation vocabulary; it grants no permissions.",
+  "properties": {
+    "components": {
+      "description": "Approved components.",
+      "items": {
+        "$ref": "#/$defs/CatalogComponent"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "description": "Catalog version.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "view_schema": {
+      "description": "Schema for persisted View documents."
+    }
+  },
+  "required": [
+    "schema_version",
+    "components",
+    "view_schema"
+  ],
+  "title": "CatalogResponse",
+  "type": "object"
+}

@@ -1,0 +1,42 @@
+{
+  "$defs": {
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspacePath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Create a user-selected folder and its navigable index.",
+  "properties": {
+    "base_revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Exact revision on which this change is based; stale writes conflict."
+    },
+    "folder": {
+      "$ref": "#/$defs/WorkspacePath",
+      "description": "New relative folder path."
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "base_revision",
+    "folder"
+  ],
+  "title": "CreateFolderRequest",
+  "type": "object"
+}

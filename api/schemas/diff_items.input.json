@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Compare two explicitly resolved snapshots.",
+  "properties": {
+    "from": {
+      "$ref": "#/$defs/Revision",
+      "description": "Base version."
+    },
+    "item_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ItemId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional item filter."
+    },
+    "to": {
+      "$ref": "#/$defs/Revision",
+      "description": "Compared version."
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "from",
+    "to"
+  ],
+  "title": "DiffRequest",
+  "type": "object"
+}

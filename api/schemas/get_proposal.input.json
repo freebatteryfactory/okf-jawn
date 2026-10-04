@@ -1,0 +1,33 @@
+{
+  "$defs": {
+    "ProposalId": {
+      "description": "Identity of a suggested change set, not a review.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Open one proposal and its exact content.",
+  "properties": {
+    "proposal_id": {
+      "$ref": "#/$defs/ProposalId",
+      "description": "Suggestion identity."
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "proposal_id"
+  ],
+  "title": "GetProposalRequest",
+  "type": "object"
+}

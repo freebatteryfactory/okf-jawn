@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-list_connectors 1  "list_connectors " 
+.SH NAME
+okf\-jawn\-list_connectors \- List local connector credentials and their scopes without secrets. Local owner only.
+.SH SYNOPSIS
+\fBokf\-jawn list_connectors\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+List local connector credentials and their scopes without secrets. Local owner only.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

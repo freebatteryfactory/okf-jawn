@@ -1,0 +1,113 @@
+{
+  "$defs": {
+    "Connector": {
+      "additionalProperties": false,
+      "description": "A local MCP connector credential's scope, without its secret.",
+      "properties": {
+        "connector_id": {
+          "$ref": "#/$defs/ConnectorId",
+          "description": "Stable connector identity."
+        },
+        "created_at": {
+          "description": "RFC 3339 issue time.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Owner-chosen name.",
+          "type": "string"
+        },
+        "permissions": {
+          "description": "Granted capabilities: `read`, plus `propose` only when enabled.",
+          "items": {
+            "$ref": "#/$defs/Permission"
+          },
+          "type": "array"
+        },
+        "revoked_at": {
+          "description": "RFC 3339 revocation time; a revoked connector authenticates nothing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace_ids": {
+          "description": "Workspaces the connector may access.",
+          "items": {
+            "$ref": "#/$defs/WorkspaceId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "connector_id",
+        "label",
+        "workspace_ids",
+        "permissions",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "ConnectorId": {
+      "description": "Identity of one local MCP connector credential, never the owner's browser session.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Permission": {
+      "description": "Application capabilities checked on every operation.",
+      "oneOf": [
+        {
+          "const": "read",
+          "description": "Read authorized workspace data.",
+          "type": "string"
+        },
+        {
+          "const": "write",
+          "description": "Edit authorized workspace content.",
+          "type": "string"
+        },
+        {
+          "const": "propose",
+          "description": "Create or update proposals without merging.",
+          "type": "string"
+        },
+        {
+          "const": "approve",
+          "description": "Accept proposals at exact preconditions.",
+          "type": "string"
+        },
+        {
+          "const": "review",
+          "description": "Record an explicit content review.",
+          "type": "string"
+        },
+        {
+          "const": "admin",
+          "description": "Manage deployment or workspace access.",
+          "type": "string"
+        }
+      ]
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Connector scopes, without secrets.",
+  "properties": {
+    "connectors": {
+      "description": "Matching connectors.",
+      "items": {
+        "$ref": "#/$defs/Connector"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "connectors"
+  ],
+  "title": "ListConnectorsResponse",
+  "type": "object"
+}

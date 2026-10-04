@@ -1,0 +1,377 @@
+{
+  "$defs": {
+    "CellRange": {
+      "additionalProperties": false,
+      "description": "A one-based rectangular spreadsheet selection.",
+      "properties": {
+        "column_end": {
+          "description": "Last column, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "column_start": {
+          "description": "First column, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row_end": {
+          "description": "Last row, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row_start": {
+          "description": "First row, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sheet": {
+          "description": "Exact sheet name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sheet",
+        "row_start",
+        "row_end",
+        "column_start",
+        "column_end"
+      ],
+      "type": "object"
+    },
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "PageRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive document page range.",
+      "properties": {
+        "end": {
+          "description": "Last page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "RenderGrammar": {
+      "description": "Supported declarative presentation formats.",
+      "oneOf": [
+        {
+          "const": "vega_lite",
+          "description": "Charts over application-resolved named datasets.",
+          "type": "string"
+        },
+        {
+          "const": "json_render",
+          "description": "Compositions of the approved component catalog.",
+          "type": "string"
+        }
+      ]
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Selection": {
+      "description": "Explicit bounded source selection.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The complete source, subject to a visible response budget.",
+          "properties": {
+            "kind": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Inclusive line range.",
+          "properties": {
+            "kind": {
+              "const": "lines",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/TextRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Inclusive page range.",
+          "properties": {
+            "kind": {
+              "const": "pages",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/PageRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Rectangular sheet range.",
+          "properties": {
+            "kind": {
+              "const": "cells",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/CellRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An unambiguous heading identifier.",
+          "properties": {
+            "heading": {
+              "description": "Heading.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "section",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "heading"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SourceReference": {
+      "additionalProperties": false,
+      "description": "A precise citation that can be reopened independently of current state.",
+      "properties": {
+        "digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact derived artifact hash."
+        },
+        "item_id": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Stable application item identity; paths remain the portable OKF identity."
+        },
+        "path": {
+          "$ref": "#/$defs/WorkspacePath",
+          "description": "Relative path at the resolved source revision."
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Resolved source revision."
+        },
+        "selection": {
+          "$ref": "#/$defs/Selection",
+          "description": "Resolved page, lines, cells, section, or entire source."
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/WorkspaceId",
+          "description": "Workspace whose permissions and storage scope apply."
+        }
+      },
+      "required": [
+        "workspace_id",
+        "item_id",
+        "path",
+        "revision",
+        "selection"
+      ],
+      "type": "object"
+    },
+    "TextRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive line range.",
+      "properties": {
+        "end": {
+          "description": "Last line, at least start.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First line, starting at one.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "ViewBinding": {
+      "additionalProperties": false,
+      "description": "A named source selection used by a chart or layout.",
+      "properties": {
+        "materialized": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Retained dataset bytes for reproducibility."
+        },
+        "name": {
+          "description": "Dataset or component binding name.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceReference",
+          "description": "Resolved cited input."
+        },
+        "transforms": {
+          "description": "Declared allowed data transformations; validated against the selected grammar.",
+          "items": true,
+          "type": "array"
+        },
+        "units": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Column or field units.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "units",
+        "transforms"
+      ],
+      "type": "object"
+    },
+    "ViewMode": {
+      "description": "Pinned historical views and explicit live refresh have different semantics.",
+      "oneOf": [
+        {
+          "const": "pinned",
+          "description": "All bindings reference retained immutable source revisions.",
+          "type": "string"
+        },
+        {
+          "const": "live",
+          "description": "Bindings request current sources and disclose each resolved revision.",
+          "type": "string"
+        }
+      ]
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspacePath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An editable visual artifact with prose and explicit source bindings.",
+  "properties": {
+    "bindings": {
+      "description": "Cited input datasets and passages.",
+      "items": {
+        "$ref": "#/$defs/ViewBinding"
+      },
+      "type": "array"
+    },
+    "description": {
+      "description": "Readable explanation independent of the renderer.",
+      "type": "string"
+    },
+    "grammar": {
+      "$ref": "#/$defs/RenderGrammar",
+      "description": "Declarative renderer grammar."
+    },
+    "mode": {
+      "$ref": "#/$defs/ViewMode",
+      "description": "Pinned or explicitly live."
+    },
+    "schema_version": {
+      "description": "App-owned format version, currently 1.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "spec": {
+      "description": "Validated renderer specification with no arbitrary code or external fetching."
+    },
+    "title": {
+      "description": "Human-readable visual title.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "title",
+    "description",
+    "mode",
+    "grammar",
+    "bindings",
+    "spec"
+  ],
+  "title": "ViewDocument",
+  "type": "object"
+}

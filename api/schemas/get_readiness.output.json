@@ -1,0 +1,50 @@
+{
+  "$defs": {
+    "DependencyStatus": {
+      "additionalProperties": false,
+      "description": "One configured dependency status.",
+      "properties": {
+        "message": {
+          "description": "Diagnostic explanation without secrets.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Dependency name.",
+          "type": "string"
+        },
+        "ready": {
+          "description": "Whether required checks succeeded.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "ready",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Readiness summary, distinct from acceptance results.",
+  "properties": {
+    "dependencies": {
+      "description": "Individual dependency checks.",
+      "items": {
+        "$ref": "#/$defs/DependencyStatus"
+      },
+      "type": "array"
+    },
+    "ready": {
+      "description": "All configured mandatory dependencies are ready.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "ready",
+    "dependencies"
+  ],
+  "title": "ReadinessResponse",
+  "type": "object"
+}

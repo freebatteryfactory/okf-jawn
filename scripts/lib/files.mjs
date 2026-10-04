@@ -47,15 +47,27 @@ export async function replaceGenerated(source, destination, repo) {
   const staging = await mkdtemp(join(dirname(output), '.okf-codegen-stage-'));
   const prepared = join(staging, 'new');
   const backup = join(staging, 'previous');
-  let moved = false;
   try {
-    await mkdir(prepared);
+    await mkdir(prepared); await mkdir(backup);
     for (const name of await files(source)) {
       await mkdir(dirname(join(prepared, name)), { recursive: true });
       await copyFile(join(source, name), join(prepared, name));
     }
-    if (await exists(output)) { await rename(output, backup); moved = true; }
-    try { await rename(prepared, output); }
-    catch (error) { if (moved) await rename(backup, output); throw error; }
+    await mkdir(output, { recursive: true });
+    await swapEntries(output, prepared, backup);
   } finally { await rm(staging, { recursive: true, force: true }); }
+}
+
+// The destination directory itself is never renamed: on Windows a watcher holding the directory
+// (an editor or language server) makes that fail, while its entries can still be moved.
+async function swapEntries(output, prepared, backup) {
+  const parked = []; const placed = [];
+  try {
+    for (const name of await readdir(output)) { await rename(join(output, name), join(backup, name)); parked.push(name); }
+    for (const name of await readdir(prepared)) { await rename(join(prepared, name), join(output, name)); placed.push(name); }
+  } catch (error) {
+    for (const name of placed) await rm(join(output, name), { recursive: true, force: true });
+    for (const name of parked) await rename(join(backup, name), join(output, name));
+    throw error;
+  }
 }

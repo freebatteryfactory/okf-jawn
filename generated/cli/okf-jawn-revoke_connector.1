@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-revoke_connector 1  "revoke_connector " 
+.SH NAME
+okf\-jawn\-revoke_connector \- Revoke a local connector credential immediately. Local owner only.
+.SH SYNOPSIS
+\fBokf\-jawn revoke_connector\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Revoke a local connector credential immediately. Local owner only.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

@@ -1,0 +1,23 @@
+{
+  "$defs": {
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Open an existing workspace by application identity.",
+  "properties": {
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id"
+  ],
+  "title": "OpenWorkspaceRequest",
+  "type": "object"
+}

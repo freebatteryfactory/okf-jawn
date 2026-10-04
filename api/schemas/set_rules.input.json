@@ -1,0 +1,204 @@
+{
+  "$defs": {
+    "CollisionPolicy": {
+      "description": "How proposed naming collisions are handled.",
+      "oneOf": [
+        {
+          "const": "reject",
+          "description": "Require an explicit decision.",
+          "type": "string"
+        },
+        {
+          "const": "suffix",
+          "description": "Add a deterministic suffix.",
+          "type": "string"
+        },
+        {
+          "const": "keep_existing",
+          "description": "Keep the original name and report the collision.",
+          "type": "string"
+        }
+      ]
+    },
+    "DateOrder": {
+      "description": "Declared date interpretation; ambiguous input is not guessed.",
+      "oneOf": [
+        {
+          "const": "ymd",
+          "description": "Year, month, day.",
+          "type": "string"
+        },
+        {
+          "const": "mdy",
+          "description": "Month, day, year.",
+          "type": "string"
+        },
+        {
+          "const": "dmy",
+          "description": "Day, month, year.",
+          "type": "string"
+        },
+        {
+          "const": "reject_ambiguous",
+          "description": "Require unambiguous dates or a human choice.",
+          "type": "string"
+        }
+      ]
+    },
+    "LetterCase": {
+      "description": "Supported case transformations.",
+      "oneOf": [
+        {
+          "const": "preserve",
+          "description": "Preserve case.",
+          "type": "string"
+        },
+        {
+          "const": "lower",
+          "description": "Lower case.",
+          "type": "string"
+        },
+        {
+          "const": "upper",
+          "description": "Upper case.",
+          "type": "string"
+        },
+        {
+          "const": "title",
+          "description": "Title case.",
+          "type": "string"
+        },
+        {
+          "const": "snake",
+          "description": "Snake case.",
+          "type": "string"
+        },
+        {
+          "const": "kebab",
+          "description": "Kebab case.",
+          "type": "string"
+        }
+      ]
+    },
+    "NamingRule": {
+      "additionalProperties": false,
+      "description": "A typed rule scoped by glob and optional OKF type.",
+      "properties": {
+        "case": {
+          "$ref": "#/$defs/LetterCase",
+          "description": "Case transformation."
+        },
+        "collision": {
+          "$ref": "#/$defs/CollisionPolicy",
+          "description": "Collision behavior."
+        },
+        "date_format": {
+          "description": "Explicit output format.",
+          "type": "string"
+        },
+        "date_order": {
+          "$ref": "#/$defs/DateOrder",
+          "description": "Declared incoming date convention."
+        },
+        "destination": {
+          "description": "Relative destination template.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "glob": {
+          "description": "Match against the supplied relative path.",
+          "type": "string"
+        },
+        "prefix": {
+          "description": "Optional literal prefix.",
+          "type": "string"
+        },
+        "separator": {
+          "description": "Word separator.",
+          "type": "string"
+        },
+        "strip_version_suffix": {
+          "description": "Remove filename suffixes only from normalized notes, never originals.",
+          "type": "boolean"
+        },
+        "type_name": {
+          "description": "Optional OKF type selector.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "glob",
+        "case",
+        "separator",
+        "prefix",
+        "date_order",
+        "date_format",
+        "strip_version_suffix",
+        "collision"
+      ],
+      "type": "object"
+    },
+    "NamingRules": {
+      "additionalProperties": false,
+      "description": "Versioned naming rules rendered as a form and editable as YAML.",
+      "properties": {
+        "rules": {
+          "description": "Rules applied in explicit list order.",
+          "items": {
+            "$ref": "#/$defs/NamingRule"
+          },
+          "type": "array"
+        },
+        "schema_version": {
+          "description": "Format version; this release emits 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "rules"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Persist naming conventions as a versioned workspace file.",
+  "properties": {
+    "base_revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Exact revision on which this change is based; stale writes conflict."
+    },
+    "rules": {
+      "$ref": "#/$defs/NamingRules",
+      "description": "Validated rules."
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "base_revision",
+    "rules"
+  ],
+  "title": "SetRulesRequest",
+  "type": "object"
+}

@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-search_items 1  "search_items " 
+.SH NAME
+okf\-jawn\-search_items \- Search authorized content and return cited snippets, not whole\-document dumps.
+.SH SYNOPSIS
+\fBokf\-jawn search_items\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Search authorized content and return cited snippets, not whole\-document dumps.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

@@ -1,0 +1,42 @@
+{
+  "$defs": {
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "UploadId": {
+      "description": "Identity of one authenticated source upload occurrence.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Verify upload length and hash without silently creating duplicate occurrences.",
+  "properties": {
+    "sha256": {
+      "$ref": "#/$defs/Digest",
+      "description": "Expected full-content hash."
+    },
+    "upload_id": {
+      "$ref": "#/$defs/UploadId",
+      "description": "Upload to finalize."
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "upload_id",
+    "sha256"
+  ],
+  "title": "CompleteUploadRequest",
+  "type": "object"
+}

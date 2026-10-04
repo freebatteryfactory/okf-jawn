@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-get_object 1  "get_object " 
+.SH NAME
+okf\-jawn\-get_object \- Return a bounded binary block authorized through its source; knowing a hash never grants access.
+.SH SYNOPSIS
+\fBokf\-jawn get_object\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Return a bounded binary block authorized through its source; knowing a hash never grants access.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

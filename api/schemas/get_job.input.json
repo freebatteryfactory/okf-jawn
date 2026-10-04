@@ -1,0 +1,33 @@
+{
+  "$defs": {
+    "JobId": {
+      "description": "Durable background work identity retained across retries.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read durable job state.",
+  "properties": {
+    "job_id": {
+      "$ref": "#/$defs/JobId",
+      "description": "Job identity."
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "job_id"
+  ],
+  "title": "GetJobRequest",
+  "type": "object"
+}

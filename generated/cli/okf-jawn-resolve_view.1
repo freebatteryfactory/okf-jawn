@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-resolve_view 1  "resolve_view " 
+.SH NAME
+okf\-jawn\-resolve_view \- Resolve pinned inputs or explicitly refresh a live view without silently modifying saved state.
+.SH SYNOPSIS
+\fBokf\-jawn resolve_view\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Resolve pinned inputs or explicitly refresh a live view without silently modifying saved state.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

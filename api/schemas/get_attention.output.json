@@ -1,0 +1,122 @@
+{
+  "$defs": {
+    "AttentionItem": {
+      "additionalProperties": false,
+      "description": "An observation with a useful next action.",
+      "properties": {
+        "action": {
+          "description": "Suggested existing operation, never executable code.",
+          "type": "string"
+        },
+        "item_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Relevant item."
+        },
+        "kind": {
+          "$ref": "#/$defs/AttentionKind",
+          "description": "Diagnostic class."
+        },
+        "message": {
+          "description": "Concrete explanation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "message",
+        "action"
+      ],
+      "type": "object"
+    },
+    "AttentionKind": {
+      "description": "Known maintenance conditions.",
+      "oneOf": [
+        {
+          "const": "broken_link",
+          "description": "A reference does not resolve.",
+          "type": "string"
+        },
+        {
+          "const": "stale",
+          "description": "`stale_after` requires checking.",
+          "type": "string"
+        },
+        {
+          "const": "unreviewed",
+          "description": "Agent-authored content has no covering review.",
+          "type": "string"
+        },
+        {
+          "const": "duplicate",
+          "description": "Identical bytes have multiple visible appearances.",
+          "type": "string"
+        },
+        {
+          "const": "missing_description",
+          "description": "Navigation summary is absent.",
+          "type": "string"
+        },
+        {
+          "const": "extraction",
+          "description": "Extraction has warnings or failed.",
+          "type": "string"
+        },
+        {
+          "const": "newer_source",
+          "description": "A pinned View has newer source data available.",
+          "type": "string"
+        },
+        {
+          "const": "instruction_like",
+          "description": "Possible instruction-like source text; advisory only.",
+          "type": "string"
+        }
+      ]
+    },
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Bounded diagnostics; an empty list does not establish safety.",
+  "properties": {
+    "items": {
+      "description": "Visible observations.",
+      "items": {
+        "$ref": "#/$defs/AttentionItem"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Continuation cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Inspected revision."
+    }
+  },
+  "required": [
+    "revision",
+    "items"
+  ],
+  "title": "GetAttentionResponse",
+  "type": "object"
+}

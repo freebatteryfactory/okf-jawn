@@ -1,0 +1,60 @@
+{
+  "$defs": {
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "UploadId": {
+      "description": "Identity of one authenticated source upload occurrence.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Convert finalized uploads into source cards in the user-selected folder.",
+  "properties": {
+    "apply_naming_rules": {
+      "description": "Apply the explicit workspace conventions after preview acceptance.",
+      "type": "boolean"
+    },
+    "base_revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Exact revision on which this change is based; stale writes conflict."
+    },
+    "destination": {
+      "description": "Relative destination folder; empty for root.",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "description": "Durable retry identity.",
+      "type": "string"
+    },
+    "upload_ids": {
+      "description": "Completed upload slots.",
+      "items": {
+        "$ref": "#/$defs/UploadId"
+      },
+      "type": "array"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "base_revision",
+    "upload_ids",
+    "destination",
+    "idempotency_key",
+    "apply_naming_rules"
+  ],
+  "title": "StartImportRequest",
+  "type": "object"
+}

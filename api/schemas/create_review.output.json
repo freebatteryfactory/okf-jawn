@@ -1,0 +1,324 @@
+{
+  "$defs": {
+    "CellRange": {
+      "additionalProperties": false,
+      "description": "A one-based rectangular spreadsheet selection.",
+      "properties": {
+        "column_end": {
+          "description": "Last column, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "column_start": {
+          "description": "First column, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row_end": {
+          "description": "Last row, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row_start": {
+          "description": "First row, inclusive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sheet": {
+          "description": "Exact sheet name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sheet",
+        "row_start",
+        "row_end",
+        "column_start",
+        "column_end"
+      ],
+      "type": "object"
+    },
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "PageRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive document page range.",
+      "properties": {
+        "end": {
+          "description": "Last page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "ReviewCoverage": {
+      "description": "How recorded review evidence relates to current content.",
+      "oneOf": [
+        {
+          "const": "current",
+          "description": "The recorded content digest still matches.",
+          "type": "string"
+        },
+        {
+          "const": "changed",
+          "description": "Content changed after this review.",
+          "type": "string"
+        },
+        {
+          "const": "imported",
+          "description": "Imported metadata has no authenticated in-app review event.",
+          "type": "string"
+        },
+        {
+          "const": "unreviewed",
+          "description": "No covering review exists.",
+          "type": "string"
+        }
+      ]
+    },
+    "ReviewId": {
+      "description": "Identity of an explicit revision-bound review action.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Selection": {
+      "description": "Explicit bounded source selection.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The complete source, subject to a visible response budget.",
+          "properties": {
+            "kind": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Inclusive line range.",
+          "properties": {
+            "kind": {
+              "const": "lines",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/TextRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Inclusive page range.",
+          "properties": {
+            "kind": {
+              "const": "pages",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/PageRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Rectangular sheet range.",
+          "properties": {
+            "kind": {
+              "const": "cells",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/CellRange",
+              "description": "Range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An unambiguous heading identifier.",
+          "properties": {
+            "heading": {
+              "description": "Heading.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "section",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "heading"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SourceReference": {
+      "additionalProperties": false,
+      "description": "A precise citation that can be reopened independently of current state.",
+      "properties": {
+        "digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact derived artifact hash."
+        },
+        "item_id": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Stable application item identity; paths remain the portable OKF identity."
+        },
+        "path": {
+          "$ref": "#/$defs/WorkspacePath",
+          "description": "Relative path at the resolved source revision."
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Resolved source revision."
+        },
+        "selection": {
+          "$ref": "#/$defs/Selection",
+          "description": "Resolved page, lines, cells, section, or entire source."
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/WorkspaceId",
+          "description": "Workspace whose permissions and storage scope apply."
+        }
+      },
+      "required": [
+        "workspace_id",
+        "item_id",
+        "path",
+        "revision",
+        "selection"
+      ],
+      "type": "object"
+    },
+    "TextRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive line range.",
+      "properties": {
+        "end": {
+          "description": "Last line, at least start.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First line, starting at one.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspacePath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A review action linked to the content that was actually displayed.",
+  "properties": {
+    "content_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "Digest of the exact reviewed text."
+    },
+    "coverage": {
+      "$ref": "#/$defs/ReviewCoverage",
+      "description": "Coverage relative to current content."
+    },
+    "id": {
+      "$ref": "#/$defs/ReviewId",
+      "description": "Durable review identity."
+    },
+    "reviewed_at": {
+      "description": "RFC 3339 action time.",
+      "type": "string"
+    },
+    "reviewer_subject": {
+      "description": "Server-established subject; not supplied in request.",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/SourceReference",
+      "description": "Reviewed revision and range."
+    }
+  },
+  "required": [
+    "id",
+    "source",
+    "content_digest",
+    "reviewer_subject",
+    "reviewed_at",
+    "coverage"
+  ],
+  "title": "Review",
+  "type": "object"
+}

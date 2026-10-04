@@ -1,0 +1,50 @@
+{
+  "$defs": {
+    "TypeDefinition": {
+      "additionalProperties": false,
+      "description": "A user-defined type schema and UI hints.",
+      "properties": {
+        "name": {
+          "description": "Exact user-facing OKF type name.",
+          "type": "string"
+        },
+        "properties_schema": {
+          "description": "JSON Schema for type-specific properties."
+        },
+        "schema_version": {
+          "description": "Application format version.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ui_schema": {
+          "description": "Presentation hints; never authorization rules."
+        }
+      },
+      "required": [
+        "name",
+        "schema_version",
+        "properties_schema",
+        "ui_schema"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "User and built-in type definitions.",
+  "properties": {
+    "items": {
+      "description": "Available property schemas.",
+      "items": {
+        "$ref": "#/$defs/TypeDefinition"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "items"
+  ],
+  "title": "ListTypesResponse",
+  "type": "object"
+}

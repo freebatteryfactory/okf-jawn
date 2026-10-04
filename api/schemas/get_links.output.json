@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Link": {
+      "additionalProperties": false,
+      "description": "A source-level relationship between items.",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Linking item."
+        },
+        "label": {
+          "description": "Link label.",
+          "type": "string"
+        },
+        "line": {
+          "description": "Source line.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resolved target, absent for broken links."
+        },
+        "to_path": {
+          "description": "Target path as written.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to_path",
+        "label",
+        "line"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Links and their resolution at one revision.",
+  "properties": {
+    "links": {
+      "description": "Bounded edges.",
+      "items": {
+        "$ref": "#/$defs/Link"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Continuation cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Resolved revision."
+    }
+  },
+  "required": [
+    "revision",
+    "links"
+  ],
+  "title": "GetLinksResponse",
+  "type": "object"
+}

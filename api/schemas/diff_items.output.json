@@ -1,0 +1,109 @@
+{
+  "$defs": {
+    "FileChange": {
+      "additionalProperties": false,
+      "description": "A changed file with before and after locators.",
+      "properties": {
+        "binary": {
+          "description": "The underlying bytes are binary.",
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "Added, modified, moved, or removed.",
+          "type": "string"
+        },
+        "new_path": {
+          "description": "New path; absent for deletions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old_path": {
+          "description": "Previous path; absent for additions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "patch": {
+          "description": "Unified text diff when applicable.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "old_path",
+        "new_path",
+        "patch",
+        "binary",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Warning": {
+      "additionalProperties": false,
+      "description": "A diagnostic that does not silently discard usable input.",
+      "properties": {
+        "code": {
+          "description": "Stable diagnostic identifier.",
+          "type": "string"
+        },
+        "location": {
+          "description": "Page, cell, path, or field locator.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable explanation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A comparison tied to both source revisions.",
+  "properties": {
+    "changes": {
+      "description": "Changed content.",
+      "items": {
+        "$ref": "#/$defs/FileChange"
+      },
+      "type": "array"
+    },
+    "from": {
+      "$ref": "#/$defs/Revision",
+      "description": "Base commit."
+    },
+    "to": {
+      "$ref": "#/$defs/Revision",
+      "description": "Compared commit."
+    },
+    "warnings": {
+      "description": "Limits or unsupported binary comparison details.",
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "from",
+    "to",
+    "changes",
+    "warnings"
+  ],
+  "title": "DiffResponse",
+  "type": "object"
+}

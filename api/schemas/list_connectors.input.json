@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "List the installation's connector credentials.",
+  "properties": {
+    "include_revoked": {
+      "description": "Include revoked connectors for audit.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "include_revoked"
+  ],
+  "title": "ListConnectorsRequest",
+  "type": "object"
+}

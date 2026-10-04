@@ -1,0 +1,52 @@
+{
+  "$defs": {
+    "ProposalId": {
+      "description": "Identity of a suggested change set, not a review.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Accept exactly the displayed proposal against an unchanged workspace head.",
+  "properties": {
+    "confirmation_id": {
+      "description": "Server-issued session-bound confirmation; never a model-supplied reviewer name.",
+      "type": "string"
+    },
+    "expected_head": {
+      "$ref": "#/$defs/Revision",
+      "description": "Workspace head shown during confirmation."
+    },
+    "proposal_id": {
+      "$ref": "#/$defs/ProposalId",
+      "description": "Suggestion identity."
+    },
+    "proposal_revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Proposal version shown during confirmation."
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "proposal_id",
+    "expected_head",
+    "proposal_revision",
+    "confirmation_id"
+  ],
+  "title": "AcceptProposalRequest",
+  "type": "object"
+}

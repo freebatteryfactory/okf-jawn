@@ -1,0 +1,1849 @@
+#compdef okf-jawn
+
+autoload -U is-at-least
+
+_okf-jawn() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_okf-jawn_commands" \
+"*::: :->okf-jawn" \
+&& ret=0
+    case $state in
+    (okf-jawn)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:okf-jawn-command-$line[1]:"
+        case $line[1] in
+            (list_workspaces)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(create_workspace)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(open_workspace)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(update_workspace)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(archive_workspace)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(export_workspace)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(backup_workspace)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(list_items)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(ls)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_item)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(create_item)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(update_item)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(move_item)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(set_lifecycle)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(delete_item)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(create_folder)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(list_types)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(set_type)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(read_item)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_sources)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(sources)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_object)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(read_object)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(search_items)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(grep)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_links)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(links)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_graph)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(log_items)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(log)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(timeline)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(diff_items)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(diff)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(changes)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(commit_items)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(snapshot)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(restore_items)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(rewind)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(blame_item)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(blame)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(who)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(open_proposal)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(propose)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(list_proposals)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_proposal)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(accept_proposal)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(approve)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(decline_proposal)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(decline)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(add_comment)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(create_confirmation)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(create_review)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(verify)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(list_reviews)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(create_upload)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(complete_upload)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(start_import)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_job)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(list_jobs)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(retry_job)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(cancel_job)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(redigest_item)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(correct_digest)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_rules)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(set_rules)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(preview_names)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(apply_names)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_attention)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(attention)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(rebuild_index)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_view)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(present_view)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(present)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(resolve_view)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(export_view)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_catalog)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(catalog)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_receipt)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(list_events)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_session)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(create_connector)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(list_connectors)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(revoke_connector)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_health)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get_readiness)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_okf-jawn__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:okf-jawn-help-command-$line[1]:"
+        case $line[1] in
+            (list_workspaces)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(create_workspace)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(open_workspace)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(update_workspace)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(archive_workspace)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export_workspace)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(backup_workspace)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list_items)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_item)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(create_item)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(update_item)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(move_item)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set_lifecycle)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete_item)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(create_folder)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list_types)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set_type)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(read_item)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_sources)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_object)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(search_items)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_links)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_graph)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(log_items)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(diff_items)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(commit_items)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(restore_items)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(blame_item)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(open_proposal)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list_proposals)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_proposal)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(accept_proposal)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(decline_proposal)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add_comment)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(create_confirmation)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(create_review)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list_reviews)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(create_upload)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(complete_upload)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(start_import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_job)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list_jobs)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(retry_job)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(cancel_job)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(redigest_item)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(correct_digest)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_rules)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set_rules)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(preview_names)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(apply_names)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_attention)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rebuild_index)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_view)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(present_view)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(resolve_view)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export_view)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_catalog)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_receipt)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list_events)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_session)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(create_connector)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list_connectors)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(revoke_connector)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_health)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get_readiness)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_okf-jawn_commands] )) ||
+_okf-jawn_commands() {
+    local commands; commands=(
+'list_workspaces:List only workspaces visible to the authenticated principal.' \
+'create_workspace:Create a blank workspace; no example content is inserted.' \
+'open_workspace:Open an existing authorized workspace.' \
+'update_workspace:Update workspace metadata at the supplied base revision.' \
+'archive_workspace:Archive without deleting historical content.' \
+'export_workspace:Build a portable export with resolvable referenced assets.' \
+'export:Build a portable export with resolvable referenced assets.' \
+'backup_workspace:Back up content and durable application records.' \
+'list_items:List a folder with one-line descriptions at one resolved revision.' \
+'ls:List a folder with one-line descriptions at one resolved revision.' \
+'get_item:Read the editable Markdown and preserved properties of an item.' \
+'create_item:Create authored content without modifying source bytes.' \
+'update_item:Save content with a base revision precondition; obsolete reviews do not transfer.' \
+'move_item:Move an item and rewrite references in one committed change.' \
+'set_lifecycle:Change lifecycle without approving any claim in the document.' \
+'delete_item:Remove the current reference while retaining historical source objects.' \
+'create_folder:Create a user-selected folder with a maintained index.' \
+'list_types:List built-in and user-defined OKF property schemas.' \
+'set_type:Persist a user-defined type without dropping extension properties.' \
+'read_item:Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.' \
+'show:Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.' \
+'get_sources:Show supporting sources and occurrence-specific provenance.' \
+'sources:Show supporting sources and occurrence-specific provenance.' \
+'get_object:Return a bounded binary block authorized through its source; knowing a hash never grants access.' \
+'read_object:Return a bounded binary block authorized through its source; knowing a hash never grants access.' \
+'search_items:Search authorized content and return cited snippets, not whole-document dumps.' \
+'grep:Search authorized content and return cited snippets, not whole-document dumps.' \
+'get_links:Read incoming or outgoing references at the selected revision.' \
+'links:Read incoming or outgoing references at the selected revision.' \
+'get_graph:Read a bounded graph projection using the same authorized source identities.' \
+'log_items:Read content snapshots; Git history is not the complete application event log.' \
+'log:Read content snapshots; Git history is not the complete application event log.' \
+'timeline:Read content snapshots; Git history is not the complete application event log.' \
+'diff_items:Compare two explicit versions and retain both references.' \
+'diff:Compare two explicit versions and retain both references.' \
+'changes:Compare two explicit versions and retain both references.' \
+'commit_items:Name a snapshot from saved drafts against an unchanged base.' \
+'snapshot:Name a snapshot from saved drafts against an unchanged base.' \
+'restore_items:Restore selected historical content as a new commit without rewriting history.' \
+'rewind:Restore selected historical content as a new commit without rewriting history.' \
+'blame_item:Show which commit last changed each selected line, not the origin of each fact.' \
+'blame:Show which commit last changed each selected line, not the origin of each fact.' \
+'who:Show which commit last changed each selected line, not the origin of each fact.' \
+'open_proposal:Create a suggested change set without merging or marking anything reviewed.' \
+'propose:Create a suggested change set without merging or marking anything reviewed.' \
+'list_proposals:List visible suggested changes.' \
+'get_proposal:Read the exact proposed content and base revision.' \
+'accept_proposal:Accept exactly the confirmed proposal against the displayed head; never an agent tool.' \
+'approve:Accept exactly the confirmed proposal against the displayed head; never an agent tool.' \
+'decline_proposal:Close a proposal without applying its content.' \
+'decline:Close a proposal without applying its content.' \
+'add_comment:Add discussion without certifying content.' \
+'create_confirmation:Create a session-bound confirmation for explicit human action; issuance is not review.' \
+'create_review:Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.' \
+'verify:Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.' \
+'list_reviews:Show review coverage and revisions without extending it to later edits.' \
+'create_upload:Register a source occurrence before authenticated binary upload.' \
+'complete_upload:Check expected bytes and digest before conversion.' \
+'start_import:Durably register conversion and source creation, preserving originals.' \
+'import:Durably register conversion and source creation, preserving originals.' \
+'get_job:Read durable job progress; a receipt does not imply completion.' \
+'list_jobs:List conversion, export, and maintenance work.' \
+'retry_job:Retry the same durable work identity without duplicating completed effects.' \
+'cancel_job:Cancel work while retaining completed uploads and recorded state.' \
+'redigest_item:Re-run extraction with declared settings; preserve prior digests and separate corrections.' \
+'correct_digest:Save a correction separately from generated extraction.' \
+'get_rules:Read the same naming conventions used by the form, YAML editor, and import process.' \
+'set_rules:Save explicit rules as versioned context.' \
+'preview_names:Compute before and after naming changes without mutating content.' \
+'apply_names:Apply the checked preview and rewrite references in one versioned action.' \
+'get_attention:Show actionable maintenance observations; an empty result is not a safety certificate.' \
+'attention:Show actionable maintenance observations; an empty result is not a safety certificate.' \
+'rebuild_index:Rebuild only derived search and link data; preserve reviews and receipts.' \
+'get_view:Read a saved visual artifact and its precise source bindings.' \
+'present_view:Render a validated candidate using approved components and real source bindings; does not save or approve it.' \
+'present:Render a validated candidate using approved components and real source bindings; does not save or approve it.' \
+'resolve_view:Resolve pinned inputs or explicitly refresh a live view without silently modifying saved state.' \
+'export_view:Export the spec, source references, data table and rendering.' \
+'get_catalog:Describe the allowed visual components; the catalog never grants capabilities.' \
+'catalog:Describe the allowed visual components; the catalog never grants capabilities.' \
+'get_receipt:Inspect the exact sources returned through this server, not an external model internal state.' \
+'list_events:Read resumable notifications without treating them as authoritative document content.' \
+'get_session:Read the current authenticated principal without exposing credentials.' \
+'create_connector:Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect.' \
+'list_connectors:List local connector credentials and their scopes without secrets. Local owner only.' \
+'revoke_connector:Revoke a local connector credential immediately. Local owner only.' \
+'get_health:Read process liveness, not feature qualification.' \
+'get_readiness:Read configured dependency readiness.' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'okf-jawn commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__accept_proposal_commands] )) ||
+_okf-jawn__subcmd__accept_proposal_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn accept_proposal commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__add_comment_commands] )) ||
+_okf-jawn__subcmd__add_comment_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn add_comment commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__apply_names_commands] )) ||
+_okf-jawn__subcmd__apply_names_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn apply_names commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__archive_workspace_commands] )) ||
+_okf-jawn__subcmd__archive_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn archive_workspace commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__backup_workspace_commands] )) ||
+_okf-jawn__subcmd__backup_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn backup_workspace commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__blame_item_commands] )) ||
+_okf-jawn__subcmd__blame_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn blame_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__cancel_job_commands] )) ||
+_okf-jawn__subcmd__cancel_job_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn cancel_job commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__commit_items_commands] )) ||
+_okf-jawn__subcmd__commit_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn commit_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__complete_upload_commands] )) ||
+_okf-jawn__subcmd__complete_upload_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn complete_upload commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__correct_digest_commands] )) ||
+_okf-jawn__subcmd__correct_digest_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn correct_digest commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__create_confirmation_commands] )) ||
+_okf-jawn__subcmd__create_confirmation_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn create_confirmation commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__create_connector_commands] )) ||
+_okf-jawn__subcmd__create_connector_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn create_connector commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__create_folder_commands] )) ||
+_okf-jawn__subcmd__create_folder_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn create_folder commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__create_item_commands] )) ||
+_okf-jawn__subcmd__create_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn create_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__create_review_commands] )) ||
+_okf-jawn__subcmd__create_review_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn create_review commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__create_upload_commands] )) ||
+_okf-jawn__subcmd__create_upload_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn create_upload commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__create_workspace_commands] )) ||
+_okf-jawn__subcmd__create_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn create_workspace commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__decline_proposal_commands] )) ||
+_okf-jawn__subcmd__decline_proposal_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn decline_proposal commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__delete_item_commands] )) ||
+_okf-jawn__subcmd__delete_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn delete_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__diff_items_commands] )) ||
+_okf-jawn__subcmd__diff_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn diff_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__export_view_commands] )) ||
+_okf-jawn__subcmd__export_view_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn export_view commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__export_workspace_commands] )) ||
+_okf-jawn__subcmd__export_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn export_workspace commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_attention_commands] )) ||
+_okf-jawn__subcmd__get_attention_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_attention commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_catalog_commands] )) ||
+_okf-jawn__subcmd__get_catalog_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_catalog commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_graph_commands] )) ||
+_okf-jawn__subcmd__get_graph_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_graph commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_health_commands] )) ||
+_okf-jawn__subcmd__get_health_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_health commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_item_commands] )) ||
+_okf-jawn__subcmd__get_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_job_commands] )) ||
+_okf-jawn__subcmd__get_job_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_job commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_links_commands] )) ||
+_okf-jawn__subcmd__get_links_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_links commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_object_commands] )) ||
+_okf-jawn__subcmd__get_object_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_object commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_proposal_commands] )) ||
+_okf-jawn__subcmd__get_proposal_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_proposal commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_readiness_commands] )) ||
+_okf-jawn__subcmd__get_readiness_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_readiness commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_receipt_commands] )) ||
+_okf-jawn__subcmd__get_receipt_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_receipt commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_rules_commands] )) ||
+_okf-jawn__subcmd__get_rules_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_rules commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_session_commands] )) ||
+_okf-jawn__subcmd__get_session_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_session commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_sources_commands] )) ||
+_okf-jawn__subcmd__get_sources_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_sources commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__get_view_commands] )) ||
+_okf-jawn__subcmd__get_view_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn get_view commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help_commands] )) ||
+_okf-jawn__subcmd__help_commands() {
+    local commands; commands=(
+'list_workspaces:List only workspaces visible to the authenticated principal.' \
+'create_workspace:Create a blank workspace; no example content is inserted.' \
+'open_workspace:Open an existing authorized workspace.' \
+'update_workspace:Update workspace metadata at the supplied base revision.' \
+'archive_workspace:Archive without deleting historical content.' \
+'export_workspace:Build a portable export with resolvable referenced assets.' \
+'backup_workspace:Back up content and durable application records.' \
+'list_items:List a folder with one-line descriptions at one resolved revision.' \
+'get_item:Read the editable Markdown and preserved properties of an item.' \
+'create_item:Create authored content without modifying source bytes.' \
+'update_item:Save content with a base revision precondition; obsolete reviews do not transfer.' \
+'move_item:Move an item and rewrite references in one committed change.' \
+'set_lifecycle:Change lifecycle without approving any claim in the document.' \
+'delete_item:Remove the current reference while retaining historical source objects.' \
+'create_folder:Create a user-selected folder with a maintained index.' \
+'list_types:List built-in and user-defined OKF property schemas.' \
+'set_type:Persist a user-defined type without dropping extension properties.' \
+'read_item:Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.' \
+'get_sources:Show supporting sources and occurrence-specific provenance.' \
+'get_object:Return a bounded binary block authorized through its source; knowing a hash never grants access.' \
+'search_items:Search authorized content and return cited snippets, not whole-document dumps.' \
+'get_links:Read incoming or outgoing references at the selected revision.' \
+'get_graph:Read a bounded graph projection using the same authorized source identities.' \
+'log_items:Read content snapshots; Git history is not the complete application event log.' \
+'diff_items:Compare two explicit versions and retain both references.' \
+'commit_items:Name a snapshot from saved drafts against an unchanged base.' \
+'restore_items:Restore selected historical content as a new commit without rewriting history.' \
+'blame_item:Show which commit last changed each selected line, not the origin of each fact.' \
+'open_proposal:Create a suggested change set without merging or marking anything reviewed.' \
+'list_proposals:List visible suggested changes.' \
+'get_proposal:Read the exact proposed content and base revision.' \
+'accept_proposal:Accept exactly the confirmed proposal against the displayed head; never an agent tool.' \
+'decline_proposal:Close a proposal without applying its content.' \
+'add_comment:Add discussion without certifying content.' \
+'create_confirmation:Create a session-bound confirmation for explicit human action; issuance is not review.' \
+'create_review:Record exact revision and content reviewed by an explicit authorized action; never infer review from OAuth identity.' \
+'list_reviews:Show review coverage and revisions without extending it to later edits.' \
+'create_upload:Register a source occurrence before authenticated binary upload.' \
+'complete_upload:Check expected bytes and digest before conversion.' \
+'start_import:Durably register conversion and source creation, preserving originals.' \
+'get_job:Read durable job progress; a receipt does not imply completion.' \
+'list_jobs:List conversion, export, and maintenance work.' \
+'retry_job:Retry the same durable work identity without duplicating completed effects.' \
+'cancel_job:Cancel work while retaining completed uploads and recorded state.' \
+'redigest_item:Re-run extraction with declared settings; preserve prior digests and separate corrections.' \
+'correct_digest:Save a correction separately from generated extraction.' \
+'get_rules:Read the same naming conventions used by the form, YAML editor, and import process.' \
+'set_rules:Save explicit rules as versioned context.' \
+'preview_names:Compute before and after naming changes without mutating content.' \
+'apply_names:Apply the checked preview and rewrite references in one versioned action.' \
+'get_attention:Show actionable maintenance observations; an empty result is not a safety certificate.' \
+'rebuild_index:Rebuild only derived search and link data; preserve reviews and receipts.' \
+'get_view:Read a saved visual artifact and its precise source bindings.' \
+'present_view:Render a validated candidate using approved components and real source bindings; does not save or approve it.' \
+'resolve_view:Resolve pinned inputs or explicitly refresh a live view without silently modifying saved state.' \
+'export_view:Export the spec, source references, data table and rendering.' \
+'get_catalog:Describe the allowed visual components; the catalog never grants capabilities.' \
+'get_receipt:Inspect the exact sources returned through this server, not an external model internal state.' \
+'list_events:Read resumable notifications without treating them as authoritative document content.' \
+'get_session:Read the current authenticated principal without exposing credentials.' \
+'create_connector:Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect.' \
+'list_connectors:List local connector credentials and their scopes without secrets. Local owner only.' \
+'revoke_connector:Revoke a local connector credential immediately. Local owner only.' \
+'get_health:Read process liveness, not feature qualification.' \
+'get_readiness:Read configured dependency readiness.' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'okf-jawn help commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__accept_proposal_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__accept_proposal_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help accept_proposal commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__add_comment_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__add_comment_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help add_comment commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__apply_names_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__apply_names_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help apply_names commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__archive_workspace_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__archive_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help archive_workspace commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__backup_workspace_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__backup_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help backup_workspace commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__blame_item_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__blame_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help blame_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__cancel_job_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__cancel_job_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help cancel_job commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__commit_items_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__commit_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help commit_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__complete_upload_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__complete_upload_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help complete_upload commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__correct_digest_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__correct_digest_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help correct_digest commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__create_confirmation_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__create_confirmation_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help create_confirmation commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__create_connector_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__create_connector_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help create_connector commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__create_folder_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__create_folder_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help create_folder commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__create_item_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__create_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help create_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__create_review_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__create_review_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help create_review commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__create_upload_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__create_upload_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help create_upload commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__create_workspace_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__create_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help create_workspace commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__decline_proposal_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__decline_proposal_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help decline_proposal commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__delete_item_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__delete_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help delete_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__diff_items_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__diff_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help diff_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__export_view_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__export_view_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help export_view commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__export_workspace_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__export_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help export_workspace commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_attention_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_attention_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_attention commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_catalog_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_catalog_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_catalog commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_graph_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_graph_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_graph commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_health_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_health_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_health commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_item_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_job_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_job_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_job commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_links_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_links_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_links commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_object_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_object_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_object commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_proposal_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_proposal_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_proposal commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_readiness_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_readiness_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_readiness commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_receipt_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_receipt_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_receipt commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_rules_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_rules_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_rules commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_session_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_session_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_session commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_sources_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_sources_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_sources commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__get_view_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__get_view_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help get_view commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__help_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help help commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__list_connectors_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__list_connectors_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help list_connectors commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__list_events_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__list_events_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help list_events commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__list_items_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__list_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help list_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__list_jobs_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__list_jobs_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help list_jobs commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__list_proposals_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__list_proposals_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help list_proposals commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__list_reviews_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__list_reviews_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help list_reviews commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__list_types_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__list_types_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help list_types commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__list_workspaces_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__list_workspaces_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help list_workspaces commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__log_items_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__log_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help log_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__move_item_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__move_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help move_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__open_proposal_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__open_proposal_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help open_proposal commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__open_workspace_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__open_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help open_workspace commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__present_view_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__present_view_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help present_view commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__preview_names_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__preview_names_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help preview_names commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__read_item_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__read_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help read_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__rebuild_index_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__rebuild_index_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help rebuild_index commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__redigest_item_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__redigest_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help redigest_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__resolve_view_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__resolve_view_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help resolve_view commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__restore_items_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__restore_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help restore_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__retry_job_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__retry_job_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help retry_job commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__revoke_connector_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__revoke_connector_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help revoke_connector commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__search_items_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__search_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help search_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__set_lifecycle_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__set_lifecycle_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help set_lifecycle commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__set_rules_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__set_rules_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help set_rules commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__set_type_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__set_type_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help set_type commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__start_import_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__start_import_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help start_import commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__update_item_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__update_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help update_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__update_workspace_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__update_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help update_workspace commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__list_connectors_commands] )) ||
+_okf-jawn__subcmd__list_connectors_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn list_connectors commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__list_events_commands] )) ||
+_okf-jawn__subcmd__list_events_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn list_events commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__list_items_commands] )) ||
+_okf-jawn__subcmd__list_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn list_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__list_jobs_commands] )) ||
+_okf-jawn__subcmd__list_jobs_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn list_jobs commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__list_proposals_commands] )) ||
+_okf-jawn__subcmd__list_proposals_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn list_proposals commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__list_reviews_commands] )) ||
+_okf-jawn__subcmd__list_reviews_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn list_reviews commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__list_types_commands] )) ||
+_okf-jawn__subcmd__list_types_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn list_types commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__list_workspaces_commands] )) ||
+_okf-jawn__subcmd__list_workspaces_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn list_workspaces commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__log_items_commands] )) ||
+_okf-jawn__subcmd__log_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn log_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__move_item_commands] )) ||
+_okf-jawn__subcmd__move_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn move_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__open_proposal_commands] )) ||
+_okf-jawn__subcmd__open_proposal_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn open_proposal commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__open_workspace_commands] )) ||
+_okf-jawn__subcmd__open_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn open_workspace commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__present_view_commands] )) ||
+_okf-jawn__subcmd__present_view_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn present_view commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__preview_names_commands] )) ||
+_okf-jawn__subcmd__preview_names_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn preview_names commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__read_item_commands] )) ||
+_okf-jawn__subcmd__read_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn read_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__rebuild_index_commands] )) ||
+_okf-jawn__subcmd__rebuild_index_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn rebuild_index commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__redigest_item_commands] )) ||
+_okf-jawn__subcmd__redigest_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn redigest_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__resolve_view_commands] )) ||
+_okf-jawn__subcmd__resolve_view_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn resolve_view commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__restore_items_commands] )) ||
+_okf-jawn__subcmd__restore_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn restore_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__retry_job_commands] )) ||
+_okf-jawn__subcmd__retry_job_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn retry_job commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__revoke_connector_commands] )) ||
+_okf-jawn__subcmd__revoke_connector_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn revoke_connector commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__search_items_commands] )) ||
+_okf-jawn__subcmd__search_items_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn search_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__set_lifecycle_commands] )) ||
+_okf-jawn__subcmd__set_lifecycle_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn set_lifecycle commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__set_rules_commands] )) ||
+_okf-jawn__subcmd__set_rules_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn set_rules commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__set_type_commands] )) ||
+_okf-jawn__subcmd__set_type_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn set_type commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__start_import_commands] )) ||
+_okf-jawn__subcmd__start_import_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn start_import commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__update_item_commands] )) ||
+_okf-jawn__subcmd__update_item_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn update_item commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__update_workspace_commands] )) ||
+_okf-jawn__subcmd__update_workspace_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn update_workspace commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_okf-jawn" ]; then
+    _okf-jawn "$@"
+else
+    compdef _okf-jawn okf-jawn
+fi

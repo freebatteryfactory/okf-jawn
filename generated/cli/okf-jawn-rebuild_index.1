@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-rebuild_index 1  "rebuild_index " 
+.SH NAME
+okf\-jawn\-rebuild_index \- Rebuild only derived search and link data; preserve reviews and receipts.
+.SH SYNOPSIS
+\fBokf\-jawn rebuild_index\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Rebuild only derived search and link data; preserve reviews and receipts.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

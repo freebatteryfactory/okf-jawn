@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "ReceiptId": {
+      "description": "Identity of a durable application operation record.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Warning": {
+      "additionalProperties": false,
+      "description": "A diagnostic that does not silently discard usable input.",
+      "properties": {
+        "code": {
+          "description": "Stable diagnostic identifier.",
+          "type": "string"
+        },
+        "location": {
+          "description": "Page, cell, path, or field locator.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable explanation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A persisted change and the resolved revision it produced.",
+  "properties": {
+    "receipt_id": {
+      "$ref": "#/$defs/ReceiptId",
+      "description": "Durable application operation receipt."
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "New committed workspace revision."
+    },
+    "warnings": {
+      "description": "Non-fatal issues recorded during the operation.",
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "revision",
+    "receipt_id",
+    "warnings"
+  ],
+  "title": "MutationResult",
+  "type": "object"
+}

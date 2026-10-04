@@ -1,0 +1,93 @@
+{
+  "$defs": {
+    "ItemKind": {
+      "description": "Built-in presentation roles; user-defined OKF type names remain unrestricted.",
+      "oneOf": [
+        {
+          "const": "note",
+          "description": "Human or agent-authored Markdown knowledge.",
+          "type": "string"
+        },
+        {
+          "const": "source",
+          "description": "An appearance of immutable source bytes.",
+          "type": "string"
+        },
+        {
+          "const": "view",
+          "description": "A source-bound declarative visual artifact.",
+          "type": "string"
+        }
+      ]
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspacePath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Create a note or View without altering source bytes.",
+  "properties": {
+    "base_revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Exact revision on which this change is based; stale writes conflict."
+    },
+    "body": {
+      "description": "Markdown content.",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "description": "Retry identity.",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/ItemKind",
+      "description": "Built-in role."
+    },
+    "path": {
+      "$ref": "#/$defs/WorkspacePath",
+      "description": "Destination relative path."
+    },
+    "properties": {
+      "additionalProperties": true,
+      "description": "Preserved extension properties.",
+      "type": "object"
+    },
+    "title": {
+      "description": "Display title.",
+      "type": "string"
+    },
+    "type_name": {
+      "description": "User-selected OKF type.",
+      "type": "string"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "base_revision",
+    "path",
+    "title",
+    "type_name",
+    "kind",
+    "body",
+    "properties",
+    "idempotency_key"
+  ],
+  "title": "CreateItemRequest",
+  "type": "object"
+}

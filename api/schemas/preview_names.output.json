@@ -1,0 +1,115 @@
+{
+  "$defs": {
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "RenameEntry": {
+      "additionalProperties": false,
+      "description": "A proposed path change with an explanation.",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/WorkspacePath",
+          "description": "Current path."
+        },
+        "item_id": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Stable application item identity; paths remain the portable OKF identity."
+        },
+        "to": {
+          "$ref": "#/$defs/WorkspacePath",
+          "description": "Proposed path."
+        },
+        "warnings": {
+          "description": "Ambiguity or collision details.",
+          "items": {
+            "$ref": "#/$defs/Warning"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "item_id",
+        "from",
+        "to",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Warning": {
+      "additionalProperties": false,
+      "description": "A diagnostic that does not silently discard usable input.",
+      "properties": {
+        "code": {
+          "description": "Stable diagnostic identifier.",
+          "type": "string"
+        },
+        "location": {
+          "description": "Page, cell, path, or field locator.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable explanation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "WorkspacePath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A preview bound to source state and exact conventions.",
+  "properties": {
+    "base_revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "Workspace revision inspected."
+    },
+    "entries": {
+      "description": "Proposed changes.",
+      "items": {
+        "$ref": "#/$defs/RenameEntry"
+      },
+      "type": "array"
+    },
+    "rules_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "Digest of the exact canonical rules."
+    },
+    "warnings": {
+      "description": "Plan-level warnings.",
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "base_revision",
+    "rules_digest",
+    "entries",
+    "warnings"
+  ],
+  "title": "RenamePlan",
+  "type": "object"
+}

@@ -1,0 +1,130 @@
+{
+  "$defs": {
+    "AccessRoute": {
+      "description": "How authenticated authority reached the application.\n\nLocal and hosted entry paths both resolve to one of these routes and share the same\nauthorization rules; no route is granted authority because the connection is loopback.",
+      "oneOf": [
+        {
+          "const": "browser_session",
+          "description": "Hosted Explorer session established through WorkOS AuthKit.",
+          "type": "string"
+        },
+        {
+          "const": "mcp_delegation",
+          "description": "External agent: a WorkOS Connect token when hosted, a local connector credential when local.",
+          "type": "string"
+        },
+        {
+          "const": "local_owner",
+          "description": "The installation-local owner identity, authenticated through the local browser session.",
+          "type": "string"
+        },
+        {
+          "const": "service",
+          "description": "Configured internal service identity.",
+          "type": "string"
+        }
+      ]
+    },
+    "Permission": {
+      "description": "Application capabilities checked on every operation.",
+      "oneOf": [
+        {
+          "const": "read",
+          "description": "Read authorized workspace data.",
+          "type": "string"
+        },
+        {
+          "const": "write",
+          "description": "Edit authorized workspace content.",
+          "type": "string"
+        },
+        {
+          "const": "propose",
+          "description": "Create or update proposals without merging.",
+          "type": "string"
+        },
+        {
+          "const": "approve",
+          "description": "Accept proposals at exact preconditions.",
+          "type": "string"
+        },
+        {
+          "const": "review",
+          "description": "Record an explicit content review.",
+          "type": "string"
+        },
+        {
+          "const": "admin",
+          "description": "Manage deployment or workspace access.",
+          "type": "string"
+        }
+      ]
+    },
+    "Principal": {
+      "additionalProperties": false,
+      "description": "Server-established identity; never accepted from a request body.",
+      "properties": {
+        "client_id": {
+          "description": "OAuth client when delegation is present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permissions": {
+          "description": "Resolved application capabilities.",
+          "items": {
+            "$ref": "#/$defs/Permission"
+          },
+          "type": "array"
+        },
+        "route": {
+          "$ref": "#/$defs/AccessRoute",
+          "description": "Verified authentication route."
+        },
+        "subject": {
+          "description": "Validated identity-provider subject.",
+          "type": "string"
+        },
+        "workspace_ids": {
+          "description": "Explicitly accessible workspaces.",
+          "items": {
+            "$ref": "#/$defs/WorkspaceId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "subject",
+        "route",
+        "workspace_ids",
+        "permissions"
+      ],
+      "type": "object"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Current identity and capability summary without credentials.",
+  "properties": {
+    "csrf_required": {
+      "description": "Browser writes require a same-origin anti-CSRF token.",
+      "type": "boolean"
+    },
+    "principal": {
+      "$ref": "#/$defs/Principal",
+      "description": "Authenticated caller."
+    }
+  },
+  "required": [
+    "principal",
+    "csrf_required"
+  ],
+  "title": "SessionResponse",
+  "type": "object"
+}

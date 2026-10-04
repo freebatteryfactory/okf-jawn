@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "At": {
+      "description": "A requested version selector; resolved responses contain a `Revision` instead.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Resolve the current accepted workspace head exactly once.",
+          "properties": {
+            "kind": {
+              "const": "latest",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Read an explicitly identified historical snapshot.",
+          "properties": {
+            "kind": {
+              "const": "revision",
+              "type": "string"
+            },
+            "revision": {
+              "$ref": "#/$defs/Revision",
+              "description": "Exact resolved commit identity."
+            }
+          },
+          "required": [
+            "kind",
+            "revision"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read a bounded link graph for the human graph projection.",
+  "properties": {
+    "at": {
+      "$ref": "#/$defs/At",
+      "description": "Requested revision selector; latest is resolved once before reading."
+    },
+    "folder": {
+      "description": "Relative graph scope.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_nodes": {
+      "description": "Node limit; truncation is explicit.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "at",
+    "max_nodes"
+  ],
+  "title": "GetGraphRequest",
+  "type": "object"
+}

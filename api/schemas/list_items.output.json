@@ -1,0 +1,151 @@
+{
+  "$defs": {
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ItemKind": {
+      "description": "Built-in presentation roles; user-defined OKF type names remain unrestricted.",
+      "oneOf": [
+        {
+          "const": "note",
+          "description": "Human or agent-authored Markdown knowledge.",
+          "type": "string"
+        },
+        {
+          "const": "source",
+          "description": "An appearance of immutable source bytes.",
+          "type": "string"
+        },
+        {
+          "const": "view",
+          "description": "A source-bound declarative visual artifact.",
+          "type": "string"
+        }
+      ]
+    },
+    "ItemSummary": {
+      "additionalProperties": false,
+      "description": "A navigable item description bound to a resolved workspace revision.",
+      "properties": {
+        "description": {
+          "description": "One-line navigation summary.",
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Stable identity."
+        },
+        "kind": {
+          "$ref": "#/$defs/ItemKind",
+          "description": "Built-in rendering role."
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/Lifecycle",
+          "description": "Presentation lifecycle."
+        },
+        "media_type": {
+          "description": "Original MIME type if there is a source object.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/WorkspacePath",
+          "description": "Current relative OKF path."
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Resolved revision for this summary."
+        },
+        "title": {
+          "description": "Human-readable title.",
+          "type": "string"
+        },
+        "type_name": {
+          "description": "User-selected OKF type; not a closed enum.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "title",
+        "description",
+        "type_name",
+        "kind",
+        "revision",
+        "lifecycle"
+      ],
+      "type": "object"
+    },
+    "Lifecycle": {
+      "description": "Application lifecycle distinct from business approval.",
+      "oneOf": [
+        {
+          "const": "active",
+          "description": "Current and usable content.",
+          "type": "string"
+        },
+        {
+          "const": "deprecated",
+          "description": "Retained historical content.",
+          "type": "string"
+        },
+        {
+          "const": "archived",
+          "description": "Hidden from ordinary current listings; still retrievable.",
+          "type": "string"
+        }
+      ]
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "WorkspacePath": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A folder listing at one resolved revision.",
+  "properties": {
+    "folders": {
+      "description": "Child folder paths.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "items": {
+      "description": "Visible child items.",
+      "items": {
+        "$ref": "#/$defs/ItemSummary"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Continuation cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "revision": {
+      "$ref": "#/$defs/Revision",
+      "description": "One revision resolved for the whole listing."
+    }
+  },
+  "required": [
+    "revision",
+    "items",
+    "folders"
+  ],
+  "title": "ListItemsResponse",
+  "type": "object"
+}

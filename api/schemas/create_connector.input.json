@@ -1,0 +1,36 @@
+{
+  "$defs": {
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Issue a scoped credential for a local MCP client; read-only unless propose is enabled.",
+  "properties": {
+    "allow_propose": {
+      "description": "Also grant proposal creation. Review and approval are never grantable to a connector.",
+      "type": "boolean"
+    },
+    "label": {
+      "description": "Owner-chosen name identifying the client, such as the host application.",
+      "type": "string"
+    },
+    "workspace_ids": {
+      "description": "Workspaces the connector may read; each must already be accessible to the owner.",
+      "items": {
+        "$ref": "#/$defs/WorkspaceId"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "label",
+    "workspace_ids",
+    "allow_propose"
+  ],
+  "title": "CreateConnectorRequest",
+  "type": "object"
+}

@@ -1,0 +1,4839 @@
+{
+  "tools": [
+    {
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List a folder with one-line descriptions at one resolved revision.",
+      "inputSchema": {
+        "$defs": {
+          "At": {
+            "description": "A requested version selector; resolved responses contain a `Revision` instead.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Resolve the current accepted workspace head exactly once.",
+                "properties": {
+                  "kind": {
+                    "const": "latest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Read an explicitly identified historical snapshot.",
+                "properties": {
+                  "kind": {
+                    "const": "revision",
+                    "type": "string"
+                  },
+                  "revision": {
+                    "$ref": "#/$defs/Revision",
+                    "description": "Exact resolved commit identity."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "PageRequest": {
+            "additionalProperties": false,
+            "description": "A bounded page request; the cursor is opaque and scoped to the query.",
+            "properties": {
+              "cursor": {
+                "description": "Opaque continuation cursor.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "description": "Maximum results requested; server may return fewer.",
+                "format": "uint16",
+                "maximum": 200,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "limit"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "List one folder with descriptions instead of loading all document bodies.",
+        "properties": {
+          "at": {
+            "$ref": "#/$defs/At",
+            "description": "Requested revision selector; latest is resolved once before reading."
+          },
+          "folder": {
+            "description": "Empty string for the root; otherwise a validated relative folder.",
+            "type": "string"
+          },
+          "page": {
+            "$ref": "#/$defs/PageRequest",
+            "description": "Bounded pagination with an opaque cursor."
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "at",
+          "folder",
+          "page"
+        ],
+        "title": "ListItemsRequest",
+        "type": "object"
+      },
+      "name": "ls",
+      "outputSchema": {
+        "$defs": {
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "ItemKind": {
+            "description": "Built-in presentation roles; user-defined OKF type names remain unrestricted.",
+            "oneOf": [
+              {
+                "const": "note",
+                "description": "Human or agent-authored Markdown knowledge.",
+                "type": "string"
+              },
+              {
+                "const": "source",
+                "description": "An appearance of immutable source bytes.",
+                "type": "string"
+              },
+              {
+                "const": "view",
+                "description": "A source-bound declarative visual artifact.",
+                "type": "string"
+              }
+            ]
+          },
+          "ItemSummary": {
+            "additionalProperties": false,
+            "description": "A navigable item description bound to a resolved workspace revision.",
+            "properties": {
+              "description": {
+                "description": "One-line navigation summary.",
+                "type": "string"
+              },
+              "id": {
+                "$ref": "#/$defs/ItemId",
+                "description": "Stable identity."
+              },
+              "kind": {
+                "$ref": "#/$defs/ItemKind",
+                "description": "Built-in rendering role."
+              },
+              "lifecycle": {
+                "$ref": "#/$defs/Lifecycle",
+                "description": "Presentation lifecycle."
+              },
+              "media_type": {
+                "description": "Original MIME type if there is a source object.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "$ref": "#/$defs/WorkspacePath",
+                "description": "Current relative OKF path."
+              },
+              "revision": {
+                "$ref": "#/$defs/Revision",
+                "description": "Resolved revision for this summary."
+              },
+              "title": {
+                "description": "Human-readable title.",
+                "type": "string"
+              },
+              "type_name": {
+                "description": "User-selected OKF type; not a closed enum.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "title",
+              "description",
+              "type_name",
+              "kind",
+              "revision",
+              "lifecycle"
+            ],
+            "type": "object"
+          },
+          "Lifecycle": {
+            "description": "Application lifecycle distinct from business approval.",
+            "oneOf": [
+              {
+                "const": "active",
+                "description": "Current and usable content.",
+                "type": "string"
+              },
+              {
+                "const": "deprecated",
+                "description": "Retained historical content.",
+                "type": "string"
+              },
+              {
+                "const": "archived",
+                "description": "Hidden from ordinary current listings; still retrievable.",
+                "type": "string"
+              }
+            ]
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "WorkspacePath": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "A folder listing at one resolved revision.",
+        "properties": {
+          "folders": {
+            "description": "Child folder paths.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "items": {
+            "description": "Visible child items.",
+            "items": {
+              "$ref": "#/$defs/ItemSummary"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Continuation cursor.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "$ref": "#/$defs/Revision",
+            "description": "One revision resolved for the whole listing."
+          }
+        },
+        "required": [
+          "revision",
+          "items",
+          "folders"
+        ],
+        "title": "ListItemsResponse",
+        "type": "object"
+      },
+      "title": "Browse"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://okf-jawn/source.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.",
+      "inputSchema": {
+        "$defs": {
+          "At": {
+            "description": "A requested version selector; resolved responses contain a `Revision` instead.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Resolve the current accepted workspace head exactly once.",
+                "properties": {
+                  "kind": {
+                    "const": "latest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Read an explicitly identified historical snapshot.",
+                "properties": {
+                  "kind": {
+                    "const": "revision",
+                    "type": "string"
+                  },
+                  "revision": {
+                    "$ref": "#/$defs/Revision",
+                    "description": "Exact resolved commit identity."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "CellRange": {
+            "additionalProperties": false,
+            "description": "A one-based rectangular spreadsheet selection.",
+            "properties": {
+              "column_end": {
+                "description": "Last column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "column_start": {
+                "description": "First column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_end": {
+                "description": "Last row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_start": {
+                "description": "First row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sheet": {
+                "description": "Exact sheet name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "sheet",
+              "row_start",
+              "row_end",
+              "column_start",
+              "column_end"
+            ],
+            "type": "object"
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "PageRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive document page range.",
+            "properties": {
+              "end": {
+                "description": "Last page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "ReadView": {
+            "description": "Select a representation rather than silently truncating a source.",
+            "oneOf": [
+              {
+                "const": "outline",
+                "description": "Headings, pages, and media descriptions.",
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "description": "Structured Markdown and source locators.",
+                "type": "string"
+              },
+              {
+                "const": "multimodal",
+                "description": "Markdown and selected images.",
+                "type": "string"
+              },
+              {
+                "const": "pages",
+                "description": "Selected rendered page images.",
+                "type": "string"
+              },
+              {
+                "const": "original",
+                "description": "Authorized access to original bytes.",
+                "type": "string"
+              }
+            ]
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "Selection": {
+            "description": "Explicit bounded source selection.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The complete source, subject to a visible response budget.",
+                "properties": {
+                  "kind": {
+                    "const": "all",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive line range.",
+                "properties": {
+                  "kind": {
+                    "const": "lines",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/TextRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive page range.",
+                "properties": {
+                  "kind": {
+                    "const": "pages",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/PageRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Rectangular sheet range.",
+                "properties": {
+                  "kind": {
+                    "const": "cells",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/CellRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "An unambiguous heading identifier.",
+                "properties": {
+                  "heading": {
+                    "description": "Heading.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "section",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "heading"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "TextRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive line range.",
+            "properties": {
+              "end": {
+                "description": "Last line, at least start.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First line, starting at one.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Read an item using an explicit representation and a single revision resolution.",
+        "properties": {
+          "at": {
+            "$ref": "#/$defs/At",
+            "description": "Requested revision selector; latest is resolved once before reading."
+          },
+          "cursor": {
+            "description": "Opaque continuation tied to revision and representation.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "item_id": {
+            "$ref": "#/$defs/ItemId",
+            "description": "Stable application item identity; paths remain the portable OKF identity."
+          },
+          "max_bytes": {
+            "description": "Response text budget; partial reads are marked and have continuation.",
+            "format": "uint32",
+            "maximum": 1048576,
+            "minimum": 256,
+            "type": "integer"
+          },
+          "max_images": {
+            "description": "Maximum selected images.",
+            "format": "uint16",
+            "maximum": 16,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "selection": {
+            "$ref": "#/$defs/Selection",
+            "description": "Section, range, or full source."
+          },
+          "view": {
+            "$ref": "#/$defs/ReadView",
+            "description": "Requested representation."
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "item_id",
+          "at",
+          "view",
+          "selection",
+          "max_bytes",
+          "max_images"
+        ],
+        "title": "ReadItemRequest",
+        "type": "object"
+      },
+      "name": "show",
+      "outputSchema": {
+        "$defs": {
+          "CellRange": {
+            "additionalProperties": false,
+            "description": "A one-based rectangular spreadsheet selection.",
+            "properties": {
+              "column_end": {
+                "description": "Last column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "column_start": {
+                "description": "First column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_end": {
+                "description": "Last row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_start": {
+                "description": "First row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sheet": {
+                "description": "Exact sheet name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "sheet",
+              "row_start",
+              "row_end",
+              "column_start",
+              "column_end"
+            ],
+            "type": "object"
+          },
+          "Digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "MediaReference": {
+            "additionalProperties": false,
+            "description": "An authorized image or artifact associated with a source range.",
+            "properties": {
+              "caption": {
+                "description": "Caption text; caption origin is separate.",
+                "type": "string"
+              },
+              "caption_origin": {
+                "description": "source, process, human, or agent.",
+                "type": "string"
+              },
+              "height": {
+                "description": "Pixel height.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type.",
+                "type": "string"
+              },
+              "object": {
+                "$ref": "#/$defs/Digest",
+                "description": "Retained image bytes."
+              },
+              "source": {
+                "$ref": "#/$defs/SourceReference",
+                "description": "Original source location."
+              },
+              "width": {
+                "description": "Pixel width.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "object",
+              "media_type",
+              "source",
+              "caption",
+              "caption_origin",
+              "width",
+              "height"
+            ],
+            "type": "object"
+          },
+          "OutlineEntry": {
+            "additionalProperties": false,
+            "description": "A navigable structural element from a document.",
+            "properties": {
+              "kind": {
+                "description": "Heading, table, figure, page, or sheet.",
+                "type": "string"
+              },
+              "label": {
+                "description": "Visible heading or media caption.",
+                "type": "string"
+              },
+              "level": {
+                "description": "Heading depth or zero for non-heading elements.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "selection": {
+                "$ref": "#/$defs/Selection",
+                "description": "Precise location to request next."
+              }
+            },
+            "required": [
+              "label",
+              "level",
+              "selection",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "PageRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive document page range.",
+            "properties": {
+              "end": {
+                "description": "Last page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "ReadView": {
+            "description": "Select a representation rather than silently truncating a source.",
+            "oneOf": [
+              {
+                "const": "outline",
+                "description": "Headings, pages, and media descriptions.",
+                "type": "string"
+              },
+              {
+                "const": "text",
+                "description": "Structured Markdown and source locators.",
+                "type": "string"
+              },
+              {
+                "const": "multimodal",
+                "description": "Markdown and selected images.",
+                "type": "string"
+              },
+              {
+                "const": "pages",
+                "description": "Selected rendered page images.",
+                "type": "string"
+              },
+              {
+                "const": "original",
+                "description": "Authorized access to original bytes.",
+                "type": "string"
+              }
+            ]
+          },
+          "ReceiptId": {
+            "description": "Identity of a durable application operation record.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "Selection": {
+            "description": "Explicit bounded source selection.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The complete source, subject to a visible response budget.",
+                "properties": {
+                  "kind": {
+                    "const": "all",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive line range.",
+                "properties": {
+                  "kind": {
+                    "const": "lines",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/TextRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive page range.",
+                "properties": {
+                  "kind": {
+                    "const": "pages",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/PageRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Rectangular sheet range.",
+                "properties": {
+                  "kind": {
+                    "const": "cells",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/CellRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "An unambiguous heading identifier.",
+                "properties": {
+                  "heading": {
+                    "description": "Heading.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "section",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "heading"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "SourceReference": {
+            "additionalProperties": false,
+            "description": "A precise citation that can be reopened independently of current state.",
+            "properties": {
+              "digest": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Exact derived artifact hash."
+              },
+              "item_id": {
+                "$ref": "#/$defs/ItemId",
+                "description": "Stable application item identity; paths remain the portable OKF identity."
+              },
+              "path": {
+                "$ref": "#/$defs/WorkspacePath",
+                "description": "Relative path at the resolved source revision."
+              },
+              "revision": {
+                "$ref": "#/$defs/Revision",
+                "description": "Resolved source revision."
+              },
+              "selection": {
+                "$ref": "#/$defs/Selection",
+                "description": "Resolved page, lines, cells, section, or entire source."
+              },
+              "workspace_id": {
+                "$ref": "#/$defs/WorkspaceId",
+                "description": "Workspace whose permissions and storage scope apply."
+              }
+            },
+            "required": [
+              "workspace_id",
+              "item_id",
+              "path",
+              "revision",
+              "selection"
+            ],
+            "type": "object"
+          },
+          "TextRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive line range.",
+            "properties": {
+              "end": {
+                "description": "Last line, at least start.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First line, starting at one.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "Warning": {
+            "additionalProperties": false,
+            "description": "A diagnostic that does not silently discard usable input.",
+            "properties": {
+              "code": {
+                "description": "Stable diagnostic identifier.",
+                "type": "string"
+              },
+              "location": {
+                "description": "Page, cell, path, or field locator.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "description": "Human-readable explanation.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "WorkspacePath": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "What the tool actually returned, not a claim about the host model context.",
+        "properties": {
+          "markdown": {
+            "description": "Text within the declared budget.",
+            "type": "string"
+          },
+          "media": {
+            "description": "Selected images or original-file references.",
+            "items": {
+              "$ref": "#/$defs/MediaReference"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Resume this exact resolved read.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outline": {
+            "description": "Structural navigation.",
+            "items": {
+              "$ref": "#/$defs/OutlineEntry"
+            },
+            "type": "array"
+          },
+          "receipt_id": {
+            "$ref": "#/$defs/ReceiptId",
+            "description": "Durable record of returned content."
+          },
+          "source": {
+            "$ref": "#/$defs/SourceReference",
+            "description": "Exact source resolution."
+          },
+          "truncated": {
+            "description": "True only when the response is partial.",
+            "type": "boolean"
+          },
+          "view": {
+            "$ref": "#/$defs/ReadView",
+            "description": "Representation returned."
+          },
+          "warnings": {
+            "description": "Extraction or selection warnings.",
+            "items": {
+              "$ref": "#/$defs/Warning"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "source",
+          "view",
+          "markdown",
+          "outline",
+          "media",
+          "warnings",
+          "truncated",
+          "receipt_id"
+        ],
+        "title": "ReadItemResponse",
+        "type": "object"
+      },
+      "title": "Read"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://okf-jawn/source.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Show supporting sources and occurrence-specific provenance.",
+      "inputSchema": {
+        "$defs": {
+          "At": {
+            "description": "A requested version selector; resolved responses contain a `Revision` instead.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Resolve the current accepted workspace head exactly once.",
+                "properties": {
+                  "kind": {
+                    "const": "latest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Read an explicitly identified historical snapshot.",
+                "properties": {
+                  "kind": {
+                    "const": "revision",
+                    "type": "string"
+                  },
+                  "revision": {
+                    "$ref": "#/$defs/Revision",
+                    "description": "Exact resolved commit identity."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Retrieve sources and provenance for one item.",
+        "properties": {
+          "at": {
+            "$ref": "#/$defs/At",
+            "description": "Requested revision selector; latest is resolved once before reading."
+          },
+          "item_id": {
+            "$ref": "#/$defs/ItemId",
+            "description": "Stable application item identity; paths remain the portable OKF identity."
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "item_id",
+          "at"
+        ],
+        "title": "GetSourcesRequest",
+        "type": "object"
+      },
+      "name": "sources",
+      "outputSchema": {
+        "$defs": {
+          "CellRange": {
+            "additionalProperties": false,
+            "description": "A one-based rectangular spreadsheet selection.",
+            "properties": {
+              "column_end": {
+                "description": "Last column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "column_start": {
+                "description": "First column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_end": {
+                "description": "Last row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_start": {
+                "description": "First row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sheet": {
+                "description": "Exact sheet name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "sheet",
+              "row_start",
+              "row_end",
+              "column_start",
+              "column_end"
+            ],
+            "type": "object"
+          },
+          "Digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "PageRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive document page range.",
+            "properties": {
+              "end": {
+                "description": "Last page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "Selection": {
+            "description": "Explicit bounded source selection.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The complete source, subject to a visible response budget.",
+                "properties": {
+                  "kind": {
+                    "const": "all",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive line range.",
+                "properties": {
+                  "kind": {
+                    "const": "lines",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/TextRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive page range.",
+                "properties": {
+                  "kind": {
+                    "const": "pages",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/PageRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Rectangular sheet range.",
+                "properties": {
+                  "kind": {
+                    "const": "cells",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/CellRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "An unambiguous heading identifier.",
+                "properties": {
+                  "heading": {
+                    "description": "Heading.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "section",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "heading"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "SourceAppearance": {
+            "additionalProperties": false,
+            "description": "One source occurrence; identical bytes do not imply identical meaning.",
+            "properties": {
+              "media_type": {
+                "description": "Sniffed MIME type.",
+                "type": "string"
+              },
+              "metadata": {
+                "additionalProperties": true,
+                "description": "Extracted metadata with original field names preserved.",
+                "type": "object"
+              },
+              "names": {
+                "description": "Observed aliases associated with this occurrence.",
+                "items": {
+                  "$ref": "#/$defs/SourceName"
+                },
+                "type": "array"
+              },
+              "object": {
+                "$ref": "#/$defs/Digest",
+                "description": "Immutable object content hash."
+              },
+              "parent_item_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ItemId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Container or message parent."
+              },
+              "size": {
+                "description": "Decimal byte count.",
+                "type": "string"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ItemId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Explicit successor relationship; not inferred from arrival time."
+              }
+            },
+            "required": [
+              "object",
+              "names",
+              "media_type",
+              "size",
+              "metadata"
+            ],
+            "type": "object"
+          },
+          "SourceName": {
+            "additionalProperties": false,
+            "description": "An observed source name and location; not an authority assertion.",
+            "properties": {
+              "filename": {
+                "description": "Original supplied filename.",
+                "type": "string"
+              },
+              "folder": {
+                "description": "Original relative location.",
+                "type": "string"
+              },
+              "observed_at": {
+                "description": "RFC 3339 observation time.",
+                "type": "string"
+              },
+              "supplied_by": {
+                "description": "Server-recorded source identity.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "filename",
+              "folder",
+              "observed_at",
+              "supplied_by"
+            ],
+            "type": "object"
+          },
+          "SourceReference": {
+            "additionalProperties": false,
+            "description": "A precise citation that can be reopened independently of current state.",
+            "properties": {
+              "digest": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Exact derived artifact hash."
+              },
+              "item_id": {
+                "$ref": "#/$defs/ItemId",
+                "description": "Stable application item identity; paths remain the portable OKF identity."
+              },
+              "path": {
+                "$ref": "#/$defs/WorkspacePath",
+                "description": "Relative path at the resolved source revision."
+              },
+              "revision": {
+                "$ref": "#/$defs/Revision",
+                "description": "Resolved source revision."
+              },
+              "selection": {
+                "$ref": "#/$defs/Selection",
+                "description": "Resolved page, lines, cells, section, or entire source."
+              },
+              "workspace_id": {
+                "$ref": "#/$defs/WorkspaceId",
+                "description": "Workspace whose permissions and storage scope apply."
+              }
+            },
+            "required": [
+              "workspace_id",
+              "item_id",
+              "path",
+              "revision",
+              "selection"
+            ],
+            "type": "object"
+          },
+          "TextRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive line range.",
+            "properties": {
+              "end": {
+                "description": "Last line, at least start.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First line, starting at one.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "WorkspacePath": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Citations and source appearances for the selected item.",
+        "properties": {
+          "appearance": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SourceAppearance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Occurrence metadata if the item is a source."
+          },
+          "revision": {
+            "$ref": "#/$defs/Revision",
+            "description": "Resolved version."
+          },
+          "sources": {
+            "description": "Supporting citations.",
+            "items": {
+              "$ref": "#/$defs/SourceReference"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "revision",
+          "sources",
+          "appearance"
+        ],
+        "title": "GetSourcesResponse",
+        "type": "object"
+      },
+      "title": "Sources"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Return a bounded binary block authorized through its source; knowing a hash never grants access.",
+      "inputSchema": {
+        "$defs": {
+          "CellRange": {
+            "additionalProperties": false,
+            "description": "A one-based rectangular spreadsheet selection.",
+            "properties": {
+              "column_end": {
+                "description": "Last column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "column_start": {
+                "description": "First column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_end": {
+                "description": "Last row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_start": {
+                "description": "First row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sheet": {
+                "description": "Exact sheet name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "sheet",
+              "row_start",
+              "row_end",
+              "column_start",
+              "column_end"
+            ],
+            "type": "object"
+          },
+          "Digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "PageRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive document page range.",
+            "properties": {
+              "end": {
+                "description": "Last page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "Selection": {
+            "description": "Explicit bounded source selection.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The complete source, subject to a visible response budget.",
+                "properties": {
+                  "kind": {
+                    "const": "all",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive line range.",
+                "properties": {
+                  "kind": {
+                    "const": "lines",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/TextRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive page range.",
+                "properties": {
+                  "kind": {
+                    "const": "pages",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/PageRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Rectangular sheet range.",
+                "properties": {
+                  "kind": {
+                    "const": "cells",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/CellRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "An unambiguous heading identifier.",
+                "properties": {
+                  "heading": {
+                    "description": "Heading.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "section",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "heading"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "SourceReference": {
+            "additionalProperties": false,
+            "description": "A precise citation that can be reopened independently of current state.",
+            "properties": {
+              "digest": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Exact derived artifact hash."
+              },
+              "item_id": {
+                "$ref": "#/$defs/ItemId",
+                "description": "Stable application item identity; paths remain the portable OKF identity."
+              },
+              "path": {
+                "$ref": "#/$defs/WorkspacePath",
+                "description": "Relative path at the resolved source revision."
+              },
+              "revision": {
+                "$ref": "#/$defs/Revision",
+                "description": "Resolved source revision."
+              },
+              "selection": {
+                "$ref": "#/$defs/Selection",
+                "description": "Resolved page, lines, cells, section, or entire source."
+              },
+              "workspace_id": {
+                "$ref": "#/$defs/WorkspaceId",
+                "description": "Workspace whose permissions and storage scope apply."
+              }
+            },
+            "required": [
+              "workspace_id",
+              "item_id",
+              "path",
+              "revision",
+              "selection"
+            ],
+            "type": "object"
+          },
+          "TextRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive line range.",
+            "properties": {
+              "end": {
+                "description": "Last line, at least start.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First line, starting at one.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "WorkspacePath": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Read an authorized stored object through an item reference, never by hash alone.",
+        "properties": {
+          "length": {
+            "description": "Bounded requested byte length.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "object": {
+            "$ref": "#/$defs/Digest",
+            "description": "Referenced object."
+          },
+          "offset": {
+            "description": "Decimal byte offset.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "$ref": "#/$defs/SourceReference",
+            "description": "Authorized provenance path."
+          }
+        },
+        "required": [
+          "source",
+          "object"
+        ],
+        "title": "GetObjectRequest",
+        "type": "object"
+      },
+      "name": "read_object",
+      "outputSchema": {
+        "$defs": {
+          "Digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "An authorized bounded binary block.",
+        "properties": {
+          "data_base64": {
+            "description": "Bounded base64 block; large objects use the streaming route.",
+            "type": "string"
+          },
+          "has_more": {
+            "description": "Whether more bytes remain.",
+            "type": "boolean"
+          },
+          "media_type": {
+            "description": "Content type.",
+            "type": "string"
+          },
+          "offset": {
+            "description": "Actual byte offset.",
+            "type": "string"
+          },
+          "sha256": {
+            "$ref": "#/$defs/Digest",
+            "description": "Whole-object digest."
+          },
+          "total_size": {
+            "description": "Whole-object size.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sha256",
+          "offset",
+          "total_size",
+          "media_type",
+          "data_base64",
+          "has_more"
+        ],
+        "title": "GetObjectResponse",
+        "type": "object"
+      },
+      "title": "Original"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search authorized content and return cited snippets, not whole-document dumps.",
+      "inputSchema": {
+        "$defs": {
+          "At": {
+            "description": "A requested version selector; resolved responses contain a `Revision` instead.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Resolve the current accepted workspace head exactly once.",
+                "properties": {
+                  "kind": {
+                    "const": "latest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Read an explicitly identified historical snapshot.",
+                "properties": {
+                  "kind": {
+                    "const": "revision",
+                    "type": "string"
+                  },
+                  "revision": {
+                    "$ref": "#/$defs/Revision",
+                    "description": "Exact resolved commit identity."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "PageRequest": {
+            "additionalProperties": false,
+            "description": "A bounded page request; the cursor is opaque and scoped to the query.",
+            "properties": {
+              "cursor": {
+                "description": "Opaque continuation cursor.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "description": "Maximum results requested; server may return fewer.",
+                "format": "uint16",
+                "maximum": 200,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "limit"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Search the workspace at one revision with explicit scope and pagination.",
+        "properties": {
+          "at": {
+            "$ref": "#/$defs/At",
+            "description": "Requested revision selector; latest is resolved once before reading."
+          },
+          "folder": {
+            "description": "Limit to a relative folder.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_archived": {
+            "description": "Include historical lifecycle items.",
+            "type": "boolean"
+          },
+          "page": {
+            "$ref": "#/$defs/PageRequest",
+            "description": "Bounded pagination with an opaque cursor."
+          },
+          "query": {
+            "description": "Search expression; not executable SQL.",
+            "type": "string"
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "at",
+          "query",
+          "include_archived",
+          "page"
+        ],
+        "title": "SearchRequest",
+        "type": "object"
+      },
+      "name": "grep",
+      "outputSchema": {
+        "$defs": {
+          "CellRange": {
+            "additionalProperties": false,
+            "description": "A one-based rectangular spreadsheet selection.",
+            "properties": {
+              "column_end": {
+                "description": "Last column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "column_start": {
+                "description": "First column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_end": {
+                "description": "Last row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_start": {
+                "description": "First row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sheet": {
+                "description": "Exact sheet name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "sheet",
+              "row_start",
+              "row_end",
+              "column_start",
+              "column_end"
+            ],
+            "type": "object"
+          },
+          "Digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "PageRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive document page range.",
+            "properties": {
+              "end": {
+                "description": "Last page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "SearchHit": {
+            "additionalProperties": false,
+            "description": "A bounded excerpt linked to its exact source.",
+            "properties": {
+              "score": {
+                "description": "Ranking signal, never a truth or trust score.",
+                "format": "double",
+                "type": "number"
+              },
+              "snippet": {
+                "description": "Matching text.",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/SourceReference",
+                "description": "Reopenable citation."
+              },
+              "title": {
+                "description": "Item title.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "title",
+              "snippet",
+              "score"
+            ],
+            "type": "object"
+          },
+          "Selection": {
+            "description": "Explicit bounded source selection.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The complete source, subject to a visible response budget.",
+                "properties": {
+                  "kind": {
+                    "const": "all",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive line range.",
+                "properties": {
+                  "kind": {
+                    "const": "lines",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/TextRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive page range.",
+                "properties": {
+                  "kind": {
+                    "const": "pages",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/PageRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Rectangular sheet range.",
+                "properties": {
+                  "kind": {
+                    "const": "cells",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/CellRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "An unambiguous heading identifier.",
+                "properties": {
+                  "heading": {
+                    "description": "Heading.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "section",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "heading"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "SourceReference": {
+            "additionalProperties": false,
+            "description": "A precise citation that can be reopened independently of current state.",
+            "properties": {
+              "digest": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Exact derived artifact hash."
+              },
+              "item_id": {
+                "$ref": "#/$defs/ItemId",
+                "description": "Stable application item identity; paths remain the portable OKF identity."
+              },
+              "path": {
+                "$ref": "#/$defs/WorkspacePath",
+                "description": "Relative path at the resolved source revision."
+              },
+              "revision": {
+                "$ref": "#/$defs/Revision",
+                "description": "Resolved source revision."
+              },
+              "selection": {
+                "$ref": "#/$defs/Selection",
+                "description": "Resolved page, lines, cells, section, or entire source."
+              },
+              "workspace_id": {
+                "$ref": "#/$defs/WorkspaceId",
+                "description": "Workspace whose permissions and storage scope apply."
+              }
+            },
+            "required": [
+              "workspace_id",
+              "item_id",
+              "path",
+              "revision",
+              "selection"
+            ],
+            "type": "object"
+          },
+          "TextRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive line range.",
+            "properties": {
+              "end": {
+                "description": "Last line, at least start.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First line, starting at one.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "WorkspacePath": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "A paged authorized search result.",
+        "properties": {
+          "hits": {
+            "description": "Matching excerpts.",
+            "items": {
+              "$ref": "#/$defs/SearchHit"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Continuation cursor.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "$ref": "#/$defs/Revision",
+            "description": "Resolved revision."
+          }
+        },
+        "required": [
+          "revision",
+          "hits"
+        ],
+        "title": "SearchResponse",
+        "type": "object"
+      },
+      "title": "Search"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Read incoming or outgoing references at the selected revision.",
+      "inputSchema": {
+        "$defs": {
+          "At": {
+            "description": "A requested version selector; resolved responses contain a `Revision` instead.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Resolve the current accepted workspace head exactly once.",
+                "properties": {
+                  "kind": {
+                    "const": "latest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Read an explicitly identified historical snapshot.",
+                "properties": {
+                  "kind": {
+                    "const": "revision",
+                    "type": "string"
+                  },
+                  "revision": {
+                    "$ref": "#/$defs/Revision",
+                    "description": "Exact resolved commit identity."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "LinkDirection": {
+            "description": "Which side of the link graph to inspect.",
+            "oneOf": [
+              {
+                "const": "outgoing",
+                "description": "References made by this item.",
+                "type": "string"
+              },
+              {
+                "const": "incoming",
+                "description": "References pointing to this item.",
+                "type": "string"
+              },
+              {
+                "const": "both",
+                "description": "Both directions.",
+                "type": "string"
+              }
+            ]
+          },
+          "PageRequest": {
+            "additionalProperties": false,
+            "description": "A bounded page request; the cursor is opaque and scoped to the query.",
+            "properties": {
+              "cursor": {
+                "description": "Opaque continuation cursor.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "description": "Maximum results requested; server may return fewer.",
+                "format": "uint16",
+                "maximum": 200,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "limit"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Read outgoing links or backlinks without loading every document.",
+        "properties": {
+          "at": {
+            "$ref": "#/$defs/At",
+            "description": "Requested revision selector; latest is resolved once before reading."
+          },
+          "direction": {
+            "$ref": "#/$defs/LinkDirection",
+            "description": "Requested direction."
+          },
+          "item_id": {
+            "$ref": "#/$defs/ItemId",
+            "description": "Stable application item identity; paths remain the portable OKF identity."
+          },
+          "page": {
+            "$ref": "#/$defs/PageRequest",
+            "description": "Bounded pagination with an opaque cursor."
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "item_id",
+          "at",
+          "direction",
+          "page"
+        ],
+        "title": "GetLinksRequest",
+        "type": "object"
+      },
+      "name": "links",
+      "outputSchema": {
+        "$defs": {
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "Link": {
+            "additionalProperties": false,
+            "description": "A source-level relationship between items.",
+            "properties": {
+              "from": {
+                "$ref": "#/$defs/ItemId",
+                "description": "Linking item."
+              },
+              "label": {
+                "description": "Link label.",
+                "type": "string"
+              },
+              "line": {
+                "description": "Source line.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "to": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ItemId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Resolved target, absent for broken links."
+              },
+              "to_path": {
+                "description": "Target path as written.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to_path",
+              "label",
+              "line"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Links and their resolution at one revision.",
+        "properties": {
+          "links": {
+            "description": "Bounded edges.",
+            "items": {
+              "$ref": "#/$defs/Link"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Continuation cursor.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "$ref": "#/$defs/Revision",
+            "description": "Resolved revision."
+          }
+        },
+        "required": [
+          "revision",
+          "links"
+        ],
+        "title": "GetLinksResponse",
+        "type": "object"
+      },
+      "title": "Links"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://okf-jawn/timeline.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Read content snapshots; Git history is not the complete application event log.",
+      "inputSchema": {
+        "$defs": {
+          "At": {
+            "description": "A requested version selector; resolved responses contain a `Revision` instead.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Resolve the current accepted workspace head exactly once.",
+                "properties": {
+                  "kind": {
+                    "const": "latest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Read an explicitly identified historical snapshot.",
+                "properties": {
+                  "kind": {
+                    "const": "revision",
+                    "type": "string"
+                  },
+                  "revision": {
+                    "$ref": "#/$defs/Revision",
+                    "description": "Exact resolved commit identity."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "PageRequest": {
+            "additionalProperties": false,
+            "description": "A bounded page request; the cursor is opaque and scoped to the query.",
+            "properties": {
+              "cursor": {
+                "description": "Opaque continuation cursor.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "description": "Maximum results requested; server may return fewer.",
+                "format": "uint16",
+                "maximum": 200,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "limit"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "List snapshots for an item or workspace.",
+        "properties": {
+          "at": {
+            "$ref": "#/$defs/At",
+            "description": "Requested revision selector; latest is resolved once before reading."
+          },
+          "item_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ItemId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Limit history to an item."
+          },
+          "page": {
+            "$ref": "#/$defs/PageRequest",
+            "description": "Bounded pagination with an opaque cursor."
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "at",
+          "page"
+        ],
+        "title": "LogRequest",
+        "type": "object"
+      },
+      "name": "log",
+      "outputSchema": {
+        "$defs": {
+          "Commit": {
+            "additionalProperties": false,
+            "description": "A content snapshot, not a complete application event log.",
+            "properties": {
+              "author": {
+                "description": "Git author label, not verified human identity.",
+                "type": "string"
+              },
+              "committed_at": {
+                "description": "RFC 3339 commit timestamp.",
+                "type": "string"
+              },
+              "message": {
+                "description": "Commit message.",
+                "type": "string"
+              },
+              "parents": {
+                "description": "Parent commits.",
+                "items": {
+                  "$ref": "#/$defs/Revision"
+                },
+                "type": "array"
+              },
+              "revision": {
+                "$ref": "#/$defs/Revision",
+                "description": "Commit identity."
+              }
+            },
+            "required": [
+              "revision",
+              "parents",
+              "message",
+              "author",
+              "committed_at"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Version history with pagination.",
+        "properties": {
+          "commits": {
+            "description": "Content snapshots.",
+            "items": {
+              "$ref": "#/$defs/Commit"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Continuation cursor.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "commits"
+        ],
+        "title": "LogResponse",
+        "type": "object"
+      },
+      "title": "Timeline"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://okf-jawn/changes.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Compare two explicit versions and retain both references.",
+      "inputSchema": {
+        "$defs": {
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Compare two explicitly resolved snapshots.",
+        "properties": {
+          "from": {
+            "$ref": "#/$defs/Revision",
+            "description": "Base version."
+          },
+          "item_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ItemId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional item filter."
+          },
+          "to": {
+            "$ref": "#/$defs/Revision",
+            "description": "Compared version."
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "from",
+          "to"
+        ],
+        "title": "DiffRequest",
+        "type": "object"
+      },
+      "name": "diff",
+      "outputSchema": {
+        "$defs": {
+          "FileChange": {
+            "additionalProperties": false,
+            "description": "A changed file with before and after locators.",
+            "properties": {
+              "binary": {
+                "description": "The underlying bytes are binary.",
+                "type": "boolean"
+              },
+              "kind": {
+                "description": "Added, modified, moved, or removed.",
+                "type": "string"
+              },
+              "new_path": {
+                "description": "New path; absent for deletions.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "old_path": {
+                "description": "Previous path; absent for additions.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "patch": {
+                "description": "Unified text diff when applicable.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "old_path",
+              "new_path",
+              "patch",
+              "binary",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "Warning": {
+            "additionalProperties": false,
+            "description": "A diagnostic that does not silently discard usable input.",
+            "properties": {
+              "code": {
+                "description": "Stable diagnostic identifier.",
+                "type": "string"
+              },
+              "location": {
+                "description": "Page, cell, path, or field locator.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "description": "Human-readable explanation.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "A comparison tied to both source revisions.",
+        "properties": {
+          "changes": {
+            "description": "Changed content.",
+            "items": {
+              "$ref": "#/$defs/FileChange"
+            },
+            "type": "array"
+          },
+          "from": {
+            "$ref": "#/$defs/Revision",
+            "description": "Base commit."
+          },
+          "to": {
+            "$ref": "#/$defs/Revision",
+            "description": "Compared commit."
+          },
+          "warnings": {
+            "description": "Limits or unsupported binary comparison details.",
+            "items": {
+              "$ref": "#/$defs/Warning"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "changes",
+          "warnings"
+        ],
+        "title": "DiffResponse",
+        "type": "object"
+      },
+      "title": "Changes"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Show which commit last changed each selected line, not the origin of each fact.",
+      "inputSchema": {
+        "$defs": {
+          "At": {
+            "description": "A requested version selector; resolved responses contain a `Revision` instead.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Resolve the current accepted workspace head exactly once.",
+                "properties": {
+                  "kind": {
+                    "const": "latest",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Read an explicitly identified historical snapshot.",
+                "properties": {
+                  "kind": {
+                    "const": "revision",
+                    "type": "string"
+                  },
+                  "revision": {
+                    "$ref": "#/$defs/Revision",
+                    "description": "Exact resolved commit identity."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "revision"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "TextRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive line range.",
+            "properties": {
+              "end": {
+                "description": "Last line, at least start.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First line, starting at one.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Show which commit last changed lines, not who originated each fact.",
+        "properties": {
+          "at": {
+            "$ref": "#/$defs/At",
+            "description": "Requested revision selector; latest is resolved once before reading."
+          },
+          "item_id": {
+            "$ref": "#/$defs/ItemId",
+            "description": "Stable application item identity; paths remain the portable OKF identity."
+          },
+          "lines": {
+            "$ref": "#/$defs/TextRange",
+            "description": "Bounded lines."
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "item_id",
+          "at",
+          "lines"
+        ],
+        "title": "BlameRequest",
+        "type": "object"
+      },
+      "name": "blame",
+      "outputSchema": {
+        "$defs": {
+          "BlameLine": {
+            "additionalProperties": false,
+            "description": "A line and its last recorded content change.",
+            "properties": {
+              "commit": {
+                "$ref": "#/$defs/Commit",
+                "description": "Last recorded change."
+              },
+              "line": {
+                "description": "One-based line.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "text": {
+                "description": "Current text at the selected version.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "line",
+              "text",
+              "commit"
+            ],
+            "type": "object"
+          },
+          "CellRange": {
+            "additionalProperties": false,
+            "description": "A one-based rectangular spreadsheet selection.",
+            "properties": {
+              "column_end": {
+                "description": "Last column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "column_start": {
+                "description": "First column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_end": {
+                "description": "Last row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_start": {
+                "description": "First row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sheet": {
+                "description": "Exact sheet name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "sheet",
+              "row_start",
+              "row_end",
+              "column_start",
+              "column_end"
+            ],
+            "type": "object"
+          },
+          "Commit": {
+            "additionalProperties": false,
+            "description": "A content snapshot, not a complete application event log.",
+            "properties": {
+              "author": {
+                "description": "Git author label, not verified human identity.",
+                "type": "string"
+              },
+              "committed_at": {
+                "description": "RFC 3339 commit timestamp.",
+                "type": "string"
+              },
+              "message": {
+                "description": "Commit message.",
+                "type": "string"
+              },
+              "parents": {
+                "description": "Parent commits.",
+                "items": {
+                  "$ref": "#/$defs/Revision"
+                },
+                "type": "array"
+              },
+              "revision": {
+                "$ref": "#/$defs/Revision",
+                "description": "Commit identity."
+              }
+            },
+            "required": [
+              "revision",
+              "parents",
+              "message",
+              "author",
+              "committed_at"
+            ],
+            "type": "object"
+          },
+          "Digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "PageRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive document page range.",
+            "properties": {
+              "end": {
+                "description": "Last page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "Selection": {
+            "description": "Explicit bounded source selection.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The complete source, subject to a visible response budget.",
+                "properties": {
+                  "kind": {
+                    "const": "all",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive line range.",
+                "properties": {
+                  "kind": {
+                    "const": "lines",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/TextRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive page range.",
+                "properties": {
+                  "kind": {
+                    "const": "pages",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/PageRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Rectangular sheet range.",
+                "properties": {
+                  "kind": {
+                    "const": "cells",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/CellRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "An unambiguous heading identifier.",
+                "properties": {
+                  "heading": {
+                    "description": "Heading.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "section",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "heading"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "SourceReference": {
+            "additionalProperties": false,
+            "description": "A precise citation that can be reopened independently of current state.",
+            "properties": {
+              "digest": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Exact derived artifact hash."
+              },
+              "item_id": {
+                "$ref": "#/$defs/ItemId",
+                "description": "Stable application item identity; paths remain the portable OKF identity."
+              },
+              "path": {
+                "$ref": "#/$defs/WorkspacePath",
+                "description": "Relative path at the resolved source revision."
+              },
+              "revision": {
+                "$ref": "#/$defs/Revision",
+                "description": "Resolved source revision."
+              },
+              "selection": {
+                "$ref": "#/$defs/Selection",
+                "description": "Resolved page, lines, cells, section, or entire source."
+              },
+              "workspace_id": {
+                "$ref": "#/$defs/WorkspaceId",
+                "description": "Workspace whose permissions and storage scope apply."
+              }
+            },
+            "required": [
+              "workspace_id",
+              "item_id",
+              "path",
+              "revision",
+              "selection"
+            ],
+            "type": "object"
+          },
+          "TextRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive line range.",
+            "properties": {
+              "end": {
+                "description": "Last line, at least start.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First line, starting at one.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "WorkspacePath": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Line attribution at an explicit revision.",
+        "properties": {
+          "lines": {
+            "description": "Attribution records.",
+            "items": {
+              "$ref": "#/$defs/BlameLine"
+            },
+            "type": "array"
+          },
+          "source": {
+            "$ref": "#/$defs/SourceReference",
+            "description": "Selected source."
+          }
+        },
+        "required": [
+          "source",
+          "lines"
+        ],
+        "title": "BlameResponse",
+        "type": "object"
+      },
+      "title": "Who"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Create a suggested change set without merging or marking anything reviewed.",
+      "inputSchema": {
+        "$defs": {
+          "Change": {
+            "description": "Permitted proposal mutations; no review or acceptance variants exist.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Create a note or View with retained properties.",
+                "properties": {
+                  "body": {
+                    "description": "Body.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "create",
+                    "type": "string"
+                  },
+                  "path": {
+                    "$ref": "#/$defs/WorkspacePath",
+                    "description": "Path."
+                  },
+                  "properties": {
+                    "additionalProperties": true,
+                    "description": "Properties.",
+                    "type": "object"
+                  },
+                  "type_name": {
+                    "description": "Type name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "path",
+                  "type_name",
+                  "body",
+                  "properties"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Replace authored content with preconditions.",
+                "properties": {
+                  "body": {
+                    "description": "Body.",
+                    "type": "string"
+                  },
+                  "item_id": {
+                    "$ref": "#/$defs/ItemId",
+                    "description": "Item id."
+                  },
+                  "kind": {
+                    "const": "edit",
+                    "type": "string"
+                  },
+                  "properties": {
+                    "additionalProperties": true,
+                    "description": "Properties.",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "item_id",
+                  "body",
+                  "properties"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Move and rewrite links.",
+                "properties": {
+                  "destination": {
+                    "$ref": "#/$defs/WorkspacePath",
+                    "description": "Destination."
+                  },
+                  "item_id": {
+                    "$ref": "#/$defs/ItemId",
+                    "description": "Item id."
+                  },
+                  "kind": {
+                    "const": "move",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "item_id",
+                  "destination"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Retire an item without deleting retained objects.",
+                "properties": {
+                  "item_id": {
+                    "$ref": "#/$defs/ItemId",
+                    "description": "Item id."
+                  },
+                  "kind": {
+                    "const": "archive",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "item_id"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "WorkspacePath": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Suggest changes without changing the accepted workspace.",
+        "properties": {
+          "base_revision": {
+            "$ref": "#/$defs/Revision",
+            "description": "Exact revision on which this change is based; stale writes conflict."
+          },
+          "changes": {
+            "description": "Allowed suggestion mutations.",
+            "items": {
+              "$ref": "#/$defs/Change"
+            },
+            "type": "array"
+          },
+          "description": {
+            "description": "Reason and limitations.",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Retry identity.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Proposal title.",
+            "type": "string"
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "base_revision",
+          "title",
+          "description",
+          "changes",
+          "idempotency_key"
+        ],
+        "title": "OpenProposalRequest",
+        "type": "object"
+      },
+      "name": "propose",
+      "outputSchema": {
+        "$defs": {
+          "Change": {
+            "description": "Permitted proposal mutations; no review or acceptance variants exist.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Create a note or View with retained properties.",
+                "properties": {
+                  "body": {
+                    "description": "Body.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "create",
+                    "type": "string"
+                  },
+                  "path": {
+                    "$ref": "#/$defs/WorkspacePath",
+                    "description": "Path."
+                  },
+                  "properties": {
+                    "additionalProperties": true,
+                    "description": "Properties.",
+                    "type": "object"
+                  },
+                  "type_name": {
+                    "description": "Type name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "path",
+                  "type_name",
+                  "body",
+                  "properties"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Replace authored content with preconditions.",
+                "properties": {
+                  "body": {
+                    "description": "Body.",
+                    "type": "string"
+                  },
+                  "item_id": {
+                    "$ref": "#/$defs/ItemId",
+                    "description": "Item id."
+                  },
+                  "kind": {
+                    "const": "edit",
+                    "type": "string"
+                  },
+                  "properties": {
+                    "additionalProperties": true,
+                    "description": "Properties.",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "item_id",
+                  "body",
+                  "properties"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Move and rewrite links.",
+                "properties": {
+                  "destination": {
+                    "$ref": "#/$defs/WorkspacePath",
+                    "description": "Destination."
+                  },
+                  "item_id": {
+                    "$ref": "#/$defs/ItemId",
+                    "description": "Item id."
+                  },
+                  "kind": {
+                    "const": "move",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "item_id",
+                  "destination"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Retire an item without deleting retained objects.",
+                "properties": {
+                  "item_id": {
+                    "$ref": "#/$defs/ItemId",
+                    "description": "Item id."
+                  },
+                  "kind": {
+                    "const": "archive",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "item_id"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "ProposalId": {
+            "description": "Identity of a suggested change set, not a review.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "ProposalStatus": {
+            "description": "Lifecycle of a suggestion, not approval of a fact in it.",
+            "oneOf": [
+              {
+                "const": "open",
+                "description": "Available for review.",
+                "type": "string"
+              },
+              {
+                "const": "accepted",
+                "description": "Merged by an authorized action.",
+                "type": "string"
+              },
+              {
+                "const": "declined",
+                "description": "Closed without applying changes.",
+                "type": "string"
+              },
+              {
+                "const": "conflict",
+                "description": "Base state changed; reconciliation required.",
+                "type": "string"
+              }
+            ]
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "WorkspacePath": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "A revision-bound proposed change set.",
+        "properties": {
+          "base_revision": {
+            "$ref": "#/$defs/Revision",
+            "description": "Base on which the proposal was drafted."
+          },
+          "changes": {
+            "description": "Proposed mutations.",
+            "items": {
+              "$ref": "#/$defs/Change"
+            },
+            "type": "array"
+          },
+          "content_digest": {
+            "$ref": "#/$defs/Digest",
+            "description": "Server-computed digest of the exact displayed change set."
+          },
+          "created_at": {
+            "description": "RFC 3339 creation time.",
+            "type": "string"
+          },
+          "created_by": {
+            "description": "Server-recorded principal.",
+            "type": "string"
+          },
+          "description": {
+            "description": "Rationale and limitations.",
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/$defs/ProposalId",
+            "description": "Proposal identity."
+          },
+          "proposal_revision": {
+            "$ref": "#/$defs/Revision",
+            "description": "Exact proposed content."
+          },
+          "status": {
+            "$ref": "#/$defs/ProposalStatus",
+            "description": "Current suggestion state."
+          },
+          "title": {
+            "description": "Human-readable reason.",
+            "type": "string"
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id",
+          "base_revision",
+          "proposal_revision",
+          "content_digest",
+          "title",
+          "description",
+          "changes",
+          "status",
+          "created_by",
+          "created_at"
+        ],
+        "title": "Proposal",
+        "type": "object"
+      },
+      "title": "Propose"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://okf-jawn/present.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Render a validated candidate using approved components and real source bindings; does not save or approve it.",
+      "inputSchema": {
+        "$defs": {
+          "CellRange": {
+            "additionalProperties": false,
+            "description": "A one-based rectangular spreadsheet selection.",
+            "properties": {
+              "column_end": {
+                "description": "Last column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "column_start": {
+                "description": "First column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_end": {
+                "description": "Last row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_start": {
+                "description": "First row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sheet": {
+                "description": "Exact sheet name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "sheet",
+              "row_start",
+              "row_end",
+              "column_start",
+              "column_end"
+            ],
+            "type": "object"
+          },
+          "Digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "PageRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive document page range.",
+            "properties": {
+              "end": {
+                "description": "Last page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "RenderGrammar": {
+            "description": "Supported declarative presentation formats.",
+            "oneOf": [
+              {
+                "const": "vega_lite",
+                "description": "Charts over application-resolved named datasets.",
+                "type": "string"
+              },
+              {
+                "const": "json_render",
+                "description": "Compositions of the approved component catalog.",
+                "type": "string"
+              }
+            ]
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "Selection": {
+            "description": "Explicit bounded source selection.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The complete source, subject to a visible response budget.",
+                "properties": {
+                  "kind": {
+                    "const": "all",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive line range.",
+                "properties": {
+                  "kind": {
+                    "const": "lines",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/TextRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive page range.",
+                "properties": {
+                  "kind": {
+                    "const": "pages",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/PageRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Rectangular sheet range.",
+                "properties": {
+                  "kind": {
+                    "const": "cells",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/CellRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "An unambiguous heading identifier.",
+                "properties": {
+                  "heading": {
+                    "description": "Heading.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "section",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "heading"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "SourceReference": {
+            "additionalProperties": false,
+            "description": "A precise citation that can be reopened independently of current state.",
+            "properties": {
+              "digest": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Exact derived artifact hash."
+              },
+              "item_id": {
+                "$ref": "#/$defs/ItemId",
+                "description": "Stable application item identity; paths remain the portable OKF identity."
+              },
+              "path": {
+                "$ref": "#/$defs/WorkspacePath",
+                "description": "Relative path at the resolved source revision."
+              },
+              "revision": {
+                "$ref": "#/$defs/Revision",
+                "description": "Resolved source revision."
+              },
+              "selection": {
+                "$ref": "#/$defs/Selection",
+                "description": "Resolved page, lines, cells, section, or entire source."
+              },
+              "workspace_id": {
+                "$ref": "#/$defs/WorkspaceId",
+                "description": "Workspace whose permissions and storage scope apply."
+              }
+            },
+            "required": [
+              "workspace_id",
+              "item_id",
+              "path",
+              "revision",
+              "selection"
+            ],
+            "type": "object"
+          },
+          "TextRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive line range.",
+            "properties": {
+              "end": {
+                "description": "Last line, at least start.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First line, starting at one.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "ViewBinding": {
+            "additionalProperties": false,
+            "description": "A named source selection used by a chart or layout.",
+            "properties": {
+              "materialized": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Retained dataset bytes for reproducibility."
+              },
+              "name": {
+                "description": "Dataset or component binding name.",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/SourceReference",
+                "description": "Resolved cited input."
+              },
+              "transforms": {
+                "description": "Declared allowed data transformations; validated against the selected grammar.",
+                "items": true,
+                "type": "array"
+              },
+              "units": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Column or field units.",
+                "type": "object"
+              }
+            },
+            "required": [
+              "name",
+              "source",
+              "units",
+              "transforms"
+            ],
+            "type": "object"
+          },
+          "ViewDocument": {
+            "additionalProperties": false,
+            "description": "An editable visual artifact with prose and explicit source bindings.",
+            "properties": {
+              "bindings": {
+                "description": "Cited input datasets and passages.",
+                "items": {
+                  "$ref": "#/$defs/ViewBinding"
+                },
+                "type": "array"
+              },
+              "description": {
+                "description": "Readable explanation independent of the renderer.",
+                "type": "string"
+              },
+              "grammar": {
+                "$ref": "#/$defs/RenderGrammar",
+                "description": "Declarative renderer grammar."
+              },
+              "mode": {
+                "$ref": "#/$defs/ViewMode",
+                "description": "Pinned or explicitly live."
+              },
+              "schema_version": {
+                "description": "App-owned format version, currently 1.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "spec": {
+                "description": "Validated renderer specification with no arbitrary code or external fetching."
+              },
+              "title": {
+                "description": "Human-readable visual title.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "title",
+              "description",
+              "mode",
+              "grammar",
+              "bindings",
+              "spec"
+            ],
+            "type": "object"
+          },
+          "ViewMode": {
+            "description": "Pinned historical views and explicit live refresh have different semantics.",
+            "oneOf": [
+              {
+                "const": "pinned",
+                "description": "All bindings reference retained immutable source revisions.",
+                "type": "string"
+              },
+              {
+                "const": "live",
+                "description": "Bindings request current sources and disclose each resolved revision.",
+                "type": "string"
+              }
+            ]
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "WorkspacePath": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Render a candidate from already resolved bindings without saving or approving it.",
+        "properties": {
+          "view": {
+            "$ref": "#/$defs/ViewDocument",
+            "description": "Candidate visual composition."
+          },
+          "workspace_id": {
+            "$ref": "#/$defs/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "view"
+        ],
+        "title": "PresentRequest",
+        "type": "object"
+      },
+      "name": "present",
+      "outputSchema": {
+        "$defs": {
+          "CellRange": {
+            "additionalProperties": false,
+            "description": "A one-based rectangular spreadsheet selection.",
+            "properties": {
+              "column_end": {
+                "description": "Last column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "column_start": {
+                "description": "First column, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_end": {
+                "description": "Last row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "row_start": {
+                "description": "First row, inclusive.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sheet": {
+                "description": "Exact sheet name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "sheet",
+              "row_start",
+              "row_end",
+              "column_start",
+              "column_end"
+            ],
+            "type": "object"
+          },
+          "Digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "ItemId": {
+            "description": "Stable item identity independent of its current relative path.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "PageRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive document page range.",
+            "properties": {
+              "end": {
+                "description": "Last page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First page.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "ReceiptId": {
+            "description": "Identity of a durable application operation record.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "RenderGrammar": {
+            "description": "Supported declarative presentation formats.",
+            "oneOf": [
+              {
+                "const": "vega_lite",
+                "description": "Charts over application-resolved named datasets.",
+                "type": "string"
+              },
+              {
+                "const": "json_render",
+                "description": "Compositions of the approved component catalog.",
+                "type": "string"
+              }
+            ]
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "Selection": {
+            "description": "Explicit bounded source selection.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The complete source, subject to a visible response budget.",
+                "properties": {
+                  "kind": {
+                    "const": "all",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive line range.",
+                "properties": {
+                  "kind": {
+                    "const": "lines",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/TextRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Inclusive page range.",
+                "properties": {
+                  "kind": {
+                    "const": "pages",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/PageRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Rectangular sheet range.",
+                "properties": {
+                  "kind": {
+                    "const": "cells",
+                    "type": "string"
+                  },
+                  "range": {
+                    "$ref": "#/$defs/CellRange",
+                    "description": "Range."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "An unambiguous heading identifier.",
+                "properties": {
+                  "heading": {
+                    "description": "Heading.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "section",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "heading"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "SourceReference": {
+            "additionalProperties": false,
+            "description": "A precise citation that can be reopened independently of current state.",
+            "properties": {
+              "digest": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Exact derived artifact hash."
+              },
+              "item_id": {
+                "$ref": "#/$defs/ItemId",
+                "description": "Stable application item identity; paths remain the portable OKF identity."
+              },
+              "path": {
+                "$ref": "#/$defs/WorkspacePath",
+                "description": "Relative path at the resolved source revision."
+              },
+              "revision": {
+                "$ref": "#/$defs/Revision",
+                "description": "Resolved source revision."
+              },
+              "selection": {
+                "$ref": "#/$defs/Selection",
+                "description": "Resolved page, lines, cells, section, or entire source."
+              },
+              "workspace_id": {
+                "$ref": "#/$defs/WorkspaceId",
+                "description": "Workspace whose permissions and storage scope apply."
+              }
+            },
+            "required": [
+              "workspace_id",
+              "item_id",
+              "path",
+              "revision",
+              "selection"
+            ],
+            "type": "object"
+          },
+          "TextRange": {
+            "additionalProperties": false,
+            "description": "A one-based inclusive line range.",
+            "properties": {
+              "end": {
+                "description": "Last line, at least start.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start": {
+                "description": "First line, starting at one.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "ViewBinding": {
+            "additionalProperties": false,
+            "description": "A named source selection used by a chart or layout.",
+            "properties": {
+              "materialized": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Retained dataset bytes for reproducibility."
+              },
+              "name": {
+                "description": "Dataset or component binding name.",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/SourceReference",
+                "description": "Resolved cited input."
+              },
+              "transforms": {
+                "description": "Declared allowed data transformations; validated against the selected grammar.",
+                "items": true,
+                "type": "array"
+              },
+              "units": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Column or field units.",
+                "type": "object"
+              }
+            },
+            "required": [
+              "name",
+              "source",
+              "units",
+              "transforms"
+            ],
+            "type": "object"
+          },
+          "ViewDocument": {
+            "additionalProperties": false,
+            "description": "An editable visual artifact with prose and explicit source bindings.",
+            "properties": {
+              "bindings": {
+                "description": "Cited input datasets and passages.",
+                "items": {
+                  "$ref": "#/$defs/ViewBinding"
+                },
+                "type": "array"
+              },
+              "description": {
+                "description": "Readable explanation independent of the renderer.",
+                "type": "string"
+              },
+              "grammar": {
+                "$ref": "#/$defs/RenderGrammar",
+                "description": "Declarative renderer grammar."
+              },
+              "mode": {
+                "$ref": "#/$defs/ViewMode",
+                "description": "Pinned or explicitly live."
+              },
+              "schema_version": {
+                "description": "App-owned format version, currently 1.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "spec": {
+                "description": "Validated renderer specification with no arbitrary code or external fetching."
+              },
+              "title": {
+                "description": "Human-readable visual title.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "title",
+              "description",
+              "mode",
+              "grammar",
+              "bindings",
+              "spec"
+            ],
+            "type": "object"
+          },
+          "ViewMode": {
+            "description": "Pinned historical views and explicit live refresh have different semantics.",
+            "oneOf": [
+              {
+                "const": "pinned",
+                "description": "All bindings reference retained immutable source revisions.",
+                "type": "string"
+              },
+              {
+                "const": "live",
+                "description": "Bindings request current sources and disclose each resolved revision.",
+                "type": "string"
+              }
+            ]
+          },
+          "Warning": {
+            "additionalProperties": false,
+            "description": "A diagnostic that does not silently discard usable input.",
+            "properties": {
+              "code": {
+                "description": "Stable diagnostic identifier.",
+                "type": "string"
+              },
+              "location": {
+                "description": "Page, cell, path, or field locator.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "description": "Human-readable explanation.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "WorkspacePath": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "A candidate presentation and the exact sources available to its UI.",
+        "properties": {
+          "receipt_id": {
+            "$ref": "#/$defs/ReceiptId",
+            "description": "Tool response record."
+          },
+          "resolved_bindings": {
+            "description": "Exact data supplied for this render.",
+            "items": {
+              "$ref": "#/$defs/ViewBinding"
+            },
+            "type": "array"
+          },
+          "view": {
+            "$ref": "#/$defs/ViewDocument",
+            "description": "Validated presentation."
+          },
+          "warnings": {
+            "description": "Limits or freshness information.",
+            "items": {
+              "$ref": "#/$defs/Warning"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "view",
+          "resolved_bindings",
+          "warnings",
+          "receipt_id"
+        ],
+        "title": "PresentResponse",
+        "type": "object"
+      },
+      "title": "Present"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Describe the allowed visual components; the catalog never grants capabilities.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Read the approved component and action catalog for visual proposals.",
+        "title": "GetCatalogRequest",
+        "type": "object"
+      },
+      "name": "catalog",
+      "outputSchema": {
+        "$defs": {
+          "CatalogComponent": {
+            "additionalProperties": false,
+            "description": "A renderer component with typed props and named supported actions.",
+            "properties": {
+              "actions": {
+                "description": "Allowed existing operations.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "description": {
+                "description": "When to use it.",
+                "type": "string"
+              },
+              "name": {
+                "description": "Canonical component name.",
+                "type": "string"
+              },
+              "properties_schema": {
+                "description": "JSON Schema for props."
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "properties_schema",
+              "actions"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "The presentation vocabulary; it grants no permissions.",
+        "properties": {
+          "components": {
+            "description": "Approved components.",
+            "items": {
+              "$ref": "#/$defs/CatalogComponent"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "description": "Catalog version.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "view_schema": {
+            "description": "Schema for persisted View documents."
+          }
+        },
+        "required": [
+          "schema_version",
+          "components",
+          "view_schema"
+        ],
+        "title": "CatalogResponse",
+        "type": "object"
+      },
+      "title": "Components"
+    }
+  ]
+}

@@ -1,0 +1,317 @@
+{
+  "$defs": {
+    "ApiError": {
+      "additionalProperties": false,
+      "description": "A safe error response, not an internal backtrace.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode",
+          "description": "Stable code for programmatic handling."
+        },
+        "field": {
+          "description": "Input field needing correction.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Safe explanation for the caller.",
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Correlation identifier, not a secret.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ArtifactId": {
+      "description": "Identity of a retained export or backup artifact.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "DownloadArtifact": {
+      "additionalProperties": false,
+      "description": "An authorized export or backup artifact with integrity metadata.",
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/ArtifactId",
+          "description": "Stable downloadable artifact."
+        },
+        "download_path": {
+          "description": "Application-relative authorized download path.",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the archive."
+        },
+        "size": {
+          "description": "Byte count as a decimal string to preserve integer precision.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "sha256",
+        "size",
+        "download_path"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "description": "Stable failure classifications; HTTP and MCP adapters preserve these.",
+      "oneOf": [
+        {
+          "const": "invalid_input",
+          "description": "Input violates the declared contract.",
+          "type": "string"
+        },
+        {
+          "const": "unauthenticated",
+          "description": "No acceptable identity was established.",
+          "type": "string"
+        },
+        {
+          "const": "forbidden",
+          "description": "The principal lacks the required capability.",
+          "type": "string"
+        },
+        {
+          "const": "not_found",
+          "description": "The resource is absent or not visible to this principal.",
+          "type": "string"
+        },
+        {
+          "const": "conflict",
+          "description": "A precondition, revision, or idempotency conflict occurred.",
+          "type": "string"
+        },
+        {
+          "const": "too_large",
+          "description": "A configured resource limit was exceeded.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported",
+          "description": "The requested representation or format is unsupported.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "A configured integration is unavailable.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "The operation was cancelled.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "An unexpected server failure occurred without exposing secrets.",
+          "type": "string"
+        }
+      ]
+    },
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Job": {
+      "additionalProperties": false,
+      "description": "Durable work status; acknowledgement is not a claim of completion.",
+      "properties": {
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DownloadArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Export or backup artifact."
+        },
+        "attempt": {
+          "description": "Execution attempt number.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApiError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Last failure."
+        },
+        "id": {
+          "$ref": "#/$defs/JobId",
+          "description": "Job identity."
+        },
+        "item_ids": {
+          "description": "Produced items.",
+          "items": {
+            "$ref": "#/$defs/ItemId"
+          },
+          "type": "array"
+        },
+        "progress": {
+          "description": "Approximate completion percentage.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Revision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Committed result revision."
+        },
+        "state": {
+          "$ref": "#/$defs/JobState",
+          "description": "Current durable state."
+        },
+        "warnings": {
+          "description": "Recorded warnings.",
+          "items": {
+            "$ref": "#/$defs/Warning"
+          },
+          "type": "array"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/WorkspaceId",
+          "description": "Workspace whose permissions and storage scope apply."
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "state",
+        "progress",
+        "attempt",
+        "warnings",
+        "item_ids"
+      ],
+      "type": "object"
+    },
+    "JobId": {
+      "description": "Durable background work identity retained across retries.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "JobState": {
+      "description": "Job progress retained independently of diagnostic traces.",
+      "oneOf": [
+        {
+          "const": "queued",
+          "description": "Durably registered for execution.",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "description": "Execution attempt in progress.",
+          "type": "string"
+        },
+        {
+          "const": "succeeded",
+          "description": "Committed output is available.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "Failure retained with retry information.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "Explicit cancellation completed.",
+          "type": "string"
+        }
+      ]
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Warning": {
+      "additionalProperties": false,
+      "description": "A diagnostic that does not silently discard usable input.",
+      "properties": {
+        "code": {
+          "description": "Stable diagnostic identifier.",
+          "type": "string"
+        },
+        "location": {
+          "description": "Page, cell, path, or field locator.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable explanation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A bounded list of jobs.",
+  "properties": {
+    "items": {
+      "description": "Job records.",
+      "items": {
+        "$ref": "#/$defs/Job"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Continuation cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "items"
+  ],
+  "title": "ListJobsResponse",
+  "type": "object"
+}

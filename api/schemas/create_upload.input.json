@@ -1,0 +1,58 @@
+{
+  "$defs": {
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Register immutable upload intent before streaming bytes.",
+  "properties": {
+    "filename": {
+      "description": "Original filename, preserved.",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "description": "Retry identity.",
+      "type": "string"
+    },
+    "relative_path": {
+      "description": "Supplied folder context.",
+      "type": "string"
+    },
+    "sha256": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Digest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Expected content hash if caller knows it."
+    },
+    "size": {
+      "description": "Expected decimal byte count.",
+      "type": "string"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "filename",
+    "relative_path",
+    "size",
+    "idempotency_key"
+  ],
+  "title": "CreateUploadRequest",
+  "type": "object"
+}

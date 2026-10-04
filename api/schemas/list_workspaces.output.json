@@ -1,0 +1,76 @@
+{
+  "$defs": {
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Workspace": {
+      "additionalProperties": false,
+      "description": "A user-owned OKF workspace with a resolved head revision.",
+      "properties": {
+        "created_at": {
+          "description": "RFC 3339 creation time.",
+          "type": "string"
+        },
+        "description": {
+          "description": "One-line context for people and agents.",
+          "type": "string"
+        },
+        "head": {
+          "$ref": "#/$defs/Revision",
+          "description": "Current resolved Git commit."
+        },
+        "id": {
+          "$ref": "#/$defs/WorkspaceId",
+          "description": "Stable application identity."
+        },
+        "name": {
+          "description": "Human-selected workspace name.",
+          "type": "string"
+        },
+        "read_only": {
+          "description": "Whether this principal may only read it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description",
+        "head",
+        "created_at",
+        "read_only"
+      ],
+      "type": "object"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A bounded workspace listing.",
+  "properties": {
+    "items": {
+      "description": "Authorized workspaces.",
+      "items": {
+        "$ref": "#/$defs/Workspace"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Continuation cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "items"
+  ],
+  "title": "ListWorkspacesResponse",
+  "type": "object"
+}

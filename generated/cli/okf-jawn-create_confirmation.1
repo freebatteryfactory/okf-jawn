@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-create_confirmation 1  "create_confirmation " 
+.SH NAME
+okf\-jawn\-create_confirmation \- Create a session\-bound confirmation for explicit human action; issuance is not review.
+.SH SYNOPSIS
+\fBokf\-jawn create_confirmation\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Create a session\-bound confirmation for explicit human action; issuance is not review.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
