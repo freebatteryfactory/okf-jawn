@@ -27,7 +27,7 @@ bun scripts/dev.mjs check-offline
 bun scripts/dev.mjs vendor schemars
 ```
 
-`init` creates a local Git repository and copies the deployment environment example only when absent. It does not create a remote, set a Git identity, commit, connect WorkOS, or launch a server. It never overwrites an existing `.env`.
+`init` creates a local Git repository, copies the deployment environment example only when absent, and points `core.hooksPath` at the tracked `scripts/hooks/`. It does not create a remote, set a Git identity, commit, connect WorkOS, or launch a server. It never overwrites an existing `.env`.
 
 The toolchain baseline is Rust 1.99.0 (`rust-toolchain.toml`) and Bun 1.4.2 (`package.json` `packageManager` and `.bun-version`, which must agree). `doctor` reports the Bun version actually executing it. These are selected inputs, not an assertion that every package resolves and compiles together.
 
@@ -41,6 +41,8 @@ bun scripts/dev.mjs foundation
 Equivalent `just` recipes are provided. `lock` is the only task that resolves dependencies: it runs `cargo update --workspace`, which rewrites only the workspace members' own entries and keeps every version already locked, and `bun install --lockfile-only`. To move one locked crate on purpose, run `cargo update <crate> --precise <version>` and review the diff. `bootstrap` refuses to run without both `Cargo.lock` and `bun.lock`, fetches with `--locked`/`--frozen-lockfile`, builds the actual Rust generator, executes both generation passes, and type checks and builds the real UI consumer. Install scripts run only for packages in `trustedDependencies` (currently empty: no dependency lifecycle scripts are trusted). Generators run from installed, pinned packages through `bun --bun run`; nothing is downloaded on demand. A resolution or API incompatibility fails visibly. Do not guess a replacement version, handwrite the expected generated files, disable a lint, or claim a failed step passed.
 
 `gen` generates into two temporary directories, compares the entire output file sets and bytes, then publishes only generated directories. `gen-check` compares those results to the checkout without editing it. The generator does not require a database, converter, identity provider, or running application. Generator output is not an implementation-status claim.
+
+`bootstrap` and `init` install the tracked hooks through `core.hooksPath`; nothing else needs installing. pre-commit runs `check-offline`. pre-push runs `check-offline`, `cargo fmt --all --check` and, on a `build/*` or `cure/*` branch, the scope check. Hooks never regenerate files or touch another worktree.
 
 ## What gets generated
 

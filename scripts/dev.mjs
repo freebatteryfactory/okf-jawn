@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { gitLocalEnvironment, run, version } from './lib/process.mjs';
 import { files, exists } from './lib/files.mjs';
 import { generate, requireLockfiles } from './lib/generation.mjs';
-import { initialize } from './lib/init.mjs';
+import { initialize, installHooks } from './lib/init.mjs';
 import { tree } from './lib/tree.mjs';
 import { bun, pins } from './lib/toolchain.mjs';
 import { checkScope, createLanes, resetLanes, syncLaneTable } from './lib/lanes.mjs';
@@ -85,6 +85,7 @@ async function routes() {
 async function bootstrap() {
   await prerequisites();
   await requireLockfiles(root);
+  await installHooks(root);
   await run('cargo', ['fetch', '--locked'], { cwd: root });
   await run(bun(), ['install', '--frozen-lockfile'], { cwd: root });
   await run('cargo', ['build', '--locked', '--package', 'xtask'], { cwd: root });
