@@ -2,12 +2,25 @@
 
 use okf_jawn_contract::history::CommitRequest;
 use okf_jawn_contract::identity::{At, Digest, Revision, WorkspacePath};
+use okf_jawn_contract::import::{Job, JobKind};
+use okf_jawn_contract::metadata::operations;
 use okf_jawn_contract::read::ReadItemRequest;
 use okf_jawn_contract::views::ViewDocument;
 use serde_json::json;
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
+
+/// Wire names of every job kind, one per operation that starts a job.
+const JOB_KINDS: &[&str] = &[
+    "import",
+    "redigest",
+    "export_workspace",
+    "backup_workspace",
+    "restore_workspace",
+    "rebuild_index",
+    "export_view",
+];
 
 #[test]
 fn revision_does_not_accept_a_selector() -> Result<(), Box<dyn Error>> {
@@ -113,4 +126,47 @@ fn a_snapshot_request_carries_no_expected_head() -> Result<(), Box<dyn Error>> {
         "head movement alone is not a Snapshot precondition"
     );
     Ok(())
+}
+
+#[test]
+fn every_job_states_its_kind() -> Result<(), Box<dyn Error>> {
+    let mut job = json!({
+        "id": "66666666-6666-4666-8666-666666666666",
+        "workspace_id": "11111111-1111-4111-8111-111111111111",
+        "kind": "import",
+        "state": "queued",
+        "progress": 0,
+        "attempt": 1,
+        "warnings": [],
+        "item_ids": []
+    });
+    let decoded: Job = serde_json::from_value(job.clone())?;
+    assert_eq!(decoded.kind, JobKind::Import);
+    for kind in JOB_KINDS {
+        *job.get_mut("kind").ok_or("kind field")? = json!(kind);
+        let decoded: Job = serde_json::from_value(job.clone())?;
+        assert_eq!(serde_json::to_value(decoded.kind)?, json!(kind));
+    }
+    job.as_object_mut()
+        .ok_or("job must be an object")?
+        .remove("kind");
+    assert!(
+        serde_json::from_value::<Job>(job).is_err(),
+        "a job without a kind must not decode"
+    );
+    Ok(())
+}
+
+#[test]
+fn every_operation_that_starts_a_job_has_a_kind() {
+    let starters: Vec<&str> = operations()
+        .iter()
+        .filter(|operation| operation.success_status == 202 && operation.id != "retry_job")
+        .map(|operation| operation.id)
+        .collect();
+    assert_eq!(
+        starters.len(),
+        JOB_KINDS.len(),
+        "202 operations: {starters:?}"
+    );
 }

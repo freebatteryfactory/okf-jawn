@@ -19,6 +19,26 @@ pub enum JobState {
     Cancelled,
 }
 
+/// What a durable job does; fixed when the job is accepted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    /// Convert finalized uploads into source cards.
+    Import,
+    /// Re-run extraction for one item.
+    Redigest,
+    /// Build a portable export.
+    ExportWorkspace,
+    /// Back up content and durable application records.
+    BackupWorkspace,
+    /// Restore content and durable application records from a backup.
+    RestoreWorkspace,
+    /// Rebuild derived search and link data.
+    RebuildIndex,
+    /// Export one View with its sources, data table and rendering.
+    ExportView,
+}
+
 /// Durable work status; acknowledgement is not a claim of completion.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +47,8 @@ pub struct Job {
     pub id: crate::identity::JobId,
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
+    /// What this job does.
+    pub kind: JobKind,
     /// Current durable state.
     pub state: JobState,
     /// Approximate completion percentage.
