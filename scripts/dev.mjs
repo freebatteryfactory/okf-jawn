@@ -9,7 +9,7 @@ import { generate, requireLockfiles } from './lib/generation.mjs';
 import { initialize } from './lib/init.mjs';
 import { tree } from './lib/tree.mjs';
 import { bun, pins } from './lib/toolchain.mjs';
-import { checkScope, createLanes, syncLaneTable } from './lib/lanes.mjs';
+import { checkScope, createLanes, resetLanes, syncLaneTable } from './lib/lanes.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ui = join(root, 'ui');
@@ -86,67 +86,6 @@ async function vendor() {
   const selected = data.vendors.filter(entry => !query || JSON.stringify(entry).toLowerCase().includes(query));
   if (!selected.length) throw new Error(`No vendor entry for ${query}`);
   process.stdout.write(`${JSON.stringify(selected, null, 2)}\n`);
-}
-
-/**
- * Remove empty construction lanes created by `lanes`.
- *
- * Refuses if any build/* branch has commits beyond its merge-base with HEAD, or if any
- * lane worktree is dirty. Otherwise removes the worktrees and deletes the local branches.
- */
-async function lanesReset() {
-  const parent = resolve(root, '..', 'okf-jawn-lanes');
-  const lanes = ['storage', 'ingest', 'core-cli', 'server', 'mcp-execution', 'workspace-ui', 'views'];
-  for (const lane of lanes) {
-    const branch = `build/${lane}`;
-    const worktree = join(parent, lane);
-    const exists = await run('git', ['rev-parse', '--verify', branch], {
-      cwd: root,
-      capture: true,
-      allowFailure: true,
-    });
-    if (exists.code !== 0) continue;
-    if (await existsPath(worktree)) {
-      const dirty = await run('git', ['status', '--porcelain'], {
-        cwd: worktree,
-        capture: true,
-        allowFailure: true,
-      });
-      if (dirty.code === 0 && dirty.stdout.trim()) {
-        throw new Error(`lanes-reset refused: worktree ${worktree} is dirty`);
-      }
-    }
-    const base = (await run('git', ['merge-base', branch, 'HEAD'], { cwd: root, capture: true })).stdout.trim();
-    const ahead = await run('git', ['rev-list', '--count', `${base}..${branch}`], {
-      cwd: root,
-      capture: true,
-    });
-    if (Number(ahead.stdout.trim()) > 0) {
-      throw new Error(
-        `lanes-reset refused: ${branch} has ${ahead.stdout.trim()} commit(s) beyond its base; reset would discard lane work`,
-      );
-    }
-  }
-  for (const lane of lanes) {
-    const branch = `build/${lane}`;
-    const worktree = join(parent, lane);
-    if (await existsPath(worktree)) {
-      await run('git', ['worktree', 'remove', '--force', worktree], { cwd: root });
-    }
-    const exists = await run('git', ['rev-parse', '--verify', branch], {
-      cwd: root,
-      capture: true,
-      allowFailure: true,
-    });
-    if (exists.code === 0) {
-      await run('git', ['branch', '-D', branch], { cwd: root });
-    }
-  }
-  process.stdout.write('lanes-reset: removed empty build/* worktrees and branches.\n');
-}
-
-async function existsPath(path) {
-  return exists(path);
 }
 
 async function offlineChecks() {
@@ -276,7 +215,7 @@ async function main() {
       process.stdout.write(`scope: ${result.changed.length} changed path(s) since ${result.base}, all inside ${result.name}.\n`);
       break;
     }
-    case 'lanes-reset': await lanesReset(); break;
+    case 'lanes-reset': process.stdout.write(`${await resetLanes(root)}\n`); break;
     case 'qualify': await qualify(); break;
     case 'check-receipts': await checkReceipts(); break;
     case 'audit': await audit(); break;

@@ -1,10 +1,12 @@
 /** One lane table drives worktrees, gates, scope, the AGENTS.md table and CODEOWNERS. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LANE_TABLE_BEGIN, LANE_TABLE_END, checkScope, laneNamed, lanes, lanesParent, outOfScope, renderLaneTable, scopeFor } from '../../scripts/lib/lanes.mjs';
+import { LANE_TABLE_BEGIN, LANE_TABLE_END, checkScope, createLanes, laneNamed, lanes, lanesParent, outOfScope, renderLaneTable, resetLanes, scopeFor } from '../../scripts/lib/lanes.mjs';
+import { run } from '../../scripts/lib/process.mjs';
 import { commit, fixtureRepo, git } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const read=file=>readFile(join(root,file),'utf8');
@@ -100,4 +102,45 @@ test('this package has a scope row against the integration branch',()=>{
  const scope=scopeFor('cure/gates');
  assert.equal(scope.base,'integration/foundation-cure');
  assert.deepEqual(outOfScope(['scripts/dev.mjs','scripts/hooks/pre-push','Cargo.lock','crates/core/Cargo.toml','crates/core/src/dispatch.rs','qualification/docling/run.mjs','scripts/lib/provenance.mjs','tests/foundation/harness.test.mjs'],scope),['crates/core/src/dispatch.rs','qualification/docling/run.mjs','scripts/lib/provenance.mjs','tests/foundation/harness.test.mjs']);
+});
+test('lanes-reset removes clean, empty lanes without forcing anything',async t=>{
+ const {base,root}=await fixtureRepo(t);const parent=join(base,'lanes');const calls=[];
+ await createLanes(root,{names:['storage','views'],parent});
+ const recording=(args,options={})=>{calls.push(args);return run('git',args,{cwd:options.cwd??root,capture:true,allowFailure:true});};
+ assert.match(await resetLanes(root,{parent,git:recording}),/removed 2 worktree\(s\) and 2 branch\(es\); nothing was forced/);
+ assert.equal(existsSync(join(parent,'storage')),false);assert.equal(existsSync(join(parent,'views')),false);
+ assert.equal(await git(root,'branch','--list','build/*'),'');
+ for(const args of calls)for(const flag of ['--force','-f','-D'])assert.ok(!args.includes(flag),`git ${args.join(' ')}`);
+});
+test('lanes-reset refuses a dirty worktree even when its branch was deleted',async t=>{
+ const {base,root}=await fixtureRepo(t);const parent=join(base,'lanes');
+ await createLanes(root,{names:['storage','ingest'],parent});
+ const storage=join(parent,'storage');
+ await git(storage,'checkout','--quiet','--detach');
+ await git(root,'branch','-D','build/storage');
+ await writeFile(join(storage,'unsaved-work.txt'),'not committed anywhere');
+ await assert.rejects(resetLanes(root,{parent}),/lanes-reset refused; nothing was removed:[\s\S]*storage is dirty/);
+ assert.equal(await readFile(join(storage,'unsaved-work.txt'),'utf8'),'not committed anywhere');
+ assert.equal(existsSync(join(parent,'ingest')),true,'a refusal leaves every lane in place');
+});
+test('lanes-reset treats a failed git status as dirty, and lane commits as work',async t=>{
+ const {base,root}=await fixtureRepo(t);const parent=join(base,'lanes');
+ await createLanes(root,{names:['server'],parent});
+ const failing=(args,options={})=>args[0]==='status'&&options.cwd?Promise.resolve({code:128,stdout:'',stderr:'fatal: simulated'}):run('git',args,{cwd:options.cwd??root,capture:true,allowFailure:true});
+ await assert.rejects(resetLanes(root,{parent,git:failing}),/could not read its status \(git exit 128\); treated as dirty/);
+ await commit(join(parent,'server'),{'crates/server/src/new.rs':'//! lane work\n'},'lane work');
+ await assert.rejects(resetLanes(root,{parent}),/1 commit\(s\) that are not in HEAD/);
+ assert.equal(existsSync(join(parent,'server')),true);
+});
+test('a directory that is not a worktree of this repository is never removed',async t=>{
+ const {base,root}=await fixtureRepo(t);const parent=join(base,'lanes');
+ await mkdir(join(parent,'views'),{recursive:true});await writeFile(join(parent,'views','notes.txt'),'someone else');
+ await assert.rejects(resetLanes(root,{parent}),/views exists but is not a worktree of this repository/);
+ assert.equal(existsSync(join(parent,'views','notes.txt')),true);
+});
+test('the entrypoint lists no lane and no lane directory of its own, and nothing forces git',async()=>{
+ const entry=await read('scripts/dev.mjs');
+ for(const lane of lanes)assert.doesNotMatch(entry,new RegExp(`'${lane.name}'`),lane.name);
+ assert.doesNotMatch(entry,/okf-jawn-lanes|--force/);
+ assert.doesNotMatch(await read('scripts/lib/lanes.mjs'),/'--force'|'-f'|'-D'/);
 });

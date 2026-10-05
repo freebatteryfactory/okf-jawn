@@ -2,10 +2,11 @@
  * The one lane table. Worktree creation and reset, each lane's gate, the scope check, the
  * AGENTS.md table and the CODEOWNERS lane rows read it; nothing else lists lanes.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { run } from './process.mjs';
+import { exists } from './files.mjs';
 
 /** Unit specs of the views lane that sit beside the workspace-ui specs, relative to `ui/`. */
 const viewsUnitSpecs = ['catalog-schema.test.ts', 'json-render-roundtrip.test.tsx', 'layout.test.tsx',
@@ -171,4 +172,66 @@ export async function checkScope(root, { lane, base, git = gitIn(root) } = {}) {
   const outside = outOfScope(changed, scope);
   if (outside.length) throw new Error(`scope check failed for ${scope.name}: ${outside.length} path(s) outside its scope:\n  ${outside.join('\n  ')}`);
   return { name: scope.name, base: mergeBase, changed };
+}
+
+/** A path as the filesystem spells it, so git's and Node's spellings of one directory compare equal. */
+function canonical(path) {
+  let real;
+  try { real = realpathSync.native(path); } catch { real = resolve(path); }
+  return process.platform === 'win32' ? real.toLowerCase() : real;
+}
+
+/** Registered worktrees as {path, head, branch}; `branch` is null when detached. */
+async function worktrees(git) {
+  return must(await git(['worktree', 'list', '--porcelain']), 'git worktree list').split(/\r?\n\r?\n/)
+    .map(block => block.trim()).filter(Boolean).map(block => ({
+      path: /^worktree (.+)$/m.exec(block)?.[1] ?? '',
+      head: /^HEAD ([0-9a-f]{40})$/m.exec(block)?.[1] ?? null,
+      branch: /^branch (.+)$/m.exec(block)?.[1] ?? null,
+    }));
+}
+
+/**
+ * Remove lane worktrees and branches that hold nothing. Every lane directory that exists is
+ * inspected whatever it has checked out; any doubt is a refusal, and a refusal removes nothing.
+ */
+export async function resetLanes(root, { parent = lanesParent(root), git = gitIn(root) } = {}) {
+  const registered = await worktrees(git);
+  const head = must(await git(['rev-parse', '--verify', 'HEAD']), 'git rev-parse HEAD').trim();
+  const main = canonical(root);
+  const targets = new Map();
+  const branches = [];
+  for (const lane of lanes) {
+    for (const entry of registered) {
+      if (entry.branch === `refs/heads/${lane.branch}` && canonical(entry.path) !== main) targets.set(canonical(entry.path), { path: entry.path, entry });
+    }
+    const expected = join(parent, lane.name);
+    if (await exists(expected) && !targets.has(canonical(expected))) {
+      targets.set(canonical(expected), { path: expected, entry: registered.find(entry => canonical(entry.path) === canonical(expected)) ?? null });
+    }
+    if ((await git(['rev-parse', '--verify', '--quiet', `refs/heads/${lane.branch}`])).code === 0) branches.push(lane.branch);
+  }
+  const refusals = [];
+  const holdsWork = async (tip, label) => {
+    const count = await git(['rev-list', '--count', `${head}..${tip}`]);
+    if (count.code !== 0) return `${label}: could not compare it with HEAD (git exit ${count.code}); treated as holding work`;
+    return Number(count.stdout.trim()) > 0 ? `${label} has ${count.stdout.trim()} commit(s) that are not in HEAD` : null;
+  };
+  for (const { path, entry } of targets.values()) {
+    if (!entry) { refusals.push(`${path} exists but is not a worktree of this repository`); continue; }
+    if (!await exists(path)) { refusals.push(`${path} is a registered worktree whose directory is missing; run \`git worktree prune\` and retry`); continue; }
+    const status = await git(['status', '--porcelain'], { cwd: path });
+    if (status.code !== 0) { refusals.push(`${path}: could not read its status (git exit ${status.code}); treated as dirty`); continue; }
+    if (status.stdout.trim()) { refusals.push(`${path} is dirty`); continue; }
+    const problem = entry.head ? await holdsWork(entry.head, path) : `${path} has no readable HEAD; treated as holding work`;
+    if (problem) refusals.push(problem);
+  }
+  for (const branch of branches) {
+    const problem = await holdsWork(`refs/heads/${branch}`, branch);
+    if (problem) refusals.push(problem);
+  }
+  if (refusals.length) throw new Error(`lanes-reset refused; nothing was removed:\n  ${[...new Set(refusals)].join('\n  ')}`);
+  for (const { path } of targets.values()) must(await git(['worktree', 'remove', path]), `git worktree remove ${path}`);
+  for (const branch of branches) must(await git(['branch', '-d', branch]), `git branch -d ${branch}`);
+  return `lanes-reset: removed ${targets.size} worktree(s) and ${branches.length} branch(es); nothing was forced.`;
 }
