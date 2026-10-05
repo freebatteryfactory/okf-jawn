@@ -146,7 +146,12 @@ async function runFixture(only, env) {
         peakWorkingSet = peakWorkingSet == null ? n : Math.max(peakWorkingSet, n);
       }
     });
-  }, 250);
+  }, 50);
+
+  // Sample as soon as we have a pid; fast fixtures can finish before the first interval.
+  if (child.pid) {
+    peakWorkingSet = await samplePeakBytes(child.pid);
+  }
 
   const exitCode = await new Promise((resolveExit) => {
     child.on('close', resolveExit);
