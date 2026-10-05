@@ -29,19 +29,21 @@ use crate::uploads::UploadStore;
 ///
 /// `JobHandler` is intentionally not injected here: ingest owns the Tokio worker
 /// that claims leases from `records`/`queue` and executes handlers separately.
+/// `CandidateCheck` is not injected either: it is this module's own OKF conformance policy,
+/// handed to `versions` with every commit and every proposal candidate.
 #[derive(Clone)]
 pub struct Ports {
     /// Workspace and tenant grant resolution.
     pub access: Arc<dyn AccessControl>,
     /// Idempotency ledger.
     pub mutations: Arc<dyn MutationStore>,
-    /// Workspace metadata and permissions.
+    /// Workspace metadata keyed by tenant; the caller's permissions come from `access`.
     pub catalog: Arc<dyn WorkspaceCatalog>,
     /// Immutable content-addressed bytes.
     pub blobs: Arc<dyn BlobStore>,
     /// Git-versioned notes and source cards.
     pub versions: Arc<dyn VersionStore>,
-    /// Durable, non-rebuildable jobs, reviews, and receipts.
+    /// Durable, non-rebuildable jobs, reviews, receipts, and artifact records.
     pub records: Arc<dyn RecordStore>,
     /// Wake-up delivery for jobs already persisted in `records`.
     pub queue: Arc<dyn JobQueue>,

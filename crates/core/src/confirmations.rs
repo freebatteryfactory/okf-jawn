@@ -1,7 +1,7 @@
-//! Session-bound human confirmation challenges; consume records which MutationId used it.
+//! Session-bound human confirmation challenges; consuming one records which `MutationId` used it.
 //!
-//! A retry of the same MutationId after a crash may re-consume successfully; a different
-//! MutationId still fails as already used.
+//! A retry of the same `MutationId` after a crash may consume again successfully; a different
+//! `MutationId` still fails as already used.
 
 use okf_jawn_contract::identity::{ConfirmationId, Digest, MutationId, Revision};
 use okf_jawn_contract::review::{Confirmation, ConfirmationAction, ConfirmationTarget};
@@ -49,26 +49,20 @@ pub struct ConfirmationConsume {
 
 /// Confirmation issuance and single-use consume; storage owns the implementation.
 pub trait ConfirmationStore: Send + Sync {
-    /// Create a session-bound challenge.
+    /// Create a session-bound challenge and allocate its identity.
     ///
-    /// Unique on `mutation_id`; a reused id returns the prior row, never a duplicate.
+    /// Unique on `mutation_id`: a repeated id creates nothing and returns the prior challenge.
     fn create<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
         create: ConfirmationCreate,
     ) -> PortFuture<'a, Confirmation>;
-    /// Look up a confirmation created under `mutation_id`.
-    fn find_by_mutation<'a>(
-        &'a self,
-        scope: &'a StorageScope,
-        mutation_id: MutationId,
-    ) -> PortFuture<'a, Option<Confirmation>>;
     /// Atomically consume a confirmation for `mutation_id`.
     ///
-    /// Checks subject, session, action, target, revision, digest and expiry. Records which
-    /// `MutationId` consumed it. Re-consume with the same `MutationId` succeeds; a different
-    /// `MutationId` fails as already used.
+    /// Checks subject, session, action, target, revision, digest and expiry, and records which
+    /// `MutationId` consumed it. Consuming again with the same `MutationId` succeeds; a
+    /// different `MutationId` fails with `Conflict` as already used.
     fn consume<'a>(
         &'a self,
         scope: &'a StorageScope,

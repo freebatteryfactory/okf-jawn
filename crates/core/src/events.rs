@@ -1,34 +1,53 @@
 //! Resumable workspace notifications are projections, not canonical document content.
 //!
-//! Comment and event inserts take `MutationId` and enforce uniqueness.
+//! A notification is a hint to read again; it is appended after the durable change it projects.
+//! The store allocates the monotonic cursor.
 
-use okf_jawn_contract::events::{Event, ListEventsRequest, ListEventsResponse};
-use okf_jawn_contract::identity::MutationId;
+use okf_jawn_contract::events::{Event, EventKind, ListEventsResponse};
+use okf_jawn_contract::identity::{ItemId, JobId, MutationId, Revision};
 
 use crate::ports::PortFuture;
-use crate::storage::StorageScope;
+use crate::storage::{Page, StorageScope};
+
+/// One notification to append.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewEvent {
+    /// What changed.
+    pub kind: EventKind,
+    /// Content revision, when the change produced one.
+    pub revision: Option<Revision>,
+    /// Affected item.
+    pub item_id: Option<ItemId>,
+    /// Affected job.
+    pub job_id: Option<JobId>,
+}
+
+/// Which notifications to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventQuery {
+    /// Last event cursor the reader has seen; `None` reads from the start.
+    pub after: Option<String>,
+    /// Bounded page.
+    pub page: Page,
+}
 
 /// Append-only event log for live notifications; storage owns the implementation.
 pub trait EventLog: Send + Sync {
     /// Append one notification after the durable change it projects.
     ///
-    /// Unique on `mutation_id` when the event is the creating effect of a write.
+    /// With a `mutation_id`, an identical notification already appended under that mutation is
+    /// not appended again and the prior event is returned. Without one, as for job progress, the
+    /// notification is always appended.
     fn append<'a>(
         &'a self,
         scope: &'a StorageScope,
-        mutation_id: MutationId,
-        event: Event,
+        mutation_id: Option<MutationId>,
+        event: NewEvent,
     ) -> PortFuture<'a, Event>;
-    /// Look up an event created under `mutation_id`, for abandoned-lease reconciliation.
-    fn find_by_mutation<'a>(
-        &'a self,
-        scope: &'a StorageScope,
-        mutation_id: MutationId,
-    ) -> PortFuture<'a, Option<Event>>;
-    /// Read notifications after an opaque cursor with bounded pagination.
+    /// Read notifications after a cursor, oldest first, with bounded pagination.
     fn list<'a>(
         &'a self,
         scope: &'a StorageScope,
-        request: ListEventsRequest,
+        query: EventQuery,
     ) -> PortFuture<'a, ListEventsResponse>;
 }
