@@ -6,6 +6,7 @@ use okf_jawn_contract::import::{Job, JobKind};
 use okf_jawn_contract::metadata::operations;
 use okf_jawn_contract::read::ReadItemRequest;
 use okf_jawn_contract::views::ViewDocument;
+use schemars::generate::SchemaSettings;
 use serde_json::json;
 use std::error::Error;
 use std::fs;
@@ -213,5 +214,36 @@ fn a_view_reports_the_bindings_outside_its_workspace() -> Result<(), Box<dyn Err
         .map(|found| found.name.as_str())
         .collect();
     assert_eq!(outside_other, ["local"]);
+    Ok(())
+}
+
+#[test]
+fn workspace_path_schema_states_the_expressible_part_of_its_rule() -> Result<(), Box<dyn Error>> {
+    let schema = serde_json::to_value(
+        SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<WorkspacePath>(),
+    )?;
+    assert_eq!(
+        schema.get("pattern"),
+        Some(&json!(r"^[^/\\:\x00-\x1f]+(/[^/\\:\x00-\x1f]+)*$"))
+    );
+    assert_eq!(schema.get("minLength"), Some(&json!(1)));
+    assert_eq!(schema.get("maxLength"), Some(&json!(4096)));
+    // What a regular expression cannot state stays in `TryFrom`.
+    for path in [
+        ".",
+        "..",
+        "a/./b",
+        "a/../b",
+        ".git/config",
+        "notes/.GIT/x",
+        "a\u{7f}b",
+    ] {
+        assert!(
+            WorkspacePath::try_from(path.to_owned()).is_err(),
+            "{path:?}"
+        );
+    }
     Ok(())
 }

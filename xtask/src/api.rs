@@ -627,4 +627,38 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn workspace_path_schema_accepts_and_rejects_through_the_generated_schema()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        super::generate(directory.path())?;
+        let schema: Value = serde_json::from_slice(&std::fs::read(
+            directory
+                .path()
+                .join("schemas")
+                .join("create_item.input.json"),
+        )?)?;
+        let validator = jsonschema::validator_for(&schema)?;
+        let request = |path: &str| {
+            json!({
+                "workspace_id": "11111111-1111-4111-8111-111111111111",
+                "base_revision": "a".repeat(40),
+                "path": path,
+                "title": "Note",
+                "type_name": "note",
+                "kind": "note",
+                "body": "",
+                "properties": {},
+                "idempotency_key": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+            })
+        };
+        for path in ["Clients/one.md", "a", "a/b/c"] {
+            assert!(validator.is_valid(&request(path)), "{path:?} must be accepted");
+        }
+        for path in ["", "/client", "a//b", "a/", "C:/docs", "a\\b", "a\nb"] {
+            assert!(!validator.is_valid(&request(path)), "{path:?} must be rejected");
+        }
+        Ok(())
+    }
 }
