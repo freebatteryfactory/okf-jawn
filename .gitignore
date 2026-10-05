@@ -13,3 +13,4 @@
 /data/
 /.okf-jawn-data/
 *.log
+*/dist/
