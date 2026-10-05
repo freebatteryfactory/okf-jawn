@@ -33,8 +33,9 @@ pub struct DispatchPorts<'a> {
 }
 
 macro_rules! dispatch_operations {
-    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal, $visibility:literal,
-        $permission:ident, $ui:literal, $status:literal, $description:literal)),* $(,)?) => {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
         /// Dispatch one declared JSON operation into its typed implementation.
         ///
         /// # Errors
@@ -182,7 +183,7 @@ fn strip_connector_secret(body: Value) -> Result<Value, ApiError> {
 fn replay_response(replay: ReplayPolicy, body: Value) -> Result<Value, ApiError> {
     match replay {
         ReplayPolicy::StoredResponse => Ok(body),
-        ReplayPolicy::AlreadyIssued => {
+        ReplayPolicy::AlreadyIssued { .. } => {
             let connector_id: ConnectorId = body
                 .get("connector_id")
                 .cloned()
@@ -216,6 +217,7 @@ async fn authorize_targets(
     let mut tenant: Option<TenantGrant> = None;
     for target in targets {
         match target {
+            Target::Authenticated => {}
             Target::Deployment(permission) => {
                 let raw = access.authorize_tenant(principal, permission).await?;
                 let grant = access::authorize_tenant(principal, raw, permission)?;

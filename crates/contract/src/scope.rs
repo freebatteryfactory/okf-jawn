@@ -3,14 +3,18 @@
 //! Dispatch authorizes every target before the handler runs; a request that touches several
 //! workspaces names each one, so no workspace is reached without its own grant. The first
 //! target carries the operation's table permission, except `create_confirmation`, whose
-//! required permission depends on the confirmed action.
+//! required permission depends on the confirmed action. `Target::Authenticated` asks only
+//! for a signed-in principal: session, workspace listing, catalog and health results are
+//! filtered by the caller's grants instead of being gated by one.
 
 use crate::access::{
     CreateConnectorRequest, ListConnectorsRequest, Permission, RevokeConnectorRequest,
 };
 use crate::attention::{GetAttentionRequest, RebuildIndexRequest};
 use crate::common::Empty;
-use crate::conventions::{ApplyNamesRequest, GetRulesRequest, PreviewNamesRequest, SetRulesRequest};
+use crate::conventions::{
+    ApplyNamesRequest, GetRulesRequest, PreviewNamesRequest, SetRulesRequest,
+};
 use crate::events::{GetReceiptRequest, ListEventsRequest};
 use crate::health::{HealthRequest, ReadinessRequest};
 use crate::history::{BlameRequest, CommitRequest, DiffRequest, LogRequest, RestoreRequest};
@@ -20,9 +24,9 @@ use crate::import::{
     GetJobRequest, ListJobsRequest, RedigestRequest, RetryJobRequest, StartImportRequest,
 };
 use crate::item::{
-    CreateFolderRequest, CreateItemRequest, DeleteItemRequest, DiscardDraftRequest,
-    GetItemRequest, ListDraftsRequest, ListItemsRequest, ListTypesRequest, MoveItemRequest,
-    SaveDraftRequest, SetLifecycleRequest, SetTypeRequest,
+    CreateFolderRequest, CreateItemRequest, DeleteItemRequest, DiscardDraftRequest, GetItemRequest,
+    ListDraftsRequest, ListItemsRequest, ListTypesRequest, MoveItemRequest, SaveDraftRequest,
+    SetLifecycleRequest, SetTypeRequest,
 };
 use crate::proposal::{
     AcceptProposalRequest, AddCommentRequest, DeclineProposalRequest, GetProposalRequest,
@@ -69,11 +73,11 @@ macro_rules! workspace_keyed {
     };
 }
 
-macro_rules! deployment_read {
+macro_rules! authenticated {
     ($($request:ty),* $(,)?) => {
         $(impl RequestScope for $request {
             fn targets(&self) -> Vec<Target> {
-                vec![Target::Deployment(Permission::Read)]
+                vec![Target::Authenticated]
             }
             fn idempotency_key(&self) -> Option<&IdempotencyKey> {
                 None
@@ -85,6 +89,8 @@ macro_rules! deployment_read {
 /// A resource the caller must hold a permission on before the handler runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Target {
+    /// Any signed-in principal; no grant lookup. The handler filters results by grants.
+    Authenticated,
     /// The caller's tenant within this deployment, checked through the tenant grant.
     Deployment(Permission),
     /// One workspace, checked through that workspace's grant.
@@ -96,8 +102,12 @@ pub enum Target {
 pub enum ReplayPolicy {
     /// Return the stored response unchanged.
     StoredResponse,
-    /// Return `already_issued` with the created identity; the response held a secret that is never stored.
-    AlreadyIssued,
+    /// Return `already_issued` with the created identity; the response held a secret that is
+    /// never stored or replayed.
+    AlreadyIssued {
+        /// JSON pointer into the response to the created identity.
+        id_pointer: &'static str,
+    },
 }
 
 /// Authorization targets and retry identity, implemented by every operation request.
@@ -113,10 +123,11 @@ pub trait RequestScope {
 }
 
 impl Target {
-    /// The capability this target requires.
+    /// The capability this target requires; sign-in alone is reported as `Read`.
     #[must_use]
     pub const fn permission(self) -> Permission {
         match self {
+            Self::Authenticated => Permission::Read,
             Self::Deployment(permission) | Self::Workspace(_, permission) => permission,
         }
     }
@@ -184,7 +195,7 @@ workspace_keyed!(Admin:
     RebuildIndexRequest,
 );
 
-deployment_read!(
+authenticated!(
     ListWorkspacesRequest,
     GetCatalogRequest,
     Empty,
@@ -268,7 +279,9 @@ impl RequestScope for CreateReviewRequest {
 }
 
 impl RequestScope for CreateConnectorRequest {
-    const REPLAY: ReplayPolicy = ReplayPolicy::AlreadyIssued;
+    const REPLAY: ReplayPolicy = ReplayPolicy::AlreadyIssued {
+        id_pointer: "/connector/connector_id",
+    };
 
     fn targets(&self) -> Vec<Target> {
         let mut targets = vec![Target::Deployment(Permission::Admin)];

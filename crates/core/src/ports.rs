@@ -8,8 +8,9 @@ use okf_jawn_contract::error::ApiError;
 use crate::context::OperationContext;
 
 macro_rules! application_port {
-    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal, $visibility:literal,
-        $permission:ident, $ui:literal, $status:literal, $description:literal)),* $(,)?) => {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
         /// Complete application interface; each method must implement its documented behavior.
         pub trait Application: Send + Sync {
             $(#[doc = $description]

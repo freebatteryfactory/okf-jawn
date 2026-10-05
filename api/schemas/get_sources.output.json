@@ -338,6 +338,7 @@
     "WorkspacePath": {
       "maxLength": 4096,
       "minLength": 1,
+      "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
       "type": "string"
     }
   },
@@ -370,8 +371,7 @@
   },
   "required": [
     "revision",
-    "sources",
-    "appearance"
+    "sources"
   ],
   "title": "GetSourcesResponse",
   "type": "object"

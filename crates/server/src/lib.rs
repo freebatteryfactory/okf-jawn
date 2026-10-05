@@ -31,8 +31,9 @@ pub struct BoundApplication {
 }
 
 macro_rules! bind_routes {
-    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal, $visibility:literal,
-        $permission:ident, $ui:literal, $status:literal, $description:literal)),* $(,)?) => {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
         /// Bind every canonical operation to its shared domain implementation.
         ///
         /// Missing authenticated `Principal` extensions reject requests; there is no anonymous owner fallback.
@@ -72,6 +73,7 @@ fn error_response(error: ApiError) -> Response {
         ErrorCode::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
         ErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::NotImplemented => StatusCode::NOT_IMPLEMENTED,
     };
     (status, Json(error)).into_response()
 }

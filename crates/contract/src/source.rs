@@ -79,6 +79,7 @@ pub struct GetSourcesResponse {
     /// Supporting citations.
     pub sources: Vec<SourceReference>,
     /// Occurrence metadata if the item is a source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appearance: Option<SourceAppearance>,
 }
 

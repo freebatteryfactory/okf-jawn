@@ -2,11 +2,11 @@
 .el .ds Aq '
 .TH okf-jawn-list_workspaces 1  "list_workspaces " 
 .SH NAME
-okf\-jawn\-list_workspaces \- List only workspaces visible to the authenticated principal.
+okf\-jawn\-list_workspaces \- List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {"kind": "revision", "revision": head} so every call sees one consistent state, and compare it with a later listing to detect change.
 .SH SYNOPSIS
 \fBokf\-jawn list_workspaces\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-List only workspaces visible to the authenticated principal.
+List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {"kind": "revision", "revision": head} so every call sees one consistent state, and compare it with a later listing to detect change.
 .SH OPTIONS
 .TP
 \fB\-\-server\fR [default: http://127.0.0.1:7711]

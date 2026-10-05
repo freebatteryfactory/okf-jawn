@@ -10,10 +10,6 @@
       "format": "uuid",
       "type": "string"
     },
-    "Revision": {
-      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
-      "type": "string"
-    },
     "WorkspaceId": {
       "description": "Stable application identity for one user-organized workspace.",
       "format": "uuid",
@@ -22,12 +18,8 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Snapshot the caller's drafts of the selected items in one commit.\n\nIf any selected item changed after its draft's base, or was deleted, the whole commit is\nrejected with a `draft_conflict` error detail. On success the snapshotted drafts are removed.",
+  "description": "Snapshot the caller's drafts of the selected items in one commit.\n\nEach draft's own base revision is the precondition. The Snapshot is blocked only when an\nitem being snapshotted was itself changed or deleted since its draft's base; head movement\nthat did not touch a selected item never blocks. When blocked, nothing is committed and the\n`draft_conflict` error detail lists every conflicting item, not only the first. On success\nthe snapshotted drafts are removed.",
   "properties": {
-    "expected_head": {
-      "$ref": "#/$defs/Revision",
-      "description": "Workspace head the editor saw; a moved head conflicts."
-    },
     "idempotency_key": {
       "$ref": "#/$defs/IdempotencyKey",
       "description": "Retry identity."
@@ -51,7 +43,6 @@
   },
   "required": [
     "workspace_id",
-    "expected_head",
     "item_ids",
     "message",
     "idempotency_key"

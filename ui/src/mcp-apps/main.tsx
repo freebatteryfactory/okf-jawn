@@ -5,7 +5,7 @@ import { StrictMode, useCallback, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { z } from 'zod';
 import {
-  zDiffResponseOutput,
+  zDiffResponse,
   zGetSourcesResponse,
   zLogResponse,
   zPresentResponse,
@@ -21,7 +21,7 @@ import '../styles.css';
 
 const resultSchema = z.union([
   zReadItemResponse,
-  zDiffResponseOutput,
+  zDiffResponse,
   zLogResponse,
   zPresentResponse,
   zGetSourcesResponse,

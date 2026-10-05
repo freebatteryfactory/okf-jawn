@@ -23,7 +23,7 @@ Print version
 .SH SUBCOMMANDS
 .TP
 okf\-jawn\-list_workspaces(1)
-List only workspaces visible to the authenticated principal.
+List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {"kind": "revision", "revision": head} so every call sees one consistent state, and compare it with a later listing to detect change.
 .TP
 okf\-jawn\-create_workspace(1)
 Create a blank workspace; no example content is inserted.
@@ -110,7 +110,7 @@ okf\-jawn\-diff_items(1)
 Compare two explicit versions and retain both references.
 .TP
 okf\-jawn\-commit_items(1)
-Name a snapshot from saved drafts against an unchanged base.
+Name a snapshot from the caller\*(Aqs saved drafts; blocked only when a selected item was changed or deleted since its draft\*(Aqs base.
 .TP
 okf\-jawn\-restore_items(1)
 Restore selected historical content as a new commit without rewriting history.

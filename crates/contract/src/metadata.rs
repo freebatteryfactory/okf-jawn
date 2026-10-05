@@ -10,15 +10,17 @@ use serde::{Deserialize, Serialize};
 use crate::access::Permission;
 
 macro_rules! collect_operations {
-    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal, $visibility:literal,
-        $permission:ident, $ui:literal, $status:literal, $description:literal)),* $(,)?) => {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
         /// Return canonical operations without opening storage or running an HTTP server.
         #[must_use]
         pub fn operations() -> Vec<OperationInfo> {
             vec![$(OperationInfo {
-                id: stringify!($id), path: $path, label: $label, alias: $alias, visibility: $visibility,
+                id: stringify!($id), path: $path, label: $label, alias: $alias,
+                operator_alias: $operator, visibility: $visibility,
                 permission: Permission::$permission, ui: $ui, success_status: $status,
-                description: $description,
+                destructive: $destructive, description: $description,
             }),*]
         }
 
@@ -62,8 +64,10 @@ pub struct OperationInfo {
     pub path: &'static str,
     /// Human-facing operator vocabulary.
     pub label: &'static str,
-    /// Optional concise tool and CLI alias; empty means not model-exposed.
+    /// Agent tool name; empty means the operation is not an MCP tool.
     pub alias: &'static str,
+    /// Operator and CLI name for the same operation; empty means only the canonical id.
+    pub operator_alias: &'static str,
     /// Model-facing, app-only, or not exposed through MCP.
     pub visibility: &'static str,
     /// Minimum application capability, independent of HTTP method.
@@ -72,6 +76,8 @@ pub struct OperationInfo {
     pub ui: &'static str,
     /// HTTP success status.
     pub success_status: u16,
+    /// Whether the operation destroys or overwrites user state; a hint, never access control.
+    pub destructive: bool,
     /// Shared operation documentation.
     pub description: &'static str,
 }

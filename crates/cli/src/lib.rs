@@ -1,7 +1,6 @@
 //! Command bindings are composed from the same canonical operation declarations.
 
 use clap::{Arg, Command};
-use okf_jawn_contract::labels::operator_alias;
 use okf_jawn_contract::metadata::operations;
 
 /// Construct command parsing and help without contacting a server.
@@ -30,10 +29,8 @@ pub fn command() -> Command {
         if !operation.alias.is_empty() {
             child = child.visible_alias(operation.alias);
         }
-        if let Some(alias) = operator_alias(operation.id)
-            && alias != operation.alias
-        {
-            child = child.visible_alias(alias);
+        if !operation.operator_alias.is_empty() && operation.operator_alias != operation.alias {
+            child = child.visible_alias(operation.operator_alias);
         }
         command = command.subcommand(child);
     }
