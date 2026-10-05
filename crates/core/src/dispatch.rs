@@ -1,7 +1,8 @@
 //! Route only declared operations through validation, target authorization, and the mutation ledger.
 //!
 //! Order: validate, decode, `targets()`, authorize every target, build the context,
-//! `MutationStore::begin`, the handler, `complete`. `request_workspace` is gone.
+//! `MutationStore::begin`, the handler, `complete`. The ledger never inspects other stores:
+//! a resumed attempt re-runs the handler under the same `MutationId`.
 
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
@@ -16,21 +17,9 @@ use std::sync::OnceLock;
 use uuid::Uuid;
 
 use crate::access::{self, AccessControl};
-use crate::context::{OperationContext, TenantGrant, WorkspaceGrant};
-use crate::mutations::{
-    AbandonedEffects, BeginOutcome, MutationKey, MutationStore, request_digest,
-};
+use crate::context::{Attempt, OperationContext, TenantGrant, WorkspaceGrant};
+use crate::mutations::{BeginOutcome, MutationKey, MutationStore, request_digest};
 use crate::ports::Application;
-
-/// Ports dispatch needs beyond the typed application handlers.
-pub struct DispatchPorts<'a> {
-    /// Grant lookup.
-    pub access: &'a dyn AccessControl,
-    /// Idempotency ledger.
-    pub mutations: &'a dyn MutationStore,
-    /// Creating-store lookups for abandoned-lease reconciliation.
-    pub effects: &'a dyn AbandonedEffects,
-}
 
 macro_rules! dispatch_operations {
     ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
@@ -43,7 +32,7 @@ macro_rules! dispatch_operations {
         pub async fn dispatch(
             service: &dyn Application,
             ports: &DispatchPorts<'_>,
-            principal: &Principal,
+            caller: &Caller<'_>,
             operation_id: &str,
             input: Value,
         ) -> Result<Value, ApiError> {
@@ -53,12 +42,8 @@ macro_rules! dispatch_operations {
                     static VALIDATOR: OnceLock<Result<jsonschema::Validator, String>> = OnceLock::new();
                     let request_value = input.clone();
                     let request: $request = decode_validated(input, &VALIDATOR)?;
-                    let mut context = authorize_targets(
-                        ports.access,
-                        principal,
-                        operation,
-                        &request,
-                    ).await?;
+                    let mut context =
+                        authorize_targets(ports.access, caller, operation, &request).await?;
                     let replay = <$request as RequestScope>::REPLAY;
                     let key = request.idempotency_key().copied();
                     match prepare_mutation(ports, &mut context, replay, key, &request_value).await? {
@@ -73,6 +58,23 @@ macro_rules! dispatch_operations {
             }
         }
     };
+}
+
+/// The authenticated caller of one dispatch.
+#[derive(Debug, Clone, Copy)]
+pub struct Caller<'a> {
+    /// Server-established identity; never taken from a request body.
+    pub principal: &'a Principal,
+    /// Browser session; `None` for bearer and connector callers.
+    pub session_id: Option<&'a str>,
+}
+
+/// Ports dispatch needs beyond the typed application handlers.
+pub struct DispatchPorts<'a> {
+    /// Grant lookup.
+    pub access: &'a dyn AccessControl,
+    /// Idempotency ledger.
+    pub mutations: &'a dyn MutationStore,
 }
 
 enum MutationGate {
@@ -102,6 +104,11 @@ async fn prepare_mutation(
             context.mutation = Some(mutation_id);
             Ok(MutationGate::Run)
         }
+        BeginOutcome::Abandoned { mutation_id } => {
+            context.mutation = Some(mutation_id);
+            context.attempt = Attempt::Resumed;
+            Ok(MutationGate::Run)
+        }
         BeginOutcome::Replay(stored) => {
             replay_response(replay, stored.body).map(MutationGate::ShortCircuit)
         }
@@ -121,25 +128,6 @@ async fn prepare_mutation(
             mutation_id,
             retry_after,
         })),
-        BeginOutcome::Abandoned { mutation_id } => {
-            if let Some(body) = ports
-                .effects
-                .lookup(context.operation, mutation_id)
-                .await?
-            {
-                ports.mutations.complete(mutation_id, body.clone()).await?;
-                return replay_response(replay, body).map(MutationGate::ShortCircuit);
-            }
-            if let Some(stored) = ports.mutations.find(mutation_id).await? {
-                ports
-                    .mutations
-                    .complete(mutation_id, stored.body.clone())
-                    .await?;
-                return replay_response(replay, stored.body).map(MutationGate::ShortCircuit);
-            }
-            context.mutation = Some(mutation_id);
-            Ok(MutationGate::Run)
-        }
     }
 }
 
@@ -208,27 +196,27 @@ fn replay_response(replay: ReplayPolicy, body: Value) -> Result<Value, ApiError>
 
 async fn authorize_targets(
     access: &dyn AccessControl,
-    principal: &Principal,
+    caller: &Caller<'_>,
     operation: OperationName,
     request: &impl RequestScope,
 ) -> Result<OperationContext, ApiError> {
-    let targets = request.targets();
-    let mut grants = Vec::new();
+    let principal = caller.principal;
+    let mut grants: Vec<WorkspaceGrant> = Vec::new();
     let mut tenant: Option<TenantGrant> = None;
-    for target in targets {
+    for target in request.targets() {
         match target {
+            // Any signed-in principal; the handler filters its result by grants.
             Target::Authenticated => {}
             Target::Deployment(permission) => {
                 let raw = access.authorize_tenant(principal, permission).await?;
-                let grant = access::authorize_tenant(principal, raw, permission)?;
-                tenant = Some(grant);
+                tenant = Some(access::authorize_tenant(principal, raw, permission)?);
             }
             Target::Workspace(workspace, permission) => {
                 let raw = access.authorize(principal, workspace, permission).await?;
                 let grant = access::authorize_workspace(principal, raw, permission)?;
                 if !grants
                     .iter()
-                    .any(|existing: &WorkspaceGrant| existing.workspace_id() == workspace)
+                    .any(|existing| existing.workspace_id() == workspace)
                 {
                     grants.push(grant);
                 }
@@ -237,10 +225,12 @@ async fn authorize_targets(
     }
     Ok(OperationContext {
         principal: principal.clone(),
+        session_id: caller.session_id.map(str::to_owned),
         operation,
         tenant,
         grants,
         mutation: None,
+        attempt: Attempt::First,
     })
 }
 
