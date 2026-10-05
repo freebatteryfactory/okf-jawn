@@ -1,19 +1,23 @@
 //! Deterministic OpenAPI and JSON Schema output from the complete Rust operation surface.
 //!
-//! OpenAPI `components.schemas` are built from schemars (draft 2020-12). Request types use the
-//! deserialize contract; response types use `for_serialize()`. When the two contracts for one
-//! type differ, generation emits `<Name>Input` and `<Name>Output`.
+//! Every schema is the schemars (draft 2020-12) schema of a contract type, published under the
+//! name schemars gives it. A type has one wire shape: generation fails, naming the type, when
+//! its serialize and deserialize schemas differ.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
 
-use okf_jawn_contract::access::Permission;
+use okf_jawn_contract::access::{Permission, ResourceMetadata};
+use okf_jawn_contract::error::ApiError;
+use okf_jawn_contract::health::HealthResponse;
+use okf_jawn_contract::import::Upload;
 use okf_jawn_contract::metadata::{OperationInfo, operations};
+use okf_jawn_contract::transport::{TransportAuth, TransportOperation};
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde_json::{Map, Value, json};
-use utoipa::openapi::info::InfoBuilder;
 use utoipa::openapi::OpenApiBuilder;
+use utoipa::openapi::info::InfoBuilder;
 
 use crate::output::write_json;
 
@@ -21,52 +25,69 @@ macro_rules! generate_operations {
     ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
         $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
         $destructive:literal, $description:literal)),* $(,)?) => {
+        /// Pair every row of `operations()` with the schemas of its request and response types.
         fn typed_operations() -> Result<Vec<TypedOperation>, Box<dyn Error>> {
-            let mut result = Vec::new();
-            $(result.push(typed::<$request, $response>(OperationInfo {
-                id: stringify!($id), path: $path, label: $label, alias: $alias,
-                operator_alias: $operator, visibility: $visibility,
-                permission: Permission::$permission, ui: $ui, success_status: $status,
-                destructive: $destructive, description: $description,
-            })?);)*
-            Ok(result)
+            operations()
+                .into_iter()
+                .map(|info| {
+                    let id = info.id;
+                    match id {
+                        $(stringify!($id) => typed::<$request, $response>(info),)*
+                        other => Err(format!("operation {other} has no declared types").into()),
+                    }
+                })
+                .collect()
         }
     };
 }
 
-pub(crate) struct TypedOperation {
+/// One declared operation with the schemas of its request and response types.
+struct TypedOperation {
     info: OperationInfo,
-    request_name: String,
-    response_name: String,
-    /// Named component schemas contributed by this operation (flattened `$defs` + root).
-    components: BTreeMap<String, Value>,
-    /// Input/Output pairs emitted when serialize≠deserialize for this operation's types.
-    splits: SplitLog,
-    input: Value,
-    output: Value,
+    request: Registered,
+    response: Registered,
 }
 
-/// Split names produced when serialize and deserialize contracts differ for one type.
-#[derive(Debug, Default)]
-struct SplitLog {
-    pairs: Vec<(String, String)>,
+/// One contract type: its component name, its standalone schema document, and every named
+/// component (itself and its definitions) it contributes to the OpenAPI document.
+struct Registered {
+    name: String,
+    document: Value,
+    components: BTreeMap<String, Value>,
 }
+
+/// Types the document refers to outside the operation table.
+struct SharedTypes {
+    api_error: Registered,
+    upload: Registered,
+    resource_metadata: Registered,
+    health: Registered,
+}
+
+const COMPONENT_PREFIX: &str = "#/components/schemas/";
+const DEFINITION_PREFIX: &str = "#/$defs/";
 
 pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn Error>> {
     let typed = typed_operations()?;
-    let mut splits = SplitLog::default();
+    let shared = SharedTypes {
+        api_error: register::<ApiError>()?,
+        upload: register::<Upload>()?,
+        resource_metadata: register::<ResourceMetadata>()?,
+        health: register::<HealthResponse>()?,
+    };
     let mut schemas = BTreeMap::new();
-    register_type::<okf_jawn_contract::error::ApiError>(&mut schemas, &mut splits, true)?;
-    register_type::<okf_jawn_contract::access::ResourceMetadata>(&mut schemas, &mut splits, true)?;
-    // Transport response refs assume these serialize names.
-    register_type::<okf_jawn_contract::import::Upload>(&mut schemas, &mut splits, true)?;
-    register_type::<okf_jawn_contract::health::HealthResponse>(&mut schemas, &mut splits, true)?;
-    for operation in &typed {
-        for (name, schema) in &operation.components {
+    let outside = [
+        &shared.api_error,
+        &shared.upload,
+        &shared.resource_metadata,
+        &shared.health,
+    ];
+    let declared = typed
+        .iter()
+        .flat_map(|operation| [&operation.request, &operation.response]);
+    for registered in outside.into_iter().chain(declared) {
+        for (name, schema) in &registered.components {
             insert_schema(&mut schemas, name.clone(), schema.clone())?;
-        }
-        for (input, output) in &operation.splits.pairs {
-            record_split(&mut splits, input, output);
         }
     }
     let mut api = OpenApiBuilder::new()
@@ -82,28 +103,27 @@ pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn Error>> {
         .build();
     for operation in &typed {
         let path: utoipa::openapi::path::PathItem =
-            serde_json::from_value(json!({"post": path_operation(operation)}))
+            serde_json::from_value(json!({"post": path_operation(operation, &shared)}))
                 .map_err(|error| format!("operation {}: {error}", operation.info.id))?;
-        api.paths
-            .paths
-            .insert(operation.info.path.to_owned(), path);
+        api.paths.paths.insert(operation.info.path.to_owned(), path);
         write_json(
             &directory
                 .join("schemas")
                 .join(format!("{}.input.json", operation.info.id)),
-            &operation.input,
+            &operation.request.document,
         )?;
         write_json(
             &directory
                 .join("schemas")
                 .join(format!("{}.output.json", operation.info.id)),
-            &operation.output,
+            &operation.response.document,
         )?;
     }
     for transport in okf_jawn_contract::transport::operations() {
-        let path: utoipa::openapi::path::PathItem =
-            serde_json::from_value(json!({(transport.method): transport_operation(&transport)}))
-                .map_err(|error| format!("transport {}: {error}", transport.id))?;
+        let path: utoipa::openapi::path::PathItem = serde_json::from_value(
+            json!({(transport.method): transport_operation(&transport, &shared)}),
+        )
+        .map_err(|error| format!("transport {}: {error}", transport.id))?;
         let current = api
             .paths
             .paths
@@ -138,14 +158,6 @@ pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn Error>> {
         }),
     );
     root.insert("components".to_owned(), Value::Object(components));
-    if !splits.pairs.is_empty() {
-        let receipt: Value = json!({
-            "input_output_splits": splits.pairs.iter().map(|(input, output)| {
-                json!({"input": input, "output": output})
-            }).collect::<Vec<_>>()
-        });
-        write_json(&directory.join("schemars-splits.json"), &receipt)?;
-    }
     write_json(&directory.join("openapi.json"), &document)?;
     std::fs::write(
         directory.join("openapi.yaml"),
@@ -197,215 +209,124 @@ pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn Error>> {
 fn typed<Q: JsonSchema, R: JsonSchema>(
     info: OperationInfo,
 ) -> Result<TypedOperation, Box<dyn Error>> {
-    let mut splits = SplitLog::default();
-    let mut components = BTreeMap::new();
-    let request_name = register_request_response::<Q>(&mut components, &mut splits, false)?;
-    let response_name = register_request_response::<R>(&mut components, &mut splits, true)?;
     Ok(TypedOperation {
         info,
-        request_name,
-        response_name,
-        components,
-        splits,
-        input: schema::<Q>(false)?,
-        output: schema::<R>(true)?,
+        request: register::<Q>()?,
+        response: register::<R>()?,
     })
 }
 
-fn register_type<T: JsonSchema>(
-    schemas: &mut BTreeMap<String, Value>,
-    splits: &mut SplitLog,
-    prefer_serialize: bool,
-) -> Result<String, Box<dyn Error>> {
-    let mut local = BTreeMap::new();
-    let name = register_request_response::<T>(&mut local, splits, prefer_serialize)?;
-    for (n, s) in local {
-        insert_schema(schemas, n, s)?;
+/// Register one type under the name schemars gives it.
+///
+/// Fails when the type, or a type it contains, serializes with a different schema than it
+/// deserializes with.
+fn register<T: JsonSchema>() -> Result<Registered, Box<dyn Error>> {
+    let name = T::schema_name().into_owned();
+    let document = schema_document::<T>(false)?;
+    let serialized = schema_document::<T>(true)?;
+    if document != serialized {
+        return Err(format!(
+            "{}: serialize and deserialize schemas differ (reached through {name}); give the type one wire shape or two named types",
+            differing_types(&name, &document, &serialized).join(", ")
+        )
+        .into());
     }
-    Ok(name)
-}
-
-/// Register one type. When used as a response (`prefer_serialize`), the serialize contract is
-/// primary; when used as a request, the deserialize contract is. If both contracts differ, both
-/// `Input` and `Output` names are registered and the preferred name is returned. Nested `$defs`
-/// that differ between contracts also receive Input/Output suffixes.
-fn register_request_response<T: JsonSchema>(
-    schemas: &mut BTreeMap<String, Value>,
-    splits: &mut SplitLog,
-    prefer_serialize: bool,
-) -> Result<String, Box<dyn Error>> {
-    let base = T::schema_name().into_owned();
-    let mut de = flatten_root::<T>(false)?;
-    let mut ser = flatten_root::<T>(true)?;
-    let def_names: BTreeMap<String, ()> = de
-        .defs
-        .keys()
-        .chain(ser.defs.keys())
-        .map(|k| (k.clone(), ()))
-        .collect();
-    let mut rename_de = BTreeMap::new();
-    let mut rename_ser = BTreeMap::new();
-    for name in def_names.keys() {
-        let de_def = de.defs.get(name);
-        let ser_def = ser.defs.get(name);
-        match (de_def, ser_def) {
-            (Some(a), Some(b)) if a == b => {
-                // Placeholder; rewritten after rename maps are complete.
-                let _ = (a, b);
-            }
-            (Some(_), Some(_)) => {
-                let input = format!("{name}Input");
-                let output = format!("{name}Output");
-                record_split(splits, &input, &output);
-                rename_de.insert(name.clone(), input);
-                rename_ser.insert(name.clone(), output);
-            }
-            (Some(_), None) | (None, Some(_)) | (None, None) => {}
-        }
-    }
-    // Apply renames to def bodies, then insert under final names.
-    for name in def_names.keys() {
-        let de_def = de.defs.get(name).cloned();
-        let ser_def = ser.defs.get(name).cloned();
-        match (de_def, ser_def) {
-            (Some(a), Some(b)) if a == b => {
-                insert_schema(schemas, name.clone(), apply_renames(a, &rename_de))?;
-            }
-            (Some(a), Some(b)) => {
-                let input = rename_de.get(name).cloned().unwrap_or_else(|| name.clone());
-                let output = rename_ser.get(name).cloned().unwrap_or_else(|| name.clone());
-                insert_schema(schemas, input, apply_renames(a, &rename_de))?;
-                insert_schema(schemas, output, apply_renames(b, &rename_ser))?;
-            }
-            (Some(a), None) => {
-                insert_schema(schemas, name.clone(), apply_renames(a, &rename_de))?;
-            }
-            (None, Some(b)) => {
-                insert_schema(schemas, name.clone(), apply_renames(b, &rename_ser))?;
-            }
-            (None, None) => {}
-        }
-    }
-    de.root = apply_renames(de.root, &rename_de);
-    ser.root = apply_renames(ser.root, &rename_ser);
-    if de.root == ser.root {
-        insert_schema(schemas, base.clone(), de.root)?;
-        return Ok(base);
-    }
-    let input_name = format!("{base}Input");
-    let output_name = format!("{base}Output");
-    record_split(splits, &input_name, &output_name);
-    insert_schema(schemas, input_name.clone(), de.root)?;
-    insert_schema(schemas, output_name.clone(), ser.root)?;
-    Ok(if prefer_serialize {
-        output_name
-    } else {
-        input_name
-    })
-}
-
-fn record_split(splits: &mut SplitLog, input: &str, output: &str) {
-    if !splits
-        .pairs
-        .iter()
-        .any(|(i, o)| i == input && o == output)
-    {
-        splits.pairs.push((input.to_owned(), output.to_owned()));
-    }
-}
-
-fn apply_renames(value: Value, renames: &BTreeMap<String, String>) -> Value {
-    if renames.is_empty() {
-        return value;
-    }
-    match value {
-        Value::Object(map) => {
-            let mut out = Map::new();
-            for (key, child) in map {
-                if key == "$ref"
-                    && let Some(reference) = child.as_str()
-                    && let Some(name) = reference.strip_prefix("#/components/schemas/")
-                    && let Some(new_name) = renames.get(name)
-                {
-                    out.insert(
-                        key,
-                        Value::String(format!("#/components/schemas/{new_name}")),
-                    );
-                } else {
-                    out.insert(key, apply_renames(child, renames));
-                }
-            }
-            Value::Object(out)
-        }
-        Value::Array(items) => Value::Array(
-            items
-                .into_iter()
-                .map(|item| apply_renames(item, renames))
-                .collect(),
-        ),
-        other => other,
-    }
-}
-
-struct Flattened {
-    root: Value,
-    defs: BTreeMap<String, Value>,
-}
-
-fn flatten_root<T: JsonSchema>(serialize: bool) -> Result<Flattened, Box<dyn Error>> {
-    let root = schema::<T>(serialize)?;
-    let mut object = root
+    let mut body = document
         .as_object()
         .cloned()
-        .ok_or("schemars root must be an object")?;
-    let defs_value = object.remove("$defs").unwrap_or_else(|| json!({}));
-    let mut defs = BTreeMap::new();
-    if let Some(map) = defs_value.as_object() {
-        for (name, def) in map {
-            defs.insert(name.clone(), rewrite_refs(def.clone()));
+        .ok_or_else(|| format!("{name}: schemars root schema is not an object"))?;
+    let definitions = body.remove("$defs");
+    body.remove("$schema");
+    body.remove("title");
+    let mut components = BTreeMap::new();
+    if let Some(Value::Object(definitions)) = definitions {
+        for (definition, schema) in definitions {
+            components.insert(definition, component_references(schema));
         }
     }
-    object.remove("$schema");
-    object.remove("title");
-    let body = rewrite_refs(Value::Object(object));
-    Ok(Flattened {
-        root: body,
-        defs,
+    insert_schema(
+        &mut components,
+        name.clone(),
+        component_references(Value::Object(body)),
+    )?;
+    Ok(Registered {
+        name,
+        document,
+        components,
     })
 }
 
-fn rewrite_refs(value: Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut out = Map::new();
-            for (key, child) in map {
-                if key == "$ref"
-                    && let Some(reference) = child.as_str()
-                    && let Some(name) = reference.strip_prefix("#/$defs/")
-                {
-                    out.insert(
-                        key,
-                        Value::String(format!("#/components/schemas/{name}")),
-                    );
-                } else {
-                    out.insert(key, rewrite_refs(child));
-                }
-            }
-            Value::Object(out)
-        }
-        Value::Array(items) => Value::Array(items.into_iter().map(rewrite_refs).collect()),
-        other => other,
-    }
-}
-
-fn schema<T: JsonSchema>(serialize: bool) -> Result<Value, serde_json::Error> {
+fn schema_document<T: JsonSchema>(serialize: bool) -> Result<Value, serde_json::Error> {
     let settings = SchemaSettings::draft2020_12();
     let settings = if serialize {
         settings.for_serialize()
     } else {
-        settings
+        settings.for_deserialize()
     };
     serde_json::to_value(settings.into_generator().into_root_schema_for::<T>())
+}
+
+/// Names of the definitions whose two schemas differ, and the root when its own body differs.
+fn differing_types(root: &str, deserialize: &Value, serialize: &Value) -> Vec<String> {
+    let empty = Map::new();
+    let before = deserialize
+        .get("$defs")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let after = serialize
+        .get("$defs")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let mut names: Vec<String> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|key| before.get(*key) != after.get(*key))
+        .cloned()
+        .collect();
+    names.sort();
+    names.dedup();
+    if without_definitions(deserialize) != without_definitions(serialize) {
+        names.push(root.to_owned());
+    }
+    names
+}
+
+fn without_definitions(schema: &Value) -> Value {
+    let mut body = schema.clone();
+    if let Some(object) = body.as_object_mut() {
+        object.remove("$defs");
+    }
+    body
+}
+
+/// Point every local `$defs` reference at the OpenAPI component of the same name.
+fn component_references(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut out = Map::new();
+            for (key, child) in map {
+                if key == "$ref"
+                    && let Some(reference) = child.as_str()
+                    && let Some(name) = reference.strip_prefix(DEFINITION_PREFIX)
+                {
+                    out.insert(key, Value::String(format!("{COMPONENT_PREFIX}{name}")));
+                } else {
+                    out.insert(key, component_references(child));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(component_references).collect()),
+        other => other,
+    }
+}
+
+fn component_reference(name: &str) -> Value {
+    json!({"$ref": format!("{COMPONENT_PREFIX}{name}")})
+}
+
+fn optional(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
 }
 
 fn insert_schema(
@@ -423,28 +344,47 @@ fn insert_schema(
     Ok(())
 }
 
-fn path_operation(operation: &TypedOperation) -> Value {
-    let mut responses = serde_json::Map::new();
-    responses.insert(operation.info.success_status.to_string(), json!({"description":"Successful operation result",
-        "content":{"application/json":{"schema":{"$ref":format!("#/components/schemas/{}",operation.response_name)}}}}));
+fn path_operation(operation: &TypedOperation, shared: &SharedTypes) -> Value {
+    let info = &operation.info;
+    let mut responses = Map::new();
+    responses.insert(
+        info.success_status.to_string(),
+        json!({
+            "description": "Successful operation result",
+            "content": {"application/json": {"schema": component_reference(&operation.response.name)}}
+        }),
+    );
     for status in [
         "400", "401", "403", "404", "409", "413", "422", "500", "503",
     ] {
         responses.insert(
             status.to_owned(),
-            json!({"description":"Structured application failure",
-            "content":{"application/json":{"schema":{"$ref":"#/components/schemas/ApiError"}}}}),
+            json!({
+                "description": "Structured application failure",
+                "content": {"application/json": {"schema": component_reference(&shared.api_error.name)}}
+            }),
         );
     }
-    json!({"operationId":operation.info.id, "summary":operation.info.label,
-        "description":operation.info.description, "tags":[operation.info.path.split('/').nth(2).unwrap_or("operations")],
-        "requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":format!("#/components/schemas/{}",operation.request_name)}}}},
-        "responses":responses, "x-agent-tool":operation.info.visibility == "model",
-        "x-mcp-tool":!operation.info.alias.is_empty(),"x-tool-visibility":operation.info.visibility,
-        "x-agent-alias":operation.info.alias,"x-operator-label":operation.info.label,
-        "x-cli-alias":(!operation.info.operator_alias.is_empty()).then_some(operation.info.operator_alias),
-        "x-permission":operation.info.permission,"x-ui-resource":resource_uri(operation.info.ui),
-        "x-tool-annotations":annotations(&operation.info)})
+    json!({
+        "operationId": info.id,
+        "summary": info.label,
+        "description": info.description,
+        "tags": [info.path.split('/').nth(2).unwrap_or("operations")],
+        "requestBody": {
+            "required": true,
+            "content": {"application/json": {"schema": component_reference(&operation.request.name)}}
+        },
+        "responses": responses,
+        "x-agent-tool": info.visibility == "model",
+        "x-mcp-tool": !info.alias.is_empty(),
+        "x-tool-visibility": info.visibility,
+        "x-agent-alias": info.alias,
+        "x-operator-label": info.label,
+        "x-cli-alias": optional(info.operator_alias),
+        "x-permission": info.permission,
+        "x-ui-resource": resource_uri(info.ui),
+        "x-tool-annotations": annotations(info)
+    })
 }
 
 fn annotations(info: &OperationInfo) -> Value {
@@ -458,9 +398,14 @@ fn annotations(info: &OperationInfo) -> Value {
 }
 
 fn tool_definition(operation: &TypedOperation) -> Value {
-    let mut tool = json!({"name":operation.info.alias,"title":operation.info.label,
-        "description":operation.info.description,"inputSchema":operation.input,"outputSchema":operation.output,
-        "annotations":annotations(&operation.info)});
+    let mut tool = json!({
+        "name": operation.info.alias,
+        "title": operation.info.label,
+        "description": operation.info.description,
+        "inputSchema": operation.request.document,
+        "outputSchema": operation.response.document,
+        "annotations": annotations(&operation.info)
+    });
     if let Some(object) = tool.as_object_mut() {
         let mut ui = json!({"visibility": if operation.info.visibility == "app" { vec!["app"] } else { vec!["model", "app"] }});
         if !operation.info.ui.is_empty()
@@ -496,7 +441,7 @@ fn form_schema<T: JsonSchema>() -> Result<Value, serde_json::Error> {
     )
 }
 
-fn transport_operation(operation: &okf_jawn_contract::transport::TransportOperation) -> Value {
+fn transport_operation(operation: &TransportOperation, shared: &SharedTypes) -> Value {
     let parameters: Vec<Value> = operation
         .path
         .split('/')
@@ -508,13 +453,10 @@ fn transport_operation(operation: &okf_jawn_contract::transport::TransportOperat
     let mut result = json!({"operationId":operation.id,"description":operation.description,
         "summary":operation.id,"tags":["transport"],"parameters":parameters,
         "responses":{(operation.status.to_string()):{"description":operation.description,
-            "content":{(operation.response_media):{"schema":transport_response_schema(operation.id, operation.response_media)}}}},
+            "content":{(operation.response_media):{"schema":transport_response_schema(operation, shared)}}}},
         "x-agent-tool":false,"x-transport-binding":true});
     if let Some(map) = result.as_object_mut() {
-        if matches!(
-            operation.auth,
-            okf_jawn_contract::transport::TransportAuth::Public
-        ) {
+        if matches!(operation.auth, TransportAuth::Public) {
             map.insert("security".to_owned(), json!([]));
         }
         if let Some(media) = operation.request_media {
@@ -532,13 +474,14 @@ fn transport_operation(operation: &okf_jawn_contract::transport::TransportOperat
     result
 }
 
-fn transport_response_schema(id: &str, media: &str) -> Value {
-    match id {
-        "upload_content" => json!({"$ref":"#/components/schemas/Upload"}),
-        "get_resource_metadata" => json!({"$ref":"#/components/schemas/ResourceMetadata"}),
-        "liveness" => json!({"$ref":"#/components/schemas/HealthResponse"}),
-        _ if media.contains("json") => any_value_schema(),
-        _ => json!({"type":"string"}),
+/// The transport table has no response-type column; these three routes return contract types.
+fn transport_response_schema(operation: &TransportOperation, shared: &SharedTypes) -> Value {
+    match operation.id {
+        "upload_content" => component_reference(&shared.upload.name),
+        "get_resource_metadata" => component_reference(&shared.resource_metadata.name),
+        "liveness" => component_reference(&shared.health.name),
+        _ if operation.response_media.contains("json") => any_value_schema(),
+        _ => json!({"type": "string"}),
     }
 }
 
@@ -550,9 +493,136 @@ fn any_value_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
     use std::error::Error;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    use okf_jawn_contract::metadata::operations;
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
+    use serde_json::{Value, json};
+
+    type TestResult = Result<(), Box<dyn Error>>;
+
+    /// Optional when read, required when written: the shape generation must refuse.
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct Asymmetric {
+        note: Option<String>,
+    }
+
+    /// One shape of its own, but it contains a type with two.
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct Holder {
+        inner: Asymmetric,
+    }
+
+    fn read(path: &Path) -> Result<Value, Box<dyn Error>> {
+        Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+    }
+
+    /// Every `$ref` target in `value`, in document order.
+    fn references(value: &Value, found: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    if key == "$ref"
+                        && let Some(reference) = child.as_str()
+                    {
+                        found.push(reference.to_owned());
+                    } else {
+                        references(child, found);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    references(item, found);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
+    #[test]
+    fn a_type_with_two_wire_shapes_is_refused_by_name() -> TestResult {
+        let Err(direct) = super::register::<Asymmetric>() else {
+            return Err("a type with two wire shapes must not register".into());
+        };
+        let direct = direct.to_string();
+        assert!(
+            direct.starts_with("Asymmetric: serialize and deserialize schemas differ"),
+            "{direct}"
+        );
+        let Err(nested) = super::register::<Holder>() else {
+            return Err("a type containing a two-shape type must not register".into());
+        };
+        let nested = nested.to_string();
+        assert!(
+            nested.starts_with("Asymmetric: serialize and deserialize schemas differ"),
+            "{nested}"
+        );
+        assert!(nested.contains("reached through Holder"), "{nested}");
+        Ok(())
+    }
+
+    #[test]
+    fn every_operation_schema_compiles_and_every_reference_resolves() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        super::generate(directory.path())?;
+        assert!(
+            !directory.path().join("schemars-splits.json").exists(),
+            "no split receipt is written"
+        );
+        let api = read(&directory.path().join("openapi.json"))?;
+        let components = api
+            .pointer("/components/schemas")
+            .and_then(Value::as_object)
+            .ok_or("components.schemas")?;
+        let mut published = Vec::new();
+        references(&api, &mut published);
+        assert!(
+            published.len() > operations().len(),
+            "the document must reference its components"
+        );
+        for reference in &published {
+            let name = reference
+                .strip_prefix(super::COMPONENT_PREFIX)
+                .ok_or_else(|| format!("{reference} is not a component reference"))?;
+            assert!(
+                components.contains_key(name),
+                "{reference} names no component"
+            );
+        }
+        for operation in operations() {
+            for side in ["input", "output"] {
+                let label = format!("{}.{side}", operation.id);
+                let schema = read(
+                    &directory
+                        .path()
+                        .join("schemas")
+                        .join(format!("{label}.json")),
+                )?;
+                let definitions = schema.get("$defs").and_then(Value::as_object);
+                let mut local = Vec::new();
+                references(&schema, &mut local);
+                for reference in &local {
+                    let name = reference
+                        .strip_prefix(super::DEFINITION_PREFIX)
+                        .ok_or_else(|| format!("{label}: {reference} is not a local definition"))?;
+                    assert!(
+                        definitions.is_some_and(|definitions| definitions.contains_key(name)),
+                        "{label}: {reference} names no definition"
+                    );
+                }
+                let validator = jsonschema::validator_for(&schema)
+                    .map_err(|error| format!("{label}: {error}"))?;
+                assert!(
+                    !validator.is_valid(&json!(7)),
+                    "{label}: every request and response is an object"
+                );
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn request_schemas_agree_on_all_example_fixtures() -> Result<(), Box<dyn Error>> {
@@ -591,7 +661,8 @@ mod tests {
             let mut request_ref = None;
             for item in paths.values() {
                 if let Some(post) = item.get("post")
-                    && post.get("operationId").and_then(Value::as_str) == Some(operation_id.as_str())
+                    && post.get("operationId").and_then(Value::as_str)
+                        == Some(operation_id.as_str())
                 {
                     request_ref = post
                         .pointer("/requestBody/content/application~1json/schema/$ref")
@@ -654,10 +725,16 @@ mod tests {
             })
         };
         for path in ["Clients/one.md", "a", "a/b/c"] {
-            assert!(validator.is_valid(&request(path)), "{path:?} must be accepted");
+            assert!(
+                validator.is_valid(&request(path)),
+                "{path:?} must be accepted"
+            );
         }
         for path in ["", "/client", "a//b", "a/", "C:/docs", "a\\b", "a\nb"] {
-            assert!(!validator.is_valid(&request(path)), "{path:?} must be rejected");
+            assert!(
+                !validator.is_valid(&request(path)),
+                "{path:?} must be rejected"
+            );
         }
         Ok(())
     }
