@@ -1,11 +1,11 @@
 {
   "project": "okf-jawn",
   "delivery": "Full-scope executable foundation source; not a completed or qualified application",
-  "phase_0_qualified": false,
+  "phase_0_qualified": true,
   "application_implemented": false,
   "current": {
-    "recorded_at_utc": "2026-10-05T02:59:33Z",
-    "base_commit": "579910970612d4032b1f98ba08ed122e8dcc9563",
+    "recorded_at_utc": "2026-10-05T03:04:19Z",
+    "base_commit": "phase-0-closure",
     "environment": {
       "os": "Windows 10.0.26200 (developer workstation, not CI or the build container)",
       "bun": "1.4.2 (process.versions.bun, C:\\Users\\eayou\\.bun\\bin\\bun.exe)",
@@ -26,7 +26,7 @@
     "project_typescript_passed": true,
     "authored_typescript_error_count": 0,
     "deterministic_foundation_green": true,
-    "phase_0_note": "Library/seam qualifications and clean-checkout passed. GitHub Actions CI receipt pending or in progress. Product journeys remain on construction/acceptance gates. Claude Desktop host not claimed; Chromium paint closed the 1.8MiB question.",
+    "phase_0_note": "Phase 0 foundation/seam/library gates are terminal. Product journeys remain on construction and acceptance gates. Next action: bun scripts/dev.mjs lanes.",
     "direct_versions": {
       "okf-core": "0.2.7",
       "okf-validator": "0.2.7 (default-features=false)",
@@ -194,13 +194,14 @@
         },
         {
           "id": "github-actions-ci-receipt",
-          "status": "not_run",
-          "meaning": "Needs confirmed push; local foundation is not a CI receipt"
+          "status": "passed",
+          "meaning": "workflow_dispatch on phase-0-closure: source-tooling + foundation jobs success",
+          "receipt": "https://github.com/freebatteryfactory/okf-jawn/actions/runs/37257588545"
         },
         {
           "id": "mcp-apps-claude-desktop",
-          "status": "not_run",
-          "meaning": "Optional second real host; not claimed. Chromium observed render closed the 1.8MiB question."
+          "status": "not_claimed",
+          "meaning": "Optional second real host not claimed. Chromium paint+axe under mcp-apps-protocol-qualification closed the 1.8MiB question."
         }
       ],
       "construction": [
@@ -267,7 +268,8 @@
           "meaning": "Connected product acceptance against a real server"
         }
       ]
-    }
+    },
+    "phase_0_qualified": true
   },
   "historical_archive_record": {
     "note": "Recorded when the archive was assembled in an environment without Rust, network access, pnpm or Docker, using Node and TypeScript 5.8.3 for syntax-only checks. Kept unchanged as history. Its toolchain (Node 24.21.0, pnpm 12.8.1) is superseded by Bun 1.4.2, and its counts (62 operations, 13 transports, 28 offline tests) by the current source. It is not current readiness.",
