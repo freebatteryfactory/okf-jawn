@@ -4,8 +4,9 @@
 //! Requests are synthesized from each type's own deserialize schema, so a newly declared
 //! operation is covered without a hand-written sample.
 
-use okf_jawn_contract::access::{CreateConnectorRequest, Permission};
+use okf_jawn_contract::access::{CreateConnectorRequest, IssuedConnector, Permission};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+use okf_jawn_contract::identity::ConnectorId;
 use okf_jawn_contract::metadata::{OperationName, operations};
 use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
 use okf_jawn_contract::views::PresentRequest;
@@ -45,6 +46,14 @@ struct Scoped {
 const PRIVILEGED_READS: &[&str] = &["list_connectors"];
 /// Operations whose required permission depends on the request rather than the table column.
 const ACTION_DEPENDENT: &[&str] = &["create_confirmation"];
+/// Operations any signed-in principal may call; their results are filtered by grants.
+const SIGN_IN_ONLY: &[&str] = &[
+    "list_workspaces",
+    "get_catalog",
+    "get_session",
+    "get_health",
+    "get_readiness",
+];
 const OTHER_WORKSPACE: &str = "33333333-3333-4333-8333-333333333333";
 
 fn scoped<T: RequestScope>(id: &'static str, permission: Permission, request: &T) -> Scoped {
@@ -180,6 +189,21 @@ fn every_request_names_its_table_permission_first() -> Result<(), Box<dyn Error>
             .targets
             .first()
             .ok_or_else(|| format!("{} declares no authorization target", operation.id))?;
+        if SIGN_IN_ONLY.contains(&operation.id) {
+            assert_eq!(
+                *first,
+                Target::Authenticated,
+                "{} needs sign-in only",
+                operation.id
+            );
+        } else {
+            assert_ne!(
+                *first,
+                Target::Authenticated,
+                "{} must name a grant target",
+                operation.id
+            );
+        }
         if ACTION_DEPENDENT.contains(&operation.id) {
             assert!(
                 matches!(first.permission(), Permission::Review | Permission::Approve),
@@ -244,18 +268,61 @@ fn every_mutation_example_carries_an_idempotency_key() -> Result<(), Box<dyn Err
 
 #[test]
 fn only_connector_issuance_refuses_to_replay_its_response() -> Result<(), Box<dyn Error>> {
-    assert_eq!(
-        <CreateConnectorRequest as RequestScope>::REPLAY,
-        ReplayPolicy::AlreadyIssued
-    );
+    let issued = ReplayPolicy::AlreadyIssued {
+        id_pointer: "/connector/connector_id",
+    };
+    assert_eq!(<CreateConnectorRequest as RequestScope>::REPLAY, issued);
     for operation in sampled_operations()? {
         let expected = if operation.id == "create_connector" {
-            ReplayPolicy::AlreadyIssued
+            issued
         } else {
             ReplayPolicy::StoredResponse
         };
         assert_eq!(operation.replay, expected, "{} replay policy", operation.id);
     }
+    Ok(())
+}
+
+#[test]
+fn the_already_issued_pointer_finds_the_connector_id_in_the_response() -> Result<(), Box<dyn Error>>
+{
+    let ReplayPolicy::AlreadyIssued { id_pointer } =
+        <CreateConnectorRequest as RequestScope>::REPLAY
+    else {
+        return Err("create_connector must replay as already_issued".into());
+    };
+    let response = synthesize_for::<IssuedConnector>()?;
+    let issued: IssuedConnector = serde_json::from_value(response.clone())?;
+    let found = response
+        .pointer(id_pointer)
+        .cloned()
+        .ok_or_else(|| format!("{id_pointer} is absent from IssuedConnector"))?;
+    let connector_id: ConnectorId = serde_json::from_value(found)?;
+    assert_eq!(connector_id, issued.connector.connector_id);
+    Ok(())
+}
+
+#[test]
+fn tenant_level_reads_need_sign_in_only() -> Result<(), Box<dyn Error>> {
+    assert_eq!(Target::Authenticated.permission(), Permission::Read);
+    let mut found = Vec::new();
+    for operation in sampled_operations()? {
+        if operation.targets.contains(&Target::Authenticated) {
+            assert_eq!(
+                operation.targets,
+                vec![Target::Authenticated],
+                "{} mixes sign-in with a grant target",
+                operation.id
+            );
+            assert_eq!(operation.permission, Permission::Read, "{}", operation.id);
+            assert!(!operation.keyed, "{} is a read", operation.id);
+            found.push(operation.id);
+        }
+    }
+    found.sort_unstable();
+    let mut expected = SIGN_IN_ONLY.to_vec();
+    expected.sort_unstable();
+    assert_eq!(found, expected);
     Ok(())
 }
 
