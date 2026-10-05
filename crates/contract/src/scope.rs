@@ -10,7 +10,9 @@ use crate::access::{
 };
 use crate::attention::{GetAttentionRequest, RebuildIndexRequest};
 use crate::common::Empty;
-use crate::conventions::{ApplyNamesRequest, GetRulesRequest, PreviewNamesRequest, SetRulesRequest};
+use crate::conventions::{
+    ApplyNamesRequest, GetRulesRequest, PreviewNamesRequest, SetRulesRequest,
+};
 use crate::events::{GetReceiptRequest, ListEventsRequest};
 use crate::health::{HealthRequest, ReadinessRequest};
 use crate::history::{BlameRequest, CommitRequest, DiffRequest, LogRequest, RestoreRequest};
@@ -20,9 +22,9 @@ use crate::import::{
     GetJobRequest, ListJobsRequest, RedigestRequest, RetryJobRequest, StartImportRequest,
 };
 use crate::item::{
-    CreateFolderRequest, CreateItemRequest, DeleteItemRequest, DiscardDraftRequest,
-    GetItemRequest, ListDraftsRequest, ListItemsRequest, ListTypesRequest, MoveItemRequest,
-    SaveDraftRequest, SetLifecycleRequest, SetTypeRequest,
+    CreateFolderRequest, CreateItemRequest, DeleteItemRequest, DiscardDraftRequest, GetItemRequest,
+    ListDraftsRequest, ListItemsRequest, ListTypesRequest, MoveItemRequest, SaveDraftRequest,
+    SetLifecycleRequest, SetTypeRequest,
 };
 use crate::proposal::{
     AcceptProposalRequest, AddCommentRequest, DeclineProposalRequest, GetProposalRequest,

@@ -234,7 +234,10 @@ fn every_mutation_example_carries_an_idempotency_key() -> Result<(), Box<dyn Err
         assert_eq!(operation.keyed, mutation, "{id} example idempotency key");
         checked = checked.saturating_add(1);
     }
-    assert!(checked > 0, "expected api/examples to contain request fixtures");
+    assert!(
+        checked > 0,
+        "expected api/examples to contain request fixtures"
+    );
     Ok(())
 }
 
@@ -324,7 +327,10 @@ fn typed_error_details_are_tagged_and_closed() -> Result<(), Box<dyn Error>> {
     let error = ApiError::new(ErrorCode::AlreadyIssued, "Connector already issued")
         .with_detail(ErrorDetail::AlreadyIssued { connector_id });
     let value = serde_json::to_value(&error)?;
-    assert_eq!(value.pointer("/detail/kind"), Some(&json!("already_issued")));
+    assert_eq!(
+        value.pointer("/detail/kind"),
+        Some(&json!("already_issued"))
+    );
     assert_eq!(value.get("code"), Some(&json!("already_issued")));
     let decoded: ApiError = serde_json::from_value(value.clone())?;
     assert_eq!(decoded.detail, error.detail);
@@ -340,6 +346,9 @@ fn typed_error_details_are_tagged_and_closed() -> Result<(), Box<dyn Error>> {
         "mutation_id": "55555555-5555-4555-8555-555555555555",
         "retry_after": 2
     }))?;
-    assert!(matches!(in_progress, ErrorDetail::InProgress { retry_after: 2, .. }));
+    assert!(matches!(
+        in_progress,
+        ErrorDetail::InProgress { retry_after: 2, .. }
+    ));
     Ok(())
 }
