@@ -181,7 +181,7 @@ fn append_effect_ledger(job_id: &str, first_effect: bool) -> Result<(), Error> {
     Ok(())
 }
 
-fn handle_import(job: ImportJob) -> Result<ImportResult, Error> {
+fn handle_import(job: &ImportJob) -> Result<ImportResult, Error> {
     let job_id = job.job_id.clone();
     touch_status(&format!("ENTERED_{job_id}"), "import")?;
     if let Some(blob_path) = job.blob_path.as_ref() {
@@ -258,25 +258,13 @@ async fn handle_channel_recv(job: ChannelJob) -> Result<ChannelResult, Error> {
     })
 }
 
-fn main() -> Result<(), Error> {
-    let url = env::var("III_URL").unwrap_or_else(|_| iii_sdk::DEFAULT_ENGINE_URL.to_owned());
-    let namespace = env::var("III_NAMESPACE").unwrap_or_else(|_| "okf-qualify".to_owned());
-    let control = control_dir()?;
-    let markers = marker_dir()?;
-    ensure_dir(&control)?;
-    ensure_dir(&markers)?;
-
-    let worker = register_worker(
-        &url,
-        InitOptions {
-            namespace: Some(namespace.clone()),
-            ..InitOptions::default()
-        },
-    );
-
+fn register_qualify_functions(
+    worker: &iii_sdk::IIIClient,
+    namespace: &str,
+) -> Result<(), Error> {
     worker.register_function(
         "qualify::import",
-        RegisterFunction::new(|job: ImportJob| handle_import(job)),
+        RegisterFunction::new(|job: ImportJob| handle_import(&job)),
     );
     worker
         .register_trigger(RegisterTriggerInput::new(
@@ -325,7 +313,7 @@ fn main() -> Result<(), Error> {
         .map_err(|error| Error::Handler(format!("register channel trigger: {error}")))?;
 
     let publisher = worker.clone();
-    let publish_namespace = namespace.clone();
+    let publish_namespace = namespace.to_owned();
     worker.register_function(
         "qualify::channel_send",
         RegisterFunction::new_async(move |request: ChannelSendRequest| {
@@ -358,10 +346,27 @@ fn main() -> Result<(), Error> {
             }
         }),
     );
+    Ok(())
+}
 
+fn main() -> Result<(), Error> {
+    let url = env::var("III_URL").unwrap_or_else(|_| iii_sdk::DEFAULT_ENGINE_URL.to_owned());
+    let namespace = env::var("III_NAMESPACE").unwrap_or_else(|_| "okf-qualify".to_owned());
+    let control = control_dir()?;
+    let markers = marker_dir()?;
+    ensure_dir(&control)?;
+    ensure_dir(&markers)?;
+
+    let worker = register_worker(
+        &url,
+        InitOptions {
+            namespace: Some(namespace.clone()),
+            ..InitOptions::default()
+        },
+    );
+    register_qualify_functions(&worker, &namespace)?;
     touch_status(READY_FILE, &format!("pid={}\n", process::id()))?;
 
-    // Keep the process alive until the orchestrator kills or signals stop.
     let stop = control.join("STOP");
     while !stop.exists() {
         thread::sleep(Duration::from_millis(100));
