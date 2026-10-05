@@ -1,9 +1,10 @@
 //! Route only declared operations through validation, target authorization, and the mutation ledger.
 //!
 //! Order: validate, decode, `targets()`, authorize every target, build the context,
-//! `MutationStore::begin`, the handler, then `complete` on success or `release` on error. The
-//! ledger never inspects other stores: a resumed attempt re-runs the handler under the same
-//! `MutationId`.
+//! `MutationStore::begin`, the handler, then `complete` on success or `release` on error.
+//! A grant is used only when it is for the workspace and tenant that were asked for. The ledger
+//! never inspects other stores: a resumed attempt re-runs the handler under the same
+//! `MutationId`, and what the ledger retains is decided by the request's `ReplayPolicy`.
 
 use jsonschema::error::ValidationErrorKind;
 use okf_jawn_contract::access::Principal;
