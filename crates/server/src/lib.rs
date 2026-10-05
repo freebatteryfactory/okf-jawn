@@ -4,10 +4,12 @@
 //! middleware, written by the server lane, inserts the authenticated `Principal` and, for
 //! browser sessions, a `SessionId` as request extensions before this router runs. A request
 //! that reaches a route without a `Principal` is answered 401; there is no anonymous owner
-//! fallback. A dispatch failure is an `ApiError` JSON body whose status follows its `ErrorCode`.
+//! fallback. Every failure, including a malformed, mistyped or oversized body, is an `ApiError`
+//! JSON body whose status follows its `ErrorCode`.
 
 use std::sync::Arc;
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, FromRequestParts, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
@@ -34,8 +36,8 @@ macro_rules! bind_routes {
             $(let router = router.route($path, post(
                 |State(bound): State<BoundApplication>,
                  authenticated: Authenticated,
-                 Json(input): Json<Value>| async move {
-                    respond(&bound, &authenticated, input, stringify!($id), $status).await
+                 body: Result<Json<Value>, JsonRejection>| async move {
+                    respond(&bound, &authenticated, body, stringify!($id), $status).await
                 },
             ));)*
             router.layer(DefaultBodyLimit::max(JSON_BODY_LIMIT)).with_state(bound)
@@ -93,10 +95,14 @@ impl<S: Send + Sync> FromRequestParts<S> for Authenticated {
 async fn respond(
     bound: &BoundApplication,
     authenticated: &Authenticated,
-    input: Value,
+    body: Result<Json<Value>, JsonRejection>,
     operation_id: &str,
     success_status: u16,
 ) -> Response {
+    let input = match body {
+        Ok(Json(input)) => input,
+        Err(rejection) => return error_response(body_rejection(&rejection)),
+    };
     let ports = DispatchPorts {
         access: bound.access.as_ref(),
         mutations: bound.mutations.as_ref(),
@@ -122,6 +128,19 @@ async fn respond(
             )),
         },
         Err(error) => error_response(error),
+    }
+}
+
+/// Describe a body that could not be read as JSON.
+///
+/// An over-limit body is `too_large` (413). Everything else, including a missing or wrong
+/// `Content-Type` (which axum would answer 415), is `invalid_input` (400): the API accepts only
+/// JSON, and 415 is not among the statuses the published contract declares.
+fn body_rejection(rejection: &JsonRejection) -> ApiError {
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::new(ErrorCode::TooLarge, "Request body exceeds the 2 MiB limit")
+    } else {
+        ApiError::new(ErrorCode::InvalidInput, rejection.body_text())
     }
 }
 

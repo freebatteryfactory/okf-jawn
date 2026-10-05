@@ -26,6 +26,8 @@ const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
 const OTHER_WORKSPACE: &str = "22222222-2222-4222-8222-222222222222";
 const REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const LIST_ITEMS: &str = "/api/items/list-items";
+/// One byte more than the router's 2 MiB JSON body limit.
+const OVER_LIMIT: usize = 2_097_153;
 
 fn alice() -> Result<Principal, IdentityError> {
     Ok(Principal {
@@ -188,6 +190,54 @@ async fn a_not_implemented_handler_is_501() -> TestResult {
     let error = api_error(response).await?;
     assert_eq!(error.code, ErrorCode::NotImplemented);
     assert_eq!(error.message, "list_items is not built yet");
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_json_is_400_invalid_input() -> TestResult {
+    let ports = ports()?;
+    let counting = Arc::new(CountingApplication::new());
+    let app = signed_in(counting.clone(), &ports)?;
+    let request = post(LIST_ITEMS, "application/json", "{not json")?;
+    let response = app.oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await?;
+    assert_eq!(body.get("code"), Some(&json!("invalid_input")));
+    assert_eq!(counting.call_count("list_items")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_wrong_content_type_is_400_invalid_input() -> TestResult {
+    let ports = ports()?;
+    let counting = Arc::new(CountingApplication::new());
+    counting.set_response("list_items", listing())?;
+    let app = signed_in(counting.clone(), &ports)?;
+    let request = post(
+        LIST_ITEMS,
+        "text/plain",
+        list_items_body(WORKSPACE).to_string(),
+    )?;
+    let response = app.oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error = api_error(response).await?;
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert!(error.message.contains("Content-Type"));
+    assert_eq!(counting.call_count("list_items")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_body_over_the_limit_is_413_too_large() -> TestResult {
+    let ports = ports()?;
+    let counting = Arc::new(CountingApplication::new());
+    let app = signed_in(counting.clone(), &ports)?;
+    let request = post(LIST_ITEMS, "application/json", vec![b' '; OVER_LIMIT])?;
+    let response = app.oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = json_body(response).await?;
+    assert_eq!(body.get("code"), Some(&json!("too_large")));
+    assert_eq!(counting.call_count("list_items")?, 0);
     Ok(())
 }
 
