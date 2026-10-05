@@ -14,7 +14,7 @@ use std::time::Duration;
 use okf_jawn_contract::access::{AccessRoute, Connector, IssuedConnector, Permission, Principal};
 use okf_jawn_contract::common::{PageRequest, TextRange, Warning};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::events::Receipt;
+use okf_jawn_contract::events::{Event, EventKind, Receipt};
 use okf_jawn_contract::identity::{
     ArtifactId, Digest, ItemId, JobId, MutationId, ProposalId, Revision, TenantId, UploadId,
     WorkspaceId, WorkspacePath,
@@ -32,6 +32,7 @@ use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, NewConnector, SessionRecord, secret_hash,
 };
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
+use okf_jawn_core::events::{EventLog, EventQuery, NewEvent};
 use okf_jawn_core::jobs::{
     ClaimedJob, JobCompletion, JobHandler, JobLease, JobQueue, JobSpec, NewJob, RecordStore,
 };
@@ -43,6 +44,7 @@ use okf_jawn_core::storage::{
     StorageScope, TreeEdit, VersionStore, WorkspaceArchive, WorkspaceCatalog, WorkspaceUpdate,
     derive_item_id, derive_proposal_id, workspace_with_permissions,
 };
+use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -494,6 +496,61 @@ async fn proposal_calls(
         .await
 }
 
+async fn upload_calls(
+    uploads: &dyn UploadStore,
+    scope: &StorageScope,
+    mutation_id: MutationId,
+    body: ByteReader,
+    sha256: Digest,
+) -> Result<UploadRecord, ApiError> {
+    let slot = uploads
+        .create(
+            scope,
+            mutation_id,
+            NewUpload {
+                filename: "report.pdf".to_owned(),
+                relative_path: "finance/2026".to_owned(),
+                expected_size: 3,
+                expected_sha256: Some(sha256.clone()),
+                supplied_by: initiator(),
+            },
+        )
+        .await?;
+    uploads.get(scope, slot.id).await?;
+    uploads
+        .put_content(scope, slot.id, body, slot.expected_size)
+        .await?;
+    uploads.complete(scope, slot.id, sha256).await
+}
+
+async fn event_calls(
+    events: &dyn EventLog,
+    scope: &StorageScope,
+    mutation_id: MutationId,
+    job_id: JobId,
+) -> Result<Event, ApiError> {
+    let progress = NewEvent {
+        kind: EventKind::JobUpdated,
+        revision: None,
+        item_id: None,
+        job_id: Some(job_id),
+    };
+    events.append(scope, None, progress.clone()).await?;
+    events
+        .list(
+            scope,
+            EventQuery {
+                after: None,
+                page: Page {
+                    cursor: None,
+                    limit: 100,
+                },
+            },
+        )
+        .await?;
+    events.append(scope, Some(mutation_id), progress).await
+}
+
 #[test]
 fn provenance_keeps_the_typed_route_and_client() -> TestResult {
     let principal = Principal {
@@ -821,5 +878,22 @@ fn row_stores_take_core_types() -> TestResult {
     assert!(type_checked(&confirmation_calls));
     assert!(type_checked(&draft_calls));
     assert!(type_checked(&proposal_calls));
+    Ok(())
+}
+
+#[test]
+fn an_upload_slot_keeps_what_the_request_supplied() -> TestResult {
+    let slot = NewUpload {
+        filename: "report.pdf".to_owned(),
+        relative_path: "finance/2026".to_owned(),
+        expected_size: 3,
+        expected_sha256: Some(digest('e')?),
+        supplied_by: initiator(),
+    };
+    assert_eq!(slot.filename, "report.pdf");
+    assert_eq!(slot.relative_path, "finance/2026");
+    assert_eq!(slot.supplied_by, initiator());
+    assert!(type_checked(&upload_calls));
+    assert!(type_checked(&event_calls));
     Ok(())
 }
