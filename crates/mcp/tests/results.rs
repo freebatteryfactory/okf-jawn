@@ -4,9 +4,10 @@ use std::error::Error;
 use std::path::Path;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_mcp::{decode_tools, error_result};
+use okf_jawn_contract::read::ReadItemResponse;
+use okf_jawn_mcp::{MAX_TEXT_BYTES, decode_tools, error_result, read_result, structured_result};
 use rmcp::model::CallToolResult;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -29,6 +30,30 @@ fn text_of(result: &CallToolResult) -> Result<&str, Box<dyn Error>> {
         .ok_or("the result has no content block")?;
     let text = block.as_text().ok_or("the first block is not text")?;
     Ok(text.text.as_str())
+}
+
+fn read_response(
+    markdown: &str,
+    truncated: bool,
+    next_cursor: Option<&str>,
+) -> Result<ReadItemResponse, Box<dyn Error>> {
+    Ok(serde_json::from_value(json!({
+        "source": {
+            "workspace_id": "11111111-1111-4111-8111-111111111111",
+            "item_id": "22222222-2222-4222-8222-222222222222",
+            "path": "notes/plan.md",
+            "revision": "a".repeat(40),
+            "selection": {"kind": "all"}
+        },
+        "view": "text",
+        "markdown": markdown,
+        "outline": [],
+        "media": [],
+        "warnings": [],
+        "truncated": truncated,
+        "next_cursor": next_cursor,
+        "receipt_id": "33333333-3333-4333-8333-333333333333"
+    }))?)
 }
 
 #[test]
@@ -90,5 +115,91 @@ fn error_result_is_text_with_is_error_and_no_structured_content() -> TestResult 
     let parsed: ApiError = serde_json::from_str(text_of(&result)?)?;
     assert_eq!(parsed.code, ErrorCode::NotFound);
     assert_eq!(parsed.message, "No such item");
+    Ok(())
+}
+
+#[test]
+fn read_result_text_is_the_document_markdown() -> TestResult {
+    let response = read_response(
+        "# Plan
+
+Ship the cure.
+",
+        false,
+        None,
+    )?;
+    let result = read_result(&response, MAX_TEXT_BYTES)?;
+    assert_eq!(
+        text_of(&result)?,
+        "# Plan
+
+Ship the cure.
+"
+    );
+    assert_eq!(result.is_error, Some(false));
+    assert_eq!(
+        result.structured_content,
+        Some(serde_json::to_value(&response)?)
+    );
+    Ok(())
+}
+
+#[test]
+fn read_result_cuts_text_at_a_character_boundary_and_says_so() -> TestResult {
+    let markdown = "é".repeat(10);
+    let response = read_response(&markdown, false, None)?;
+    let result = read_result(&response, 5)?;
+    let text = text_of(&result)?;
+    assert!(
+        text.starts_with(
+            "éé
+
+[Text cut"
+        ),
+        "{text}"
+    );
+    let structured = result
+        .structured_content
+        .as_ref()
+        .ok_or("no structured content")?;
+    assert_eq!(
+        structured.get("markdown").and_then(Value::as_str),
+        Some(markdown.as_str())
+    );
+    Ok(())
+}
+
+#[test]
+fn read_result_reports_a_partial_read_with_its_cursor() -> TestResult {
+    let response = read_response("First page.", true, Some("cursor-2"))?;
+    let result = read_result(&response, MAX_TEXT_BYTES)?;
+    assert_eq!(
+        text_of(&result)?,
+        "First page.
+
+[Partial read; continue with cursor cursor-2]"
+    );
+    Ok(())
+}
+
+#[test]
+fn structured_result_text_is_the_serialized_response() -> TestResult {
+    let value = json!({"revision": "a".repeat(40), "items": [], "folders": ["notes"]});
+    let result = structured_result(&value, MAX_TEXT_BYTES);
+    let parsed: Value = serde_json::from_str(text_of(&result)?)?;
+    assert_eq!(parsed, value);
+    assert_eq!(result.structured_content, Some(value));
+    assert_eq!(result.is_error, Some(false));
+    Ok(())
+}
+
+#[test]
+fn structured_result_never_emits_cut_json() -> TestResult {
+    let value = json!({"revision": "a".repeat(40), "items": [], "folders": ["notes"]});
+    let result = structured_result(&value, 8);
+    let text = text_of(&result)?;
+    assert!(serde_json::from_str::<Value>(text).is_err(), "{text}");
+    assert!(text.contains("structuredContent"), "{text}");
+    assert_eq!(result.structured_content, Some(value));
     Ok(())
 }
