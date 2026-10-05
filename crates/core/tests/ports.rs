@@ -13,14 +13,21 @@ use std::time::Duration;
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::common::{PageRequest, TextRange, Warning};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::events::Receipt;
 use okf_jawn_contract::identity::{
-    Digest, ItemId, MutationId, ProposalId, Revision, TenantId, WorkspaceId, WorkspacePath,
+    ArtifactId, Digest, ItemId, JobId, MutationId, ProposalId, Revision, TenantId, UploadId,
+    WorkspaceId, WorkspacePath,
 };
+use okf_jawn_contract::import::{Job, JobKind, JobState};
 use okf_jawn_contract::item::{ItemKind, Lifecycle};
 use okf_jawn_contract::proposal::Change;
+use okf_jawn_contract::review::Review;
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::conversion::{
     ConversionInput, ConversionSettings, ConversionStatus, Converter, OcrPolicy,
+};
+use okf_jawn_core::jobs::{
+    ClaimedJob, JobCompletion, JobHandler, JobLease, JobQueue, JobSpec, NewJob, RecordStore,
 };
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
@@ -262,6 +269,105 @@ async fn converter_calls(
     Ok(conversion.status)
 }
 
+fn job_specs() -> Result<Vec<JobSpec>, Box<dyn Error>> {
+    Ok(vec![
+        JobSpec::Import {
+            base_revision: revision('a')?,
+            upload_ids: vec![UploadId(Uuid::from_u128(9))],
+            destination: Some(WorkspacePath::try_from("inbox".to_owned())?),
+            apply_naming_rules: true,
+        },
+        JobSpec::Redigest {
+            item_id: ItemId(Uuid::from_u128(10)),
+            base_revision: revision('a')?,
+            settings: ConversionSettings::default(),
+        },
+        JobSpec::ExportWorkspace {
+            revision: revision('a')?,
+            include_history: false,
+        },
+        JobSpec::BackupWorkspace,
+        JobSpec::RestoreWorkspace {
+            artifact_id: ArtifactId(Uuid::from_u128(12)),
+            sha256: Some(digest('c')?),
+        },
+        JobSpec::RebuildIndex,
+        JobSpec::ExportView {
+            item_id: ItemId(Uuid::from_u128(10)),
+            revision: revision('a')?,
+        },
+    ])
+}
+
+/// What an import handler does with nothing but the claim it was handed.
+fn commit_for(claimed: &ClaimedJob, edits: Vec<TreeEdit>) -> Option<CommitChanges> {
+    let JobSpec::Import { base_revision, .. } = &claimed.spec else {
+        return None;
+    };
+    Some(CommitChanges {
+        mutation_id: claimed.mutation_id,
+        expected_head: base_revision.clone(),
+        author: claimed.initiator.clone(),
+        message: format!("Import {} source(s)", edits.len()),
+        edits,
+    })
+}
+
+async fn record_store_calls(
+    records: &dyn RecordStore,
+    scope: &StorageScope,
+    new_job: NewJob,
+    review: Review,
+    receipt: Receipt,
+) -> Result<Vec<Review>, ApiError> {
+    let mutation_id = new_job.mutation_id;
+    let job = records.create_job(scope, new_job).await?;
+    records.get_job(scope, job.id).await?;
+    let page = Page {
+        cursor: None,
+        limit: 50,
+    };
+    records.list_jobs(scope, page).await?;
+    if let Some(claimed) = records.claim_job(job.id).await? {
+        records.update_progress(&claimed.lease, 40).await?;
+        records
+            .complete_job(JobCompletion {
+                lease: claimed.lease.clone(),
+                revision: None,
+                item_ids: Vec::new(),
+                artifact: None,
+                outputs: Vec::new(),
+                warnings: Vec::new(),
+            })
+            .await?;
+        records
+            .fail_job(claimed.lease, "converter stopped".to_owned(), true)
+            .await?;
+    }
+    records.cancel_job(scope, job.id).await?;
+    records.retry_job(scope, job.id).await?;
+    records.pending_jobs().await?;
+    records.expire_leases().await?;
+    let item_id = review.source.item_id;
+    records.insert_review(scope, mutation_id, review).await?;
+    let stored = records
+        .insert_receipt(scope, Some(mutation_id), receipt)
+        .await?;
+    records.get_receipt(scope, stored.id).await?;
+    records.list_reviews(scope, item_id).await
+}
+
+async fn job_runtime_calls(
+    queue: &dyn JobQueue,
+    handler: &dyn JobHandler,
+    claimed: &ClaimedJob,
+) -> Result<(), ApiError> {
+    queue
+        .enqueue(claimed.scope.workspace_id, claimed.lease.job_id)
+        .await?;
+    handler.handle(claimed).await
+}
+
 #[test]
 fn provenance_keeps_the_typed_route_and_client() -> TestResult {
     let principal = Principal {
@@ -453,5 +559,85 @@ fn conversion_settings_are_typed_and_reject_unknown_keys() -> TestResult {
     );
     assert!(serde_json::from_value::<ConversionSettings>(json!({"quality": "high"})).is_err());
     assert!(type_checked(&converter_calls));
+    Ok(())
+}
+
+#[test]
+fn every_job_spec_reports_its_kind_and_survives_storage() -> TestResult {
+    let specs = job_specs()?;
+    let kinds: Vec<JobKind> = specs.iter().map(JobSpec::kind).collect();
+    assert!(matches!(
+        kinds.as_slice(),
+        [
+            JobKind::Import,
+            JobKind::Redigest,
+            JobKind::ExportWorkspace,
+            JobKind::BackupWorkspace,
+            JobKind::RestoreWorkspace,
+            JobKind::RebuildIndex,
+            JobKind::ExportView
+        ]
+    ));
+    for spec in &specs {
+        let stored = serde_json::to_value(spec)?;
+        let loaded: JobSpec = serde_json::from_value(stored)?;
+        assert_eq!(&loaded, spec);
+    }
+    assert_eq!(
+        serde_json::to_value(JobSpec::RebuildIndex)?,
+        json!({"kind": "rebuild_index"})
+    );
+    Ok(())
+}
+
+#[test]
+fn a_commit_is_built_from_a_claimed_job_alone() -> TestResult {
+    let scope = scope()?;
+    let spec = JobSpec::Import {
+        base_revision: revision('a')?,
+        upload_ids: vec![UploadId(Uuid::from_u128(9))],
+        destination: None,
+        apply_naming_rules: true,
+    };
+    let mutation_id = MutationId(Uuid::from_u128(5));
+    let job_id = JobId(Uuid::from_u128(7));
+    let claimed = ClaimedJob {
+        scope: scope.clone(),
+        lease: JobLease {
+            job_id,
+            token: "claim-1".to_owned(),
+            attempt: 1,
+        },
+        job: Job {
+            id: job_id,
+            workspace_id: scope.workspace_id,
+            kind: spec.kind(),
+            state: JobState::Running,
+            progress: 0,
+            attempt: 1,
+            warnings: Vec::new(),
+            error: None,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: None,
+        },
+        mutation_id,
+        initiator: initiator(),
+        spec,
+    };
+    let folder = WorkspacePath::try_from("inbox".to_owned())?;
+    let commit = commit_for(&claimed, vec![TreeEdit::CreateFolder { folder }])
+        .ok_or("an import job must yield a commit")?;
+    assert_eq!(commit.mutation_id, mutation_id);
+    assert_eq!(commit.expected_head, revision('a')?);
+    assert_eq!(commit.author, initiator());
+    assert_eq!(commit.message, "Import 1 source(s)");
+    assert_eq!(commit.edits.len(), 1);
+    assert_eq!(
+        derive_item_id(claimed.mutation_id, 0),
+        derive_item_id(commit.mutation_id, 0)
+    );
+    assert!(type_checked(&record_store_calls));
+    assert!(type_checked(&job_runtime_calls));
     Ok(())
 }
