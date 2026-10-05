@@ -28,6 +28,6 @@ jobs:
         with:
           include-hidden-files: true
           name: qualification-artifacts
-          if-no-files-found: warn
+          if-no-files-found: error
           path: |
             .artifacts/qualification/

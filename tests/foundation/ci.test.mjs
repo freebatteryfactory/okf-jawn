@@ -60,3 +60,11 @@ test('lane branches run their own gate; audit runs on main and on a schedule, no
  assert.ok(Array.isArray(workflow.on.schedule)&&workflow.on.schedule.length===1);
  for(const job of ['source-tooling','foundation'])assert.match(workflow.jobs[job].if,/github\.event_name != 'schedule'/,job);
 });
+test('a pull request from this repository runs CI once, and an upload that finds nothing fails',async()=>{
+ assert.ok('push' in workflow.on&&'workflow_dispatch' in workflow.on);
+ assert.ok(!('pull_request' in workflow.on),'pull_request would run CI a second time for a branch of this repository');
+ const qualify=Bun.YAML.parse(await read('.github/workflows/qualify.yml'));
+ const uploads=Object.values(qualify.jobs).flatMap(job=>job.steps).filter(step=>step.uses?.startsWith('actions/upload-artifact@'));
+ assert.ok(uploads.length>0);
+ for(const upload of uploads)assert.equal(upload.with['if-no-files-found'],'error',upload.with.name);
+});
