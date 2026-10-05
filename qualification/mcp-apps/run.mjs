@@ -1,9 +1,15 @@
 /**
- * Orchestrate Phase 0 MCP Apps / web-hosts qualification.
+ * Orchestrate Phase 0 MCP Apps protocol qualification.
  *
- * Steps: rebuild dist-apps, harness --check, Streamable HTTP protocol check,
- * optional official basic-host Playwright/axe, optional ngrok URL recording,
- * honest host_render from `.artifacts/.../hosts/` evidence only.
+ * Steps: rebuild dist-apps, build the harness binary, harness --check, Streamable HTTP
+ * protocol check over all four render tools and the app-only show tool, then (unless
+ * OKF_MCP_APPS_PROTOCOL_ONLY=1) the official basic-host example rendering each of the
+ * four views under Playwright with axe, and an optional ngrok URL (OKF_MCP_APPS_NGROK=1)
+ * that is always closed before the receipt is written.
+ *
+ * Usage (from PowerShell, cargo on PATH): bun qualification/mcp-apps/run.mjs [--record]
+ * Exits non-zero when the protocol check or any view fails; the receipt is written first.
+ * host_render reports only evidence found under .artifacts/.../hosts/ and never a PASS.
  */
 
 import { createHash } from 'node:crypto';
@@ -12,7 +18,21 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { requireCleanTree } from '../../scripts/lib/provenance.mjs';
+import { receiptHeader, recordReceipt } from '../../scripts/lib/provenance.mjs';
+import { buildRelease } from '../lib/cargo.mjs';
+import { killProcessTree, spawnGroup, waitForListening } from './lib/process.mjs';
+import {
+  APP_ONLY_TOOLS,
+  APP_RESOURCE_URI,
+  UPSTREAM_HOST_RULES,
+  VIEWS,
+  basicHostUrl,
+  basicHostVerdict,
+  judgeView,
+  ngrokRecord,
+  partitionAxe,
+  runProblems,
+} from './lib/views.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const PROTOCOL_ONLY =
@@ -28,8 +48,16 @@ const basicHostDir = join(outDir, 'basic-host');
 const HTTP_PORT = Number(process.env.OKF_MCP_APPS_PORT ?? '18765');
 const HTTP_BIND = `127.0.0.1:${HTTP_PORT}`;
 const MCP_URL = `http://127.0.0.1:${HTTP_PORT}/mcp`;
-const NGROK_ENABLED =
-  process.env.OKF_MCP_APPS_NGROK === '1' || process.env.OKF_MCP_APPS_NGROK === 'true';
+const NGROK_ENABLED = process.env.OKF_MCP_APPS_NGROK === '1';
+const MCP_APPS_INPUTS = [
+  'qualification/mcp-apps',
+  'qualification/lib',
+  'tests/fixtures/views',
+  'ui/src/mcp-apps',
+  'ui/scripts/bundle-app.mjs',
+  'Cargo.toml',
+  'Cargo.lock',
+];
 
 const require = createRequire(join(uiDir, 'package.json'));
 const { RESOURCE_MIME_TYPE } = require('@modelcontextprotocol/ext-apps');
@@ -66,63 +94,6 @@ function run(cmd, args, options = {}) {
   });
 }
 
-function killProcessTree(child) {
-  if (!child?.pid) return;
-  try {
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-    } else {
-      // Negative PID signals the process group started with detached:true.
-      try {
-        process.kill(-child.pid, 'SIGTERM');
-      } catch {
-        child.kill('SIGTERM');
-      }
-    }
-  } catch {
-    // ignore
-  }
-}
-
-function spawnDetached(cmd, args, options = {}) {
-  const child = spawn(cmd, args, {
-    cwd: options.cwd ?? root,
-    env: options.env ?? process.env,
-    stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'],
-    shell: options.shell ?? false,
-    windowsHide: true,
-    detached: process.platform !== 'win32',
-  });
-  let stdout = '';
-  let stderr = '';
-  if (child.stdout) child.stdout.on('data', (chunk) => { stdout += chunk; });
-  if (child.stderr) child.stderr.on('data', (chunk) => { stderr += chunk; });
-  return { child, getStdout: () => stdout, getStderr: () => stderr };
-}
-
-async function waitForTcp(host, port, attempts = 60) {
-  const net = await import('node:net');
-  for (let i = 0; i < attempts; i += 1) {
-    const ok = await new Promise((resolveOk) => {
-      const socket = net.createConnection({ host, port }, () => {
-        socket.end();
-        resolveOk(true);
-      });
-      socket.on('error', () => resolveOk(false));
-      socket.setTimeout(1_000, () => {
-        socket.destroy();
-        resolveOk(false);
-      });
-    });
-    if (ok) return;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error(`timed out waiting for tcp ${host}:${port}`);
-}
-
 async function waitForHttp(url, attempts = 60) {
   for (let i = 0; i < attempts; i += 1) {
     const controller = new AbortController();
@@ -149,24 +120,37 @@ async function protocolCheck(mcpUrl, manifest) {
   await client.connect(transport);
   try {
     const tools = await client.listTools();
-    const resources = await client.listResources();
-    if (!Array.isArray(tools.tools) || tools.tools.length !== 4) {
-      throw new Error(`tools/list expected 4 tools, got ${tools.tools?.length}`);
+    const listed = Array.isArray(tools.tools) ? tools.tools : [];
+    const names = (items) => JSON.stringify(items.map((tool) => tool.name).sort());
+    const renderTools = listed.filter((tool) => typeof tool._meta?.ui?.resourceUri === 'string');
+    const appOnly = listed.filter(
+      (tool) => JSON.stringify(tool._meta?.ui?.visibility ?? null) === '["app"]',
+    );
+    const expectedRender = JSON.stringify(VIEWS.map((view) => view.tool).sort());
+    if (names(renderTools) !== expectedRender) {
+      throw new Error(`tools/list render tools ${names(renderTools)} !== ${expectedRender}`);
     }
-    for (const tool of tools.tools) {
-      const resourceUri = tool._meta?.ui?.resourceUri;
-      if (typeof resourceUri !== 'string' || !resourceUri.startsWith('ui://okf-jawn/')) {
-        throw new Error(`tool ${tool.name} missing _meta.ui.resourceUri`);
+    for (const tool of renderTools) {
+      if (tool._meta.ui.resourceUri !== APP_RESOURCE_URI) {
+        throw new Error(`tool ${tool.name} resourceUri ${tool._meta.ui.resourceUri} !== ${APP_RESOURCE_URI}`);
       }
     }
+    if (names(appOnly) !== JSON.stringify([...APP_ONLY_TOOLS].sort())) {
+      throw new Error(`tools/list app-only tools ${names(appOnly)} !== ${JSON.stringify(APP_ONLY_TOOLS)}`);
+    }
+    if (listed.length !== renderTools.length + appOnly.length) {
+      throw new Error(`tools/list has tools that are neither render tools nor app-only: ${names(listed)}`);
+    }
+
+    const resources = await client.listResources();
     if (!Array.isArray(resources.resources) || resources.resources.length !== 1) {
       throw new Error(
         `resources/list expected 1 shared App resource, got ${resources.resources?.length}`,
       );
     }
-    if (resources.resources[0]?.uri !== 'ui://okf-jawn/app.html') {
+    if (resources.resources[0]?.uri !== APP_RESOURCE_URI) {
       throw new Error(
-        `resources/list uri must be ui://okf-jawn/app.html, got ${resources.resources[0]?.uri}`,
+        `resources/list uri must be ${APP_RESOURCE_URI}, got ${resources.resources[0]?.uri}`,
       );
     }
     const reads = [];
@@ -205,27 +189,59 @@ async function protocolCheck(mcpUrl, manifest) {
         cspObject: true,
       });
     }
-    // Exercise one tool for structuredContent + text fallback.
-    const call = await client.callTool({ name: 'render_source', arguments: {} });
-    if (!call.structuredContent) {
-      throw new Error('render_source missing structuredContent');
-    }
-    const textBlock = (call.content ?? []).find((block) => block.type === 'text');
-    if (!textBlock || typeof textBlock.text !== 'string' || textBlock.text.length === 0) {
-      throw new Error('render_source missing text fallback');
-    }
-    return {
-      status: 'passed',
-      tools: tools.tools.map((tool) => ({
-        name: tool.name,
-        resourceUri: tool._meta?.ui?.resourceUri,
-      })),
-      resources: reads,
-      sample_tool: {
-        name: 'render_source',
+
+    // Every render tool: structuredContent for the App, text for hosts without Apps.
+    const toolCalls = [];
+    let present = null;
+    for (const view of VIEWS) {
+      const call = await client.callTool({ name: view.tool, arguments: {} });
+      if (!call.structuredContent) throw new Error(`${view.tool} missing structuredContent`);
+      const textBlock = (call.content ?? []).find((block) => block.type === 'text');
+      if (!textBlock || typeof textBlock.text !== 'string' || textBlock.text.length === 0) {
+        throw new Error(`${view.tool} missing text fallback`);
+      }
+      if (view.tool === 'render_present') present = call.structuredContent;
+      toolCalls.push({
+        name: view.tool,
         has_structured_content: true,
         text_fallback: textBlock.text,
-      },
+      });
+    }
+
+    // The present view resolves each binding through the app-only show tool
+    // (arguments as ui/src/features/views/PresentView.tsx sends them).
+    const showCalls = [];
+    for (const binding of present?.resolved_bindings ?? []) {
+      const shown = await client.callTool({
+        name: 'show',
+        arguments: {
+          workspace_id: binding.source.workspace_id,
+          item_id: binding.source.item_id,
+          at: { kind: 'revision', revision: binding.source.revision },
+          view: 'text',
+          selection: binding.source.selection,
+          max_bytes: 65536,
+          max_images: 0,
+        },
+      });
+      const source = shown.structuredContent?.source;
+      if (source?.item_id !== binding.source.item_id || source?.revision !== binding.source.revision) {
+        throw new Error(`show did not return the bound source for binding ${binding.name}`);
+      }
+      showCalls.push({ binding: binding.name, item_id: source.item_id, revision: source.revision });
+    }
+    if (showCalls.length === 0) throw new Error('render_present has no resolved_bindings to show');
+
+    return {
+      status: 'passed',
+      tools: renderTools.map((tool) => ({
+        name: tool.name,
+        resourceUri: tool._meta.ui.resourceUri,
+      })),
+      app_only_tools: appOnly.map((tool) => tool.name),
+      resources: reads,
+      tool_calls: toolCalls,
+      show_calls: showCalls,
     };
   } finally {
     await client.close().catch(() => {});
@@ -311,11 +327,101 @@ async function buildBasicHost() {
   }
 }
 
+function frameDepth(frame) {
+  let depth = 0;
+  for (let parent = frame.parentFrame(); parent; parent = parent.parentFrame()) depth += 1;
+  return depth;
+}
+
+/** The App document: host page (0) -> sandbox proxy on :8081 (1) -> App (2). */
+function appFrameOf(page) {
+  return (
+    page
+      .frames()
+      .map((frame) => ({ frame, depth: frameDepth(frame) }))
+      .filter((item) => item.depth >= 2)
+      .sort((a, b) => b.depth - a.depth)[0] ?? null
+  );
+}
+
+async function readFrame(frame) {
+  try {
+    const text = await frame.locator('body').innerText({ timeout: 1_000 });
+    const alerts = await frame.locator('[role="alert"]').allInnerTexts();
+    return { text, alerts };
+  } catch {
+    return null;
+  }
+}
+
+async function renderView(browser, AxeBuilder, view) {
+  const url = basicHostUrl(view.tool);
+  const screenshot = join(outDir, `basic-host-${view.tool}.png`);
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+
+    let located = null;
+    let observed = null;
+    let verdict = judgeView(view, null);
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline && !verdict.ok) {
+      const hostText = await page.locator('body').innerText();
+      if (/Failed to connect to any servers/i.test(hostText)) {
+        throw new Error(`basic-host could not reach the harness: ${hostText.slice(0, 200)}`);
+      }
+      located = appFrameOf(page);
+      observed = located ? await readFrame(located.frame) : null;
+      verdict = judgeView(view, observed);
+      if (!verdict.ok) await page.waitForTimeout(500);
+    }
+    await page.screenshot({ path: screenshot, fullPage: true });
+
+    const base = {
+      tool: view.tool,
+      view: view.view,
+      url,
+      screenshot,
+      app_frame_depth: located?.depth ?? null,
+      feature_text: (observed?.text ?? '').slice(0, 400),
+      alerts: verdict.alerts,
+      expected_alerts: verdict.expected_alerts,
+    };
+    if (!verdict.ok) {
+      return {
+        ...base,
+        status: 'failed',
+        error: `App frame did not show the ${view.view} view: missing=${JSON.stringify(verdict.missing)} foreign=${JSON.stringify(verdict.foreign)} blocking=${JSON.stringify(verdict.blocking)} alerts=${JSON.stringify(verdict.alerts)}`,
+      };
+    }
+
+    // Every rule runs on the whole page; partitionAxe tolerates the two upstream rules
+    // on host chrome only and requires proof that axe reached the App frame.
+    const axe = partitionAxe(await new AxeBuilder({ page }).analyze(), located.depth);
+    const axeProblems = [];
+    if (!axe.app_frame_analysed) axeProblems.push('axe did not analyse the App frame');
+    if (axe.app_frame.length) {
+      axeProblems.push(`App frame serious/critical: ${JSON.stringify(axe.app_frame)}`);
+    }
+    if (axe.host_blocking.length) {
+      axeProblems.push(
+        `host chrome serious/critical outside the tolerated upstream rules: ${JSON.stringify(axe.host_blocking)}`,
+      );
+    }
+    return axeProblems.length
+      ? { ...base, axe, status: 'failed', error: axeProblems.join('; ') }
+      : { ...base, axe, status: 'passed' };
+  } finally {
+    await context.close().catch(() => {});
+  }
+}
+
 async function runBasicHostCheck(mcpUrl) {
   // Package does not ship basic-host HTML; use the tagged GitHub example.
   const ensured = await ensureBasicHost();
   await buildBasicHost();
-  const host = spawnDetached('bun', ['serve.ts'], {
+  const host = spawnGroup('bun', ['serve.ts'], {
     cwd: basicHostDir,
     env: {
       ...process.env,
@@ -326,7 +432,19 @@ async function runBasicHostCheck(mcpUrl) {
     },
   });
   try {
-    await waitForHttp('http://127.0.0.1:8080/api/servers');
+    let serving = false;
+    const exitedEarly = host.exited.then(({ code, error }) => {
+      if (serving) return;
+      throw new Error(
+        `basic-host server exited before serving (exit ${code ?? 'none'}${error ? `, ${error}` : ''})\n${host.stderr().slice(-2000)}`,
+      );
+    });
+    try {
+      await Promise.race([waitForHttp('http://127.0.0.1:8080/api/servers'), exitedEarly]);
+    } finally {
+      serving = true; // from here an exit is teardown, not a rejection nobody awaits
+    }
+
     const { chromium } = await import(
       pathToFileURL(join(uiDir, 'node_modules/@playwright/test/index.mjs')).href
     );
@@ -335,133 +453,66 @@ async function runBasicHostCheck(mcpUrl) {
     ).default;
 
     const browser = await chromium.launch({ headless: true });
+    const views = [];
     try {
-      const context = await browser.newContext();
-      const page = await context.newPage();
-      const url =
-        'http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_source&call=true&theme=hide';
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-
-      const bodyText = await page.locator('body').innerText();
-      if (/Host connection failed/i.test(bodyText)) {
-        throw new Error('Host connection failed (counted as failure)');
-      }
-      if (/Failed to connect to any servers/i.test(bodyText)) {
-        throw new Error(`Host connection failed: ${bodyText.slice(0, 200)}`);
-      }
-
-      // Nested App lives in host → sandbox:8081 → srcdoc (about:blank).
-      let featureText = '';
-      const deadline = Date.now() + 30_000;
-      while (Date.now() < deadline && !featureText) {
-        for (const frame of page.frames()) {
-          try {
-            const text = await frame.locator('body').innerText({ timeout: 1_000 });
-            if (/Host connection failed/i.test(text)) {
-              throw new Error('Host connection failed inside sandbox frame');
-            }
-            if (/Qualification source/i.test(text) && !/Tool Result/i.test(text)) {
-              featureText = text.slice(0, 240);
-              break;
-            }
-          } catch (error) {
-            if (String(error.message || error).includes('Host connection failed')) throw error;
-          }
+      for (const view of VIEWS) {
+        try {
+          views.push(await renderView(browser, AxeBuilder, view));
+        } catch (error) {
+          views.push({
+            tool: view.tool,
+            view: view.view,
+            status: 'failed',
+            error: String(error.message || error),
+          });
         }
-        if (!featureText) await page.waitForTimeout(500);
       }
-      if (!featureText) {
-        const frameDump = [];
-        for (const frame of page.frames()) {
-          let text = '';
-          try {
-            text = (await frame.locator('body').innerText({ timeout: 2_000 })).slice(0, 200);
-          } catch (error) {
-            text = `unreadable: ${String(error.message || error).slice(0, 80)}`;
-          }
-          frameDump.push({ url: frame.url(), text });
-        }
-        const shotFail = join(outDir, 'basic-host-render-source.png');
-        await page.screenshot({ path: shotFail, fullPage: true });
-        throw new Error(
-          `basic-host App iframe did not render feature content from the tool result; frames=${JSON.stringify(frameDump)} body=${bodyText.slice(0, 400)}`,
-        );
-      }
-
-      const shot = join(outDir, 'basic-host-render-source.png');
-      await page.screenshot({ path: shot, fullPage: true });
-
-      // Official basic-host chrome trips color-contrast (meta "N chars") and frame-title
-      // (untitled sandbox iframe). Those are upstream host UI issues, not the App under test.
-      const axe = await new AxeBuilder({ page })
-        .disableRules(['color-contrast', 'frame-title'])
-        .analyze();
-      const serious = axe.violations.filter(
-        (violation) => violation.impact === 'serious' || violation.impact === 'critical',
-      );
-
-      if (serious.length > 0) {
-        throw new Error(`basic-host axe serious/critical: ${JSON.stringify(serious)}`);
-      }
-      return {
-        status: 'passed',
-        source: ensured.source,
-        url,
-        feature_text: featureText,
-        screenshot: shot,
-        axe_serious_or_critical: 0,
-        axe_disabled_upstream_host_rules: ['color-contrast', 'frame-title'],
-        note: 'Official ext-apps basic-host example (v2.0.3) against Streamable HTTP harness; not a claude.ai/ChatGPT claim. color-contrast/frame-title disabled because they fire on upstream basic-host chrome.',
-      };
     } finally {
       await browser.close().catch(() => {});
     }
+    return {
+      ...basicHostVerdict(views),
+      source: ensured.source,
+      views,
+      axe_tolerated_upstream_host_rules: UPSTREAM_HOST_RULES,
+      present_dataset:
+        'not_exercised: tests/fixtures/views/present-response.json has no materialized dataset, so the DataTable and Chart show their "unavailable" alerts; binding resolution through the app-only show tool is exercised',
+      note: 'Official ext-apps basic-host example (v2.0.3) against the Streamable HTTP harness; not a claude.ai/ChatGPT claim.',
+    };
   } finally {
-    killProcessTree(host.child);
+    await killProcessTree(host);
   }
 }
 
-async function maybeNgrok(port) {
-  if (!NGROK_ENABLED) {
-    return { status: 'not_run', reason: 'OKF_MCP_APPS_NGROK not set' };
-  }
+async function openNgrok(port) {
   const opened_at = new Date().toISOString();
-  const ngrok = spawnDetached('ngrok', ['http', String(port), '--log=stdout'], {
-    env: process.env,
+  const proc = spawnGroup('ngrok', ['http', String(port), '--log=stdout']);
+  let gone = false;
+  proc.exited.then(() => {
+    gone = true;
   });
   const deadline = Date.now() + 30_000;
   let publicUrl = null;
-  while (Date.now() < deadline && !publicUrl) {
+  while (!gone && Date.now() < deadline && !publicUrl) {
     try {
       const response = await fetch('http://127.0.0.1:4040/api/tunnels');
       if (response.ok) {
         const payload = await response.json();
-        const tunnel = (payload.tunnels ?? []).find((entry) => entry.public_url?.startsWith('https://'));
-        if (tunnel) publicUrl = tunnel.public_url;
+        const entry = (payload.tunnels ?? []).find((item) => item.public_url?.startsWith('https://'));
+        if (entry) publicUrl = entry.public_url;
       }
     } catch {
       // retry
     }
-    await new Promise((r) => setTimeout(r, 500));
+    if (!publicUrl) await new Promise((r) => setTimeout(r, 500));
   }
-  if (!publicUrl) {
-    killProcessTree(ngrok.child);
-    return {
-      status: 'closed',
-      opened_at,
-      closed_at: new Date().toISOString(),
-      reason: 'ngrok started but no public https URL appeared on 127.0.0.1:4040',
-      stderr: ngrok.getStderr().slice(0, 1000),
-    };
-  }
-  // Leave ngrok running only for the remainder of this process; kill before exit.
   return {
-    status: 'session_open',
+    proc,
     opened_at,
-    public_url: `${publicUrl}/mcp`,
-    local_port: port,
-    child: ngrok.child,
-    note: 'Short-lived public URL for manual claude.ai / ChatGPT connector testing. Not Cloudflare.',
+    public_url: publicUrl ? `${publicUrl}/mcp` : null,
+    note: publicUrl
+      ? 'Short-lived public URL for manual claude.ai / ChatGPT connector testing; closed before this receipt was written. Not Cloudflare.'
+      : `ngrok started but no public https URL appeared on 127.0.0.1:4040; stderr: ${proc.stderr().slice(0, 1000)}`,
   };
 }
 
@@ -495,7 +546,11 @@ async function hostRenderFromEvidence() {
   };
 }
 
-const commitSha = await requireCleanTree(root);
+const record = process.argv.includes('--record');
+if (record && PROTOCOL_ONLY) {
+  throw new Error('--record refused: a protocol-only run is not the gate receipt');
+}
+const header = await receiptHeader(root, MCP_APPS_INPUTS);
 
 await mkdir(outDir, { recursive: true });
 await mkdir(hostsDir, { recursive: true });
@@ -510,8 +565,8 @@ const resources = Array.isArray(manifest.resources) ? manifest.resources : [];
 if (resources.length !== 1) {
   throw new Error(`manifest must list 1 shared App resource, found ${resources.length}`);
 }
-if (resources[0]?.uri !== 'ui://okf-jawn/app.html') {
-  throw new Error(`manifest uri must be ui://okf-jawn/app.html, got ${resources[0]?.uri}`);
+if (resources[0]?.uri !== APP_RESOURCE_URI) {
+  throw new Error(`manifest uri must be ${APP_RESOURCE_URI}, got ${resources[0]?.uri}`);
 }
 
 const mimeMismatches = resources.filter((resource) => resource.mimeType !== RESOURCE_MIME_TYPE);
@@ -529,14 +584,14 @@ if (!mimeCheck.equal) {
   );
 }
 
-const checkRun = await run(
-  'cargo',
-  ['run', '--locked', '-p', 'okf-qualify-mcp-apps', '--release', '--', '--check'],
-  {
-    env: { ...process.env, OKF_MCP_APPS_DIST: distApps },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  },
-);
+// Build once, then run the binary itself: its stderr and exit code are ours to read,
+// and the process group holds the harness, not `cargo run`.
+const harnessBin = await buildRelease(root, 'okf-qualify-mcp-apps');
+
+const checkRun = await run(harnessBin, ['--check'], {
+  env: { ...process.env, OKF_MCP_APPS_DIST: distApps },
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
 if (checkRun.code !== 0) {
   throw new Error(`okf-qualify-mcp-apps --check exited ${checkRun.code}\n${checkRun.stderr}`);
 }
@@ -559,44 +614,41 @@ if (!readable.app) {
   throw new Error('shared App resource was not reported readable by the harness');
 }
 
-const harnessEnv = {
-  ...process.env,
-  OKF_MCP_APPS_DIST: distApps,
-};
-if (NGROK_ENABLED) harnessEnv.OKF_MCP_APPS_NGROK = '1';
-
-const harness = spawnDetached(
-  'cargo',
-  ['run', '--locked', '-p', 'okf-qualify-mcp-apps', '--release', '--', '--http', HTTP_BIND],
-  { env: harnessEnv },
-);
+const harness = spawnGroup(harnessBin, ['--http', HTTP_BIND], {
+  env: {
+    ...process.env,
+    OKF_MCP_APPS_DIST: distApps,
+    // Explicit either way: an inherited value must not lift Host protection.
+    OKF_MCP_APPS_NGROK: NGROK_ENABLED && !PROTOCOL_ONLY ? '1' : '0',
+  },
+});
 
 let protocol = { status: 'not_run' };
 let basicHost = { status: 'not_run', reason: PROTOCOL_ONLY ? 'skipped: protocol-only' : undefined };
-let ngrok = { status: 'not_run', reason: PROTOCOL_ONLY ? 'skipped: protocol-only' : undefined };
+let tunnel = null;
 let fatal = null;
+let harnessExit = null;
+let harnessDiedEarly = false;
 
 try {
-  await waitForTcp('127.0.0.1', HTTP_PORT);
+  await waitForListening(harness, {
+    pattern: /okf-qualify-mcp-apps listening on (\S+)/,
+    label: 'okf-qualify-mcp-apps',
+  });
   try {
     protocol = await protocolCheck(MCP_URL, manifest);
   } catch (error) {
     protocol = { status: 'failed', error: String(error.message || error) };
-    fatal = fatal ?? error;
   }
 
   if (!PROTOCOL_ONLY) {
-    try {
-      ngrok = await maybeNgrok(HTTP_PORT);
-    } catch (error) {
-      ngrok = {
-        status: 'closed',
-        opened_at: null,
-        closed_at: new Date().toISOString(),
-        error: String(error.message || error),
-      };
+    if (NGROK_ENABLED) {
+      try {
+        tunnel = await openNgrok(HTTP_PORT);
+      } catch (error) {
+        tunnel = { proc: null, opened_at: null, public_url: null, note: String(error.message || error) };
+      }
     }
-
     try {
       basicHost = await runBasicHostCheck(MCP_URL);
     } catch (error) {
@@ -605,44 +657,55 @@ try {
         error: String(error.message || error),
         note: '@modelcontextprotocol/ext-apps npm package does not ship basic-host; attempted official v2.0.3 GitHub example.',
       };
-      // basic-host failure is recorded; do not abort receipt write.
     }
   }
 } catch (error) {
   fatal = error;
   protocol = { status: 'failed', error: String(error.message || error) };
 } finally {
-  if (ngrok.child) {
-    killProcessTree(ngrok.child);
-    delete ngrok.child;
-    ngrok.closed_at = new Date().toISOString();
-    ngrok.status = 'closed';
+  if (tunnel) {
+    if (tunnel.proc) await killProcessTree(tunnel.proc);
+    tunnel.closed_at = new Date().toISOString();
   }
-  killProcessTree(harness.child);
+  harnessDiedEarly = harness.child.exitCode !== null;
+  harnessExit = await killProcessTree(harness);
 }
+
+const ngrok = ngrokRecord({
+  enabled: NGROK_ENABLED && !PROTOCOL_ONLY,
+  opened_at: tunnel?.opened_at ?? null,
+  closed_at: tunnel?.closed_at ?? null,
+  public_url: tunnel?.public_url ?? null,
+  local_port: HTTP_PORT,
+  note: tunnel?.note ?? (PROTOCOL_ONLY ? 'skipped: protocol-only' : 'OKF_MCP_APPS_NGROK is not 1'),
+});
 
 const host_render = PROTOCOL_ONLY
   ? { status: 'not_run', reason: 'skipped: protocol-only' }
   : await hostRenderFromEvidence();
 
+const problems = runProblems({ protocol, basicHost, protocolOnly: PROTOCOL_ONLY });
+if (fatal) problems.unshift(`harness: ${String(fatal.message || fatal)}`);
+
 const receipt = {
-  component: 'mcp-apps-web-hosts',
-  gate: 'mcp-apps-web-hosts',
-  commit_sha: commitSha,
-  git_sha: commitSha,
-  inputs: [
-    'qualification/mcp-apps',
-    'ui/src/mcp-apps',
-    'ui/scripts/bundle-app.mjs',
-    'Cargo.toml',
-    'Cargo.lock',
-  ],
+  ...header,
+  component: 'mcp-apps-protocol-qualification',
+  gate: 'mcp-apps-protocol-qualification',
+  finished_at: new Date().toISOString(),
+  result: problems.length === 0 ? 'PASS' : 'FAIL',
+  problems,
   harness: 'okf-qualify-mcp-apps',
   protocol_only: PROTOCOL_ONLY,
   transport: {
     stdio: 'default',
     http: MCP_URL,
-    serve_command: `cargo run --locked -p okf-qualify-mcp-apps --release -- --http ${HTTP_BIND}`,
+    build_command: 'cargo build --locked --release -p okf-qualify-mcp-apps',
+    serve_command: `okf-qualify-mcp-apps --http ${HTTP_BIND}`,
+  },
+  harness_process: {
+    exited_before_teardown: harnessDiedEarly,
+    exit: harnessExit,
+    stderr_tail: harness.stderr().slice(-2000),
   },
   mime_check: mimeCheck,
   bundle_sizes: Object.fromEntries(
@@ -652,14 +715,7 @@ const receipt = {
   check,
   protocol_check: protocol,
   basic_host: basicHost,
-  ngrok: {
-    status: ngrok.status,
-    opened_at: ngrok.opened_at ?? null,
-    closed_at: ngrok.closed_at ?? null,
-    public_url: ngrok.public_url ?? null,
-    local_port: ngrok.local_port ?? HTTP_PORT,
-    note: ngrok.note ?? ngrok.reason ?? ngrok.error ?? null,
-  },
+  ngrok,
   host_render,
   static_bundle_smoke:
     'ui/tests/e2e/mcp-apps-static-bundle-smoke.spec.ts is smoke only; not a host-render check.',
@@ -669,15 +725,15 @@ const receipt = {
     ngrok: `OKF_MCP_APPS_NGROK=1 ngrok http ${HTTP_PORT}`,
     connector_url: `https://<ngrok-host>/mcp`,
   },
-  note: 'Phase 0 MCP Apps web-hosts qualification. host_render PASS is never invented; claude.ai/ChatGPT need evidence under hosts/.',
+  note: 'Phase 0 MCP Apps protocol qualification against the official basic-host example. host_render (claude.ai/ChatGPT) belongs to the acceptance gate mcp-apps-web-hosts and is never invented here.',
 };
 
 await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
-process.stdout.write(`MCP Apps web-hosts qualification receipt: ${receiptPath}\n`);
-
-if (fatal) {
-  throw fatal;
+process.stdout.write(`MCP Apps qualification receipt: ${receiptPath}\n`);
+if (record) {
+  process.stdout.write(`MCP Apps receipt recorded: ${await recordReceipt(root, 'mcp-apps', receipt)}\n`);
 }
-if (protocol.status !== 'passed') {
-  throw new Error(`protocol_check ${protocol.status}: ${protocol.error ?? ''}`);
+
+if (problems.length) {
+  throw new Error(`MCP Apps qualification FAIL:\n${problems.join('\n')}`);
 }

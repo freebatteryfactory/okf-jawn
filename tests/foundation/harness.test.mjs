@@ -668,3 +668,16 @@ test('a receipt never records an open tunnel', () => {
   assert.equal(ngrokRecord({ ...base, enabled: true, opened_at: null, closed_at: null }).status, 'not_opened');
   assert.throws(() => ngrokRecord({ ...base, enabled: true, opened_at: 't1', closed_at: null }), /opened but not closed/);
 });
+
+test('the MCP Apps orchestrator renders every view, fails on any failure and never tolerates App-frame rules', async () => {
+  const source = await readFile(join(root, 'qualification/mcp-apps/run.mjs'), 'utf8');
+  assert.match(source, /for \(const view of VIEWS\)/);
+  assert.match(source, /runProblems\(\{ protocol, basicHost, protocolOnly: PROTOCOL_ONLY \}\)/);
+  assert.match(source, /waitForListening\(harness,/);
+  assert.match(source, /partitionAxe\(/);
+  assert.match(source, /ngrokRecord\(/);
+  assert.match(source, /receiptHeader\(root, MCP_APPS_INPUTS\)/);
+  assert.match(source, /recordReceipt\(root, 'mcp-apps', receipt\)/);
+  assert.doesNotMatch(source, /disableRules\(|session_open|spawnDetached|waitForTcp|requireCleanTree|commit_sha/);
+  assert.doesNotMatch(source, /'cargo',\s*\[\s*'run'/);
+});
