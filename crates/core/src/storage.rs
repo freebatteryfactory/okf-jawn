@@ -315,9 +315,9 @@ pub fn derive_proposal_id(mutation_id: MutationId) -> ProposalId {
 /// A version-8 UUID from SHA-256 of a label, a mutation identity and a count.
 fn derived_uuid(label: &[u8], mutation_id: MutationId, ordinal: u32) -> uuid::Uuid {
     let mut hasher = Sha256::new();
-    hasher.update(b"okf-jawn derived identity ");
+    hasher.update(b"okf-jawn derived identity\0");
     hasher.update(label);
-    hasher.update(b" ");
+    hasher.update(b"\0");
     hasher.update(mutation_id.0.as_bytes());
     hasher.update(ordinal.to_be_bytes());
     let hash: [u8; 32] = hasher.finalize().into();
