@@ -4,8 +4,8 @@
   "phase_0_qualified": false,
   "application_implemented": false,
   "current": {
-    "recorded_at_utc": "2026-10-05T02:40:49Z",
-    "base_commit": "phase-0-closure-in-progress",
+    "recorded_at_utc": "2026-10-05T02:59:33Z",
+    "base_commit": "579910970612d4032b1f98ba08ed122e8dcc9563",
     "environment": {
       "os": "Windows 10.0.26200 (developer workstation, not CI or the build container)",
       "bun": "1.4.2 (process.versions.bun, C:\\Users\\eayou\\.bun\\bin\\bun.exe)",
@@ -26,7 +26,7 @@
     "project_typescript_passed": true,
     "authored_typescript_error_count": 0,
     "deterministic_foundation_green": true,
-    "phase_0_note": "Library/seam qualifications have receipts. Clean-checkout and GitHub Actions CI remain before phase_0_qualified=true. Product journeys stay on construction/acceptance gates.",
+    "phase_0_note": "Library/seam qualifications and clean-checkout passed. GitHub Actions CI receipt pending or in progress. Product journeys remain on construction/acceptance gates. Claude Desktop host not claimed; Chromium paint closed the 1.8MiB question.",
     "direct_versions": {
       "okf-core": "0.2.7",
       "okf-validator": "0.2.7 (default-features=false)",
@@ -188,8 +188,9 @@
         },
         {
           "id": "clean-checkout-rerun",
-          "status": "in_progress",
-          "meaning": "Fresh clone bootstrap/gen-check/foundation"
+          "status": "passed",
+          "meaning": "Fresh clone: bootstrap, gen-check x2 (no drift), foundation, check, test, check-offline, audit; empty git status",
+          "receipt": ".artifacts/qualification/clean-checkout/receipt.json"
         },
         {
           "id": "github-actions-ci-receipt",
