@@ -158,10 +158,26 @@ pub trait RecordStore: Send + Sync {
     fn complete_job(&self, completion: JobCompletion) -> PortFuture<'_, Job>;
     /// Keep the failure and retry eligibility for the current claim.
     fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job>;
-    /// Cancel pending or running work while retaining recorded state; repeating it changes nothing.
-    fn cancel_job<'a>(&'a self, scope: &'a StorageScope, job: JobId) -> PortFuture<'a, Job>;
-    /// Queue a failed job again under the same durable identity; repeating it changes nothing.
-    fn retry_job<'a>(&'a self, scope: &'a StorageScope, job: JobId) -> PortFuture<'a, Job>;
+    /// Cancel pending or running work while retaining recorded state.
+    ///
+    /// Unique on `mutation_id`: a repeated id makes no second transition and returns the job
+    /// row as it stands.
+    fn cancel_job<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        mutation_id: MutationId,
+        job: JobId,
+    ) -> PortFuture<'a, Job>;
+    /// Queue a failed job again under the same durable identity.
+    ///
+    /// Unique on `mutation_id`: a repeated id does not queue the job a second time, even when
+    /// the job has run and failed again since, and returns the job row as it stands.
+    fn retry_job<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        mutation_id: MutationId,
+        job: JobId,
+    ) -> PortFuture<'a, Job>;
     /// Enumerate unfinished records across tenants for queue reconciliation on restart.
     fn pending_jobs(&self) -> PortFuture<'_, Vec<(StorageScope, JobId)>>;
     /// Release claims whose leases have expired so work can be reclaimed.

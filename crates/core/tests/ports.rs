@@ -356,8 +356,8 @@ async fn record_store_calls(
             .fail_job(claimed.lease, "converter stopped".to_owned(), true)
             .await?;
     }
-    records.cancel_job(scope, job.id).await?;
-    records.retry_job(scope, job.id).await?;
+    records.cancel_job(scope, mutation_id, job.id).await?;
+    records.retry_job(scope, mutation_id, job.id).await?;
     records.pending_jobs().await?;
     records.expire_leases().await?;
     let item_id = review.source.item_id;
