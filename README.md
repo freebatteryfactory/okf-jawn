@@ -38,7 +38,7 @@ bun scripts/dev.mjs gen-check
 bun scripts/dev.mjs foundation
 ```
 
-Equivalent `just` recipes are provided. `lock` is the only task that resolves dependencies: it runs `cargo generate-lockfile` and `bun install --lockfile-only`. `bootstrap` refuses to run without both `Cargo.lock` and `bun.lock`, fetches with `--locked`/`--frozen-lockfile`, builds the actual Rust generator, executes both generation passes, and type checks and builds the real UI consumer. Install scripts run only for packages in `trustedDependencies` (currently esbuild, whose postinstall selects its native binary). Generators run from installed, pinned packages through `bun --bun run`; nothing is downloaded on demand. A resolution or API incompatibility fails visibly. Do not guess a replacement version, handwrite the expected generated files, disable a lint, or claim a failed step passed.
+Equivalent `just` recipes are provided. `lock` is the only task that resolves dependencies: it runs `cargo generate-lockfile` and `bun install --lockfile-only`. `bootstrap` refuses to run without both `Cargo.lock` and `bun.lock`, fetches with `--locked`/`--frozen-lockfile`, builds the actual Rust generator, executes both generation passes, and type checks and builds the real UI consumer. Install scripts run only for packages in `trustedDependencies` (currently empty: no dependency lifecycle scripts are trusted). Generators run from installed, pinned packages through `bun --bun run`; nothing is downloaded on demand. A resolution or API incompatibility fails visibly. Do not guess a replacement version, handwrite the expected generated files, disable a lint, or claim a failed step passed.
 
 `gen` generates into two temporary directories, compares the entire output file sets and bytes, then publishes only generated directories. `gen-check` compares those results to the checkout without editing it. The generator does not require a database, converter, identity provider, or running application. Generator output is not an implementation-status claim.
 
@@ -59,7 +59,7 @@ The authored source of operation meaning is `crates/contract/src/operations.rs`,
 | `generated/cli/*` | clap_complete and clap_mangen |
 | `ui/src/routeTree.gen.ts` | TanStack Router build plugin |
 | `ui/dist-apps/*.html` | Actual frontend bundling of shared feature components |
-| `ui/dist/docs/*` | Locally copied Scalar browser bundle and generated OpenAPI |
+| `ui/dist/docs/*` | Locally copied swagger-ui-dist assets and the canonical `api/openapi.yaml` |
 
 There are 65 typed JSON application commands and 14 distinct transport declarations. Eleven tools are model-facing; the scoped binary-read tool is app-only. Human approval, verification and connector management are never model tools. The raw transport declarations are documented schema obligations, not bound handlers yet.
 
