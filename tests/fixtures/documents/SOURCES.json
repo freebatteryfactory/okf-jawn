@@ -1,0 +1,55 @@
+{
+  "generated_at": "2026-10-05T01:39:26.058768+00:00",
+  "generator": "okf-jawn qualification fixture builder (Python stdlib)",
+  "license_note": "All fixtures are original minimal files generated for MIT-licensed qualification use; no third-party corpus download was required.",
+  "files": {
+    "sample_image.png": {
+      "role": "image",
+      "url": "generated://okf-jawn/fixtures/sample_image.png",
+      "license": "MIT (generated for qualification; not third-party copyrighted content)",
+      "notes": "Minimal valid RGB PNG; usable as OCR/image backend input",
+      "sha256": "c845833844c2085e427dec79455f1274e413569de93e30605ba8c43ad20bcfb5",
+      "bytes": 211
+    },
+    "sample_with_image.docx": {
+      "role": "docx_with_images",
+      "url": "generated://okf-jawn/fixtures/sample_with_image.docx",
+      "license": "MIT (generated for qualification)",
+      "notes": "Valid OOXML DOCX zip with word/media/image1.png",
+      "sha256": "585cc09d1c5990439bfcfe341a424aff99fcc40d14701e2ad65fe123d2e3c025",
+      "bytes": 1912
+    },
+    "sample_sheet.xlsx": {
+      "role": "xlsx",
+      "url": "generated://okf-jawn/fixtures/sample_sheet.xlsx",
+      "license": "MIT (generated for qualification)",
+      "notes": "Valid OOXML XLSX with shared strings and numeric cells",
+      "sha256": "fc03b4d75e6c90e47699cfe6ffbfa90ed856549d1ec9ff78f6b3571263aa50f9",
+      "bytes": 1993
+    },
+    "born_digital_text.pdf": {
+      "role": "born_digital_pdf",
+      "url": "generated://okf-jawn/fixtures/born_digital_text.pdf",
+      "license": "MIT (generated for qualification)",
+      "notes": "Valid PDF-1.4 with Helvetica text operators (text layer)",
+      "sha256": "475e19546a52bb05488e6a5267c110176e8fb851c6d712a771bf5b48e6183d6f",
+      "bytes": 661
+    },
+    "scanned_image_only.pdf": {
+      "role": "scanned_or_image_pdf",
+      "url": "generated://okf-jawn/fixtures/scanned_image_only.pdf",
+      "license": "MIT (generated for qualification)",
+      "notes": "Image-only PDF with DeviceRGB XObject and no text operators (OCR path)",
+      "sha256": "0deee37bf0d2206b4bba1964f9b43b02244f1e2108b18c34e129bbff925e7b4e",
+      "bytes": 72666
+    },
+    "table_heavy.pdf": {
+      "role": "table_heavy_pdf",
+      "url": "generated://okf-jawn/fixtures/table_heavy.pdf",
+      "license": "MIT (generated for qualification)",
+      "notes": "Born-digital PDF with multi-column tabular text + stroked grid",
+      "sha256": "01ac9dc21954a7842c1bcba748ad8c7b32dbf7e62acad9d691f69da316503906",
+      "bytes": 2621
+    }
+  }
+}
