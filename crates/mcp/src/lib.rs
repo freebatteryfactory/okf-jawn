@@ -1,9 +1,12 @@
 //! MCP transport helpers preserve generated tool schemas and application-level content.
 //!
 //! This is not a JSON-RPC implementation. `rmcp` owns protocol and transport behavior.
+//! A failed call is reported as text with `isError` set and no structured content: a tool's
+//! declared output schema describes its success response only.
 
+use okf_jawn_contract::error::ApiError;
 use rmcp::model::{CallToolResult, ContentBlock, Tool};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 /// Decode the generated model-tool catalog using the actual SDK's wire types.
 ///
@@ -26,14 +29,15 @@ pub fn structured_result(
     Ok(result)
 }
 
-/// Preserve explicit tool-execution failure rather than fabricating an empty successful result.
+/// Report a failed tool call as text the caller can read and parse.
+///
+/// The text block is the serialized `ApiError`. `structured_content` stays empty, because an
+/// error object can never satisfy the tool's declared output schema.
 ///
 /// # Errors
-/// Returns an SDK serialization error.
-pub fn error_result(
-    error: &okf_jawn_contract::error::ApiError,
-) -> Result<CallToolResult, serde_json::Error> {
-    let mut result = CallToolResult::error(vec![ContentBlock::text(error.message.clone())]);
-    result.structured_content = Some(json!({"error":error}));
-    Ok(result)
+/// Returns an error if the `ApiError` cannot be serialized.
+pub fn error_result(error: &ApiError) -> Result<CallToolResult, serde_json::Error> {
+    Ok(CallToolResult::error(vec![ContentBlock::text(
+        serde_json::to_string(error)?,
+    )]))
 }
