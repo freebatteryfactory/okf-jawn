@@ -1,7 +1,8 @@
 //! Structured transport-independent application errors.
 //!
 //! `detail` carries the typed outcome a client can act on; adapters map `conflict`,
-//! `already_issued` and `in_progress` to HTTP 409 with this body.
+//! `already_issued` and `in_progress` to HTTP 409 with this body. `detail` is boxed so that
+//! `Result<_, ApiError>` stays small.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -86,7 +87,7 @@ pub struct ApiError {
     pub request_id: Option<String>,
     /// Typed context for conflict, replay, and in-progress outcomes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<ErrorDetail>,
+    pub detail: Option<Box<ErrorDetail>>,
 }
 
 impl std::fmt::Display for ApiError {
@@ -111,7 +112,14 @@ impl ApiError {
     /// Attach typed context the caller can act on.
     #[must_use]
     pub fn with_detail(mut self, detail: ErrorDetail) -> Self {
-        self.detail = Some(detail);
+        self.detail = Some(Box::new(detail));
+        self
+    }
+
+    /// Name the input field that needs correction.
+    #[must_use]
+    pub fn with_field(mut self, field: impl Into<String>) -> Self {
+        self.field = Some(field.into());
         self
     }
 }

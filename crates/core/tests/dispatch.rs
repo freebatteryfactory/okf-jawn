@@ -451,7 +451,7 @@ async fn abandoned_connector_reconciles_without_second_secret() -> Result<(), Bo
     let detail = err.detail.expect("AlreadyIssued detail");
     let okf_jawn_contract::error::ErrorDetail::AlreadyIssued {
         connector_id: found,
-    } = detail
+    } = *detail
     else {
         panic!("expected AlreadyIssued detail");
     };
