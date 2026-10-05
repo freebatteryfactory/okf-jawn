@@ -75,8 +75,11 @@ fn view_document_six_component_round_trips_with_deny_unknown_fields() -> Result<
         parsed.grammar,
         okf_jawn_contract::views::RenderGrammar::JsonRender
     );
-    assert_eq!(parsed.spec["root"], "root");
-    assert_eq!(parsed.spec["elements"]["root"]["type"], "Stack");
+    assert_eq!(parsed.spec.get("root"), Some(&json!("root")));
+    assert_eq!(
+        parsed.spec.pointer("/elements/root/type").cloned(),
+        Some(json!("Stack"))
+    );
     let reserialized = serde_json::to_value(&parsed)?;
     let again: ViewDocument = serde_json::from_value(reserialized.clone())?;
     assert_eq!(serde_json::to_value(&again)?, reserialized);
