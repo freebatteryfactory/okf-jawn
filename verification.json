@@ -1,11 +1,11 @@
 {
   "project": "okf-jawn",
   "delivery": "Full-scope executable foundation source; not a completed or qualified application",
-  "phase_0_qualified": true,
+  "phase_0_qualified": false,
   "application_implemented": false,
   "current": {
-    "recorded_at_utc": "2026-10-05T03:04:19Z",
-    "base_commit": "phase-0-closure",
+    "recorded_at_utc": "2026-10-05T11:32:56Z",
+    "base_commit": "979e2ba (record corrected after independent QA)",
     "environment": {
       "os": "Windows 10.0.26200 (developer workstation, not CI or the build container)",
       "bun": "1.4.2 (process.versions.bun, C:\\Users\\eayou\\.bun\\bin\\bun.exe)",
@@ -14,7 +14,8 @@
       "cargo_audit": "0.22.2",
       "git": "2.55.0.windows.2",
       "typescript_checker": "7.0.2 (tsc, from @typescript/native = npm:typescript@7.0.2)",
-      "typescript_compiler_api": "6.0.3 (the typescript package = npm:@typescript/typescript6@6.0.2, consumed by Hey API openapi-ts 0.99.0)"
+      "typescript_compiler_api": "6.0.3 (the typescript package = npm:@typescript/typescript6@6.0.2, consumed by Hey API openapi-ts 0.99.0)",
+      "node": "Required by `ui` test script (node ./node_modules/vitest/vitest.mjs) because Bun breaks jsdom EventTarget. This conflicts with AGENTS.md (Node is not a project prerequisite) and is an open defect."
     },
     "lockfiles_resolved": true,
     "lockfile_provenance": "Cargo.lock from cargo update after OKF/Docling feature-slicing; bun.lock from bun install with exact pins and a js-yaml 4.3.2 override. Neither is handwritten.",
@@ -26,7 +27,7 @@
     "project_typescript_passed": true,
     "authored_typescript_error_count": 0,
     "deterministic_foundation_green": true,
-    "phase_0_note": "Phase 0 foundation/seam/library gates are terminal. Product journeys remain on construction and acceptance gates. Next action: bun scripts/dev.mjs lanes.",
+    "phase_0_note": "Phase 0 is open. An independent QA pass found that several gates recorded as passed were not run as the Phase 0 plan specified. Not executed: any MCP Apps host (basic-host or Claude Desktop), the json-render ViewDocument serde + Zod round trip, iii engine/queue kill-restart. Missing evidence: Docling peak RSS, page provenance, a failure case and corpus fixtures; iii observed DLQ inspection, blob-reference payloads and startup time. Product journeys remain on construction and acceptance gates.",
     "direct_versions": {
       "okf-core": "0.2.7",
       "okf-validator": "0.2.7 (default-features=false)",
@@ -42,9 +43,9 @@
       "iii_engine": "iii/v0.24.4"
     },
     "typescript_policy": {
-      "authored": "ui/tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes on authored source and generated files except the Hey API client runtime. skipLibCheck for third-party .d.ts only. Tooling configs are a separate composite project (ui/tsconfig.tooling.json) with types:[bun].",
+      "authored": "ui/tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes on authored source and generated files except the Hey API client runtime. skipLibCheck for third-party .d.ts only. Tooling configs are a separate composite project (ui/tsconfig.tooling.json) with types:[bun]. ui/tests/** (Vitest and Playwright) has been excluded from every TS project since 0660188 and is not type-checked.",
       "generated_client_runtime": "ui/tsconfig.generated.json: client/ and core/ only; exactOptionalPropertyTypes false (hey-api/openapi-ts#3157). Removal probe: typecheck:generated-strict.",
-      "wire_validation_boundary": "Host/tool payloads validated with generated Zod schemas keep z.infer/z.output (equivalent in Zod 4) in authored UI. types.gen remains the HTTP-client shape. At a real SDK/wire boundary, construct the generated request object explicitly and omit undefined optionals. No cast through unknown.",
+      "wire_validation_boundary": "Host/tool payloads validated with generated Zod schemas keep z.infer/z.output (equivalent in Zod 4) in authored UI. types.gen remains the HTTP-client shape. At a real SDK/wire boundary, construct the generated request object explicitly and omit undefined optionals. No cast through unknown in ui/src; the unchecked test ui/tests/unit/rules-form.test.tsx uses one.",
       "node_ambient": "No MCP Apps Node-types island. Buffer appears only in @modelcontextprotocol/client .d.ts; skipLibCheck covers it. @types/node is not a direct dependency."
     },
     "checks": [
@@ -66,7 +67,7 @@
         ],
         "exit_code": 0,
         "status": "passed",
-        "log": ".artifacts/verification/gen-check.log"
+        "log": "%TEMP%/okf-jawn-phase0-logs/gen-check-resume.log (5799109); CI 37257588545"
       },
       {
         "command": [
@@ -76,8 +77,8 @@
         ],
         "exit_code": 0,
         "status": "passed",
-        "log": ".artifacts/verification/foundation.log",
-        "meaning": "gen-check, cargo tests, UI build, typecheck and offline all succeed."
+        "log": "CI 37257588545 foundation step (4eb2c88)",
+        "meaning": "gen-check, cargo test for contract/core/xtask only, UI build, typecheck and offline."
       },
       {
         "command": [
@@ -100,7 +101,7 @@
         "cwd": "ui",
         "exit_code": 0,
         "status": "passed",
-        "meaning": "0 authored TypeScript errors under the existing strict application policy."
+        "meaning": "0 errors in ui/src (tsc -b, clean checkout 5799109). ui/tests is not type-checked."
       },
       {
         "command": [
@@ -110,7 +111,7 @@
         ],
         "exit_code": 0,
         "status": "passed",
-        "meaning": "Unchanged from dependency qualification; not re-run in the TypeScript boundary pass."
+        "meaning": "Re-run in the clean checkout (5799109) and CI 37257588545. GHSA-vfj7-8cjw-p6xm remains, ignored as build-time tooling."
       }
     ],
     "typescript_boundary_fixes": [
@@ -148,38 +149,38 @@
       "phase_0": [
         {
           "id": "authored-typescript-seams",
-          "status": "passed",
-          "meaning": "Layout normalize\u2192validate, wire omitUndefined, RulesForm generics, mcp-apps onAppCreated, Vitest 18 tests"
+          "status": "incomplete",
+          "meaning": "Vitest 18/18 pass. Gaps: wire.test.ts has no missing-key or generated-request case; RulesForm AJV errors come from a standalone validator, not the mounted form; ui/tests is not type-checked; Vitest needs Node."
         },
         {
           "id": "deterministic-foundation",
           "status": "passed",
-          "receipt": ".artifacts/verification/foundation.log",
-          "meaning": "gen-check, cargo tests, UI build, typecheck, offline"
+          "receipt": "https://github.com/freebatteryfactory/okf-jawn/actions/runs/37257588545",
+          "meaning": "CI 37257588545 foundation job at 4eb2c88: bootstrap, foundation, check, audit."
         },
         {
           "id": "docling-library-qualification",
-          "status": "passed",
+          "status": "incomplete",
           "receipt": ".artifacts/qualification/docling/receipt.json",
-          "meaning": "DocumentConverter against real fixtures/assets; timeout PartialSuccess; originals unchanged"
+          "meaning": "Observed: six self-generated minimal fixtures all Success with non-empty markdown, originals unchanged, document_timeout produced PartialSuccess. Missing: peak RSS (null for every fixture), page provenance, any Failure case, docling-project corpus fixtures. The harness pass rule accepts Failure on supported formats and cannot fail the timeout probe. Receipt came from a direct cargo run; `qualify docling` timed out."
         },
         {
           "id": "iii-library-qualification",
-          "status": "passed",
+          "status": "incomplete",
           "receipt": ".artifacts/qualification/iii/receipt.json",
-          "meaning": "WSL iii/v0.24.4 + queue file_based; crash Test1/Test2 before Ok; DLQ; adopted"
+          "meaning": "Observed: SDK worker-process SIGKILL before Ok with redelivery (deliveries=2) and effect-before-ack idempotency; topic redrive reported redriven=1 and the job completed. Not done: engine/queue kill and restart, observed DLQ inspection (dlq_messages null), blob-reference payloads, startup time, separate engine/queue memory. Worker ran on Windows against a WSL engine."
         },
         {
           "id": "mcp-apps-protocol-qualification",
-          "status": "passed",
+          "status": "incomplete",
           "receipt": ".artifacts/qualification/mcp-apps/receipt.json",
-          "meaning": "RESOURCE_MIME_TYPE manifest; harness readable; Chromium paint+axe of 1.8MiB bundles"
+          "meaning": "Passed: bundle manifest mimeType equals SDK RESOURCE_MIME_TYPE (text/html;profile=mcp-app). Not done: no host ran; the four render screenshots are byte-identical and show 'Host connection failed: ProtocolError: Method not found'; no MCP client exercised the rmcp stdio server; _meta.ui is not SDK 2.0.3-conformant; no tools, text fallback or structuredContent. run.mjs hard-codes host_render.status 'passed' and is not what wrote the on-disk receipt. The 1.8 MiB host question is open."
         },
         {
           "id": "json-render-catalog-round-trip",
-          "status": "passed",
+          "status": "incomplete",
           "receipt": "ui/tests/unit/json-render-roundtrip.test.tsx",
-          "meaning": "six-component Spec prepareSpec round-trip + Layout render"
+          "meaning": "Spec JSON round trip (prepareSpec -> JSON -> prepareSpec) and a Layout render only. ViewDocument with Rust serde (deny_unknown_fields) and generated Zod was not executed."
         },
         {
           "id": "hey-api-generated-runtime-probe",
@@ -188,20 +189,20 @@
         },
         {
           "id": "clean-checkout-rerun",
-          "status": "passed",
-          "meaning": "Fresh clone: bootstrap, gen-check x2 (no drift), foundation, check, test, check-offline, audit; empty git status",
+          "status": "incomplete",
+          "meaning": "Ran across two commits: 0660188 (bootstrap, gen-check x2, foundation) then 5799109 after reset (gen-check, check, test, check-offline, audit); final git status empty. Needs one uninterrupted run on a single commit with logs copied beside the receipt.",
           "receipt": ".artifacts/qualification/clean-checkout/receipt.json"
         },
         {
           "id": "github-actions-ci-receipt",
           "status": "passed",
-          "meaning": "workflow_dispatch on phase-0-closure: source-tooling + foundation jobs success",
+          "meaning": "workflow_dispatch at 4eb2c88: source-tooling and foundation jobs success. Scope: no Vitest and no workspace cargo test run in CI.",
           "receipt": "https://github.com/freebatteryfactory/okf-jawn/actions/runs/37257588545"
         },
         {
           "id": "mcp-apps-claude-desktop",
-          "status": "not_claimed",
-          "meaning": "Optional second real host not claimed. Chromium paint+axe under mcp-apps-protocol-qualification closed the 1.8MiB question."
+          "status": "not_run",
+          "meaning": "Required by the Phase 0 plan (section C). No MCP Apps host evidence exists yet."
         }
       ],
       "construction": [
@@ -269,7 +270,10 @@
         }
       ]
     },
-    "phase_0_qualified": true
+    "code_tested_commits": {
+      "clean_checkout": "0660188 (bootstrap, gen-check x2, foundation) then 5799109 after reset (gen-check, check, test, check-offline, audit)",
+      "ci": "4eb2c88de11021d3a2797400fd1dbb3660b51223"
+    }
   },
   "historical_archive_record": {
     "note": "Recorded when the archive was assembled in an environment without Rust, network access, pnpm or Docker, using Node and TypeScript 5.8.3 for syntax-only checks. Kept unchanged as history. Its toolchain (Node 24.21.0, pnpm 12.8.1) is superseded by Bun 1.4.2, and its counts (62 operations, 13 transports, 28 offline tests) by the current source. It is not current readiness.",

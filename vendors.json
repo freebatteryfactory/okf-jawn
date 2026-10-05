@@ -145,7 +145,7 @@
         "Model-facing and app-only tools have separate visibility; server authorization still applies to both."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Exercised by qualification/mcp-apps harness ServerHandler over stdio for resource serving; product Application ServerHandler not implemented."
+      "qualification": "Harness ServerHandler compiles; the stdio serve path has not been exercised by any MCP client. Product ServerHandler over Application not implemented."
     },
     {
       "name": "mcp-apps",
@@ -174,7 +174,7 @@
         "App-only read_object fetches are still workspace scoped; never assume a URI itself grants permission."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "RESOURCE_MIME_TYPE manifest + rmcp harness readability + Chromium paint/axe of four ~1.8MiB bundles; receipt .artifacts/qualification/mcp-apps/receipt.json. Claude Desktop not claimed."
+      "qualification": "Partial: bundle manifest mimeType equals SDK RESOURCE_MIME_TYPE. No host has rendered the bundles (static-server screenshots show a host-connection failure); _meta.ui not yet SDK-conformant."
     },
     {
       "name": "json-render",
@@ -204,7 +204,7 @@
         "Source components take binding keys, not model-authored quotes or authoritative numeric values."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Catalog six-component Spec prepareSpec serialize prepareSpec semantic equality and Layout render covered by ui/tests/unit/json-render-roundtrip.test.tsx."
+      "qualification": "Partial: catalog six-component Spec prepareSpec JSON round trip and Layout render in ui/tests/unit/json-render-roundtrip.test.tsx. ViewDocument serde + Zod round trip not yet executed."
     },
     {
       "name": "vega",
@@ -532,11 +532,11 @@
         "Pinned =1.93.5 with default-features = false and features = [\"pdf\"]. Do not enable asr, fetch-images or vlm without a shared change.",
         "Do not direct-depend on docling-core; docling owns the matching core version (currently resolves docling-core 1.93.6).",
         "resvg 0.47 (rustybuzz, ttf-parser unmaintained advisories) is pinned upstream for Docling MSRV 1.88; ignored exactly in .cargo/audit.toml until Docling moves to resvg 0.48+.",
-        "paste is pulled via docling \u2192 image \u2192 pulp/rav1e/tokenizers; ignored exactly with the same policy.",
+        "paste is pulled via docling → image → pulp/rav1e/tokenizers; ignored exactly with the same policy.",
         "Converter API and native/model assets still need an executed qualification. Retain originals; record converter version/settings."
       ],
       "version_authority": "Cargo.toml and Cargo.lock",
-      "qualification": "Executed DocumentConverter qualification at 1.93.5 against real fixtures and models-v1 assets; receipt .artifacts/qualification/docling/receipt.json. Timeout PartialSuccess proven. DOCLING_RS_MAX_MEMORY_MB not claimed for in-process converter."
+      "qualification": "Partial: DocumentConverter 1.93.5 converted six self-generated fixtures (all Success) and document_timeout produced PartialSuccess; originals unchanged. Peak RSS, page provenance, failure case and corpus fixtures not yet qualified. Receipt .artifacts/qualification/docling/receipt.json."
     },
     {
       "name": "git2",
@@ -644,12 +644,12 @@
       "context7_query": null,
       "knowledge_source": "Official documentation reference; qualify installed version before use",
       "offline_notes": [
-        "Selected runtime: adopted after the recorded Phase 0 receipt (engine iii/v0.24.4, iii-sdk 0.24.4, builtin file_based queue). Product-level RecordStore crash qualification remains a construction gate.",
+        "Provisionally selected runtime (engine iii/v0.24.4, iii-sdk 0.24.4, builtin file_based queue). Phase 0 iii qualification is incomplete; product-level RecordStore crash qualification is a construction gate.",
         "Registry schemas are metadata; typed deserialization and application validation still run.",
         "Test crash immediately after acknowledgment with the exact worker/adapter/config; inspect ELv2 terms."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Adopted after WSL crash Test1/Test2 before Ok ack on engine iii/v0.24.4 + queue builtin file_based + iii-sdk 0.24.4; receipt .artifacts/qualification/iii/receipt.json. ELv2 reviewed."
+      "qualification": "Partial: worker-process kill before Ok (redelivery + idempotent effect) and topic redrive observed on engine iii/v0.24.4 + builtin file_based queue + iii-sdk 0.24.4. Engine/queue kill-restart, observed DLQ inspection, blob references and startup cost not yet qualified. Receipt .artifacts/qualification/iii/receipt.json."
     },
     {
       "name": "pdfjs",
