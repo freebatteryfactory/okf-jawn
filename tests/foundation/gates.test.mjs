@@ -19,7 +19,7 @@ test('a Rust lane gate is fmt, Clippy and tests for its crates and features, sou
  const steps=laneSteps('/repo',laneNamed('storage'));
  assert.deepEqual(steps.map(step=>step.id),['fmt','clippy','test','source-policy','scope']);
  assert.deepEqual(steps.slice(0,4).map(step=>step.command),['cargo','cargo','cargo','cargo']);
- assert.deepEqual(steps[0].args,['fmt','--all','--check']);
+ assert.deepEqual(steps[0].args,['fmt','--check','-p','okf-jawn-storage']);
  assert.deepEqual(steps[1].args,['clippy','--locked','-p','okf-jawn-storage','--features','okf-jawn-storage/runtime','--all-targets','--','-D','warnings']);
  assert.deepEqual(steps[2].args,['test','--locked','-p','okf-jawn-storage','--features','okf-jawn-storage/runtime']);
  assert.deepEqual(steps[3].args,['xtask','source-policy','--root','/repo']);
@@ -27,6 +27,13 @@ test('a Rust lane gate is fmt, Clippy and tests for its crates and features, sou
  const core=laneSteps('/repo',laneNamed('core-cli'));
  assert.deepEqual(core[1].args,['clippy','--locked','-p','okf-jawn-core','-p','okf-jawn-cli','--all-targets','--','-D','warnings']);
  assert.deepEqual(core[2].args,['test','--locked','-p','okf-jawn-core','-p','okf-jawn-cli']);
+});
+test('every Rust lane checks the formatting of its own crates only, never the workspace',()=>{
+ for(const lane of lanes.filter(entry=>entry.kind==='rust')){
+  const args=laneSteps('/repo',lane)[0].args;
+  assert.deepEqual(args,['fmt','--check',...lane.crates.flatMap(name=>['-p',name])],lane.name);
+  assert.ok(!args.includes('--all'),lane.name);
+ }
 });
 test('a UI lane gate is Biome, route generation, tsc, Vitest filtered to the lane, then scope',async()=>{
  const views=laneSteps('/repo',laneNamed('views'));

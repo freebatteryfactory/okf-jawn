@@ -25,7 +25,7 @@ export function laneSteps(root, lane) {
   const packages = lane.crates.flatMap(name => ['-p', name]);
   const features = lane.features.length ? ['--features', lane.features.join(',')] : [];
   return [
-    cargo(root, 'fmt', 'fmt', '--all', '--check'),
+    cargo(root, 'fmt', 'fmt', '--check', ...packages),
     cargo(root, 'clippy', 'clippy', '--locked', ...packages, ...features, '--all-targets', '--', '-D', 'warnings'),
     cargo(root, 'test', 'test', '--locked', ...packages, ...features),
     cargo(root, 'source-policy', 'xtask', 'source-policy', '--root', root),
