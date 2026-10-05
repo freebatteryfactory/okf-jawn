@@ -23,6 +23,7 @@ use okf_jawn_contract::import::{Job, JobKind, JobState};
 use okf_jawn_contract::item::{Draft, ItemKind, Lifecycle};
 use okf_jawn_contract::proposal::{Change, Comment, Proposal, ProposalStatus};
 use okf_jawn_contract::review::{Confirmation, Review};
+use okf_jawn_contract::search::{GetGraphResponse, LinkDirection};
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::conversion::{
@@ -38,6 +39,7 @@ use okf_jawn_core::jobs::{
 };
 use okf_jawn_core::proposals::{ProposalFilter, ProposalStore};
 use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolved, token_hash};
+use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
     DiffQuery, LocalSource, LogQuery, NewWorkspace, ObjectInfo, Page, Promotion, Provenance,
@@ -551,6 +553,55 @@ async fn event_calls(
     events.append(scope, Some(mutation_id), progress).await
 }
 
+async fn search_index_calls(
+    index: &dyn SearchIndex,
+    scope: &StorageScope,
+    head: Revision,
+    item: ItemId,
+) -> Result<GetGraphResponse, ApiError> {
+    index.index_revision(scope, head.clone()).await?;
+    index
+        .search(
+            scope,
+            SearchQuery {
+                revision: head.clone(),
+                text: "quarterly revenue".to_owned(),
+                folder: None,
+                include_archived: false,
+                page: Page {
+                    cursor: None,
+                    limit: 20,
+                },
+            },
+        )
+        .await?;
+    index
+        .links(
+            scope,
+            LinkQuery {
+                revision: head.clone(),
+                item_id: item,
+                direction: LinkDirection::Both,
+                page: Page {
+                    cursor: None,
+                    limit: 20,
+                },
+            },
+        )
+        .await?;
+    index.rebuild(scope, head.clone()).await?;
+    index
+        .graph(
+            scope,
+            GraphQuery {
+                revision: head,
+                folder: None,
+                max_nodes: 200,
+            },
+        )
+        .await
+}
+
 #[test]
 fn provenance_keeps_the_typed_route_and_client() -> TestResult {
     let principal = Principal {
@@ -895,5 +946,26 @@ fn an_upload_slot_keeps_what_the_request_supplied() -> TestResult {
     assert_eq!(slot.supplied_by, initiator());
     assert!(type_checked(&upload_calls));
     assert!(type_checked(&event_calls));
+    Ok(())
+}
+
+#[test]
+fn a_search_query_names_exactly_one_revision() -> TestResult {
+    let query = SearchQuery {
+        revision: revision('a')?,
+        text: "quarterly revenue".to_owned(),
+        folder: Some(WorkspacePath::try_from("finance".to_owned())?),
+        include_archived: false,
+        page: Page {
+            cursor: None,
+            limit: 20,
+        },
+    };
+    assert_eq!(query.revision, revision('a')?);
+    assert_eq!(
+        query.folder.as_ref().map(WorkspacePath::as_str),
+        Some("finance")
+    );
+    assert!(type_checked(&search_index_calls));
     Ok(())
 }
