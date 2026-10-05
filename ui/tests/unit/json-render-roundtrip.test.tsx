@@ -1,12 +1,10 @@
 /** Phase 0: json-render catalog Spec round-trip and empty-binding render. */
 
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { BindingsContext, type ResolvedPresentation } from '../../src/features/views/Bindings';
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
+import sixComponentSpec from '../fixtures/six-component-spec.json';
 
 const emptyBindings: ResolvedPresentation = {
   charts: new Map(),
@@ -14,12 +12,6 @@ const emptyBindings: ResolvedPresentation = {
   bindings: new Map(),
   tables: new Map(),
 };
-
-const fixturePath = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '../../../tests/fixtures/views/six-component-spec.json',
-);
-const sixComponentSpec: unknown = JSON.parse(readFileSync(fixturePath, 'utf8'));
 
 const CATALOG_TYPES = [
   'Stack',

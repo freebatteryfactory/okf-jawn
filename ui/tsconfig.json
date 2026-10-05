@@ -23,7 +23,7 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src", "tests"],
+  "include": ["src"],
   "exclude": ["src/api/generated/client", "src/api/generated/core"],
   "references": [{ "path": "./tsconfig.generated.json" }, { "path": "./tsconfig.tooling.json" }]
 }
