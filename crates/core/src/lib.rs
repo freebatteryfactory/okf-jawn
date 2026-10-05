@@ -23,9 +23,9 @@ pub mod ports;
 
 /// Bounded conversion worker interface.
 pub mod conversion;
-/// Durable job and review record interfaces.
+/// Durable job specifications, leases, reviews and receipts.
 pub mod jobs;
-/// Durable mutation ledger and abandoned-effect lookup.
+/// Durable mutation ledger.
 pub mod mutations;
 /// Proposal and comment persistence.
 pub mod proposals;
@@ -35,7 +35,7 @@ pub mod readiness;
 pub mod sandbox;
 /// Rebuildable search, link, and graph index interface.
 pub mod search;
-/// Scoped byte and version persistence interfaces.
+/// Blob, version and workspace-catalog ports with their core parameter types.
 pub mod storage;
 /// Authenticated upload occurrence slots.
 pub mod uploads;
