@@ -36,6 +36,7 @@ import {
   TIMEOUT_PROBE,
   buildDoclingReceipt,
 } from '../../qualification/docling/lib/receipt.mjs';
+import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -491,4 +492,75 @@ test('every fixture run is a recorded source whose bytes are unchanged, and must
     assert.equal(createHash('sha256').update(bytes).digest('hex'), entry.sha256, name);
   }
   assert.deepEqual(sources.files[MUST_FAIL].pass_when, ['converter_error', 'converter_status:Failure']);
+});
+
+const pidAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const pause = (ms) => new Promise((done) => setTimeout(done, ms));
+
+test('waitForListening resolves on the listening line and the process can then be stopped', async () => {
+  const proc = spawnGroup(process.execPath, [
+    '-e',
+    "process.stderr.write('okf-qualify-mcp-apps listening on http://127.0.0.1:1/mcp\\n');setInterval(()=>{},1000)",
+  ]);
+  try {
+    const match = await within(
+      waitForListening(proc, { pattern: /okf-qualify-mcp-apps listening on (\S+)/, label: 'harness' }),
+      4000,
+      'listening',
+    );
+    assert.equal(match[1], 'http://127.0.0.1:1/mcp');
+  } finally {
+    await killProcessTree(proc);
+  }
+  assert.equal(pidAlive(proc.child.pid), false);
+});
+
+test('a harness that fails to bind is reported at once with its exit code and stderr', async () => {
+  const proc = spawnGroup(process.execPath, [
+    '-e',
+    "process.stderr.write('okf-qualify-mcp-apps: bind 127.0.0.1:1: access denied\\n');process.exit(1)",
+  ]);
+  const started = Date.now();
+  await assert.rejects(
+    within(waitForListening(proc, { pattern: /listening on (\S+)/, timeoutMs: 60_000, label: 'harness' }), 4000, 'bind failure'),
+    (error) => {
+      assert.match(error.message, /harness exited before listening \(exit 1\)/);
+      assert.match(error.message, /bind 127\.0\.0\.1:1: access denied/);
+      return true;
+    },
+  );
+  assert.ok(Date.now() - started < 4000);
+});
+
+test('killProcessTree stops grandchildren, not only the process it was given', async () => {
+  const parent =
+    "const {spawn}=require('node:child_process');const g=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});process.stdout.write(String(g.pid)+'\\n');setInterval(()=>{},1000)";
+  const proc = spawnGroup(process.execPath, ['-e', parent]);
+  let grandchild = null;
+  try {
+    for (let attempt = 0; attempt < 80 && grandchild === null; attempt += 1) {
+      const match = /^(\d+)\r?\n/.exec(proc.stdout());
+      if (match) grandchild = Number(match[1]);
+      else await pause(50);
+    }
+    assert.ok(grandchild !== null, 'parent did not report its child pid');
+    assert.equal(pidAlive(grandchild), true);
+    await killProcessTree(proc);
+    let gone = false;
+    for (let attempt = 0; attempt < 60 && !gone; attempt += 1) {
+      gone = !pidAlive(grandchild);
+      if (!gone) await pause(50);
+    }
+    assert.equal(gone, true, `grandchild ${grandchild} survived killProcessTree`);
+  } finally {
+    if (grandchild !== null && pidAlive(grandchild)) process.kill(grandchild);
+    await killProcessTree(proc);
+  }
 });
