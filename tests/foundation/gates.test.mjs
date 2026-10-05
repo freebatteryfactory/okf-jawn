@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cleanCheckout, cleanCheckoutTasks, foundationTests, laneSteps, premergeSteps, runLane, runPremerge } from '../../scripts/lib/gates.mjs';
+import { cleanCheckout, cleanCheckoutTasks, foundationTests, laneSteps, premergeSteps, revisionLabel, runLane, runPremerge } from '../../scripts/lib/gates.mjs';
 import { laneNamed, lanes } from '../../scripts/lib/lanes.mjs';
 import { fixtureRepo, git } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
@@ -137,4 +137,12 @@ test('every foundation test file is in exactly one of the fast and slow lists, a
  const entry=await read('scripts/dev.mjs');
  assert.match(entry,/case 'check-offline': await offlineChecks\(\{ fast: args\.includes\('--fast'\) \}\); break;/);
  assert.match(entry,/!fast \|\| foundationTests\.fast\.includes\(name\)/);
+});
+test('a failed git status counts as dirty, never as the clean commit',async t=>{
+ const {root:repo}=await fixtureRepo(t,fixture);const sha=await git(repo,'rev-parse','HEAD');
+ assert.equal(await revisionLabel(repo),sha);
+ // A corrupt index makes `git status` fail while `git rev-parse HEAD` still works.
+ await writeFile(join(repo,'.git','index'),'not an index');
+ await assert.rejects(git(repo,'status','--porcelain'));
+ assert.equal(await revisionLabel(repo),`${sha}-dirty`);
 });

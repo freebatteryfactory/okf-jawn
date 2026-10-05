@@ -63,11 +63,12 @@ export async function runSteps(steps, { logPath, failFast, execute = executeStep
   return { results, failed: results.filter(result => result.code !== 0).map(result => result.id), write };
 }
 
-/** HEAD, suffixed `-dirty` when the tree has uncommitted changes, so a log never claims a commit it did not test. */
+/** HEAD, suffixed `-dirty` when the tree has uncommitted changes or its status cannot be read, so a log never claims a commit it did not test. */
 export async function revisionLabel(root) {
   const head = (await run('git', ['rev-parse', 'HEAD'], { cwd: root, capture: true })).stdout.trim();
-  const status = (await run('git', ['status', '--porcelain'], { cwd: root, capture: true })).stdout.trim();
-  return status ? `${head}-dirty` : head;
+  // A status that cannot be read is not evidence of a clean tree.
+  const status = await run('git', ['status', '--porcelain'], { cwd: root, capture: true, allowFailure: true });
+  return status.code !== 0 || status.stdout.trim() ? `${head}-dirty` : head;
 }
 
 export async function runLane(root, name, { execute, echo } = {}) {
