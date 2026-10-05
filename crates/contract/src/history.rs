@@ -75,12 +75,14 @@ pub struct DiffRequest {
 }
 
 /// A changed file with before and after locators.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileChange {
     /// Previous path; absent for additions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
     /// New path; absent for deletions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_path: Option<String>,
     /// Unified text diff when applicable.
     pub patch: String,
