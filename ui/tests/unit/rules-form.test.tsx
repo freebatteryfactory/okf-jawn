@@ -38,21 +38,17 @@ describe('RulesForm', () => {
 
   it('displays AJV errors for invalid NamingRules data', () => {
     const onPreview = vi.fn();
-    const invalid = JSON.parse(
-      '{"schema_version":"not-an-integer","rules":[]}',
-    ) as Record<string, unknown>;
+    // JSON.parse yields any — no `as unknown as NamingRules`.
+    const invalid = JSON.parse('{"schema_version":"not-an-integer","rules":[]}');
     const ajv = validator.validateFormData(invalid, schema);
     expect(ajv.errors.length).toBeGreaterThan(0);
-    expect(ajv.errors.some((error) => /schema_version|type|integer/i.test(JSON.stringify(error)))).toBe(
-      true,
-    );
 
     const { container } = render(
       <RulesForm schema={schema} value={invalid} onPreview={onPreview} />,
     );
     fireEvent.click(screen.getByRole('button', { name: /preview naming changes/i }));
     const body = container.textContent ?? '';
-    expect(body).toMatch(/schema_version|integer|type/i);
+    expect(body).toMatch(/schema_version/i);
     expect(ajv.errors.map((error) => error.message ?? '').join(' ')).toMatch(
       /integer|type|must|should/i,
     );

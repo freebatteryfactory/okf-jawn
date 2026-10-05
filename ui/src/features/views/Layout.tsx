@@ -127,7 +127,7 @@ function normalizeElement(key: string, raw: z.infer<typeof rawElementSchema>): U
   if (slots !== undefined) next.slots = slots;
   // Pass authored visibility through unchanged so validateSpec judges the original.
   if (raw.visible !== undefined) {
-    next.visible = raw.visible as UIElement['visible'];
+    next.visible = raw.visible as NonNullable<UIElement['visible']>;
   }
   if (raw.repeat !== undefined) {
     const repeat = repeatSchema.safeParse(raw.repeat);

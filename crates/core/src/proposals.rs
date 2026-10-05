@@ -13,7 +13,11 @@ use crate::storage::StorageScope;
 /// Durable suggested change sets and discussion; storage owns the implementation.
 pub trait ProposalStore: Send + Sync {
     /// Persist a new open proposal.
-    fn insert<'a>(&'a self, scope: &'a StorageScope, proposal: Proposal) -> PortFuture<'a, Proposal>;
+    fn insert<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        proposal: Proposal,
+    ) -> PortFuture<'a, Proposal>;
     /// Read one proposal by identity.
     fn get<'a>(
         &'a self,
@@ -27,7 +31,11 @@ pub trait ProposalStore: Send + Sync {
         request: ListProposalsRequest,
     ) -> PortFuture<'a, ListProposalsResponse>;
     /// Replace proposal status and retained fields after accept, decline, or conflict.
-    fn update<'a>(&'a self, scope: &'a StorageScope, proposal: Proposal) -> PortFuture<'a, Proposal>;
+    fn update<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        proposal: Proposal,
+    ) -> PortFuture<'a, Proposal>;
     /// Append a discussion comment without certifying content.
     fn add_comment<'a>(
         &'a self,

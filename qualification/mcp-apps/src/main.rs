@@ -118,8 +118,7 @@ fn fixtures_dir() -> PathBuf {
 fn load_fixture(path: &Path) -> Result<Value, String> {
     let raw = fs::read_to_string(path)
         .map_err(|error| format!("read fixture {}: {error}", path.display()))?;
-    serde_json::from_str(&raw)
-        .map_err(|error| format!("parse fixture {}: {error}", path.display()))
+    serde_json::from_str(&raw).map_err(|error| format!("parse fixture {}: {error}", path.display()))
 }
 
 impl QualifyAppsServer {
@@ -389,7 +388,9 @@ fn dist_apps_dir() -> PathBuf {
 
 fn parse_http_bind() -> Result<Option<SocketAddr>, String> {
     let mut args = env::args().skip(1);
-    let mut bind: Option<String> = env::var("OKF_MCP_APPS_HTTP").ok().filter(|value| !value.is_empty());
+    let mut bind: Option<String> = env::var("OKF_MCP_APPS_HTTP")
+        .ok()
+        .filter(|value| !value.is_empty());
     while let Some(arg) = args.next() {
         if arg == "--check" {
             continue;

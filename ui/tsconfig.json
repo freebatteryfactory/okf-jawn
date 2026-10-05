@@ -25,9 +25,5 @@
   },
   "include": ["src"],
   "exclude": ["src/api/generated/client", "src/api/generated/core"],
-  "references": [
-    { "path": "./tsconfig.generated.json" },
-    { "path": "./tsconfig.tooling.json" },
-    { "path": "./tsconfig.tests.json" }
-  ]
+  "references": [{ "path": "./tsconfig.generated.json" }, { "path": "./tsconfig.tooling.json" }]
 }

@@ -32,10 +32,7 @@ pub trait CredentialStore: Send + Sync {
     /// Load or create the persistent local installation identity.
     fn installation_identity(&self) -> PortFuture<'_, InstallationIdentity>;
     /// Issue a local MCP connector credential; the secret is returned once.
-    fn create_connector(
-        &self,
-        request: CreateConnectorRequest,
-    ) -> PortFuture<'_, IssuedConnector>;
+    fn create_connector(&self, request: CreateConnectorRequest) -> PortFuture<'_, IssuedConnector>;
     /// List connector metadata without secrets.
     fn list_connectors(&self) -> PortFuture<'_, ListConnectorsResponse>;
     /// Revoke a connector immediately.

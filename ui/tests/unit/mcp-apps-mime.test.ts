@@ -6,17 +6,16 @@ import { fileURLToPath } from 'node:url';
 import { RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps';
 import { describe, expect, it } from 'vitest';
 
-const manifestPath = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '../../dist-apps/manifest.json',
-);
-
 describe('MCP Apps RESOURCE_MIME_TYPE', () => {
   it('exports the installed UI resource MIME profile', () => {
     expect(RESOURCE_MIME_TYPE).toBe('text/html;profile=mcp-app');
   });
 
   it('matches the mimeType written into dist-apps/manifest.json', () => {
+    const manifestPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../dist-apps/manifest.json',
+    );
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
       resources?: Array<{ mimeType?: string }>;
       mimeType?: string;

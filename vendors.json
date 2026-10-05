@@ -346,12 +346,12 @@
       "context7_query": null,
       "knowledge_source": "Official documentation reference; pin matches ui/package.json",
       "offline_notes": [
-        "Pinned at 20.8.4 as the Vitest DOM environment under Bun.",
+        "Pinned at 20.8.9 as the Vitest DOM environment under Bun (fixes GHSA-w4gp-fjgq-3q4g / GHSA-6q6h-j7hj-3r64).",
         "Vitest environment selection is separate from Bun's own test runner used by check-offline.",
         "Prefer happy-dom over jsdom for Vitest unit tests when the UI lane selects it; do not invent a second DOM environment."
       ],
       "version_authority": "ui/package.json and bun.lock",
-      "qualification": "PASS under Bun 1.4.2: Vitest 5.0.3 environment happy-dom 20.8.4; ui `bun --bun run test` 6 files / 23 tests. Node jsdom special-case removed from scripts/dev.mjs and ui test script."
+      "qualification": "PASS under Bun 1.4.2: Vitest 5.0.3 environment happy-dom 20.8.9; ui `bun --bun run test` green. Node jsdom special-case removed."
     },
     {
       "name": "tanstack",

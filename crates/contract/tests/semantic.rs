@@ -64,13 +64,17 @@ fn content_identity_cannot_be_a_filename() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn view_document_six_component_round_trips_with_deny_unknown_fields() -> Result<(), Box<dyn Error>> {
+fn view_document_six_component_round_trips_with_deny_unknown_fields() -> Result<(), Box<dyn Error>>
+{
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/views/view-document-six-component.json");
     let raw = fs::read_to_string(&path)?;
     let parsed: ViewDocument = serde_json::from_str(&raw)?;
     assert_eq!(parsed.schema_version, 1);
-    assert_eq!(parsed.grammar, okf_jawn_contract::views::RenderGrammar::JsonRender);
+    assert_eq!(
+        parsed.grammar,
+        okf_jawn_contract::views::RenderGrammar::JsonRender
+    );
     assert_eq!(parsed.spec["root"], "root");
     assert_eq!(parsed.spec["elements"]["root"]["type"], "Stack");
     let reserialized = serde_json::to_value(&parsed)?;

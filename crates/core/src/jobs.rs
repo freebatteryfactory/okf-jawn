@@ -45,11 +45,7 @@ pub trait RecordStore: Send + Sync {
         request_digest: Digest,
     ) -> PortFuture<'a, Job>;
     /// Read one durable job within workspace scope.
-    fn get_job<'a>(
-        &'a self,
-        scope: &'a StorageScope,
-        job: JobId,
-    ) -> PortFuture<'a, Job>;
+    fn get_job<'a>(&'a self, scope: &'a StorageScope, job: JobId) -> PortFuture<'a, Job>;
     /// List durable jobs for a workspace with bounded pagination.
     fn list_jobs<'a>(
         &'a self,
