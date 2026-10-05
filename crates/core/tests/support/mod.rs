@@ -74,11 +74,23 @@ struct Ledger {
     granted: u64,
 }
 
+/// A `MutationStore` call that a test can make fail once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LedgerCall {
+    /// `MutationStore::begin`.
+    Begin,
+    /// `MutationStore::complete`.
+    Complete,
+    /// `MutationStore::release`.
+    Release,
+}
+
 /// `MutationStore` over a `Mutex` map; leases use the wall clock, and every grant carries a
 /// token no earlier grant carried.
 #[derive(Debug)]
 pub struct FixtureMutations {
     ledger: Mutex<Ledger>,
+    failures: Mutex<BTreeMap<LedgerCall, ApiError>>,
     lease: Duration,
 }
 
@@ -247,7 +259,26 @@ impl FixtureMutations {
     pub fn new() -> Self {
         Self {
             ledger: Mutex::new(Ledger::default()),
+            failures: Mutex::new(BTreeMap::new()),
             lease: Duration::from_secs(30),
+        }
+    }
+
+    /// Make the next `call` fail with `error` without touching the ledger; later calls answer
+    /// normally. This is how an unreachable or failing store is simulated.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_next(&self, call: LedgerCall, error: ApiError) -> Result<(), ApiError> {
+        lock(&self.failures, "ledger failures")?.insert(call, error);
+        Ok(())
+    }
+
+    /// Take the failure scripted for `call`, if a test set one.
+    fn scripted_failure(&self, call: LedgerCall) -> Result<(), ApiError> {
+        match lock(&self.failures, "ledger failures")?.remove(&call) {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 
@@ -296,6 +327,7 @@ impl MutationStore for FixtureMutations {
         digest: &'a Digest,
     ) -> PortFuture<'a, BeginOutcome> {
         Box::pin(async move {
+            self.scripted_failure(LedgerCall::Begin)?;
             let mut ledger = lock(&self.ledger, "mutation ledger")?;
             let now = Instant::now();
             let lease_until = now
@@ -348,6 +380,7 @@ impl MutationStore for FixtureMutations {
 
     fn complete(&self, lease: MutationLease, response: Value) -> PortFuture<'_, ()> {
         Box::pin(async move {
+            self.scripted_failure(LedgerCall::Complete)?;
             let mut ledger = lock(&self.ledger, "mutation ledger")?;
             let row = ledger.row_mut(lease.mutation_id)?;
             if !row.held_by(lease) {
@@ -360,6 +393,7 @@ impl MutationStore for FixtureMutations {
 
     fn release(&self, lease: MutationLease) -> PortFuture<'_, ()> {
         Box::pin(async move {
+            self.scripted_failure(LedgerCall::Release)?;
             let mut ledger = lock(&self.ledger, "mutation ledger")?;
             let row = ledger.row_mut(lease.mutation_id)?;
             if row.held_by(lease) {
@@ -450,7 +484,7 @@ pub mod counting;
 #[cfg(test)]
 mod tests {
     use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
-    use okf_jawn_contract::error::ErrorCode;
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
     use okf_jawn_contract::identity::{Digest, IdentityError};
     use okf_jawn_contract::metadata::OperationName;
     use okf_jawn_core::access::AccessControl;
@@ -458,7 +492,9 @@ mod tests {
     use okf_jawn_core::storage::StorageScope;
     use serde_json::json;
 
-    use super::{FixturePorts, GrantTable, all_permissions, idempotency_key, tenant, workspace};
+    use super::{
+        FixturePorts, GrantTable, LedgerCall, all_permissions, idempotency_key, tenant, workspace,
+    };
     use crate::check::{TestResult, err_of};
 
     const HOME: &str = "11111111-1111-4111-8111-111111111111";
@@ -529,6 +565,47 @@ mod tests {
         };
         assert_eq!(stored.mutation_id, id);
         assert_eq!(stored.body, json!({ "done": true }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fixture_ledger_fails_one_scripted_call_and_leaves_the_row_alone() -> TestResult {
+        let ports = FixturePorts::new(GrantTable::default());
+        let ledger = ports.mutations.as_ref();
+        let key = MutationKey {
+            tenant_id: tenant("tenant-local")?,
+            subject: "alice".to_owned(),
+            operation: OperationName::CreateItem,
+            key: idempotency_key("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")?,
+        };
+        let digest = digest_of("a")?;
+        let offline = || ApiError::new(ErrorCode::Unavailable, "ledger offline");
+
+        ledger.fail_next(LedgerCall::Begin, offline())?;
+        let refused = err_of(ledger.begin(&key, &digest).await)?;
+        assert_eq!(refused.code, ErrorCode::Unavailable);
+        // The failed begin wrote nothing, so the next one starts the mutation.
+        let BeginOutcome::New(lease) = ledger.begin(&key, &digest).await? else {
+            return Err("the begin after a failed begin must be New".into());
+        };
+
+        ledger.fail_next(LedgerCall::Release, offline())?;
+        let refused = err_of(ledger.release(lease).await)?;
+        assert_eq!(refused.code, ErrorCode::Unavailable);
+        assert!(matches!(
+            ledger.begin(&key, &digest).await?,
+            BeginOutcome::InProgress { .. }
+        ));
+
+        ledger.fail_next(LedgerCall::Complete, offline())?;
+        let refused = err_of(ledger.complete(lease, json!({ "done": true })).await)?;
+        assert_eq!(refused.code, ErrorCode::Unavailable);
+        assert_eq!(ledger.stored_body(lease.mutation_id)?, None);
+        ledger.complete(lease, json!({ "done": true })).await?;
+        assert_eq!(
+            ledger.stored_body(lease.mutation_id)?,
+            Some(json!({ "done": true }))
+        );
         Ok(())
     }
 

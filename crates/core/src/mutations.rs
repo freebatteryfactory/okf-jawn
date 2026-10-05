@@ -19,9 +19,12 @@
 //! [`MutationLease`] and act only for the current grant: the slow attempt's `complete` is
 //! refused with `Conflict`, and its `release` changes nothing.
 //!
-//! # Failed handlers
-//! A handler error releases the lease. The row keeps its id and digest and is not completed,
-//! so the same key and body may be sent again at once; that retry runs as a resumed attempt.
+//! # Failed attempts
+//! A handler error releases the lease, and so does any failure after a successful handler
+//! (the response cannot be serialized, the ledger body cannot be built, or `complete` fails
+//! for a reason other than a lost lease). The row keeps its id and digest and is not
+//! completed, so the same key and body may be sent again at once; that retry runs as a
+//! resumed attempt.
 
 use std::collections::BTreeMap;
 

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use check::{TestResult, err_of, some};
 use support::counting::CountingApplication;
-use support::{FixturePorts, GrantTable, all_permissions, tenant, workspace};
+use support::{FixturePorts, GrantTable, LedgerCall, all_permissions, tenant, workspace};
 
 /// A dispatch that was started and is still running, held so a test can finish or drop it.
 type Running<'a> = Pin<Box<dyn Future<Output = Result<Value, ApiError>> + 'a>>;
@@ -686,6 +686,73 @@ async fn handler_error_then_retry_runs_again() -> TestResult {
     assert!(earlier.mutation.is_some());
     assert_eq!(later.mutation, earlier.mutation);
     assert_eq!(later.attempt, Attempt::Resumed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_begin_is_returned_and_the_handler_does_not_run() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", item_document("hello"))?;
+    ports.mutations.fail_next(
+        LedgerCall::Begin,
+        ApiError::new(ErrorCode::Unavailable, "ledger offline"),
+    )?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let refused = err_of(call(&app, &ports, &alice, "create_item", body).await)?;
+    assert_eq!(refused.code, ErrorCode::Unavailable);
+    assert_eq!(refused.message, "ledger offline");
+    assert_eq!(app.call_count("create_item")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_complete_releases_the_lease_so_a_retry_resumes_at_once() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", item_document("hello"))?;
+    ports.mutations.fail_next(
+        LedgerCall::Complete,
+        ApiError::new(ErrorCode::Unavailable, "ledger offline"),
+    )?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let refused = err_of(call(&app, &ports, &alice, "create_item", body.clone()).await)?;
+    assert_eq!(refused.code, ErrorCode::Unavailable);
+    assert_eq!(refused.message, "ledger offline");
+
+    // The lease was released, not left to expire: the retry is not `InProgress`.
+    let response = call(&app, &ports, &alice, "create_item", body).await?;
+    assert_eq!(response.get("body"), Some(&json!("hello")));
+    let seen = app.contexts("create_item")?;
+    assert_eq!(seen.len(), 2);
+    let earlier = some(seen.first(), "the attempt whose complete failed")?;
+    let later = some(seen.get(1), "the retry")?;
+    assert!(earlier.mutation.is_some());
+    assert_eq!(later.mutation, earlier.mutation);
+    assert_eq!(later.attempt, Attempt::Resumed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_release_does_not_replace_the_handler_error() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.fail_once(
+        "create_item",
+        ApiError::new(ErrorCode::Unavailable, "index offline"),
+    )?;
+    ports.mutations.fail_next(
+        LedgerCall::Release,
+        ApiError::new(ErrorCode::Internal, "ledger offline"),
+    )?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let refused = err_of(call(&app, &ports, &alice, "create_item", body).await)?;
+    assert_eq!(refused.code, ErrorCode::Unavailable);
+    assert_eq!(refused.message, "index offline");
+    assert_eq!(app.call_count("create_item")?, 1);
     Ok(())
 }
 
