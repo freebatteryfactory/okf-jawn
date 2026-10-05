@@ -153,9 +153,11 @@ export function outOfScope(paths, scope) {
 
 /**
  * Fail when anything changed since the merge-base with the scope's base lies outside the scope.
- * Committed, staged, unstaged and untracked-but-not-ignored paths all count.
+ * Committed, staged, unstaged and untracked-but-not-ignored paths all count. With `head` (a
+ * commit, as a pre-push hook receives it) only that commit's history counts and the working
+ * tree is ignored.
  */
-export async function checkScope(root, { lane, base, git = gitIn(root) } = {}) {
+export async function checkScope(root, { lane, base, head, git = gitIn(root) } = {}) {
   const branch = lane ? laneNamed(lane).branch : must(await git(['rev-parse', '--abbrev-ref', 'HEAD']), 'git rev-parse --abbrev-ref HEAD').trim();
   const scope = scopeFor(branch);
   if (!scope) throw new Error(`No scope row for branch ${branch}; add one to scripts/lib/lanes.mjs before pushing or gating it.`);
@@ -165,9 +167,10 @@ export async function checkScope(root, { lane, base, git = gitIn(root) } = {}) {
     if ((await git(['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`])).code === 0) { reference = candidate; break; }
   }
   if (!reference) throw new Error(`scope check needs ${wanted} or origin/${wanted} to compare against; neither exists here.`);
-  const mergeBase = must(await git(['merge-base', 'HEAD', reference]), `git merge-base HEAD ${reference}`).trim();
-  const tracked = must(await git(['diff', '--name-only', '--no-renames', '-z', mergeBase]), 'git diff --name-only');
-  const untracked = must(await git(['ls-files', '--others', '--exclude-standard', '-z']), 'git ls-files --others');
+  const tip = head ?? 'HEAD';
+  const mergeBase = must(await git(['merge-base', tip, reference]), `git merge-base ${tip} ${reference}`).trim();
+  const tracked = must(await git(['diff', '--name-only', '--no-renames', '-z', mergeBase, ...(head ? [head] : [])]), 'git diff --name-only');
+  const untracked = head ? '' : must(await git(['ls-files', '--others', '--exclude-standard', '-z']), 'git ls-files --others');
   const changed = [...new Set([...tracked.split('\0'), ...untracked.split('\0')].filter(Boolean))].sort();
   const outside = outOfScope(changed, scope);
   if (outside.length) throw new Error(`scope check failed for ${scope.name}: ${outside.length} path(s) outside its scope:\n  ${outside.join('\n  ')}`);

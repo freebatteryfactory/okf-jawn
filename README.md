@@ -42,7 +42,7 @@ Equivalent `just` recipes are provided. `lock` is the only task that resolves de
 
 `gen` generates into two temporary directories, compares the entire output file sets and bytes, then publishes only generated directories. `gen-check` compares those results to the checkout without editing it. The generator does not require a database, converter, identity provider, or running application. Generator output is not an implementation-status claim.
 
-`bootstrap` and `init` install the tracked hooks through `core.hooksPath`; nothing else needs installing. pre-commit runs `check-offline`. pre-push runs `check-offline`, `cargo fmt --all --check` and, on a `build/*` or `cure/*` branch, the scope check. Hooks never regenerate files or touch another worktree.
+`bootstrap` and `init` install the tracked hooks through `core.hooksPath`; nothing else needs installing. pre-commit runs `check-offline --fast` (the tests that create no repository and spawn no process, under a second). pre-push runs the full `check-offline`, `cargo fmt --all --check` and, for each pushed `build/*` ref (read from the refs git passes on stdin, at the commit being pushed), the scope check. Hooks never regenerate files or touch another worktree.
 
 ## What gets generated
 

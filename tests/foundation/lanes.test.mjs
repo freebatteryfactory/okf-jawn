@@ -144,3 +144,14 @@ test('the entrypoint lists no lane and no lane directory of its own, and nothing
  assert.doesNotMatch(entry,/okf-jawn-lanes|--force/);
  assert.doesNotMatch(await read('scripts/lib/lanes.mjs'),/'--force'|'-f'|'-D'/);
 });
+test('the scope check can address a pushed commit instead of HEAD, and then ignores the working tree',async t=>{
+ const {root}=await fixtureRepo(t,{'crates/storage/src/lib.rs':'//! storage\n','crates/core/src/lib.rs':'//! core\n'});
+ await git(root,'checkout','--quiet','-b','build/storage');
+ const good=await commit(root,{'crates/storage/src/lib.rs':'//! storage, changed\n'},'in lane');
+ const bad=await commit(root,{'crates/core/src/lib.rs':'//! core, changed from the storage lane\n'},'out of lane');
+ await git(root,'checkout','--quiet','main');
+ await writeFile(join(root,'stray.txt'),'not part of any pushed commit');
+ assert.deepEqual((await checkScope(root,{lane:'storage',head:good})).changed,['crates/storage/src/lib.rs']);
+ await assert.rejects(checkScope(root,{lane:'storage',head:bad}),/scope check failed for storage: 1 path\(s\) outside its scope:\n  crates\/core\/src\/lib\.rs/);
+ await assert.rejects(checkScope(root,{lane:'storage'}),/stray\.txt/,'without a head the working tree still counts');
+});

@@ -174,7 +174,7 @@ async function main() {
     case 'lanes': process.stdout.write(`${(await createLanes(root, { names: args })).join('\n')}\n`); break;
     case 'lanes-table': process.stdout.write(await syncLaneTable(root) ? 'AGENTS.md lane table regenerated.\n' : 'AGENTS.md lane table is current.\n'); break;
     case 'scope': {
-      const result = await checkScope(root, { lane: positional[0], base: option('--base') });
+      const result = await checkScope(root, { lane: positional[0], base: option('--base'), head: option('--head') });
       process.stdout.write(`scope: ${result.changed.length} changed path(s) since ${result.base}, all inside ${result.name}.\n`);
       break;
     }
