@@ -7,6 +7,7 @@ use okf_jawn_contract::identity::IdentityError;
 use okf_jawn_core::context::Attempt;
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use okf_jawn_core::mutations::request_digest;
+use okf_jawn_core::storage::StorageScope;
 use serde_json::{Value, json};
 
 use check::{TestResult, err_of, some};
@@ -656,6 +657,58 @@ fn request_digest_sorts_keys_at_every_depth() -> TestResult {
         request_digest(&scrambled)?.as_str(),
         "fa6628597d53c1e5019d96bfec141c0069e6959a5e0662f3899becda15925240"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_grant_for_another_workspace_is_refused_before_the_handler() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    ports.access.answer_workspaces_as(StorageScope {
+        tenant_id: tenant("tenant-local")?,
+        workspace_id: workspace(WORKSPACE_C)?,
+    })?;
+    let app = CountingApplication::new();
+    app.set_response("list_items", listing())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = list_items_body(WORKSPACE_A);
+    let refused = err_of(call(&app, &ports, &alice, "list_items", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert_eq!(
+        refused.message,
+        "Access adapter returned a grant for a different scope"
+    );
+    assert_eq!(app.call_count("list_items")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_workspace_grant_for_another_tenant_is_refused_before_the_handler() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    ports.access.answer_workspaces_as(StorageScope {
+        tenant_id: tenant("tenant-other")?,
+        workspace_id: workspace(WORKSPACE_A)?,
+    })?;
+    let app = CountingApplication::new();
+    app.set_response("list_items", listing())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = list_items_body(WORKSPACE_A);
+    let refused = err_of(call(&app, &ports, &alice, "list_items", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert_eq!(app.call_count("list_items")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_tenant_grant_for_another_tenant_is_refused_before_the_handler() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    ports.access.answer_tenants_as(tenant("tenant-other")?)?;
+    let app = CountingApplication::new();
+    app.set_response("create_workspace", created_workspace())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = create_workspace_body(KEY_ONE);
+    let refused = err_of(call(&app, &ports, &alice, "create_workspace", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert_eq!(app.call_count("create_workspace")?, 0);
     Ok(())
 }
 

@@ -7,7 +7,7 @@
 
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-use okf_jawn_contract::identity::{ConnectorId, MutationId};
+use okf_jawn_contract::identity::{ConnectorId, MutationId, WorkspaceId};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
 use schemars::{JsonSchema, generate::SchemaSettings};
@@ -216,10 +216,12 @@ async fn authorize_targets(
             Target::Authenticated => {}
             Target::Deployment(permission) => {
                 let raw = access.authorize_tenant(principal, permission).await?;
+                require_tenant_scope(principal, &raw)?;
                 tenant = Some(access::authorize_tenant(principal, raw, permission)?);
             }
             Target::Workspace(workspace, permission) => {
                 let raw = access.authorize(principal, workspace, permission).await?;
+                require_workspace_scope(principal, workspace, &raw)?;
                 let grant = access::authorize_workspace(principal, raw, permission)?;
                 if !grants
                     .iter()
@@ -239,6 +241,35 @@ async fn authorize_targets(
         mutation: None,
         attempt: Attempt::First,
     })
+}
+
+/// Refuse a workspace grant the adapter returned for a workspace or tenant that was not asked.
+fn require_workspace_scope(
+    principal: &Principal,
+    workspace: WorkspaceId,
+    grant: &WorkspaceGrant,
+) -> Result<(), ApiError> {
+    if grant.workspace_id() == workspace && grant.scope.tenant_id == principal.tenant_id {
+        Ok(())
+    } else {
+        Err(foreign_scope())
+    }
+}
+
+/// Refuse a tenant grant the adapter returned for a tenant other than the caller's.
+fn require_tenant_scope(principal: &Principal, grant: &TenantGrant) -> Result<(), ApiError> {
+    if grant.tenant_id == principal.tenant_id {
+        Ok(())
+    } else {
+        Err(foreign_scope())
+    }
+}
+
+fn foreign_scope() -> ApiError {
+    ApiError::new(
+        ErrorCode::Internal,
+        "Access adapter returned a grant for a different scope",
+    )
 }
 
 fn parse_operation(operation_id: &str) -> Result<OperationName, ApiError> {
