@@ -2,16 +2,19 @@
 import { useEffect, useState } from 'react';
 import type { TopLevelSpec } from 'vega-lite';
 import { z } from 'zod';
-import type { PresentResponse, ViewBinding } from '../../api/generated/types.gen';
-import { zGetObjectResponse, zReadItemResponse } from '../../api/generated/zod.gen';
+import {
+  zGetObjectResponse,
+  type zPresentResponse,
+  zReadItemResponse,
+} from '../../api/generated/zod.gen';
+import { omitUndefined } from '../../lib/wire';
 import type { ResolvedPresentation } from './Bindings';
 import { BindingsContext } from './Bindings';
 import { Chart } from './Chart';
-import { catalog } from './catalog';
 import { Layout } from './Layout';
 
 export interface PresentViewProps {
-  response: PresentResponse;
+  response: z.infer<typeof zPresentResponse>;
   callTool: (name: string, input: Record<string, unknown>) => Promise<unknown>;
 }
 const rowsSchema = z
@@ -19,19 +22,25 @@ const rowsSchema = z
   .max(100000);
 const toolResult = z.object({ structuredContent: z.unknown() });
 
-async function dataset(binding: ViewBinding, callTool: PresentViewProps['callTool']) {
+async function dataset(
+  binding: z.infer<typeof zPresentResponse>['resolved_bindings'][number],
+  callTool: PresentViewProps['callTool'],
+) {
   if (!binding.materialized) return undefined;
   const chunks: Uint8Array[] = [];
   let offset = 0n;
   let more = true;
   while (more) {
     const output = toolResult.parse(
-      await callTool('read_object', {
-        source: binding.source,
-        object: binding.materialized,
-        offset: offset.toString(),
-        length: 1048576,
-      }),
+      await callTool(
+        'read_object',
+        omitUndefined({
+          source: binding.source,
+          object: binding.materialized,
+          offset: offset.toString(),
+          length: 1048576,
+        }),
+      ),
     );
     const part = zGetObjectResponse.parse(output.structuredContent);
     if (part.sha256 !== binding.materialized || BigInt(part.offset) !== offset)
@@ -73,15 +82,18 @@ export function PresentView({ response, callTool }: PresentViewProps) {
       for (const binding of response.resolved_bindings) {
         definitions.set(binding.name, binding);
         const output = toolResult.parse(
-          await callTool('show', {
-            workspace_id: binding.source.workspace_id,
-            item_id: binding.source.item_id,
-            at: { kind: 'revision', revision: binding.source.revision },
-            view: 'text',
-            selection: binding.source.selection,
-            max_bytes: 65536,
-            max_images: 0,
-          }),
+          await callTool(
+            'show',
+            omitUndefined({
+              workspace_id: binding.source.workspace_id,
+              item_id: binding.source.item_id,
+              at: { kind: 'revision', revision: binding.source.revision },
+              view: 'text',
+              selection: binding.source.selection,
+              max_bytes: 65536,
+              max_images: 0,
+            }),
+          ),
         );
         const source = zReadItemResponse.parse(output.structuredContent);
         if (source.source.revision !== binding.source.revision)
@@ -103,12 +115,9 @@ export function PresentView({ response, callTool }: PresentViewProps) {
   if (!bindings) return <p role="status">Resolving the presentation's exact source references…</p>;
   const view = response.view;
   if (view.grammar === 'json_render') {
-    const validated = catalog.validate(view.spec);
-    if (!validated.success || !validated.data)
-      return <p role="alert">The composition does not match the approved catalog.</p>;
     return (
       <BindingsContext.Provider value={bindings}>
-        <Layout spec={validated.data} />
+        <Layout spec={view.spec} />
       </BindingsContext.Provider>
     );
   }

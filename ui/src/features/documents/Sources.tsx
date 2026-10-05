@@ -1,8 +1,9 @@
 /** Present occurrence metadata and exact citations without inventing document contents. */
-import type { GetSourcesResponse } from '../../api/generated/types.gen';
+import type { z } from 'zod';
+import type { zGetSourcesResponse } from '../../api/generated/zod.gen';
 
 export interface SourcesProps {
-  result: GetSourcesResponse;
+  result: z.infer<typeof zGetSourcesResponse>;
 }
 
 export function Sources({ result }: SourcesProps) {

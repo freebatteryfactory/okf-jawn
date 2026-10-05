@@ -2,10 +2,11 @@
 import Markdown from 'react-markdown';
 import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
-import type { ReadItemResponse } from '../../api/generated/types.gen';
+import type { z } from 'zod';
+import type { zReadItemResponse } from '../../api/generated/zod.gen';
 
 export interface SourceExcerptProps {
-  result: ReadItemResponse;
+  result: z.infer<typeof zReadItemResponse>;
 }
 
 export function SourceExcerpt({ result }: SourceExcerptProps) {

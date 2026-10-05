@@ -1,8 +1,9 @@
 /** Show content versions, not an invented complete application audit trail. */
-import type { LogResponse } from '../../api/generated/types.gen';
+import type { z } from 'zod';
+import type { zLogResponse } from '../../api/generated/zod.gen';
 
 export interface TimelineProps {
-  result: LogResponse;
+  result: z.infer<typeof zLogResponse>;
 }
 
 export function Timeline({ result }: TimelineProps) {

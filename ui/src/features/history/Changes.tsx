@@ -1,8 +1,9 @@
 /** Render version comparison without substituting current documents for historical inputs. */
-import type { DiffResponse } from '../../api/generated/types.gen';
+import type { z } from 'zod';
+import type { zDiffResponse } from '../../api/generated/zod.gen';
 
 export interface ChangesProps {
-  result: DiffResponse;
+  result: z.infer<typeof zDiffResponse>;
 }
 
 export function Changes({ result }: ChangesProps) {

@@ -1,7 +1,7 @@
 /** The host owns the model loop; this resource displays tool results only. */
 
 import { useApp } from '@modelcontextprotocol/ext-apps/react';
-import { StrictMode, useCallback, useEffect, useState } from 'react';
+import { StrictMode, useCallback, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { z } from 'zod';
 import {
@@ -16,6 +16,7 @@ import { Sources } from '../features/documents/Sources';
 import { Changes } from '../features/history/Changes';
 import { Timeline } from '../features/history/Timeline';
 import { PresentView } from '../features/views/PresentView';
+import { omitUndefined } from '../lib/wire';
 import '../styles.css';
 
 const resultSchema = z.union([
@@ -26,21 +27,21 @@ const resultSchema = z.union([
   zGetSourcesResponse,
 ]);
 function App() {
+  const [result, setResult] = useState<unknown>(null);
   const { app, error } = useApp({
     appInfo: { name: 'okf-jawn', version: '0.1.0' },
     capabilities: {},
+    onAppCreated: (created) => {
+      // Handlers must be registered before connect(); events can arrive immediately after.
+      created.ontoolresult = (message) => {
+        setResult(message.structuredContent);
+      };
+    },
   });
-  const [result, setResult] = useState<unknown>(null);
-  useEffect(() => {
-    if (!app) return;
-    app.ontoolresult = (message) => {
-      setResult(message.structuredContent);
-    };
-  }, [app]);
   const callTool = useCallback(
     async (name: string, input: Record<string, unknown>) => {
       if (!app) throw new Error('Host connection unavailable');
-      return app.callServerTool({ name, arguments: input });
+      return app.callServerTool({ name, arguments: omitUndefined(input) });
     },
     [app],
   );

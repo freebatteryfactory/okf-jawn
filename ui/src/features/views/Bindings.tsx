@@ -2,12 +2,13 @@
 
 import { createContext, useContext } from 'react';
 import type { TopLevelSpec } from 'vega-lite';
-import type { ReadItemResponse, ViewBinding } from '../../api/generated/types.gen';
+import type { z } from 'zod';
+import type { zReadItemResponse, zViewBinding } from '../../api/generated/zod.gen';
 
 export interface ResolvedPresentation {
   charts: ReadonlyMap<string, TopLevelSpec>;
-  sources: ReadonlyMap<string, ReadItemResponse>;
-  bindings: ReadonlyMap<string, ViewBinding>;
+  sources: ReadonlyMap<string, z.infer<typeof zReadItemResponse>>;
+  bindings: ReadonlyMap<string, z.infer<typeof zViewBinding>>;
   tables: ReadonlyMap<
     string,
     ReadonlyArray<Readonly<Record<string, string | number | boolean | null>>>
