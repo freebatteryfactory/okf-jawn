@@ -37,6 +37,16 @@ import {
   buildDoclingReceipt,
 } from '../../qualification/docling/lib/receipt.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
+import {
+  UPSTREAM_HOST_RULES,
+  VIEWS,
+  basicHostUrl,
+  basicHostVerdict,
+  judgeView,
+  ngrokRecord,
+  partitionAxe,
+  runProblems,
+} from '../../qualification/mcp-apps/lib/views.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -563,4 +573,98 @@ test('killProcessTree stops grandchildren, not only the process it was given', a
     if (grandchild !== null && pidAlive(grandchild)) process.kill(grandchild);
     await killProcessTree(proc);
   }
+});
+
+const REVISION = '0123456789abcdef0123456789abcdef01234567';
+/** What each view's App frame shows for the committed fixtures (innerText, abbreviated). */
+const VIEW_TEXT = {
+  render_source: `fixtures/qualification-source.md ${REVISION}\nQualification source\nContract-valid ReadItemResponse fixture for the MCP Apps harness.`,
+  render_changes: `Changes\n${REVISION} → 89abcdef0123456789abcdef0123456789abcdef\nfixtures/qualification-source.md\n@@ -1,3 +1,4 @@\n # Qualification source\n+\n+Harness fixture line.`,
+  render_timeline: `Timeline\nQualification timeline fixture\nokf-qualify-mcp-apps · 2026-10-05T12:00:00Z\n89abcdef0123456789abcdef0123456789abcdef`,
+  render_present: `Six-component catalog\nfixtures/qualification-source.md ${REVISION}\nQualification source\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\nDataset unavailable: metrics\nMetrics chart\nResolved chart data or specification unavailable.\nfixtures/qualification-source.md @ ${REVISION}\nfixtures/qualification-metrics.json @ ${REVISION}`,
+};
+
+test('each of the four views is recognised by its own text and by no other view', () => {
+  assert.deepEqual(VIEWS.map((view) => view.tool), ['render_source', 'render_changes', 'render_timeline', 'render_present']);
+  for (const view of VIEWS) {
+    assert.equal(
+      basicHostUrl(view.tool),
+      `http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=${view.tool}&call=true&theme=hide`,
+    );
+    for (const other of VIEWS) {
+      const verdict = judgeView(view, { text: VIEW_TEXT[other.tool], alerts: other.alerts });
+      assert.equal(verdict.ok, view === other, `${view.tool} judged against ${other.tool}: ${JSON.stringify(verdict)}`);
+    }
+  }
+});
+
+test('a view that is waiting, disconnected, unparsed or showing an unexpected alert is not rendered', () => {
+  const source = VIEWS[0];
+  assert.equal(judgeView(source, null).ok, false);
+  assert.equal(judgeView(source, { text: 'Waiting for a tool result from the connected host.', alerts: [] }).ok, false);
+  assert.equal(
+    judgeView(source, { text: `${VIEW_TEXT.render_source}\nHost connection failed: x`, alerts: ['Host connection failed: x'] }).ok,
+    false,
+  );
+  const present = VIEWS[3];
+  const broken = judgeView(present, { text: VIEW_TEXT.render_present, alerts: ['MCP error -32602: unknown tool: show'] });
+  assert.equal(broken.ok, false);
+  assert.deepEqual(broken.alerts, ['MCP error -32602: unknown tool: show']);
+  assert.equal(judgeView(present, { text: VIEW_TEXT.render_present, alerts: [] }).ok, false);
+});
+
+test('axe exclusions cover host chrome only; the App frame is judged by every rule', () => {
+  const rule = (id, impact, ...targets) => ({ id, impact, nodes: targets.map((target) => ({ target })) });
+  const results = {
+    passes: [rule('document-title', null, ['iframe', 'iframe', 'html'])],
+    incomplete: [],
+    violations: [
+      rule('color-contrast', 'serious', ['.collapsibleSize'], ['iframe', 'iframe', 'code']),
+      rule('frame-title', 'serious', ['iframe'], ['iframe', 'iframe']),
+      rule('button-name', 'critical', ['.closeButton']),
+      rule('region', 'moderate', ['iframe', 'iframe', 'p']),
+    ],
+  };
+  const axe = partitionAxe(results, 2);
+  assert.equal(axe.app_frame_analysed, true);
+  assert.deepEqual(axe.app_frame.map((item) => item.id), ['color-contrast']);
+  assert.deepEqual(axe.app_frame[0].nodes, [['iframe', 'iframe', 'code']]);
+  assert.deepEqual(axe.host_tolerated.map((item) => item.id), UPSTREAM_HOST_RULES);
+  assert.deepEqual(axe.host_blocking.map((item) => item.id), ['button-name']);
+  // Zero App-frame violations is a claim only when axe actually reached that frame.
+  assert.equal(partitionAxe({ passes: [rule('x', null, ['body'])], violations: [], incomplete: [] }, 2).app_frame_analysed, false);
+});
+
+test('the run fails when one view fails, when a view is missing, or when the protocol check fails', () => {
+  const passedViews = VIEWS.map((view) => ({ tool: view.tool, status: 'passed' }));
+  assert.deepEqual(basicHostVerdict(passedViews), { status: 'passed', failed: [] });
+  const oneFailed = passedViews.map((item) =>
+    item.tool === 'render_timeline' ? { tool: item.tool, status: 'failed', error: 'missing=["Timeline"]' } : item,
+  );
+  const verdict = basicHostVerdict(oneFailed);
+  assert.equal(verdict.status, 'failed');
+  assert.deepEqual(verdict.failed, [{ tool: 'render_timeline', error: 'missing=["Timeline"]' }]);
+  assert.equal(basicHostVerdict(passedViews.slice(0, 3)).failed[0].tool, 'render_present');
+
+  const protocol = { status: 'passed' };
+  assert.deepEqual(runProblems({ protocol, basicHost: { ...basicHostVerdict(passedViews) }, protocolOnly: false }), []);
+  assert.match(runProblems({ protocol, basicHost: verdict, protocolOnly: false })[0], /basic_host failed: render_timeline/);
+  assert.match(
+    runProblems({ protocol, basicHost: { status: 'failed', error: 'chromium missing' }, protocolOnly: false })[0],
+    /basic_host failed: chromium missing/,
+  );
+  assert.deepEqual(runProblems({ protocol, basicHost: { status: 'not_run' }, protocolOnly: true }), []);
+  assert.match(runProblems({ protocol: { status: 'failed', error: 'x' }, basicHost: verdict, protocolOnly: true })[0], /protocol_check failed: x/);
+});
+
+test('a receipt never records an open tunnel', () => {
+  const base = { public_url: 'https://x.ngrok.app/mcp', local_port: 18765, note: 'n' };
+  assert.deepEqual(ngrokRecord({ ...base, enabled: false, opened_at: 't1', closed_at: 't2' }), {
+    status: 'not_run', opened_at: null, closed_at: null, public_url: null, local_port: 18765, note: 'n',
+  });
+  assert.deepEqual(ngrokRecord({ ...base, enabled: true, opened_at: 't1', closed_at: 't2' }), {
+    status: 'closed', opened_at: 't1', closed_at: 't2', public_url: 'https://x.ngrok.app/mcp', local_port: 18765, note: 'n',
+  });
+  assert.equal(ngrokRecord({ ...base, enabled: true, opened_at: null, closed_at: null }).status, 'not_opened');
+  assert.throws(() => ngrokRecord({ ...base, enabled: true, opened_at: 't1', closed_at: null }), /opened but not closed/);
 });
