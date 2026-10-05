@@ -11,6 +11,10 @@
 //! therefore safe to run again under the same id: when `begin` reports `Abandoned`, dispatch
 //! re-runs the handler with `Attempt::Resumed` and the same `MutationId`, and each store hands
 //! back what the earlier attempt already wrote instead of writing it twice.
+//!
+//! # Failed handlers
+//! A handler error releases the lease. The row keeps its id and digest and is not completed,
+//! so the same key and body may be sent again at once; that retry runs as a resumed attempt.
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::identity::{Digest, IdempotencyKey, MutationId, TenantId};

@@ -1,8 +1,9 @@
 //! Route only declared operations through validation, target authorization, and the mutation ledger.
 //!
 //! Order: validate, decode, `targets()`, authorize every target, build the context,
-//! `MutationStore::begin`, the handler, `complete`. The ledger never inspects other stores:
-//! a resumed attempt re-runs the handler under the same `MutationId`.
+//! `MutationStore::begin`, the handler, then `complete` on success or `release` on error. The
+//! ledger never inspects other stores: a resumed attempt re-runs the handler under the same
+//! `MutationId`.
 
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
@@ -48,8 +49,8 @@ macro_rules! dispatch_operations {
                     let key = request.idempotency_key().copied();
                     match prepare_mutation(ports, &mut context, replay, key, &request_value).await? {
                         MutationGate::Run => {
-                            let response = service.$id(&context, request).await?;
-                            finish_if_mutation(ports, &context, replay, response).await
+                            let outcome = service.$id(&context, request).await;
+                            finish(ports, &context, replay, outcome).await
                         }
                         MutationGate::ShortCircuit(value) => Ok(value),
                     }
@@ -131,12 +132,24 @@ async fn prepare_mutation(
     }
 }
 
-async fn finish_if_mutation<Res: Serialize>(
+/// Close the ledger row for a handler outcome and return what the caller receives.
+async fn finish<Res: Serialize>(
     ports: &DispatchPorts<'_>,
     context: &OperationContext,
     _replay: ReplayPolicy,
-    response: Res,
+    outcome: Result<Res, ApiError>,
 ) -> Result<Value, ApiError> {
+    let response = match outcome {
+        Ok(response) => response,
+        Err(error) => {
+            if let Some(mutation_id) = context.mutation {
+                // The caller must see the handler's error. If the release itself fails, the
+                // lease simply expires into `Abandoned`, which a later attempt resumes safely.
+                let _released = ports.mutations.release(mutation_id).await;
+            }
+            return Err(error);
+        }
+    };
     let body = serialize_response(response)?;
     let Some(mutation_id) = context.mutation else {
         return Ok(body);

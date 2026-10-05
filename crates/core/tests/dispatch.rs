@@ -577,6 +577,33 @@ async fn the_session_id_of_the_caller_reaches_the_handler() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn handler_error_then_retry_runs_again() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", item_document("hello"))?;
+    app.fail_once(
+        "create_item",
+        ApiError::new(ErrorCode::Unavailable, "index offline"),
+    )?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let refused = err_of(call(&app, &ports, &alice, "create_item", body.clone()).await)?;
+    assert_eq!(refused.code, ErrorCode::Unavailable);
+    assert_eq!(refused.message, "index offline");
+
+    let response = call(&app, &ports, &alice, "create_item", body).await?;
+    assert_eq!(response.get("body"), Some(&json!("hello")));
+    let seen = app.contexts("create_item")?;
+    assert_eq!(seen.len(), 2);
+    let earlier = some(seen.first(), "the failed attempt")?;
+    let later = some(seen.get(1), "the retry")?;
+    assert!(earlier.mutation.is_some());
+    assert_eq!(later.mutation, earlier.mutation);
+    assert_eq!(later.attempt, Attempt::Resumed);
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
 mod support;
