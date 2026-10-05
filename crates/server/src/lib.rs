@@ -74,21 +74,24 @@ const JSON_BODY_LIMIT: usize = 2_097_152;
 impl<S: Send + Sync> FromRequestParts<S> for Authenticated {
     type Rejection = Response;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> {
         let Some(principal) = parts.extensions.get::<Principal>().cloned() else {
-            return Err(error_response(ApiError::new(
+            return std::future::ready(Err(error_response(ApiError::new(
                 ErrorCode::Unauthenticated,
                 "Authentication is required",
-            )));
+            ))));
         };
         let session_id = parts
             .extensions
             .get::<SessionId>()
             .map(|session| session.0.clone());
-        Ok(Self {
+        std::future::ready(Ok(Self {
             principal,
             session_id,
-        })
+        }))
     }
 }
 
