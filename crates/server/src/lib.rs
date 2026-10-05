@@ -11,13 +11,14 @@ use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, FromRequestParts, State};
-use axum::http::StatusCode;
+use axum::http::header::RETRY_AFTER;
 use axum::http::request::Parts;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use okf_jawn_contract::access::Principal;
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use okf_jawn_core::mutations::MutationStore;
@@ -160,7 +161,24 @@ fn error_response(error: ApiError) -> Response {
         ErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    (status, Json(error)).into_response()
+    let wait = retry_after(&error);
+    let mut response = (status, Json(error)).into_response();
+    if let Some(value) = wait {
+        response.headers_mut().insert(RETRY_AFTER, value);
+    }
+    response
+}
+
+/// The `Retry-After` value for an in-progress refusal, taken from its typed detail.
+fn retry_after(error: &ApiError) -> Option<HeaderValue> {
+    let ErrorDetail::InProgress {
+        retry_after: seconds,
+        ..
+    } = error.detail.as_deref()?
+    else {
+        return None;
+    };
+    Some(HeaderValue::from(*seconds))
 }
 
 okf_jawn_contract::for_each_operation!(bind_routes);

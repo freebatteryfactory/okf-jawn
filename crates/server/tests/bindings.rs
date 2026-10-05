@@ -10,7 +10,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use axum::{Extension, Router};
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::IdentityError;
 use okf_jawn_core::ports::Application;
 use okf_jawn_server::{BoundApplication, SessionId, router};
@@ -26,6 +26,7 @@ const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
 const OTHER_WORKSPACE: &str = "22222222-2222-4222-8222-222222222222";
 const REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const LIST_ITEMS: &str = "/api/items/list-items";
+const CREATE_ITEM: &str = "/api/items/create-item";
 /// One byte more than the router's 2 MiB JSON body limit.
 const OVER_LIMIT: usize = 2_097_153;
 
@@ -112,6 +113,37 @@ fn list_items_body(workspace_id: &str) -> Value {
 
 fn listing() -> Value {
     json!({ "revision": REVISION, "items": [], "folders": [] })
+}
+
+fn create_item_body() -> Value {
+    json!({
+        "workspace_id": WORKSPACE,
+        "base_revision": REVISION,
+        "path": "notes/a.md",
+        "title": "a",
+        "type_name": "note",
+        "kind": "note",
+        "body": "hello",
+        "properties": {},
+        "idempotency_key": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    })
+}
+
+fn item_document() -> Value {
+    json!({
+        "summary": {
+            "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "path": "notes/a.md",
+            "title": "a",
+            "description": "",
+            "type_name": "note",
+            "kind": "note",
+            "revision": REVISION,
+            "lifecycle": "active"
+        },
+        "body": "hello",
+        "properties": {}
+    })
 }
 
 #[tokio::test]
@@ -238,6 +270,54 @@ async fn a_body_over_the_limit_is_413_too_large() -> TestResult {
     let body = json_body(response).await?;
     assert_eq!(body.get("code"), Some(&json!("too_large")));
     assert_eq!(counting.call_count("list_items")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_progress_is_409_with_retry_after_from_the_detail() -> TestResult {
+    let ports = ports()?;
+    let counting = Arc::new(CountingApplication::new());
+    counting.set_response("create_item", item_document())?;
+    counting.park_next("create_item")?;
+    let app = signed_in(counting.clone(), &ports)?;
+
+    let running = app
+        .clone()
+        .oneshot(post_json(CREATE_ITEM, &create_item_body())?);
+    tokio::pin!(running);
+    tokio::select! {
+        biased;
+        outcome = &mut running => {
+            let status = outcome.map(|response| response.status());
+            return Err(format!("the first request finished while parked: {status:?}").into());
+        }
+        () = counting.entered() => {}
+    }
+
+    let response = app
+        .oneshot(post_json(CREATE_ITEM, &create_item_body())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let header = some(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        "the Retry-After header",
+    )?;
+    let error = api_error(response).await?;
+    assert_eq!(error.code, ErrorCode::InProgress);
+    let detail = some(error.detail, "the in-progress detail")?;
+    let ErrorDetail::InProgress { retry_after, .. } = *detail else {
+        return Err("expected an in-progress detail".into());
+    };
+    assert!(retry_after >= 1);
+    assert_eq!(header, retry_after.to_string());
+
+    counting.resume();
+    assert_eq!(running.await?.status(), StatusCode::OK);
+    assert_eq!(counting.call_count("create_item")?, 1);
     Ok(())
 }
 
