@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** Agent-agnostic task entrypoint. Every task fails honestly when prerequisites are missing. */
-import { readFile, mkdir, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitLocalEnvironment, run, version } from './lib/process.mjs';
@@ -10,6 +10,7 @@ import { initialize } from './lib/init.mjs';
 import { tree } from './lib/tree.mjs';
 import { bun, pins } from './lib/toolchain.mjs';
 import { checkScope, createLanes, resetLanes, syncLaneTable } from './lib/lanes.mjs';
+import { checkReceipts } from './lib/receipts.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ui = join(root, 'ui');
@@ -113,73 +114,6 @@ async function audit() {
   process.stdout.write(`Ignored high tooling advisory ${bracesException} (shadcn braces path; see vendors.json / verification).\n`);
 }
 
-/**
- * Validate qualification receipts under qualification/receipts/.
- *
- * Expected minimum JSON shape per receipt:
- *   { "git_sha": "<full sha>", "inputs": ["path/relative/to/repo", ...] }
- *
- * Fails when git_sha is not an ancestor of HEAD, or when any listed input path
- * changed after that SHA (git diff --name-only <sha> HEAD -- <inputs...>).
- */
-async function checkReceipts() {
-  const receiptsDir = join(root, 'qualification', 'receipts');
-  await mkdir(receiptsDir, { recursive: true });
-  const entries = (await readdir(receiptsDir)).filter((name) => name.endsWith('.json')).sort();
-  if (!entries.length) {
-    process.stdout.write('check-receipts: no *.json receipts under qualification/receipts/ (ok while empty).\n');
-    return;
-  }
-  const failures = [];
-  for (const name of entries) {
-    const path = join(receiptsDir, name);
-    let receipt;
-    try {
-      receipt = JSON.parse(await readFile(path, 'utf8'));
-    } catch (error) {
-      failures.push(`${name}: not valid JSON (${error.message})`);
-      continue;
-    }
-    const sha = receipt.git_sha ?? receipt.commit_sha;
-    if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/i.test(sha)) {
-      failures.push(`${name}: missing git_sha (expected 40-hex); shape is { git_sha, inputs: string[] }`);
-      continue;
-    }
-    if (!Array.isArray(receipt.inputs) || !receipt.inputs.every((item) => typeof item === 'string')) {
-      failures.push(`${name}: inputs must be a string[] of repo-relative paths`);
-      continue;
-    }
-    const ancestor = await run('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], {
-      cwd: root,
-      capture: true,
-      allowFailure: true,
-    });
-    if (ancestor.code !== 0) {
-      failures.push(`${name}: git_sha ${sha} is not an ancestor of HEAD`);
-      continue;
-    }
-    if (receipt.inputs.length === 0) continue;
-    const changed = await run(
-      'git',
-      ['diff', '--name-only', sha, 'HEAD', '--', ...receipt.inputs],
-      { cwd: root, capture: true },
-    );
-    const names = changed.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    if (names.length) {
-      failures.push(
-        `${name}: inputs changed after ${sha}:\n  ${names.join('\n  ')}`,
-      );
-    }
-  }
-  if (failures.length) {
-    throw new Error(`check-receipts failed:\n${failures.join('\n')}`);
-  }
-  process.stdout.write(`check-receipts: ${entries.length} receipt(s) valid against HEAD.\n`);
-}
-
 async function qualify() {
   const name = args[0];
   if (name === 'mcp-wire') {
@@ -217,7 +151,7 @@ async function main() {
     }
     case 'lanes-reset': process.stdout.write(`${await resetLanes(root)}\n`); break;
     case 'qualify': await qualify(); break;
-    case 'check-receipts': await checkReceipts(); break;
+    case 'check-receipts': process.stdout.write(`${await checkReceipts(root)}\n`); break;
     case 'audit': await audit(); break;
     case 'check':
       await run('cargo', ['fmt', '--all', '--check'], { cwd: root });
