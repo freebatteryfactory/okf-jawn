@@ -644,7 +644,7 @@
       "context7_query": null,
       "knowledge_source": "Official documentation reference; qualify installed version before use",
       "offline_notes": [
-        "Conditional runtime only. No iii SDK or daemon has been qualified in this delivery.",
+        "Selected runtime: adopted after the recorded Phase 0 receipt (engine iii/v0.24.4, iii-sdk 0.24.4, builtin file_based queue). Product-level RecordStore crash qualification remains a construction gate.",
         "Registry schemas are metadata; typed deserialization and application validation still run.",
         "Test crash immediately after acknowledgment with the exact worker/adapter/config; inspect ELv2 terms."
       ],

@@ -97,6 +97,6 @@ The intended release is the complete product in `SPEC.md`, not a succession of c
 
 `bun scripts/dev.mjs qualify mcp-wire` checks a supplied running MCP endpoint. It does not certify that a host rendered the iframe. `qualify application` exercises a disposable test deployment; it refuses to run without explicit credentials and a test-environment opt-in. No secret or external endpoint is supplied by default.
 
-Jobs run first on an in-process Tokio worker driven by durable records; iii has not been adopted. No daemon, mutable image tag, fake worker lockfile, or fallback executor is included. Neither executor may be described as crash-durable until the restart check passes against it.
+Jobs run on iii (engine v0.24.4, iii-sdk 0.24.4, builtin `file_based` queue), adopted by the Phase 0 qualification receipt; RecordStore remains the durable source of job truth. Engine and queue artifacts are pinned by hash outside git; no mutable image tag, fake worker lockfile, or parallel Tokio executor is included. The product is not crash-durable until the construction restart check passes against the real RecordStore and import path.
 
 Our source is dual licensed under MIT OR Apache-2.0. Dependencies retain their own licenses. This repository is not a license/security/compliance certification.
