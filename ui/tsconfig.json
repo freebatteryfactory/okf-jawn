@@ -23,14 +23,7 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": [
-    "src",
-    "vite.config.ts",
-    "openapi-ts.config.ts",
-    "vitest.config.ts",
-    "playwright.config.ts",
-    "tests"
-  ],
+  "include": ["src", "tests"],
   "exclude": ["src/api/generated/client", "src/api/generated/core"],
-  "references": [{ "path": "./tsconfig.generated.json" }]
+  "references": [{ "path": "./tsconfig.generated.json" }, { "path": "./tsconfig.tooling.json" }]
 }

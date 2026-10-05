@@ -1,0 +1,16 @@
+{
+  "//": "Bun-run tooling only. Browser and app source stay under tsconfig.json without Node ambient globals.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "types": ["bun"],
+    "rootDir": ".",
+    "outDir": "./.tsbuild/tooling",
+    "tsBuildInfoFile": "./.tsbuild/tooling.tsbuildinfo"
+  },
+  "include": ["vite.config.ts", "vitest.config.ts", "playwright.config.ts", "openapi-ts.config.ts"],
+  "exclude": [],
+  "references": []
+}
