@@ -11,7 +11,6 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process;
 use std::time::{Duration, Instant};
 
 #[derive(Serialize)]
@@ -240,9 +239,8 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn main() {
-    if let Err(error) = run() {
+fn main() -> Result<(), String> {
+    run().inspect_err(|error| {
         let _ = writeln!(io::stderr(), "okf-qualify-docling: {error}");
-        process::exit(1);
-    }
+    })
 }
