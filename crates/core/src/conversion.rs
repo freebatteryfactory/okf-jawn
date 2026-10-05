@@ -69,8 +69,37 @@ pub struct ConvertedAsset {
     pub media_type: String,
     /// Page, cells, figure, or other original location.
     pub selection: Selection,
-    /// Original or generated caption; the origin is not concealed.
-    pub caption: Option<String>,
+    /// Pixel dimensions; present exactly when the asset is a raster image.
+    pub pixel_size: Option<PixelSize>,
+    /// Caption and where its text came from; `None` when the source gives the asset none.
+    pub caption: Option<AssetCaption>,
+}
+
+/// Pixel dimensions of a raster image asset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelSize {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+/// A caption with its origin, so generated text is never shown as the document's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetCaption {
+    /// Caption text.
+    pub text: String,
+    /// Where the text came from.
+    pub origin: CaptionOrigin,
+}
+
+/// Where a caption's text came from, as far as a converter can know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptionOrigin {
+    /// The document's own caption or alternative text.
+    Source,
+    /// Text the conversion process generated.
+    Process,
 }
 
 /// How a conversion ended.
@@ -152,6 +181,17 @@ impl Default for ConversionSettings {
             ocr_language: None,
             table_structure: true,
             page_images: false,
+        }
+    }
+}
+
+impl CaptionOrigin {
+    /// The word a read response uses for this origin.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Process => "process",
         }
     }
 }

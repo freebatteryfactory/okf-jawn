@@ -22,13 +22,15 @@ use okf_jawn_contract::identity::{
 use okf_jawn_contract::import::{Job, JobKind, JobState};
 use okf_jawn_contract::item::{Draft, ItemKind, Lifecycle};
 use okf_jawn_contract::proposal::{Change, Comment, Proposal, ProposalStatus};
+use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::review::{Confirmation, Review};
 use okf_jawn_contract::search::{GetGraphResponse, LinkDirection};
 use okf_jawn_contract::transport::TRANSPORTS;
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::conversion::{
-    ConversionInput, ConversionSettings, ConversionStatus, Converter, OcrPolicy,
+    AssetCaption, CaptionOrigin, ConversionInput, ConversionSettings, ConversionStatus,
+    ConvertedAsset, Converter, OcrPolicy, PixelSize,
 };
 use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, NewConnector, SessionRecord, secret_hash,
@@ -1061,4 +1063,37 @@ fn an_artifact_record_yields_the_wire_download_for_its_transport() -> TestResult
     assert_eq!(transport.response_media, record.media_type);
     assert!(type_checked(&artifact_calls));
     Ok(())
+}
+
+#[test]
+fn a_converted_image_carries_its_size_and_caption_origin() {
+    let asset = ConvertedAsset {
+        path: PathBuf::from("out/figure-1.png"),
+        media_type: "image/png".to_owned(),
+        selection: Selection::All,
+        pixel_size: Some(PixelSize {
+            width: 640,
+            height: 480,
+        }),
+        caption: Some(AssetCaption {
+            text: "Revenue by quarter".to_owned(),
+            origin: CaptionOrigin::Source,
+        }),
+    };
+    assert_eq!(
+        asset.pixel_size,
+        Some(PixelSize {
+            width: 640,
+            height: 480,
+        })
+    );
+    assert_eq!(
+        asset
+            .caption
+            .as_ref()
+            .map(|caption| caption.origin.as_str()),
+        Some("source")
+    );
+    assert_eq!(CaptionOrigin::Process.as_str(), "process");
+    assert_eq!(asset.media_type, "image/png");
 }
