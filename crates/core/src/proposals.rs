@@ -20,6 +20,15 @@ pub struct ProposalFilter {
     pub page: Page,
 }
 
+/// One page of a proposal's discussion, oldest first.
+#[derive(Debug, Clone)]
+pub struct CommentPage {
+    /// Comments on this page.
+    pub items: Vec<Comment>,
+    /// Continuation cursor, when more comments remain.
+    pub next_cursor: Option<String>,
+}
+
 /// Durable suggested change sets and discussion; storage owns the implementation.
 pub trait ProposalStore: Send + Sync {
     /// Persist a new open proposal.
@@ -58,4 +67,12 @@ pub trait ProposalStore: Send + Sync {
         proposal: ProposalId,
         comment: Comment,
     ) -> PortFuture<'a, Comment>;
+    /// List a proposal's discussion, oldest first; `NotFound` when the workspace has no such
+    /// proposal.
+    fn list_comments<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        proposal: ProposalId,
+        page: Page,
+    ) -> PortFuture<'a, CommentPage>;
 }

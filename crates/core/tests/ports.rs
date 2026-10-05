@@ -37,7 +37,7 @@ use okf_jawn_core::events::{EventLog, EventQuery, NewEvent};
 use okf_jawn_core::jobs::{
     ClaimedJob, JobCompletion, JobHandler, JobLease, JobQueue, JobSpec, NewJob, RecordStore,
 };
-use okf_jawn_core::proposals::{ProposalFilter, ProposalStore};
+use okf_jawn_core::proposals::{CommentPage, ProposalFilter, ProposalStore};
 use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolved, token_hash};
 use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
@@ -477,7 +477,7 @@ async fn proposal_calls(
     mutation_id: MutationId,
     proposal: Proposal,
     comment: Comment,
-) -> Result<Comment, ApiError> {
+) -> Result<CommentPage, ApiError> {
     let stored = proposals.insert(scope, mutation_id, proposal).await?;
     let read = proposals.get(scope, stored.id).await?;
     proposals
@@ -495,7 +495,12 @@ async fn proposal_calls(
     let updated = proposals.update(scope, read).await?;
     proposals
         .add_comment(scope, mutation_id, updated.id, comment)
-        .await
+        .await?;
+    let page = Page {
+        cursor: None,
+        limit: 50,
+    };
+    proposals.list_comments(scope, updated.id, page).await
 }
 
 async fn upload_calls(
@@ -968,4 +973,23 @@ fn a_search_query_names_exactly_one_revision() -> TestResult {
     );
     assert!(type_checked(&search_index_calls));
     Ok(())
+}
+
+#[test]
+fn a_page_of_comments_keeps_its_order_and_cursor() {
+    let page = CommentPage {
+        items: vec![Comment {
+            id: "c1".to_owned(),
+            author: "user_1".to_owned(),
+            text: "Why this figure?".to_owned(),
+            created_at: "2026-10-05T00:00:00Z".to_owned(),
+        }],
+        next_cursor: Some("after-c1".to_owned()),
+    };
+    assert_eq!(
+        page.items.first().map(|comment| comment.id.as_str()),
+        Some("c1")
+    );
+    assert_eq!(page.next_cursor.as_deref(), Some("after-c1"));
+    assert!(type_checked(&proposal_calls));
 }
