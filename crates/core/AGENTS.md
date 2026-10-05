@@ -4,4 +4,6 @@ Read root AGENTS.md and SPEC.md.
 
 Implement `ports::Application` for `application::ApplicationService` in cohesive child modules of `crates/core/src/application/`, using only the injected `Ports`. Core never depends on the storage, ingest, server, mcp or cli crates. Capability checks and exact revision semantics remain shared. Coordinate SearchIndex updates and rebuilds with content changes; rebuild never touches RecordStore. Connector operations are available to the local owner only. Add production behavior, not an in-memory stand-in. Coordinate CLI ergonomics with the complete operation contract.
 
+OKF conformance and lint are application policy owned here. Call `okf_validator::validate_bundle` and `okf_validator::lint_bundle` at the appropriate boundaries (import, edit, refactor, proposal) and surface diagnostics through Attention and health. Do not duplicate that policy in storage or ingest. Use `okf-core` types only through the validator unless a core port or application type must name them directly.
+
 Do not alter shared manifests, operation declarations, generator output, or protected acceptance as a private workaround. Return concrete boundary changes to the integration owner.

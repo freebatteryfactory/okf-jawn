@@ -23,11 +23,15 @@ serde_json = { version = "=1.0.151" }
 schemars = { version = "=1.2.2", features = ["uuid1"] }
 thiserror = { version = "=2.0.21" }
 rmcp = { version = "=3.5.0", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
-okf = { version = "=0.2.7" }
-docling = { version = "=1.89.0" }
-# docling 1.89.0 requires docling-core ^1.89.0, but docling-core 1.93 adds a field 1.89.0 does not
-# initialize. Holding core at the matching release keeps the selected Docling compiling.
-docling-core = { version = "=1.89.0" }
+# Bundle/model/link/index live in okf-core. Conformance and lint live in okf-validator
+# (default-features false: no Python/JS/Rust/SQL syntax parsers). Application policy
+# that calls validate_bundle/lint_bundle belongs in core; storage and ingest take okf-core only.
+okf-core = { version = "=0.2.7" }
+okf-validator = { version = "=0.2.7", default-features = false }
+# Newest published matching release. default-features off: no asr, fetch-images or vlm.
+# pdf enables the ML PDF/image path. Office/HTML and other declarative converters need no feature.
+# Do not direct-depend on docling-core; docling owns the matching core version.
+docling = { version = "=1.93.5", default-features = false, features = ["pdf"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rusqlite_migration = { version = "=2.6.0" }
 git2 = { version = "=0.21.0", default-features = false, features = ["vendored-libgit2"] }
