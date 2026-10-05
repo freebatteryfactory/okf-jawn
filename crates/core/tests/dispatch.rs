@@ -1,6 +1,9 @@
 //! Dispatch tests: every case goes through `dispatch` with the fixture `AccessControl` and the
 //! fixture `MutationStore`, and fails when the rule it names is removed.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use okf_jawn_contract::access::{AccessRoute, DelegationCeiling, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::IdentityError;
@@ -13,6 +16,9 @@ use serde_json::{Value, json};
 use check::{TestResult, err_of, some};
 use support::counting::CountingApplication;
 use support::{FixturePorts, GrantTable, all_permissions, tenant, workspace};
+
+/// A dispatch that was started and is still running, held so a test can finish or drop it.
+type Running<'a> = Pin<Box<dyn Future<Output = Result<Value, ApiError>> + 'a>>;
 
 const WORKSPACE_A: &str = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_B: &str = "22222222-2222-4222-8222-222222222222";
@@ -85,6 +91,26 @@ async fn call(
     .await
 }
 
+/// Start `operation` and wait until its handler is parked. The returned attempt holds its lease
+/// until the test resumes the handler and awaits it, or drops it.
+async fn park_in_handler<'a>(
+    app: &'a CountingApplication,
+    ports: &'a FixturePorts,
+    principal: &'a Principal,
+    operation: &'a str,
+    input: Value,
+) -> Result<Running<'a>, Box<dyn std::error::Error>> {
+    app.park_next(operation)?;
+    let mut attempt: Running<'a> = Box::pin(call(app, ports, principal, operation, input));
+    tokio::select! {
+        biased;
+        outcome = &mut attempt => Err(Box::<dyn std::error::Error>::from(format!(
+            "the attempt finished while its handler was parked: {outcome:?}"
+        ))),
+        () = app.entered() => Ok(attempt),
+    }
+}
+
 /// Start `operation`, wait until its handler is running, then drop the attempt: a crash that
 /// leaves the lease behind.
 async fn crash_in_handler(
@@ -94,16 +120,8 @@ async fn crash_in_handler(
     operation: &str,
     input: Value,
 ) -> TestResult {
-    app.park_next(operation)?;
-    let attempt = call(app, ports, principal, operation, input);
-    tokio::pin!(attempt);
-    tokio::select! {
-        biased;
-        outcome = &mut attempt => Err(Box::<dyn std::error::Error>::from(format!(
-            "the attempt finished while its handler was parked: {outcome:?}"
-        ))),
-        () = app.entered() => Ok(()),
-    }
+    drop(park_in_handler(app, ports, principal, operation, input).await?);
+    Ok(())
 }
 
 fn create_item_body(workspace_id: &str, key: &str, text: &str) -> Value {
@@ -421,6 +439,71 @@ async fn an_abandoned_attempt_reruns_the_handler_once_as_resumed() -> TestResult
     let replayed = call(&app, &ports, &alice, "create_item", body).await?;
     assert_eq!(replayed, response);
     assert_eq!(app.call_count("create_item")?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_slow_attempt_whose_lease_was_taken_over_cannot_complete() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", item_document("from the second attempt"))?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let slow = park_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
+    ports.mutations.expire_leases()?;
+
+    let second = call(&app, &ports, &alice, "create_item", body.clone()).await?;
+    assert_eq!(second.get("body"), Some(&json!("from the second attempt")));
+    let seen = app.contexts("create_item")?;
+    let slow_context = some(seen.first(), "the slow attempt")?;
+    let second_context = some(seen.get(1), "the attempt that took the lease over")?;
+    let mutation_id = some(slow_context.mutation, "the mutation id")?;
+    assert_eq!(second_context.mutation, Some(mutation_id));
+    assert_eq!(second_context.attempt, Attempt::Resumed);
+
+    // The slow handler now returns, with another response, under a lease it no longer holds.
+    app.set_response("create_item", item_document("from the slow attempt"))?;
+    app.resume();
+    let refused = err_of(slow.await)?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    assert_eq!(
+        ports.mutations.stored_body(mutation_id)?,
+        Some(second.clone())
+    );
+    let replayed = call(&app, &ports, &alice, "create_item", body).await?;
+    assert_eq!(replayed, second);
+    assert_eq!(app.call_count("create_item")?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_attempt_whose_lease_was_taken_over_leaves_the_new_lease_held() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", item_document("hello"))?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let slow = park_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
+    ports.mutations.expire_leases()?;
+    let current = park_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
+
+    // Parked handlers resume oldest first, so the failure goes to the slow attempt.
+    app.fail_once(
+        "create_item",
+        ApiError::new(ErrorCode::Unavailable, "index offline"),
+    )?;
+    app.resume();
+    let failed = err_of(slow.await)?;
+    assert_eq!(failed.code, ErrorCode::Unavailable);
+
+    // Its release named a lease that is no longer the grant, so the mutation is still held.
+    let refused = err_of(call(&app, &ports, &alice, "create_item", body).await)?;
+    assert_eq!(refused.code, ErrorCode::InProgress);
+    assert_eq!(app.call_count("create_item")?, 2);
+
+    app.resume();
+    let finished = current.await?;
+    assert_eq!(finished.get("body"), Some(&json!("hello")));
     Ok(())
 }
 

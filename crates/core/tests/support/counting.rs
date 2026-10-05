@@ -80,7 +80,7 @@ impl CountingApplication {
         self.entered.notified().await;
     }
 
-    /// Let the parked handler continue.
+    /// Let one parked handler continue: the one that has been parked longest.
     pub fn resume(&self) {
         self.resumed.notify_one();
     }

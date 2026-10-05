@@ -5,6 +5,10 @@
 //! A grant is used only when it is for the workspace and tenant that were asked for. The ledger
 //! never inspects other stores: a resumed attempt re-runs the handler under the same
 //! `MutationId`, and what the ledger retains is decided by the request's `ReplayPolicy`.
+//!
+//! Handlers see the `MutationId`; dispatch keeps the `MutationLease` it was granted and closes
+//! the row with it, so an attempt whose lease was taken over cannot complete or release the
+//! attempt that now holds the mutation.
 
 use jsonschema::error::ValidationErrorKind;
 use okf_jawn_contract::access::Principal;
@@ -21,7 +25,7 @@ use uuid::Uuid;
 
 use crate::access::{self, AccessControl};
 use crate::context::{Attempt, OperationContext, TenantGrant, WorkspaceGrant};
-use crate::mutations::{BeginOutcome, MutationKey, MutationStore, request_digest};
+use crate::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore, request_digest};
 use crate::ports::Application;
 
 macro_rules! dispatch_operations {
@@ -48,9 +52,9 @@ macro_rules! dispatch_operations {
                         authorize_targets(ports.access, caller, operation, &request).await?;
                     let replay = <$request as RequestScope>::REPLAY;
                     match prepare_mutation(ports, &mut context, replay, &request).await? {
-                        MutationGate::Run => {
+                        MutationGate::Run(lease) => {
                             let outcome = service.$id(&context, request).await;
-                            finish(ports, &context, replay, outcome).await
+                            finish(ports, lease, replay, outcome).await
                         }
                         MutationGate::ShortCircuit(value) => Ok(value),
                     }
@@ -79,7 +83,9 @@ pub struct DispatchPorts<'a> {
 }
 
 enum MutationGate {
-    Run,
+    /// Run the handler; a mutation runs under the lease this attempt was granted.
+    Run(Option<MutationLease>),
+    /// Answer from the ledger without running the handler.
     ShortCircuit(Value),
 }
 
@@ -90,7 +96,7 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
     request: &Req,
 ) -> Result<MutationGate, ApiError> {
     let Some(key) = request.idempotency_key().copied() else {
-        return Ok(MutationGate::Run);
+        return Ok(MutationGate::Run(None));
     };
     let digest = request_digest(request)?;
     let mutation_key = MutationKey {
@@ -100,14 +106,14 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
         key,
     };
     match ports.mutations.begin(&mutation_key, &digest).await? {
-        BeginOutcome::New(mutation_id) => {
-            context.mutation = Some(mutation_id);
-            Ok(MutationGate::Run)
+        BeginOutcome::New(lease) => {
+            context.mutation = Some(lease.mutation_id);
+            Ok(MutationGate::Run(Some(lease)))
         }
-        BeginOutcome::Abandoned { mutation_id } => {
-            context.mutation = Some(mutation_id);
+        BeginOutcome::Abandoned { lease } => {
+            context.mutation = Some(lease.mutation_id);
             context.attempt = Attempt::Resumed;
-            Ok(MutationGate::Run)
+            Ok(MutationGate::Run(Some(lease)))
         }
         BeginOutcome::Replay(stored) => {
             replay_response(replay, stored.body).map(MutationGate::ShortCircuit)
@@ -132,31 +138,34 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
 }
 
 /// Close the ledger row for a handler outcome and return what the caller receives.
+///
+/// `lease` is the grant this attempt holds. The store refuses a `complete` under a lease that
+/// was taken over, and that refusal is what the caller of the slow attempt receives.
 async fn finish<Res: Serialize>(
     ports: &DispatchPorts<'_>,
-    context: &OperationContext,
+    lease: Option<MutationLease>,
     replay: ReplayPolicy,
     outcome: Result<Res, ApiError>,
 ) -> Result<Value, ApiError> {
     let response = match outcome {
         Ok(response) => response,
         Err(error) => {
-            if let Some(mutation_id) = context.mutation {
+            if let Some(lease) = lease {
                 // The caller must see the handler's error. If the release itself fails, the
                 // lease simply expires into `Abandoned`, which a later attempt resumes safely.
-                let _released = ports.mutations.release(mutation_id).await;
+                let _released = ports.mutations.release(lease).await;
             }
             return Err(error);
         }
     };
     let body = serde_json::to_value(response)
         .map_err(|_| ApiError::new(ErrorCode::Internal, "Response serialization failed"))?;
-    let Some(mutation_id) = context.mutation else {
+    let Some(lease) = lease else {
         return Ok(body);
     };
     ports
         .mutations
-        .complete(mutation_id, ledger_body(replay, &body)?)
+        .complete(lease, ledger_body(replay, &body)?)
         .await?;
     Ok(body)
 }

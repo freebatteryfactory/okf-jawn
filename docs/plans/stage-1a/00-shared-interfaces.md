@@ -118,19 +118,41 @@ pub async fn dispatch(
 ) -> Result<serde_json::Value, ApiError>;
 
 // crates/core/src/mutations.rs
+/// One granted lease on a mutation. `token` is different for every grant of the same mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MutationLease {
+    /// The durable write identity.
+    pub mutation_id: MutationId,
+    /// Changes every time the lease is granted; a stale holder cannot complete or release.
+    pub token: u64,
+}
+
+pub enum BeginOutcome {
+    New(MutationLease),
+    Replay(StoredResponse),
+    Conflict { operation: OperationName },
+    InProgress { mutation_id: MutationId, retry_after: u32 },
+    Abandoned { lease: MutationLease },
+}
+
 pub trait MutationStore: Send + Sync {
     fn begin<'a>(&'a self, key: &'a MutationKey, digest: &'a Digest) -> PortFuture<'a, BeginOutcome>;
-    fn complete(&self, mutation_id: MutationId, response: Value) -> PortFuture<'_, ()>;
-    /// End the lease after a handler error. The row keeps its id. The next `begin` with the
-    /// same key and digest returns `Abandoned { mutation_id }`, so the retry runs as
-    /// `Attempt::Resumed` under the same identity (the failed attempt may have left effects).
-    fn release(&self, mutation_id: MutationId) -> PortFuture<'_, ()>;
+    /// Compare-and-set on the lease: fails with `ErrorCode::Conflict` when `lease` is no longer
+    /// the current grant (it expired and another attempt holds the mutation).
+    fn complete(&self, lease: MutationLease, response: Value) -> PortFuture<'_, ()>;
+    /// Ends the lease only if `lease` is the current grant; a stale lease is a no-op. After a
+    /// release that took effect, the next `begin` with the same key and digest returns
+    /// `Abandoned { lease }`, so the retry runs as `Attempt::Resumed` under the same identity
+    /// (the failed attempt may have left effects).
+    fn release(&self, lease: MutationLease) -> PortFuture<'_, ()>;
     // Lifetimes are elided wherever only `&self` is borrowed: clippy::elidable_lifetime_names
     // rejects the named form.
 }
-// BeginOutcome keeps its five variants. `record_effect`, `find` and the `AbandonedEffects`
-// trait are deleted. On Abandoned{mutation_id}: context.mutation = Some(id),
-// context.attempt = Attempt::Resumed, and the handler runs.
+// `record_effect`, `find` and the `AbandonedEffects` trait are deleted. On New(lease) and
+// Abandoned{lease}: context.mutation = Some(lease.mutation_id); on Abandoned also
+// context.attempt = Attempt::Resumed; the handler runs. `OperationContext.mutation` stays
+// `Option<MutationId>`: handlers get the identity, dispatch keeps the lease and closes the
+// row with it.
 
 /// SHA-256 over the typed request re-serialized with object keys sorted; independent of
 /// serde_json's `preserve_order` feature.
