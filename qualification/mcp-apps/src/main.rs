@@ -74,53 +74,6 @@ struct QualifyAppsServer {
     tools: Vec<RenderTool>,
 }
 
-fn empty_object_schema() -> Arc<JsonObject> {
-    let mut schema = Map::new();
-    schema.insert("type".to_owned(), json!("object"));
-    schema.insert("properties".to_owned(), json!({}));
-    schema.insert("additionalProperties".to_owned(), json!(false));
-    Arc::new(schema)
-}
-
-fn resource_ui_meta() -> MetaObject {
-    let mut meta = MetaObject::new();
-    meta.insert(
-        "ui".to_owned(),
-        json!({
-            "csp": {
-                "connectDomains": [],
-                "resourceDomains": []
-            },
-            "prefersBorder": true
-        }),
-    );
-    meta
-}
-
-fn tool_ui_meta(resource_uri: &str) -> MetaObject {
-    let mut meta = MetaObject::new();
-    meta.insert(
-        "ui".to_owned(),
-        json!({
-            "resourceUri": resource_uri
-        }),
-    );
-    meta
-}
-
-fn fixtures_dir() -> PathBuf {
-    env::var_os("OKF_MCP_APPS_FIXTURES").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/views"),
-        PathBuf::from,
-    )
-}
-
-fn load_fixture(path: &Path) -> Result<Value, String> {
-    let raw = fs::read_to_string(path)
-        .map_err(|error| format!("read fixture {}: {error}", path.display()))?;
-    serde_json::from_str(&raw).map_err(|error| format!("parse fixture {}: {error}", path.display()))
-}
-
 impl QualifyAppsServer {
     fn load(dist_apps: &Path) -> Result<Self, String> {
         let manifest_path = dist_apps.join("manifest.json");
@@ -377,6 +330,53 @@ impl ServerHandler for QualifyAppsServer {
     ) -> impl Future<Output = Result<CallToolResponse, McpError>> + Send + '_ {
         std::future::ready(self.call_render_tool(&request.name).map(Into::into))
     }
+}
+
+fn empty_object_schema() -> Arc<JsonObject> {
+    let mut schema = Map::new();
+    schema.insert("type".to_owned(), json!("object"));
+    schema.insert("properties".to_owned(), json!({}));
+    schema.insert("additionalProperties".to_owned(), json!(false));
+    Arc::new(schema)
+}
+
+fn resource_ui_meta() -> MetaObject {
+    let mut meta = MetaObject::new();
+    meta.insert(
+        "ui".to_owned(),
+        json!({
+            "csp": {
+                "connectDomains": [],
+                "resourceDomains": []
+            },
+            "prefersBorder": true
+        }),
+    );
+    meta
+}
+
+fn tool_ui_meta(resource_uri: &str) -> MetaObject {
+    let mut meta = MetaObject::new();
+    meta.insert(
+        "ui".to_owned(),
+        json!({
+            "resourceUri": resource_uri
+        }),
+    );
+    meta
+}
+
+fn fixtures_dir() -> PathBuf {
+    env::var_os("OKF_MCP_APPS_FIXTURES").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/views"),
+        PathBuf::from,
+    )
+}
+
+fn load_fixture(path: &Path) -> Result<Value, String> {
+    let raw = fs::read_to_string(path)
+        .map_err(|error| format!("read fixture {}: {error}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|error| format!("parse fixture {}: {error}", path.display()))
 }
 
 fn dist_apps_dir() -> PathBuf {
