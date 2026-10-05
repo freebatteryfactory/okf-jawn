@@ -4,34 +4,34 @@ overview: Feature-slice OKF and Docling to the narrowest official seams, replace
 todos:
   - id: okf
     content: "Replace umbrella okf: okf-core in storage and ingest; okf-validator (default-features=false) in core only; record ownership in the AGENTS files and vendors.json"
-    status: pending
+    status: completed
   - id: docling
     content: Upgrade to newest published matching docling version with default-features=false, features=[pdf]; drop direct docling-core
-    status: pending
+    status: completed
   - id: cargo-audit
-    content: "cargo update, review lock diff; .cargo/audit.toml with deny warnings; exact-ID ignores only if the new graph still reports the font-stack pair"
-    status: pending
+    content: cargo update, review lock diff; .cargo/audit.toml with deny warnings; exact-ID ignores only if the new graph still reports the font-stack pair
+    status: completed
   - id: swagger
     content: Replace Scalar with swagger-ui-dist reading canonical api/openapi.yaml; root scarfSettings disabled; no CDN
-    status: pending
+    status: completed
   - id: esbuild
     content: "Move generate-catalog.mjs to Vite build() with fixed unhashed names; remove esbuild; trustedDependencies: []; bun pm untrusted recorded; update toolchain test and README"
-    status: pending
+    status: completed
   - id: ts-types
     content: Align MCP client/core 2.3.0; add @types/bun 1.4.2; tooling tsconfig with bun types; scope node types only where MCP declarations need Buffer; check Hey API version
-    status: pending
+    status: completed
   - id: js-audit
-    content: "bun audit fix --dry-run only; apply via exact bun add pins or targeted exact overrides; audit --prod, --audit-level=high, full"
-    status: pending
+    content: bun audit fix --dry-run only; apply via exact bun add pins or targeted exact overrides; audit --prod, --audit-level=high, full
+    status: completed
   - id: gates-docs
     content: Add audit task (cargo-audit 0.22.2, three bun levels, SCARF_ANALYTICS=false in CI); update vendors.json (fix okf upstream), README, verification.json current, tree
-    status: pending
+    status: completed
   - id: verify
     content: Run the full verification order and report versions, eliminated and remaining advisories with labels
-    status: pending
+    status: completed
   - id: commit
     content: Create themed self-describing commits (no push)
-    status: pending
+    status: completed
 isProject: false
 ---
 
