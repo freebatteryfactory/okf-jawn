@@ -11,7 +11,7 @@ import { tree } from './lib/tree.mjs';
 import { bun, pins } from './lib/toolchain.mjs';
 import { checkScope, createLanes, resetLanes, syncLaneTable } from './lib/lanes.mjs';
 import { checkReceipts } from './lib/receipts.mjs';
-import { premergeSteps, runLane, runPremerge } from './lib/gates.mjs';
+import { cleanCheckout, premergeSteps, runLane, runPremerge } from './lib/gates.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ui = join(root, 'ui');
@@ -182,6 +182,12 @@ async function main() {
     }
     case 'premerge': {
       const result = await runPremerge(root, { only: option('--step') });
+      if (!result.passed) process.exitCode = 1;
+      break;
+    }
+    case 'clean-checkout': {
+      const result = await cleanCheckout(root);
+      process.stdout.write(`${result.passed ? 'CLEAN_CHECKOUT_PASS' : 'CLEAN_CHECKOUT_FAIL'} ${result.receipt.git_sha}\nreceipt: ${result.receiptPath}\n`);
       if (!result.passed) process.exitCode = 1;
       break;
     }

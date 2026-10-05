@@ -1,10 +1,11 @@
 /** Gate sequences as data (lane, premerge, clean checkout) and the one runner that logs them. */
 import { appendFileSync, writeFileSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { run } from './process.mjs';
+import { exists } from './files.mjs';
 import { bun } from './toolchain.mjs';
-import { laneNamed } from './lanes.mjs';
+import { laneNamed, lanesParent } from './lanes.mjs';
 
 const dev = (root, id, ...task) => ({ id, command: bun(), args: ['scripts/dev.mjs', ...task], cwd: root });
 const uiScript = (root, id, script, ...extra) => ({ id, command: bun(), args: ['--bun', 'run', script, ...extra], cwd: join(root, 'ui') });
@@ -113,4 +114,44 @@ export async function runPremerge(root, { only, execute, echo } = {}) {
   const line = failed.length ? `FAIL premerge ${label} ${failed.join(',')}` : `PASS premerge ${label}`;
   write(`\n${line}\n`);
   return { passed: failed.length === 0, line, logPath };
+}
+
+/** The clean-checkout sequence as [log id, dev.mjs task]; generation is checked twice for drift. */
+export const cleanCheckoutTasks = Object.freeze([['bootstrap', 'bootstrap'], ['gen-check-1', 'gen-check'], ['gen-check-2', 'gen-check'],
+  ['foundation', 'foundation'], ['check', 'check'], ['test', 'test'], ['check-offline', 'check-offline'], ['audit', 'audit']]);
+
+/**
+ * Run the whole foundation in a temporary detached worktree of HEAD and write a receipt.
+ * Every task runs even after a failure. The worktree is removed only when it is still clean;
+ * otherwise it stays as evidence. Nothing here forces git.
+ */
+export async function cleanCheckout(root, { parent = lanesParent(root), execute = executeStep, echo = chunk => process.stdout.write(chunk), now = () => new Date() } = {}) {
+  const git = (args, cwd = root) => run('git', args, { cwd, capture: true, allowFailure: true });
+  const sha = (await run('git', ['rev-parse', 'HEAD'], { cwd: root, capture: true })).stdout.trim();
+  const worktree = join(parent, `clean-checkout-${sha.slice(0, 12)}`);
+  if (await exists(worktree)) throw new Error(`clean-checkout refused: ${worktree} already exists. Inspect it, then remove it with \`git worktree remove\`.`);
+  await mkdir(parent, { recursive: true });
+  const added = await git(['worktree', 'add', '--detach', worktree, sha]);
+  if (added.code !== 0) throw new Error(`git worktree add failed (git exit ${added.code}): ${added.stderr.trim()}`);
+  const out = join(root, '.artifacts', 'qualification', 'clean-checkout');
+  const exit_codes = {};
+  for (const [id, task] of cleanCheckoutTasks) {
+    const step = { id, command: bun(), args: ['scripts/dev.mjs', task], cwd: worktree };
+    const { results } = await runSteps([step], { logPath: join(out, `${id}.log`), failFast: true, execute, echo });
+    exit_codes[id] = results[0].code;
+  }
+  const status = await git(['status', '--porcelain'], worktree);
+  const git_status_empty = status.code === 0 && status.stdout.trim() === '';
+  const receipt = { git_sha: sha, inputs: ['.'], produced_at: now().toISOString(), exit_codes, git_status_empty };
+  const receiptPath = join(out, 'receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+  let removed = false;
+  if (git_status_empty) {
+    const removal = await git(['worktree', 'remove', worktree]);
+    removed = removal.code === 0;
+    if (!removed) echo(`clean-checkout: could not remove ${worktree} (${removal.stderr.trim()}); remove it with \`git worktree remove\` once nothing holds it open.\n`);
+  } else {
+    echo(`clean-checkout: ${worktree} is not clean after the run and was left in place:\n${status.stdout}${status.stderr}`);
+  }
+  return { passed: git_status_empty && Object.values(exit_codes).every(value => value === 0), receipt, receiptPath, worktree, removed };
 }

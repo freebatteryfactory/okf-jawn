@@ -1,10 +1,11 @@
 /** Gate sequences are data; the runner logs every step and ends with one verdict line. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { laneSteps, premergeSteps, runLane, runPremerge } from '../../scripts/lib/gates.mjs';
+import { cleanCheckout, cleanCheckoutTasks, laneSteps, premergeSteps, runLane, runPremerge } from '../../scripts/lib/gates.mjs';
 import { laneNamed, lanes } from '../../scripts/lib/lanes.mjs';
 import { fixtureRepo, git } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
@@ -90,4 +91,32 @@ test('check and test are subsets of premerge, so the cargo flags are written onc
  assert.match(entry,/case 'check': await runNamed\(\['fmt', 'clippy', 'source-policy', 'ui-lint', 'ui-typecheck', 'gen-check'\]\); break;/);
  assert.match(entry,/case 'test': await runNamed\(\['test', 'ui-test'\]\); break;/);
  assert.doesNotMatch(entry,/'--all-targets'|'--all-features'/);
+});
+test('clean-checkout runs the whole foundation in a detached worktree of HEAD and removes it',async t=>{
+ const {base,root:repo}=await fixtureRepo(t,fixture);const sha=await git(repo,'rev-parse','HEAD');
+ const parent=join(base,'lanes');const worktree=join(parent,`clean-checkout-${sha.slice(0,12)}`);const ran=[];
+ const execute=async(step,write)=>{ran.push([step.id,step.cwd,step.args.join(' ')]);write(`ran ${step.id}\n`);return 0;};
+ const result=await cleanCheckout(repo,{parent,execute,...quiet,now:()=>new Date('2026-10-05T18:00:00Z')});
+ assert.deepEqual(ran.map(([id])=>id),['bootstrap','gen-check-1','gen-check-2','foundation','check','test','check-offline','audit']);
+ assert.deepEqual(ran.map(([,,args])=>args),['bootstrap','gen-check','gen-check','foundation','check','test','check-offline','audit'].map(name=>`scripts/dev.mjs ${name}`));
+ for(const [,cwd] of ran)assert.equal(cwd,worktree);
+ assert.deepEqual(result.receipt,{git_sha:sha,inputs:['.'],produced_at:'2026-10-05T18:00:00.000Z',exit_codes:Object.fromEntries(ran.map(([id])=>[id,0])),git_status_empty:true});
+ assert.deepEqual(Object.keys(result.receipt),['git_sha','inputs','produced_at','exit_codes','git_status_empty']);
+ assert.deepEqual(JSON.parse(await readFile(join(repo,'.artifacts','qualification','clean-checkout','receipt.json'),'utf8')),result.receipt);
+ assert.equal(result.passed,true);assert.equal(result.removed,true);
+ assert.equal(existsSync(worktree),false);
+ assert.equal((await git(repo,'worktree','list','--porcelain')).split(/\r?\n/).filter(line=>line.startsWith('worktree ')).length,1);
+});
+test('clean-checkout records a failing step and a drifted tree, keeps the evidence, and never forces',async t=>{
+ const {base,root:repo}=await fixtureRepo(t,fixture);const sha=await git(repo,'rev-parse','HEAD');
+ const parent=join(base,'lanes');const ran=[];
+ const execute=async(step,write)=>{ran.push(step.id);write(`ran ${step.id}\n`);if(step.id==='gen-check-2')await writeFile(join(step.cwd,'drift.json'),'{}');return step.id==='check'?3:0;};
+ const result=await cleanCheckout(repo,{parent,execute,...quiet});
+ assert.equal(ran.length,cleanCheckoutTasks.length,'a failing step does not stop the run');
+ assert.equal(result.receipt.exit_codes.check,3);assert.equal(result.receipt.git_status_empty,false);
+ assert.equal(result.passed,false);assert.equal(result.removed,false);
+ assert.equal(existsSync(join(parent,`clean-checkout-${sha.slice(0,12)}`,'drift.json')),true,'a drifted worktree is left for inspection');
+ await assert.rejects(cleanCheckout(repo,{parent,execute,...quiet}),/clean-checkout refused: .* already exists/);
+ // `-D` is Clippy's deny flag here, so only the force spellings are forbidden in this file.
+ assert.doesNotMatch(await read('scripts/lib/gates.mjs'),/'--force'|'-f'/,'gates.mjs must never force git');
 });
