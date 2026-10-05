@@ -23,7 +23,7 @@ pub mod ports;
 
 /// Bounded conversion worker interface.
 pub mod conversion;
-/// Durable job specifications, leases, reviews and receipts.
+/// Durable job specifications, leases, reviews, receipts and artifact records.
 pub mod jobs;
 /// Durable mutation ledger.
 pub mod mutations;

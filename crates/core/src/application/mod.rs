@@ -43,7 +43,7 @@ pub struct Ports {
     pub blobs: Arc<dyn BlobStore>,
     /// Git-versioned notes and source cards.
     pub versions: Arc<dyn VersionStore>,
-    /// Durable, non-rebuildable jobs, reviews, and receipts.
+    /// Durable, non-rebuildable jobs, reviews, receipts, and artifact records.
     pub records: Arc<dyn RecordStore>,
     /// Wake-up delivery for jobs already persisted in `records`.
     pub queue: Arc<dyn JobQueue>,

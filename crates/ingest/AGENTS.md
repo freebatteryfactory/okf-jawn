@@ -23,7 +23,7 @@ Read root AGENTS.md and SPEC.md.
 
 ## Ports to call (implemented by storage)
 
-`RecordStore::{claim_job, update_progress, complete_job, fail_job, pending_jobs, expire_leases}`, `UploadStore::get`, `BlobStore::{put, materialize}`, `VersionStore::{head, show, commit}`, `SearchIndex::{index_revision, rebuild}`, `EventLog::append`.
+`RecordStore::{claim_job, update_progress, record_artifact, get_artifact, complete_job, fail_job, pending_jobs, expire_leases}`, `UploadStore::get`, `BlobStore::{put, open, materialize}`, `VersionStore::{head, show, commit}`, `SearchIndex::{index_revision, rebuild}`, `EventLog::append`.
 
 ## Rules
 

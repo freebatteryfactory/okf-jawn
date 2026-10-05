@@ -24,6 +24,7 @@ use okf_jawn_contract::item::{Draft, ItemKind, Lifecycle};
 use okf_jawn_contract::proposal::{Change, Comment, Proposal, ProposalStatus};
 use okf_jawn_contract::review::{Confirmation, Review};
 use okf_jawn_contract::search::{GetGraphResponse, LinkDirection};
+use okf_jawn_contract::transport::TRANSPORTS;
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::conversion::{
@@ -35,7 +36,8 @@ use okf_jawn_core::credentials::{
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::events::{EventLog, EventQuery, NewEvent};
 use okf_jawn_core::jobs::{
-    ClaimedJob, JobCompletion, JobHandler, JobLease, JobQueue, JobSpec, NewJob, RecordStore,
+    ArtifactKind, ArtifactRecord, ClaimedJob, JobCompletion, JobHandler, JobLease, JobQueue,
+    JobSpec, NewArtifact, NewJob, RecordStore,
 };
 use okf_jawn_core::proposals::{CommentPage, ProposalFilter, ProposalStore};
 use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolved, token_hash};
@@ -607,6 +609,42 @@ async fn search_index_calls(
         .await
 }
 
+/// What an export handler and, later, a download or a restore do with an artifact.
+async fn artifact_calls(
+    records: &dyn RecordStore,
+    blobs: &dyn BlobStore,
+    claimed: &ClaimedJob,
+    stored: ObjectInfo,
+) -> Result<ObjectInfo, ApiError> {
+    let record = records
+        .record_artifact(
+            &claimed.scope,
+            claimed.mutation_id,
+            NewArtifact {
+                kind: ArtifactKind::Export,
+                object: stored,
+                media_type: "application/zip".to_owned(),
+                created_by_job: claimed.lease.job_id,
+            },
+        )
+        .await?;
+    records
+        .complete_job(JobCompletion {
+            lease: claimed.lease.clone(),
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: Some(record.id),
+            outputs: vec![record.object.digest.clone()],
+            warnings: Vec::new(),
+        })
+        .await?;
+    let found = records.get_artifact(&claimed.scope, record.id).await?;
+    let read = blobs
+        .open(&claimed.scope, &found.object.digest, 0, found.object.size)
+        .await?;
+    Ok(read.object)
+}
+
 #[test]
 fn provenance_keeps_the_typed_route_and_client() -> TestResult {
     let principal = Principal {
@@ -992,4 +1030,35 @@ fn a_page_of_comments_keeps_its_order_and_cursor() {
     );
     assert_eq!(page.next_cursor.as_deref(), Some("after-c1"));
     assert!(type_checked(&proposal_calls));
+}
+
+#[test]
+fn an_artifact_record_yields_the_wire_download_for_its_transport() -> TestResult {
+    let workspace = WorkspaceId(Uuid::from_u128(1));
+    let record = ArtifactRecord {
+        id: ArtifactId(Uuid::from_u128(12)),
+        kind: ArtifactKind::Backup,
+        object: ObjectInfo {
+            digest: digest('c')?,
+            size: 2048,
+        },
+        media_type: "application/zip".to_owned(),
+        created_by_job: JobId(Uuid::from_u128(7)),
+    };
+    let transport = TRANSPORTS
+        .iter()
+        .find(|transport| transport.id == "download_artifact")
+        .ok_or("the download_artifact transport is not declared")?;
+    let expected_path = transport
+        .path
+        .replace("{workspace_id}", &workspace.0.to_string())
+        .replace("{artifact_id}", &record.id.0.to_string());
+    let download = record.download(workspace);
+    assert_eq!(download.download_path, expected_path);
+    assert_eq!(download.artifact_id, record.id);
+    assert_eq!(download.sha256, digest('c')?);
+    assert_eq!(download.size, "2048");
+    assert_eq!(transport.response_media, record.media_type);
+    assert!(type_checked(&artifact_calls));
+    Ok(())
 }

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::conversion::ConversionSettings;
 use crate::ports::PortFuture;
-use crate::storage::{Page, Provenance, StorageScope};
+use crate::storage::{ObjectInfo, Page, Provenance, StorageScope};
 
 /// What a job must do: the inputs of the request that started it, with selectors resolved.
 ///
@@ -125,12 +125,51 @@ pub struct JobCompletion {
     pub revision: Option<Revision>,
     /// Items the job produced.
     pub item_ids: Vec<ItemId>,
-    /// Export or backup artifact the job produced.
-    pub artifact: Option<DownloadArtifact>,
+    /// Artifact the job produced, already recorded with `RecordStore::record_artifact`.
+    pub artifact: Option<ArtifactId>,
     /// Retained output objects, kept as garbage-collection roots.
     pub outputs: Vec<Digest>,
     /// Non-fatal issues recorded during the work.
     pub warnings: Vec<Warning>,
+}
+
+/// What a retained artifact is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactKind {
+    /// A portable export of a workspace.
+    Export,
+    /// A full backup of content, retained objects and application records.
+    Backup,
+    /// An export of one View.
+    ViewExport,
+}
+
+/// An artifact a job produced, recorded once its bytes are retained in the blob store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewArtifact {
+    /// What the artifact is.
+    pub kind: ArtifactKind,
+    /// Identity and size of the retained bytes.
+    pub object: ObjectInfo,
+    /// Media type the download transport sends.
+    pub media_type: String,
+    /// Job that produced the artifact.
+    pub created_by_job: JobId,
+}
+
+/// The non-rebuildable link from an artifact identity to retained bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactRecord {
+    /// Artifact identity, allocated by the store.
+    pub id: ArtifactId,
+    /// What the artifact is.
+    pub kind: ArtifactKind,
+    /// Identity and size of the retained bytes; open them with `BlobStore::open`.
+    pub object: ObjectInfo,
+    /// Media type the download transport sends.
+    pub media_type: String,
+    /// Job that produced the artifact.
+    pub created_by_job: JobId,
 }
 
 /// SQLite-backed non-rebuildable application records.
@@ -155,6 +194,9 @@ pub trait RecordStore: Send + Sync {
     /// A handler reads the returned state: a cancelled job stops working.
     fn update_progress<'a>(&'a self, lease: &'a JobLease, progress: u8) -> PortFuture<'a, Job>;
     /// Commit completion only for the current unexpired claim.
+    ///
+    /// When `completion.artifact` is set, the returned and stored job shows
+    /// `ArtifactRecord::download` of that record as its artifact.
     fn complete_job(&self, completion: JobCompletion) -> PortFuture<'_, Job>;
     /// Keep the failure and retry eligibility for the current claim.
     fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job>;
@@ -178,6 +220,24 @@ pub trait RecordStore: Send + Sync {
         mutation_id: MutationId,
         job: JobId,
     ) -> PortFuture<'a, Job>;
+    /// Record the artifact a job produced and allocate its identity.
+    ///
+    /// The bytes are already retained in `BlobStore` under `artifact.object.digest`. Unique on
+    /// `mutation_id`, the producing job's write identity: a repeated id records nothing and
+    /// returns the prior record.
+    fn record_artifact<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        mutation_id: MutationId,
+        artifact: NewArtifact,
+    ) -> PortFuture<'a, ArtifactRecord>;
+    /// Read one artifact record within workspace scope; `NotFound` when this workspace has no
+    /// artifact with that identity.
+    fn get_artifact<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        artifact: ArtifactId,
+    ) -> PortFuture<'a, ArtifactRecord>;
     /// Enumerate unfinished records across tenants for queue reconciliation on restart.
     fn pending_jobs(&self) -> PortFuture<'_, Vec<(StorageScope, JobId)>>;
     /// Release claims whose leases have expired so work can be reclaimed.
@@ -229,6 +289,19 @@ pub trait JobHandler: Send + Sync {
     fn handle<'a>(&'a self, claimed: &'a ClaimedJob) -> PortFuture<'a, ()>;
 }
 
+impl ArtifactRecord {
+    /// The wire form shown on a job, with the `download_artifact` transport path.
+    #[must_use]
+    pub fn download(&self, workspace: WorkspaceId) -> DownloadArtifact {
+        DownloadArtifact {
+            artifact_id: self.id,
+            sha256: self.object.digest.clone(),
+            size: self.object.size.to_string(),
+            download_path: artifact_download_path(workspace, self.id),
+        }
+    }
+}
+
 impl JobSpec {
     /// The wire kind shown on the job.
     #[must_use]
@@ -243,4 +316,12 @@ impl JobSpec {
             Self::ExportView { .. } => JobKind::ExportView,
         }
     }
+}
+
+/// The application-relative path of the `download_artifact` transport for one artifact.
+///
+/// Defined once so the record store, the application and the server route agree.
+#[must_use]
+pub fn artifact_download_path(workspace: WorkspaceId, artifact: ArtifactId) -> String {
+    format!("/api/workspaces/{}/artifacts/{}", workspace.0, artifact.0)
 }
