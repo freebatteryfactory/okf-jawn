@@ -1,13 +1,13 @@
 /**
- * Orchestrate Phase 0 MCP Apps qualification.
- * Ensures ui/dist-apps, asserts SDK MIME, runs okf-qualify-mcp-apps --check,
- * and records the Playwright observed-render receipt fields.
+ * Orchestrate Phase 0 MCP Apps qualification (MIME + harness --check).
+ * Host render evidence is recorded only by a later Playwright / web-host step.
  */
 
 import { spawn } from 'node:child_process';
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const uiDir = join(root, 'ui');
@@ -16,61 +16,30 @@ const manifestPath = join(distApps, 'manifest.json');
 const outDir = join(root, '.artifacts/qualification/mcp-apps');
 const receiptPath = join(outDir, 'receipt.json');
 
-const { RESOURCE_MIME_TYPE } = await import(
-  pathToFileURL(join(uiDir, 'node_modules/@modelcontextprotocol/ext-apps/dist/src/app.js')).href
-);
+const require = createRequire(join(uiDir, 'package.json'));
+const { RESOURCE_MIME_TYPE } = require('@modelcontextprotocol/ext-apps');
 
-async function exists(path) {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function ensureDistApps() {
-  const names = ['source', 'changes', 'timeline', 'present'];
-  const htmlOk = await Promise.all(names.map((name) => exists(join(distApps, `${name}.html`))));
-  if (htmlOk.every(Boolean) && (await exists(manifestPath))) return;
-  await new Promise((resolveRun, reject) => {
-    const child = spawn('bun', ['--bun', 'run', 'build'], {
-      cwd: uiDir,
-      stdio: 'inherit',
-      env: process.env,
-    });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code === 0) resolveRun();
-      else reject(new Error(`ui build exited ${code}`));
-    });
-  });
-  if (!(await exists(manifestPath))) {
-    throw new Error(`ui build did not write ${manifestPath}`);
-  }
-}
-
-function runCargoCheck() {
+function run(cmd, args, options = {}) {
   return new Promise((resolveRun, reject) => {
-    const child = spawn(
-      'cargo',
-      ['run', '--locked', '-p', 'okf-qualify-mcp-apps', '--release', '--', '--check'],
-      {
-        cwd: root,
-        env: { ...process.env, OKF_MCP_APPS_DIST: distApps },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
+    const child = spawn(cmd, args, {
+      cwd: options.cwd ?? root,
+      env: options.env ?? process.env,
+      stdio: options.stdio ?? 'inherit',
+    });
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk;
-      process.stdout.write(chunk);
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk;
-      process.stderr.write(chunk);
-    });
+    if (child.stdout) {
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk;
+        process.stdout.write(chunk);
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk;
+        process.stderr.write(chunk);
+      });
+    }
     child.on('error', reject);
     child.on('close', (code) => {
       resolveRun({ code: code ?? 1, stdout, stderr });
@@ -79,7 +48,12 @@ function runCargoCheck() {
 }
 
 await mkdir(outDir, { recursive: true });
-await ensureDistApps();
+
+// Always rebuild so qualification never reads a stale dist-apps tree.
+const build = await run('bun', ['--bun', 'run', 'build'], { cwd: uiDir });
+if (build.code !== 0) {
+  throw new Error(`ui build exited ${build.code}`);
+}
 
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 const resources = Array.isArray(manifest.resources) ? manifest.resources : [];
@@ -102,14 +76,28 @@ if (!mimeCheck.equal) {
   );
 }
 
-const { code, stdout, stderr } = await runCargoCheck();
+const { code, stdout, stderr } = await run(
+  'cargo',
+  ['run', '--locked', '-p', 'okf-qualify-mcp-apps', '--release', '--', '--check'],
+  {
+    env: { ...process.env, OKF_MCP_APPS_DIST: distApps },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  },
+);
 if (code !== 0) {
   throw new Error(`okf-qualify-mcp-apps --check exited ${code}\n${stderr}`);
 }
 
 let check;
 try {
-  check = JSON.parse(stdout.trim().split('\n').at(-1) ?? '');
+  // Harness prints one compact JSON object on stdout.
+  const trimmed = stdout.trim();
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  if (start < 0 || end < start) {
+    throw new Error('no JSON object in stdout');
+  }
+  check = JSON.parse(trimmed.slice(start, end + 1));
 } catch (error) {
   throw new Error(`could not parse harness check JSON: ${error.message}\n${stdout}`);
 }
@@ -123,8 +111,13 @@ for (const name of ['source', 'changes', 'timeline', 'present']) {
   }
 }
 
+const commit = (
+  await run('git', ['rev-parse', 'HEAD'], { stdio: ['ignore', 'pipe', 'pipe'] })
+).stdout.trim();
+
 const receipt = {
   component: 'mcp-apps-phase0',
+  commit_sha: commit,
   harness: 'okf-qualify-mcp-apps',
   transport: 'stdio',
   serve_command: 'cargo run --locked -p okf-qualify-mcp-apps --release',
@@ -135,22 +128,11 @@ const receipt = {
   resources_readable: readable,
   check,
   host_render: {
-    playwright_spec: 'ui/tests/e2e/mcp-apps-bundle-render.spec.ts',
-    status: 'passed',
+    status: 'not_run',
     meaning:
-      'Chromium loaded each ~1.8 MiB bundle; App painted host-connection status/alert; axe found no serious/critical issues. Screenshots under .artifacts/qualification/mcp-apps/render-*.png. This is an observed render of the real bundles, not a Claude/ChatGPT screenshot.',
-    screenshots: [
-      'render-source.png',
-      'render-changes.png',
-      'render-timeline.png',
-      'render-present.png',
-    ],
-    basic_host:
-      'Official ext-apps basic-host remains the documented reference host for full tool-call→iframe journeys. Phase 0 closed the 1.8 MiB question via Playwright observed paint of the built resources served by this harness.',
-    claude_desktop:
-      'Not executed in this pass. Real Claude Desktop visual qualification is not claimed here and stays available for construction/acceptance host checks.',
+      'Host render is recorded only after basic-host Playwright/axe or a real web host (claude.ai / ChatGPT) observes a feature component. This receipt does not claim a host render.',
   },
-  note: 'Phase 0 proves MIME + resource readability + observed Chromium paint of the four bundles. Product MCP server over Application is a later gate.',
+  note: 'Phase 0 MIME + resource readability from a fresh ui build. Product MCP server over Application is a later gate.',
 };
 await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
 process.stdout.write(`MCP Apps qualification receipt: ${receiptPath}\n`);

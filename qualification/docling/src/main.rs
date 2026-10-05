@@ -25,19 +25,30 @@ struct FixtureReceipt {
     converter_version: String,
     elapsed_ms: u128,
     errors: Vec<ErrorReceipt>,
+    expected: String,
     fixture: String,
     markdown_chars: usize,
     markdown_nonempty: bool,
+    must_contain_ok: Option<bool>,
     original_unchanged: bool,
     outcome: String,
     page_image_count: usize,
+    page_provenance: Vec<PageProvenance>,
     path: PathBuf,
+    /// Always null in-process: authored Rust forbids the OS FFI needed to sample RSS.
+    /// The orchestrator may attach a process-level peak separately.
     peak_rss_bytes: Option<u64>,
     role: String,
     settings: BTreeMap<String, serde_json::Value>,
     sha256_after: String,
     sha256_before: String,
     status: String,
+}
+
+#[derive(Serialize)]
+struct PageProvenance {
+    page_no: usize,
+    has_image: bool,
 }
 
 #[derive(Serialize)]
@@ -50,15 +61,26 @@ struct QualificationReport {
     timeout_case: Option<FixtureReceipt>,
 }
 
+/// What a fixture must produce for the gate to pass.
+#[derive(Clone, Copy)]
+enum Expected {
+    /// Supported extraction: Success, non-empty markdown, optional substring.
+    SuccessNonEmpty { must_contain: Option<&'static str> },
+    /// Must surface ConversionStatus::Failure (never empty Success).
+    ExplicitFailure,
+}
+
 fn sha256_file(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
-fn peak_rss_bytes() -> Option<u64> {
-    // Authored code forbids unsafe. The Bun/PowerShell orchestrator records
-    // peak working-set from the OS after this process exits.
-    None
+fn converter_version() -> String {
+    format!(
+        "{} {}",
+        env!("CARGO_PKG_NAME"),
+        option_env!("DOCLING_CRATE_VERSION").unwrap_or("1.93.5")
+    )
 }
 
 fn status_label(status: ConversionStatus) -> &'static str {
@@ -69,10 +91,73 @@ fn status_label(status: ConversionStatus) -> &'static str {
     }
 }
 
+fn expected_label(expected: Expected) -> &'static str {
+    match expected {
+        Expected::SuccessNonEmpty { .. } => "SuccessNonEmpty",
+        Expected::ExplicitFailure => "ExplicitFailure",
+    }
+}
+
+fn page_provenance(result: &docling::ConversionResult) -> Vec<PageProvenance> {
+    let mut pages: Vec<PageProvenance> = result
+        .document
+        .page_images
+        .iter()
+        .map(|(page_no, image)| PageProvenance {
+            page_no: *page_no,
+            has_image: !image.mimetype.is_empty(),
+        })
+        .collect();
+    pages.sort_by_key(|page| page.page_no);
+    pages
+}
+
+fn judge_outcome(
+    expected: Expected,
+    status: ConversionStatus,
+    markdown: &str,
+    original_unchanged: bool,
+) -> (String, Option<bool>) {
+    if !original_unchanged {
+        return ("FAIL_original_mutated".to_owned(), None);
+    }
+    let nonempty = !markdown.trim().is_empty();
+    match expected {
+        Expected::SuccessNonEmpty { must_contain } => {
+            let contain_ok = must_contain.map(|needle| markdown.contains(needle));
+            if matches!(status, ConversionStatus::Failure) {
+                return ("FAIL_unexpected_failure".to_owned(), contain_ok);
+            }
+            if !nonempty {
+                return ("FAIL_empty_markdown".to_owned(), contain_ok);
+            }
+            if let Some(false) = contain_ok {
+                return ("FAIL_missing_expected_text".to_owned(), contain_ok);
+            }
+            if matches!(status, ConversionStatus::Success) {
+                ("PASS".to_owned(), contain_ok)
+            } else {
+                // PartialSuccess with content is recorded but not a full pass for text fixtures.
+                ("FAIL_partial_not_success".to_owned(), contain_ok)
+            }
+        }
+        Expected::ExplicitFailure => {
+            if matches!(status, ConversionStatus::Failure) {
+                ("PASS_explicit_failure".to_owned(), None)
+            } else if matches!(status, ConversionStatus::Success) && !nonempty {
+                ("FAIL_empty_success".to_owned(), None)
+            } else {
+                ("FAIL_expected_failure".to_owned(), None)
+            }
+        }
+    }
+}
+
 fn convert_fixture(
     converter: &DocumentConverter,
     path: &Path,
     role: &str,
+    expected: Expected,
     settings: &BTreeMap<String, serde_json::Value>,
 ) -> Result<FixtureReceipt, String> {
     let sha_before = sha256_file(path)?;
@@ -85,6 +170,7 @@ fn convert_fixture(
     let sha_after = sha256_file(path)?;
     let markdown = result.document.export_to_markdown();
     let page_image_count = result.document.page_images.len();
+    let provenance = page_provenance(&result);
     let errors: Vec<ErrorReceipt> = result
         .errors
         .iter()
@@ -95,40 +181,43 @@ fn convert_fixture(
         })
         .collect();
     let status = status_label(result.status).to_owned();
-    let empty_success =
-        matches!(result.status, ConversionStatus::Success) && markdown.trim().is_empty();
     let original_unchanged = sha_before == sha_after;
-    let outcome = if empty_success {
-        "FAIL_empty_success".to_owned()
-    } else if !original_unchanged {
-        "FAIL_original_mutated".to_owned()
-    } else {
-        match result.status {
-            ConversionStatus::Failure => "PASS_explicit_failure".to_owned(),
-            ConversionStatus::PartialSuccess | ConversionStatus::Success => "PASS".to_owned(),
-        }
-    };
+    let (outcome, must_contain_ok) =
+        judge_outcome(expected, result.status, &markdown, original_unchanged);
     Ok(FixtureReceipt {
-        converter_version: "docling-1.93.5".to_owned(),
+        converter_version: converter_version(),
         elapsed_ms,
         errors,
+        expected: expected_label(expected).to_owned(),
         fixture: path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default(),
         markdown_chars: markdown.chars().count(),
         markdown_nonempty: !markdown.trim().is_empty(),
+        must_contain_ok,
         original_unchanged,
         outcome,
         page_image_count,
+        page_provenance: provenance,
         path: path.to_path_buf(),
-        peak_rss_bytes: peak_rss_bytes(),
+        peak_rss_bytes: None,
         role: role.to_owned(),
         settings: settings.clone(),
         sha256_after: sha_after,
         sha256_before: sha_before,
         status,
     })
+}
+
+fn timeout_honoured(timeout_case: &FixtureReceipt) -> bool {
+    timeout_case.errors.iter().any(|item| {
+        item.module_name == "pipeline" && item.error_message.to_lowercase().contains("timeout")
+    }) || (timeout_case.status == "PartialSuccess"
+        && timeout_case
+            .errors
+            .iter()
+            .any(|item| item.error_message.to_lowercase().contains("timeout")))
 }
 
 fn run() -> Result<(), String> {
@@ -167,24 +256,73 @@ fn run() -> Result<(), String> {
         .ocr_lang("en")
         .artifacts_dir(artifacts.path().display().to_string());
 
-    let fixtures = [
-        ("sample_with_image.docx", "docx_with_images"),
-        ("sample_sheet.xlsx", "xlsx"),
-        ("born_digital_text.pdf", "born_digital_pdf"),
-        ("scanned_image_only.pdf", "scanned_or_image_pdf"),
-        ("table_heavy.pdf", "table_heavy_pdf"),
-        ("sample_image.png", "image"),
+    // must_contain needles are stable tokens from the MIT fixtures / corpus notes.
+    // Corpus fixtures added in the docling-rerun step keep the same needles where possible.
+    let fixtures: [(&str, &str, Expected); 6] = [
+        (
+            "sample_with_image.docx",
+            "docx_with_images",
+            Expected::SuccessNonEmpty {
+                must_contain: Some("OKF"),
+            },
+        ),
+        (
+            "sample_sheet.xlsx",
+            "xlsx",
+            Expected::SuccessNonEmpty {
+                must_contain: Some("Widget"),
+            },
+        ),
+        (
+            "born_digital_text.pdf",
+            "born_digital_pdf",
+            Expected::SuccessNonEmpty {
+                must_contain: Some("Born-digital"),
+            },
+        ),
+        (
+            "scanned_image_only.pdf",
+            "scanned_or_image_pdf",
+            Expected::SuccessNonEmpty { must_contain: None },
+        ),
+        (
+            "table_heavy.pdf",
+            "table_heavy_pdf",
+            Expected::SuccessNonEmpty {
+                must_contain: Some("Name"),
+            },
+        ),
+        (
+            "sample_image.png",
+            "image",
+            Expected::SuccessNonEmpty { must_contain: None },
+        ),
     ];
 
     let mut receipts = Vec::new();
     let mut summary = BTreeMap::new();
-    for (name, role) in fixtures {
+    for (name, role, expected) in fixtures {
         let path = PathBuf::from(&fixtures_dir).join(name);
         if !path.is_file() {
             return Err(format!("missing fixture {}", path.display()));
         }
-        let receipt = convert_fixture(&converter, &path, role, &settings)?;
+        let receipt = convert_fixture(&converter, &path, role, expected, &settings)?;
         summary.insert(name.to_owned(), receipt.outcome.clone());
+        receipts.push(receipt);
+    }
+
+    // Optional must-fail fixture (added in docling-rerun). Absent is OK until that step.
+    let fail_name = "must_fail_corrupt.bin";
+    let fail_path = PathBuf::from(&fixtures_dir).join(fail_name);
+    if fail_path.is_file() {
+        let receipt = convert_fixture(
+            &converter,
+            &fail_path,
+            "must_fail",
+            Expected::ExplicitFailure,
+            &settings,
+        )?;
+        summary.insert(fail_name.to_owned(), receipt.outcome.clone());
         receipts.push(receipt);
     }
 
@@ -198,27 +336,24 @@ fn run() -> Result<(), String> {
         serde_json::Value::Number(1.into()),
     );
     let timeout_path = PathBuf::from(&fixtures_dir).join("scanned_image_only.pdf");
-    let timeout_case = convert_fixture(
+    let mut timeout_case = convert_fixture(
         &timeout_converter,
         &timeout_path,
         "timeout_probe",
+        Expected::SuccessNonEmpty { must_contain: None },
         &timeout_settings,
     )?;
-    let timeout_ok = timeout_case.status == "PartialSuccess"
-        || timeout_case.errors.iter().any(|item| {
-            item.module_name == "pipeline" || item.error_message.to_lowercase().contains("timeout")
-        });
-    summary.insert(
-        "timeout_probe".to_owned(),
-        if timeout_ok {
-            "PASS".to_owned()
-        } else {
-            format!("OBSERVED_{}", timeout_case.status)
-        },
-    );
+    let timeout_ok = timeout_honoured(&timeout_case);
+    let timeout_outcome = if timeout_ok {
+        "PASS".to_owned()
+    } else {
+        "FAIL_timeout_not_honoured".to_owned()
+    };
+    timeout_case.outcome = timeout_outcome.clone();
+    summary.insert("timeout_probe".to_owned(), timeout_outcome);
 
     let report = QualificationReport {
-        converter_crate: "docling 1.93.5".to_owned(),
+        converter_crate: converter_version(),
         fixtures_dir: PathBuf::from(fixtures_dir),
         models_dir: PathBuf::from(models_dir),
         receipts,
@@ -234,7 +369,10 @@ fn run() -> Result<(), String> {
         .values()
         .any(|value| value.starts_with("FAIL"));
     if failed {
-        return Err("one or more fixtures failed qualification rules".to_owned());
+        return Err(format!(
+            "one or more fixtures failed qualification rules: {:?}",
+            report.summary
+        ));
     }
     Ok(())
 }

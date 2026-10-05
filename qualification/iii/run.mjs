@@ -34,8 +34,9 @@ const FAIL_GATE = 'FAIL_GATE';
 
 const ELV2_NOTES = {
   license: 'Elastic License 2.0',
-  source: 'https://github.com/iii-hq/iii/blob/main/engine/LICENSE',
+  source: `https://github.com/iii-hq/iii/blob/${ENGINE_TAG}/engine/LICENSE`,
   reviewed_text_sha256: null,
+  source_ref: null,
   deployment_implications: [
     'ELv2 forbids providing the software to third parties as a hosted/managed service that exposes a substantial set of iii engine features.',
     'Self-hosted / single-tenant use of the engine as an internal dependency is the intended qualification posture for okf-jawn.',
@@ -171,10 +172,12 @@ async function ensureCacheLinux() {
 }
 
 async function fetchElv2() {
-  const response = await fetch('https://raw.githubusercontent.com/iii-hq/iii/main/engine/LICENSE');
+  const response = await fetch(
+    `https://raw.githubusercontent.com/iii-hq/iii/refs/tags/${ENGINE_TAG}/engine/LICENSE`,
+  );
   if (!response.ok) throw new Error(`ELv2 fetch failed: ${response.status}`);
   const text = await response.text();
-  return { text, sha256: sha256Buffer(Buffer.from(text, 'utf8')) };
+  return { text, sha256: sha256Buffer(Buffer.from(text, 'utf8')), source_ref: `refs/tags/${ENGINE_TAG}` };
 }
 
 async function writeComposeWsl(nativeWorkdir) {
@@ -408,6 +411,33 @@ async function killWorker(child) {
   await sleep(300);
 }
 
+/** Kill the qualify worker and the WSL engine+queue compose, then restart compose. */
+async function killEngineStack(worker, nativeWorkdir, nativeCache) {
+  await killWorker(worker);
+  await stopCompose(nativeWorkdir);
+  await sleep(500);
+  await startCompose(nativeWorkdir, nativeCache);
+}
+
+async function readEffectLedger(markerDir, jobId) {
+  const path = join(markerDir, `effect_ledger_${jobId}`);
+  if (!(await exists(path))) return [];
+  const text = await readFile(path, 'utf8');
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line === 'true');
+}
+
+async function writeCrashBlob(markerDir, jobId) {
+  const payload = `okf-iii-blob-${jobId}-v1`;
+  const path = join(markerDir, `blob_${jobId}.bin`);
+  await writeFile(path, payload);
+  const sha256 = sha256Buffer(Buffer.from(payload, 'utf8'));
+  return { path, sha256, payload };
+}
+
 async function rssForCompose(nativeWorkdir) {
   const result = await wslBash(
     [
@@ -479,6 +509,7 @@ async function main() {
 
     elv2 = await fetchElv2();
     ELV2_NOTES.reviewed_text_sha256 = elv2.sha256;
+    ELV2_NOTES.source_ref = elv2.source_ref;
     if (!elv2.text.includes('Elastic License 2.0')) {
       throw new Error('ELv2 license text did not contain expected header');
     }
@@ -494,13 +525,16 @@ async function main() {
     await writeComposeWsl(nativeWorkdir);
 
     const workerBin = await buildWorker();
+    const composeStarted = Date.now();
     await startCompose(nativeWorkdir, nativeCache);
-    memory = await rssForCompose(nativeWorkdir);
+    const startupMs = Date.now() - composeStarted;
+    memory = { startup_ms: startupMs, before: await rssForCompose(nativeWorkdir) };
 
-    // ---- Test 1: redelivery (kill before side effect / before Ok) ----
+    // ---- Test 1: redelivery (kill engine before side effect / before Ok) ----
     await rm(join(controlDir, 'READY'), { force: true });
     await writeFile(join(controlDir, GATE_BEFORE_WORK), '1');
     await unlink(join(controlDir, GATE_AFTER_EFFECT)).catch(() => {});
+    const blob1 = await writeCrashBlob(markerDir, 'test1');
     let worker = startQualifyWorker(workerBin, controlDir, markerDir);
     if (!(await waitForFile(join(controlDir, 'READY'), 60_000))) {
       await killWorker(worker);
@@ -508,7 +542,7 @@ async function main() {
     }
     await iiiTrigger(nativeCache, 'iii::durable::publish', {
       topic: 'okf.qualify.import',
-      data: { job_id: 'test1' },
+      data: { job_id: 'test1', blob_path: blob1.path, blob_sha256: blob1.sha256 },
     });
     if (!(await waitForFile(join(controlDir, 'BLOCKED_GATE_BEFORE_WORK_test1'), 30_000))) {
       await killWorker(worker);
@@ -518,7 +552,7 @@ async function main() {
       await killWorker(worker);
       throw new Error('Test1: effect marker exists before kill (gate failed)');
     }
-    await killWorker(worker);
+    await killEngineStack(worker, nativeWorkdir, nativeCache);
     await unlink(join(controlDir, GATE_BEFORE_WORK)).catch(() => {});
     await unlink(join(controlDir, 'READY')).catch(() => {});
     worker = startQualifyWorker(workerBin, controlDir, markerDir);
@@ -529,12 +563,16 @@ async function main() {
     const t1Ok = await waitForFile(join(markerDir, 'completed_test1'), 60_000);
     const t1Effect = await exists(join(markerDir, 'effect_test1'));
     const t1Deliveries = await countLines(join(markerDir, 'deliveries_test1'));
+    const t1BlobOk = await exists(join(markerDir, 'blob_ok_test1'));
+    const t1BlobIntact = (await sha256File(blob1.path)) === blob1.sha256;
     tests.test1_redelivery = {
       completed: t1Ok,
       effect_present: t1Effect,
       deliveries: t1Deliveries,
-      kill_point: 'GATE_BEFORE_WORK (before side effect and before Ok ack)',
-      passed: Boolean(t1Ok && t1Effect && t1Deliveries >= 2),
+      kill_point: 'GATE_BEFORE_WORK; engine+queue+worker SIGKILL before Ok',
+      blob_verified: t1BlobOk,
+      blob_intact: t1BlobIntact,
+      passed: Boolean(t1Ok && t1Effect && t1Deliveries >= 2 && t1BlobOk && t1BlobIntact),
     };
     await killWorker(worker);
 
@@ -542,6 +580,7 @@ async function main() {
     await rm(join(controlDir, 'READY'), { force: true });
     await unlink(join(controlDir, GATE_BEFORE_WORK)).catch(() => {});
     await writeFile(join(controlDir, GATE_AFTER_EFFECT), '1');
+    const blob2 = await writeCrashBlob(markerDir, 'test2');
     worker = startQualifyWorker(workerBin, controlDir, markerDir);
     if (!(await waitForFile(join(controlDir, 'READY'), 60_000))) {
       await killWorker(worker);
@@ -549,7 +588,7 @@ async function main() {
     }
     await iiiTrigger(nativeCache, 'iii::durable::publish', {
       topic: 'okf.qualify.import',
-      data: { job_id: 'test2' },
+      data: { job_id: 'test2', blob_path: blob2.path, blob_sha256: blob2.sha256 },
     });
     if (!(await waitForFile(join(markerDir, 'effect_test2'), 30_000))) {
       await killWorker(worker);
@@ -563,7 +602,7 @@ async function main() {
       await killWorker(worker);
       throw new Error('Test2: completed before kill (acked too early)');
     }
-    await killWorker(worker);
+    await killEngineStack(worker, nativeWorkdir, nativeCache);
     await unlink(join(controlDir, GATE_AFTER_EFFECT)).catch(() => {});
     await unlink(join(controlDir, 'READY')).catch(() => {});
     worker = startQualifyWorker(workerBin, controlDir, markerDir);
@@ -574,13 +613,30 @@ async function main() {
     const t2Ok = await waitForFile(join(markerDir, 'completed_test2'), 60_000);
     const t2Deliveries = await countLines(join(markerDir, 'deliveries_test2'));
     const t2Effect = await exists(join(markerDir, 'effect_test2'));
+    const ledger = await readEffectLedger(markerDir, 'test2');
+    const firstTrue = ledger.filter((v) => v === true).length;
+    const firstFalse = ledger.filter((v) => v === false).length;
+    const t2BlobOk = await exists(join(markerDir, 'blob_ok_test2'));
+    const t2BlobIntact = (await sha256File(blob2.path)) === blob2.sha256;
     tests.test2_idempotency = {
       completed: t2Ok,
       effect_present: t2Effect,
       deliveries: t2Deliveries,
-      kill_point: 'GATE_AFTER_EFFECT (after create_new marker, before Ok ack)',
-      single_effect: t2Effect,
-      passed: Boolean(t2Ok && t2Effect && t2Deliveries >= 2),
+      kill_point: 'GATE_AFTER_EFFECT; engine+queue+worker SIGKILL before Ok',
+      effect_ledger: ledger,
+      first_effect_true_count: firstTrue,
+      first_effect_false_count: firstFalse,
+      blob_verified: t2BlobOk,
+      blob_intact: t2BlobIntact,
+      passed: Boolean(
+        t2Ok &&
+          t2Effect &&
+          t2Deliveries >= 2 &&
+          firstTrue === 1 &&
+          firstFalse >= 1 &&
+          t2BlobOk &&
+          t2BlobIntact,
+      ),
     };
     await killWorker(worker);
 
@@ -596,10 +652,18 @@ async function main() {
       topic: 'okf.qualify.fail',
       data: { job_id: 'dlq1' },
     });
+    // max_retries=1 → expect deliveries == 2 before DLQ.
+    let failDeliveries = 0;
+    for (let i = 0; i < 40; i += 1) {
+      failDeliveries = await countLines(join(markerDir, 'deliveries_fail_dlq1'));
+      if (failDeliveries >= 2) break;
+      await sleep(500);
+    }
     let dlqMessages = null;
     let dlqTopics = null;
     let topicStats = null;
-    let dlqInspected = false;
+    let browseHit = false;
+    let messageId = null;
     for (let i = 0; i < 40; i += 1) {
       const stats = await iiiTrigger(
         nativeCache,
@@ -625,44 +689,51 @@ async function main() {
       const arr = Array.isArray(dlqMessages)
         ? dlqMessages
         : dlqMessages?.messages || dlqMessages?.items || [];
-      const topicList = Array.isArray(dlqTopics)
-        ? dlqTopics
-        : dlqTopics?.topics || dlqTopics?.items || [];
-      const depth = topicStats?.dlq_depth ?? topicStats?.dlqDepth ?? 0;
-      if ((Array.isArray(arr) && arr.length > 0) || depth > 0 || (Array.isArray(topicList) && topicList.length > 0)) {
-        dlqInspected = true;
+      if (Array.isArray(arr) && arr.length > 0) {
+        browseHit = true;
+        messageId = arr[0]?.id || arr[0]?.message_id || arr[0]?.messageId || null;
         break;
       }
       await sleep(500);
     }
     await unlink(join(controlDir, FAIL_GATE)).catch(() => {});
-    const redrive = await iiiTrigger(
-      nativeCache,
-      'iii::queue::redrive',
-      { topic: 'okf.qualify.fail' },
-      { allowFailure: true },
-    );
-    const dlqCompleted = await waitForFile(join(markerDir, 'completed_fail_dlq1'), 60_000);
-    // Browse APIs may return empty for this adapter/version; redrive.redriven>0
-    // is still direct evidence a DLQ entry existed and was inspected by redrive.
-    const redriven = Number(redrive.json?.redriven ?? 0);
-    const browseHit = dlqInspected;
-    if (!dlqInspected && redriven > 0) {
-      dlqInspected = true;
+    let redrive;
+    if (messageId) {
+      redrive = await iiiTrigger(
+        nativeCache,
+        'iii::queue::redrive_message',
+        { topic: 'okf.qualify.fail', message_id: messageId },
+        { allowFailure: true },
+      );
+    } else {
+      redrive = await iiiTrigger(
+        nativeCache,
+        'iii::queue::redrive',
+        { topic: 'okf.qualify.fail' },
+        { allowFailure: true },
+      );
     }
+    const dlqCompleted = await waitForFile(join(markerDir, 'completed_fail_dlq1'), 60_000);
+    const redriven = Number(redrive.json?.redriven ?? (redrive.code === 0 && messageId ? 1 : 0));
     tests.dlq = {
-      inspected: dlqInspected,
+      inspected: browseHit,
       browse_hit: browseHit,
+      fail_deliveries_before_dlq: failDeliveries,
+      expected_deliveries: 2,
       topic_stats: topicStats,
       dlq_topics: dlqTopics,
       dlq_messages: dlqMessages,
+      message_id: messageId,
+      redrive_api: messageId ? 'iii::queue::redrive_message' : 'iii::queue::redrive',
       redrive_exit: redrive.code,
       redrive_result: redrive.json,
       completed_after_redrive: dlqCompleted,
-      passed: Boolean(dlqInspected && redrive.code === 0 && redriven > 0 && dlqCompleted),
+      passed: Boolean(
+        browseHit && failDeliveries >= 2 && redrive.code === 0 && redriven > 0 && dlqCompleted,
+      ),
       note: browseHit
-        ? 'fail → browse inspect → redrive → success'
-        : 'fail → browse APIs empty; iii::queue::redrive reported redriven>0 then success',
+        ? 'fail (max_retries=1) → dlq_messages inspect → redrive → success'
+        : 'dlq_messages browse empty; cannot claim inspected',
     };
     await killWorker(worker);
 
@@ -724,8 +795,12 @@ async function main() {
     }
   }
 
+  const commit = (
+    await run('git', ['rev-parse', 'HEAD'], { timeout: 10_000 })
+  ).stdout.trim();
   const receipt = {
     component: 'iii-phase0',
+    commit_sha: commit,
     decision,
     reason,
     fallback: decision === 'PASS' ? null : FALLBACK,
@@ -740,6 +815,7 @@ async function main() {
         file_path: 'data/queue',
         redis: false,
       },
+      artifact_sha256: cacheInfo?.measured ?? null,
     },
     ran_on: ranOs,
     cache: cacheInfo,
@@ -749,7 +825,8 @@ async function main() {
     blockers,
     started_at: started,
     finished_at: new Date().toISOString(),
-    acknowledgement_model: 'Returning Ok from the durable:subscriber handler is the queue ack; kills were issued before Ok.',
+    acknowledgement_model:
+      'Returning Ok from the durable:subscriber handler is the queue ack; engine+queue+worker were killed before Ok.',
     product_ports: 'Not implemented (no RecordStore/JobQueue product wiring).',
   };
   await writeReceipt(receipt);

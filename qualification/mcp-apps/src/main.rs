@@ -155,13 +155,11 @@ impl QualifyAppsServer {
             .resources
             .iter()
             .map(|app| {
-                let readable = fs::read(&app.path).is_ok()
-                    && String::from_utf8(app.bytes.as_ref().to_vec()).is_ok()
-                    && app
-                        .bytes
-                        .as_ref()
-                        .windows(6)
-                        .any(|window| window == b"<html>");
+                let text = String::from_utf8(app.bytes.as_ref().to_vec()).ok();
+                let readable = text.as_ref().is_some_and(|body| {
+                    let lower = body.to_ascii_lowercase();
+                    lower.starts_with("<!doctype html") || lower.contains("id=\"root\"")
+                });
                 json!({
                     "name": app.name,
                     "uri": app.uri,
@@ -231,7 +229,7 @@ async fn serve_stdio(server: QualifyAppsServer) -> Result<(), String> {
 
 fn run_check(server: &QualifyAppsServer) -> Result<(), String> {
     let report = server.check_report();
-    let json = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+    let json = serde_json::to_string(&report).map_err(|error| error.to_string())?;
     writeln!(io::stdout(), "{json}").map_err(|error| error.to_string())?;
     let resources = report
         .get("resources")

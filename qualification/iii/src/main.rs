@@ -23,6 +23,10 @@ use std::time::Duration;
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ImportJob {
     job_id: String,
+    #[serde(default)]
+    blob_path: Option<String>,
+    #[serde(default)]
+    blob_sha256: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -162,12 +166,46 @@ fn mark_completed(job_id: &str) -> Result<(), Error> {
         .map_err(|error| Error::Handler(format!("write {}: {error}", path.display())))
 }
 
+fn append_effect_ledger(job_id: &str, first_effect: bool) -> Result<(), Error> {
+    let dir = marker_dir()?;
+    ensure_dir(&dir)?;
+    let path = dir.join(format!("effect_ledger_{job_id}"));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| Error::Handler(format!("open {}: {error}", path.display())))?;
+    let line = if first_effect { "true\n" } else { "false\n" };
+    file.write_all(line.as_bytes())
+        .map_err(|error| Error::Handler(format!("append {}: {error}", path.display())))?;
+    Ok(())
+}
+
 fn handle_import(job: ImportJob) -> Result<ImportResult, Error> {
-    let job_id = job.job_id;
+    let job_id = job.job_id.clone();
     touch_status(&format!("ENTERED_{job_id}"), "import")?;
+    if let Some(blob_path) = job.blob_path.as_ref() {
+        let expected = job
+            .blob_sha256
+            .as_ref()
+            .ok_or_else(|| Error::Handler("blob_path requires blob_sha256".into()))?;
+        let bytes = fs::read(blob_path)
+            .map_err(|error| Error::Handler(format!("read blob {blob_path}: {error}")))?;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        if digest != *expected {
+            return Err(Error::Handler(format!(
+                "blob sha mismatch for {job_id}: got {digest} expected {expected}"
+            )));
+        }
+        let dir = marker_dir()?;
+        ensure_dir(&dir)?;
+        fs::write(dir.join(format!("blob_ok_{job_id}")), format!("{digest}\n"))
+            .map_err(|error| Error::Handler(format!("write blob_ok: {error}")))?;
+    }
     let _deliveries = append_delivery(&job_id)?;
     wait_while_gate(GATE_BEFORE_WORK, &job_id)?;
     let first_effect = create_effect_marker(&job_id)?;
+    append_effect_ledger(&job_id, first_effect)?;
     wait_while_gate(GATE_AFTER_EFFECT, &job_id)?;
     mark_completed(&job_id)?;
     Ok(ImportResult {
@@ -231,7 +269,7 @@ fn main() -> Result<(), Error> {
     let worker = register_worker(
         &url,
         InitOptions {
-            namespace: Some(namespace),
+            namespace: Some(namespace.clone()),
             ..InitOptions::default()
         },
     );
@@ -262,7 +300,7 @@ fn main() -> Result<(), Error> {
             "qualify::fail",
             json!({
                 "topic": "okf.qualify.fail",
-                "max_retries": 0,
+                "max_retries": 1,
                 "backoff_ms": 100
             }),
         ))
@@ -287,10 +325,12 @@ fn main() -> Result<(), Error> {
         .map_err(|error| Error::Handler(format!("register channel trigger: {error}")))?;
 
     let publisher = worker.clone();
+    let publish_namespace = namespace.clone();
     worker.register_function(
         "qualify::channel_send",
         RegisterFunction::new_async(move |request: ChannelSendRequest| {
             let publisher = publisher.clone();
+            let publish_namespace = publish_namespace.clone();
             async move {
                 let channel = create_channel(&publisher, None).await?;
                 let reader_value = serde_json::to_value(&channel.reader_ref)
@@ -309,7 +349,7 @@ fn main() -> Result<(), Error> {
                             action: None,
                             timeout_ms: Some(30_000),
                         }
-                        .namespace("okf-qualify"),
+                        .namespace(publish_namespace),
                     )
                     .await?;
                 channel.writer.write(request.payload.as_bytes()).await?;
