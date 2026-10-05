@@ -67,20 +67,21 @@ pub struct Provenance {
     pub client_id: Option<String>,
 }
 
-/// Retained byte metadata; occurrence-specific names live in source cards instead.
-#[derive(Debug, Clone)]
+/// Retained byte identity.
+///
+/// The media type is not stored with the bytes. It is detected per occurrence and recorded by
+/// whatever refers to the object: a source card, a converted asset, or a sandbox capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectInfo {
     /// Digest verified against stored bytes.
     pub digest: Digest,
     /// Exact byte count.
     pub size: u64,
-    /// Detected content type.
-    pub media_type: String,
 }
 
 /// A bounded stream and the object identity to which it belongs.
 pub struct ObjectRead {
-    /// Whole-object metadata.
+    /// Whole-object identity.
     pub object: ObjectInfo,
     /// Byte offset at which this stream starts.
     pub offset: u64,
@@ -90,18 +91,27 @@ pub struct ObjectRead {
     pub body: ByteReader,
 }
 
-/// Controlled local materialization for a converter process.
+/// Where a retained object lies on the local filesystem, for a bounded converter worker.
 #[derive(Debug, Clone)]
 pub struct LocalSource {
-    /// Caller-created path; never an unchecked client pathname.
+    /// Absolute path of the retained bytes inside the store. The caller only reads it; the
+    /// path carries no file extension and is never an unchecked client pathname.
     pub path: PathBuf,
     /// Identity checked during materialization.
     pub object: ObjectInfo,
 }
 
-/// Immutable scoped object storage; use `object_store`, not another storage protocol.
+/// Immutable content-addressed bytes, keyed by tenant and SHA-256 digest.
+///
+/// Objects are shared inside one tenant and never across tenants; the workspace in `scope` is
+/// not part of the key. Knowing a digest authorizes nothing: the application authorizes a read
+/// through an item reference before it calls `open`. Use `object_store`, not another protocol.
 pub trait BlobStore: Send + Sync {
-    /// Store and hash a bounded stream; preserve an already stored identical object.
+    /// Store and hash a bounded stream.
+    ///
+    /// Fails with `TooLarge` past `limit`, and with `Conflict` when `expected` is given and
+    /// differs from the computed digest; in both cases nothing is retained. Storing bytes that
+    /// are already retained writes nothing and returns the existing identity.
     fn put<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -109,7 +119,7 @@ pub trait BlobStore: Send + Sync {
         limit: u64,
         expected: Option<Digest>,
     ) -> PortFuture<'a, ObjectInfo>;
-    /// Open an already authorized object's selected byte interval.
+    /// Open an already authorized object's selected byte interval; `NotFound` when absent.
     fn open<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -117,7 +127,7 @@ pub trait BlobStore: Send + Sync {
         offset: u64,
         length: u64,
     ) -> PortFuture<'a, ObjectRead>;
-    /// Materialize retained bytes for a bounded converter worker.
+    /// Locate retained bytes on the local filesystem for a bounded converter worker.
     fn materialize<'a>(
         &'a self,
         scope: &'a StorageScope,

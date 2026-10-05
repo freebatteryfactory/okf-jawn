@@ -8,11 +8,35 @@ use std::error::Error;
 
 use okf_jawn_contract::access::{AccessRoute, Principal};
 use okf_jawn_contract::common::PageRequest;
-use okf_jawn_contract::identity::{MutationId, TenantId};
-use okf_jawn_core::storage::{Page, Provenance, derive_item_id, derive_proposal_id};
+use okf_jawn_contract::error::ApiError;
+use okf_jawn_contract::identity::{Digest, MutationId, TenantId};
+use okf_jawn_core::storage::{
+    BlobStore, ByteReader, LocalSource, ObjectInfo, Page, Provenance, StorageScope, derive_item_id,
+    derive_proposal_id,
+};
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
+
+/// Marks a `*_calls` proof as used without awaiting it: a function item has no runtime size.
+fn type_checked<F>(proof: &F) -> bool {
+    std::mem::size_of_val(proof) == 0
+}
+
+fn digest(fill: char) -> Result<Digest, Box<dyn Error>> {
+    Ok(Digest::try_from(fill.to_string().repeat(64))?)
+}
+
+async fn blob_store_calls(
+    blobs: &dyn BlobStore,
+    scope: &StorageScope,
+    body: ByteReader,
+    expected: &Digest,
+) -> Result<LocalSource, ApiError> {
+    let stored = blobs.put(scope, body, 1024, Some(expected.clone())).await?;
+    let read = blobs.open(scope, &stored.digest, 0, stored.size).await?;
+    blobs.materialize(scope, &read.object.digest).await
+}
 
 #[test]
 fn provenance_keeps_the_typed_route_and_client() -> TestResult {
@@ -60,4 +84,16 @@ fn derived_identities_are_stable_per_mutation() {
     assert_eq!(derive_proposal_id(first), derive_proposal_id(first));
     assert_ne!(derive_proposal_id(first), derive_proposal_id(second));
     assert_ne!(derive_proposal_id(first).0, derive_item_id(first, 0).0);
+}
+
+#[test]
+fn object_info_is_digest_and_size_only() -> TestResult {
+    let object = ObjectInfo {
+        digest: digest('a')?,
+        size: 3,
+    };
+    assert_eq!(object.size, 3);
+    assert_eq!(object.digest, digest('a')?);
+    assert!(type_checked(&blob_store_calls));
+    Ok(())
 }
