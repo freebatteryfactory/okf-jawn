@@ -70,6 +70,18 @@ enum Expected {
     ExplicitFailure,
 }
 
+struct ExplicitFailureInput<'a> {
+    path: &'a Path,
+    role: &'a str,
+    expected: Expected,
+    settings: &'a BTreeMap<String, serde_json::Value>,
+    sha_before: String,
+    started: Instant,
+    component_type: &'a str,
+    module_name: &'a str,
+    error_message: String,
+}
+
 fn sha256_file(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -151,18 +163,6 @@ fn judge_outcome(
             }
         }
     }
-}
-
-struct ExplicitFailureInput<'a> {
-    path: &'a Path,
-    role: &'a str,
-    expected: Expected,
-    settings: &'a BTreeMap<String, serde_json::Value>,
-    sha_before: String,
-    started: Instant,
-    component_type: &'a str,
-    module_name: &'a str,
-    error_message: String,
 }
 
 fn explicit_failure_receipt(input: ExplicitFailureInput<'_>) -> Result<FixtureReceipt, String> {
