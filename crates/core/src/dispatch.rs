@@ -133,7 +133,7 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
 async fn finish<Res: Serialize>(
     ports: &DispatchPorts<'_>,
     context: &OperationContext,
-    _replay: ReplayPolicy,
+    replay: ReplayPolicy,
     outcome: Result<Res, ApiError>,
 ) -> Result<Value, ApiError> {
     let response = match outcome {
@@ -147,35 +147,32 @@ async fn finish<Res: Serialize>(
             return Err(error);
         }
     };
-    let body = serialize_response(response)?;
+    let body = serde_json::to_value(response)
+        .map_err(|_| ApiError::new(ErrorCode::Internal, "Response serialization failed"))?;
     let Some(mutation_id) = context.mutation else {
         return Ok(body);
     };
-    let stored = match context.operation {
-        OperationName::CreateConnector => strip_connector_secret(body.clone())?,
-        _ => body.clone(),
-    };
-    ports.mutations.complete(mutation_id, stored).await?;
+    ports
+        .mutations
+        .complete(mutation_id, ledger_body(replay, &body)?)
+        .await?;
     Ok(body)
 }
 
-fn serialize_response<Res: Serialize>(response: Res) -> Result<Value, ApiError> {
-    serde_json::to_value(response)
-        .map_err(|_| ApiError::new(ErrorCode::Internal, "Response serialization failed"))
-}
-
-fn strip_connector_secret(body: Value) -> Result<Value, ApiError> {
-    let connector_id = body
-        .get("connector")
-        .and_then(|connector| connector.get("connector_id"))
-        .cloned()
-        .ok_or_else(|| {
-            ApiError::new(
-                ErrorCode::Internal,
-                "Issued connector response missing connector_id",
-            )
-        })?;
-    Ok(serde_json::json!({ "connector_id": connector_id }))
+/// What the ledger retains for a completed mutation, decided by its replay policy.
+fn ledger_body(replay: ReplayPolicy, body: &Value) -> Result<Value, ApiError> {
+    match replay {
+        ReplayPolicy::StoredResponse => Ok(body.clone()),
+        ReplayPolicy::AlreadyIssued { id_pointer } => {
+            let connector_id = body.pointer(id_pointer).ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::Internal,
+                    "Issued response is missing the identity its replay policy names",
+                )
+            })?;
+            Ok(serde_json::json!({ "connector_id": connector_id }))
+        }
+    }
 }
 
 fn replay_response(replay: ReplayPolicy, body: Value) -> Result<Value, ApiError> {
@@ -284,3 +281,54 @@ pub fn new_mutation_id() -> MutationId {
 }
 
 okf_jawn_contract::for_each_operation!(dispatch_operations);
+
+#[cfg(test)]
+mod tests {
+    use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+    use okf_jawn_contract::scope::ReplayPolicy;
+    use serde_json::json;
+
+    use super::{ledger_body, replay_response};
+
+    const CONNECTOR: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const POLICY: ReplayPolicy = ReplayPolicy::AlreadyIssued {
+        id_pointer: "/issued/id",
+    };
+
+    #[test]
+    fn stored_response_policy_keeps_the_whole_body() -> Result<(), ApiError> {
+        let body = json!({ "revision": "r", "warnings": [] });
+        assert_eq!(ledger_body(ReplayPolicy::StoredResponse, &body)?, body);
+        Ok(())
+    }
+
+    #[test]
+    fn already_issued_policy_keeps_only_the_id_at_its_pointer() -> Result<(), ApiError> {
+        let body = json!({ "issued": { "id": CONNECTOR, "label": "agent" }, "secret": "s" });
+        assert_eq!(
+            ledger_body(POLICY, &body)?,
+            json!({ "connector_id": CONNECTOR })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn already_issued_policy_refuses_a_response_without_the_id() {
+        let refused = ledger_body(POLICY, &json!({ "secret": "s" }));
+        assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
+    }
+
+    #[test]
+    fn already_issued_replay_names_the_connector_and_returns_no_body() {
+        let replayed = replay_response(POLICY, json!({ "connector_id": CONNECTOR }));
+        assert!(matches!(
+            replayed,
+            Err(error) if error.code == ErrorCode::AlreadyIssued
+                && matches!(
+                    error.detail.as_deref(),
+                    Some(ErrorDetail::AlreadyIssued { connector_id })
+                        if connector_id.0.to_string() == CONNECTOR
+                )
+        ));
+    }
+}
