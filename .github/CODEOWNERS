@@ -17,7 +17,6 @@
 /.bun-version @okf-jawn-integration-owner
 /rust-toolchain.toml @okf-jawn-integration-owner
 /justfile @okf-jawn-integration-owner
-/REPOSITORY-TREE.txt @okf-jawn-integration-owner
 /scripts/ @okf-jawn-integration-owner
 /crates/contract/ @okf-jawn-integration-owner
 /xtask/ @okf-jawn-integration-owner
