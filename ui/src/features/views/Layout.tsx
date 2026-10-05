@@ -6,11 +6,7 @@
  * `visible` is passed through unchanged so validateSpec judges the authored condition.
  * `on` and `watch` are rejected: the catalog has no actions.
  */
-import {
-  type Spec,
-  type UIElement,
-  validateSpec,
-} from '@json-render/core';
+import { type Spec, type UIElement, validateSpec } from '@json-render/core';
 import { defineRegistry, JSONUIProvider, Renderer } from '@json-render/react';
 import { z } from 'zod';
 import { SourceExcerpt } from '../documents/SourceExcerpt';

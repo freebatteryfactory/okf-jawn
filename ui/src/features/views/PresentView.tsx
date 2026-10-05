@@ -139,7 +139,9 @@ export function PresentView({ response, callTool }: PresentViewProps) {
   } catch (cause) {
     return (
       <p role="alert">
-        {cause instanceof Error ? cause.message : 'Vega-Lite specification failed runtime validation'}
+        {cause instanceof Error
+          ? cause.message
+          : 'Vega-Lite specification failed runtime validation'}
       </p>
     );
   }

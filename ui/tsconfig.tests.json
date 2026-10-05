@@ -14,10 +14,6 @@
     "src/**/*.ts",
     "src/**/*.tsx"
   ],
-  "exclude": [
-    "tests/e2e/**",
-    "src/api/generated/client/**",
-    "src/api/generated/core/**"
-  ],
+  "exclude": ["tests/e2e/**", "src/api/generated/client/**", "src/api/generated/core/**"],
   "references": [{ "path": "./tsconfig.generated.json" }]
 }

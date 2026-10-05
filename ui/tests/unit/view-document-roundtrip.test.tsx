@@ -2,10 +2,10 @@
 
 import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
+import viewDocumentFixture from '../../../tests/fixtures/views/view-document-six-component.json';
 import { zViewDocument } from '../../src/api/generated/zod.gen';
 import { BindingsContext, type ResolvedPresentation } from '../../src/features/views/Bindings';
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
-import viewDocumentFixture from '../../../tests/fixtures/views/view-document-six-component.json';
 
 const emptyBindings: ResolvedPresentation = {
   charts: new Map(),
