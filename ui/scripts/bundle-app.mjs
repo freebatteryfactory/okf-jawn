@@ -10,6 +10,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath, URL } from 'node:url';
+import { RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps';
 import babel from '@rolldown/plugin-babel';
 import tailwindcss from '@tailwindcss/vite';
 import react, { reactCompilerPreset } from '@vitejs/plugin-react';
@@ -55,8 +56,21 @@ const safeStyle = style.replaceAll('</style', '<\\/style');
 const policy = `default-src 'none'; script-src 'sha256-${hash(safeScript)}'; style-src 'sha256-${hash(safeStyle)}'; img-src data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`;
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${policy}"><title>okf-jawn source view</title><style>${safeStyle}</style></head><body><div id="root"></div><script>${safeScript}</script></body></html>\n`;
 await mkdir('dist-apps', { recursive: true });
-for (const name of ['source', 'changes', 'timeline', 'present'])
-  await writeFile(`dist-apps/${name}.html`, html);
+const resources = [];
+for (const name of ['source', 'changes', 'timeline', 'present']) {
+  const file = `dist-apps/${name}.html`;
+  await writeFile(file, html);
+  const bytes = Buffer.from(html, 'utf8');
+  resources.push({
+    name,
+    uri: `ui://okf-jawn/${name}.html`,
+    mimeType: RESOURCE_MIME_TYPE,
+    byteLength: bytes.byteLength,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    csp: policy,
+  });
+}
+await writeFile('dist-apps/manifest.json', `${JSON.stringify({ resources }, null, 2)}\n`);
 process.stdout.write(
   'Built source, changes, timeline, and present resources from the shared result-dispatching component.\n',
 );
