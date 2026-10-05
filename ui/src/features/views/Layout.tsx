@@ -8,12 +8,12 @@
  */
 import { type Spec, type UIElement, validateSpec } from '@json-render/core';
 import { defineRegistry, JSONUIProvider, Renderer } from '@json-render/react';
-import { z } from 'zod';
 import { SourceExcerpt } from '../documents/SourceExcerpt';
 import { useBindings } from './Bindings';
 import { Chart } from './Chart';
 import { catalog } from './catalog';
 import { DataTable } from './DataTable';
+import { type RawElement, rawSpecSchema, repeatSchema, slotsSchema } from './spec-schema';
 
 const { registry } = defineRegistry(catalog, {
   components: {
@@ -73,25 +73,6 @@ const { registry } = defineRegistry(catalog, {
   },
 });
 
-const slotsSchema = z.record(z.string(), z.array(z.string()));
-const repeatSchema = z.strictObject({
-  statePath: z.union([z.string(), z.object({ $item: z.string() })]),
-  key: z.string().optional(),
-});
-const rawElementSchema = z.strictObject({
-  type: z.string().min(1),
-  props: z.record(z.string(), z.unknown()).default({}),
-  children: z.array(z.string()).optional(),
-  slots: z.unknown().optional(),
-  visible: z.unknown().optional(),
-  repeat: z.unknown().optional(),
-});
-const rawSpecSchema = z.strictObject({
-  root: z.string().min(1),
-  elements: z.record(z.string(), rawElementSchema),
-  state: z.record(z.string(), z.unknown()).optional(),
-});
-
 /**
  * Convert authored/catalog slot shapes into `Record<string, string[]>`.
  * Accepts already-canonical records or a single default array of child keys.
@@ -112,7 +93,7 @@ export function materializeSlots(
   throw new Error('Element slots must be a record of string arrays or a string array');
 }
 
-function normalizeElement(key: string, raw: z.infer<typeof rawElementSchema>): UIElement {
+function normalizeElement(key: string, raw: RawElement): UIElement {
   const next: UIElement = {
     type: raw.type,
     props: raw.props,

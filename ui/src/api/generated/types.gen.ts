@@ -3546,6 +3546,10 @@ export type GetAttentionErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -3600,6 +3604,10 @@ export type RebuildIndexErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -3660,6 +3668,10 @@ export type ApplyNamesErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -3714,6 +3726,10 @@ export type GetRulesErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -3774,6 +3790,10 @@ export type PreviewNamesErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -3828,6 +3848,10 @@ export type SetRulesErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -3888,6 +3912,10 @@ export type GetReceiptErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -3942,6 +3970,10 @@ export type ListEventsErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -4002,6 +4034,10 @@ export type GetHealthErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -4056,6 +4092,10 @@ export type GetReadinessErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -4116,6 +4156,10 @@ export type BlameItemErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -4170,6 +4214,10 @@ export type CommitItemsErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -4230,6 +4278,10 @@ export type DiffItemsErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -4284,6 +4336,10 @@ export type LogItemsErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -4344,6 +4400,10 @@ export type RestoreItemsErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -4398,6 +4458,10 @@ export type CancelJobErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -4458,6 +4522,10 @@ export type CompleteUploadErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -4512,6 +4580,10 @@ export type CorrectDigestErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -4572,6 +4644,10 @@ export type CreateUploadErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -4626,6 +4702,10 @@ export type GetJobErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -4686,6 +4766,10 @@ export type ListJobsErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -4740,6 +4824,10 @@ export type RedigestItemErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -4800,6 +4888,10 @@ export type RetryJobErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -4854,6 +4946,10 @@ export type StartImportErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -4914,6 +5010,10 @@ export type CreateFolderErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -4968,6 +5068,10 @@ export type CreateItemErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -5028,6 +5132,10 @@ export type DeleteItemErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -5082,6 +5190,10 @@ export type DiscardDraftErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -5142,6 +5254,10 @@ export type GetItemErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -5196,6 +5312,10 @@ export type ListDraftsErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -5256,6 +5376,10 @@ export type ListItemsErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -5310,6 +5434,10 @@ export type MoveItemErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -5370,6 +5498,10 @@ export type SaveDraftErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -5424,6 +5556,10 @@ export type SetLifecycleErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -5484,6 +5620,10 @@ export type AcceptProposalErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -5538,6 +5678,10 @@ export type AddCommentErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -5598,6 +5742,10 @@ export type DeclineProposalErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -5652,6 +5800,10 @@ export type GetProposalErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -5712,6 +5864,10 @@ export type ListProposalsErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -5766,6 +5922,10 @@ export type OpenProposalErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -5826,6 +5986,10 @@ export type CreateSandboxCapabilityErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -5880,6 +6044,10 @@ export type GetObjectErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -5940,6 +6108,10 @@ export type GetSourcesErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -5994,6 +6166,10 @@ export type ReadItemErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -6054,6 +6230,10 @@ export type CreateConfirmationErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -6111,6 +6291,10 @@ export type CreateReviewErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -6165,6 +6349,10 @@ export type ListReviewsErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -6241,6 +6429,10 @@ export type GetGraphErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -6295,6 +6487,10 @@ export type GetLinksErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -6355,6 +6551,10 @@ export type SearchItemsErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -6409,6 +6609,10 @@ export type CreateConnectorErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -6469,6 +6673,10 @@ export type GetSessionErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -6523,6 +6731,10 @@ export type ListConnectorsErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -6583,6 +6795,10 @@ export type RevokeConnectorErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -6637,6 +6853,10 @@ export type ListTypesErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -6697,6 +6917,10 @@ export type SetTypeErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -6751,6 +6975,10 @@ export type ExportViewErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -6811,6 +7039,10 @@ export type GetCatalogErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -6865,6 +7097,10 @@ export type GetViewErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -6925,6 +7161,10 @@ export type PresentViewErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -6979,6 +7219,10 @@ export type ResolveViewErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -7039,6 +7283,10 @@ export type ArchiveWorkspaceErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -7093,6 +7341,10 @@ export type BackupWorkspaceErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -7153,6 +7405,10 @@ export type CreateWorkspaceErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -7207,6 +7463,10 @@ export type ExportWorkspaceErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -7267,6 +7527,10 @@ export type ListWorkspacesErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -7321,6 +7585,10 @@ export type OpenWorkspaceErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */
@@ -7381,6 +7649,10 @@ export type RestoreWorkspaceErrors = {
     /**
      * Structured application failure
      */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
     503: ApiError;
 };
 
@@ -7435,6 +7707,10 @@ export type UpdateWorkspaceErrors = {
      * Structured application failure
      */
     500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
     /**
      * Structured application failure
      */

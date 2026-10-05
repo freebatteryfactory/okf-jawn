@@ -6104,6 +6104,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -6231,6 +6241,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -6376,6 +6396,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -6503,6 +6533,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -6648,6 +6688,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -6775,6 +6825,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -6920,6 +6980,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -7047,6 +7117,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -7192,6 +7272,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -7319,6 +7409,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -7464,6 +7564,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -7591,6 +7701,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -7736,6 +7856,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -7863,6 +7993,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -8008,6 +8148,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -8135,6 +8285,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -8280,6 +8440,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -8407,6 +8577,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -8552,6 +8732,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -8679,6 +8869,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -8824,6 +9024,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -8951,6 +9161,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -9096,6 +9316,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -9223,6 +9453,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -9368,6 +9608,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -9495,6 +9745,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -9640,6 +9900,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -9776,6 +10046,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -9798,7 +10078,7 @@
         "x-operator-label": "Discard draft",
         "x-permission": "write",
         "x-tool-annotations": {
-          "destructiveHint": false,
+          "destructiveHint": true,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
@@ -9903,6 +10183,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -10048,6 +10338,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -10175,6 +10475,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -10320,6 +10630,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -10447,6 +10767,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -10592,6 +10922,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -10719,6 +11059,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -10864,6 +11214,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -10991,6 +11351,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -11136,6 +11506,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -11263,6 +11643,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -11408,6 +11798,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -11535,6 +11935,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -11680,6 +12090,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -11807,6 +12227,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -11952,6 +12382,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -12079,6 +12519,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -12224,6 +12674,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -12351,6 +12811,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -12528,6 +12998,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -12655,6 +13135,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -12800,6 +13290,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -12927,6 +13427,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -13072,6 +13582,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -13199,6 +13719,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -13344,6 +13874,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -13366,7 +13906,7 @@
         "x-operator-label": "Disconnect",
         "x-permission": "admin",
         "x-tool-annotations": {
-          "destructiveHint": false,
+          "destructiveHint": true,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
@@ -13471,6 +14011,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -13616,6 +14166,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -13743,6 +14303,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -13888,6 +14458,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -14015,6 +14595,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -14160,6 +14750,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -14287,6 +14887,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -14432,6 +15042,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -14559,6 +15179,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -14704,6 +15334,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -14831,6 +15471,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -14976,6 +15626,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -15103,6 +15763,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {
@@ -15248,6 +15918,16 @@
             },
             "description": "Structured application failure"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -15270,7 +15950,7 @@
         "x-operator-label": "Restore",
         "x-permission": "admin",
         "x-tool-annotations": {
-          "destructiveHint": false,
+          "destructiveHint": true,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
@@ -15375,6 +16055,16 @@
             "description": "Structured application failure"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
             "content": {
               "application/json": {
                 "schema": {

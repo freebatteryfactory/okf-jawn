@@ -897,25 +897,24 @@ export const openProposalMutation = (options?: Partial<Options<OpenProposalData>
     return mutationOptions;
 };
 
-export const createSandboxCapabilityQueryKey = (options: Options<CreateSandboxCapabilityData>) => createQueryKey('createSandboxCapability', options);
-
 /**
  * Open sandboxed
  *
  * Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.
  */
-export const createSandboxCapabilityOptions = (options: Options<CreateSandboxCapabilityData>) => queryOptions<CreateSandboxCapabilityResponse, CreateSandboxCapabilityError, CreateSandboxCapabilityResponse, ReturnType<typeof createSandboxCapabilityQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await createSandboxCapability({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: createSandboxCapabilityQueryKey(options)
-});
+export const createSandboxCapabilityMutation = (options?: Partial<Options<CreateSandboxCapabilityData>>): UseMutationOptions<CreateSandboxCapabilityResponse, CreateSandboxCapabilityError, Options<CreateSandboxCapabilityData>> => {
+    const mutationOptions: UseMutationOptions<CreateSandboxCapabilityResponse, CreateSandboxCapabilityError, Options<CreateSandboxCapabilityData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await createSandboxCapability({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
 
 export const getObjectQueryKey = (options: Options<GetObjectData>) => createQueryKey('getObject', options);
 

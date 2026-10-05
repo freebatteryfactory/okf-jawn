@@ -4362,6 +4362,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -4444,6 +4450,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -4536,6 +4548,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -4618,6 +4636,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -4710,6 +4734,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -4792,6 +4822,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -4884,6 +4920,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -4966,6 +5008,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -5058,6 +5106,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -5140,6 +5194,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -5232,6 +5292,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -5314,6 +5380,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -5406,6 +5478,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -5488,6 +5566,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -5580,6 +5664,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -5662,6 +5752,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -5754,6 +5850,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -5836,6 +5938,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -5928,6 +6036,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -6010,6 +6124,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -6102,6 +6222,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -6184,6 +6310,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -6276,6 +6408,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -6358,6 +6496,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -6450,6 +6594,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -6532,6 +6682,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -6624,6 +6780,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -6711,6 +6873,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -6727,7 +6895,7 @@ paths:
       x-operator-label: Discard draft
       x-permission: write
       x-tool-annotations:
-        destructiveHint: false
+        destructiveHint: true
         idempotentHint: false
         openWorldHint: false
         readOnlyHint: false
@@ -6793,6 +6961,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -6885,6 +7059,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -6967,6 +7147,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -7059,6 +7245,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -7141,6 +7333,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -7233,6 +7431,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -7315,6 +7519,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -7407,6 +7617,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -7489,6 +7705,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -7581,6 +7803,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -7663,6 +7891,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -7755,6 +7989,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -7837,6 +8077,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -7929,6 +8175,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -8011,6 +8263,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -8103,6 +8361,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -8185,6 +8449,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -8277,6 +8547,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -8359,6 +8635,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -8472,6 +8754,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -8554,6 +8842,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -8646,6 +8940,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -8728,6 +9028,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -8820,6 +9126,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -8902,6 +9214,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -8994,6 +9312,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -9010,7 +9334,7 @@ paths:
       x-operator-label: Disconnect
       x-permission: admin
       x-tool-annotations:
-        destructiveHint: false
+        destructiveHint: true
         idempotentHint: false
         openWorldHint: false
         readOnlyHint: false
@@ -9076,6 +9400,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -9168,6 +9498,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -9250,6 +9586,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -9342,6 +9684,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -9424,6 +9772,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -9516,6 +9870,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -9598,6 +9958,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -9690,6 +10056,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -9772,6 +10144,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -9864,6 +10242,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -9946,6 +10330,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -10038,6 +10428,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -10120,6 +10516,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:
@@ -10212,6 +10614,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
         '503':
           content:
             application/json:
@@ -10228,7 +10636,7 @@ paths:
       x-operator-label: Restore
       x-permission: admin
       x-tool-annotations:
-        destructiveHint: false
+        destructiveHint: true
         idempotentHint: false
         openWorldHint: false
         readOnlyHint: false
@@ -10294,6 +10702,12 @@ paths:
                 $ref: '#/components/schemas/ApiError'
           description: Structured application failure
         '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '501':
           content:
             application/json:
               schema:

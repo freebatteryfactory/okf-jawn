@@ -1,57 +1,25 @@
-/** Emit the actual catalog's schemas and model guidance using json-render's library APIs. */
-import { mkdirSync, writeFileSync } from 'node:fs';
+/** Emit the catalog's published files from json-render's library APIs and the single spec shape. */
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { env } from 'node:process';
-import { z } from 'zod';
 import { catalog } from '../src/features/views/catalog';
+import { catalogResponse, specJsonSchema } from './catalog-response';
 
-// Read through node:process so the bundler cannot fold OKF_CATALOG_OUT at build time.
+// Read through node:process so the bundler cannot fold these at build time.
 const output = env.OKF_CATALOG_OUT;
 if (!output) throw new Error('OKF_CATALOG_OUT must name a generation staging directory');
+const viewSchemaPath = env.OKF_VIEW_SCHEMA;
+if (!viewSchemaPath)
+  throw new Error('OKF_VIEW_SCHEMA must name the generated forms/view.schema.json');
+const viewSchema: unknown = JSON.parse(readFileSync(viewSchemaPath, 'utf8'));
 
-/** Per-component props from Zod; never emit unconstrained catalog.jsonSchema() props. */
-function catalogSchema(): Record<string, unknown> {
-  const elementBranches = catalog.componentNames.map((name) => {
-    const entry = catalog.data.components[name];
-    if (!entry?.props) throw new Error(`Catalog component ${name} has no props schema`);
-    const props = z.toJSONSchema(entry.props, { target: 'draft-7' }) as Record<string, unknown>;
-    // Nested object schemas must not carry a sibling $schema; keep draft-7 constraints only.
-    const { $schema: _dropped, ...propsSchema } = props;
-    return {
-      type: 'object',
-      properties: {
-        type: { const: name },
-        props: { ...propsSchema, additionalProperties: false },
-        children: { type: 'array', items: { type: 'string' } },
-        slots: {
-          type: 'object',
-          additionalProperties: { type: 'array', items: { type: 'string' } },
-        },
-        visible: {},
-        repeat: {},
-      },
-      required: ['type', 'props', 'children'],
-      additionalProperties: false,
-    };
-  });
-  return {
-    $schema: 'http://json-schema.org/draft-07/schema#',
-    type: 'object',
-    properties: {
-      root: { type: 'string' },
-      elements: {
-        type: 'object',
-        additionalProperties: { oneOf: elementBranches },
-      },
-      state: { type: 'object', additionalProperties: {} },
-    },
-    required: ['root', 'elements'],
-    additionalProperties: false,
-  };
+function writeJson(name: string, value: unknown): void {
+  writeFileSync(join(output as string, name), `${JSON.stringify(value, null, 2)}\n`);
 }
 
 mkdirSync(output, { recursive: true });
-writeFileSync(join(output, 'catalog.schema.json'), `${JSON.stringify(catalogSchema(), null, 2)}\n`);
+writeJson('catalog.schema.json', specJsonSchema());
+writeJson('catalog.json', catalogResponse(viewSchema));
 writeFileSync(
   join(output, 'catalog-prompt.txt'),
   `${catalog.prompt({
@@ -62,7 +30,7 @@ writeFileSync(
     ],
   })}\n`,
 );
-writeFileSync(
-  join(output, 'catalog-components.json'),
-  `${JSON.stringify({ components: catalog.componentNames, actions: catalog.actionNames }, null, 2)}\n`,
-);
+writeJson('catalog-components.json', {
+  components: catalog.componentNames,
+  actions: catalog.actionNames,
+});
