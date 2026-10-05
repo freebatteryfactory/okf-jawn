@@ -6,6 +6,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::IdentityError;
 use okf_jawn_core::context::Attempt;
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
+use okf_jawn_core::mutations::request_digest;
 use serde_json::{Value, json};
 
 use check::{TestResult, err_of, some};
@@ -601,6 +602,60 @@ async fn handler_error_then_retry_runs_again() -> TestResult {
     assert!(earlier.mutation.is_some());
     assert_eq!(later.mutation, earlier.mutation);
     assert_eq!(later.attempt, Attempt::Resumed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reordered_keys_replay_instead_of_conflicting() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", item_document("hello"))?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let original = json!({
+        "workspace_id": WORKSPACE_A,
+        "base_revision": REVISION,
+        "path": "notes/a.md",
+        "title": "a",
+        "type_name": "note",
+        "kind": "note",
+        "body": "hello",
+        "properties": { "nested": { "alpha": 1, "beta": 2 } },
+        "idempotency_key": KEY_ONE
+    });
+    let reordered = json!({
+        "idempotency_key": KEY_ONE,
+        "properties": { "nested": { "beta": 2, "alpha": 1 } },
+        "body": "hello",
+        "kind": "note",
+        "type_name": "note",
+        "title": "a",
+        "path": "notes/a.md",
+        "base_revision": REVISION,
+        "workspace_id": WORKSPACE_A
+    });
+    // Precondition: `preserve_order` is enabled for this test build, so the two inputs are the
+    // same JSON value written with different key order, at the top level and inside a value.
+    assert_eq!(original, reordered);
+    assert_ne!(
+        serde_json::to_string(&original)?,
+        serde_json::to_string(&reordered)?
+    );
+
+    let created = call(&app, &ports, &alice, "create_item", original).await?;
+    let replayed = call(&app, &ports, &alice, "create_item", reordered).await?;
+    assert_eq!(replayed, created);
+    assert_eq!(app.call_count("create_item")?, 1);
+    Ok(())
+}
+
+#[test]
+fn request_digest_sorts_keys_at_every_depth() -> TestResult {
+    let scrambled = json!({ "b": [{ "k": 1, "j": 2 }], "a": { "y": 2, "x": 1 } });
+    // SHA-256 of the bytes `{"a":{"x":1,"y":2},"b":[{"j":2,"k":1}]}`.
+    assert_eq!(
+        request_digest(&scrambled)?.as_str(),
+        "fa6628597d53c1e5019d96bfec141c0069e6959a5e0662f3899becda15925240"
+    );
     Ok(())
 }
 

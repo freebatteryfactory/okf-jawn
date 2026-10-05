@@ -7,7 +7,7 @@
 
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-use okf_jawn_contract::identity::{ConnectorId, IdempotencyKey, MutationId};
+use okf_jawn_contract::identity::{ConnectorId, MutationId};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
 use schemars::{JsonSchema, generate::SchemaSettings};
@@ -41,13 +41,11 @@ macro_rules! dispatch_operations {
             match operation_id {
                 $(stringify!($id) => {
                     static VALIDATOR: OnceLock<Result<jsonschema::Validator, String>> = OnceLock::new();
-                    let request_value = input.clone();
                     let request: $request = decode_validated(input, &VALIDATOR)?;
                     let mut context =
                         authorize_targets(ports.access, caller, operation, &request).await?;
                     let replay = <$request as RequestScope>::REPLAY;
-                    let key = request.idempotency_key().copied();
-                    match prepare_mutation(ports, &mut context, replay, key, &request_value).await? {
+                    match prepare_mutation(ports, &mut context, replay, &request).await? {
                         MutationGate::Run => {
                             let outcome = service.$id(&context, request).await;
                             finish(ports, &context, replay, outcome).await
@@ -83,17 +81,16 @@ enum MutationGate {
     ShortCircuit(Value),
 }
 
-async fn prepare_mutation(
+async fn prepare_mutation<Req: RequestScope + Serialize>(
     ports: &DispatchPorts<'_>,
     context: &mut OperationContext,
     replay: ReplayPolicy,
-    idempotency_key: Option<IdempotencyKey>,
-    request_value: &Value,
+    request: &Req,
 ) -> Result<MutationGate, ApiError> {
-    let Some(key) = idempotency_key else {
+    let Some(key) = request.idempotency_key().copied() else {
         return Ok(MutationGate::Run);
     };
-    let digest = request_digest(request_value)?;
+    let digest = request_digest(request)?;
     let mutation_key = MutationKey {
         tenant_id: context.principal.tenant_id.clone(),
         subject: context.principal.subject.clone(),
