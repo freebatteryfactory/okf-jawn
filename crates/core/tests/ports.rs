@@ -9,7 +9,7 @@ use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
 
-use okf_jawn_contract::access::{AccessRoute, Principal};
+use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::common::{PageRequest, TextRange, Warning};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{
@@ -17,10 +17,12 @@ use okf_jawn_contract::identity::{
 };
 use okf_jawn_contract::item::{ItemKind, Lifecycle};
 use okf_jawn_contract::proposal::Change;
+use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
-    DiffQuery, LocalSource, LogQuery, ObjectInfo, Page, Promotion, Provenance, StorageScope,
-    TreeEdit, VersionStore, derive_item_id, derive_proposal_id,
+    DiffQuery, LocalSource, LogQuery, NewWorkspace, ObjectInfo, Page, Promotion, Provenance,
+    StorageScope, TreeEdit, VersionStore, WorkspaceArchive, WorkspaceCatalog, WorkspaceUpdate,
+    derive_item_id, derive_proposal_id, workspace_with_permissions,
 };
 use uuid::Uuid;
 
@@ -196,6 +198,48 @@ async fn blob_store_calls(
     blobs.materialize(scope, &read.object.digest).await
 }
 
+async fn catalog_calls(
+    catalog: &dyn WorkspaceCatalog,
+    scope: &StorageScope,
+    mutation_id: MutationId,
+) -> Result<Vec<Workspace>, ApiError> {
+    let created = catalog
+        .create(
+            &scope.tenant_id,
+            mutation_id,
+            NewWorkspace {
+                name: "Team".to_owned(),
+                description: "Shared notes".to_owned(),
+                creator: initiator(),
+            },
+        )
+        .await?;
+    let opened = catalog.open(scope).await?;
+    let updated = catalog
+        .update(
+            scope,
+            mutation_id,
+            WorkspaceUpdate {
+                expected_head: opened.head,
+                name: created.name,
+                description: created.description,
+                author: initiator(),
+            },
+        )
+        .await?;
+    catalog
+        .archive(
+            scope,
+            mutation_id,
+            WorkspaceArchive {
+                expected_head: updated.head,
+                author: initiator(),
+            },
+        )
+        .await?;
+    catalog.list(&scope.tenant_id).await
+}
+
 #[test]
 fn provenance_keeps_the_typed_route_and_client() -> TestResult {
     let principal = Principal {
@@ -350,5 +394,21 @@ fn a_commit_names_its_mutation_author_base_and_edits() -> TestResult {
     assert_eq!(changes.author, initiator());
     assert_eq!(changes.edits.len(), 2);
     assert_eq!(scope()?.workspace_id, WorkspaceId(Uuid::from_u128(1)));
+    Ok(())
+}
+
+#[test]
+fn the_application_not_the_catalog_fills_permissions() -> TestResult {
+    let bare = Workspace {
+        id: WorkspaceId(Uuid::from_u128(1)),
+        name: "Team".to_owned(),
+        description: "Shared notes".to_owned(),
+        head: revision('a')?,
+        created_at: "2026-10-05T00:00:00Z".to_owned(),
+        permissions: Vec::new(),
+    };
+    let shown = workspace_with_permissions(bare, vec![Permission::Read]);
+    assert_eq!(shown.permissions, vec![Permission::Read]);
+    assert!(type_checked(&catalog_calls));
     Ok(())
 }

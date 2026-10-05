@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use okf_jawn_contract::{
     access::{AccessRoute, Permission, Principal},
-    common::{MutationResult, PageRequest, TextRange, Warning},
+    common::{PageRequest, TextRange, Warning},
     conventions::NamingRules,
     error::ApiError,
     history::{BlameResponse, DiffResponse, LogResponse},
@@ -22,7 +22,7 @@ use okf_jawn_contract::{
     item::{ItemDocument, ItemKind, ItemSummary, Lifecycle, TypeDefinition},
     proposal::Change,
     source::SourceAppearance,
-    workspace::{ArchiveWorkspaceRequest, UpdateWorkspaceRequest, Workspace},
+    workspace::Workspace,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -510,36 +510,79 @@ pub trait VersionStore: Send + Sync {
     ) -> PortFuture<'a, BlameResponse>;
 }
 
-/// Deployment catalog is separate from the arbitrary folder structure inside each workspace.
+/// A new blank workspace.
+#[derive(Debug, Clone)]
+pub struct NewWorkspace {
+    /// Display name.
+    pub name: String,
+    /// Purpose of the workspace.
+    pub description: String,
+    /// Who creates it; recorded as the author of the initial commit.
+    pub creator: Provenance,
+}
+
+/// New presentation metadata for a workspace.
+#[derive(Debug, Clone)]
+pub struct WorkspaceUpdate {
+    /// Head the caller saw; a moved head conflicts.
+    pub expected_head: Revision,
+    /// New display name.
+    pub name: String,
+    /// New purpose.
+    pub description: String,
+    /// Who makes the change.
+    pub author: Provenance,
+}
+
+/// Archival of a workspace without deleting anything it retains.
+#[derive(Debug, Clone)]
+pub struct WorkspaceArchive {
+    /// Head the caller saw; a moved head conflicts.
+    pub expected_head: Revision,
+    /// Who archives it.
+    pub author: Provenance,
+}
+
+/// The deployment's workspaces, separate from the folder structure inside each one.
+///
+/// The catalog knows tenants and workspaces, not callers. It never receives a `Principal` and
+/// never filters: the application lists by the grants `AccessControl` returns and fills
+/// `Workspace::permissions` with `workspace_with_permissions`. The catalog returns that field
+/// empty.
 pub trait WorkspaceCatalog: Send + Sync {
-    /// List metadata already filtered for the authenticated principal.
-    fn list<'a>(&'a self, principal: &'a Principal) -> PortFuture<'a, Vec<Workspace>>;
-    /// Create a blank workspace with configured permissions and no sample content.
+    /// Every workspace of the tenant that is not archived, unfiltered, in creation order.
+    fn list<'a>(&'a self, tenant: &'a TenantId) -> PortFuture<'a, Vec<Workspace>>;
+    /// Create a blank workspace: its repository and an initial commit, with no sample content.
+    ///
+    /// Unique on `mutation_id`: a repeated id creates nothing and returns the prior workspace.
     fn create<'a>(
         &'a self,
-        principal: &'a Principal,
-        name: String,
-        description: String,
-        properties: BTreeMap<String, serde_json::Value>,
+        tenant: &'a TenantId,
+        mutation_id: MutationId,
+        workspace: NewWorkspace,
     ) -> PortFuture<'a, Workspace>;
-    /// Open an existing authorized workspace.
-    fn open<'a>(
-        &'a self,
-        principal: &'a Principal,
-        workspace: WorkspaceId,
-    ) -> PortFuture<'a, Workspace>;
-    /// Update workspace presentation metadata at a known revision.
+    /// Read one workspace, archived or not; `NotFound` when the tenant has no such workspace.
+    fn open<'a>(&'a self, scope: &'a StorageScope) -> PortFuture<'a, Workspace>;
+    /// Replace the name and description.
+    ///
+    /// Fails with `Conflict` when the head is not `update.expected_head`. A repeated
+    /// `mutation_id` changes nothing and returns the workspace as the first call left it.
     fn update<'a>(
         &'a self,
-        principal: &'a Principal,
-        request: UpdateWorkspaceRequest,
-    ) -> PortFuture<'a, MutationResult>;
-    /// Archive without deleting retained historical content.
+        scope: &'a StorageScope,
+        mutation_id: MutationId,
+        update: WorkspaceUpdate,
+    ) -> PortFuture<'a, Workspace>;
+    /// Archive the workspace; its history, objects and records stay.
+    ///
+    /// Fails with `Conflict` when the head is not `archive.expected_head`. A repeated
+    /// `mutation_id` changes nothing and returns the archived workspace.
     fn archive<'a>(
         &'a self,
-        principal: &'a Principal,
-        request: ArchiveWorkspaceRequest,
-    ) -> PortFuture<'a, MutationResult>;
+        scope: &'a StorageScope,
+        mutation_id: MutationId,
+        archive: WorkspaceArchive,
+    ) -> PortFuture<'a, Workspace>;
 }
 
 impl TreeEdit {
