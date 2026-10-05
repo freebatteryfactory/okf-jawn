@@ -4,19 +4,56 @@
 //! every method of a port through `&dyn`; it is never awaited, and its proof is that this file
 //! compiles. The other tests run the pure helpers and the data flow between port types.
 
+use std::collections::BTreeMap;
 use std::error::Error;
+use std::path::Path;
+use std::sync::Arc;
 
 use okf_jawn_contract::access::{AccessRoute, Principal};
-use okf_jawn_contract::common::PageRequest;
-use okf_jawn_contract::error::ApiError;
-use okf_jawn_contract::identity::{Digest, MutationId, TenantId};
+use okf_jawn_contract::common::{PageRequest, TextRange, Warning};
+use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::{
+    Digest, ItemId, MutationId, ProposalId, Revision, TenantId, WorkspaceId, WorkspacePath,
+};
+use okf_jawn_contract::item::{ItemKind, Lifecycle};
+use okf_jawn_contract::proposal::Change;
 use okf_jawn_core::storage::{
-    BlobStore, ByteReader, LocalSource, ObjectInfo, Page, Provenance, StorageScope, derive_item_id,
-    derive_proposal_id,
+    BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
+    DiffQuery, LocalSource, LogQuery, ObjectInfo, Page, Promotion, Provenance, StorageScope,
+    TreeEdit, VersionStore, derive_item_id, derive_proposal_id,
 };
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
+
+/// The application-side check: load the candidate with okf-core and judge it with okf-validator.
+struct OkfConformance;
+
+impl CandidateCheck for OkfConformance {
+    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
+        let bundle = okf_core::Bundle::load(root)
+            .map_err(|error| ApiError::new(ErrorCode::InvalidInput, error.to_string()))?;
+        let report = okf_validator::validate_bundle(&bundle);
+        if !report.is_conformant() {
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                "The candidate tree is not a conformant OKF bundle",
+            ));
+        }
+        Ok(report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| Warning {
+                code: diagnostic.severity.as_str().to_owned(),
+                message: diagnostic.message.clone(),
+                location: diagnostic
+                    .path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+            })
+            .collect())
+    }
+}
 
 /// Marks a `*_calls` proof as used without awaiting it: a function item has no runtime size.
 fn type_checked<F>(proof: &F) -> bool {
@@ -25,6 +62,127 @@ fn type_checked<F>(proof: &F) -> bool {
 
 fn digest(fill: char) -> Result<Digest, Box<dyn Error>> {
     Ok(Digest::try_from(fill.to_string().repeat(64))?)
+}
+
+fn revision(fill: char) -> Result<Revision, Box<dyn Error>> {
+    Ok(Revision::try_from(fill.to_string().repeat(40))?)
+}
+
+fn scope() -> Result<StorageScope, Box<dyn Error>> {
+    Ok(StorageScope {
+        tenant_id: TenantId::try_from("local".to_owned())?,
+        workspace_id: WorkspaceId(Uuid::from_u128(1)),
+    })
+}
+
+fn initiator() -> Provenance {
+    Provenance {
+        subject: "user_1".to_owned(),
+        route: AccessRoute::LocalOwner,
+        client_id: None,
+    }
+}
+
+async fn version_reads(
+    versions: &dyn VersionStore,
+    scope: &StorageScope,
+    item: ItemId,
+    digest: &Digest,
+) -> Result<Option<String>, ApiError> {
+    let head = versions.head(scope).await?;
+    let page = Page {
+        cursor: None,
+        limit: 50,
+    };
+    let listing = versions.list(scope, &head, None, page).await?;
+    let document = versions.show(scope, &head, item).await?;
+    versions
+        .read_file(scope, &head, &document.summary.path)
+        .await?;
+    versions.rules(scope, &head).await?;
+    versions.types(scope, &head).await?;
+    versions
+        .log(
+            scope,
+            LogQuery {
+                tip: head.clone(),
+                item_id: Some(item),
+                page: Page {
+                    cursor: listing.next_cursor,
+                    limit: 20,
+                },
+            },
+        )
+        .await?;
+    versions
+        .diff(
+            scope,
+            DiffQuery {
+                from: head.clone(),
+                to: head.clone(),
+                item_id: None,
+            },
+        )
+        .await?;
+    versions
+        .blame(
+            scope,
+            BlameQuery {
+                revision: head.clone(),
+                item_id: item,
+                lines: TextRange { start: 1, end: 5 },
+            },
+        )
+        .await?;
+    versions.correction(scope, &head, item, digest).await
+}
+
+async fn version_writes(
+    versions: &dyn VersionStore,
+    scope: &StorageScope,
+    changes: CommitChanges,
+    proposal_id: ProposalId,
+) -> Result<Committed, ApiError> {
+    let check: Arc<dyn CandidateCheck> = Arc::new(OkfConformance);
+    let mutation_id = changes.mutation_id;
+    let base = changes.expected_head.clone();
+    let author = changes.author.clone();
+    let edits = changes.edits.clone();
+    if let Some(found) = versions.find_commit(scope, mutation_id, &base).await? {
+        return Ok(Committed {
+            revision: found,
+            replayed: true,
+            warnings: Vec::new(),
+        });
+    }
+    let committed = versions.commit(scope, changes, Arc::clone(&check)).await?;
+    let candidate = versions
+        .create_candidate(
+            scope,
+            proposal_id,
+            CandidateChanges {
+                mutation_id,
+                base,
+                author: author.clone(),
+                message: "Propose a change".to_owned(),
+                edits,
+            },
+            check,
+        )
+        .await?;
+    versions
+        .promote_candidate(
+            scope,
+            Promotion {
+                mutation_id,
+                proposal_id,
+                expected_head: committed.revision,
+                candidate,
+                approver: author,
+                message: "Accept the proposal".to_owned(),
+            },
+        )
+        .await
 }
 
 async fn blob_store_calls(
@@ -95,5 +253,102 @@ fn object_info_is_digest_and_size_only() -> TestResult {
     assert_eq!(object.size, 3);
     assert_eq!(object.digest, digest('a')?);
     assert!(type_checked(&blob_store_calls));
+    Ok(())
+}
+
+#[test]
+fn version_store_calls_type_check() {
+    assert!(type_checked(&version_reads));
+    assert!(type_checked(&version_writes));
+}
+
+#[test]
+fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
+    let new_id = ItemId(Uuid::from_u128(10));
+    let existing = ItemId(Uuid::from_u128(11));
+    let path = WorkspacePath::try_from("notes/plan.md".to_owned())?;
+    let created = TreeEdit::from_change(
+        Change::Create {
+            path: path.clone(),
+            type_name: "Note".to_owned(),
+            body: "# Plan\n".to_owned(),
+            properties: BTreeMap::new(),
+        },
+        new_id,
+        ItemKind::View,
+    );
+    assert!(matches!(
+        created,
+        TreeEdit::CreateItem { item_id, kind: ItemKind::View, title: None, path: created_path, .. }
+            if item_id == new_id && created_path == path
+    ));
+    let archived = TreeEdit::from_change(
+        Change::Archive { item_id: existing },
+        new_id,
+        ItemKind::Note,
+    );
+    assert!(matches!(
+        archived,
+        TreeEdit::SetLifecycle { item_id, lifecycle: Lifecycle::Archived } if item_id == existing
+    ));
+    let moved = TreeEdit::from_change(
+        Change::Move {
+            item_id: existing,
+            destination: path.clone(),
+        },
+        new_id,
+        ItemKind::Note,
+    );
+    assert!(matches!(
+        moved,
+        TreeEdit::MoveItem { item_id, destination } if item_id == existing && destination == path
+    ));
+    let edited = TreeEdit::from_change(
+        Change::Edit {
+            item_id: existing,
+            body: "new".to_owned(),
+            properties: BTreeMap::new(),
+        },
+        new_id,
+        ItemKind::Note,
+    );
+    assert!(matches!(
+        edited,
+        TreeEdit::EditItem { item_id, body, .. } if item_id == existing && body == "new"
+    ));
+    Ok(())
+}
+
+#[test]
+fn a_candidate_check_rejects_a_tree_it_cannot_load() -> TestResult {
+    let check: Arc<dyn CandidateCheck> = Arc::new(OkfConformance);
+    let error = check
+        .check(Path::new("no-such-okf-jawn-candidate-directory"))
+        .err()
+        .ok_or("a missing candidate directory must be rejected")?;
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    Ok(())
+}
+
+#[test]
+fn a_commit_names_its_mutation_author_base_and_edits() -> TestResult {
+    let changes = CommitChanges {
+        mutation_id: MutationId(Uuid::from_u128(5)),
+        expected_head: revision('a')?,
+        author: initiator(),
+        message: "Remove a note".to_owned(),
+        edits: vec![
+            TreeEdit::DeleteItem {
+                item_id: derive_item_id(MutationId(Uuid::from_u128(4)), 0),
+            },
+            TreeEdit::RestoreWorkspace {
+                from: revision('b')?,
+            },
+        ],
+    };
+    assert_eq!(changes.expected_head, revision('a')?);
+    assert_eq!(changes.author, initiator());
+    assert_eq!(changes.edits.len(), 2);
+    assert_eq!(scope()?.workspace_id, WorkspaceId(Uuid::from_u128(1)));
     Ok(())
 }
