@@ -681,3 +681,13 @@ test('the MCP Apps orchestrator renders every view, fails on any failure and nev
   assert.doesNotMatch(source, /disableRules\(|session_open|spawnDetached|waitForTcp|requireCleanTree|commit_sha/);
   assert.doesNotMatch(source, /'cargo',\s*\[\s*'run'/);
 });
+
+test('all three orchestrators take their header from receiptHeader and record only through recordReceipt', async () => {
+  for (const name of ['docling', 'mcp-apps', 'iii']) {
+    const source = await readFile(join(root, 'qualification', name, 'run.mjs'), 'utf8');
+    assert.match(source, /= await receiptHeader\(root, /, name);
+    assert.match(source, new RegExp(`recordReceipt\\(root, '${name}', receipt\\)`), name);
+    assert.match(source, /process\.argv\.includes\('--record'\)/, name);
+    assert.doesNotMatch(source, /requireCleanTree|commit_sha|writeFile\([^)]*qualification\/receipts/, name);
+  }
+});

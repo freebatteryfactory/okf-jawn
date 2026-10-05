@@ -2,7 +2,7 @@
  * Orchestrate Docling direct-library qualification. Thin entry point:
  *   lib/runner.mjs  runs one process per fixture and samples its peak memory once;
  *   lib/receipt.mjs composes and judges the receipt;
- *   scripts/lib/provenance.mjs supplies the header behind requireCleanTree.
+ *   scripts/lib/provenance.mjs supplies the receipt header behind its clean-tree guard.
  *
  * Usage (from PowerShell, cargo on PATH): bun qualification/docling/run.mjs [--record]
  * Needs .artifacts/qualification/docling/assets.json naming the verified model assets.
