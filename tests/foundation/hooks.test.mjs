@@ -16,9 +16,11 @@ test('tracked hooks are POSIX sh, drop the hook environment, and run the agreed 
   assert.ok(!source.includes('\r'),`${name} must use LF line endings`);
   assert.match(source,/^set -eu$/m,name);
   assert.match(source,/^unset \$\(git rev-parse --local-env-vars\)$/m,`${name} must drop GIT_DIR and GIT_INDEX_FILE before running tests`);
-  assert.match(source,/^bun scripts\/dev\.mjs check-offline$/m,name);
   assert.doesNotMatch(source,/\[\[|\bfunction\b|<<<|\blefthook\b/,`${name} uses a non-POSIX construct or an uninstalled tool`);
  }
+ assert.match(commitHook,/^bun scripts\/dev\.mjs check-offline --fast$/m,'pre-commit runs only the fast tests');
+ assert.doesNotMatch(commitHook,/^bun scripts\/dev\.mjs check-offline$/m,'pre-commit must not run the full suite');
+ assert.match(pushHook,/^bun scripts\/dev\.mjs check-offline$/m,'pre-push runs the full suite');
  assert.doesNotMatch(commitHook,/cargo/,'pre-commit stays dependency-free');
  assert.match(pushHook,/^cargo fmt --all --check$/m);
  assert.match(pushHook,/build\/\*\|cure\/\*\) bun scripts\/dev\.mjs scope ;;/);

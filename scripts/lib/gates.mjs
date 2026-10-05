@@ -155,3 +155,14 @@ export async function cleanCheckout(root, { parent = lanesParent(root), execute 
   }
   return { passed: git_status_empty && Object.values(exit_codes).every(value => value === 0), receipt, receiptPath, worktree, removed };
 }
+
+/**
+ * The foundation tests by cost. `fast` files create no temporary repository and spawn no child
+ * process, so `check-offline --fast` (the pre-commit hook) stays under a few seconds; every
+ * other file is `slow` and runs in the full `check-offline`. tests/foundation/gates.test.mjs
+ * fails when a `*.test.mjs` file is in neither list or in both, or when a fast file spawns.
+ */
+export const foundationTests = Object.freeze({
+  fast: Object.freeze(['ci', 'files', 'generation', 'lockfile', 'policy', 'ports', 'toolchain'].map(name => `${name}.test.mjs`)),
+  slow: Object.freeze(['gates', 'harness', 'hooks', 'init', 'lanes', 'process', 'receipts', 'records', 'vendor'].map(name => `${name}.test.mjs`)),
+});

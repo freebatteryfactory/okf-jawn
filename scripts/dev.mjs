@@ -11,7 +11,7 @@ import { tree } from './lib/tree.mjs';
 import { bun, pins } from './lib/toolchain.mjs';
 import { checkScope, createLanes, resetLanes, syncLaneTable } from './lib/lanes.mjs';
 import { checkReceipts } from './lib/receipts.mjs';
-import { cleanCheckout, premergeSteps, runLane, runPremerge } from './lib/gates.mjs';
+import { cleanCheckout, foundationTests, premergeSteps, runLane, runPremerge } from './lib/gates.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ui = join(root, 'ui');
@@ -104,8 +104,11 @@ async function vendor() {
   process.stdout.write(`${JSON.stringify(selected, null, 2)}\n`);
 }
 
-async function offlineChecks() {
-  const tests = (await files(join(root, 'tests/foundation'))).filter(name => name.endsWith('.test.mjs')).map(name => `./tests/foundation/${name}`);
+async function offlineChecks({ fast = false } = {}) {
+  const discovered = (await files(join(root, 'tests/foundation'))).filter(name => name.endsWith('.test.mjs'));
+  const unlisted = discovered.filter(name => !foundationTests.fast.includes(name) && !foundationTests.slow.includes(name));
+  if (unlisted.length) throw new Error(`Foundation test(s) in neither foundationTests.fast nor .slow (scripts/lib/gates.mjs): ${unlisted.join(', ')}`);
+  const tests = discovered.filter(name => !fast || foundationTests.fast.includes(name)).map(name => `./tests/foundation/${name}`);
   if (!tests.length) throw new Error('No foundation tests discovered');
   // Fixture repositories run many git processes; the bun default of 5 s is too short on a loaded Windows machine.
   await run(bun(), ['test', '--timeout', '60000', ...tests], { cwd: root });
@@ -160,7 +163,7 @@ async function main() {
   switch (task) {
     case 'doctor': await doctor(); break;
     case 'init': process.stdout.write(`${JSON.stringify(await initialize(root), null, 2)}\n`); break;
-    case 'check-offline': await offlineChecks(); break;
+    case 'check-offline': await offlineChecks({ fast: args.includes('--fast') }); break;
     case 'lock': await lock(); break;
     case 'bootstrap': await bootstrap(); break;
     case 'gen': await generate(root); break;

@@ -2,10 +2,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cleanCheckout, cleanCheckoutTasks, laneSteps, premergeSteps, runLane, runPremerge } from '../../scripts/lib/gates.mjs';
+import { cleanCheckout, cleanCheckoutTasks, foundationTests, laneSteps, premergeSteps, runLane, runPremerge } from '../../scripts/lib/gates.mjs';
 import { laneNamed, lanes } from '../../scripts/lib/lanes.mjs';
 import { fixtureRepo, git } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
@@ -126,4 +126,15 @@ test('clean-checkout records a failing step and a drifted tree, keeps the eviden
  await assert.rejects(cleanCheckout(repo,{parent,execute,...quiet}),/clean-checkout refused: .* already exists/);
  // `-D` is Clippy's deny flag here, so only the force spellings are forbidden in this file.
  assert.doesNotMatch(await read('scripts/lib/gates.mjs'),/'--force'|'-f'/,'gates.mjs must never force git');
+});
+test('every foundation test file is in exactly one of the fast and slow lists, and a fast file spawns nothing',async()=>{
+ const onDisk=(await readdir(join(root,'tests/foundation'))).filter(name=>name.endsWith('.test.mjs')).sort();
+ assert.deepEqual([...foundationTests.fast,...foundationTests.slow].sort(),onDisk,'a *.test.mjs file is in neither list, in both, or listed but missing');
+ for(const name of foundationTests.fast){
+  const source=await read(`tests/foundation/${name}`);
+  assert.doesNotMatch(source,/fixture-repo|process\.mjs|child_process|Bun\.spawn|Bun\.\$|\$\{?\s*git/,`${name} is listed fast but creates a repository or spawns a process`);
+ }
+ const entry=await read('scripts/dev.mjs');
+ assert.match(entry,/case 'check-offline': await offlineChecks\(\{ fast: args\.includes\('--fast'\) \}\); break;/);
+ assert.match(entry,/!fast \|\| foundationTests\.fast\.includes\(name\)/);
 });
