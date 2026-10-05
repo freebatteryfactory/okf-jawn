@@ -4,113 +4,101 @@
   "phase_0_qualified": false,
   "application_implemented": false,
   "current": {
-    "recorded_at_utc": "2026-10-04T23:05:11Z",
-    "base_commit": "0c9de08 with uncommitted foundation corrections",
+    "recorded_at_utc": "2026-10-05T00:20:20Z",
+    "base_commit": "3b8eb42 with dependency qualification pass (uncommitted until themed commits)",
     "environment": {
       "os": "Windows 10.0.26200 (developer workstation, not CI or the build container)",
       "bun": "1.4.2 (process.versions.bun, C:\\Users\\eayou\\.bun\\bin\\bun.exe)",
       "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
       "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+      "cargo_audit": "0.22.2",
       "git": "2.55.0.windows.2",
       "typescript_checker": "7.0.2 (tsc, from @typescript/native = npm:typescript@7.0.2)",
       "typescript_compiler_api": "6.0.3 (the typescript package = npm:@typescript/typescript6@6.0.2, consumed by Hey API openapi-ts 0.99.0)"
     },
     "lockfiles_resolved": true,
-    "lockfile_provenance": "Cargo.lock from cargo generate-lockfile, cargo update --workspace and cargo update --precise for the docling-* 1.89.0 siblings; bun.lock from bun install. Neither is handwritten.",
+    "lockfile_provenance": "Cargo.lock from cargo update after OKF/Docling feature-slicing; bun.lock from bun install with exact pins and a js-yaml 4.3.2 override. Neither is handwritten.",
     "rust_compiled": true,
     "rust_generator_executed": true,
     "frontend_generation_executed": true,
     "generation_deterministic": true,
     "project_typescript_checked": true,
     "project_typescript_passed": false,
+    "authored_typescript_error_count": 8,
+    "direct_versions": {
+      "okf-core": "0.2.7",
+      "okf-validator": "0.2.7 (default-features=false)",
+      "docling": "1.93.5 (default-features=false, features=[pdf]; owns docling-core 1.93.6)",
+      "swagger-ui-dist": "5.33.1",
+      "@modelcontextprotocol/client": "2.3.0",
+      "@modelcontextprotocol/core": "2.3.0",
+      "@modelcontextprotocol/ext-apps": "2.0.3",
+      "@types/bun": "1.4.2",
+      "@hey-api/openapi-ts": "0.99.0",
+      "shadcn": "4.21.1"
+    },
     "typescript_policy": {
-      "authored": "ui/tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes and the remaining checks on all authored source and on every generated file except the Hey API client runtime. skipLibCheck applies only to third-party .d.ts files; the repository has no authored declarations.",
-      "generated_client_runtime": "ui/tsconfig.generated.json: ui/src/api/generated/client and core only, strict with exactOptionalPropertyTypes false, built as a composite project. Authored code consumes its emitted declarations through a project reference. Reason: hey-api/openapi-ts#3157 (open). Removal signal: ui/tsconfig.generated-strict.json, run non-blockingly by foundation.",
-      "boundary_scope_reason": "Quarantining the whole generated directory was tried and rejected: declaration emit without the rule widens inferred optional properties to explicit undefined (for example TanStack queryFn), which broke strict consumers of generated files that pass the rule."
+      "authored": "ui/tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes on authored source and generated files except the Hey API client runtime. skipLibCheck for third-party .d.ts only. Tooling configs are a separate composite project (ui/tsconfig.tooling.json) with types:[bun].",
+      "generated_client_runtime": "ui/tsconfig.generated.json: client/ and core/ only; exactOptionalPropertyTypes false (hey-api/openapi-ts#3157). Removal probe: typecheck:generated-strict.",
+      "node_ambient": "No MCP Apps Node-types island. Buffer appears only in @modelcontextprotocol/client .d.ts; skipLibCheck covers it. @types/node is not a direct dependency."
     },
     "checks": [
-      {
-        "command": ["bun", "scripts/dev.mjs", "doctor"],
-        "exit_code": 0,
-        "status": "passed",
-        "log": ".artifacts/verification/doctor.log"
-      },
       {
         "command": ["bun", "scripts/dev.mjs", "check-offline"],
         "exit_code": 0,
         "status": "passed",
         "log": ".artifacts/verification/check-offline.log",
-        "meaning": "37 bun test cases (the original 28 plus toolchain, connector, core-dependency, fixture-isolation, port and generated-directory-preservation checks). Not a Rust build, type check or generator run."
+        "meaning": "37 bun test cases."
       },
       {
         "command": ["bun", "scripts/dev.mjs", "gen-check"],
         "exit_code": 0,
         "status": "passed",
         "log": ".artifacts/verification/gen-check.log",
-        "meaning": "Two independent generation passes (Rust xtask, Hey API, CLI, catalog) are byte-identical and match the published api/, generated/cli/ and ui/src/api/generated/."
-      },
-      {
-        "command": ["bun", "scripts/dev.mjs", "bootstrap"],
-        "exit_code": 1,
-        "status": "failed",
-        "log": ".artifacts/verification/bootstrap.log",
-        "meaning": "Frozen installs, xtask build, both generation passes, publication, Vite build, MCP App bundle and Scalar docs succeed; the final TS7 type check fails on the 8 authored errors listed under the ui typecheck entry."
+        "meaning": "Two generation passes byte-identical, including Vite-bundled catalog with fixed catalog.mjs name."
       },
       {
         "command": ["bun", "scripts/dev.mjs", "foundation"],
         "exit_code": 1,
         "status": "failed",
         "log": ".artifacts/verification/foundation.log",
-        "meaning": "gen-check, contract/core/xtask cargo tests, UI build and the non-blocking probe complete; the TS7 type check fails on 8 authored errors, so its trailing offline checks did not run in this task (they pass separately above)."
+        "meaning": "Build, swagger-ui-dist docs vendor and non-blocking probe succeed; typecheck fails on 8 authored TS errors."
       },
       {
         "command": ["cargo", "fmt", "--all", "--check"],
         "exit_code": 0,
-        "status": "passed",
-        "log": ".artifacts/verification/fmt.log"
+        "status": "passed"
       },
       {
         "command": ["cargo", "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"],
         "exit_code": 0,
-        "status": "passed",
-        "log": ".artifacts/verification/clippy.log",
-        "meaning": "Default features only; runtime-feature code is compiled below but not linted."
+        "status": "passed"
       },
       {
-        "command": ["cargo", "xtask", "source-policy", "--root", "."],
+        "command": ["cargo", "clippy", "--locked", "--workspace", "--all-targets", "--features", "okf-jawn-server/runtime,okf-jawn-storage/runtime,okf-jawn-ingest/runtime", "--", "-D", "warnings"],
         "exit_code": 0,
         "status": "passed",
-        "log": ".artifacts/verification/source-policy.log"
+        "meaning": "Strict Clippy with runtime features also passes."
       },
       {
         "command": ["cargo", "test", "--locked", "--workspace"],
         "exit_code": 0,
         "status": "passed",
-        "log": ".artifacts/verification/cargo-test.log",
-        "meaning": "8 tests, including the full Rust generator with jsonschema validation and the server binding test over the test-only fixture."
+        "meaning": "8 tests."
       },
       {
-        "command": ["cargo", "check", "--locked", "--workspace", "--all-targets", "--features", "okf-jawn-server/runtime,okf-jawn-storage/runtime,okf-jawn-ingest/runtime"],
+        "command": ["bun", "scripts/dev.mjs", "audit"],
         "exit_code": 0,
         "status": "passed",
-        "log": ".artifacts/verification/runtime-feature-check.log",
-        "meaning": "The declared runtime dependency graph compiles. The adapter implementations it will hold do not exist yet."
+        "log": ".artifacts/verification/audit.log",
+        "meaning": "cargo audit (deny unmaintained/unsound/yanked via .cargo/audit.toml), bun audit --prod, bun audit --audit-level=high with exact braces ignore; full bun audit recorded informationally."
       },
       {
         "command": ["bun", "--bun", "run", "lint"],
         "cwd": "ui",
         "exit_code": 0,
         "status": "passed",
-        "log": ".artifacts/verification/ui-lint.log",
-        "meaning": "Biome 2.5.15; 6 informational suggestions remain."
-      },
-      {
-        "command": ["bun", "--bun", "x", "tsc", "-b", "tsconfig.generated.json"],
-        "cwd": "ui",
-        "exit_code": 0,
-        "status": "passed",
-        "log": ".artifacts/verification/ui-generated-runtime-typecheck.log",
-        "meaning": "The Hey API client runtime passes TS 7.0.2 under its declared generated-code policy and emits the declarations authored code consumes."
+        "meaning": "Biome 2.5.15; 3 informational suggestions remain."
       },
       {
         "command": ["bun", "--bun", "run", "typecheck"],
@@ -118,35 +106,57 @@
         "exit_code": 1,
         "status": "failed",
         "log": ".artifacts/verification/ui-typecheck.log",
-        "meaning": "tsc -b with TS 7.0.2. All generated files other than the runtime pass the authored policy. 8 authored errors remain, owned by the UI/views lanes: mcp-apps/main.tsx:59-63 and features/views/PresentView.tsx:89 assign zod.gen parse output (.nullish() infers ?: T | null | undefined) to types.gen types (?: T | null); features/conventions/RulesForm.tsx:18 AJV8Validator generic; features/views/PresentView.tsx:111 json-render Spec."
+        "meaning": "8 authored errors remain (same set as before this pass): mcp-apps/main.tsx:59-63, PresentView.tsx:89, PresentView.tsx:111, RulesForm.tsx:18."
+      }
+    ],
+    "advisories_eliminated": [
+      "RUSTSEC unic-* and OKF umbrella paste path via rustpython-parser (feature-sliced okf-validator)",
+      "GHSA @ai-sdk/provider-utils via Scalar agent-chat (Scalar removed)",
+      "GHSA js-yaml 4.2.0 via hey-api (override to 4.3.2)"
+    ],
+    "advisories_remaining": [
+      {
+        "id": "RUSTSEC-2024-0436",
+        "crate": "paste",
+        "label": "upstream-only",
+        "path": "docling → image → pulp/rav1e/tokenizers",
+        "action": "ignored exactly in .cargo/audit.toml; no CVE; removal when Docling/image drops paste"
       },
       {
-        "command": ["bun", "--bun", "run", "typecheck:generated-strict"],
-        "cwd": "ui",
-        "exit_code": 1,
-        "status": "expected failure (non-blocking probe)",
-        "log": ".artifacts/verification/ui-generated-strict-probe.log",
-        "meaning": "12 exactOptionalPropertyTypes errors in client/client.gen.ts, client/utils.gen.ts and core/{params,pathSerializer,serverSentEvents}.gen.ts, matching hey-api/openapi-ts#3157."
+        "id": "RUSTSEC-2026-0206",
+        "crate": "rustybuzz",
+        "label": "upstream-only",
+        "path": "docling → resvg 0.47 → usvg",
+        "action": "ignored exactly; upstream Docling MSRV pin; removal when Docling moves to resvg 0.48+"
+      },
+      {
+        "id": "RUSTSEC-2026-0192",
+        "crate": "ttf-parser",
+        "label": "upstream-only",
+        "path": "docling → resvg 0.47 → usvg",
+        "action": "ignored exactly; same as rustybuzz"
+      },
+      {
+        "id": "GHSA-vfj7-8cjw-p6xm",
+        "package": "braces@3.0.3",
+        "label": "build-time tooling",
+        "path": "shadcn → @shadcn/registry → fast-glob → micromatch → braces",
+        "action": "no published fix; ignored exactly in bun scripts/dev.mjs audit --audit-level=high; not in product runtime (bun audit --prod clean)"
       }
     ],
     "dependency_qualification_findings": [
-      "Hey API openapi-ts 0.99.0 requires the TypeScript 5/6 compiler API (hey-api/hey-api#4235); satisfied by the side-by-side TypeScript 6 API package while tsc remains 7.0.2.",
-      "Hey API client runtime does not satisfy exactOptionalPropertyTypes (hey-api/openapi-ts#3157, open draft); isolated in ui/tsconfig.generated.json with a removal probe.",
-      "Hey API zod plugin emits .nullish() where the TypeScript plugin emits ?: T | null; zod-parsed values are not assignable to the generated types under exactOptionalPropertyTypes. No 0.99.0 option found to align them.",
-      "Third-party declarations failing under TS 7 (covered by skipLibCheck, revisit when upstream converges): @hey-api/shared log typing and missing semver types; @rolldown/plugin-babel 0.2.4 and babel-plugin-react-compiler 1.0.0 against @babel/core 8.0.6, plus missing convert-source-map types; vega-lite 6.4.3 Axis interface; vega-embed missing fast-json-patch types.",
-      "docling 1.89.0 does not compile against docling-core 1.93; docling-core is held at =1.89.0.",
-      "Each single-file MCP App resource is about 1.8 MB (Vega, CodeMirror and React inlined); not yet measured against host limits."
-    ],
-    "foundation_fixes_this_pass": [
-      "scripts/lib/files.mjs publishes by moving entries instead of renaming the destination directory, which a Windows editor watcher holds open; guards and restore-on-failure kept.",
-      "ui/scripts/bundle-app.mjs bundles through Vite with the React compiler and Tailwind plugins; plain esbuild cannot compile Tailwind source.",
-      "scripts/dev.mjs runs the UI build (which writes routeTree.gen.ts) before the type check."
+      "OKF: umbrella okf replaced with okf-core (storage+ingest) and okf-validator default-features=false (core only). Application owns validate_bundle/lint_bundle policy.",
+      "Docling: =1.93.5, default-features=false, features=[pdf]. Direct docling-core removed.",
+      "Docs: Scalar replaced with swagger-ui-dist 5.33.1 reading canonical api/openapi.yaml.",
+      "esbuild direct dependency removed; catalog uses Vite build() with fixed catalog.mjs; trustedDependencies=[].",
+      "bun pm untrusted: 0 packages with suppressed scripts after empty trust list.",
+      "Hey API remains 0.99.0; TS6 API island and exactOptionalPropertyTypes airlock retained with probes.",
+      "MCP client/core aligned at 2.3.0; ext-apps 2.0.3; no TS server package."
     ],
     "not_run": [
       "deploy/Dockerfile build: Docker is not installed on this workstation",
       "GitHub Actions CI: workflows edited but not executed",
       "Vitest and Playwright suites",
-      "Strict Clippy with runtime features (only cargo check was run with them)",
       "qualify mcp-wire / qualify application: no running deployment",
       "Converter native/model asset qualification, WorkOS integration, executor restart check"
     ],

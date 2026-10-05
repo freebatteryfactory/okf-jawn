@@ -93,6 +93,22 @@ async function offlineChecks() {
   await run(bun(), ['test', ...tests], { cwd: root });
 }
 
+async function audit() {
+  // Exact tooling exception: braces@3.0.3 via shadcn → @shadcn/registry → fast-glob → micromatch.
+  // No newer braces release exists. No CVE-class fix available. Removal: shadcn/micromatch
+  // move past braces 3.0.3, or braces publishes a patched release.
+  const bracesException = 'GHSA-vfj7-8cjw-p6xm';
+  await run('cargo', ['audit'], { cwd: root });
+  await run(bun(), ['audit', '--prod'], { cwd: root });
+  await run(bun(), ['audit', '--audit-level=high', '--ignore', bracesException], { cwd: root });
+  // Full audit is informational for lower-severity tooling; never fail the task on it alone.
+  const full = await run(bun(), ['audit'], { cwd: root, capture: true, allowFailure: true });
+  process.stdout.write(full.stdout);
+  if (full.stderr) process.stderr.write(full.stderr);
+  process.stdout.write(`Full bun audit exit=${full.code} (informational; lower-severity tooling findings do not fail this task).\n`);
+  process.stdout.write(`Ignored high tooling advisory ${bracesException} (shadcn braces path; see vendors.json / verification).\n`);
+}
+
 async function qualify() {
   const name = args[0];
   if (name === 'mcp-wire') {
@@ -117,6 +133,7 @@ async function main() {
     case 'tree': process.stdout.write(await tree(root)); break;
     case 'lanes': await lanes(); break;
     case 'qualify': await qualify(); break;
+    case 'audit': await audit(); break;
     case 'check':
       await run('cargo', ['fmt', '--all', '--check'], { cwd: root });
       await run('cargo', ['clippy', '--locked', '--workspace', '--all-targets', '--', '-D', 'warnings'], { cwd: root });
@@ -134,7 +151,7 @@ async function main() {
       await generatedStrictProbe();
       await uiScript('typecheck');
       await offlineChecks(); break;
-    case 'help': process.stdout.write('Tasks: init doctor lock bootstrap gen gen-check check-offline check test foundation vendor tree lanes qualify\n'); break;
+    case 'help': process.stdout.write('Tasks: init doctor lock bootstrap gen gen-check check-offline check test foundation vendor tree lanes qualify audit\n'); break;
     default: throw new Error(`Unknown task: ${task}. Use help.`);
   }
 }

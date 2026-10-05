@@ -2,7 +2,7 @@
 import { spawn } from 'node:child_process';
 
 export async function run(command, args, options = {}) {
-  const { cwd, env = {}, capture = false, timeout = 600_000 } = options;
+  const { cwd, env = {}, capture = false, timeout = 600_000, allowFailure = false } = options;
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env: { ...process.env, ...env }, shell: false,
       stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit' });
@@ -15,7 +15,7 @@ export async function run(command, args, options = {}) {
     child.once('error', error => { clearTimeout(timer); reject(error); });
     child.once('close', (code, signal) => {
       clearTimeout(timer);
-      if (code === 0) resolve({ code, stdout, stderr });
+      if (code === 0 || allowFailure) resolve({ code: code ?? 1, stdout, stderr });
       else reject(new Error(`${command} ${args.join(' ')} exited ${code ?? signal}\n${stderr}`));
     });
     timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`${command} timed out; no success recorded`)); }, timeout);

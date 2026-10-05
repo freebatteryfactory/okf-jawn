@@ -52,3 +52,7 @@ lanes:
 # Qualification uses a real implementation supplied by the corresponding lane.
 qualify case="":
     bun scripts/dev.mjs qualify "{{case}}"
+
+# Strict cargo-audit plus bun audit --prod and --audit-level=high. Full bun audit is recorded only.
+audit:
+    bun scripts/dev.mjs audit
