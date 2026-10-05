@@ -65,6 +65,10 @@ struct SharedTypes {
 const COMPONENT_PREFIX: &str = "#/components/schemas/";
 const DEFINITION_PREFIX: &str = "#/$defs/";
 const TRANSPORT_METHODS: [&str; 4] = ["get", "put", "post", "delete"];
+/// Statuses that carry `ApiError`; 501 is the generated "not implemented" outcome.
+const ERROR_STATUSES: [&str; 10] = [
+    "400", "401", "403", "404", "409", "413", "422", "500", "501", "503",
+];
 
 pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn Error>> {
     let typed = typed_operations()?;
@@ -366,9 +370,7 @@ fn path_operation(operation: &TypedOperation, shared: &SharedTypes) -> Value {
             "content": {"application/json": {"schema": component_reference(&operation.response.name)}}
         }),
     );
-    for status in [
-        "400", "401", "403", "404", "409", "413", "422", "500", "503",
-    ] {
+    for status in ERROR_STATUSES {
         responses.insert(
             status.to_owned(),
             json!({
@@ -401,12 +403,12 @@ fn path_operation(operation: &TypedOperation, shared: &SharedTypes) -> Value {
 
 fn annotations(info: &OperationInfo) -> Value {
     let read_only = info.permission == Permission::Read;
-    let destructive = matches!(
-        info.id,
-        "delete_item" | "restore_items" | "apply_names" | "archive_workspace"
-    );
-    json!({"readOnlyHint":read_only,"destructiveHint":destructive,
-        "idempotentHint":read_only,"openWorldHint":false})
+    json!({
+        "readOnlyHint": read_only,
+        "destructiveHint": info.destructive,
+        "idempotentHint": read_only,
+        "openWorldHint": false
+    })
 }
 
 fn tool_definition(operation: &TypedOperation) -> Value {
@@ -692,6 +694,46 @@ mod tests {
             checked.len() >= 3,
             "the generator writes at least its three typed examples, checked {checked:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn hints_aliases_and_the_not_implemented_response_come_from_the_table() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        super::generate(directory.path())?;
+        let api = read(&directory.path().join("openapi.json"))?;
+        let mut destructive = 0_usize;
+        for operation in operations() {
+            let pointer = format!("/paths/{}/post", operation.path.replace('/', "~1"));
+            let post = api
+                .pointer(&pointer)
+                .ok_or_else(|| format!("{}: no path", operation.id))?;
+            assert_eq!(
+                post.pointer("/x-tool-annotations/destructiveHint"),
+                Some(&json!(operation.destructive)),
+                "{} destructive hint",
+                operation.id
+            );
+            let alias = if operation.operator_alias.is_empty() {
+                Value::Null
+            } else {
+                json!(operation.operator_alias)
+            };
+            assert_eq!(
+                post.get("x-cli-alias"),
+                Some(&alias),
+                "{} operator alias",
+                operation.id
+            );
+            assert_eq!(
+                post.pointer("/responses/501/content/application~1json/schema/$ref"),
+                Some(&json!("#/components/schemas/ApiError")),
+                "{} not-implemented response",
+                operation.id
+            );
+            destructive = destructive.saturating_add(usize::from(operation.destructive));
+        }
+        assert!(destructive > 0, "the table marks destructive operations");
         Ok(())
     }
 
