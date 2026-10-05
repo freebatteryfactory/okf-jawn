@@ -499,8 +499,9 @@ fn transport_response_schema(operation: &TransportOperation, shared: &SharedType
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::error::Error;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use okf_jawn_contract::metadata::operations;
     use schemars::JsonSchema;
@@ -631,76 +632,65 @@ mod tests {
     }
 
     #[test]
-    fn request_schemas_agree_on_all_example_fixtures() -> Result<(), Box<dyn Error>> {
+    fn every_example_validates_against_the_operation_it_names() -> TestResult {
         let directory = tempfile::tempdir()?;
         super::generate(directory.path())?;
-        let api: Value =
-            serde_json::from_slice(&std::fs::read(directory.path().join("openapi.json"))?)?;
-        let components = api.get("components").ok_or("missing components")?;
-        let examples_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../api/examples");
-        let mut checked = 0usize;
-        for entry in std::fs::read_dir(&examples_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or("example stem")?;
-            // Fixture files use kebab-case operation ids (read-item.json → read_item).
-            let operation_id = stem.replace('-', "_");
-            let input_path = directory
-                .path()
-                .join("schemas")
-                .join(format!("{operation_id}.input.json"));
-            if !input_path.exists() {
-                continue;
-            }
-            let input: Value = serde_json::from_slice(&std::fs::read(&input_path)?)?;
-            let fixture: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-            let paths = api
-                .pointer("/paths")
-                .and_then(Value::as_object)
-                .ok_or("paths")?;
-            let mut request_ref = None;
-            for item in paths.values() {
-                if let Some(post) = item.get("post")
-                    && post.get("operationId").and_then(Value::as_str)
-                        == Some(operation_id.as_str())
-                {
-                    request_ref = post
-                        .pointer("/requestBody/content/application~1json/schema/$ref")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                    break;
-                }
-            }
-            let request_ref = request_ref.ok_or_else(|| format!("no path for {operation_id}"))?;
-            let name = request_ref
-                .strip_prefix("#/components/schemas/")
-                .ok_or("bad ref")?;
+        let api = read(&directory.path().join("openapi.json"))?;
+        let components = api.get("components").ok_or("components")?;
+        let table = operations();
+        let mut checked = BTreeSet::new();
+        for entry in std::fs::read_dir(directory.path().join("examples"))? {
+            let path = entry?.path();
+            let file = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("example file name")?
+                .to_owned();
+            let stem = file
+                .strip_suffix(".json")
+                .ok_or_else(|| format!("{file}: examples are JSON files"))?;
+            let id = stem.replace('-', "_");
+            let operation = table
+                .iter()
+                .find(|operation| operation.id == id)
+                .ok_or_else(|| format!("{file} names no declared operation"))?;
+            let example = read(&path)?;
+            let input = read(
+                &directory
+                    .path()
+                    .join("schemas")
+                    .join(format!("{id}.input.json")),
+            )?;
+            let pointer = format!(
+                "/paths/{}/post/requestBody/content/application~1json/schema/$ref",
+                operation.path.replace('/', "~1")
+            );
+            let reference = api
+                .pointer(&pointer)
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("{id}: no request component"))?;
             let published = json!({
-                "$schema":"https://json-schema.org/draft/2020-12/schema",
-                "$ref": format!("#/components/schemas/{name}"),
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$ref": reference,
                 "components": components
             });
-            let input_validator = jsonschema::validator_for(&input)?;
-            let published_validator = jsonschema::validator_for(&published)?;
-            assert!(
-                input_validator.is_valid(&fixture),
-                "{operation_id} fixture must validate against schemars input"
-            );
-            assert!(
-                published_validator.is_valid(&fixture),
-                "{operation_id} fixture must validate against OpenAPI component {name}"
-            );
-            checked += 1;
+            for (source, schema) in [
+                ("its input schema", &input),
+                ("its OpenAPI component", &published),
+            ] {
+                let validator = jsonschema::validator_for(schema)
+                    .map_err(|error| format!("{file}: {source}: {error}"))?;
+                if let Err(error) = validator.validate(&example) {
+                    return Err(
+                        format!("{file} does not validate against {source}: {error}").into(),
+                    );
+                }
+            }
+            checked.insert(id);
         }
         assert!(
-            checked > 0,
-            "expected at least one api/examples fixture to be checked"
+            checked.len() >= 3,
+            "the generator writes at least its three typed examples, checked {checked:?}"
         );
         Ok(())
     }
