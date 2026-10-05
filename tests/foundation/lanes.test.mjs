@@ -1,0 +1,146 @@
+/** One lane table drives worktrees, gates, scope, the AGENTS.md table and CODEOWNERS. */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { LANE_TABLE_BEGIN, LANE_TABLE_END, checkScope, createLanes, laneNamed, lanes, lanesParent, outOfScope, renderLaneTable, resetLanes, scopeFor } from '../../scripts/lib/lanes.mjs';
+import { run } from '../../scripts/lib/process.mjs';
+import { commit, fixtureRepo, git } from './fixture-repo.mjs';
+const root=fileURLToPath(new URL('../../',import.meta.url));
+const read=file=>readFile(join(root,file),'utf8');
+
+/** Case-sensitive existence, so `/Justfile` cannot stand in for `justfile` on Windows or macOS. */
+async function existsExact(relative){
+ let directory=root;
+ for(const segment of relative.split('/').filter(Boolean)){
+  let names;try{names=await readdir(directory);}catch{return false;}
+  if(!names.includes(segment))return false;
+  directory=join(directory,segment);
+ }
+ return true;
+}
+
+test('the lane table is well formed and matches the crates it gates',async()=>{
+ assert.equal(new Set(lanes.map(lane=>lane.name)).size,lanes.length);
+ for(const lane of lanes){
+  assert.equal(lane.branch,`build/${lane.name}`);
+  assert.ok(['rust','ui'].includes(lane.kind),lane.name);
+  assert.ok(lane.directories.length>0,lane.name);
+  for(const directory of lane.directories){assert.ok(directory.endsWith('/'),directory);assert.ok(await existsExact(directory),`${lane.name}: ${directory} does not exist`);}
+  for(const path of [...lane.files,...lane.exclude])assert.ok(await existsExact(path),`${lane.name}: ${path} does not exist`);
+  assert.ok(lane.proves.length>0,lane.name);
+  if(lane.kind==='ui'){assert.deepEqual(lane.crates,[]);assert.deepEqual(lane.features,[]);continue;}
+  assert.ok(lane.crates.length>0,lane.name);
+  const manifests=await Promise.all(lane.directories.map(directory=>read(`${directory}Cargo.toml`)));
+  for(const crate of lane.crates){
+   const manifest=manifests.find(text=>text.includes(`name = "${crate}"`));
+   assert.ok(manifest,`${lane.name}: no manifest under its directories declares ${crate}`);
+   for(const feature of lane.features.filter(entry=>entry.startsWith(`${crate}/`)))assert.match(manifest,new RegExp(`^${feature.slice(crate.length+1)} = \\[`,'m'),`${crate} declares no feature ${feature}`);
+  }
+  for(const feature of lane.features)assert.ok(lane.crates.includes(feature.split('/')[0]),`${lane.name}: ${feature} names a crate the lane does not gate`);
+  for(const directory of lane.directories)assert.ok(lane.exclude.includes(`${directory}Cargo.toml`),`${lane.name}: ${directory}Cargo.toml is a manifest and must be excluded`);
+ }
+});
+test('what the views lane owns is excluded from workspace-ui, and every unit spec runs in exactly one UI lane',async()=>{
+ const views=laneNamed('views'),workspace=laneNamed('workspace-ui');
+ for(const path of [...views.directories,...views.files])assert.ok(workspace.exclude.includes(path),`workspace-ui does not exclude ${path}`);
+ const specs=(await readdir(join(root,'ui/tests/unit'))).filter(name=>/\.test\.tsx?$/.test(name)).map(name=>`tests/unit/${name}`);
+ for(const spec of specs)assert.equal(views.tests.includes(spec),workspace.testExclude.includes(spec),`${spec} must run in exactly one UI lane`);
+ for(const filter of views.tests.filter(entry=>entry.startsWith('tests/unit/')))assert.ok(specs.includes(filter),`views filter ${filter} matches no spec`);
+ assert.throws(()=>laneNamed('no-such-lane'),/Unknown lane: no-such-lane/);
+});
+test('the lane parent directory is configurable',()=>{
+ const configured=resolve(root,'..','elsewhere');
+ assert.equal(lanesParent(root,{OKF_LANES_DIR:configured},'win32',()=>true),configured);
+ assert.equal(lanesParent(root,{OKF_LANES_DIR:'  '},'win32',()=>true),'D:\\okf\\lanes');
+ assert.equal(lanesParent(root,{},'win32',()=>false),resolve(root,'..','okf-jawn-lanes'));
+ assert.equal(lanesParent(root,{},'linux',()=>true),resolve(root,'..','okf-jawn-lanes'));
+});
+test('AGENTS.md carries the table rendered from the lane table',async()=>{
+ const agents=await read('AGENTS.md');
+ const begin=agents.indexOf(LANE_TABLE_BEGIN),end=agents.indexOf(LANE_TABLE_END);
+ assert.ok(begin>=0&&end>begin,'AGENTS.md is missing the lane-table markers');
+ assert.equal(agents.slice(begin+LANE_TABLE_BEGIN.length,end).trim(),renderLaneTable());
+ for(const lane of lanes)assert.ok(agents.includes(`\`bun scripts/dev.mjs lane ${lane.name}\``),lane.name);
+});
+test('CODEOWNERS names real paths and its lane rows agree with the lane table',async()=>{
+ const rows=(await read('.github/CODEOWNERS')).split(/\r?\n/).filter(line=>line.trim()&&!line.startsWith('#'))
+  .map(line=>({path:line.split(/\s+/)[0],lane:/# lane: (\S+)/.exec(line)?.[1]??null}));
+ for(const row of rows){
+  assert.ok(row.path.startsWith('/'),row.path);
+  assert.ok(await existsExact(row.path),`CODEOWNERS path ${row.path} does not exist with that exact spelling`);
+ }
+ for(const lane of lanes)assert.deepEqual(rows.filter(row=>row.lane===lane.name).map(row=>row.path).sort(),[...lane.directories,...lane.files].map(path=>`/${path}`).sort(),lane.name);
+ for(const row of rows.filter(entry=>entry.lane))assert.ok(lanes.some(lane=>lane.name===row.lane),`CODEOWNERS names unknown lane ${row.lane}`);
+});
+test('paths outside a lane, and manifests inside it, are out of scope',()=>{
+ assert.deepEqual(outOfScope(['crates/storage/src/lib.rs','api/operations.json','crates/storage/Cargo.toml','crates/core/src/lib.rs','Cargo.lock'],scopeFor('build/storage')),['crates/storage/Cargo.toml','crates/core/src/lib.rs','Cargo.lock']);
+ assert.deepEqual(outOfScope(['ui/src/routes/index.tsx','ui/src/features/views/Chart.tsx','ui/package.json','ui/tests/unit/layout.test.tsx'],scopeFor('build/workspace-ui')),['ui/src/features/views/Chart.tsx','ui/package.json','ui/tests/unit/layout.test.tsx']);
+ assert.deepEqual(outOfScope(['ui/src/features/views/Chart.tsx','ui/tests/unit/layout.test.tsx','ui/tests/unit/wire.test.ts'],scopeFor('build/views')),['ui/tests/unit/wire.test.ts']);
+ assert.equal(scopeFor('feature/unknown'),null);
+});
+test('the scope check fails a lane branch that changed an out-of-lane file',async t=>{
+ const {root}=await fixtureRepo(t,{'crates/storage/src/lib.rs':'//! storage\n','crates/core/src/lib.rs':'//! core\n'});
+ await git(root,'checkout','--quiet','-b','build/storage');
+ await commit(root,{'crates/storage/src/lib.rs':'//! storage, changed\n','api/operations.json':'[]\n'},'in lane, with generated output');
+ assert.deepEqual((await checkScope(root)).changed,['api/operations.json','crates/storage/src/lib.rs']);
+ await commit(root,{'crates/core/src/lib.rs':'//! core, changed from the storage lane\n'},'out of lane');
+ await assert.rejects(checkScope(root),/scope check failed for storage: 1 path\(s\) outside its scope:\n  crates\/core\/src\/lib\.rs/);
+ await assert.rejects(checkScope(root,{lane:'core-cli'}),/crates\/storage\/src\/lib\.rs/);
+});
+test('uncommitted and untracked files count, and a branch without a row has no scope',async t=>{
+ const {root}=await fixtureRepo(t);
+ await git(root,'checkout','--quiet','-b','build/ingest');
+ await writeFile(join(root,'stray.txt'),'x');
+ await assert.rejects(checkScope(root),/scope check failed for ingest[\s\S]*stray\.txt/);
+ await git(root,'checkout','--quiet','-b','cure/unknown');
+ await assert.rejects(checkScope(root),/No scope row for branch cure\/unknown/);
+});
+test('this package has a scope row against the integration branch',()=>{
+ const scope=scopeFor('cure/gates');
+ assert.equal(scope.base,'integration/foundation-cure');
+ assert.deepEqual(outOfScope(['scripts/dev.mjs','scripts/hooks/pre-push','Cargo.lock','crates/core/Cargo.toml','crates/core/src/dispatch.rs','qualification/docling/run.mjs','scripts/lib/provenance.mjs','tests/foundation/harness.test.mjs'],scope),['crates/core/src/dispatch.rs','qualification/docling/run.mjs','scripts/lib/provenance.mjs','tests/foundation/harness.test.mjs']);
+});
+test('lanes-reset removes clean, empty lanes without forcing anything',async t=>{
+ const {base,root}=await fixtureRepo(t);const parent=join(base,'lanes');const calls=[];
+ await createLanes(root,{names:['storage','views'],parent});
+ const recording=(args,options={})=>{calls.push(args);return run('git',args,{cwd:options.cwd??root,capture:true,allowFailure:true});};
+ assert.match(await resetLanes(root,{parent,git:recording}),/removed 2 worktree\(s\) and 2 branch\(es\); nothing was forced/);
+ assert.equal(existsSync(join(parent,'storage')),false);assert.equal(existsSync(join(parent,'views')),false);
+ assert.equal(await git(root,'branch','--list','build/*'),'');
+ for(const args of calls)for(const flag of ['--force','-f','-D'])assert.ok(!args.includes(flag),`git ${args.join(' ')}`);
+});
+test('lanes-reset refuses a dirty worktree even when its branch was deleted',async t=>{
+ const {base,root}=await fixtureRepo(t);const parent=join(base,'lanes');
+ await createLanes(root,{names:['storage','ingest'],parent});
+ const storage=join(parent,'storage');
+ await git(storage,'checkout','--quiet','--detach');
+ await git(root,'branch','-D','build/storage');
+ await writeFile(join(storage,'unsaved-work.txt'),'not committed anywhere');
+ await assert.rejects(resetLanes(root,{parent}),/lanes-reset refused; nothing was removed:[\s\S]*storage is dirty/);
+ assert.equal(await readFile(join(storage,'unsaved-work.txt'),'utf8'),'not committed anywhere');
+ assert.equal(existsSync(join(parent,'ingest')),true,'a refusal leaves every lane in place');
+});
+test('lanes-reset treats a failed git status as dirty, and lane commits as work',async t=>{
+ const {base,root}=await fixtureRepo(t);const parent=join(base,'lanes');
+ await createLanes(root,{names:['server'],parent});
+ const failing=(args,options={})=>args[0]==='status'&&options.cwd?Promise.resolve({code:128,stdout:'',stderr:'fatal: simulated'}):run('git',args,{cwd:options.cwd??root,capture:true,allowFailure:true});
+ await assert.rejects(resetLanes(root,{parent,git:failing}),/could not read its status \(git exit 128\); treated as dirty/);
+ await commit(join(parent,'server'),{'crates/server/src/new.rs':'//! lane work\n'},'lane work');
+ await assert.rejects(resetLanes(root,{parent}),/1 commit\(s\) that are not in HEAD/);
+ assert.equal(existsSync(join(parent,'server')),true);
+});
+test('a directory that is not a worktree of this repository is never removed',async t=>{
+ const {base,root}=await fixtureRepo(t);const parent=join(base,'lanes');
+ await mkdir(join(parent,'views'),{recursive:true});await writeFile(join(parent,'views','notes.txt'),'someone else');
+ await assert.rejects(resetLanes(root,{parent}),/views exists but is not a worktree of this repository/);
+ assert.equal(existsSync(join(parent,'views','notes.txt')),true);
+});
+test('the entrypoint lists no lane and no lane directory of its own, and nothing forces git',async()=>{
+ const entry=await read('scripts/dev.mjs');
+ for(const lane of lanes)assert.doesNotMatch(entry,new RegExp(`'${lane.name}'`),lane.name);
+ assert.doesNotMatch(entry,/okf-jawn-lanes|--force/);
+ assert.doesNotMatch(await read('scripts/lib/lanes.mjs'),/'--force'|'-f'|'-D'/);
+});

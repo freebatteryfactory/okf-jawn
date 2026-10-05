@@ -44,7 +44,7 @@
     "project_typescript_checked": true,
     "project_typescript_passed": true,
     "authored_typescript_error_count": 0,
-    "deterministic_foundation_green": true,
+    "deterministic_foundation_green": false,
     "phase_0_note": "Phase 0 reopened. Prior terminal record at b13fcd0 overclaimed harness evidence and left shared contract/port gaps. Foundation repair in progress; requalify on one clean SHA after contract and port repairs. iii REJECTED_WITH_FALLBACK (Tokio+RecordStore) stands. web-host gate moved to acceptance as not_run. Docling and MCP Apps protocol gates return to incomplete pending clean-tree requalification.",
     "direct_versions": {
       "okf-core": "0.2.7",
@@ -73,9 +73,9 @@
           "scripts/dev.mjs",
           "check-offline"
         ],
-        "exit_code": 0,
-        "status": "passed",
-        "meaning": "37 bun test cases."
+        "status": "incomplete",
+        "last_passed_on": "e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807",
+        "meaning": "Failed on b205c4a (CI 37352882339): policy.test.mjs and vendor.test.mjs asserted stale literal counts. Record again from a run on S."
       },
       {
         "command": [
@@ -83,9 +83,9 @@
           "scripts/dev.mjs",
           "gen-check"
         ],
-        "exit_code": 0,
-        "status": "passed",
-        "log": "CI 37322344115 on e3dd8bf (supersedes earlier 37257588545 / 5799109 logs)"
+        "status": "incomplete",
+        "last_passed_on": "e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807",
+        "meaning": "Last pass was CI 37322344115, before the repair in 50113b9..b205c4a. Record again from a run on S."
       },
       {
         "command": [
@@ -93,10 +93,9 @@
           "scripts/dev.mjs",
           "foundation"
         ],
-        "exit_code": 0,
-        "status": "passed",
-        "log": "CI 37322344115 foundation step on e3dd8bf",
-        "meaning": "gen-check, cargo test for contract/core/xtask only, UI build, typecheck and offline."
+        "status": "incomplete",
+        "last_passed_on": "e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807",
+        "meaning": "Failed on b205c4a (CI 37352882339). Covers gen-check, cargo test for contract/core/xtask only, UI build, typecheck and offline. Record again from a run on S."
       },
       {
         "command": [
@@ -106,8 +105,9 @@
           "lint"
         ],
         "cwd": "ui",
-        "exit_code": 0,
-        "status": "passed"
+        "status": "incomplete",
+        "last_passed_on": "e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807",
+        "meaning": "Skipped in CI 37352882339 on b205c4a after the foundation step failed. Record again from a run on S."
       },
       {
         "command": [
@@ -117,9 +117,9 @@
           "typecheck"
         ],
         "cwd": "ui",
-        "exit_code": 0,
-        "status": "passed",
-        "meaning": "0 errors in ui/src and ui/tests (tsc -b via ui/tsconfig.json referencing ui/tsconfig.tests.json) on e3dd8bf / CI 37322344115."
+        "status": "incomplete",
+        "last_passed_on": "e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807",
+        "meaning": "tsc -b via ui/tsconfig.json referencing ui/tsconfig.tests.json. Skipped in CI 37352882339 on b205c4a after the foundation step failed. Record again from a run on S."
       },
       {
         "command": [
@@ -127,9 +127,9 @@
           "scripts/dev.mjs",
           "audit"
         ],
-        "exit_code": 0,
-        "status": "passed",
-        "meaning": "Re-run in the clean checkout and CI 37322344115 on e3dd8bf. GHSA-vfj7-8cjw-p6xm remains, ignored as build-time tooling."
+        "status": "incomplete",
+        "last_passed_on": "e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807",
+        "meaning": "Skipped in CI 37352882339 on b205c4a. GHSA-vfj7-8cjw-p6xm remains, ignored as build-time tooling. Record again from a run on S."
       }
     ],
     "typescript_boundary_fixes": [
@@ -167,15 +167,15 @@
       "phase_0": [
         {
           "id": "authored-typescript-seams",
-          "status": "passed",
-          "receipt": "ui/tests/unit/",
-          "meaning": "Vitest under Bun+happy-dom; ui/tsconfig.tests.json type-checks tests; Layout strictObject rejects on/watch and passes visible; wire missing-key + generated request cases; RulesForm mounts with invalid data and asserts AJV errors; mcp-apps-mime reads real manifest; PresentView validates Vega via compile; omitUndefined once in main.tsx."
+          "status": "incomplete",
+          "receipt": null,
+          "meaning": "Reopened: last passed on e3dd8bf (CI 37322344115); Vitest was skipped in CI 37352882339 on b205c4a. Re-run on S. Covers: Vitest under Bun+happy-dom; ui/tsconfig.tests.json type-checks tests; Layout strictObject rejects on/watch and passes visible; wire missing-key + generated request cases; RulesForm mounts with invalid data and asserts AJV errors; mcp-apps-mime reads real manifest; PresentView validates Vega via compile; omitUndefined once in main.tsx."
         },
         {
           "id": "deterministic-foundation",
-          "status": "passed",
-          "receipt": "https://github.com/freebatteryfactory/okf-jawn/actions/runs/37322344115",
-          "meaning": "CI 37322344115 and clean-checkout at e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807: bootstrap, foundation, check, test, audit."
+          "status": "incomplete",
+          "receipt": null,
+          "meaning": "Reopened: CI 37352882339 on b205c4a is red (check-offline and foundation failed; test, check and audit were skipped). Last green was CI 37322344115 and the clean checkout at e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807, before the repair. Re-run on S."
         },
         {
           "id": "docling-library-qualification",
@@ -197,9 +197,9 @@
         },
         {
           "id": "json-render-catalog-round-trip",
-          "status": "passed",
-          "receipt": "ui/tests/unit/view-document-roundtrip.test.tsx",
-          "meaning": "ViewDocument fixture: Rust serde deny_unknown_fields round trip (crates/contract/tests/semantic.rs) and UI Zod parse + prepareSpec + render equivalence (ui/tests/unit/view-document-roundtrip.test.tsx)."
+          "status": "incomplete",
+          "receipt": null,
+          "meaning": "Reopened: last passed on e3dd8bf; neither cargo test nor Vitest ran in CI 37352882339 on b205c4a. Re-run on S. Covers: ViewDocument fixture: Rust serde deny_unknown_fields round trip (crates/contract/tests/semantic.rs) and UI Zod parse + prepareSpec + render equivalence (ui/tests/unit/view-document-roundtrip.test.tsx)."
         },
         {
           "id": "hey-api-generated-runtime-probe",
@@ -208,15 +208,15 @@
         },
         {
           "id": "clean-checkout-rerun",
-          "status": "passed",
-          "receipt": ".artifacts/qualification/clean-checkout/receipt.json",
-          "meaning": "Uninterrupted single-SHA run on e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807: bootstrap, gen-check x2 (no drift), foundation, check, test, check-offline, audit all exit 0; git status empty. Logs beside .artifacts/qualification/clean-checkout/receipt.json. Will be re-run on foundation-repair SHA S."
+          "status": "incomplete",
+          "receipt": null,
+          "meaning": "Reopened: last run was on e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807, before the repair. Re-run with `bun scripts/dev.mjs clean-checkout` on S; it writes .artifacts/qualification/clean-checkout/receipt.json."
         },
         {
           "id": "github-actions-ci-receipt",
-          "status": "passed",
-          "receipt": "https://github.com/freebatteryfactory/okf-jawn/actions/runs/37322344115",
-          "meaning": "Push CI 37322344115 on e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807: source-tooling, foundation (bootstrap/foundation/test/check/audit), runtime-clippy all success. Includes Vitest (via bun test task) and workspace cargo tests. Will be re-run on foundation-repair SHA S."
+          "status": "incomplete",
+          "receipt": null,
+          "meaning": "Reopened: push CI 37352882339 on b205c4a8027b56b02f717af0c94d5dc59f5760b3 failed in all three jobs. Last green was CI 37322344115 on e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807. Record the run on S."
         }
       ],
       "construction": [

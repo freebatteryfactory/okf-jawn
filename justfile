@@ -45,9 +45,9 @@ foundation:
 tree:
     bun scripts/dev.mjs tree
 
-# Create isolated Git worktrees from an already committed foundation.
-lanes:
-    bun scripts/dev.mjs lanes
+# Create isolated Git worktrees from an already committed foundation (all lanes, or the named ones).
+lanes *names:
+    bun scripts/dev.mjs lanes {{names}}
 
 # Qualification uses a real implementation supplied by the corresponding lane.
 qualify case="":
@@ -56,3 +56,22 @@ qualify case="":
 # Strict cargo-audit plus bun audit --prod and --audit-level=high. Full bun audit is recorded only.
 audit:
     bun scripts/dev.mjs audit
+
+# Remove clean lane worktrees and branches that hold no commits. Never forces.
+lanes-reset:
+    bun scripts/dev.mjs lanes-reset
+
+# One lane's gate: fmt, Clippy, tests, source policy, scope (UI lanes: Biome, routes, tsc, Vitest).
+lane name:
+    bun scripts/dev.mjs lane "{{name}}"
+
+# The CI sequence with every feature; runs every step and reports all failures.
+premerge:
+    bun scripts/dev.mjs premerge
+
+check-receipts:
+    bun scripts/dev.mjs check-receipts
+
+# The whole foundation in a temporary detached worktree of HEAD; writes a receipt under .artifacts/.
+clean-checkout:
+    bun scripts/dev.mjs clean-checkout

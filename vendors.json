@@ -2,13 +2,12 @@
   "schema_version": 1,
   "project": "okf-jawn",
   "scope": "Offline navigation notes and exact lookup instructions, not a licensed mirror of vendor documentation or a compatibility certification. use_sites exist in the repository now; planned_use_sites are where a lane will integrate the library; generated_sites are written by gen. context7_queries_executed counts the lookups whose library and query are recorded here.",
-  "context7_queries_executed": 7,
+  "context7_queries_executed": 6,
   "vendors": [
     {
       "name": "utoipa",
       "use_sites": [
-        "xtask/src/api.rs",
-        "crates/contract/src"
+        "xtask/src/api.rs"
       ],
       "official_sources": [
         "https://docs.rs/utoipa/6.0.0/utoipa/",
@@ -339,7 +338,7 @@
         "Pin the action to a commit SHA of a version tag (e.g. v2.87.25 = 183e4297cca2404691e9380e1307288dced5c82a). Do not pin @<tool_name> tags by hash.",
         "Use with: tool: cargo-audit@0.22.2,cargo-deny@0.20.2. Explicit versions bypass the action's dependency cooldown.",
         "checksum defaults to true (SHA256 of GitHub release assets).",
-        "actions/checkout pin for foundation-repair: v4.2.2 = 11bd71901bbe5b1630ceea73d27597364c9af683."
+        "actions/checkout pin: v7.0.1 = 3d3c42e5aac5ba805825da76410c181273ba90b1 (node24). v4.2.2 (11bd7190) and actions/upload-artifact v4.6.2 (ea165f8d) declare the deprecated node20 runtime; tests/foundation/ci.test.mjs rejects both."
       ],
       "version_authority": "GitHub Actions workflow pin",
       "qualification": "Manifest at v2 lists cargo-deny 0.20.2 and cargo-audit 0.22.2."

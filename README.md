@@ -27,7 +27,7 @@ bun scripts/dev.mjs check-offline
 bun scripts/dev.mjs vendor schemars
 ```
 
-`init` creates a local Git repository and copies the deployment environment example only when absent. It does not create a remote, set a Git identity, commit, connect WorkOS, or launch a server. It never overwrites an existing `.env`.
+`init` creates a local Git repository, copies the deployment environment example only when absent, and points `core.hooksPath` at the tracked `scripts/hooks/`. It does not create a remote, set a Git identity, commit, connect WorkOS, or launch a server. It never overwrites an existing `.env`.
 
 The toolchain baseline is Rust 1.99.0 (`rust-toolchain.toml`) and Bun 1.4.2 (`package.json` `packageManager` and `.bun-version`, which must agree). `doctor` reports the Bun version actually executing it. These are selected inputs, not an assertion that every package resolves and compiles together.
 
@@ -38,9 +38,11 @@ bun scripts/dev.mjs gen-check
 bun scripts/dev.mjs foundation
 ```
 
-Equivalent `just` recipes are provided. `lock` is the only task that resolves dependencies: it runs `cargo generate-lockfile` and `bun install --lockfile-only`. `bootstrap` refuses to run without both `Cargo.lock` and `bun.lock`, fetches with `--locked`/`--frozen-lockfile`, builds the actual Rust generator, executes both generation passes, and type checks and builds the real UI consumer. Install scripts run only for packages in `trustedDependencies` (currently empty: no dependency lifecycle scripts are trusted). Generators run from installed, pinned packages through `bun --bun run`; nothing is downloaded on demand. A resolution or API incompatibility fails visibly. Do not guess a replacement version, handwrite the expected generated files, disable a lint, or claim a failed step passed.
+Equivalent `just` recipes are provided. `lock` is the only task that resolves dependencies: it runs `cargo update --workspace`, which rewrites only the workspace members' own entries and keeps every version already locked, and `bun install --lockfile-only`. To move one locked crate on purpose, run `cargo update <crate> --precise <version>` and review the diff. `bootstrap` refuses to run without both `Cargo.lock` and `bun.lock`, fetches with `--locked`/`--frozen-lockfile`, builds the actual Rust generator, executes both generation passes, and type checks and builds the real UI consumer. Install scripts run only for packages in `trustedDependencies` (currently empty: no dependency lifecycle scripts are trusted). Generators run from installed, pinned packages through `bun --bun run`; nothing is downloaded on demand. A resolution or API incompatibility fails visibly. Do not guess a replacement version, handwrite the expected generated files, disable a lint, or claim a failed step passed.
 
 `gen` generates into two temporary directories, compares the entire output file sets and bytes, then publishes only generated directories. `gen-check` compares those results to the checkout without editing it. The generator does not require a database, converter, identity provider, or running application. Generator output is not an implementation-status claim.
+
+`bootstrap` and `init` install the tracked hooks through `core.hooksPath`; nothing else needs installing. pre-commit runs `check-offline`. pre-push runs `check-offline`, `cargo fmt --all --check` and, on a `build/*` or `cure/*` branch, the scope check. Hooks never regenerate files or touch another worktree.
 
 ## What gets generated
 
@@ -48,7 +50,7 @@ The authored source of operation meaning is `crates/contract/src/operations.rs`,
 
 | Output | Actual producer |
 | --- | --- |
-| `api/openapi.json` and `.yaml` | Utoipa schema types and the typed operation declarations |
+| `api/openapi.json` and `.yaml` | Schemars component schemas (the schema authority) and the typed operation declarations, assembled with Utoipa's OpenAPI builder |
 | `api/operations.json`, `transports.json` | Serde serialization of the same declarations |
 | Per-operation input/output JSON Schemas | Schemars, explicit deserialize/serialize contracts |
 | `api/forms/*.schema.json` | Schemars Draft 7 for RJSF's default AJV adapter |
@@ -61,7 +63,7 @@ The authored source of operation meaning is `crates/contract/src/operations.rs`,
 | `ui/dist-apps/*.html` | Actual frontend bundling of shared feature components |
 | `ui/dist/docs/*` | Locally copied swagger-ui-dist assets and the canonical `api/openapi.yaml` |
 
-There are 66 typed JSON application commands and 15 distinct transport declarations. Eleven tools are model-facing; the scoped binary-read tool is app-only. Human approval, verification and connector management are never model tools. The raw transport declarations are documented schema obligations, not bound handlers yet.
+There are 69 typed JSON application commands and 15 distinct transport declarations. Twelve tools are model-facing: `ls`, `grep`, `show`, `log`, `diff`, `blame`, `sources`, `links`, `propose`, `catalog`, `present` and `workspaces` (which lists the workspaces a connection may see, so an agent can pin its reads to the returned head revision); the scoped binary-read tool is app-only. Human approval, verification and connector management are never model tools. The raw transport declarations are documented schema obligations, not bound handlers yet.
 
 A candidate `present` operation selects or composes approved views. Source components receive source bindings, not model-authored replacement evidence. The frontend includes source excerpts, Changes, Timeline, naming forms, a constrained composition catalog, and chart/table rendering source. The rest of the full UI is assigned in `SPEC.md`, not replaced by demo data.
 
@@ -77,17 +79,19 @@ bun scripts/dev.mjs vendor mcp
 bun scripts/dev.mjs vendor bun
 ```
 
-`vendors.json` records existing use sites, planned use sites, generated sites, official documentation locations, concrete symbols, short offline notes, and the three Context7 library IDs/queries recorded for the foundation. Other entries are explicitly reference pointers rather than invented Context7 research receipts. Follow the installed package's exact version when a latest-page example disagrees. After packages are fetched, Cargo and installed package sources provide local source documentation too.
+`vendors.json` records existing use sites, planned use sites, generated sites, official documentation locations, concrete symbols, short offline notes, and, for each entry that records an executed Context7 lookup, its library ID and query (`context7_queries_executed` equals the number of such entries). Other entries are explicitly reference pointers rather than invented Context7 research receipts. Follow the installed package's exact version when a latest-page example disagrees. After packages are fetched, Cargo and installed package sources provide local source documentation too.
 
 ## Constructing the whole product
 
 After the foundation is resolved and qualified, commit it and create isolated worktrees:
 
 ```sh
-bun scripts/dev.mjs lanes
+bun scripts/dev.mjs lanes            # all seven; or name them: lanes storage
+bun scripts/dev.mjs lane storage     # that lane's gate
+bun scripts/dev.mjs premerge         # the CI sequence, every step, every feature
 ```
 
-This creates seven lanes from the same clean commit. It does not start paid agents, spend API credits, or grant repository privileges. Each lane's files contain short local instructions. The integration owner controls contracts, manifests, lockfiles, generated outputs, deployment and independent acceptance. `CODEOWNERS` routes review on GitHub; it is not a local lock, and no branch protection is configured yet. Builders may test their work but may not redefine it from whichever unrelated check is red.
+`lanes` creates one worktree and `build/<lane>` branch per lane from the same clean commit, under `OKF_LANES_DIR` when set, else `D:\okf\lanes` on Windows when `D:` exists, else `../okf-jawn-lanes`. `scripts/lib/lanes.mjs` is the only lane table: worktrees, gates, the scope check, the AGENTS.md table and the CODEOWNERS lane rows are generated from it or tested against it. `lane <name>` runs that lane's fmt, Clippy, tests, source policy and scope check (Biome, route generation, `tsc` and filtered Vitest for the UI lanes), writes `.artifacts/lane/<name>/<sha>.log` and ends with `PASS <name> <sha>` or `FAIL <name> <sha> <step>`; the sha carries `-dirty` when the tree had uncommitted changes. `premerge` is what CI runs; it never stops at the first failure. `lanes-reset` removes only clean lanes that hold no commits of their own, and never forces. None of this starts paid agents, spends API credits, or grants repository privileges. Each lane's files contain short local instructions. The integration owner controls contracts, manifests, lockfiles, generated outputs, deployment and independent acceptance. `CODEOWNERS` routes review on GitHub; it is not a local lock, and no branch protection is configured yet. Builders may test their work but may not redefine it from whichever unrelated check is red.
 
 The intended release is the complete product in `SPEC.md`, not a succession of cut-down demos. Lanes work on full responsibilities in parallel rather than storage first and UI later; assemble them while context is fresh, then accept connected user journeys. Do not spend construction time on speculative optimization or adapters hiding a wrong shared assumption.
 
