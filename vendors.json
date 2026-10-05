@@ -204,7 +204,7 @@
         "Source components take binding keys, not model-authored quotes or authoritative numeric values."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Partial: catalog six-component Spec prepareSpec JSON round trip and Layout render in ui/tests/unit/json-render-roundtrip.test.tsx. ViewDocument serde + Zod round trip not yet executed."
+      "qualification": "PASS: ViewDocument six-component fixture round-trips with Rust serde (deny_unknown_fields) and generated Zod + prepareSpec + render equivalence (ui/tests/unit/view-document-roundtrip.test.tsx; crates/contract/tests/semantic.rs)."
     },
     {
       "name": "vega",
