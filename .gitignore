@@ -4,6 +4,8 @@
 /ui/dist/
 /ui/dist-apps/
 /ui/.tsbuild/
+/ui/test-results/
+/ui/playwright-report/
 /ui/src/routeTree.gen.ts
 /.artifacts/
 /.env

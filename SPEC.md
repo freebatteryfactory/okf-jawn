@@ -140,7 +140,7 @@ The workshop is a usage scenario, not app state. Compare representations without
 
 ## 13. Phase 0 acceptance and full construction
 
-Phase 0 builds the real foundation. It is complete only after clean-checkout generation, repeat generation with no file-set or byte drift, compilation/exercise of representative consumers, semantic schema controls, and architecture-relevant external library/host qualification. Its green claims no finished product behavior.
+Phase 0 builds the real foundation. It is complete only after clean-checkout generation, repeat generation with no file-set or byte drift, compilation/exercise of representative consumers, semantic schema controls, and architecture-relevant external library/host qualification. Its green claims no finished product behavior. Blocking is gate-scoped: a qualification may block the foundation, construction, or final acceptance. A later-gate requirement must not be satisfied by adding a temporary earlier-phase implementation.
 
 Generation must not depend on running storage, conversion or the UI, and may never require success-returning product stubs. Synthetic API examples may ship with the API documentation. FixtureApplication and other tests/support implementations never ship as the production application, never seed real workspaces and never become runtime fallback behavior.
 
