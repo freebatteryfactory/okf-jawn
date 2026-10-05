@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** Agent-agnostic task entrypoint. Every task fails honestly when prerequisites are missing. */
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitLocalEnvironment, run, version } from './lib/process.mjs';
@@ -11,6 +11,7 @@ import { tree } from './lib/tree.mjs';
 import { bun, pins } from './lib/toolchain.mjs';
 import { checkScope, createLanes, resetLanes, syncLaneTable } from './lib/lanes.mjs';
 import { checkReceipts } from './lib/receipts.mjs';
+import { runLane } from './lib/gates.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ui = join(root, 'ui');
@@ -66,6 +67,19 @@ async function generatedStrictProbe() {
   } catch {
     process.stdout.write('PROBE (non-blocking): generated client runtime still fails exactOptionalPropertyTypes (hey-api/openapi-ts#3157); exception retained.\n');
   }
+}
+
+/**
+ * Write ui/src/routeTree.gen.ts without bundling. The TanStack Router Vite plugin generates
+ * the tree from its configResolved hook, so resolving the Vite config is enough. The plugin
+ * logs and swallows generator errors, so the file is removed first and required afterwards.
+ */
+async function routes() {
+  const target = join(ui, 'src', 'routeTree.gen.ts');
+  await rm(target, { force: true });
+  await run(bun(), ['-e', "const { resolveConfig } = await import('vite'); await resolveConfig({}, 'build');"], { cwd: ui });
+  if (!await exists(target)) throw new Error('Route tree was not generated: ui/src/routeTree.gen.ts is missing after resolving the Vite config.');
+  process.stdout.write('Generated ui/src/routeTree.gen.ts.\n');
 }
 
 async function bootstrap() {
@@ -140,6 +154,7 @@ async function main() {
     case 'bootstrap': await bootstrap(); break;
     case 'gen': await generate(root); break;
     case 'gen-check': await generate(root, true); break;
+    case 'routes': await routes(); break;
     case 'vendor': await vendor(); break;
     case 'tree': process.stdout.write(await tree(root)); break;
     case 'lanes': process.stdout.write(`${(await createLanes(root, { names: args })).join('\n')}\n`); break;
@@ -147,6 +162,11 @@ async function main() {
     case 'scope': {
       const result = await checkScope(root, { lane: positional[0], base: option('--base') });
       process.stdout.write(`scope: ${result.changed.length} changed path(s) since ${result.base}, all inside ${result.name}.\n`);
+      break;
+    }
+    case 'lane': {
+      const result = await runLane(root, positional[0]);
+      if (!result.passed) process.exitCode = 1;
       break;
     }
     case 'lanes-reset': process.stdout.write(`${await resetLanes(root)}\n`); break;
