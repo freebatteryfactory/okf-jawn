@@ -1,0 +1,23 @@
+[package]
+name = "okf-qualify-iii"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "okf-qualify-iii"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+iii-sdk = { workspace = true }
+# iii-sdk 0.24.4 binds schemars 0.8; workspace schemars 1.x is a distinct trait.
+schemars = { version = "=0.8.22" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
