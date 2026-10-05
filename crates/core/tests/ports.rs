@@ -6,8 +6,9 @@
 
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::common::{PageRequest, TextRange, Warning};
@@ -18,12 +19,16 @@ use okf_jawn_contract::identity::{
 use okf_jawn_contract::item::{ItemKind, Lifecycle};
 use okf_jawn_contract::proposal::Change;
 use okf_jawn_contract::workspace::Workspace;
+use okf_jawn_core::conversion::{
+    ConversionInput, ConversionSettings, ConversionStatus, Converter, OcrPolicy,
+};
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
     DiffQuery, LocalSource, LogQuery, NewWorkspace, ObjectInfo, Page, Promotion, Provenance,
     StorageScope, TreeEdit, VersionStore, WorkspaceArchive, WorkspaceCatalog, WorkspaceUpdate,
     derive_item_id, derive_proposal_id, workspace_with_permissions,
 };
+use serde_json::json;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -240,6 +245,23 @@ async fn catalog_calls(
     catalog.list(&scope.tenant_id).await
 }
 
+async fn converter_calls(
+    converter: &dyn Converter,
+    source: LocalSource,
+    output_directory: PathBuf,
+) -> Result<ConversionStatus, ApiError> {
+    let conversion = converter
+        .convert(ConversionInput {
+            source,
+            file_name: "report.pdf".to_owned(),
+            settings: ConversionSettings::default(),
+            timeout: Duration::from_secs(120),
+            output_directory,
+        })
+        .await?;
+    Ok(conversion.status)
+}
+
 #[test]
 fn provenance_keeps_the_typed_route_and_client() -> TestResult {
     let principal = Principal {
@@ -410,5 +432,26 @@ fn the_application_not_the_catalog_fills_permissions() -> TestResult {
     let shown = workspace_with_permissions(bare, vec![Permission::Read]);
     assert_eq!(shown.permissions, vec![Permission::Read]);
     assert!(type_checked(&catalog_calls));
+    Ok(())
+}
+
+#[test]
+fn conversion_settings_are_typed_and_reject_unknown_keys() -> TestResult {
+    let defaults = ConversionSettings::default();
+    assert_eq!(defaults.ocr, OcrPolicy::Auto);
+    assert!(defaults.table_structure);
+    assert!(!defaults.page_images);
+    let parsed: ConversionSettings =
+        serde_json::from_value(json!({"ocr": "force_full_page", "ocr_language": "de"}))?;
+    assert_eq!(
+        parsed,
+        ConversionSettings {
+            ocr: OcrPolicy::ForceFullPage,
+            ocr_language: Some("de".to_owned()),
+            ..ConversionSettings::default()
+        }
+    );
+    assert!(serde_json::from_value::<ConversionSettings>(json!({"quality": "high"})).is_err());
+    assert!(type_checked(&converter_calls));
     Ok(())
 }
