@@ -37,3 +37,14 @@ test('the lock task updates minimally and never re-resolves the whole graph',asy
  assert.match(source,/run\('cargo', \['update', '--workspace'\]/);
  for(const file of ['README.md','AGENTS.md','justfile'])assert.doesNotMatch(await read(file),/generate-lockfile/,file);
 });
+test('pre-landed manifest needs are declared from the workspace and locked',async()=>{
+ const section=(manifest,name)=>manifest.split(/^\[/m).find(part=>part.startsWith(`${name}]`))??'';
+ const core=await read('crates/core/Cargo.toml'),storage=await read('crates/storage/Cargo.toml');
+ for(const dependency of ['time','base64'])assert.match(section(core,'dependencies'),new RegExp(`^${dependency}\\.workspace = true$`,'m'),`okf-jawn-core must take ${dependency} from the workspace`);
+ assert.match(section(storage,'dev-dependencies'),/^tempfile\.workspace = true$/m);
+ assert.match(section(storage,'dev-dependencies'),/^tokio = \{ workspace = true \}$/m);
+ const locked=packages(await read('Cargo.lock'));
+ const dependencies=name=>locked.find(entry=>entry.name===name).dependencies;
+ for(const dependency of ['base64 0.22.1','time'])assert.ok(dependencies('okf-jawn-core').includes(dependency),`Cargo.lock: okf-jawn-core lacks ${dependency}`);
+ assert.ok(dependencies('okf-jawn-storage').includes('tempfile'),'Cargo.lock: okf-jawn-storage lacks tempfile');
+});
