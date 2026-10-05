@@ -33,6 +33,7 @@ use okf_jawn_core::credentials::{
 use okf_jawn_core::jobs::{
     ClaimedJob, JobCompletion, JobHandler, JobLease, JobQueue, JobSpec, NewJob, RecordStore,
 };
+use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolved, token_hash};
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
     DiffQuery, LocalSource, LogQuery, NewWorkspace, ObjectInfo, Page, Promotion, Provenance,
@@ -413,6 +414,16 @@ async fn credential_store_calls(
         .await
 }
 
+async fn sandbox_calls(
+    sandbox: &dyn SandboxCapabilityStore,
+    scope: &StorageScope,
+    mint: SandboxMint,
+    token: &str,
+) -> Result<Option<SandboxResolved>, ApiError> {
+    sandbox.mint(scope, token_hash(token), mint).await?;
+    sandbox.resolve(token_hash(token)).await
+}
+
 #[test]
 fn provenance_keeps_the_typed_route_and_client() -> TestResult {
     let principal = Principal {
@@ -696,5 +707,24 @@ fn connector_secrets_are_hashed_with_sha256_in_one_place() -> TestResult {
     assert_ne!(secret_hash("abc"), secret_hash("abd"));
     assert!(type_checked(&issue_connector));
     assert!(type_checked(&credential_store_calls));
+    Ok(())
+}
+
+#[test]
+fn sandbox_tokens_are_hashed_before_they_reach_the_store() -> TestResult {
+    assert_eq!(
+        hex(&token_hash("abc"))?,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_ne!(token_hash("abc"), token_hash("abd"));
+    let mint = SandboxMint {
+        item_id: ItemId(Uuid::from_u128(10)),
+        revision: revision('a')?,
+        object: digest('b')?,
+        media_type: "text/html".to_owned(),
+        expires_at: "2026-10-05T00:05:00Z".to_owned(),
+    };
+    assert_eq!(mint.media_type, "text/html");
+    assert!(type_checked(&sandbox_calls));
     Ok(())
 }
