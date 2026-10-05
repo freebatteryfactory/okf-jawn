@@ -2,14 +2,16 @@
 //!
 //! Implementations use selected libraries; they do not infer domain approval from a Git merge.
 //! Every commit carries an `Okf-Jawn-Mutation:` trailer naming the durable write identity.
+//! Ports take resolved `Revision`s and core parameter types: the application resolves selectors
+//! and authorizes the caller before it calls a port.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 
 use okf_jawn_contract::{
-    access::{Permission, Principal},
-    common::MutationResult,
+    access::{AccessRoute, Permission, Principal},
+    common::{MutationResult, PageRequest},
     history::{BlameRequest, BlameResponse, DiffRequest, DiffResponse, LogRequest, LogResponse},
     identity::{
         At, Digest, ItemId, MutationId, ProposalId, Revision, TenantId, WorkspaceId, WorkspacePath,
@@ -18,6 +20,8 @@ use okf_jawn_contract::{
     proposal::Change,
     workspace::{ArchiveWorkspaceRequest, UpdateWorkspaceRequest, Workspace},
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncRead;
 
 use crate::ports::PortFuture;
@@ -34,6 +38,15 @@ pub struct StorageScope {
     pub workspace_id: WorkspaceId,
 }
 
+/// A bounded page of a listing; the cursor is opaque and scoped to the query that issued it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page {
+    /// Continuation cursor returned with the previous page, if any.
+    pub cursor: Option<String>,
+    /// Maximum results wanted; an implementation may return fewer.
+    pub limit: u16,
+}
+
 /// Where `find_mutation` scans for an `Okf-Jawn-Mutation:` trailer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VersionTarget {
@@ -43,33 +56,15 @@ pub enum VersionTarget {
     Proposal(ProposalId),
 }
 
-/// Commit authorship retained in Git metadata; not a claim of review.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Who a write or a job acts for, retained in Git metadata and job records; not a review claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     /// Validated identity-provider subject.
     pub subject: String,
-    /// Verified authentication route, as a stable label.
-    pub route: String,
+    /// Verified authentication route.
+    pub route: AccessRoute,
     /// OAuth client when delegation is present.
     pub client_id: Option<String>,
-}
-
-impl Provenance {
-    /// Derive commit authorship from the authenticated principal.
-    #[must_use]
-    pub fn from_principal(principal: &Principal) -> Self {
-        let route = match principal.route {
-            okf_jawn_contract::access::AccessRoute::BrowserSession => "browser_session",
-            okf_jawn_contract::access::AccessRoute::McpDelegation => "mcp_delegation",
-            okf_jawn_contract::access::AccessRoute::LocalOwner => "local_owner",
-            okf_jawn_contract::access::AccessRoute::Service => "service",
-        };
-        Self {
-            subject: principal.subject.clone(),
-            route: route.to_owned(),
-            client_id: principal.client_id.clone(),
-        }
-    }
 }
 
 /// Retained byte metadata; occurrence-specific names live in source cards instead.
@@ -257,6 +252,27 @@ pub trait WorkspaceCatalog: Send + Sync {
     ) -> PortFuture<'a, MutationResult>;
 }
 
+impl From<PageRequest> for Page {
+    fn from(page: PageRequest) -> Self {
+        Self {
+            cursor: page.cursor,
+            limit: page.limit,
+        }
+    }
+}
+
+impl Provenance {
+    /// Record the authenticated principal as the author of a write or the initiator of a job.
+    #[must_use]
+    pub fn from_principal(principal: &Principal) -> Self {
+        Self {
+            subject: principal.subject.clone(),
+            route: principal.route.clone(),
+            client_id: principal.client_id.clone(),
+        }
+    }
+}
+
 /// Attach the caller's effective permissions onto a workspace summary.
 #[must_use]
 pub fn workspace_with_permissions(
@@ -265,4 +281,39 @@ pub fn workspace_with_permissions(
 ) -> Workspace {
     workspace.permissions = permissions;
     workspace
+}
+
+/// The identity of the `ordinal`-th item created under one mutation.
+///
+/// The caller allocates the identity of every item it creates. A resumed attempt re-runs its
+/// handler under the same `MutationId`, so deriving identities from that id and a running count
+/// makes the repeated edits name exactly the items the first attempt committed.
+#[must_use]
+pub fn derive_item_id(mutation_id: MutationId, ordinal: u32) -> ItemId {
+    ItemId(derived_uuid(b"item", mutation_id, ordinal))
+}
+
+/// The identity of the proposal opened under one mutation.
+///
+/// A resumed attempt derives the same identity, so it finds the candidate reference its first
+/// attempt wrote instead of writing a second one.
+#[must_use]
+pub fn derive_proposal_id(mutation_id: MutationId) -> ProposalId {
+    ProposalId(derived_uuid(b"proposal", mutation_id, 0))
+}
+
+/// A version-8 UUID from SHA-256 of a label, a mutation identity and a count.
+fn derived_uuid(label: &[u8], mutation_id: MutationId, ordinal: u32) -> uuid::Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"okf-jawn derived identity ");
+    hasher.update(label);
+    hasher.update(b" ");
+    hasher.update(mutation_id.0.as_bytes());
+    hasher.update(ordinal.to_be_bytes());
+    let hash: [u8; 32] = hasher.finalize().into();
+    let mut bytes = [0_u8; 16];
+    for (target, source) in bytes.iter_mut().zip(hash) {
+        *target = source;
+    }
+    uuid::Builder::from_custom_bytes(bytes).into_uuid()
 }
