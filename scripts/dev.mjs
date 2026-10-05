@@ -9,7 +9,7 @@ import { generate, requireLockfiles } from './lib/generation.mjs';
 import { initialize } from './lib/init.mjs';
 import { tree } from './lib/tree.mjs';
 import { bun, pins } from './lib/toolchain.mjs';
-import { createLanes, syncLaneTable } from './lib/lanes.mjs';
+import { checkScope, createLanes, syncLaneTable } from './lib/lanes.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ui = join(root, 'ui');
@@ -18,6 +18,10 @@ const [task = 'help', ...args] = process.argv.slice(2);
 // the offline tests create disposable repositories; an inherited GIT_DIR or GIT_INDEX_FILE
 // would aim their git commands at this repository.
 for (const name of gitLocalEnvironment) delete process.env[name];
+/** The value following `--name`, or undefined. */
+const option = name => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
+/** Arguments that are neither a `--flag` nor the value of one. */
+const positional = args.filter((value, index) => !value.startsWith('--') && !args[index - 1]?.startsWith('--'));
 
 async function doctor() {
   const selected = await pins(root);
@@ -148,7 +152,8 @@ async function existsPath(path) {
 async function offlineChecks() {
   const tests = (await files(join(root, 'tests/foundation'))).filter(name => name.endsWith('.test.mjs')).map(name => `./tests/foundation/${name}`);
   if (!tests.length) throw new Error('No foundation tests discovered');
-  await run(bun(), ['test', ...tests], { cwd: root });
+  // Fixture repositories run many git processes; the bun default of 5 s is too short on a loaded Windows machine.
+  await run(bun(), ['test', '--timeout', '60000', ...tests], { cwd: root });
 }
 
 async function audit() {
@@ -266,6 +271,11 @@ async function main() {
     case 'tree': process.stdout.write(await tree(root)); break;
     case 'lanes': process.stdout.write(`${(await createLanes(root, { names: args })).join('\n')}\n`); break;
     case 'lanes-table': process.stdout.write(await syncLaneTable(root) ? 'AGENTS.md lane table regenerated.\n' : 'AGENTS.md lane table is current.\n'); break;
+    case 'scope': {
+      const result = await checkScope(root, { lane: positional[0], base: option('--base') });
+      process.stdout.write(`scope: ${result.changed.length} changed path(s) since ${result.base}, all inside ${result.name}.\n`);
+      break;
+    }
     case 'lanes-reset': await lanesReset(); break;
     case 'qualify': await qualify(); break;
     case 'check-receipts': await checkReceipts(); break;

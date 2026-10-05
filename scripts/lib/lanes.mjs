@@ -113,3 +113,62 @@ export async function createLanes(root, { names = [], parent = lanesParent(root)
   }
   return created;
 }
+
+/** Generated outputs any lane may commit after running `gen` (AGENTS.md, generator-input rule). */
+export const generatedRoots = Object.freeze(['api/', 'generated/cli/', 'ui/src/api/generated/']);
+
+/**
+ * Stage 1 cure packages: temporary rows the integration owner adds per package and deletes when
+ * Stage 1 closes. A `cure/*` branch without a row has no scope and fails the check.
+ */
+export const cures = Object.freeze([
+  { name: 'gates', branch: 'cure/gates', base: 'integration/foundation-cure', paths: [
+    'scripts/dev.mjs', 'scripts/lib/lanes.mjs', 'scripts/lib/receipts.mjs', 'scripts/lib/gates.mjs',
+    'scripts/lib/process.mjs', 'scripts/lib/init.mjs', 'scripts/hooks/',
+    'tests/foundation/fixture-repo.mjs', 'tests/foundation/lockfile.test.mjs', 'tests/foundation/lanes.test.mjs',
+    'tests/foundation/receipts.test.mjs', 'tests/foundation/gates.test.mjs', 'tests/foundation/hooks.test.mjs',
+    'tests/foundation/ci.test.mjs', 'tests/foundation/records.test.mjs', 'tests/foundation/policy.test.mjs',
+    'tests/foundation/vendor.test.mjs', 'tests/foundation/process.test.mjs', 'tests/foundation/init.test.mjs',
+    'tests/foundation/toolchain.test.mjs', 'tests/integration/acceptance.mjs',
+    '.github/workflows/ci.yml', '.github/workflows/qualify.yml', '.github/workflows/contract.yml', '.github/CODEOWNERS',
+    'Cargo.lock', 'crates/core/Cargo.toml', 'crates/storage/Cargo.toml', 'ui/vitest.config.ts',
+    'README.md', 'AGENTS.md', 'justfile', 'verification.json', 'vendors.json', 'deploy/.env.example',
+    'lefthook.yml', 'REPOSITORY-TREE.txt', '.cursor/plans/dependency_qualification_pass_e1c8326b.plan.md',
+  ] },
+]);
+
+const inside = (path, entry) => (entry.endsWith('/') ? path.startsWith(entry) : path === entry);
+
+export function scopeFor(branch) {
+  const lane = lanes.find(entry => entry.branch === branch);
+  if (lane) return { name: lane.name, base: 'main', allowed: [...lane.directories, ...lane.files, ...generatedRoots], exclude: lane.exclude };
+  const cure = cures.find(entry => entry.branch === branch);
+  return cure ? { name: cure.name, base: cure.base, allowed: cure.paths, exclude: [] } : null;
+}
+
+export function outOfScope(paths, scope) {
+  return paths.filter(path => scope.exclude.some(entry => inside(path, entry)) || !scope.allowed.some(entry => inside(path, entry)));
+}
+
+/**
+ * Fail when anything changed since the merge-base with the scope's base lies outside the scope.
+ * Committed, staged, unstaged and untracked-but-not-ignored paths all count.
+ */
+export async function checkScope(root, { lane, base, git = gitIn(root) } = {}) {
+  const branch = lane ? laneNamed(lane).branch : must(await git(['rev-parse', '--abbrev-ref', 'HEAD']), 'git rev-parse --abbrev-ref HEAD').trim();
+  const scope = scopeFor(branch);
+  if (!scope) throw new Error(`No scope row for branch ${branch}; add one to scripts/lib/lanes.mjs before pushing or gating it.`);
+  const wanted = base ?? scope.base;
+  let reference = null;
+  for (const candidate of [wanted, `origin/${wanted}`]) {
+    if ((await git(['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`])).code === 0) { reference = candidate; break; }
+  }
+  if (!reference) throw new Error(`scope check needs ${wanted} or origin/${wanted} to compare against; neither exists here.`);
+  const mergeBase = must(await git(['merge-base', 'HEAD', reference]), `git merge-base HEAD ${reference}`).trim();
+  const tracked = must(await git(['diff', '--name-only', '--no-renames', '-z', mergeBase]), 'git diff --name-only');
+  const untracked = must(await git(['ls-files', '--others', '--exclude-standard', '-z']), 'git ls-files --others');
+  const changed = [...new Set([...tracked.split('\0'), ...untracked.split('\0')].filter(Boolean))].sort();
+  const outside = outOfScope(changed, scope);
+  if (outside.length) throw new Error(`scope check failed for ${scope.name}: ${outside.length} path(s) outside its scope:\n  ${outside.join('\n  ')}`);
+  return { name: scope.name, base: mergeBase, changed };
+}

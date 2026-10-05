@@ -1,10 +1,11 @@
 /** One lane table drives worktrees, gates, scope, the AGENTS.md table and CODEOWNERS. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LANE_TABLE_BEGIN, LANE_TABLE_END, laneNamed, lanes, lanesParent, renderLaneTable } from '../../scripts/lib/lanes.mjs';
+import { LANE_TABLE_BEGIN, LANE_TABLE_END, checkScope, laneNamed, lanes, lanesParent, outOfScope, renderLaneTable, scopeFor } from '../../scripts/lib/lanes.mjs';
+import { commit, fixtureRepo, git } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const read=file=>readFile(join(root,file),'utf8');
 
@@ -71,4 +72,32 @@ test('CODEOWNERS names real paths and its lane rows agree with the lane table',a
  }
  for(const lane of lanes)assert.deepEqual(rows.filter(row=>row.lane===lane.name).map(row=>row.path).sort(),[...lane.directories,...lane.files].map(path=>`/${path}`).sort(),lane.name);
  for(const row of rows.filter(entry=>entry.lane))assert.ok(lanes.some(lane=>lane.name===row.lane),`CODEOWNERS names unknown lane ${row.lane}`);
+});
+test('paths outside a lane, and manifests inside it, are out of scope',()=>{
+ assert.deepEqual(outOfScope(['crates/storage/src/lib.rs','api/operations.json','crates/storage/Cargo.toml','crates/core/src/lib.rs','Cargo.lock'],scopeFor('build/storage')),['crates/storage/Cargo.toml','crates/core/src/lib.rs','Cargo.lock']);
+ assert.deepEqual(outOfScope(['ui/src/routes/index.tsx','ui/src/features/views/Chart.tsx','ui/package.json','ui/tests/unit/layout.test.tsx'],scopeFor('build/workspace-ui')),['ui/src/features/views/Chart.tsx','ui/package.json','ui/tests/unit/layout.test.tsx']);
+ assert.deepEqual(outOfScope(['ui/src/features/views/Chart.tsx','ui/tests/unit/layout.test.tsx','ui/tests/unit/wire.test.ts'],scopeFor('build/views')),['ui/tests/unit/wire.test.ts']);
+ assert.equal(scopeFor('feature/unknown'),null);
+});
+test('the scope check fails a lane branch that changed an out-of-lane file',async t=>{
+ const {root}=await fixtureRepo(t,{'crates/storage/src/lib.rs':'//! storage\n','crates/core/src/lib.rs':'//! core\n'});
+ await git(root,'checkout','--quiet','-b','build/storage');
+ await commit(root,{'crates/storage/src/lib.rs':'//! storage, changed\n','api/operations.json':'[]\n'},'in lane, with generated output');
+ assert.deepEqual((await checkScope(root)).changed,['api/operations.json','crates/storage/src/lib.rs']);
+ await commit(root,{'crates/core/src/lib.rs':'//! core, changed from the storage lane\n'},'out of lane');
+ await assert.rejects(checkScope(root),/scope check failed for storage: 1 path\(s\) outside its scope:\n  crates\/core\/src\/lib\.rs/);
+ await assert.rejects(checkScope(root,{lane:'core-cli'}),/crates\/storage\/src\/lib\.rs/);
+});
+test('uncommitted and untracked files count, and a branch without a row has no scope',async t=>{
+ const {root}=await fixtureRepo(t);
+ await git(root,'checkout','--quiet','-b','build/ingest');
+ await writeFile(join(root,'stray.txt'),'x');
+ await assert.rejects(checkScope(root),/scope check failed for ingest[\s\S]*stray\.txt/);
+ await git(root,'checkout','--quiet','-b','cure/unknown');
+ await assert.rejects(checkScope(root),/No scope row for branch cure\/unknown/);
+});
+test('this package has a scope row against the integration branch',()=>{
+ const scope=scopeFor('cure/gates');
+ assert.equal(scope.base,'integration/foundation-cure');
+ assert.deepEqual(outOfScope(['scripts/dev.mjs','scripts/hooks/pre-push','Cargo.lock','crates/core/Cargo.toml','crates/core/src/dispatch.rs','qualification/docling/run.mjs','scripts/lib/provenance.mjs','tests/foundation/harness.test.mjs'],scope),['crates/core/src/dispatch.rs','qualification/docling/run.mjs','scripts/lib/provenance.mjs','tests/foundation/harness.test.mjs']);
 });
