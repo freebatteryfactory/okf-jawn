@@ -3,7 +3,7 @@
 import { readFile, mkdir, readdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { run, version } from './lib/process.mjs';
+import { gitLocalEnvironment, run, version } from './lib/process.mjs';
 import { files, exists } from './lib/files.mjs';
 import { generate, requireLockfiles } from './lib/generation.mjs';
 import { initialize } from './lib/init.mjs';
@@ -13,6 +13,10 @@ import { bun, pins } from './lib/toolchain.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ui = join(root, 'ui');
 const [task = 'help', ...args] = process.argv.slice(2);
+// Git exports these to hooks. Every task addresses the checkout that contains this file, and
+// the offline tests create disposable repositories; an inherited GIT_DIR or GIT_INDEX_FILE
+// would aim their git commands at this repository.
+for (const name of gitLocalEnvironment) delete process.env[name];
 
 async function doctor() {
   const selected = await pins(root);
