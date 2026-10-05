@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/contract", "crates/core", "crates/storage", "crates/ingest", "crates/server", "crates/mcp", "crates/cli", "xtask"]
+members = ["crates/contract", "crates/core", "crates/storage", "crates/ingest", "crates/server", "crates/mcp", "crates/cli", "xtask", "qualification/docling", "qualification/mcp-apps", "qualification/iii"]
 default-members = ["crates/contract", "crates/core", "xtask"]
 
 [workspace.package]
@@ -70,6 +70,8 @@ proptest = { version = "=1.11.0" }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
 sha2 = { version = "=0.10.9" }
 base64 = { version = "=0.22.1" }
+# Phase 0 qualification only. Pin matches engine release iii/v0.24.4.
+iii-sdk = { version = "=0.24.4" }
 
 clap_complete = "=4.6.11"
 clap_mangen = "=0.3.3"

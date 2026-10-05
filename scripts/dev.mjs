@@ -42,6 +42,11 @@ async function lock() {
 }
 
 async function uiScript(name) {
+  // Vitest + jsdom must run under Node on Windows; Bun's --bun runtime breaks jsdom EventTarget.
+  if (name === 'test') {
+    await run(bun(), ['run', name], { cwd: ui });
+    return;
+  }
   await run(bun(), ['--bun', 'run', name], { cwd: ui });
 }
 
@@ -115,8 +120,14 @@ async function qualify() {
     await run(bun(), ['tests/integration/mcp-wire.mjs'], { cwd: root });
   } else if (name === 'application') {
     await run(bun(), ['tests/integration/acceptance.mjs'], { cwd: root });
+  } else if (name === 'docling') {
+    await run(bun(), ['qualification/docling/run.mjs'], { cwd: root, timeout: 1_800_000 });
+  } else if (name === 'iii') {
+    await run(bun(), ['qualification/iii/run.mjs'], { cwd: root, timeout: 1_800_000 });
+  } else if (name === 'mcp-apps') {
+    await run(bun(), ['qualification/mcp-apps/run.mjs'], { cwd: root, timeout: 1_800_000 });
   } else {
-    throw new Error('Available: qualify mcp-wire or qualify application against a real server. Converter, iii crash recovery, and visual host qualification require their completed integrations; see SPEC.md and the lane instructions. None is recorded as passed by this command.');
+    throw new Error('Available: qualify mcp-wire | application | docling | iii | mcp-apps. None is recorded as passed by this command until its receipt is written.');
   }
 }
 

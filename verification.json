@@ -4,8 +4,8 @@
   "phase_0_qualified": false,
   "application_implemented": false,
   "current": {
-    "recorded_at_utc": "2026-10-05T00:20:20Z",
-    "base_commit": "3b8eb42 with dependency qualification pass (uncommitted until themed commits)",
+    "recorded_at_utc": "2026-10-05T02:40:49Z",
+    "base_commit": "phase-0-closure-in-progress",
     "environment": {
       "os": "Windows 10.0.26200 (developer workstation, not CI or the build container)",
       "bun": "1.4.2 (process.versions.bun, C:\\Users\\eayou\\.bun\\bin\\bun.exe)",
@@ -23,8 +23,10 @@
     "frontend_generation_executed": true,
     "generation_deterministic": true,
     "project_typescript_checked": true,
-    "project_typescript_passed": false,
-    "authored_typescript_error_count": 8,
+    "project_typescript_passed": true,
+    "authored_typescript_error_count": 0,
+    "deterministic_foundation_green": true,
+    "phase_0_note": "Library/seam qualifications have receipts. Clean-checkout and GitHub Actions CI remain before phase_0_qualified=true. Product journeys stay on construction/acceptance gates.",
     "direct_versions": {
       "okf-core": "0.2.7",
       "okf-validator": "0.2.7 (default-features=false)",
@@ -35,134 +37,236 @@
       "@modelcontextprotocol/ext-apps": "2.0.3",
       "@types/bun": "1.4.2",
       "@hey-api/openapi-ts": "0.99.0",
-      "shadcn": "4.21.1"
+      "shadcn": "4.21.1",
+      "iii-sdk": "0.24.4",
+      "iii_engine": "iii/v0.24.4"
     },
     "typescript_policy": {
       "authored": "ui/tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes on authored source and generated files except the Hey API client runtime. skipLibCheck for third-party .d.ts only. Tooling configs are a separate composite project (ui/tsconfig.tooling.json) with types:[bun].",
       "generated_client_runtime": "ui/tsconfig.generated.json: client/ and core/ only; exactOptionalPropertyTypes false (hey-api/openapi-ts#3157). Removal probe: typecheck:generated-strict.",
+      "wire_validation_boundary": "Host/tool payloads validated with generated Zod schemas keep z.infer/z.output (equivalent in Zod 4) in authored UI. types.gen remains the HTTP-client shape. At a real SDK/wire boundary, construct the generated request object explicitly and omit undefined optionals. No cast through unknown.",
       "node_ambient": "No MCP Apps Node-types island. Buffer appears only in @modelcontextprotocol/client .d.ts; skipLibCheck covers it. @types/node is not a direct dependency."
     },
     "checks": [
       {
-        "command": ["bun", "scripts/dev.mjs", "check-offline"],
+        "command": [
+          "bun",
+          "scripts/dev.mjs",
+          "check-offline"
+        ],
         "exit_code": 0,
         "status": "passed",
-        "log": ".artifacts/verification/check-offline.log",
         "meaning": "37 bun test cases."
       },
       {
-        "command": ["bun", "scripts/dev.mjs", "gen-check"],
+        "command": [
+          "bun",
+          "scripts/dev.mjs",
+          "gen-check"
+        ],
         "exit_code": 0,
         "status": "passed",
-        "log": ".artifacts/verification/gen-check.log",
-        "meaning": "Two generation passes byte-identical, including Vite-bundled catalog with fixed catalog.mjs name."
+        "log": ".artifacts/verification/gen-check.log"
       },
       {
-        "command": ["bun", "scripts/dev.mjs", "foundation"],
-        "exit_code": 1,
-        "status": "failed",
+        "command": [
+          "bun",
+          "scripts/dev.mjs",
+          "foundation"
+        ],
+        "exit_code": 0,
+        "status": "passed",
         "log": ".artifacts/verification/foundation.log",
-        "meaning": "Build, swagger-ui-dist docs vendor and non-blocking probe succeed; typecheck fails on 8 authored TS errors."
+        "meaning": "gen-check, cargo tests, UI build, typecheck and offline all succeed."
       },
       {
-        "command": ["cargo", "fmt", "--all", "--check"],
+        "command": [
+          "bun",
+          "--bun",
+          "run",
+          "lint"
+        ],
+        "cwd": "ui",
         "exit_code": 0,
         "status": "passed"
       },
       {
-        "command": ["cargo", "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"],
-        "exit_code": 0,
-        "status": "passed"
-      },
-      {
-        "command": ["cargo", "clippy", "--locked", "--workspace", "--all-targets", "--features", "okf-jawn-server/runtime,okf-jawn-storage/runtime,okf-jawn-ingest/runtime", "--", "-D", "warnings"],
-        "exit_code": 0,
-        "status": "passed",
-        "meaning": "Strict Clippy with runtime features also passes."
-      },
-      {
-        "command": ["cargo", "test", "--locked", "--workspace"],
-        "exit_code": 0,
-        "status": "passed",
-        "meaning": "8 tests."
-      },
-      {
-        "command": ["bun", "scripts/dev.mjs", "audit"],
-        "exit_code": 0,
-        "status": "passed",
-        "log": ".artifacts/verification/audit.log",
-        "meaning": "cargo audit (deny unmaintained/unsound/yanked via .cargo/audit.toml), bun audit --prod, bun audit --audit-level=high with exact braces ignore; full bun audit recorded informationally."
-      },
-      {
-        "command": ["bun", "--bun", "run", "lint"],
+        "command": [
+          "bun",
+          "--bun",
+          "run",
+          "typecheck"
+        ],
         "cwd": "ui",
         "exit_code": 0,
         "status": "passed",
-        "meaning": "Biome 2.5.15; 3 informational suggestions remain."
+        "meaning": "0 authored TypeScript errors under the existing strict application policy."
       },
       {
-        "command": ["bun", "--bun", "run", "typecheck"],
-        "cwd": "ui",
-        "exit_code": 1,
-        "status": "failed",
-        "log": ".artifacts/verification/ui-typecheck.log",
-        "meaning": "8 authored errors remain (same set as before this pass): mcp-apps/main.tsx:59-63, PresentView.tsx:89, PresentView.tsx:111, RulesForm.tsx:18."
+        "command": [
+          "bun",
+          "scripts/dev.mjs",
+          "audit"
+        ],
+        "exit_code": 0,
+        "status": "passed",
+        "meaning": "Unchanged from dependency qualification; not re-run in the TypeScript boundary pass."
       }
     ],
-    "advisories_eliminated": [
-      "RUSTSEC unic-* and OKF umbrella paste path via rustpython-parser (feature-sliced okf-validator)",
-      "GHSA @ai-sdk/provider-utils via Scalar agent-chat (Scalar removed)",
-      "GHSA js-yaml 4.2.0 via hey-api (override to 4.3.2)"
+    "typescript_boundary_fixes": [
+      "Feature components that consume Zod-parsed tool results take z.infer<typeof z\u2026> instead of types.gen (exactOptionalPropertyTypes). Zod 4 treats z.infer and z.output as equivalent; no respelling.",
+      "RulesForm uses customizeValidator<NamingRules>() and Form<NamingRules> from @rjsf/validator-ajv8.",
+      "Layout normalizes raw presentation data into a canonical Spec, then runs catalog.validate and validateSpec before render."
     ],
     "advisories_remaining": [
       {
         "id": "RUSTSEC-2024-0436",
         "crate": "paste",
         "label": "upstream-only",
-        "path": "docling → image → pulp/rav1e/tokenizers",
-        "action": "ignored exactly in .cargo/audit.toml; no CVE; removal when Docling/image drops paste"
+        "path": "docling \u2192 image \u2192 pulp/rav1e/tokenizers"
       },
       {
         "id": "RUSTSEC-2026-0206",
         "crate": "rustybuzz",
         "label": "upstream-only",
-        "path": "docling → resvg 0.47 → usvg",
-        "action": "ignored exactly; upstream Docling MSRV pin; removal when Docling moves to resvg 0.48+"
+        "path": "docling \u2192 resvg 0.47 \u2192 usvg"
       },
       {
         "id": "RUSTSEC-2026-0192",
         "crate": "ttf-parser",
         "label": "upstream-only",
-        "path": "docling → resvg 0.47 → usvg",
-        "action": "ignored exactly; same as rustybuzz"
+        "path": "docling \u2192 resvg 0.47 \u2192 usvg"
       },
       {
         "id": "GHSA-vfj7-8cjw-p6xm",
         "package": "braces@3.0.3",
         "label": "build-time tooling",
-        "path": "shadcn → @shadcn/registry → fast-glob → micromatch → braces",
-        "action": "no published fix; ignored exactly in bun scripts/dev.mjs audit --audit-level=high; not in product runtime (bun audit --prod clean)"
+        "path": "shadcn \u2192 micromatch \u2192 braces"
       }
     ],
-    "dependency_qualification_findings": [
-      "OKF: umbrella okf replaced with okf-core (storage+ingest) and okf-validator default-features=false (core only). Application owns validate_bundle/lint_bundle policy.",
-      "Docling: =1.93.5, default-features=false, features=[pdf]. Direct docling-core removed.",
-      "Docs: Scalar replaced with swagger-ui-dist 5.33.1 reading canonical api/openapi.yaml.",
-      "esbuild direct dependency removed; catalog uses Vite build() with fixed catalog.mjs; trustedDependencies=[].",
-      "bun pm untrusted: 0 packages with suppressed scripts after empty trust list.",
-      "Hey API remains 0.99.0; TS6 API island and exactOptionalPropertyTypes airlock retained with probes.",
-      "MCP client/core aligned at 2.3.0; ext-apps 2.0.3; no TS server package."
-    ],
-    "not_run": [
-      "deploy/Dockerfile build: Docker is not installed on this workstation",
-      "GitHub Actions CI: workflows edited but not executed",
-      "Vitest and Playwright suites",
-      "qualify mcp-wire / qualify application: no running deployment",
-      "Converter native/model asset qualification, WorkOS integration, executor restart check"
-    ],
-    "phase_0_blockers": [
-      "8 authored TS7 errors in the UI/views lanes (listed under the ui typecheck entry)"
-    ]
+    "gates": {
+      "phase_0": [
+        {
+          "id": "authored-typescript-seams",
+          "status": "passed",
+          "meaning": "Layout normalize\u2192validate, wire omitUndefined, RulesForm generics, mcp-apps onAppCreated, Vitest 18 tests"
+        },
+        {
+          "id": "deterministic-foundation",
+          "status": "passed",
+          "receipt": ".artifacts/verification/foundation.log",
+          "meaning": "gen-check, cargo tests, UI build, typecheck, offline"
+        },
+        {
+          "id": "docling-library-qualification",
+          "status": "passed",
+          "receipt": ".artifacts/qualification/docling/receipt.json",
+          "meaning": "DocumentConverter against real fixtures/assets; timeout PartialSuccess; originals unchanged"
+        },
+        {
+          "id": "iii-library-qualification",
+          "status": "passed",
+          "receipt": ".artifacts/qualification/iii/receipt.json",
+          "meaning": "WSL iii/v0.24.4 + queue file_based; crash Test1/Test2 before Ok; DLQ; adopted"
+        },
+        {
+          "id": "mcp-apps-protocol-qualification",
+          "status": "passed",
+          "receipt": ".artifacts/qualification/mcp-apps/receipt.json",
+          "meaning": "RESOURCE_MIME_TYPE manifest; harness readable; Chromium paint+axe of 1.8MiB bundles"
+        },
+        {
+          "id": "json-render-catalog-round-trip",
+          "status": "passed",
+          "receipt": "ui/tests/unit/json-render-roundtrip.test.tsx",
+          "meaning": "six-component Spec prepareSpec round-trip + Layout render"
+        },
+        {
+          "id": "hey-api-generated-runtime-probe",
+          "status": "bounded_upstream_exception",
+          "meaning": "generated-strict typecheck remains the documented Hey API EOPT island probe"
+        },
+        {
+          "id": "clean-checkout-rerun",
+          "status": "in_progress",
+          "meaning": "Fresh clone bootstrap/gen-check/foundation"
+        },
+        {
+          "id": "github-actions-ci-receipt",
+          "status": "not_run",
+          "meaning": "Needs confirmed push; local foundation is not a CI receipt"
+        },
+        {
+          "id": "mcp-apps-claude-desktop",
+          "status": "not_run",
+          "meaning": "Optional second real host; not claimed. Chromium observed render closed the 1.8MiB question."
+        }
+      ],
+      "construction": [
+        {
+          "id": "storage-git-cas-sqlite",
+          "status": "blocked_on_lanes",
+          "meaning": "Real persistence after storage lane"
+        },
+        {
+          "id": "converter-worker-memory-ceiling",
+          "status": "blocked_on_lanes",
+          "meaning": "Production ingest worker hard memory bound; not DOCLING_RS_MAX_MEMORY_MB on DocumentConverter"
+        },
+        {
+          "id": "job-crash-against-record-store",
+          "status": "blocked_on_lanes",
+          "meaning": "Same crash semantics against real RecordStore on adopted iii worker (or Tokio fallback path if later rejected in product)"
+        },
+        {
+          "id": "application-operations",
+          "status": "blocked_on_lanes",
+          "meaning": "core Application implements the operation table"
+        },
+        {
+          "id": "server-binary-and-startup",
+          "status": "blocked_on_lanes",
+          "meaning": "Authenticated HTTP composition"
+        },
+        {
+          "id": "mcp-server-backed-by-application",
+          "status": "blocked_on_lanes",
+          "meaning": "Production ServerHandler over Application, not the qualification harness"
+        }
+      ],
+      "acceptance": [
+        {
+          "id": "workos-end-to-end",
+          "status": "blocked_on_product",
+          "meaning": "CIMD/DCR, protected-resource metadata, WWW-Authenticate, JWKS/iss/aud, Principal mapping, role matrix"
+        },
+        {
+          "id": "docker-volume-persistence",
+          "status": "blocked_on_product",
+          "meaning": "Clean locked build; workspace/Git/CAS/SQLite across fresh container"
+        },
+        {
+          "id": "index-rebuild",
+          "status": "blocked_on_product",
+          "meaning": "Rebuild without losing records"
+        },
+        {
+          "id": "explorer-playwright-journeys",
+          "status": "blocked_on_product",
+          "meaning": "Import, naming, viewer, Changes, Timeline, View, keyboard, axe, workspace isolation"
+        },
+        {
+          "id": "saved-view-persist-reopen",
+          "status": "blocked_on_product",
+          "meaning": "View note through storage; same rendering on reopen"
+        },
+        {
+          "id": "qualify-application",
+          "status": "blocked_on_product",
+          "meaning": "Connected product acceptance against a real server"
+        }
+      ]
+    }
   },
   "historical_archive_record": {
     "note": "Recorded when the archive was assembled in an environment without Rust, network access, pnpm or Docker, using Node and TypeScript 5.8.3 for syntax-only checks. Kept unchanged as history. Its toolchain (Node 24.21.0, pnpm 12.8.1) is superseded by Bun 1.4.2, and its counts (62 operations, 13 transports, 28 offline tests) by the current source. It is not current readiness.",
@@ -175,28 +279,45 @@
     "project_typescript_checked": false,
     "checks": [
       {
-        "command": ["node", "scripts/dev.mjs", "check-offline"],
+        "command": [
+          "node",
+          "scripts/dev.mjs",
+          "check-offline"
+        ],
         "exit_code": 0,
         "status": "passed",
         "log": ".artifacts/verification/offline-tests.log",
         "expected_exit_code": 0
       },
       {
-        "command": ["node", "scripts/dev.mjs", "doctor"],
+        "command": [
+          "node",
+          "scripts/dev.mjs",
+          "doctor"
+        ],
         "exit_code": 0,
         "status": "passed",
         "log": ".artifacts/verification/environment.log",
         "expected_exit_code": 0
       },
       {
-        "command": ["node", "scripts/dev.mjs", "vendor", "schemars"],
+        "command": [
+          "node",
+          "scripts/dev.mjs",
+          "vendor",
+          "schemars"
+        ],
         "exit_code": 0,
         "status": "passed",
         "log": ".artifacts/verification/vendor-lookup.log",
         "expected_exit_code": 0
       },
       {
-        "command": ["node", "scripts/dev.mjs", "gen"],
+        "command": [
+          "node",
+          "scripts/dev.mjs",
+          "gen"
+        ],
         "exit_code": 1,
         "status": "expected_failure_observed",
         "log": ".artifacts/verification/generation-refusal.log",
@@ -204,7 +325,11 @@
         "meaning": "Correctly refuses missing lockfiles. This is not successful generation."
       },
       {
-        "command": ["node", "scripts/dev.mjs", "bootstrap"],
+        "command": [
+          "node",
+          "scripts/dev.mjs",
+          "bootstrap"
+        ],
         "exit_code": 1,
         "status": "blocked",
         "log": ".artifacts/verification/bootstrap-blocked.log",
@@ -212,7 +337,10 @@
         "meaning": "Environmental failure; no selected Rust/Node/pnpm combination is installed."
       },
       {
-        "command": ["node", "/mnt/data/okf-jawn-build/syntax-check.mjs"],
+        "command": [
+          "node",
+          "/mnt/data/okf-jawn-build/syntax-check.mjs"
+        ],
         "exit_code": 0,
         "status": "passed",
         "log": ".artifacts/verification/typescript-syntax.log",
