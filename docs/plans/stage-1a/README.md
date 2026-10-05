@@ -51,9 +51,11 @@ One file per package, so each implementer reads only `00-shared-interfaces.md` a
 | `60-package-f.md` | Store ports: job spec, tree edits, staged validation, catalog by tenant, artifacts, converter, search, lane briefs, signature guard | 19 | 2 | sub-agent |
 | `70-package-g.md` | MCP helpers: text content within budget, error results | 3 | 2 | sub-agent |
 | `80-package-h.md` | HTTP binding: 401/400/413/501 as `ApiError`, `Retry-After`, session extension | 4 | 3 | sub-agent |
+| `85-package-e2.md` | Dispatch hardening (added after verification of E): lease holder identity, no stranded lease, tests that pin tenant authorization and ledger-key scope, empty-target refusal | 4 | 4 | sub-agent |
+| `86-package-t.md` | Tooling follow-ups (added after the wave-1 checkpoint audit): lane-scoped fmt gate, fast pre-commit, workflow gaps, gate details, rmcp decode test | 5 | 4 | sub-agent |
 | `90-orchestrator-close.md` | Integrate to S, protect main, requalify on D:, record R, merge-commit PR | O.3–O.5 | — | orchestrator |
 
-Merge order: A, B, C; then G, F, E, D; then H. The integration branch may be red between
+Merge order: A, B, C; then G, F, E, D; then H; then E2 and T (wave 4, added during execution). The integration branch may be red between
 packages; `main` is untouched until Task O.5.
 
 ## Rulings on the deviations the section writers reported
