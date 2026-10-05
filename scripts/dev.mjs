@@ -9,6 +9,7 @@ import { generate, requireLockfiles } from './lib/generation.mjs';
 import { initialize } from './lib/init.mjs';
 import { tree } from './lib/tree.mjs';
 import { bun, pins } from './lib/toolchain.mjs';
+import { createLanes, syncLaneTable } from './lib/lanes.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ui = join(root, 'ui');
@@ -81,16 +82,6 @@ async function vendor() {
   const selected = data.vendors.filter(entry => !query || JSON.stringify(entry).toLowerCase().includes(query));
   if (!selected.length) throw new Error(`No vendor entry for ${query}`);
   process.stdout.write(`${JSON.stringify(selected, null, 2)}\n`);
-}
-
-async function lanes() {
-  const status = await run('git', ['status', '--porcelain'], { cwd: root, capture: true });
-  if (status.stdout.trim()) throw new Error('Commit the foundation before creating worktrees; no dirty-state fan-out.');
-  const base = (await run('git', ['rev-parse', '--verify', 'HEAD'], { cwd: root, capture: true })).stdout.trim();
-  const parent = resolve(root, '..', 'okf-jawn-lanes'); await mkdir(parent, { recursive: true });
-  for (const lane of ['storage', 'ingest', 'core-cli', 'server', 'mcp-execution', 'workspace-ui', 'views']) {
-    await run('git', ['worktree', 'add', '-b', `build/${lane}`, join(parent, lane), base], { cwd: root });
-  }
 }
 
 /**
@@ -273,7 +264,8 @@ async function main() {
     case 'gen-check': await generate(root, true); break;
     case 'vendor': await vendor(); break;
     case 'tree': process.stdout.write(await tree(root)); break;
-    case 'lanes': await lanes(); break;
+    case 'lanes': process.stdout.write(`${(await createLanes(root, { names: args })).join('\n')}\n`); break;
+    case 'lanes-table': process.stdout.write(await syncLaneTable(root) ? 'AGENTS.md lane table regenerated.\n' : 'AGENTS.md lane table is current.\n'); break;
     case 'lanes-reset': await lanesReset(); break;
     case 'qualify': await qualify(); break;
     case 'check-receipts': await checkReceipts(); break;
