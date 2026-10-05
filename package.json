@@ -7,9 +7,13 @@
   "workspaces": [
     "ui"
   ],
-  "trustedDependencies": [
-    "esbuild"
-  ],
+  "trustedDependencies": [],
+  "scarfSettings": {
+    "enabled": false
+  },
+  "overrides": {
+    "js-yaml": "4.3.2"
+  },
   "scripts": {
     "lock": "bun scripts/dev.mjs lock",
     "bootstrap": "bun scripts/dev.mjs bootstrap",

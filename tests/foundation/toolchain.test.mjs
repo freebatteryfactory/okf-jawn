@@ -38,6 +38,7 @@ test('no active configuration requires pnpm or a Node version',async()=>{
  }
  for(const gone of ['pnpm-workspace.yaml','.npmrc','.node-version'])await assert.rejects(readFile(join(root,gone)),{code:'ENOENT'},gone);
 });
-test('only reviewed dependencies may run install scripts',async()=>{
- assert.deepEqual(JSON.parse(await read('package.json')).trustedDependencies,['esbuild']);
+test('only reviewed dependencies may run install scripts, and Scarf is disabled',async()=>{
+ assert.deepEqual(JSON.parse(await read('package.json')).trustedDependencies,[]);
+ assert.equal(JSON.parse(await read('package.json')).scarfSettings?.enabled,false);
 });
