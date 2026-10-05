@@ -20,19 +20,22 @@ use okf_jawn_contract::identity::{
     WorkspaceId, WorkspacePath,
 };
 use okf_jawn_contract::import::{Job, JobKind, JobState};
-use okf_jawn_contract::item::{ItemKind, Lifecycle};
-use okf_jawn_contract::proposal::Change;
-use okf_jawn_contract::review::Review;
+use okf_jawn_contract::item::{Draft, ItemKind, Lifecycle};
+use okf_jawn_contract::proposal::{Change, Comment, Proposal, ProposalStatus};
+use okf_jawn_contract::review::{Confirmation, Review};
 use okf_jawn_contract::workspace::Workspace;
+use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::conversion::{
     ConversionInput, ConversionSettings, ConversionStatus, Converter, OcrPolicy,
 };
 use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, NewConnector, SessionRecord, secret_hash,
 };
+use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::jobs::{
     ClaimedJob, JobCompletion, JobHandler, JobLease, JobQueue, JobSpec, NewJob, RecordStore,
 };
+use okf_jawn_core::proposals::{ProposalFilter, ProposalStore};
 use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolved, token_hash};
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
@@ -424,6 +427,73 @@ async fn sandbox_calls(
     sandbox.resolve(token_hash(token)).await
 }
 
+async fn confirmation_calls(
+    confirmations: &dyn ConfirmationStore,
+    scope: &StorageScope,
+    mutation_id: MutationId,
+    create: ConfirmationCreate,
+) -> Result<Confirmation, ApiError> {
+    let issued = confirmations
+        .create(scope, mutation_id, create.clone())
+        .await?;
+    confirmations
+        .consume(
+            scope,
+            mutation_id,
+            ConfirmationConsume {
+                confirmation_id: issued.id,
+                action: create.action,
+                target: create.target,
+                revision: create.revision,
+                content_digest: create.content_digest,
+                session_id: create.session_id,
+                subject: create.subject,
+            },
+        )
+        .await
+}
+
+async fn draft_calls(
+    drafts: &dyn DraftStore,
+    scope: &StorageScope,
+    mutation_id: MutationId,
+    draft: DraftWrite,
+) -> Result<Draft, ApiError> {
+    let item = draft.item_id;
+    let editor = draft.editor.clone();
+    drafts.save(scope, mutation_id, draft).await?;
+    drafts.get(scope, item, &editor).await?;
+    drafts.list(scope, &editor).await?;
+    drafts.discard(scope, mutation_id, item, &editor).await
+}
+
+async fn proposal_calls(
+    proposals: &dyn ProposalStore,
+    scope: &StorageScope,
+    mutation_id: MutationId,
+    proposal: Proposal,
+    comment: Comment,
+) -> Result<Comment, ApiError> {
+    let stored = proposals.insert(scope, mutation_id, proposal).await?;
+    let read = proposals.get(scope, stored.id).await?;
+    proposals
+        .list(
+            scope,
+            ProposalFilter {
+                status: Some(ProposalStatus::Open),
+                page: Page {
+                    cursor: None,
+                    limit: 20,
+                },
+            },
+        )
+        .await?;
+    let updated = proposals.update(scope, read).await?;
+    proposals
+        .add_comment(scope, mutation_id, updated.id, comment)
+        .await
+}
+
 #[test]
 fn provenance_keeps_the_typed_route_and_client() -> TestResult {
     let principal = Principal {
@@ -726,5 +796,30 @@ fn sandbox_tokens_are_hashed_before_they_reach_the_store() -> TestResult {
     };
     assert_eq!(mint.media_type, "text/html");
     assert!(type_checked(&sandbox_calls));
+    Ok(())
+}
+
+#[test]
+fn row_stores_take_core_types() -> TestResult {
+    let draft = DraftWrite {
+        item_id: ItemId(Uuid::from_u128(10)),
+        editor: "user_1".to_owned(),
+        base_revision: revision('a')?,
+        body: "# Draft\n".to_owned(),
+        properties: BTreeMap::new(),
+        content_digest: digest('d')?,
+    };
+    assert_eq!(draft.content_digest, digest('d')?);
+    let filter = ProposalFilter {
+        status: None,
+        page: Page::from(PageRequest {
+            cursor: None,
+            limit: 10,
+        }),
+    };
+    assert_eq!(filter.page.limit, 10);
+    assert!(type_checked(&confirmation_calls));
+    assert!(type_checked(&draft_calls));
+    assert!(type_checked(&proposal_calls));
     Ok(())
 }
