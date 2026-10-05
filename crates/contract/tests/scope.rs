@@ -16,8 +16,9 @@ use std::error::Error;
 use std::path::PathBuf;
 
 macro_rules! scope_checks {
-    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal, $visibility:literal,
-        $permission:ident, $ui:literal, $status:literal, $description:literal)),* $(,)?) => {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
         fn sampled_operations() -> Result<Vec<Scoped>, Box<dyn Error>> {
             Ok(vec![$(sample::<$request>(stringify!($id), Permission::$permission)?),*])
         }

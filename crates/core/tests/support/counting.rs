@@ -10,8 +10,9 @@ use okf_jawn_core::ports::{Application, PortFuture};
 use serde_json::Value;
 
 macro_rules! counting_operations {
-    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal, $visibility:literal,
-        $permission:ident, $ui:literal, $status:literal, $description:literal)),* $(,)?) => {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
         impl Application for CountingApplication {
             $(fn $id<'a>(&'a self, context: &'a OperationContext, _request: $request) -> PortFuture<'a, $response> {
                 Box::pin(async move {

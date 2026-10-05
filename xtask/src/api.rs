@@ -18,14 +18,16 @@ use utoipa::openapi::OpenApiBuilder;
 use crate::output::write_json;
 
 macro_rules! generate_operations {
-    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal, $visibility:literal,
-        $permission:ident, $ui:literal, $status:literal, $description:literal)),* $(,)?) => {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
         fn typed_operations() -> Result<Vec<TypedOperation>, Box<dyn Error>> {
             let mut result = Vec::new();
             $(result.push(typed::<$request, $response>(OperationInfo {
-                id: stringify!($id), path: $path, label: $label, alias: $alias, visibility: $visibility,
+                id: stringify!($id), path: $path, label: $label, alias: $alias,
+                operator_alias: $operator, visibility: $visibility,
                 permission: Permission::$permission, ui: $ui, success_status: $status,
-                description: $description,
+                destructive: $destructive, description: $description,
             })?);)*
             Ok(result)
         }
@@ -440,7 +442,7 @@ fn path_operation(operation: &TypedOperation) -> Value {
         "responses":responses, "x-agent-tool":operation.info.visibility == "model",
         "x-mcp-tool":!operation.info.alias.is_empty(),"x-tool-visibility":operation.info.visibility,
         "x-agent-alias":operation.info.alias,"x-operator-label":operation.info.label,
-        "x-cli-alias":okf_jawn_contract::labels::operator_alias(operation.info.id),
+        "x-cli-alias":(!operation.info.operator_alias.is_empty()).then_some(operation.info.operator_alias),
         "x-permission":operation.info.permission,"x-ui-resource":resource_uri(operation.info.ui),
         "x-tool-annotations":annotations(&operation.info)})
 }

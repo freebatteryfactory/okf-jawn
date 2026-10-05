@@ -33,8 +33,9 @@ pub struct DispatchPorts<'a> {
 }
 
 macro_rules! dispatch_operations {
-    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal, $visibility:literal,
-        $permission:ident, $ui:literal, $status:literal, $description:literal)),* $(,)?) => {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
         /// Dispatch one declared JSON operation into its typed implementation.
         ///
         /// # Errors
