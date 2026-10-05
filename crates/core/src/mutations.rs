@@ -2,17 +2,26 @@
 //!
 //! # Retention
 //! Completed mutations are retained for 7 days; a key reused after that starts a new mutation.
-//! Abandoned mutations stay until reconciled (completed or explicitly failed); they are never
-//! dropped by the 7-day TTL, or crash protection has a hole.
+//! A mutation that began and never completed stays until a later attempt completes it; the
+//! 7-day TTL never drops it, or crash protection has a hole.
 //!
-//! # Reconciliation
-//! Reconciliation is not Git-only. Every store that creates a durable row takes `MutationId`
-//! and enforces uniqueness. On `Abandoned`, dispatch looks up the id in the relevant store(s);
-//! if a row exists the handler is not re-run.
+//! # Resumed attempts
+//! The ledger never looks into another store. Every store that creates a durable row takes the
+//! `MutationId` and treats a repeated id as a no-op that returns the prior row. A handler is
+//! therefore safe to run again under the same id: when `begin` reports `Abandoned`, dispatch
+//! re-runs the handler with `Attempt::Resumed` and the same `MutationId`, and each store hands
+//! back what the earlier attempt already wrote instead of writing it twice.
+//!
+//! # Failed handlers
+//! A handler error releases the lease. The row keeps its id and digest and is not completed,
+//! so the same key and body may be sent again at once; that retry runs as a resumed attempt.
 
-use okf_jawn_contract::error::ApiError;
+use std::collections::BTreeMap;
+
+use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{Digest, IdempotencyKey, MutationId, TenantId};
 use okf_jawn_contract::metadata::OperationName;
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -36,7 +45,7 @@ pub struct MutationKey {
 pub enum BeginOutcome {
     /// No prior row; execute the handler under this identity.
     New(MutationId),
-    /// Same key and digest already completed; return the stored response (or AlreadyIssued).
+    /// Same key and digest already completed; return the stored response (or `AlreadyIssued`).
     Replay(StoredResponse),
     /// Same key, different digest.
     Conflict {
@@ -50,14 +59,16 @@ pub enum BeginOutcome {
         /// Whole seconds before the caller should retry.
         retry_after: u32,
     },
-    /// The lease expired without completion; the caller holds the lease and must reconcile.
+    /// An earlier attempt ended without completing: its lease expired, or it was released
+    /// after a handler error. The caller now holds the lease and re-runs the handler under
+    /// the same identity.
     Abandoned {
-        /// Mutation whose effect may already exist in a creating store.
+        /// Mutation whose rows may already exist in the stores the handler writes.
         mutation_id: MutationId,
     },
 }
 
-/// Completed or recorded response body retained by the ledger.
+/// Completed response body retained by the ledger.
 #[derive(Debug, Clone)]
 pub struct StoredResponse {
     /// Mutation that produced this response.
@@ -70,64 +81,53 @@ pub struct StoredResponse {
 pub trait MutationStore: Send + Sync {
     /// Atomic insert-or-read with a lease.
     ///
-    /// `digest` is SHA-256 of the canonical request JSON.
+    /// `digest` is [`request_digest`] of the typed request.
     fn begin<'a>(
         &'a self,
         key: &'a MutationKey,
         digest: &'a Digest,
     ) -> PortFuture<'a, BeginOutcome>;
 
-    /// Record that a durable effect was produced before `complete` (crash window).
-    fn record_effect<'a>(
-        &'a self,
-        mutation_id: MutationId,
-        effect: Value,
-    ) -> PortFuture<'a, ()>;
-
     /// Mark the mutation completed and retain the response for replay.
-    fn complete<'a>(
-        &'a self,
-        mutation_id: MutationId,
-        response: Value,
-    ) -> PortFuture<'a, ()>;
+    fn complete(&self, mutation_id: MutationId, response: Value) -> PortFuture<'_, ()>;
 
-    /// Look up a mutation by id when reconciling an abandoned lease.
-    fn find<'a>(
-        &'a self,
-        mutation_id: MutationId,
-    ) -> PortFuture<'a, Option<StoredResponse>>;
+    /// End the lease after a handler error. The row keeps its id; the same key may begin again.
+    ///
+    /// The next `begin` with the same key and digest returns `Abandoned` without waiting for
+    /// the lease to expire. Releasing a completed mutation changes nothing.
+    fn release(&self, mutation_id: MutationId) -> PortFuture<'_, ()>;
 }
 
-/// Look up whether an abandoned mutation already produced its durable effect outside the ledger.
-///
-/// Production wires VersionStore::find_mutation, CredentialStore, comments, uploads,
-/// confirmations, and drafts. Test fixtures implement this directly.
-pub trait AbandonedEffects: Send + Sync {
-    /// Return a response body when the effect already exists; `None` means the handler may run.
-    fn lookup<'a>(
-        &'a self,
-        operation: OperationName,
-        mutation_id: MutationId,
-    ) -> PortFuture<'a, Option<Value>>;
-}
-
-/// SHA-256 digest of canonical JSON bytes for an idempotency begin.
+/// SHA-256 over the typed request re-serialized with object keys sorted; independent of
+/// `serde_json`'s `preserve_order` feature.
 ///
 /// # Errors
-/// Returns `Internal` when serialization fails or the digest is not valid hex.
-pub fn request_digest(value: &Value) -> Result<Digest, ApiError> {
-    let bytes = serde_json::to_vec(value).map_err(|error| {
-        okf_jawn_contract::error::ApiError::new(
-            okf_jawn_contract::error::ErrorCode::Internal,
-            error.to_string(),
-        )
-    })?;
+/// Returns `Internal` when the request cannot be serialized.
+pub fn request_digest<T: Serialize>(request: &T) -> Result<Digest, ApiError> {
+    let value = serde_json::to_value(request).map_err(|error| internal(&error))?;
+    let bytes = serde_json::to_vec(&canonical(value)).map_err(|error| internal(&error))?;
     let hash = Sha256::digest(bytes);
-    let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
-    Digest::try_from(hex).map_err(|error| {
-        ApiError::new(
-            okf_jawn_contract::error::ErrorCode::Internal,
-            error.to_string(),
-        )
-    })
+    Digest::try_from(format!("{hash:x}")).map_err(|error| internal(&error))
+}
+
+/// Rebuild `value` with the keys of every object in byte order, at every depth.
+///
+/// Collecting through a `BTreeMap` fixes the order whether `serde_json::Map` keeps insertion
+/// order (`preserve_order`) or is itself a `BTreeMap`.
+fn canonical(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let sorted: BTreeMap<String, Value> = map
+                .into_iter()
+                .map(|(key, child)| (key, canonical(child)))
+                .collect();
+            Value::Object(sorted.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical).collect()),
+        scalar => scalar,
+    }
+}
+
+fn internal(error: &dyn std::fmt::Display) -> ApiError {
+    ApiError::new(ErrorCode::Internal, error.to_string())
 }

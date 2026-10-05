@@ -1,11 +1,15 @@
 //! Route only declared operations through validation, target authorization, and the mutation ledger.
 //!
 //! Order: validate, decode, `targets()`, authorize every target, build the context,
-//! `MutationStore::begin`, the handler, `complete`. `request_workspace` is gone.
+//! `MutationStore::begin`, the handler, then `complete` on success or `release` on error.
+//! A grant is used only when it is for the workspace and tenant that were asked for. The ledger
+//! never inspects other stores: a resumed attempt re-runs the handler under the same
+//! `MutationId`, and what the ledger retains is decided by the request's `ReplayPolicy`.
 
+use jsonschema::error::ValidationErrorKind;
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-use okf_jawn_contract::identity::{ConnectorId, IdempotencyKey, MutationId};
+use okf_jawn_contract::identity::{ConnectorId, MutationId, WorkspaceId};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
 use schemars::{JsonSchema, generate::SchemaSettings};
@@ -16,21 +20,9 @@ use std::sync::OnceLock;
 use uuid::Uuid;
 
 use crate::access::{self, AccessControl};
-use crate::context::{OperationContext, TenantGrant, WorkspaceGrant};
-use crate::mutations::{
-    AbandonedEffects, BeginOutcome, MutationKey, MutationStore, request_digest,
-};
+use crate::context::{Attempt, OperationContext, TenantGrant, WorkspaceGrant};
+use crate::mutations::{BeginOutcome, MutationKey, MutationStore, request_digest};
 use crate::ports::Application;
-
-/// Ports dispatch needs beyond the typed application handlers.
-pub struct DispatchPorts<'a> {
-    /// Grant lookup.
-    pub access: &'a dyn AccessControl,
-    /// Idempotency ledger.
-    pub mutations: &'a dyn MutationStore,
-    /// Creating-store lookups for abandoned-lease reconciliation.
-    pub effects: &'a dyn AbandonedEffects,
-}
 
 macro_rules! dispatch_operations {
     ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
@@ -43,7 +35,7 @@ macro_rules! dispatch_operations {
         pub async fn dispatch(
             service: &dyn Application,
             ports: &DispatchPorts<'_>,
-            principal: &Principal,
+            caller: &Caller<'_>,
             operation_id: &str,
             input: Value,
         ) -> Result<Value, ApiError> {
@@ -51,20 +43,14 @@ macro_rules! dispatch_operations {
             match operation_id {
                 $(stringify!($id) => {
                     static VALIDATOR: OnceLock<Result<jsonschema::Validator, String>> = OnceLock::new();
-                    let request_value = input.clone();
                     let request: $request = decode_validated(input, &VALIDATOR)?;
-                    let mut context = authorize_targets(
-                        ports.access,
-                        principal,
-                        operation,
-                        &request,
-                    ).await?;
+                    let mut context =
+                        authorize_targets(ports.access, caller, operation, &request).await?;
                     let replay = <$request as RequestScope>::REPLAY;
-                    let key = request.idempotency_key().copied();
-                    match prepare_mutation(ports, &mut context, replay, key, &request_value).await? {
+                    match prepare_mutation(ports, &mut context, replay, &request).await? {
                         MutationGate::Run => {
-                            let response = service.$id(&context, request).await?;
-                            finish_if_mutation(ports, &context, replay, response).await
+                            let outcome = service.$id(&context, request).await;
+                            finish(ports, &context, replay, outcome).await
                         }
                         MutationGate::ShortCircuit(value) => Ok(value),
                     }
@@ -75,22 +61,38 @@ macro_rules! dispatch_operations {
     };
 }
 
+/// The authenticated caller of one dispatch.
+#[derive(Debug, Clone, Copy)]
+pub struct Caller<'a> {
+    /// Server-established identity; never taken from a request body.
+    pub principal: &'a Principal,
+    /// Browser session; `None` for bearer and connector callers.
+    pub session_id: Option<&'a str>,
+}
+
+/// Ports dispatch needs beyond the typed application handlers.
+pub struct DispatchPorts<'a> {
+    /// Grant lookup.
+    pub access: &'a dyn AccessControl,
+    /// Idempotency ledger.
+    pub mutations: &'a dyn MutationStore,
+}
+
 enum MutationGate {
     Run,
     ShortCircuit(Value),
 }
 
-async fn prepare_mutation(
+async fn prepare_mutation<Req: RequestScope + Serialize>(
     ports: &DispatchPorts<'_>,
     context: &mut OperationContext,
     replay: ReplayPolicy,
-    idempotency_key: Option<IdempotencyKey>,
-    request_value: &Value,
+    request: &Req,
 ) -> Result<MutationGate, ApiError> {
-    let Some(key) = idempotency_key else {
+    let Some(key) = request.idempotency_key().copied() else {
         return Ok(MutationGate::Run);
     };
-    let digest = request_digest(request_value)?;
+    let digest = request_digest(request)?;
     let mutation_key = MutationKey {
         tenant_id: context.principal.tenant_id.clone(),
         subject: context.principal.subject.clone(),
@@ -100,6 +102,11 @@ async fn prepare_mutation(
     match ports.mutations.begin(&mutation_key, &digest).await? {
         BeginOutcome::New(mutation_id) => {
             context.mutation = Some(mutation_id);
+            Ok(MutationGate::Run)
+        }
+        BeginOutcome::Abandoned { mutation_id } => {
+            context.mutation = Some(mutation_id);
+            context.attempt = Attempt::Resumed;
             Ok(MutationGate::Run)
         }
         BeginOutcome::Replay(stored) => {
@@ -121,63 +128,53 @@ async fn prepare_mutation(
             mutation_id,
             retry_after,
         })),
-        BeginOutcome::Abandoned { mutation_id } => {
-            if let Some(body) = ports
-                .effects
-                .lookup(context.operation, mutation_id)
-                .await?
-            {
-                ports.mutations.complete(mutation_id, body.clone()).await?;
-                return replay_response(replay, body).map(MutationGate::ShortCircuit);
-            }
-            if let Some(stored) = ports.mutations.find(mutation_id).await? {
-                ports
-                    .mutations
-                    .complete(mutation_id, stored.body.clone())
-                    .await?;
-                return replay_response(replay, stored.body).map(MutationGate::ShortCircuit);
-            }
-            context.mutation = Some(mutation_id);
-            Ok(MutationGate::Run)
-        }
     }
 }
 
-async fn finish_if_mutation<Res: Serialize>(
+/// Close the ledger row for a handler outcome and return what the caller receives.
+async fn finish<Res: Serialize>(
     ports: &DispatchPorts<'_>,
     context: &OperationContext,
-    _replay: ReplayPolicy,
-    response: Res,
+    replay: ReplayPolicy,
+    outcome: Result<Res, ApiError>,
 ) -> Result<Value, ApiError> {
-    let body = serialize_response(response)?;
+    let response = match outcome {
+        Ok(response) => response,
+        Err(error) => {
+            if let Some(mutation_id) = context.mutation {
+                // The caller must see the handler's error. If the release itself fails, the
+                // lease simply expires into `Abandoned`, which a later attempt resumes safely.
+                let _released = ports.mutations.release(mutation_id).await;
+            }
+            return Err(error);
+        }
+    };
+    let body = serde_json::to_value(response)
+        .map_err(|_| ApiError::new(ErrorCode::Internal, "Response serialization failed"))?;
     let Some(mutation_id) = context.mutation else {
         return Ok(body);
     };
-    let stored = match context.operation {
-        OperationName::CreateConnector => strip_connector_secret(body.clone())?,
-        _ => body.clone(),
-    };
-    ports.mutations.complete(mutation_id, stored).await?;
+    ports
+        .mutations
+        .complete(mutation_id, ledger_body(replay, &body)?)
+        .await?;
     Ok(body)
 }
 
-fn serialize_response<Res: Serialize>(response: Res) -> Result<Value, ApiError> {
-    serde_json::to_value(response)
-        .map_err(|_| ApiError::new(ErrorCode::Internal, "Response serialization failed"))
-}
-
-fn strip_connector_secret(body: Value) -> Result<Value, ApiError> {
-    let connector_id = body
-        .get("connector")
-        .and_then(|connector| connector.get("connector_id"))
-        .cloned()
-        .ok_or_else(|| {
-            ApiError::new(
-                ErrorCode::Internal,
-                "Issued connector response missing connector_id",
-            )
-        })?;
-    Ok(serde_json::json!({ "connector_id": connector_id }))
+/// What the ledger retains for a completed mutation, decided by its replay policy.
+fn ledger_body(replay: ReplayPolicy, body: &Value) -> Result<Value, ApiError> {
+    match replay {
+        ReplayPolicy::StoredResponse => Ok(body.clone()),
+        ReplayPolicy::AlreadyIssued { id_pointer } => {
+            let connector_id = body.pointer(id_pointer).ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::Internal,
+                    "Issued response is missing the identity its replay policy names",
+                )
+            })?;
+            Ok(serde_json::json!({ "connector_id": connector_id }))
+        }
+    }
 }
 
 fn replay_response(replay: ReplayPolicy, body: Value) -> Result<Value, ApiError> {
@@ -208,27 +205,29 @@ fn replay_response(replay: ReplayPolicy, body: Value) -> Result<Value, ApiError>
 
 async fn authorize_targets(
     access: &dyn AccessControl,
-    principal: &Principal,
+    caller: &Caller<'_>,
     operation: OperationName,
     request: &impl RequestScope,
 ) -> Result<OperationContext, ApiError> {
-    let targets = request.targets();
-    let mut grants = Vec::new();
+    let principal = caller.principal;
+    let mut grants: Vec<WorkspaceGrant> = Vec::new();
     let mut tenant: Option<TenantGrant> = None;
-    for target in targets {
+    for target in request.targets() {
         match target {
+            // Any signed-in principal; the handler filters its result by grants.
             Target::Authenticated => {}
             Target::Deployment(permission) => {
                 let raw = access.authorize_tenant(principal, permission).await?;
-                let grant = access::authorize_tenant(principal, raw, permission)?;
-                tenant = Some(grant);
+                require_tenant_scope(principal, &raw)?;
+                tenant = Some(access::authorize_tenant(principal, raw, permission)?);
             }
             Target::Workspace(workspace, permission) => {
                 let raw = access.authorize(principal, workspace, permission).await?;
+                require_workspace_scope(principal, workspace, &raw)?;
                 let grant = access::authorize_workspace(principal, raw, permission)?;
                 if !grants
                     .iter()
-                    .any(|existing: &WorkspaceGrant| existing.workspace_id() == workspace)
+                    .any(|existing| existing.workspace_id() == workspace)
                 {
                     grants.push(grant);
                 }
@@ -237,11 +236,42 @@ async fn authorize_targets(
     }
     Ok(OperationContext {
         principal: principal.clone(),
+        session_id: caller.session_id.map(str::to_owned),
         operation,
         tenant,
         grants,
         mutation: None,
+        attempt: Attempt::First,
     })
+}
+
+/// Refuse a workspace grant the adapter returned for a workspace or tenant that was not asked.
+fn require_workspace_scope(
+    principal: &Principal,
+    workspace: WorkspaceId,
+    grant: &WorkspaceGrant,
+) -> Result<(), ApiError> {
+    if grant.workspace_id() == workspace && grant.scope.tenant_id == principal.tenant_id {
+        Ok(())
+    } else {
+        Err(foreign_scope())
+    }
+}
+
+/// Refuse a tenant grant the adapter returned for a tenant other than the caller's.
+fn require_tenant_scope(principal: &Principal, grant: &TenantGrant) -> Result<(), ApiError> {
+    if grant.tenant_id == principal.tenant_id {
+        Ok(())
+    } else {
+        Err(foreign_scope())
+    }
+}
+
+fn foreign_scope() -> ApiError {
+    ApiError::new(
+        ErrorCode::Internal,
+        "Access adapter returned a grant for a different scope",
+    )
 }
 
 fn parse_operation(operation_id: &str) -> Result<OperationName, ApiError> {
@@ -273,8 +303,28 @@ fn decode_validated<T: DeserializeOwned + JsonSchema>(
         .map_err(|message| ApiError::new(ErrorCode::Internal, message.clone()))?;
     validator
         .validate(&value)
-        .map_err(|error| ApiError::new(ErrorCode::InvalidInput, error.to_string()))?;
+        .map_err(|error| invalid_input(&error))?;
     decode(value)
+}
+
+/// Report a schema failure and name the offending field as a JSON Pointer into the request.
+///
+/// A missing required property is reported at the parent object, so its name is appended.
+fn invalid_input(error: &jsonschema::ValidationError<'_>) -> ApiError {
+    let location = if let ValidationErrorKind::Required {
+        property: Value::String(name),
+    } = error.kind()
+    {
+        error.instance_path().join(name)
+    } else {
+        error.instance_path().clone()
+    };
+    let refused = ApiError::new(ErrorCode::InvalidInput, error.to_string());
+    if location.is_empty() {
+        refused
+    } else {
+        refused.with_field(location.as_str())
+    }
 }
 
 /// Allocate a fresh mutation identity for adapters and fixtures.
@@ -284,3 +334,54 @@ pub fn new_mutation_id() -> MutationId {
 }
 
 okf_jawn_contract::for_each_operation!(dispatch_operations);
+
+#[cfg(test)]
+mod tests {
+    use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+    use okf_jawn_contract::scope::ReplayPolicy;
+    use serde_json::json;
+
+    use super::{ledger_body, replay_response};
+
+    const CONNECTOR: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const POLICY: ReplayPolicy = ReplayPolicy::AlreadyIssued {
+        id_pointer: "/issued/id",
+    };
+
+    #[test]
+    fn stored_response_policy_keeps_the_whole_body() -> Result<(), ApiError> {
+        let body = json!({ "revision": "r", "warnings": [] });
+        assert_eq!(ledger_body(ReplayPolicy::StoredResponse, &body)?, body);
+        Ok(())
+    }
+
+    #[test]
+    fn already_issued_policy_keeps_only_the_id_at_its_pointer() -> Result<(), ApiError> {
+        let body = json!({ "issued": { "id": CONNECTOR, "label": "agent" }, "secret": "s" });
+        assert_eq!(
+            ledger_body(POLICY, &body)?,
+            json!({ "connector_id": CONNECTOR })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn already_issued_policy_refuses_a_response_without_the_id() {
+        let refused = ledger_body(POLICY, &json!({ "secret": "s" }));
+        assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
+    }
+
+    #[test]
+    fn already_issued_replay_names_the_connector_and_returns_no_body() {
+        let replayed = replay_response(POLICY, json!({ "connector_id": CONNECTOR }));
+        assert!(matches!(
+            replayed,
+            Err(error) if error.code == ErrorCode::AlreadyIssued
+                && matches!(
+                    error.detail.as_deref(),
+                    Some(ErrorDetail::AlreadyIssued { connector_id })
+                        if connector_id.0.to_string() == CONNECTOR
+                )
+        ));
+    }
+}

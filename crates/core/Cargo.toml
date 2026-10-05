@@ -28,3 +28,5 @@ okf-validator.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+# Tests must see insertion-ordered JSON maps, as the real server graph does (docling-core).
+serde_json = { workspace = true, features = ["preserve_order"] }

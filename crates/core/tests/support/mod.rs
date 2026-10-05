@@ -1,23 +1,24 @@
-//! Fixture AccessControl and MutationStore for dispatch tests; not production adapters.
-
-pub mod counting;
+//! Fixture `AccessControl` and `MutationStore` for dispatch and binding tests; not production
+//! adapters.
+//!
+//! The including test target declares `mod check;` (`tests/support/check.rs`) at its crate
+//! root. Every public item here is exercised by the self-tests at the end of this file, so a
+//! target that uses only part of the fixture still compiles without dead-code warnings.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use okf_jawn_contract::access::{Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{
-    Digest, IdempotencyKey, MutationId, TenantId, WorkspaceId,
+    Digest, IdempotencyKey, IdentityError, MutationId, TenantId, WorkspaceId,
 };
-use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::context::{TenantGrant, WorkspaceGrant};
 use okf_jawn_core::dispatch::new_mutation_id;
-use okf_jawn_core::mutations::{
-    AbandonedEffects, BeginOutcome, MutationKey, MutationStore, StoredResponse,
-};
+use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationStore, StoredResponse};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::StorageScope;
 use serde_json::Value;
@@ -25,17 +26,61 @@ use serde_json::Value;
 /// Grant table keyed by subject.
 #[derive(Debug, Default, Clone)]
 pub struct GrantTable {
-    /// Workspace grants: subject → workspace → permissions.
+    /// Workspace grants: subject, then workspace, then permissions.
     pub workspaces: BTreeMap<String, BTreeMap<WorkspaceId, Vec<Permission>>>,
-    /// Tenant grants: subject → permissions.
+    /// Tenant grants: subject, then permissions.
     pub tenants: BTreeMap<String, Vec<Permission>>,
 }
 
-/// AccessControl built from an explicit grant table.
+/// `AccessControl` built from an explicit grant table.
+///
+/// It answers for the scope that was asked unless a test tells it to answer for another one,
+/// which is how a misbehaving adapter is simulated.
 #[derive(Debug, Default)]
 pub struct FixtureAccess {
-    /// Raw grants before route/delegation intersection.
-    pub table: Mutex<GrantTable>,
+    table: Mutex<GrantTable>,
+    workspace_answer: Mutex<Option<StorageScope>>,
+    tenant_answer: Mutex<Option<TenantId>>,
+    lookups: AtomicUsize,
+}
+
+/// One ledger row: its identity, the digest it was begun with, and where it stands.
+#[derive(Debug, Clone)]
+struct Row {
+    mutation_id: MutationId,
+    digest: Digest,
+    phase: Phase,
+}
+
+#[derive(Debug, Clone)]
+enum Phase {
+    /// A handler holds the lease until this instant.
+    Leased { until: Instant },
+    /// The lease was released after a handler error; the next `begin` resumes at once.
+    Released,
+    /// The handler finished and its response is retained.
+    Completed { body: Value },
+}
+
+#[derive(Debug, Default)]
+struct Ledger {
+    by_key: BTreeMap<MutationKey, Row>,
+    by_id: BTreeMap<MutationId, MutationKey>,
+}
+
+/// `MutationStore` over a `Mutex` map; leases use the wall clock.
+#[derive(Debug)]
+pub struct FixtureMutations {
+    ledger: Mutex<Ledger>,
+    lease: Duration,
+}
+
+/// The fixture ports one dispatch needs, shared by reference-counted handles.
+pub struct FixturePorts {
+    /// Grant table.
+    pub access: Arc<FixtureAccess>,
+    /// Mutation ledger.
+    pub mutations: Arc<FixtureMutations>,
 }
 
 impl FixtureAccess {
@@ -44,7 +89,32 @@ impl FixtureAccess {
     pub fn new(table: GrantTable) -> Self {
         Self {
             table: Mutex::new(table),
+            ..Self::default()
         }
+    }
+
+    /// Answer every later workspace lookup with a grant for `scope`, whatever was asked.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn answer_workspaces_as(&self, scope: StorageScope) -> Result<(), ApiError> {
+        *lock(&self.workspace_answer, "workspace answer")? = Some(scope);
+        Ok(())
+    }
+
+    /// Answer every later tenant lookup with a grant for `tenant`, whoever asked.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn answer_tenants_as(&self, tenant: TenantId) -> Result<(), ApiError> {
+        *lock(&self.tenant_answer, "tenant answer")? = Some(tenant);
+        Ok(())
+    }
+
+    /// Number of `authorize` and `authorize_tenant` lookups made so far.
+    #[must_use]
+    pub fn lookups(&self) -> usize {
+        self.lookups.load(Ordering::SeqCst)
     }
 }
 
@@ -56,24 +126,20 @@ impl AccessControl for FixtureAccess {
         _permission: Permission,
     ) -> PortFuture<'a, WorkspaceGrant> {
         Box::pin(async move {
-            let table = self.table.lock().map_err(|_| {
-                ApiError::new(ErrorCode::Internal, "grant table lock poisoned")
-            })?;
-            let permissions = table
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            let permissions = lock(&self.table, "grant table")?
                 .workspaces
                 .get(&principal.subject)
-                .and_then(|map| map.get(&workspace))
+                .and_then(|granted| granted.get(&workspace))
                 .cloned()
-                .ok_or_else(|| {
-                    ApiError::new(ErrorCode::Forbidden, "Required capability is not granted")
-                })?;
-            Ok(WorkspaceGrant {
-                scope: StorageScope {
+                .ok_or_else(not_granted)?;
+            let scope = lock(&self.workspace_answer, "workspace answer")?
+                .clone()
+                .unwrap_or_else(|| StorageScope {
                     tenant_id: principal.tenant_id.clone(),
                     workspace_id: workspace,
-                },
-                permissions,
-            })
+                });
+            Ok(WorkspaceGrant { scope, permissions })
         })
     }
 
@@ -83,18 +149,17 @@ impl AccessControl for FixtureAccess {
         _permission: Permission,
     ) -> PortFuture<'a, TenantGrant> {
         Box::pin(async move {
-            let table = self.table.lock().map_err(|_| {
-                ApiError::new(ErrorCode::Internal, "grant table lock poisoned")
-            })?;
-            let permissions = table
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            let permissions = lock(&self.table, "grant table")?
                 .tenants
                 .get(&principal.subject)
                 .cloned()
-                .ok_or_else(|| {
-                    ApiError::new(ErrorCode::Forbidden, "Required capability is not granted")
-                })?;
+                .ok_or_else(not_granted)?;
+            let tenant_id = lock(&self.tenant_answer, "tenant answer")?
+                .clone()
+                .unwrap_or_else(|| principal.tenant_id.clone());
             Ok(TenantGrant {
-                tenant_id: principal.tenant_id.clone(),
+                tenant_id,
                 permissions,
             })
         })
@@ -102,13 +167,11 @@ impl AccessControl for FixtureAccess {
 
     fn grants<'a>(&'a self, principal: &'a Principal) -> PortFuture<'a, Vec<WorkspaceGrant>> {
         Box::pin(async move {
-            let table = self.table.lock().map_err(|_| {
-                ApiError::new(ErrorCode::Internal, "grant table lock poisoned")
-            })?;
-            let Some(map) = table.workspaces.get(&principal.subject) else {
+            let table = lock(&self.table, "grant table")?;
+            let Some(granted) = table.workspaces.get(&principal.subject) else {
                 return Ok(Vec::new());
             };
-            Ok(map
+            Ok(granted
                 .iter()
                 .map(|(workspace_id, permissions)| WorkspaceGrant {
                     scope: StorageScope {
@@ -127,141 +190,74 @@ impl AccessControl for FixtureAccess {
         workspace: WorkspaceId,
     ) -> PortFuture<'a, WorkspaceGrant> {
         Box::pin(async move {
-            let mut table = self.table.lock().map_err(|_| {
-                ApiError::new(ErrorCode::Internal, "grant table lock poisoned")
-            })?;
-            let permissions = vec![
-                Permission::Read,
-                Permission::Write,
-                Permission::Propose,
-                Permission::Approve,
-                Permission::Review,
-                Permission::Admin,
-            ];
-            table
+            lock(&self.table, "grant table")?
                 .workspaces
                 .entry(principal.subject.clone())
                 .or_default()
-                .insert(workspace, permissions.clone());
+                .insert(workspace, all_permissions());
             Ok(WorkspaceGrant {
                 scope: StorageScope {
                     tenant_id: principal.tenant_id.clone(),
                     workspace_id: workspace,
                 },
-                permissions,
+                permissions: all_permissions(),
             })
         })
     }
 }
 
-#[derive(Debug, Clone)]
-enum LedgerState {
-    InProgress {
-        mutation_id: MutationId,
-        digest: Digest,
-        lease_until: Instant,
-        effect: Option<Value>,
-    },
-    Completed {
-        mutation_id: MutationId,
-        digest: Digest,
-        body: Value,
-        completed_at: Instant,
-    },
-    Abandoned {
-        mutation_id: MutationId,
-        digest: Digest,
-        effect: Option<Value>,
-    },
-}
-
-/// MutationStore over a Mutex map; leases are wall-clock for tests.
-#[derive(Debug, Default)]
-pub struct FixtureMutations {
-    rows: Mutex<BTreeMap<MutationKey, LedgerState>>,
-    by_id: Mutex<BTreeMap<MutationId, MutationKey>>,
-    /// Lease duration used for InProgress vs Abandoned.
-    pub lease: Duration,
-    /// Retention for completed rows (7 days in production).
-    pub completed_ttl: Duration,
+impl Ledger {
+    fn row_mut(&mut self, mutation_id: MutationId) -> Result<&mut Row, ApiError> {
+        let key = self.by_id.get(&mutation_id).ok_or_else(unknown_mutation)?;
+        self.by_key.get_mut(key).ok_or_else(unknown_mutation)
+    }
 }
 
 impl FixtureMutations {
-    /// Construct with a short lease suitable for InProgress tests.
+    /// Construct an empty ledger with a 30-second lease.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            rows: Mutex::new(BTreeMap::new()),
-            by_id: Mutex::new(BTreeMap::new()),
+            ledger: Mutex::new(Ledger::default()),
             lease: Duration::from_secs(30),
-            completed_ttl: Duration::from_secs(7 * 24 * 60 * 60),
         }
     }
 
-    /// Force an existing in-progress row into Abandoned without waiting for the lease.
+    /// Let every live lease lapse, as if its holder had crashed and the lease time had passed.
     ///
     /// # Errors
-    /// Returns when the key is missing or not in progress.
-    pub fn force_abandon(&self, key: &MutationKey) -> Result<MutationId, ApiError> {
-        let mut rows = self
-            .rows
-            .lock()
-            .map_err(|_| ApiError::new(ErrorCode::Internal, "mutation lock poisoned"))?;
-        match rows.get_mut(key) {
-            Some(LedgerState::InProgress {
-                mutation_id,
-                digest,
-                effect,
-                ..
-            }) => {
-                let mutation_id = *mutation_id;
-                let digest = digest.clone();
-                let effect = effect.clone();
-                *rows.get_mut(key).expect("key present") = LedgerState::Abandoned {
-                    mutation_id,
-                    digest,
-                    effect,
-                };
-                Ok(mutation_id)
+    /// Returns when the lock is poisoned.
+    pub fn expire_leases(&self) -> Result<(), ApiError> {
+        let now = Instant::now();
+        for row in lock(&self.ledger, "mutation ledger")?.by_key.values_mut() {
+            if let Phase::Leased { until } = &mut row.phase {
+                *until = now;
             }
-            _ => Err(ApiError::new(
-                ErrorCode::Internal,
-                "force_abandon requires an in-progress row",
-            )),
         }
+        Ok(())
     }
 
-    /// Record an effect on an in-progress or abandoned row (simulates crash after create).
+    /// The response body retained for a completed mutation; `None` until it completes.
     ///
     /// # Errors
-    /// Returns when the mutation is unknown.
-    pub fn put_effect(&self, mutation_id: MutationId, effect: Value) -> Result<(), ApiError> {
-        let key = {
-            let by_id = self
-                .by_id
-                .lock()
-                .map_err(|_| ApiError::new(ErrorCode::Internal, "mutation lock poisoned"))?;
-            by_id.get(&mutation_id).cloned().ok_or_else(|| {
-                ApiError::new(ErrorCode::NotFound, "mutation not found")
-            })?
+    /// Returns when the lock is poisoned.
+    pub fn stored_body(&self, mutation_id: MutationId) -> Result<Option<Value>, ApiError> {
+        let ledger = lock(&self.ledger, "mutation ledger")?;
+        let Some(Phase::Completed { body }) = ledger
+            .by_id
+            .get(&mutation_id)
+            .and_then(|key| ledger.by_key.get(key))
+            .map(|row| &row.phase)
+        else {
+            return Ok(None);
         };
-        let mut rows = self
-            .rows
-            .lock()
-            .map_err(|_| ApiError::new(ErrorCode::Internal, "mutation lock poisoned"))?;
-        match rows.get_mut(&key) {
-            Some(
-                LedgerState::InProgress { effect: slot, .. }
-                | LedgerState::Abandoned { effect: slot, .. },
-            ) => {
-                *slot = Some(effect);
-                Ok(())
-            }
-            _ => Err(ApiError::new(
-                ErrorCode::Internal,
-                "effect requires an open mutation",
-            )),
-        }
+        Ok(Some(body.clone()))
+    }
+}
+
+impl Default for FixtureMutations {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -272,106 +268,45 @@ impl MutationStore for FixtureMutations {
         digest: &'a Digest,
     ) -> PortFuture<'a, BeginOutcome> {
         Box::pin(async move {
-            let mut rows = self
-                .rows
-                .lock()
-                .map_err(|_| ApiError::new(ErrorCode::Internal, "mutation lock poisoned"))?;
-            let mut by_id = self
-                .by_id
-                .lock()
-                .map_err(|_| ApiError::new(ErrorCode::Internal, "mutation lock poisoned"))?;
+            let mut ledger = lock(&self.ledger, "mutation ledger")?;
             let now = Instant::now();
-            match rows.get(key).cloned() {
-                None => {
-                    let mutation_id = new_mutation_id();
-                    rows.insert(
-                        key.clone(),
-                        LedgerState::InProgress {
-                            mutation_id,
-                            digest: digest.clone(),
-                            lease_until: now + self.lease,
-                            effect: None,
-                        },
-                    );
-                    by_id.insert(mutation_id, key.clone());
-                    Ok(BeginOutcome::New(mutation_id))
-                }
-                Some(LedgerState::Completed {
-                    mutation_id,
-                    digest: prior,
-                    body,
-                    completed_at,
-                }) => {
-                    if now.duration_since(completed_at) > self.completed_ttl {
-                        let mutation_id = new_mutation_id();
-                        rows.insert(
-                            key.clone(),
-                            LedgerState::InProgress {
-                                mutation_id,
-                                digest: digest.clone(),
-                                lease_until: now + self.lease,
-                                effect: None,
-                            },
-                        );
-                        by_id.insert(mutation_id, key.clone());
-                        return Ok(BeginOutcome::New(mutation_id));
-                    }
-                    if &prior != digest {
-                        return Ok(BeginOutcome::Conflict {
-                            operation: key.operation,
-                        });
-                    }
+            let lease_until = now
+                .checked_add(self.lease)
+                .ok_or_else(|| ApiError::new(ErrorCode::Internal, "lease overflows the clock"))?;
+            let Some(row) = ledger.by_key.get(key).cloned() else {
+                let mutation_id = new_mutation_id();
+                ledger.by_key.insert(
+                    key.clone(),
+                    Row {
+                        mutation_id,
+                        digest: digest.clone(),
+                        phase: Phase::Leased { until: lease_until },
+                    },
+                );
+                ledger.by_id.insert(mutation_id, key.clone());
+                return Ok(BeginOutcome::New(mutation_id));
+            };
+            if row.digest != *digest {
+                return Ok(BeginOutcome::Conflict {
+                    operation: key.operation,
+                });
+            }
+            let mutation_id = row.mutation_id;
+            match row.phase {
+                Phase::Completed { body } => {
                     Ok(BeginOutcome::Replay(StoredResponse { mutation_id, body }))
                 }
-                Some(LedgerState::InProgress {
+                Phase::Leased { until } if now < until => Ok(BeginOutcome::InProgress {
                     mutation_id,
-                    digest: prior,
-                    lease_until,
-                    effect,
-                }) => {
-                    if &prior != digest {
-                        return Ok(BeginOutcome::Conflict {
-                            operation: key.operation,
-                        });
-                    }
-                    if now < lease_until {
-                        let retry_after = lease_until
-                            .saturating_duration_since(now)
-                            .as_secs()
-                            .max(1) as u32;
-                        return Ok(BeginOutcome::InProgress {
-                            mutation_id,
-                            retry_after,
-                        });
-                    }
-                    rows.insert(
+                    retry_after: whole_seconds(until.saturating_duration_since(now)),
+                }),
+                Phase::Leased { .. } | Phase::Released => {
+                    ledger.by_key.insert(
                         key.clone(),
-                        LedgerState::InProgress {
+                        Row {
                             mutation_id,
-                            digest: prior,
-                            lease_until: now + self.lease,
-                            effect,
-                        },
-                    );
-                    Ok(BeginOutcome::Abandoned { mutation_id })
-                }
-                Some(LedgerState::Abandoned {
-                    mutation_id,
-                    digest: prior,
-                    effect,
-                }) => {
-                    if &prior != digest {
-                        return Ok(BeginOutcome::Conflict {
-                            operation: key.operation,
-                        });
-                    }
-                    rows.insert(
-                        key.clone(),
-                        LedgerState::InProgress {
-                            mutation_id,
-                            digest: prior,
-                            lease_until: now + self.lease,
-                            effect,
+                            digest: row.digest,
+                            phase: Phase::Leased { until: lease_until },
                         },
                     );
                     Ok(BeginOutcome::Abandoned { mutation_id })
@@ -380,176 +315,211 @@ impl MutationStore for FixtureMutations {
         })
     }
 
-    fn record_effect<'a>(
-        &'a self,
-        mutation_id: MutationId,
-        effect: Value,
-    ) -> PortFuture<'a, ()> {
-        Box::pin(async move { self.put_effect(mutation_id, effect) })
-    }
-
-    fn complete<'a>(&'a self, mutation_id: MutationId, response: Value) -> PortFuture<'a, ()> {
+    fn complete(&self, mutation_id: MutationId, response: Value) -> PortFuture<'_, ()> {
         Box::pin(async move {
-            let key = {
-                let by_id = self
-                    .by_id
-                    .lock()
-                    .map_err(|_| ApiError::new(ErrorCode::Internal, "mutation lock poisoned"))?;
-                by_id.get(&mutation_id).cloned().ok_or_else(|| {
-                    ApiError::new(ErrorCode::NotFound, "mutation not found")
-                })?
-            };
-            let mut rows = self
-                .rows
-                .lock()
-                .map_err(|_| ApiError::new(ErrorCode::Internal, "mutation lock poisoned"))?;
-            let digest = match rows.get(&key) {
-                Some(
-                    LedgerState::InProgress { digest, .. }
-                    | LedgerState::Abandoned { digest, .. }
-                    | LedgerState::Completed { digest, .. },
-                ) => digest.clone(),
-                None => {
-                    return Err(ApiError::new(ErrorCode::NotFound, "mutation not found"));
-                }
-            };
-            rows.insert(
-                key,
-                LedgerState::Completed {
-                    mutation_id,
-                    digest,
-                    body: response,
-                    completed_at: Instant::now(),
-                },
-            );
+            let mut ledger = lock(&self.ledger, "mutation ledger")?;
+            ledger.row_mut(mutation_id)?.phase = Phase::Completed { body: response };
             Ok(())
         })
     }
 
-    fn find<'a>(&'a self, mutation_id: MutationId) -> PortFuture<'a, Option<StoredResponse>> {
+    fn release(&self, mutation_id: MutationId) -> PortFuture<'_, ()> {
         Box::pin(async move {
-            let key = {
-                let by_id = self
-                    .by_id
-                    .lock()
-                    .map_err(|_| ApiError::new(ErrorCode::Internal, "mutation lock poisoned"))?;
-                match by_id.get(&mutation_id).cloned() {
-                    Some(key) => key,
-                    None => return Ok(None),
-                }
-            };
-            let rows = self
-                .rows
-                .lock()
-                .map_err(|_| ApiError::new(ErrorCode::Internal, "mutation lock poisoned"))?;
-            Ok(match rows.get(&key) {
-                Some(LedgerState::Completed {
-                    mutation_id,
-                    body,
-                    ..
-                }) => Some(StoredResponse {
-                    mutation_id: *mutation_id,
-                    body: body.clone(),
-                }),
-                Some(
-                    LedgerState::InProgress {
-                        mutation_id,
-                        effect: Some(body),
-                        ..
-                    }
-                    | LedgerState::Abandoned {
-                        mutation_id,
-                        effect: Some(body),
-                        ..
-                    },
-                ) => Some(StoredResponse {
-                    mutation_id: *mutation_id,
-                    body: body.clone(),
-                }),
-                _ => None,
-            })
+            let mut ledger = lock(&self.ledger, "mutation ledger")?;
+            let row = ledger.row_mut(mutation_id)?;
+            if matches!(row.phase, Phase::Leased { .. }) {
+                row.phase = Phase::Released;
+            }
+            Ok(())
         })
     }
-}
-
-/// Abandoned effect lookup table for Git and non-Git creating stores.
-#[derive(Debug, Default)]
-pub struct FixtureEffects {
-    /// operation + mutation_id → response body already produced.
-    pub rows: Mutex<BTreeMap<(OperationName, MutationId), Value>>,
-}
-
-impl FixtureEffects {
-    /// Record that a creating store already holds a row for this mutation.
-    ///
-    /// # Errors
-    /// Returns when the lock is poisoned.
-    pub fn insert(
-        &self,
-        operation: OperationName,
-        mutation_id: MutationId,
-        body: Value,
-    ) -> Result<(), ApiError> {
-        self.rows
-            .lock()
-            .map_err(|_| ApiError::new(ErrorCode::Internal, "effects lock poisoned"))?
-            .insert((operation, mutation_id), body);
-        Ok(())
-    }
-}
-
-impl AbandonedEffects for FixtureEffects {
-    fn lookup<'a>(
-        &'a self,
-        operation: OperationName,
-        mutation_id: MutationId,
-    ) -> PortFuture<'a, Option<Value>> {
-        Box::pin(async move {
-            let rows = self
-                .rows
-                .lock()
-                .map_err(|_| ApiError::new(ErrorCode::Internal, "effects lock poisoned"))?;
-            Ok(rows.get(&(operation, mutation_id)).cloned())
-        })
-    }
-}
-
-/// Shared Arc wrappers used by dispatch tests.
-pub struct FixturePorts {
-    /// Grant table.
-    pub access: Arc<FixtureAccess>,
-    /// Mutation ledger.
-    pub mutations: Arc<FixtureMutations>,
-    /// Abandoned creating-store lookup.
-    pub effects: Arc<FixtureEffects>,
 }
 
 impl FixturePorts {
-    /// Construct empty fixtures.
+    /// Construct fixtures over `table` with an empty ledger.
     #[must_use]
     pub fn new(table: GrantTable) -> Self {
         Self {
             access: Arc::new(FixtureAccess::new(table)),
             mutations: Arc::new(FixtureMutations::new()),
-            effects: Arc::new(FixtureEffects::default()),
         }
     }
 }
 
-/// Parse a fixed workspace UUID used in tests.
+/// Lock a fixture mutex, turning poisoning into an error instead of a panic.
+fn lock<'a, T>(mutex: &'a Mutex<T>, what: &str) -> Result<MutexGuard<'a, T>, ApiError> {
+    mutex
+        .lock()
+        .map_err(|_| ApiError::new(ErrorCode::Internal, format!("{what} lock poisoned")))
+}
+
+fn not_granted() -> ApiError {
+    ApiError::new(ErrorCode::Forbidden, "Required capability is not granted")
+}
+
+fn unknown_mutation() -> ApiError {
+    ApiError::new(ErrorCode::NotFound, "mutation not found")
+}
+
+/// Whole seconds a caller should wait, never less than one.
+fn whole_seconds(wait: Duration) -> u32 {
+    u32::try_from(wait.as_secs()).unwrap_or(u32::MAX).max(1)
+}
+
+/// Every permission, in declaration order.
 #[must_use]
-pub fn workspace(hex: &str) -> WorkspaceId {
-    serde_json::from_str(&format!("\"{hex}\"")).expect("valid workspace uuid")
+pub fn all_permissions() -> Vec<Permission> {
+    vec![
+        Permission::Read,
+        Permission::Write,
+        Permission::Propose,
+        Permission::Approve,
+        Permission::Review,
+        Permission::Admin,
+    ]
+}
+
+/// Parse a fixed workspace UUID used in tests.
+///
+/// # Errors
+/// Returns when `hex` is not a UUID.
+pub fn workspace(hex: &str) -> Result<WorkspaceId, serde_json::Error> {
+    serde_json::from_value(Value::String(hex.to_owned()))
 }
 
 /// Parse a fixed tenant id used in tests.
-#[must_use]
-pub fn tenant(value: &str) -> TenantId {
-    TenantId::try_from(value.to_owned()).expect("valid tenant id")
+///
+/// # Errors
+/// Returns when `value` is not a valid tenant id.
+pub fn tenant(value: &str) -> Result<TenantId, IdentityError> {
+    TenantId::try_from(value.to_owned())
 }
 
 /// Parse a fixed idempotency key used in tests.
-#[must_use]
-pub fn idempotency_key(hex: &str) -> IdempotencyKey {
-    serde_json::from_str(&format!("\"{hex}\"")).expect("valid idempotency uuid")
+///
+/// # Errors
+/// Returns when `hex` is not a UUID.
+pub fn idempotency_key(hex: &str) -> Result<IdempotencyKey, serde_json::Error> {
+    serde_json::from_value(Value::String(hex.to_owned()))
+}
+
+pub mod counting;
+
+#[cfg(test)]
+mod tests {
+    use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
+    use okf_jawn_contract::error::ErrorCode;
+    use okf_jawn_contract::identity::{Digest, IdentityError};
+    use okf_jawn_contract::metadata::OperationName;
+    use okf_jawn_core::access::AccessControl;
+    use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationStore};
+    use okf_jawn_core::storage::StorageScope;
+    use serde_json::json;
+
+    use super::{FixturePorts, GrantTable, all_permissions, idempotency_key, tenant, workspace};
+    use crate::check::{TestResult, err_of};
+
+    const HOME: &str = "11111111-1111-4111-8111-111111111111";
+    const ELSEWHERE: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn digest_of(letter: &str) -> Result<Digest, IdentityError> {
+        letter.repeat(64).parse()
+    }
+
+    #[tokio::test]
+    async fn fixture_ledger_leases_releases_resumes_and_replays() -> TestResult {
+        let ports = FixturePorts::new(GrantTable::default());
+        let ledger = ports.mutations.as_ref();
+        let key = MutationKey {
+            tenant_id: tenant("tenant-local")?,
+            subject: "alice".to_owned(),
+            operation: OperationName::CreateItem,
+            key: idempotency_key("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")?,
+        };
+        let digest = digest_of("a")?;
+        let BeginOutcome::New(id) = ledger.begin(&key, &digest).await? else {
+            return Err("the first begin must be New".into());
+        };
+        assert!(matches!(
+            ledger.begin(&key, &digest).await?,
+            BeginOutcome::InProgress { mutation_id, retry_after }
+                if mutation_id == id && retry_after >= 1
+        ));
+        assert!(matches!(
+            ledger.begin(&key, &digest_of("b")?).await?,
+            BeginOutcome::Conflict {
+                operation: OperationName::CreateItem
+            }
+        ));
+
+        ledger.release(id).await?;
+        assert!(matches!(
+            ledger.begin(&key, &digest).await?,
+            BeginOutcome::Abandoned { mutation_id } if mutation_id == id
+        ));
+        ledger.expire_leases()?;
+        assert!(matches!(
+            ledger.begin(&key, &digest).await?,
+            BeginOutcome::Abandoned { mutation_id } if mutation_id == id
+        ));
+
+        assert_eq!(ledger.stored_body(id)?, None);
+        ledger.complete(id, json!({ "done": true })).await?;
+        ledger.release(id).await?;
+        assert_eq!(ledger.stored_body(id)?, Some(json!({ "done": true })));
+        let BeginOutcome::Replay(stored) = ledger.begin(&key, &digest).await? else {
+            return Err("a completed mutation must replay".into());
+        };
+        assert_eq!(stored.mutation_id, id);
+        assert_eq!(stored.body, json!({ "done": true }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fixture_access_answers_from_its_table_unless_told_otherwise() -> TestResult {
+        let alice = Principal {
+            subject: "alice".to_owned(),
+            tenant_id: tenant("tenant-local")?,
+            route: AccessRoute::LocalOwner,
+            client_id: None,
+            delegation: None,
+        };
+        let home = workspace(HOME)?;
+        let elsewhere = workspace(ELSEWHERE)?;
+        let mut table = GrantTable::default();
+        table
+            .workspaces
+            .entry("alice".to_owned())
+            .or_default()
+            .insert(home, vec![Permission::Read]);
+        table.tenants.insert("alice".to_owned(), all_permissions());
+        let ports = FixturePorts::new(table);
+        let access = ports.access.as_ref();
+
+        assert_eq!(access.lookups(), 0);
+        let granted = access.authorize(&alice, home, Permission::Read).await?;
+        assert_eq!(granted.workspace_id(), home);
+        assert_eq!(granted.permissions, vec![Permission::Read]);
+        let refused = err_of(access.authorize(&alice, elsewhere, Permission::Read).await)?;
+        assert_eq!(refused.code, ErrorCode::Forbidden);
+        let tenant_grant = access.authorize_tenant(&alice, Permission::Admin).await?;
+        assert_eq!(tenant_grant.tenant_id, alice.tenant_id);
+        assert_eq!(access.lookups(), 3);
+
+        let created = access.grant_creator(&alice, elsewhere).await?;
+        assert_eq!(created.permissions, all_permissions());
+        assert_eq!(access.grants(&alice).await?.len(), 2);
+
+        access.answer_workspaces_as(StorageScope {
+            tenant_id: tenant("tenant-other")?,
+            workspace_id: elsewhere,
+        })?;
+        access.answer_tenants_as(tenant("tenant-other")?)?;
+        let misrouted = access.authorize(&alice, home, Permission::Read).await?;
+        assert_eq!(misrouted.workspace_id(), elsewhere);
+        assert_eq!(misrouted.scope.tenant_id, tenant("tenant-other")?);
+        let foreign = access.authorize_tenant(&alice, Permission::Admin).await?;
+        assert_eq!(foreign.tenant_id, tenant("tenant-other")?);
+        Ok(())
+    }
 }

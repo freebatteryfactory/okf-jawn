@@ -1,96 +1,126 @@
-//! A5 dispatch tests: grants, targets, delegation ceiling, and mutation ledger outcomes.
-
-mod support;
-
-use std::collections::BTreeMap;
-use std::error::Error;
-use std::sync::Mutex;
+//! Dispatch tests: every case goes through `dispatch` with the fixture `AccessControl` and the
+//! fixture `MutationStore`, and fails when the rule it names is removed.
 
 use okf_jawn_contract::access::{AccessRoute, DelegationCeiling, Permission, Principal};
-use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_contract::identity::{ConfirmationId, MutationId};
-use okf_jawn_contract::metadata::OperationName;
-use okf_jawn_contract::review::{ConfirmationAction, ConfirmationTarget};
-use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
-use okf_jawn_core::dispatch::{DispatchPorts, dispatch};
-use okf_jawn_core::mutations::MutationStore;
-use okf_jawn_core::ports::PortFuture;
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+use okf_jawn_contract::identity::IdentityError;
+use okf_jawn_core::context::Attempt;
+use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
+use okf_jawn_core::mutations::request_digest;
 use okf_jawn_core::storage::StorageScope;
 use serde_json::{Value, json};
-use support::counting::CountingApplication;
-use support::{FixturePorts, GrantTable, idempotency_key, tenant, workspace};
-use uuid::Uuid;
 
-fn principal(subject: &str, route: AccessRoute) -> Principal {
-    Principal {
+use check::{TestResult, err_of, some};
+use support::counting::CountingApplication;
+use support::{FixturePorts, GrantTable, all_permissions, tenant, workspace};
+
+const WORKSPACE_A: &str = "11111111-1111-4111-8111-111111111111";
+const WORKSPACE_B: &str = "22222222-2222-4222-8222-222222222222";
+const WORKSPACE_C: &str = "33333333-3333-4333-8333-333333333333";
+const KEY_ONE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const KEY_TWO: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const CONNECTOR: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+fn principal(subject: &str, route: AccessRoute) -> Result<Principal, IdentityError> {
+    Ok(Principal {
         subject: subject.to_owned(),
-        tenant_id: tenant("tenant-local"),
+        tenant_id: tenant("tenant-local")?,
         route,
         client_id: None,
         delegation: None,
-    }
-}
-
-fn all_perms() -> Vec<Permission> {
-    vec![
-        Permission::Read,
-        Permission::Write,
-        Permission::Propose,
-        Permission::Approve,
-        Permission::Review,
-        Permission::Admin,
-    ]
-}
-
-fn ports_admin_a_read_b() -> FixturePorts {
-    let a = workspace("11111111-1111-4111-8111-111111111111");
-    let b = workspace("22222222-2222-4222-8222-222222222222");
-    let mut workspaces = BTreeMap::new();
-    workspaces.insert(
-        a,
-        vec![
-            Permission::Read,
-            Permission::Write,
-            Permission::Propose,
-            Permission::Approve,
-            Permission::Review,
-            Permission::Admin,
-        ],
-    );
-    workspaces.insert(b, vec![Permission::Read]);
-    let mut subjects = BTreeMap::new();
-    subjects.insert("alice".to_owned(), workspaces);
-    let mut tenants = BTreeMap::new();
-    tenants.insert("alice".to_owned(), all_perms());
-    FixturePorts::new(GrantTable {
-        workspaces: subjects,
-        tenants,
     })
+}
+
+/// A connector acting for `subject` under a delegation ceiling of `permissions`.
+fn connector(subject: &str, permissions: Vec<Permission>) -> Result<Principal, IdentityError> {
+    let mut delegated = principal(subject, AccessRoute::McpDelegation)?;
+    delegated.client_id = Some("connector".to_owned());
+    delegated.delegation = Some(DelegationCeiling {
+        permissions,
+        workspace_ids: None,
+    });
+    Ok(delegated)
+}
+
+/// Alice holds every permission on A and on the tenant, and only Read on B.
+fn ports_admin_a_read_b() -> Result<FixturePorts, serde_json::Error> {
+    let mut table = GrantTable::default();
+    let alice = table.workspaces.entry("alice".to_owned()).or_default();
+    alice.insert(workspace(WORKSPACE_A)?, all_permissions());
+    alice.insert(workspace(WORKSPACE_B)?, vec![Permission::Read]);
+    table.tenants.insert("alice".to_owned(), all_permissions());
+    Ok(FixturePorts::new(table))
 }
 
 fn dispatch_ports(ports: &FixturePorts) -> DispatchPorts<'_> {
     DispatchPorts {
         access: ports.access.as_ref(),
         mutations: ports.mutations.as_ref(),
-        effects: ports.effects.as_ref(),
     }
 }
 
-fn write_item_body(workspace_id: &str, key: &str) -> Value {
+/// Dispatch as a caller without a browser session.
+///
+/// The dispatch future is boxed: it holds one state per declared operation, and awaiting it
+/// inline would make every test future that large (`clippy::large_futures`).
+async fn call(
+    app: &CountingApplication,
+    ports: &FixturePorts,
+    principal: &Principal,
+    operation: &str,
+    input: Value,
+) -> Result<Value, ApiError> {
+    let caller = Caller {
+        principal,
+        session_id: None,
+    };
+    Box::pin(dispatch(
+        app,
+        &dispatch_ports(ports),
+        &caller,
+        operation,
+        input,
+    ))
+    .await
+}
+
+/// Start `operation`, wait until its handler is running, then drop the attempt: a crash that
+/// leaves the lease behind.
+async fn crash_in_handler(
+    app: &CountingApplication,
+    ports: &FixturePorts,
+    principal: &Principal,
+    operation: &str,
+    input: Value,
+) -> TestResult {
+    app.park_next(operation)?;
+    let attempt = call(app, ports, principal, operation, input);
+    tokio::pin!(attempt);
+    tokio::select! {
+        biased;
+        outcome = &mut attempt => Err(Box::<dyn std::error::Error>::from(format!(
+            "the attempt finished while its handler was parked: {outcome:?}"
+        ))),
+        () = app.entered() => Ok(()),
+    }
+}
+
+fn create_item_body(workspace_id: &str, key: &str, text: &str) -> Value {
     json!({
         "workspace_id": workspace_id,
-        "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_revision": REVISION,
         "path": "notes/a.md",
         "title": "a",
         "type_name": "note",
         "kind": "note",
-        "body": "hello",
+        "body": text,
         "properties": {},
         "idempotency_key": key
     })
 }
 
-fn item_document(body: &str) -> Value {
+fn item_document(text: &str) -> Value {
     json!({
         "summary": {
             "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -99,632 +129,613 @@ fn item_document(body: &str) -> Value {
             "description": "",
             "type_name": "note",
             "kind": "note",
-            "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "revision": REVISION,
             "lifecycle": "active"
         },
-        "body": body,
+        "body": text,
         "properties": {}
     })
 }
 
+fn list_items_body(workspace_id: &str) -> Value {
+    json!({
+        "workspace_id": workspace_id,
+        "at": { "kind": "latest" },
+        "folder": "",
+        "page": { "limit": 10 }
+    })
+}
+
+fn listing() -> Value {
+    json!({ "revision": REVISION, "items": [], "folders": [] })
+}
+
+fn create_workspace_body(key: &str) -> Value {
+    json!({ "name": "n", "description": "d", "idempotency_key": key })
+}
+
+fn created_workspace() -> Value {
+    json!({
+        "id": WORKSPACE_A,
+        "name": "n",
+        "description": "d",
+        "head": REVISION,
+        "created_at": "2026-01-01T00:00:00Z",
+        "permissions": ["admin"]
+    })
+}
+
+fn open_proposal_body(key: &str) -> Value {
+    json!({
+        "workspace_id": WORKSPACE_A,
+        "base_revision": REVISION,
+        "title": "t",
+        "description": "d",
+        "changes": [],
+        "idempotency_key": key
+    })
+}
+
+fn proposal() -> Value {
+    json!({
+        "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "workspace_id": WORKSPACE_A,
+        "base_revision": REVISION,
+        "proposal_revision": REVISION,
+        "content_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "title": "t",
+        "description": "d",
+        "changes": [],
+        "status": "open",
+        "created_by": "alice",
+        "created_at": "2026-01-01T00:00:00Z"
+    })
+}
+
+fn create_connector_body(key: &str) -> Value {
+    json!({
+        "label": "agent",
+        "workspace_ids": [WORKSPACE_A],
+        "allow_propose": false,
+        "idempotency_key": key
+    })
+}
+
+fn issued_connector() -> Value {
+    json!({
+        "connector": {
+            "connector_id": CONNECTOR,
+            "label": "agent",
+            "workspace_ids": [WORKSPACE_A],
+            "permissions": ["read"],
+            "created_at": "2026-01-01T00:00:00Z"
+        },
+        "secret": "super-secret-value"
+    })
+}
+
 #[tokio::test]
-async fn admin_in_a_write_succeeds_write_in_b_forbidden_read_in_b_ok() -> Result<(), Box<dyn Error>>
-{
-    let ports = ports_admin_a_read_b();
+async fn write_needs_a_write_grant_and_read_needs_only_read() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
     app.set_response("create_item", item_document("hello"))?;
-    app.set_response(
-        "list_items",
-        json!({
-            "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "items": [],
-            "folders": []
-        }),
-    )?;
-    let alice = principal("alice", AccessRoute::LocalOwner);
-    let dp = dispatch_ports(&ports);
-    let key = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    let ok = dispatch(
-        &app,
-        &dp,
-        &alice,
-        "create_item",
-        write_item_body("11111111-1111-4111-8111-111111111111", key),
-    )
-    .await?;
-    assert!(ok.get("body").is_some());
+    app.set_response("list_items", listing())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let created = call(&app, &ports, &alice, "create_item", body).await?;
+    assert_eq!(created.get("body"), Some(&json!("hello")));
     assert_eq!(app.call_count("create_item")?, 1);
 
-    let forbidden = dispatch(
-        &app,
-        &dp,
-        &alice,
-        "create_item",
-        write_item_body(
-            "22222222-2222-4222-8222-222222222222",
-            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        ),
-    )
-    .await
-    .expect_err("write in B must fail");
-    assert_eq!(forbidden.code, ErrorCode::Forbidden);
+    let body = create_item_body(WORKSPACE_B, KEY_TWO, "hello");
+    let refused = err_of(call(&app, &ports, &alice, "create_item", body).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
     assert_eq!(app.call_count("create_item")?, 1);
 
-    let read = dispatch(
+    let listed = call(
         &app,
-        &dp,
+        &ports,
         &alice,
         "list_items",
-        json!({
-            "workspace_id": "22222222-2222-4222-8222-222222222222",
-            "at": {"kind": "latest"},
-            "folder": "",
-            "page": {"limit": 10}
-        }),
+        list_items_body(WORKSPACE_B),
     )
     .await?;
-    assert!(read.get("items").is_some());
+    assert_eq!(listed.get("items"), Some(&json!([])));
     assert_eq!(app.call_count("list_items")?, 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn present_with_foreign_binding_is_forbidden_before_handler() -> Result<(), Box<dyn Error>> {
-    let ports = ports_admin_a_read_b();
+async fn present_with_a_foreign_binding_is_forbidden_before_the_handler() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response(
-        "present_view",
-        json!({
-            "view": {
-                "schema_version": 1,
-                "title": "t",
-                "description": "d",
-                "mode": "pinned",
-                "grammar": "json_render",
-                "bindings": [],
-                "spec": {},
-                "charts": {}
-            },
-            "resolved_bindings": [],
-            "warnings": [],
-            "receipt_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
-        }),
-    )?;
-    let alice = principal("alice", AccessRoute::LocalOwner);
-    let err = dispatch(
-        &app,
-        &dispatch_ports(&ports),
-        &alice,
-        "present_view",
-        json!({
-            "workspace_id": "11111111-1111-4111-8111-111111111111",
-            "view": {
-                "schema_version": 1,
-                "title": "t",
-                "description": "d",
-                "mode": "pinned",
-                "grammar": "json_render",
-                "bindings": [{
-                    "name": "src",
-                    "source": {
-                        "workspace_id": "33333333-3333-4333-8333-333333333333",
-                        "item_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-                        "path": "notes/a.md",
-                        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                        "selection": {"kind": "all"}
-                    },
-                    "units": {},
-                    "transforms": []
-                }],
-                "spec": {},
-                "charts": {}
-            }
-        }),
-    )
-    .await
-    .expect_err("foreign binding must fail");
-    assert_eq!(err.code, ErrorCode::Forbidden);
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = json!({
+        "workspace_id": WORKSPACE_A,
+        "view": {
+            "schema_version": 1,
+            "title": "t",
+            "description": "d",
+            "mode": "pinned",
+            "grammar": "json_render",
+            "bindings": [{
+                "name": "src",
+                "source": {
+                    "workspace_id": WORKSPACE_C,
+                    "item_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "path": "notes/a.md",
+                    "revision": REVISION,
+                    "selection": { "kind": "all" }
+                },
+                "units": {},
+                "transforms": []
+            }],
+            "spec": {},
+            "charts": {}
+        }
+    });
+    let refused = err_of(call(&app, &ports, &alice, "present_view", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
     assert_eq!(app.call_count("present_view")?, 0);
     Ok(())
 }
 
 #[tokio::test]
-async fn create_workspace_without_tenant_grant_is_forbidden() -> Result<(), Box<dyn Error>> {
-    let a = workspace("11111111-1111-4111-8111-111111111111");
-    let mut workspaces = BTreeMap::new();
-    workspaces.insert(a, all_perms());
-    let mut subjects = BTreeMap::new();
-    subjects.insert("alice".to_owned(), workspaces);
-    let ports = FixturePorts::new(GrantTable {
-        workspaces: subjects,
-        tenants: BTreeMap::new(),
-    });
+async fn create_workspace_without_a_tenant_grant_is_forbidden() -> TestResult {
+    let mut table = GrantTable::default();
+    table
+        .workspaces
+        .entry("alice".to_owned())
+        .or_default()
+        .insert(workspace(WORKSPACE_A)?, all_permissions());
+    let ports = FixturePorts::new(table);
     let app = CountingApplication::new();
-    app.set_response(
-        "create_workspace",
-        json!({
-            "id": "11111111-1111-4111-8111-111111111111",
-            "name": "n",
-            "description": "d",
-            "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "created_at": "2026-01-01T00:00:00Z",
-            "permissions": ["admin"]
-        }),
-    )?;
-    let err = dispatch(
-        &app,
-        &dispatch_ports(&ports),
-        &principal("alice", AccessRoute::LocalOwner),
-        "create_workspace",
-        json!({
-            "name": "n",
-            "description": "d",
-            "idempotency_key": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-        }),
-    )
-    .await
-    .expect_err("missing tenant grant");
-    assert_eq!(err.code, ErrorCode::Forbidden);
+    app.set_response("create_workspace", created_workspace())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = create_workspace_body(KEY_ONE);
+    let refused = err_of(call(&app, &ports, &alice, "create_workspace", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
     assert_eq!(app.call_count("create_workspace")?, 0);
     Ok(())
 }
 
 #[tokio::test]
-async fn delegation_ceiling_blocks_write_for_read_only_connector() -> Result<(), Box<dyn Error>> {
-    let ports = ports_admin_a_read_b();
+async fn delegation_ceiling_decides_whether_a_connector_may_propose() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
+    app.set_response("open_proposal", proposal())?;
+
+    // Proposing passes the route check for a connector, and Alice's raw grant on A includes
+    // Propose, so the ceiling is the only rule left to refuse a read-only connector.
+    let reader = connector("alice", vec![Permission::Read])?;
+    let input = open_proposal_body(KEY_ONE);
+    let refused = err_of(call(&app, &ports, &reader, "open_proposal", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    assert_eq!(app.call_count("open_proposal")?, 0);
+
+    let drafter = connector("alice", vec![Permission::Read, Permission::Propose])?;
+    let input = open_proposal_body(KEY_TWO);
+    let opened = call(&app, &ports, &drafter, "open_proposal", input).await?;
+    assert_eq!(opened.get("status"), Some(&json!("open")));
+    assert_eq!(app.call_count("open_proposal")?, 1);
+
+    // A propose-capable ceiling still never reaches a write.
     app.set_response("create_item", item_document("hello"))?;
-    let mut alice = principal("alice", AccessRoute::McpDelegation);
-    alice.client_id = Some("connector".to_owned());
-    alice.delegation = Some(DelegationCeiling {
-        permissions: vec![Permission::Read],
-        workspace_ids: None,
-    });
-    let err = dispatch(
-        &app,
-        &dispatch_ports(&ports),
-        &alice,
-        "create_item",
-        write_item_body(
-            "11111111-1111-4111-8111-111111111111",
-            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        ),
-    )
-    .await
-    .expect_err("delegated read cannot write");
-    assert_eq!(err.code, ErrorCode::Forbidden);
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let refused = err_of(call(&app, &ports, &drafter, "create_item", body).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
     assert_eq!(app.call_count("create_item")?, 0);
     Ok(())
 }
 
 #[tokio::test]
-async fn replay_returns_identical_response_and_handler_runs_once() -> Result<(), Box<dyn Error>> {
-    let ports = ports_admin_a_read_b();
+async fn replay_returns_the_stored_response_and_the_handler_runs_once() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
     app.set_response("create_item", item_document("hello"))?;
-    let alice = principal("alice", AccessRoute::LocalOwner);
-    let body = write_item_body(
-        "11111111-1111-4111-8111-111111111111",
-        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    );
-    let first = dispatch(&app, &dispatch_ports(&ports), &alice, "create_item", body.clone()).await?;
-    let second = dispatch(&app, &dispatch_ports(&ports), &alice, "create_item", body).await?;
-    assert_eq!(first, second);
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let created = call(&app, &ports, &alice, "create_item", body.clone()).await?;
+    let replayed = call(&app, &ports, &alice, "create_item", body).await?;
+    assert_eq!(replayed, created);
     assert_eq!(app.call_count("create_item")?, 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn conflict_when_key_reused_with_different_body() -> Result<(), Box<dyn Error>> {
-    let ports = ports_admin_a_read_b();
+async fn the_same_key_with_a_different_body_conflicts() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
     app.set_response("create_item", item_document("hello"))?;
-    let alice = principal("alice", AccessRoute::LocalOwner);
-    let key = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    let _ = dispatch(
-        &app,
-        &dispatch_ports(&ports),
-        &alice,
-        "create_item",
-        write_item_body("11111111-1111-4111-8111-111111111111", key),
-    )
-    .await?;
-    let mut other = write_item_body("11111111-1111-4111-8111-111111111111", key);
-    other["body"] = json!("different");
-    let err = dispatch(&app, &dispatch_ports(&ports), &alice, "create_item", other)
-        .await
-        .expect_err("digest conflict");
-    assert_eq!(err.code, ErrorCode::Conflict);
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    call(&app, &ports, &alice, "create_item", body).await?;
+    let changed = create_item_body(WORKSPACE_A, KEY_ONE, "different");
+    let refused = err_of(call(&app, &ports, &alice, "create_item", changed).await)?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
     assert_eq!(app.call_count("create_item")?, 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn in_progress_when_second_begin_during_live_lease() -> Result<(), Box<dyn Error>> {
-    let ports = ports_admin_a_read_b();
-    let key = idempotency_key("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-    let mutation_key = okf_jawn_core::mutations::MutationKey {
-        tenant_id: tenant("tenant-local"),
-        subject: "alice".to_owned(),
-        operation: OperationName::CreateItem,
-        key,
-    };
-    let digest = okf_jawn_core::mutations::request_digest(&write_item_body(
-        "11111111-1111-4111-8111-111111111111",
-        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    ))?;
-    let first = ports.mutations.begin(&mutation_key, &digest).await?;
-    assert!(matches!(
-        first,
-        okf_jawn_core::mutations::BeginOutcome::New(_)
-    ));
-    let second = ports.mutations.begin(&mutation_key, &digest).await?;
-    assert!(matches!(
-        second,
-        okf_jawn_core::mutations::BeginOutcome::InProgress { .. }
-    ));
-    Ok(())
-}
-
-#[tokio::test]
-async fn abandoned_git_reconciles_via_effects_without_second_handler() -> Result<(), Box<dyn Error>>
-{
-    let ports = ports_admin_a_read_b();
+async fn a_second_attempt_during_a_live_lease_is_in_progress() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    let key = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    let body = write_item_body("11111111-1111-4111-8111-111111111111", key);
-    let mutation_key = okf_jawn_core::mutations::MutationKey {
-        tenant_id: tenant("tenant-local"),
-        subject: "alice".to_owned(),
-        operation: OperationName::CreateItem,
-        key: idempotency_key(key),
-    };
-    let digest = okf_jawn_core::mutations::request_digest(&body)?;
-    let outcome = ports.mutations.begin(&mutation_key, &digest).await?;
-    let okf_jawn_core::mutations::BeginOutcome::New(mutation_id) = outcome else {
-        panic!("expected New");
-    };
-    let stored = item_document("hello");
-    ports
-        .effects
-        .insert(OperationName::CreateItem, mutation_id, stored.clone())?;
-    ports.mutations.force_abandon(&mutation_key)?;
+    app.set_response("create_item", item_document("hello"))?;
+    app.park_next("create_item")?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let running = call(&app, &ports, &alice, "create_item", body.clone());
+    tokio::pin!(running);
+    tokio::select! {
+        biased;
+        outcome = &mut running => {
+            return Err(format!("the first attempt finished while parked: {outcome:?}").into());
+        }
+        () = app.entered() => {}
+    }
 
-    let alice = principal("alice", AccessRoute::LocalOwner);
-    let response = dispatch(&app, &dispatch_ports(&ports), &alice, "create_item", body).await?;
-    assert_eq!(response, stored);
-    assert_eq!(app.call_count("create_item")?, 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn abandoned_connector_reconciles_without_second_secret() -> Result<(), Box<dyn Error>> {
-    let mut tenants = BTreeMap::new();
-    tenants.insert("alice".to_owned(), all_perms());
-    let a = workspace("11111111-1111-4111-8111-111111111111");
-    let mut workspaces = BTreeMap::new();
-    workspaces.insert(a, all_perms());
-    let mut subjects = BTreeMap::new();
-    subjects.insert("alice".to_owned(), workspaces);
-    let ports = FixturePorts::new(GrantTable {
-        workspaces: subjects,
-        tenants,
-    });
-    let app = CountingApplication::new();
-    let key = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    let body = json!({
-        "label": "agent",
-        "workspace_ids": ["11111111-1111-4111-8111-111111111111"],
-        "allow_propose": false,
-        "idempotency_key": key
-    });
-    let mutation_key = okf_jawn_core::mutations::MutationKey {
-        tenant_id: tenant("tenant-local"),
-        subject: "alice".to_owned(),
-        operation: OperationName::CreateConnector,
-        key: idempotency_key(key),
-    };
-    let digest = okf_jawn_core::mutations::request_digest(&body)?;
-    let outcome = ports.mutations.begin(&mutation_key, &digest).await?;
-    let okf_jawn_core::mutations::BeginOutcome::New(mutation_id) = outcome else {
-        panic!("expected New");
-    };
-    let connector_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-    ports.effects.insert(
-        OperationName::CreateConnector,
-        mutation_id,
-        json!({ "connector_id": connector_id }),
+    let refused = err_of(call(&app, &ports, &alice, "create_item", body).await)?;
+    assert_eq!(refused.code, ErrorCode::InProgress);
+    let seen = app.contexts("create_item")?;
+    let holder = some(
+        seen.first().and_then(|context| context.mutation),
+        "the mutation id of the running attempt",
     )?;
-    ports.mutations.force_abandon(&mutation_key)?;
+    let detail = some(refused.detail, "the in-progress detail")?;
+    assert!(matches!(
+        *detail,
+        ErrorDetail::InProgress { mutation_id, retry_after }
+            if mutation_id == holder && retry_after >= 1
+    ));
+    assert_eq!(app.call_count("create_item")?, 1);
 
-    let err = dispatch(
-        &app,
-        &dispatch_ports(&ports),
-        &principal("alice", AccessRoute::LocalOwner),
-        "create_connector",
-        body,
-    )
-    .await
-    .expect_err("already issued");
-    assert_eq!(err.code, ErrorCode::AlreadyIssued);
-    assert_eq!(app.call_count("create_connector")?, 0);
-    let detail = err.detail.expect("AlreadyIssued detail");
-    let okf_jawn_contract::error::ErrorDetail::AlreadyIssued {
-        connector_id: found,
-    } = *detail
-    else {
-        panic!("expected AlreadyIssued detail");
-    };
-    assert_eq!(found.0.to_string(), connector_id);
+    app.resume();
+    let finished = running.await?;
+    assert_eq!(finished.get("body"), Some(&json!("hello")));
     Ok(())
 }
 
 #[tokio::test]
-async fn cross_subject_keys_are_independent() -> Result<(), Box<dyn Error>> {
-    let a = workspace("11111111-1111-4111-8111-111111111111");
-    let mut map = BTreeMap::new();
-    map.insert(a, all_perms());
-    let mut subjects = BTreeMap::new();
-    subjects.insert("x".to_owned(), map.clone());
-    subjects.insert("y".to_owned(), map);
-    let mut tenants = BTreeMap::new();
-    tenants.insert("x".to_owned(), all_perms());
-    tenants.insert("y".to_owned(), all_perms());
-    let ports = FixturePorts::new(GrantTable {
-        workspaces: subjects,
-        tenants,
-    });
+async fn an_abandoned_attempt_reruns_the_handler_once_as_resumed() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("from-x"))?;
-    let key = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    let body = write_item_body("11111111-1111-4111-8111-111111111111", key);
-    let x = dispatch(
-        &app,
-        &dispatch_ports(&ports),
-        &principal("x", AccessRoute::LocalOwner),
-        "create_item",
-        body.clone(),
-    )
-    .await?;
-    app.set_response("create_item", item_document("from-y"))?;
-    let y = dispatch(
-        &app,
-        &dispatch_ports(&ports),
-        &principal("y", AccessRoute::LocalOwner),
-        "create_item",
-        body,
-    )
-    .await?;
-    assert_ne!(x.get("body"), y.get("body"));
+    app.set_response("create_item", item_document("hello"))?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    crash_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
+    ports.mutations.expire_leases()?;
+
+    let response = call(&app, &ports, &alice, "create_item", body.clone()).await?;
+    assert_eq!(response.get("body"), Some(&json!("hello")));
+    let seen = app.contexts("create_item")?;
+    assert_eq!(seen.len(), 2);
+    let crashed = some(seen.first(), "the crashed attempt")?;
+    let resumed = some(seen.get(1), "the resumed attempt")?;
+    assert_eq!(crashed.attempt, Attempt::First);
+    assert_eq!(resumed.attempt, Attempt::Resumed);
+    assert!(crashed.mutation.is_some());
+    assert_eq!(resumed.mutation, crashed.mutation);
+
+    // The resumed attempt completed the mutation, so one more retry replays without a handler.
+    let replayed = call(&app, &ports, &alice, "create_item", body).await?;
+    assert_eq!(replayed, response);
     assert_eq!(app.call_count("create_item")?, 2);
     Ok(())
 }
 
 #[tokio::test]
-async fn create_connector_replay_is_already_issued_without_secret() -> Result<(), Box<dyn Error>> {
-    let mut tenants = BTreeMap::new();
-    tenants.insert("alice".to_owned(), all_perms());
-    let a = workspace("11111111-1111-4111-8111-111111111111");
-    let mut workspaces = BTreeMap::new();
-    workspaces.insert(a, all_perms());
-    let mut subjects = BTreeMap::new();
-    subjects.insert("alice".to_owned(), workspaces);
-    let ports = FixturePorts::new(GrantTable {
-        workspaces: subjects,
-        tenants,
-    });
+async fn a_resumed_create_connector_stores_only_the_connector_id() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response(
-        "create_connector",
-        json!({
-            "connector": {
-                "connector_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-                "label": "agent",
-                "workspace_ids": ["11111111-1111-4111-8111-111111111111"],
-                "permissions": ["read"],
-                "created_at": "2026-01-01T00:00:00Z"
-            },
-            "secret": "super-secret-value"
-        }),
-    )?;
-    let body = json!({
-        "label": "agent",
-        "workspace_ids": ["11111111-1111-4111-8111-111111111111"],
-        "allow_propose": false,
-        "idempotency_key": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-    });
-    let alice = principal("alice", AccessRoute::LocalOwner);
-    let first = dispatch(
-        &app,
-        &dispatch_ports(&ports),
-        &alice,
-        "create_connector",
-        body.clone(),
-    )
-    .await?;
-    assert_eq!(first["secret"], "super-secret-value");
-    let err = dispatch(&app, &dispatch_ports(&ports), &alice, "create_connector", body)
-        .await
-        .expect_err("replay must be AlreadyIssued");
-    assert_eq!(err.code, ErrorCode::AlreadyIssued);
+    app.set_response("create_connector", issued_connector())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = create_connector_body(KEY_ONE);
+    crash_in_handler(&app, &ports, &alice, "create_connector", input.clone()).await?;
+    ports.mutations.expire_leases()?;
+
+    let issued = call(&app, &ports, &alice, "create_connector", input).await?;
+    assert_eq!(issued.get("secret"), Some(&json!("super-secret-value")));
+    let seen = app.contexts("create_connector")?;
+    let resumed = some(seen.get(1), "the resumed attempt")?;
+    assert_eq!(resumed.attempt, Attempt::Resumed);
+    let mutation_id = some(resumed.mutation, "the mutation id")?;
+    assert_eq!(
+        ports.mutations.stored_body(mutation_id)?,
+        Some(json!({ "connector_id": CONNECTOR }))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_connector_replay_is_already_issued_without_the_secret() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_connector", issued_connector())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = create_connector_body(KEY_ONE);
+    let issued = call(&app, &ports, &alice, "create_connector", input.clone()).await?;
+    assert_eq!(issued.get("secret"), Some(&json!("super-secret-value")));
+
+    let refused = err_of(call(&app, &ports, &alice, "create_connector", input).await)?;
+    assert_eq!(refused.code, ErrorCode::AlreadyIssued);
     assert_eq!(app.call_count("create_connector")?, 1);
-    let stored = ports
-        .mutations
-        .find(app.last_mutation.lock().unwrap().expect("mutation"))
-        .await?
-        .expect("ledger row");
-    assert!(stored.body.get("secret").is_none());
-    assert!(stored.body.get("connector_id").is_some());
+    let detail = some(refused.detail, "the already-issued detail")?;
+    assert!(matches!(
+        *detail,
+        ErrorDetail::AlreadyIssued { connector_id } if connector_id.0.to_string() == CONNECTOR
+    ));
+
+    let seen = app.contexts("create_connector")?;
+    let mutation_id = some(
+        seen.first().and_then(|context| context.mutation),
+        "the mutation id",
+    )?;
+    assert_eq!(
+        ports.mutations.stored_body(mutation_id)?,
+        Some(json!({ "connector_id": CONNECTOR }))
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn confirmation_reconsume_same_mutation_succeeds_different_fails()
--> Result<(), Box<dyn Error>> {
-    let store = FixtureConfirmationStore::default();
-    let scope = StorageScope {
-        tenant_id: tenant("tenant-local"),
-        workspace_id: workspace("11111111-1111-4111-8111-111111111111"),
-    };
-    let create_id = MutationId(Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")?);
-    let confirmation = store
-        .create(
-            &scope,
-            create_id,
-            ConfirmationCreate {
-                action: ConfirmationAction::AcceptProposal,
-                target: ConfirmationTarget::Proposal {
-                    proposal_id: serde_json::from_str(
-                        "\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"",
-                    )?,
-                },
-                revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".parse()?,
-                content_digest:
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".parse()?,
-                session_id: "session".to_owned(),
-                subject: "alice".to_owned(),
-                expires_at: "2099-01-01T00:00:00Z".to_owned(),
-            },
-        )
-        .await?;
-    let consume = ConfirmationConsume {
-        confirmation_id: confirmation.id,
-        action: ConfirmationAction::AcceptProposal,
-        target: ConfirmationTarget::Proposal {
-            proposal_id: serde_json::from_str("\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\"")?,
-        },
-        revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".parse()?,
-        content_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .parse()?,
-        session_id: "session".to_owned(),
-        subject: "alice".to_owned(),
-    };
-    let m1 = MutationId(Uuid::parse_str("cccccccc-cccc-4ccc-8ccc-cccccccccccc")?);
-    let m2 = MutationId(Uuid::parse_str("dddddddd-dddd-4ddd-8ddd-dddddddddddd")?);
-    store.consume(&scope, m1, consume.clone()).await?;
-    // Crash before complete: retry with same MutationId succeeds.
-    store.consume(&scope, m1, consume.clone()).await?;
-    let err = store
-        .consume(&scope, m2, consume)
-        .await
-        .expect_err("different mutation cannot re-consume");
-    assert_eq!(err.code, ErrorCode::Conflict);
-    Ok(())
-}
-
-#[tokio::test]
-async fn write_without_idempotency_key_rejected_by_schema() -> Result<(), Box<dyn Error>> {
-    let ports = ports_admin_a_read_b();
+async fn the_same_key_from_two_subjects_is_two_mutations() -> TestResult {
+    let mut table = GrantTable::default();
+    for subject in ["xavier", "yolanda"] {
+        table
+            .workspaces
+            .entry(subject.to_owned())
+            .or_default()
+            .insert(workspace(WORKSPACE_A)?, all_permissions());
+    }
+    let ports = FixturePorts::new(table);
     let app = CountingApplication::new();
-    let err = dispatch(
-        &app,
-        &dispatch_ports(&ports),
-        &principal("alice", AccessRoute::LocalOwner),
-        "create_item",
-        json!({
-            "workspace_id": "11111111-1111-4111-8111-111111111111",
-            "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "path": "notes/a.md",
-            "title": "a",
-            "type_name": "note",
-            "kind": "note",
-            "body": "hello",
-            "properties": {}
-        }),
-    )
-    .await
-    .expect_err("missing idempotency_key");
-    assert_eq!(err.code, ErrorCode::InvalidInput);
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+
+    app.set_response("create_item", item_document("for xavier"))?;
+    let xavier = principal("xavier", AccessRoute::LocalOwner)?;
+    let xavier_item = call(&app, &ports, &xavier, "create_item", body.clone()).await?;
+    app.set_response("create_item", item_document("for yolanda"))?;
+    let yolanda = principal("yolanda", AccessRoute::LocalOwner)?;
+    let yolanda_item = call(&app, &ports, &yolanda, "create_item", body).await?;
+
+    assert_eq!(xavier_item.get("body"), Some(&json!("for xavier")));
+    assert_eq!(yolanda_item.get("body"), Some(&json!("for yolanda")));
+    assert_eq!(app.call_count("create_item")?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_write_without_an_idempotency_key_is_rejected_by_the_schema() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = json!({
+        "workspace_id": WORKSPACE_A,
+        "base_revision": REVISION,
+        "path": "notes/a.md",
+        "title": "a",
+        "type_name": "note",
+        "kind": "note",
+        "body": "hello",
+        "properties": {}
+    });
+    let refused = err_of(call(&app, &ports, &alice, "create_item", input).await)?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
     assert_eq!(app.call_count("create_item")?, 0);
     Ok(())
 }
 
-/// In-memory ConfirmationStore proving MutationId-scoped re-consume.
-#[derive(Default)]
-struct FixtureConfirmationStore {
-    rows: Mutex<BTreeMap<ConfirmationId, ConfirmationRow>>,
+#[tokio::test]
+async fn an_authenticated_target_needs_no_grant_and_no_adapter_lookup() -> TestResult {
+    let ports = FixturePorts::new(GrantTable::default());
+    let app = CountingApplication::new();
+    app.set_response("list_workspaces", json!({ "items": [] }))?;
+    let stranger = principal("stranger", AccessRoute::BrowserSession)?;
+    let input = json!({ "page": { "limit": 10 } });
+    let listed = call(&app, &ports, &stranger, "list_workspaces", input).await?;
+    assert_eq!(listed.get("items"), Some(&json!([])));
+    assert_eq!(ports.access.lookups(), 0);
+    let seen = app.contexts("list_workspaces")?;
+    let context = some(seen.first(), "the handler context")?;
+    assert!(context.tenant.is_none());
+    assert_eq!(context.grants, Vec::new());
+    Ok(())
 }
 
-struct ConfirmationRow {
-    confirmation: okf_jawn_contract::review::Confirmation,
-    create: ConfirmationCreate,
-    consumed_by: Option<MutationId>,
+#[tokio::test]
+async fn the_session_id_of_the_caller_reaches_the_handler() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("list_items", listing())?;
+    let alice = principal("alice", AccessRoute::BrowserSession)?;
+    let in_session = Caller {
+        principal: &alice,
+        session_id: Some("session-1"),
+    };
+    Box::pin(dispatch(
+        &app,
+        &dispatch_ports(&ports),
+        &in_session,
+        "list_items",
+        list_items_body(WORKSPACE_A),
+    ))
+    .await?;
+    call(
+        &app,
+        &ports,
+        &alice,
+        "list_items",
+        list_items_body(WORKSPACE_A),
+    )
+    .await?;
+
+    let seen = app.contexts("list_items")?;
+    let with_session = some(seen.first(), "the call made inside a session")?;
+    let without_session = some(seen.get(1), "the call made without a session")?;
+    assert_eq!(with_session.session_id.as_deref(), Some("session-1"));
+    assert_eq!(with_session.attempt, Attempt::First);
+    assert_eq!(without_session.session_id, None);
+    Ok(())
 }
 
-impl ConfirmationStore for FixtureConfirmationStore {
-    fn create<'a>(
-        &'a self,
-        _scope: &'a StorageScope,
-        _mutation_id: MutationId,
-        create: ConfirmationCreate,
-    ) -> PortFuture<'a, okf_jawn_contract::review::Confirmation> {
-        Box::pin(async move {
-            let confirmation = okf_jawn_contract::review::Confirmation {
-                id: ConfirmationId(Uuid::new_v4()),
-                expires_at: create.expires_at.clone(),
-                revision: create.revision.clone(),
-            };
-            self.rows
-                .lock()
-                .map_err(|_| {
-                    okf_jawn_contract::error::ApiError::new(ErrorCode::Internal, "lock poisoned")
-                })?
-                .insert(
-                    confirmation.id,
-                    ConfirmationRow {
-                        confirmation: confirmation.clone(),
-                        create,
-                        consumed_by: None,
-                    },
-                );
-            Ok(confirmation)
-        })
-    }
+#[tokio::test]
+async fn handler_error_then_retry_runs_again() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", item_document("hello"))?;
+    app.fail_once(
+        "create_item",
+        ApiError::new(ErrorCode::Unavailable, "index offline"),
+    )?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let refused = err_of(call(&app, &ports, &alice, "create_item", body.clone()).await)?;
+    assert_eq!(refused.code, ErrorCode::Unavailable);
+    assert_eq!(refused.message, "index offline");
 
-    fn find_by_mutation<'a>(
-        &'a self,
-        _scope: &'a StorageScope,
-        _mutation_id: MutationId,
-    ) -> PortFuture<'a, Option<okf_jawn_contract::review::Confirmation>> {
-        Box::pin(async move { Ok(None) })
-    }
-
-    fn consume<'a>(
-        &'a self,
-        _scope: &'a StorageScope,
-        mutation_id: MutationId,
-        consume: ConfirmationConsume,
-    ) -> PortFuture<'a, okf_jawn_contract::review::Confirmation> {
-        Box::pin(async move {
-            let mut rows = self.rows.lock().map_err(|_| {
-                okf_jawn_contract::error::ApiError::new(ErrorCode::Internal, "lock poisoned")
-            })?;
-            let row = rows.get_mut(&consume.confirmation_id).ok_or_else(|| {
-                okf_jawn_contract::error::ApiError::new(ErrorCode::NotFound, "confirmation missing")
-            })?;
-            if row.create.action != consume.action
-                || row.create.target != consume.target
-                || row.create.revision != consume.revision
-                || row.create.content_digest != consume.content_digest
-                || row.create.session_id != consume.session_id
-                || row.create.subject != consume.subject
-            {
-                return Err(okf_jawn_contract::error::ApiError::new(
-                    ErrorCode::Forbidden,
-                    "confirmation binding mismatch",
-                ));
-            }
-            match row.consumed_by {
-                None => {
-                    row.consumed_by = Some(mutation_id);
-                    Ok(row.confirmation.clone())
-                }
-                Some(prior) if prior == mutation_id => Ok(row.confirmation.clone()),
-                Some(_) => Err(okf_jawn_contract::error::ApiError::new(
-                    ErrorCode::Conflict,
-                    "confirmation already used by another mutation",
-                )),
-            }
-        })
-    }
+    let response = call(&app, &ports, &alice, "create_item", body).await?;
+    assert_eq!(response.get("body"), Some(&json!("hello")));
+    let seen = app.contexts("create_item")?;
+    assert_eq!(seen.len(), 2);
+    let earlier = some(seen.first(), "the failed attempt")?;
+    let later = some(seen.get(1), "the retry")?;
+    assert!(earlier.mutation.is_some());
+    assert_eq!(later.mutation, earlier.mutation);
+    assert_eq!(later.attempt, Attempt::Resumed);
+    Ok(())
 }
+
+#[tokio::test]
+async fn reordered_keys_replay_instead_of_conflicting() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", item_document("hello"))?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let original = json!({
+        "workspace_id": WORKSPACE_A,
+        "base_revision": REVISION,
+        "path": "notes/a.md",
+        "title": "a",
+        "type_name": "note",
+        "kind": "note",
+        "body": "hello",
+        "properties": { "nested": { "alpha": 1, "beta": 2 } },
+        "idempotency_key": KEY_ONE
+    });
+    let reordered = json!({
+        "idempotency_key": KEY_ONE,
+        "properties": { "nested": { "beta": 2, "alpha": 1 } },
+        "body": "hello",
+        "kind": "note",
+        "type_name": "note",
+        "title": "a",
+        "path": "notes/a.md",
+        "base_revision": REVISION,
+        "workspace_id": WORKSPACE_A
+    });
+    // Precondition: `preserve_order` is enabled for this test build, so the two inputs are the
+    // same JSON value written with different key order, at the top level and inside a value.
+    assert_eq!(original, reordered);
+    assert_ne!(
+        serde_json::to_string(&original)?,
+        serde_json::to_string(&reordered)?
+    );
+
+    let created = call(&app, &ports, &alice, "create_item", original).await?;
+    let replayed = call(&app, &ports, &alice, "create_item", reordered).await?;
+    assert_eq!(replayed, created);
+    assert_eq!(app.call_count("create_item")?, 1);
+    Ok(())
+}
+
+#[test]
+fn request_digest_sorts_keys_at_every_depth() -> TestResult {
+    let scrambled = json!({ "b": [{ "k": 1, "j": 2 }], "a": { "y": 2, "x": 1 } });
+    // SHA-256 of the bytes `{"a":{"x":1,"y":2},"b":[{"j":2,"k":1}]}`.
+    assert_eq!(
+        request_digest(&scrambled)?.as_str(),
+        "fa6628597d53c1e5019d96bfec141c0069e6959a5e0662f3899becda15925240"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_grant_for_another_workspace_is_refused_before_the_handler() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    ports.access.answer_workspaces_as(StorageScope {
+        tenant_id: tenant("tenant-local")?,
+        workspace_id: workspace(WORKSPACE_C)?,
+    })?;
+    let app = CountingApplication::new();
+    app.set_response("list_items", listing())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = list_items_body(WORKSPACE_A);
+    let refused = err_of(call(&app, &ports, &alice, "list_items", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert_eq!(
+        refused.message,
+        "Access adapter returned a grant for a different scope"
+    );
+    assert_eq!(app.call_count("list_items")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_workspace_grant_for_another_tenant_is_refused_before_the_handler() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    ports.access.answer_workspaces_as(StorageScope {
+        tenant_id: tenant("tenant-other")?,
+        workspace_id: workspace(WORKSPACE_A)?,
+    })?;
+    let app = CountingApplication::new();
+    app.set_response("list_items", listing())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = list_items_body(WORKSPACE_A);
+    let refused = err_of(call(&app, &ports, &alice, "list_items", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert_eq!(app.call_count("list_items")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_tenant_grant_for_another_tenant_is_refused_before_the_handler() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    ports.access.answer_tenants_as(tenant("tenant-other")?)?;
+    let app = CountingApplication::new();
+    app.set_response("create_workspace", created_workspace())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = create_workspace_body(KEY_ONE);
+    let refused = err_of(call(&app, &ports, &alice, "create_workspace", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert_eq!(app.call_count("create_workspace")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_schema_failure_names_the_offending_field() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+
+    let mistyped = json!({
+        "workspace_id": WORKSPACE_A,
+        "at": { "kind": "latest" },
+        "folder": "",
+        "page": { "limit": "ten" }
+    });
+    let refused = err_of(call(&app, &ports, &alice, "list_items", mistyped).await)?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("/page/limit"));
+
+    let keyless = json!({ "name": "n", "description": "d" });
+    let refused = err_of(call(&app, &ports, &alice, "create_workspace", keyless).await)?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("/idempotency_key"));
+    assert_eq!(app.call_count("list_items")?, 0);
+    Ok(())
+}
+
+#[path = "../../../tests/support/check.rs"]
+mod check;
+mod support;
