@@ -2,10 +2,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Known maintenance conditions.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AttentionKind {
     /// A reference does not resolve.
@@ -27,7 +26,7 @@ pub enum AttentionKind {
 }
 
 /// An observation with a useful next action.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AttentionItem {
     /// Diagnostic class.
@@ -38,11 +37,11 @@ pub struct AttentionItem {
     /// Concrete explanation.
     pub message: String,
     /// Suggested existing operation, never executable code.
-    pub action: String,
+    pub action: crate::metadata::OperationName,
 }
 
 /// Read workspace diagnostics at an explicit revision.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetAttentionRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -54,7 +53,7 @@ pub struct GetAttentionRequest {
 }
 
 /// Bounded diagnostics; an empty list does not establish safety.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetAttentionResponse {
     /// Inspected revision.
@@ -67,11 +66,11 @@ pub struct GetAttentionResponse {
 }
 
 /// Rebuild derived search and link indexes without deleting application records.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RebuildIndexRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
     /// Retry identity.
-    pub idempotency_key: String,
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }

@@ -2,10 +2,23 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+
+/// How one file differs between two revisions.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileChangeKind {
+    /// Present only in the compared revision.
+    Added,
+    /// Same path, different content.
+    Modified,
+    /// Different path for the same item.
+    Moved,
+    /// Present only in the base revision.
+    Removed,
+}
 
 /// A content snapshot, not a complete application event log.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Commit {
     /// Commit identity.
@@ -21,7 +34,7 @@ pub struct Commit {
 }
 
 /// List snapshots for an item or workspace.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LogRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -36,7 +49,7 @@ pub struct LogRequest {
 }
 
 /// Version history with pagination.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LogResponse {
     /// Content snapshots.
@@ -47,7 +60,7 @@ pub struct LogResponse {
 }
 
 /// Compare two explicitly resolved snapshots.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DiffRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -62,7 +75,7 @@ pub struct DiffRequest {
 }
 
 /// A changed file with before and after locators.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FileChange {
     /// Previous path; absent for additions.
@@ -74,11 +87,11 @@ pub struct FileChange {
     /// The underlying bytes are binary.
     pub binary: bool,
     /// Added, modified, moved, or removed.
-    pub kind: String,
+    pub kind: FileChangeKind,
 }
 
 /// A comparison tied to both source revisions.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DiffResponse {
     /// Base commit.
@@ -91,22 +104,28 @@ pub struct DiffResponse {
     pub warnings: Vec<crate::common::Warning>,
 }
 
-/// Create a named snapshot from saved drafts at a checked base revision.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+/// Snapshot the caller's drafts of the selected items in one commit.
+///
+/// If any selected item changed after its draft's base, or was deleted, the whole commit is
+/// rejected with a `draft_conflict` error detail. On success the snapshotted drafts are removed.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommitRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
-    /// Exact revision on which this change is based; stale writes conflict.
-    pub base_revision: crate::identity::Revision,
+    /// Workspace head the editor saw; a moved head conflicts.
+    pub expected_head: crate::identity::Revision,
+    /// Items whose drafts by the caller are snapshotted together.
+    #[schemars(length(min = 1))]
+    pub item_ids: Vec<crate::identity::ItemId>,
     /// Human-readable snapshot name.
     pub message: String,
-    /// Selected saved drafts; empty means the explicit workspace selection.
-    pub item_ids: Vec<crate::identity::ItemId>,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Restore the selected state as a new commit without rewriting history.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RestoreRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -120,10 +139,12 @@ pub struct RestoreRequest {
     pub item_id: Option<crate::identity::ItemId>,
     /// Reason for the restore.
     pub message: String,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Show which commit last changed lines, not who originated each fact.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BlameRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -137,7 +158,7 @@ pub struct BlameRequest {
 }
 
 /// A line and its last recorded content change.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BlameLine {
     /// One-based line.
@@ -149,7 +170,7 @@ pub struct BlameLine {
 }
 
 /// Line attribution at an explicit revision.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BlameResponse {
     /// Selected source.

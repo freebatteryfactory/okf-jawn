@@ -30,10 +30,9 @@ jobs:
           bun-version-file: .bun-version
       - name: Install the toolchain selected by rust-toolchain.toml
         run: rustup toolchain install
-      - name: Install cargo-audit 0.22.2
-        run: cargo install cargo-audit --version 0.22.2 --locked
-      - name: Install cargo-deny 0.20.2
-        run: cargo install cargo-deny --version 0.20.2 --locked
+      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - run: bun scripts/dev.mjs bootstrap
       - run: bun scripts/dev.mjs foundation
       - run: bun scripts/dev.mjs test

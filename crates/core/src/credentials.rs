@@ -1,9 +1,12 @@
 //! Connector credentials, browser sessions, and installation identity are never inferred from content.
+//!
+//! `create_connector` takes `MutationId` and enforces uniqueness: inserting with a reused id
+//! returns the prior connector without issuing a second secret.
 
 use okf_jawn_contract::access::{
     Connector, CreateConnectorRequest, IssuedConnector, ListConnectorsResponse, Principal,
 };
-use okf_jawn_contract::identity::ConnectorId;
+use okf_jawn_contract::identity::{ConnectorId, MutationId};
 
 use crate::ports::PortFuture;
 
@@ -32,7 +35,19 @@ pub trait CredentialStore: Send + Sync {
     /// Load or create the persistent local installation identity.
     fn installation_identity(&self) -> PortFuture<'_, InstallationIdentity>;
     /// Issue a local MCP connector credential; the secret is returned once.
-    fn create_connector(&self, request: CreateConnectorRequest) -> PortFuture<'_, IssuedConnector>;
+    ///
+    /// Unique on `mutation_id`. An abandoned retry returns the existing connector without
+    /// issuing a second secret.
+    fn create_connector<'a>(
+        &'a self,
+        mutation_id: MutationId,
+        request: CreateConnectorRequest,
+    ) -> PortFuture<'a, IssuedConnector>;
+    /// Look up a connector created under `mutation_id`, for abandoned-lease reconciliation.
+    fn find_connector_by_mutation(
+        &self,
+        mutation_id: MutationId,
+    ) -> PortFuture<'_, Option<Connector>>;
     /// List connector metadata without secrets.
     fn list_connectors(&self) -> PortFuture<'_, ListConnectorsResponse>;
     /// Revoke a connector immediately.

@@ -11,21 +11,16 @@ describe('MCP Apps RESOURCE_MIME_TYPE', () => {
     expect(RESOURCE_MIME_TYPE).toBe('text/html;profile=mcp-app');
   });
 
-  it('matches the mimeType written into dist-apps/manifest.json', () => {
-    const manifestPath = join(
+  it('matches the mimeType declared in api/mcp-apps.json', () => {
+    const declarationPath = join(
       dirname(fileURLToPath(import.meta.url)),
-      '../../dist-apps/manifest.json',
+      '../../../api/mcp-apps.json',
     );
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
-      resources?: Array<{ mimeType?: string }>;
-      mimeType?: string;
+    const declaration = JSON.parse(readFileSync(declarationPath, 'utf8')) as {
+      resources?: Array<{ uri?: string; mimeType?: string }>;
     };
-    const mimeTypes = Array.isArray(manifest.resources)
-      ? manifest.resources.map((entry) => entry.mimeType)
-      : [manifest.mimeType];
-    expect(mimeTypes.length).toBeGreaterThan(0);
-    for (const mimeType of mimeTypes) {
-      expect(mimeType).toBe(RESOURCE_MIME_TYPE);
-    }
+    expect(declaration.resources).toHaveLength(1);
+    expect(declaration.resources?.[0]?.uri).toBe('ui://okf-jawn/app.html');
+    expect(declaration.resources?.[0]?.mimeType).toBe(RESOURCE_MIME_TYPE);
   });
 });

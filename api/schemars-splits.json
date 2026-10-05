@@ -1,0 +1,16 @@
+{
+  "input_output_splits": [
+    {
+      "input": "GetSourcesResponseInput",
+      "output": "GetSourcesResponseOutput"
+    },
+    {
+      "input": "FileChangeInput",
+      "output": "FileChangeOutput"
+    },
+    {
+      "input": "DiffResponseInput",
+      "output": "DiffResponseOutput"
+    }
+  ]
+}

@@ -4,6 +4,65 @@
       "pattern": "^[0-9a-f]{64}$",
       "type": "string"
     },
+    "Draft": {
+      "additionalProperties": false,
+      "description": "Saved draft metadata; one per (item, editor), and never a revision.",
+      "properties": {
+        "base_revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Head revision the draft is based on; a Snapshot conflicts if the item changed since."
+        },
+        "content_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the drafted body and properties."
+        },
+        "editor": {
+          "description": "Server-established subject who owns this draft.",
+          "type": "string"
+        },
+        "item_id": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Drafted item."
+        },
+        "saved_at": {
+          "description": "RFC 3339 time of the latest save.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "editor",
+        "base_revision",
+        "content_digest",
+        "saved_at"
+      ],
+      "type": "object"
+    },
+    "DraftContent": {
+      "additionalProperties": false,
+      "description": "The caller's own draft content returned beside committed content.",
+      "properties": {
+        "body": {
+          "description": "Drafted Markdown body.",
+          "type": "string"
+        },
+        "draft": {
+          "$ref": "#/$defs/Draft",
+          "description": "Draft metadata."
+        },
+        "properties": {
+          "additionalProperties": true,
+          "description": "Drafted complete property map.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "draft",
+        "body",
+        "properties"
+      ],
+      "type": "object"
+    },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
@@ -211,6 +270,17 @@
     "body": {
       "description": "Markdown body, preserving source locators.",
       "type": "string"
+    },
+    "draft": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DraftContent"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The caller's own uncommitted draft; never another editor's, and never on agent routes."
     },
     "properties": {
       "additionalProperties": true,

@@ -1,18 +1,45 @@
 //! Capability and constraint are tested together, not by accepting universal refusal.
 
-use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
-use okf_jawn_contract::identity::WorkspaceId;
-use okf_jawn_core::access::authorize;
+use okf_jawn_contract::access::{AccessRoute, DelegationCeiling, Permission, Principal};
+use okf_jawn_contract::identity::{TenantId, WorkspaceId};
+use okf_jawn_core::access::{authorize_tenant, authorize_workspace, check_route};
+use okf_jawn_core::context::{TenantGrant, WorkspaceGrant};
+use okf_jawn_core::storage::StorageScope;
 use std::error::Error;
+
+fn grant(workspace: WorkspaceId, permissions: Vec<Permission>) -> WorkspaceGrant {
+    WorkspaceGrant {
+        scope: StorageScope {
+            tenant_id: TenantId::try_from("tenant-local".to_owned()).expect("tenant"),
+            workspace_id: workspace,
+        },
+        permissions,
+    }
+}
 
 #[test]
 fn delegated_proposal_is_allowed_but_approval_is_not() -> Result<(), Box<dyn Error>> {
     let workspace: WorkspaceId = serde_json::from_str("\"11111111-1111-4111-8111-111111111111\"")?;
     let principal = Principal {
         subject: "test-subject".to_owned(),
+        tenant_id: TenantId::try_from("tenant-local".to_owned())?,
         route: AccessRoute::McpDelegation,
-        workspace_ids: vec![workspace],
-        permissions: vec![
+        client_id: Some("test-client".to_owned()),
+        delegation: Some(DelegationCeiling {
+            permissions: vec![
+                Permission::Read,
+                Permission::Propose,
+                Permission::Approve,
+                Permission::Review,
+                Permission::Write,
+                Permission::Admin,
+            ],
+            workspace_ids: Some(vec![workspace]),
+        }),
+    };
+    let raw = grant(
+        workspace,
+        vec![
             Permission::Read,
             Permission::Propose,
             Permission::Approve,
@@ -20,19 +47,27 @@ fn delegated_proposal_is_allowed_but_approval_is_not() -> Result<(), Box<dyn Err
             Permission::Write,
             Permission::Admin,
         ],
-        client_id: Some("test-client".to_owned()),
-    };
-    assert!(authorize(&principal, &Permission::Read, Some(workspace)).is_ok());
-    assert!(authorize(&principal, &Permission::Propose, Some(workspace)).is_ok());
-    assert!(authorize(&principal, &Permission::Approve, Some(workspace)).is_err());
-    assert!(authorize(&principal, &Permission::Review, Some(workspace)).is_err());
-    assert!(authorize(&principal, &Permission::Write, Some(workspace)).is_err());
-    assert!(authorize(&principal, &Permission::Admin, Some(workspace)).is_err());
+    );
+    assert!(authorize_workspace(&principal, raw.clone(), Permission::Read).is_ok());
+    assert!(authorize_workspace(&principal, raw.clone(), Permission::Propose).is_ok());
+    assert!(authorize_workspace(&principal, raw.clone(), Permission::Approve).is_err());
+    assert!(authorize_workspace(&principal, raw.clone(), Permission::Review).is_err());
+    assert!(authorize_workspace(&principal, raw.clone(), Permission::Write).is_err());
+    assert!(authorize_workspace(&principal, raw, Permission::Admin).is_err());
     let human = Principal {
         route: AccessRoute::BrowserSession,
+        delegation: None,
         ..principal
     };
-    assert!(authorize(&human, &Permission::Approve, Some(workspace)).is_ok());
+    assert!(check_route(&human, Permission::Approve).is_ok());
+    assert!(
+        authorize_workspace(
+            &human,
+            grant(workspace, vec![Permission::Approve]),
+            Permission::Approve
+        )
+        .is_ok()
+    );
     Ok(())
 }
 
@@ -43,17 +78,10 @@ fn local_owner_uses_the_same_rules_and_cannot_reach_other_workspaces() -> Result
     let foreign: WorkspaceId = serde_json::from_str("\"33333333-3333-4333-8333-333333333333\"")?;
     let owner = Principal {
         subject: "local-installation-owner".to_owned(),
+        tenant_id: TenantId::try_from("tenant-local".to_owned())?,
         route: AccessRoute::LocalOwner,
-        workspace_ids: vec![local],
-        permissions: vec![
-            Permission::Read,
-            Permission::Write,
-            Permission::Propose,
-            Permission::Approve,
-            Permission::Review,
-            Permission::Admin,
-        ],
         client_id: None,
+        delegation: None,
     };
     for permission in [
         Permission::Read,
@@ -62,18 +90,47 @@ fn local_owner_uses_the_same_rules_and_cannot_reach_other_workspaces() -> Result
         Permission::Review,
         Permission::Admin,
     ] {
-        assert!(authorize(&owner, &permission, Some(local)).is_ok());
-        assert!(authorize(&owner, &permission, Some(foreign)).is_err());
+        assert!(authorize_workspace(&owner, grant(local, vec![permission]), permission).is_ok());
+        assert!(authorize_workspace(&owner, grant(foreign, Vec::new()), permission).is_err());
     }
     let connector = Principal {
         subject: "local-installation-owner".to_owned(),
+        tenant_id: TenantId::try_from("tenant-local".to_owned())?,
         route: AccessRoute::McpDelegation,
-        workspace_ids: vec![local],
-        permissions: vec![Permission::Read],
         client_id: Some("local-connector".to_owned()),
+        delegation: Some(DelegationCeiling {
+            permissions: vec![Permission::Read],
+            workspace_ids: Some(vec![local]),
+        }),
     };
-    assert!(authorize(&connector, &Permission::Read, Some(local)).is_ok());
-    assert!(authorize(&connector, &Permission::Propose, Some(local)).is_err());
-    assert!(authorize(&connector, &Permission::Read, Some(foreign)).is_err());
+    assert!(
+        authorize_workspace(
+            &connector,
+            grant(local, vec![Permission::Read, Permission::Propose]),
+            Permission::Read
+        )
+        .is_ok()
+    );
+    assert!(
+        authorize_workspace(
+            &connector,
+            grant(local, vec![Permission::Read, Permission::Propose]),
+            Permission::Propose
+        )
+        .is_err()
+    );
+    assert!(
+        authorize_workspace(
+            &connector,
+            grant(foreign, vec![Permission::Read]),
+            Permission::Read
+        )
+        .is_err()
+    );
+    let tenant = TenantGrant {
+        tenant_id: owner.tenant_id.clone(),
+        permissions: vec![Permission::Admin],
+    };
+    assert!(authorize_tenant(&owner, tenant, Permission::Admin).is_ok());
     Ok(())
 }

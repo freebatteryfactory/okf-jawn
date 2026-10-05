@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, ServerSentEventsResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { AcceptProposalData, AcceptProposalErrors, AcceptProposalResponses, AddCommentData, AddCommentErrors, AddCommentResponses, ApplyNamesData, ApplyNamesErrors, ApplyNamesResponses, ArchiveWorkspaceData, ArchiveWorkspaceErrors, ArchiveWorkspaceResponses, BackupWorkspaceData, BackupWorkspaceErrors, BackupWorkspaceResponses, BeginLocalSessionData, BeginLoginData, BlameItemData, BlameItemErrors, BlameItemResponses, CancelJobData, CancelJobErrors, CancelJobResponses, CommitItemsData, CommitItemsErrors, CommitItemsResponses, CompleteLoginData, CompleteUploadData, CompleteUploadErrors, CompleteUploadResponses, CorrectDigestData, CorrectDigestErrors, CorrectDigestResponses, CreateConfirmationData, CreateConfirmationErrors, CreateConfirmationResponses, CreateConnectorData, CreateConnectorErrors, CreateConnectorResponses, CreateFolderData, CreateFolderErrors, CreateFolderResponses, CreateItemData, CreateItemErrors, CreateItemResponses, CreateReviewData, CreateReviewErrors, CreateReviewResponses, CreateUploadData, CreateUploadErrors, CreateUploadResponses, CreateWorkspaceData, CreateWorkspaceErrors, CreateWorkspaceResponses, DeclineProposalData, DeclineProposalErrors, DeclineProposalResponses, DeleteItemData, DeleteItemErrors, DeleteItemResponses, DiffItemsData, DiffItemsErrors, DiffItemsResponses, DownloadArtifactData, DownloadArtifactResponses, DownloadObjectData, DownloadObjectResponses, EndSessionData, EndSessionResponses, ExportViewData, ExportViewErrors, ExportViewResponses, ExportWorkspaceData, ExportWorkspaceErrors, ExportWorkspaceResponses, GetAttentionData, GetAttentionErrors, GetAttentionResponses, GetCatalogData, GetCatalogErrors, GetCatalogResponses, GetFormSchemaData, GetFormSchemaResponses, GetGraphData, GetGraphErrors, GetGraphResponses, GetHealthData, GetHealthErrors, GetHealthResponses, GetItemData, GetItemErrors, GetItemResponses, GetJobData, GetJobErrors, GetJobResponses, GetLinksData, GetLinksErrors, GetLinksResponses, GetObjectData, GetObjectErrors, GetObjectResponses, GetProposalData, GetProposalErrors, GetProposalResponses, GetReadinessData, GetReadinessErrors, GetReadinessResponses, GetReceiptData, GetReceiptErrors, GetReceiptResponses, GetResourceMetadataData, GetResourceMetadataResponses, GetRulesData, GetRulesErrors, GetRulesResponses, GetSessionData, GetSessionErrors, GetSessionResponses, GetSourcesData, GetSourcesErrors, GetSourcesResponses, GetViewData, GetViewErrors, GetViewResponses, ListConnectorsData, ListConnectorsErrors, ListConnectorsResponses, ListEventsData, ListEventsErrors, ListEventsResponses, ListItemsData, ListItemsErrors, ListItemsResponses, ListJobsData, ListJobsErrors, ListJobsResponses, ListProposalsData, ListProposalsErrors, ListProposalsResponses, ListReviewsData, ListReviewsErrors, ListReviewsResponses, ListTypesData, ListTypesErrors, ListTypesResponses, ListWorkspacesData, ListWorkspacesErrors, ListWorkspacesResponses, LivenessData, LivenessResponses, LogItemsData, LogItemsErrors, LogItemsResponses, McpCloseData, McpCloseResponses, McpEventsData, McpEventsResponse, McpEventsResponses, McpRequestData, McpRequestResponses, MoveItemData, MoveItemErrors, MoveItemResponses, OpenProposalData, OpenProposalErrors, OpenProposalResponses, OpenWorkspaceData, OpenWorkspaceErrors, OpenWorkspaceResponses, PresentViewData, PresentViewErrors, PresentViewResponses, PreviewNamesData, PreviewNamesErrors, PreviewNamesResponses, ReadItemData, ReadItemErrors, ReadItemResponses, RebuildIndexData, RebuildIndexErrors, RebuildIndexResponses, RedigestItemData, RedigestItemErrors, RedigestItemResponses, ResolveViewData, ResolveViewErrors, ResolveViewResponses, RestoreItemsData, RestoreItemsErrors, RestoreItemsResponses, RestoreWorkspaceData, RestoreWorkspaceErrors, RestoreWorkspaceResponses, RetryJobData, RetryJobErrors, RetryJobResponses, RevokeConnectorData, RevokeConnectorErrors, RevokeConnectorResponses, SearchItemsData, SearchItemsErrors, SearchItemsResponses, ServeSandboxRepresentationData, ServeSandboxRepresentationResponses, SetLifecycleData, SetLifecycleErrors, SetLifecycleResponses, SetRulesData, SetRulesErrors, SetRulesResponses, SetTypeData, SetTypeErrors, SetTypeResponses, StartImportData, StartImportErrors, StartImportResponses, StreamEventsData, StreamEventsResponse, StreamEventsResponses, UpdateItemData, UpdateItemErrors, UpdateItemResponses, UpdateWorkspaceData, UpdateWorkspaceErrors, UpdateWorkspaceResponses, UploadContentData, UploadContentResponses } from './types.gen';
+import type { AcceptProposalData, AcceptProposalErrors, AcceptProposalResponses, AddCommentData, AddCommentErrors, AddCommentResponses, ApplyNamesData, ApplyNamesErrors, ApplyNamesResponses, ArchiveWorkspaceData, ArchiveWorkspaceErrors, ArchiveWorkspaceResponses, BackupWorkspaceData, BackupWorkspaceErrors, BackupWorkspaceResponses, BeginLocalSessionData, BeginLoginData, BlameItemData, BlameItemErrors, BlameItemResponses, CancelJobData, CancelJobErrors, CancelJobResponses, CommitItemsData, CommitItemsErrors, CommitItemsResponses, CompleteLoginData, CompleteUploadData, CompleteUploadErrors, CompleteUploadResponses, CorrectDigestData, CorrectDigestErrors, CorrectDigestResponses, CreateConfirmationData, CreateConfirmationErrors, CreateConfirmationResponses, CreateConnectorData, CreateConnectorErrors, CreateConnectorResponses, CreateFolderData, CreateFolderErrors, CreateFolderResponses, CreateItemData, CreateItemErrors, CreateItemResponses, CreateReviewData, CreateReviewErrors, CreateReviewResponses, CreateSandboxCapabilityData, CreateSandboxCapabilityErrors, CreateSandboxCapabilityResponses, CreateUploadData, CreateUploadErrors, CreateUploadResponses, CreateWorkspaceData, CreateWorkspaceErrors, CreateWorkspaceResponses, DeclineProposalData, DeclineProposalErrors, DeclineProposalResponses, DeleteItemData, DeleteItemErrors, DeleteItemResponses, DiffItemsData, DiffItemsErrors, DiffItemsResponses, DiscardDraftData, DiscardDraftErrors, DiscardDraftResponses, DownloadArtifactData, DownloadArtifactResponses, DownloadObjectData, DownloadObjectResponses, EndSessionData, EndSessionResponses, ExportViewData, ExportViewErrors, ExportViewResponses, ExportWorkspaceData, ExportWorkspaceErrors, ExportWorkspaceResponses, GetAttentionData, GetAttentionErrors, GetAttentionResponses, GetCatalogData, GetCatalogErrors, GetCatalogResponses, GetFormSchemaData, GetFormSchemaResponses, GetGraphData, GetGraphErrors, GetGraphResponses, GetHealthData, GetHealthErrors, GetHealthResponses, GetItemData, GetItemErrors, GetItemResponses, GetJobData, GetJobErrors, GetJobResponses, GetLinksData, GetLinksErrors, GetLinksResponses, GetObjectData, GetObjectErrors, GetObjectResponses, GetProposalData, GetProposalErrors, GetProposalResponses, GetReadinessData, GetReadinessErrors, GetReadinessResponses, GetReceiptData, GetReceiptErrors, GetReceiptResponses, GetResourceMetadataData, GetResourceMetadataResponses, GetRulesData, GetRulesErrors, GetRulesResponses, GetSessionData, GetSessionErrors, GetSessionResponses, GetSourcesData, GetSourcesErrors, GetSourcesResponses, GetViewData, GetViewErrors, GetViewResponses, ListConnectorsData, ListConnectorsErrors, ListConnectorsResponses, ListDraftsData, ListDraftsErrors, ListDraftsResponses, ListEventsData, ListEventsErrors, ListEventsResponses, ListItemsData, ListItemsErrors, ListItemsResponses, ListJobsData, ListJobsErrors, ListJobsResponses, ListProposalsData, ListProposalsErrors, ListProposalsResponses, ListReviewsData, ListReviewsErrors, ListReviewsResponses, ListTypesData, ListTypesErrors, ListTypesResponses, ListWorkspacesData, ListWorkspacesErrors, ListWorkspacesResponses, LivenessData, LivenessResponses, LogItemsData, LogItemsErrors, LogItemsResponses, McpCloseData, McpCloseResponses, McpEventsData, McpEventsResponse, McpEventsResponses, McpRequestData, McpRequestResponses, MoveItemData, MoveItemErrors, MoveItemResponses, OpenProposalData, OpenProposalErrors, OpenProposalResponses, OpenWorkspaceData, OpenWorkspaceErrors, OpenWorkspaceResponses, PresentViewData, PresentViewErrors, PresentViewResponses, PreviewNamesData, PreviewNamesErrors, PreviewNamesResponses, ReadItemData, ReadItemErrors, ReadItemResponses, RebuildIndexData, RebuildIndexErrors, RebuildIndexResponses, RedigestItemData, RedigestItemErrors, RedigestItemResponses, ResolveViewData, ResolveViewErrors, ResolveViewResponses, RestoreItemsData, RestoreItemsErrors, RestoreItemsResponses, RestoreWorkspaceData, RestoreWorkspaceErrors, RestoreWorkspaceResponses, RetryJobData, RetryJobErrors, RetryJobResponses, RevokeConnectorData, RevokeConnectorErrors, RevokeConnectorResponses, SaveDraftData, SaveDraftErrors, SaveDraftResponses, SearchItemsData, SearchItemsErrors, SearchItemsResponses, ServeSandboxRepresentationData, ServeSandboxRepresentationResponses, SetLifecycleData, SetLifecycleErrors, SetLifecycleResponses, SetRulesData, SetRulesErrors, SetRulesResponses, SetTypeData, SetTypeErrors, SetTypeResponses, StartImportData, StartImportErrors, StartImportResponses, StreamEventsData, StreamEventsResponse, StreamEventsResponses, UpdateWorkspaceData, UpdateWorkspaceErrors, UpdateWorkspaceResponses, UploadContentData, UploadContentResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -539,6 +539,25 @@ export const deleteItem = <ThrowOnError extends boolean = false>(options: Option
 });
 
 /**
+ * Discard draft
+ *
+ * Remove the caller's own draft without changing committed content.
+ */
+export const discardDraft = <ThrowOnError extends boolean = false>(options: Options<DiscardDraftData, ThrowOnError>): RequestResult<DiscardDraftResponses, DiscardDraftErrors, ThrowOnError> => (options.client ?? client).post<DiscardDraftResponses, DiscardDraftErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/items/discard-draft',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * Properties
  *
  * Read the editable Markdown and preserved properties of an item.
@@ -550,6 +569,25 @@ export const getItem = <ThrowOnError extends boolean = false>(options: Options<G
             type: 'apiKey'
         }],
     url: '/api/items/get-item',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Drafts
+ *
+ * List only the caller's own uncommitted drafts.
+ */
+export const listDrafts = <ThrowOnError extends boolean = false>(options: Options<ListDraftsData, ThrowOnError>): RequestResult<ListDraftsResponses, ListDraftsErrors, ThrowOnError> => (options.client ?? client).post<ListDraftsResponses, ListDraftsErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/items/list-drafts',
     ...options,
     headers: {
         'Content-Type': 'application/json',
@@ -596,6 +634,25 @@ export const moveItem = <ThrowOnError extends boolean = false>(options: Options<
 });
 
 /**
+ * Save
+ *
+ * Autosave the caller's own draft against its base revision; never creates a revision, and only a Snapshot commits it.
+ */
+export const saveDraft = <ThrowOnError extends boolean = false>(options: Options<SaveDraftData, ThrowOnError>): RequestResult<SaveDraftResponses, SaveDraftErrors, ThrowOnError> => (options.client ?? client).post<SaveDraftResponses, SaveDraftErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/items/save-draft',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * Archive
  *
  * Change lifecycle without approving any claim in the document.
@@ -607,25 +664,6 @@ export const setLifecycle = <ThrowOnError extends boolean = false>(options: Opti
             type: 'apiKey'
         }],
     url: '/api/items/set-lifecycle',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-/**
- * Save
- *
- * Save content with a base revision precondition; obsolete reviews do not transfer.
- */
-export const updateItem = <ThrowOnError extends boolean = false>(options: Options<UpdateItemData, ThrowOnError>): RequestResult<UpdateItemResponses, UpdateItemErrors, ThrowOnError> => (options.client ?? client).post<UpdateItemResponses, UpdateItemErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }, {
-            in: 'cookie',
-            name: 'okf-session',
-            type: 'apiKey'
-        }],
-    url: '/api/items/update-item',
     ...options,
     headers: {
         'Content-Type': 'application/json',
@@ -740,6 +778,25 @@ export const openProposal = <ThrowOnError extends boolean = false>(options: Opti
             type: 'apiKey'
         }],
     url: '/api/proposals/open-proposal',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Open sandboxed
+ *
+ * Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.
+ */
+export const createSandboxCapability = <ThrowOnError extends boolean = false>(options: Options<CreateSandboxCapabilityData, ThrowOnError>): RequestResult<CreateSandboxCapabilityResponses, CreateSandboxCapabilityErrors, ThrowOnError> => (options.client ?? client).post<CreateSandboxCapabilityResponses, CreateSandboxCapabilityErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/reads/create-sandbox-capability',
     ...options,
     headers: {
         'Content-Type': 'application/json',
@@ -1454,6 +1511,14 @@ export const mcpRequest = <ThrowOnError extends boolean = false>(options: Option
 /**
  * serve_sandbox_representation
  *
- * Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).
+ * Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. The capability from create_sandbox_capability is the only credential: it binds workspace, item, revision and representation, is stored hashed, expires, and is never logged. No ambient session cookies, credentials, or privileged APIs; respond with no-store, no-referrer and a strict CSP (SPEC sections 7 and 11).
  */
-export const serveSandboxRepresentation = <ThrowOnError extends boolean = false>(options: Options<ServeSandboxRepresentationData, ThrowOnError>): RequestResult<ServeSandboxRepresentationResponses, unknown, ThrowOnError> => (options.client ?? client).get<ServeSandboxRepresentationResponses, unknown, ThrowOnError>({ url: '/sandbox/workspaces/{workspace_id}/items/{item_id}/revisions/{revision}', ...options });
+export const serveSandboxRepresentation = <ThrowOnError extends boolean = false>(options: Options<ServeSandboxRepresentationData, ThrowOnError>): RequestResult<ServeSandboxRepresentationResponses, unknown, ThrowOnError> => (options.client ?? client).get<ServeSandboxRepresentationResponses, unknown, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/sandbox/{capability}',
+    ...options
+});

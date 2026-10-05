@@ -104,8 +104,8 @@
       "description": "A navigable structural element from a document.",
       "properties": {
         "kind": {
-          "description": "Heading, table, figure, page, or sheet.",
-          "type": "string"
+          "$ref": "#/$defs/OutlineEntryKind",
+          "description": "Structural element type."
         },
         "label": {
           "description": "Visible heading or media caption.",
@@ -130,6 +130,36 @@
         "kind"
       ],
       "type": "object"
+    },
+    "OutlineEntryKind": {
+      "description": "Structural element types an outline can point to.",
+      "oneOf": [
+        {
+          "const": "heading",
+          "description": "A document heading.",
+          "type": "string"
+        },
+        {
+          "const": "table",
+          "description": "A table.",
+          "type": "string"
+        },
+        {
+          "const": "figure",
+          "description": "A figure or image.",
+          "type": "string"
+        },
+        {
+          "const": "page",
+          "description": "A document page.",
+          "type": "string"
+        },
+        {
+          "const": "sheet",
+          "description": "A spreadsheet sheet.",
+          "type": "string"
+        }
+      ]
     },
     "PageRange": {
       "additionalProperties": false,

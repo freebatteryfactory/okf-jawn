@@ -1253,9 +1253,9 @@ dependencies = [
 
 [[package]]
 name = "docling-core"
-version = "1.93.6"
+version = "1.96.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a9612b6016fa242f6b9c0075ff6f74688a9190bd62f7870ee62181f7f0280f1"
+checksum = "d9b5a048220b5027b616c407da4ef79dae2d2869c4b7b85fccb5183e2f22ec9c"
 dependencies = [
  "png 0.18.1",
  "serde_json",
@@ -1264,9 +1264,9 @@ dependencies = [
 
 [[package]]
 name = "docling-onnx"
-version = "1.93.6"
+version = "1.96.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e05e93f30284836ff159d7870bf8d45b1ef26ea4df5f7869bcb07fe22d15de13"
+checksum = "6b99e8ecd4c8351cf079e74631c4fd927b1b2bdbecc3e9b3b9e1589432001d08"
 dependencies = [
  "docling-core",
  "ort",
@@ -1274,9 +1274,9 @@ dependencies = [
 
 [[package]]
 name = "docling-pdf"
-version = "1.93.6"
+version = "1.96.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61cfc0d963a53cc989cdd5c427161d2d8eaa5e809cdeb82d8524c003428ead9a"
+checksum = "95014d847c2f79efdb374cb845287c51f0ddab815cd9ec385f353574ac1c33a2"
 dependencies = [
  "docling-core",
  "docling-onnx",
@@ -3210,7 +3210,6 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "utoipa",
  "uuid",
 ]
 
@@ -3225,7 +3224,9 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -3754,9 +3755,9 @@ dependencies = [
 
 [[package]]
 name = "powerfmt"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
 name = "ppmd-rust"
@@ -5624,9 +5625,9 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "unicase"
-version = "2.9.0"
+version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-bidi"

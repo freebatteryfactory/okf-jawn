@@ -43,7 +43,7 @@ const { registry } = defineRegistry(catalog, {
     Chart: ({ props }) => {
       const bindings = useBindings();
       const rows = bindings.tables.get(props.binding);
-      const spec = bindings.charts.get(props.binding);
+      const spec = bindings.charts.get(props.chart);
       return (
         <section>
           <h3>{props.title}</h3>

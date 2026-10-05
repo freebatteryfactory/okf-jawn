@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir, platform } from 'node:os';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
+import { requireCleanTree } from '../../scripts/lib/provenance.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const outDir = join(root, '.artifacts/qualification/iii');
@@ -484,6 +485,7 @@ async function writeReceipt(receipt) {
 }
 
 async function main() {
+  const commitSha = await requireCleanTree(root);
   await mkdir(outDir, { recursive: true });
   const started = new Date().toISOString();
   // Gate/marker dirs stay on the Windows filesystem for the Windows-built worker.
@@ -795,12 +797,15 @@ async function main() {
     }
   }
 
-  const commit = (
-    await run('git', ['rev-parse', 'HEAD'], { timeout: 10_000 })
-  ).stdout.trim();
   const receipt = {
     component: 'iii-phase0',
-    commit_sha: commit,
+    commit_sha: commitSha,
+    git_sha: commitSha,
+    inputs: [
+      'qualification/iii',
+      'Cargo.toml',
+      'Cargo.lock',
+    ],
     decision,
     reason,
     fallback: decision === 'PASS' ? null : FALLBACK,

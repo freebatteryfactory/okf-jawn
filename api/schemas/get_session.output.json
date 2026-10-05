@@ -25,6 +25,33 @@
         }
       ]
     },
+    "DelegationCeiling": {
+      "additionalProperties": false,
+      "description": "Upper bound on what a delegated client may do; it only narrows grants, never adds to them.",
+      "properties": {
+        "permissions": {
+          "description": "Capabilities the delegation may exercise; effective permission is the intersection with grants.",
+          "items": {
+            "$ref": "#/$defs/Permission"
+          },
+          "type": "array"
+        },
+        "workspace_ids": {
+          "description": "Workspaces the delegation is limited to; absent means no restriction beyond the delegator's grants.",
+          "items": {
+            "$ref": "#/$defs/WorkspaceId"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "permissions"
+      ],
+      "type": "object"
+    },
     "Permission": {
       "description": "Application capabilities checked on every operation.",
       "oneOf": [
@@ -62,7 +89,7 @@
     },
     "Principal": {
       "additionalProperties": false,
-      "description": "Server-established identity; never accepted from a request body.",
+      "description": "Server-established identity; never accepted from a request body.\n\nIdentity is not authorization: effective permissions come from the access-control adapter\nas workspace and tenant grants, intersected with any delegation ceiling.",
       "properties": {
         "client_id": {
           "description": "OAuth client when delegation is present.",
@@ -71,12 +98,16 @@
             "null"
           ]
         },
-        "permissions": {
-          "description": "Resolved application capabilities.",
-          "items": {
-            "$ref": "#/$defs/Permission"
-          },
-          "type": "array"
+        "delegation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DelegationCeiling"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Ceiling applied to delegated routes."
         },
         "route": {
           "$ref": "#/$defs/AccessRoute",
@@ -86,21 +117,21 @@
           "description": "Validated identity-provider subject.",
           "type": "string"
         },
-        "workspace_ids": {
-          "description": "Explicitly accessible workspaces.",
-          "items": {
-            "$ref": "#/$defs/WorkspaceId"
-          },
-          "type": "array"
+        "tenant_id": {
+          "$ref": "#/$defs/TenantId",
+          "description": "Tenant boundary every storage scope for this principal carries."
         }
       },
       "required": [
         "subject",
-        "route",
-        "workspace_ids",
-        "permissions"
+        "tenant_id",
+        "route"
       ],
       "type": "object"
+    },
+    "TenantId": {
+      "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "type": "string"
     },
     "WorkspaceId": {
       "description": "Stable application identity for one user-organized workspace.",

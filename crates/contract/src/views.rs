@@ -2,10 +2,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Pinned historical views and explicit live refresh have different semantics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewMode {
     /// All bindings reference retained immutable source revisions.
@@ -15,7 +14,7 @@ pub enum ViewMode {
 }
 
 /// Supported declarative presentation formats.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RenderGrammar {
     /// Charts over application-resolved named datasets.
@@ -25,7 +24,7 @@ pub enum RenderGrammar {
 }
 
 /// A named source selection used by a chart or layout.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ViewBinding {
     /// Dataset or component binding name.
@@ -42,7 +41,7 @@ pub struct ViewBinding {
 }
 
 /// An editable visual artifact with prose and explicit source bindings.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ViewDocument {
     /// App-owned format version, currently 1.
@@ -59,10 +58,15 @@ pub struct ViewDocument {
     pub bindings: Vec<ViewBinding>,
     /// Validated renderer specification with no arbitrary code or external fetching.
     pub spec: serde_json::Value,
+    /// Named Vega-Lite specs referenced by `json_render` Chart components; empty for `vega_lite`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub charts: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// Render a candidate from already resolved bindings without saving or approving it.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+///
+/// Every binding's source workspace is an authorization target, not only `workspace_id`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PresentRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -72,7 +76,7 @@ pub struct PresentRequest {
 }
 
 /// A candidate presentation and the exact sources available to its UI.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PresentResponse {
     /// Validated presentation.
@@ -86,7 +90,7 @@ pub struct PresentResponse {
 }
 
 /// Read a stored visual artifact at its selected revision.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetViewRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -98,7 +102,7 @@ pub struct GetViewRequest {
 }
 
 /// Resolve and materialize a View without silently changing its saved specification.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResolveViewRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -112,7 +116,7 @@ pub struct ResolveViewRequest {
 }
 
 /// Export the visual specification, sources, data table, and rendering assets.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExportViewRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -122,16 +126,16 @@ pub struct ExportViewRequest {
     /// Requested revision selector; latest is resolved once before reading.
     pub at: crate::identity::At,
     /// Retry identity.
-    pub idempotency_key: String,
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Read the approved component and action catalog for visual proposals.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetCatalogRequest {}
 
 /// A renderer component with typed props and named supported actions.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogComponent {
     /// Canonical component name.
@@ -145,7 +149,7 @@ pub struct CatalogComponent {
 }
 
 /// The presentation vocabulary; it grants no permissions.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogResponse {
     /// Catalog version.

@@ -1,5 +1,5 @@
 {
   "description": "A blank user-organized context workspace",
-  "idempotency_key": "example-create",
+  "idempotency_key": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   "name": "My workspace"
 }

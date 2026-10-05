@@ -2,7 +2,7 @@
   "schema_version": 1,
   "project": "okf-jawn",
   "scope": "Offline navigation notes and exact lookup instructions, not a licensed mirror of vendor documentation or a compatibility certification. use_sites exist in the repository now; planned_use_sites are where a lane will integrate the library; generated_sites are written by gen. context7_queries_executed counts the lookups whose library and query are recorded here.",
-  "context7_queries_executed": 3,
+  "context7_queries_executed": 7,
   "vendors": [
     {
       "name": "utoipa",
@@ -46,18 +46,22 @@
         "SchemaSettings::draft2020_12",
         "SchemaSettings::draft07",
         "SchemaSettings::for_serialize",
-        "into_root_schema_for"
+        "SchemaSettings::contract",
+        "into_root_schema_for",
+        "$defs"
       ],
       "context7_library_id": "/gresau/schemars",
-      "context7_query": "Generate serialization versus deserialization schemas, explicit dialects and Serde defaults using SchemaSettings and into_root_schema_for.",
-      "knowledge_source": "Context7 query and official API documentation",
+      "context7_query": "SchemaSettings draft2020_12 for_serialize for_deserialize take_definitions into_root_schema_for definitions path components schemas",
+      "knowledge_source": "Context7 query (/gresau/schemars) and official API documentation 2026-10-05",
       "offline_notes": [
-        "Request schemas describe deserialization. Response schemas describe serialization.",
-        "Forms use Draft 7 for the default RJSF AJV adapter; protocol schemas use Draft 2020-12.",
-        "Serde defaults and omitted nullable fields need semantic fixtures, not text equality between schema generators."
+        "Request schemas describe deserialization (default contract). Response schemas use for_serialize().",
+        "Forms use Draft 7 for the default RJSF AJV adapter; protocol/OpenAPI components use Draft 2020-12.",
+        "Default schema_for! emits draft 2020-12 with definitions under $defs.",
+        "Serde defaults and omitted nullable fields need semantic fixtures, not text equality between schema generators.",
+        "Foundation-repair 2026-10-05: OpenAPI components.schemas will be built from schemars; Input/Output suffix when serialize and deserialize contracts differ."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": "Installed at 1.2.2; schemas already feed api/schemas and runtime dispatch. Becoming sole OpenAPI component authority in foundation repair."
     },
     {
       "name": "hey-api",
@@ -174,7 +178,7 @@
         "App-only read_object fetches are still workspace scoped; never assume a URI itself grants permission."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "mcp-apps-web-hosts: Streamable HTTP+stdio harness serves four ui://okf-jawn resources with SDK _meta.ui.csp object and four render tools. Receipt records protocol_check passed, basic-host feature render passed, ngrok session_open, host_render BOUNDED_UPSTREAM_EXCEPTION (interactive claude.ai/ChatGPT connector registration). Evidence hosts/2026-10-05-bounded-upstream-exception.md under .artifacts/qualification/mcp-apps/."
+      "qualification": "incomplete: prior BOUNDED_UPSTREAM_EXCEPTION host claim and protocol PASS cited a dirty-tree SHA. Requalify protocol+basic-host on a clean SHA; web-host gate moved to acceptance as not_run."
     },
     {
       "name": "json-render",
@@ -190,16 +194,20 @@
       ],
       "symbols": [
         "defineCatalog",
+        "catalog.data.components",
         "catalog.jsonSchema",
         "catalog.validate",
         "defineRegistry",
-        "Renderer"
+        "Renderer",
+        "z.toJSONSchema"
       ],
-      "context7_library_id": null,
-      "context7_query": null,
-      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "context7_library_id": "/vercel-labs/json-render",
+      "context7_query": "defineCatalog catalog.jsonSchema component props Zod schema how to access component prop definitions",
+      "knowledge_source": "Context7 query (/vercel-labs/json-render) and installed @json-render/core 0.21.0 types 2026-10-05",
       "offline_notes": [
         "The catalog is authored once in TypeScript and exported by a real vendor-backed build.",
+        "catalog.jsonSchema() exists but leaves element props as additionalProperties:{} when multiple components share the propsOf path; it is not sufficient for server validation.",
+        "Per-component Zod props are at catalog.data.components[name].props; compose a oneOf schema with z.toJSONSchema(props, { target: 'draft-7' }) for each component.",
         "Do not install @json-render/mcp automatically: its SDK dependency line was incompatible with the selected MCP Apps major during research.",
         "Source components take binding keys, not model-authored quotes or authoritative numeric values."
       ],
@@ -256,6 +264,85 @@
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
       "qualification": "Not compiled or integrated in this environment"
+    },
+    {
+      "name": "zod",
+      "use_sites": [
+        "ui/src/features/views/catalog.ts",
+        "ui/scripts/catalog-entry.ts",
+        "ui/src/api/generated/zod.gen.ts"
+      ],
+      "official_sources": [
+        "https://zod.dev/json-schema",
+        "https://github.com/colinhacks/zod"
+      ],
+      "symbols": [
+        "z.object",
+        "z.toJSONSchema",
+        "z.infer"
+      ],
+      "context7_library_id": "/colinhacks/zod/v4.0.1",
+      "context7_query": "z.toJSONSchema options target draft-7 draft-2020-12 additionalProperties unrepresentable",
+      "knowledge_source": "Context7 query (/colinhacks/zod/v4.0.1) and installed zod 4.6.5 2026-10-05",
+      "offline_notes": [
+        "z.toJSONSchema(schema, { target: 'draft-7' | 'draft-2020-12' }); default target is draft-2020-12.",
+        "z.object() emits additionalProperties: false by default (matches Zod strip behaviour).",
+        "unrepresentable defaults to throw; catalog props are plain strings/arrays so they convert cleanly.",
+        "Foundation-repair: catalog-entry composes per-component prop schemas via z.toJSONSchema(component.props, { target: 'draft-7' }) into catalog.schema.json oneOf."
+      ],
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": "Installed at 4.6.5; used by catalog and Hey API generated zod.gen.ts."
+    },
+    {
+      "name": "cargo-deny",
+      "use_sites": [
+        "deny.toml",
+        ".github/workflows/ci.yml"
+      ],
+      "official_sources": [
+        "https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html",
+        "https://docs.rs/crate/cargo-deny/0.20.2"
+      ],
+      "symbols": [
+        "bans.wildcards",
+        "bans.allow-wildcard-paths",
+        "all-features"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official cargo-deny bans config docs 2026-10-05",
+      "offline_notes": [
+        "all-features = true covers the runtime feature graph of storage, ingest and server.",
+        "wildcards = deny with allow-wildcard-paths = true: path/git wildcards in private crates and path/git dev-deps are allowed; public crate path/git normal deps still denied.",
+        "Foundation-repair adopts these settings."
+      ],
+      "version_authority": "CI pin cargo-deny@0.20.2 via taiki-e/install-action",
+      "qualification": "Configured in deny.toml; CI install migrating from cargo install to taiki-e/install-action."
+    },
+    {
+      "name": "taiki-e-install-action",
+      "use_sites": [
+        ".github/workflows/ci.yml"
+      ],
+      "official_sources": [
+        "https://github.com/taiki-e/install-action",
+        "https://github.com/taiki-e/install-action/releases"
+      ],
+      "symbols": [
+        "tool",
+        "checksum"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official README and manifest inspection 2026-10-05",
+      "offline_notes": [
+        "Pin the action to a commit SHA of a version tag (e.g. v2.87.25 = 183e4297cca2404691e9380e1307288dced5c82a). Do not pin @<tool_name> tags by hash.",
+        "Use with: tool: cargo-audit@0.22.2,cargo-deny@0.20.2. Explicit versions bypass the action's dependency cooldown.",
+        "checksum defaults to true (SHA256 of GitHub release assets).",
+        "actions/checkout pin for foundation-repair: v4.2.2 = 11bd71901bbe5b1630ceea73d27597364c9af683."
+      ],
+      "version_authority": "GitHub Actions workflow pin",
+      "qualification": "Manifest at v2 lists cargo-deny 0.20.2 and cargo-audit 0.22.2."
     },
     {
       "name": "vite-react",
@@ -482,18 +569,25 @@
         "Resource Indicator",
         "JWKS",
         "Connect",
-        "AuthKit sessions"
+        "AuthKit sessions",
+        "authorization::list_role_assignments",
+        "authorization::list_role_assignments_for_resource"
       ],
-      "context7_library_id": null,
-      "context7_query": null,
-      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "context7_library_id": "/websites/workos",
+      "context7_query": "authorization resource role assignments list user roles for organization resource Fine-Grained Authorization permissions in Connect tokens",
+      "knowledge_source": "Context7 query (/websites/workos) and installed workos 3.3.0 2026-10-05",
       "offline_notes": [
-        "WorkOS handles identity and delegated authorization; the app verifies audience/issuer and enforces workspace permissions.",
+        "WorkOS handles identity and delegated authorization; the app verifies audience/issuer and enforces workspace permissions via AccessControl.",
+        "Connect access tokens carry iss/aud/client_id/sub/org_id/sid/jti/exp/iat and do NOT carry permissions or roles. Resolve grants via Authorization API, not the token.",
+        "AuthKit session tokens may include role/permissions for org-scoped checks; per-workspace grants still come from FGA role assignments.",
+        "Per-membership lookup: authorization.list_role_assignments(organization_membership_id) returns org-level and sub-resource role assignments (resource.external_id = workspace id).",
+        "Per-resource lookup: list_role_assignments_for_resource / GET .../resources/{type}/{external_id}/role_assignments.",
+        "Hosted AccessControl may cache grants at most 60 seconds (SPEC section 11); local adapter does not cache.",
         "An agent token for a human subject does not establish a human review.",
         "Browser sessions and delegated MCP credentials are distinct integrations; no Cloudflare fallback is part of this build."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": "Not compiled or integrated in this environment; API surface confirmed for foundation-repair AccessControl design."
     },
     {
       "name": "okf",
@@ -561,7 +655,7 @@
         "Converter API and native/model assets still need an executed qualification. Retain originals; record converter version/settings."
       ],
       "version_authority": "Cargo.toml and Cargo.lock",
-      "qualification": "PASS on commit 32a10ba (orchestrator receipt SHA at run time): DocumentConverter 1.93.5; 10 Success fixtures incl. docling-project corpus at 4e650af5; must_fail_corrupt.bin ExplicitFailure; timeout probe PASS; page_provenance recorded; PeakWorkingSet64=31416320. Receipt .artifacts/qualification/docling/receipt.json."
+      "qualification": "incomplete: prior PASS on 32a10ba cited dirty-tree SHA, cargo.pid peak memory, and must_fail_corrupt.bin failing before the converter. Requalify on a clean SHA with per-fixture peak memory and must_fail_truncated.pdf."
     },
     {
       "name": "git2",

@@ -7,7 +7,6 @@ use std::str::FromStr;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 macro_rules! uuid_id {
@@ -25,7 +24,6 @@ macro_rules! uuid_id {
             Serialize,
             Deserialize,
             JsonSchema,
-            ToSchema,
         )]
         #[serde(transparent)]
         pub struct $name(#[doc = "Underlying UUID."] pub Uuid);
@@ -67,27 +65,41 @@ uuid_id!(
     ConnectorId,
     "Identity of one local MCP connector credential, never the owner's browser session."
 );
+uuid_id!(
+    IdempotencyKey,
+    "Caller-chosen retry identity for one write, scoped to tenant, subject and operation."
+);
+uuid_id!(
+    MutationId,
+    "Durable server-assigned identity of one write; every store that creates a row enforces it as unique."
+);
+uuid_id!(
+    ConfirmationId,
+    "Identity of one session-bound human confirmation challenge."
+);
+
+/// Tenant boundary: the WorkOS organization id when hosted, a fixed installation id locally.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct TenantId(String);
 
 /// A resolved Git commit, never a branch name or the string `latest`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-#[schema(value_type = String, pattern = "^([0-9a-f]{40}|[0-9a-f]{64})$")]
 pub struct Revision(String);
 
 /// A lower-case SHA-256 identifier for immutable bytes.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-#[schema(value_type = String, pattern = "^[0-9a-f]{64}$")]
 pub struct Digest(String);
 
 /// A normalized relative workspace path; this alone is not filesystem authorization.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-#[schema(value_type = String, min_length = 1, max_length = 4096)]
 pub struct WorkspacePath(String);
 
 /// A requested version selector; resolved responses contain a `Revision` instead.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum At {
     /// Resolve the current accepted workspace head exactly once.
@@ -125,6 +137,48 @@ impl JsonSchema for WorkspacePath {
     }
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({"type": "string", "minLength": 1, "maxLength": 4096})
+    }
+}
+impl JsonSchema for TenantId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "TenantId".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"})
+    }
+}
+impl TenantId {
+    /// Return the validated tenant identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl TryFrom<String> for TenantId {
+    type Error = IdentityError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let valid = (1..=128).contains(&value.len())
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+        if valid {
+            Ok(Self(value))
+        } else {
+            Err(IdentityError(
+                "tenant id must be 1 to 128 ASCII letters, digits, '_' or '-'",
+            ))
+        }
+    }
+}
+impl From<TenantId> for String {
+    fn from(value: TenantId) -> Self {
+        value.0
+    }
+}
+impl FromStr for TenantId {
+    type Err = IdentityError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value.to_owned())
     }
 }
 impl Revision {

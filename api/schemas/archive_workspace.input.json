@@ -1,5 +1,10 @@
 {
   "$defs": {
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
@@ -18,6 +23,10 @@
       "$ref": "#/$defs/Revision",
       "description": "Exact revision on which this change is based; stale writes conflict."
     },
+    "idempotency_key": {
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity."
+    },
     "workspace_id": {
       "$ref": "#/$defs/WorkspaceId",
       "description": "Workspace whose permissions and storage scope apply."
@@ -25,7 +34,8 @@
   },
   "required": [
     "workspace_id",
-    "base_revision"
+    "base_revision",
+    "idempotency_key"
   ],
   "title": "ArchiveWorkspaceRequest",
   "type": "object"

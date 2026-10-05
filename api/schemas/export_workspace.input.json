@@ -38,6 +38,11 @@
         }
       ]
     },
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
@@ -57,8 +62,8 @@
       "description": "Requested revision selector; latest is resolved once before reading."
     },
     "idempotency_key": {
-      "description": "Retry identity for the export job.",
-      "type": "string"
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity for the export job."
     },
     "include_history": {
       "description": "Include retained Git history in addition to the selected state.",

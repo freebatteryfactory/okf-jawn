@@ -2,10 +2,35 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+
+/// Where returned content went; the two are distinct evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptAudience {
+    /// Supplied to an agent's context through a tool result.
+    AgentContext,
+    /// Shown to a person in the workspace.
+    HumanDisplay,
+}
+
+/// Kinds of workspace change notification.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EventKind {
+    /// Committed content changed.
+    Changed,
+    /// An import produced items.
+    Imported,
+    /// A job's durable state changed.
+    JobUpdated,
+    /// A review was recorded.
+    Reviewed,
+    /// A proposal's state or discussion changed.
+    ProposalUpdated,
+}
 
 /// What this application returned, not what an external model retained.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
     /// Durable operation record.
@@ -13,7 +38,7 @@ pub struct Receipt {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
     /// Canonical operation identifier.
-    pub operation_id: String,
+    pub operation_id: crate::metadata::OperationName,
     /// Authenticated acting principal.
     pub principal_subject: String,
     /// Interface route.
@@ -25,12 +50,12 @@ pub struct Receipt {
     /// Optional diagnostic trace reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
-    /// `agent_context` or `human_display`; these are distinct.
-    pub audience: String,
+    /// Agent context or human display; these are distinct.
+    pub audience: ReceiptAudience,
 }
 
 /// Inspect one durable record within workspace permissions.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetReceiptRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -40,15 +65,15 @@ pub struct GetReceiptRequest {
 }
 
 /// A resumable workspace change notification, not canonical content.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Event {
     /// Opaque monotonic event cursor.
     pub id: String,
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
-    /// Changed, imported, `job_updated`, reviewed, or `proposal_updated`.
-    pub kind: String,
+    /// What changed.
+    pub kind: EventKind,
     /// Content revision when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<crate::identity::Revision>,
@@ -61,7 +86,7 @@ pub struct Event {
 }
 
 /// Read changes after an opaque cursor; SSE uses the same record shape.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListEventsRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -74,7 +99,7 @@ pub struct ListEventsRequest {
 }
 
 /// Bounded change notifications.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListEventsResponse {
     /// New notifications.

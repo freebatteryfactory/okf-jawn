@@ -57,13 +57,13 @@
       "sha256": "01ac9dc21954a7842c1bcba748ad8c7b32dbf7e62acad9d691f69da316503906",
       "bytes": 2621
     },
-    "must_fail_corrupt.bin": {
+    "must_fail_truncated.pdf": {
       "role": "must_fail",
-      "url": "generated://okf-jawn/fixtures/must_fail_corrupt.bin",
+      "url": "generated://okf-jawn/fixtures/must_fail_truncated.pdf",
       "license": "MIT (generated for qualification)",
-      "notes": "Non-document bytes that must surface ConversionStatus::Failure",
-      "sha256": "fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108",
-      "bytes": 64,
+      "notes": "Valid PDF-1.4 header truncated mid-stream; only ConversionStatus::Failure from the converter stage counts as PASS. Success/PartialSuccess is FAIL with finding recorded; fixture is not altered to force a pass.",
+      "sha256": "6493e95ce39d3f7de423a9578c5f67a864cdc839d1048f38f04b1b1ec9a52b20",
+      "bytes": 330,
       "expected": "ExplicitFailure"
     },
     "corpus/word_sample.docx": {

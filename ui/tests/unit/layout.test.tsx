@@ -149,12 +149,11 @@ describe('Layout', () => {
         },
       },
     });
-    // Invalid visibility shape must survive normalization so structural validation can judge it.
-    if (result.ok) {
-      expect(result.spec.elements.root?.visible).toEqual(visible);
-    } else {
-      expect(result.error).toMatch(/structural|visibility|visible|validation/i);
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error(`expected prepareSpec ok; got ${result.error}`);
     }
+    expect(result.spec.elements.root?.visible).toEqual(visible);
   });
 });
 
@@ -176,5 +175,103 @@ describe('PresentView', () => {
     } satisfies z.infer<typeof zPresentResponse>;
     render(<PresentView response={response} callTool={async () => ({ structuredContent: {} })} />);
     expect(await screen.findByRole('heading', { name: 'Workshop' })).toBeTruthy();
+  });
+
+  it('fills charts from view.charts and renders svg without unavailable alert', async () => {
+    const rows = [{ category: 'a', value: 1 }];
+    const payload = new TextEncoder().encode(JSON.stringify(rows));
+    const digestBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
+    const digest = Array.from(digestBytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    const chartSpec = {
+      $schema: 'https://vega.github.io/schema/vega-lite/v6.json',
+      data: { name: 'metrics' },
+      mark: 'bar',
+      encoding: {
+        x: { field: 'category', type: 'nominal' },
+        y: { field: 'value', type: 'quantitative' },
+      },
+    };
+    const source = {
+      item_id: '11111111-2222-4333-8444-555555555555',
+      path: 'fixtures/metrics.json',
+      revision: '0123456789abcdef0123456789abcdef01234567',
+      selection: { kind: 'all' as const },
+      workspace_id: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
+    };
+    const response = {
+      view: {
+        schema_version: 1,
+        title: 'Chart board',
+        description: 'Chart with one named Vega-Lite entry',
+        mode: 'pinned',
+        grammar: 'json_render',
+        bindings: [],
+        charts: { metrics_chart: chartSpec },
+        spec: {
+          root: 'root',
+          elements: {
+            root: {
+              type: 'Chart',
+              props: {
+                binding: 'metrics',
+                chart: 'metrics_chart',
+                title: 'Metrics chart',
+              },
+              children: [],
+            },
+          },
+        },
+      },
+      resolved_bindings: [
+        {
+          name: 'metrics',
+          source,
+          units: {},
+          transforms: [],
+          materialized: digest,
+        },
+      ],
+      warnings: [],
+      receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    } as z.infer<typeof zPresentResponse>;
+    const callTool = async (name: string) => {
+      if (name === 'show') {
+        return {
+          structuredContent: {
+            markdown: 'metrics',
+            media: [],
+            outline: [],
+            receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+            source,
+            truncated: false,
+            view: 'text',
+            warnings: [],
+          },
+        };
+      }
+      if (name === 'read_object') {
+        let binary = '';
+        for (const byte of payload) binary += String.fromCharCode(byte);
+        return {
+          structuredContent: {
+            data_base64: btoa(binary),
+            has_more: false,
+            media_type: 'application/json',
+            offset: '0',
+            sha256: digest,
+            total_size: String(payload.byteLength),
+          },
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    };
+    const { container } = render(<PresentView response={response} callTool={callTool} />);
+    expect(await screen.findByRole('heading', { name: 'Metrics chart' })).toBeTruthy();
+    await expect
+      .poll(() => container.querySelector('svg') !== null, { timeout: 15_000 })
+      .toBe(true);
+    expect(
+      screen.queryByText(/Resolved chart data or specification unavailable/i),
+    ).toBeNull();
   });
 });

@@ -85,13 +85,24 @@
         },
         "chart": {
           "type": "Chart",
-          "props": { "binding": "metrics", "title": "Metrics chart" },
+          "props": { "binding": "metrics", "chart": "metrics_chart", "title": "Metrics chart" },
           "children": []
         },
         "sources": {
           "type": "SourceList",
           "props": { "bindings": ["venue", "metrics"] },
           "children": []
+        }
+      }
+    },
+    "charts": {
+      "metrics_chart": {
+        "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+        "data": { "name": "metrics" },
+        "mark": "bar",
+        "encoding": {
+          "x": { "field": "category", "type": "nominal" },
+          "y": { "field": "value", "type": "quantitative" }
         }
       }
     }

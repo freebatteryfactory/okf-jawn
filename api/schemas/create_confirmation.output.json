@@ -1,5 +1,10 @@
 {
   "$defs": {
+    "ConfirmationId": {
+      "description": "Identity of one session-bound human confirmation challenge.",
+      "format": "uuid",
+      "type": "string"
+    },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
@@ -14,8 +19,8 @@
       "type": "string"
     },
     "id": {
-      "description": "Opaque session-bound challenge.",
-      "type": "string"
+      "$ref": "#/$defs/ConfirmationId",
+      "description": "Opaque session-bound challenge."
     },
     "revision": {
       "$ref": "#/$defs/Revision",

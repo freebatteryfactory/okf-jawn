@@ -11,11 +11,15 @@ export type AcceptProposalRequest = {
     /**
      * Server-issued session-bound confirmation; never a model-supplied reviewer name.
      */
-    confirmation_id: string;
+    confirmation_id: ConfirmationId;
     /**
      * Workspace head shown during confirmation.
      */
     expected_head: Revision;
+    /**
+     * Retry identity; a retry with the same mutation may re-consume its own confirmation.
+     */
+    idempotency_key: IdempotencyKey;
     /**
      * Suggestion identity.
      */
@@ -43,9 +47,16 @@ export type AccessRoute = 'browser_session' | 'mcp_delegation' | 'local_owner' |
  */
 export type AddCommentRequest = {
     /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
      * Suggestion being discussed.
      */
     proposal_id: ProposalId;
+    /**
+     * Optional line or range under discussion; the caller must be able to read it.
+     */
     source?: SourceReference | null;
     /**
      * Comment text.
@@ -66,6 +77,10 @@ export type ApiError = {
      */
     code: ErrorCode;
     /**
+     * Typed context for conflict, replay, and in-progress outcomes.
+     */
+    detail?: ErrorDetail | null;
+    /**
      * Input field needing correction.
      */
     field?: string | null;
@@ -83,6 +98,10 @@ export type ApiError = {
  * Apply a revision-bound preview and rewrite affected links.
  */
 export type ApplyNamesRequest = {
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
     /**
      * Plan revalidated before any writes.
      */
@@ -105,6 +124,10 @@ export type ArchiveWorkspaceRequest = {
      * Exact revision on which this change is based; stale writes conflict.
      */
     base_revision: Revision;
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
     /**
      * Workspace whose permissions and storage scope apply.
      */
@@ -136,7 +159,10 @@ export type AttentionItem = {
     /**
      * Suggested existing operation, never executable code.
      */
-    action: string;
+    action: OperationName;
+    /**
+     * Relevant item.
+     */
     item_id?: ItemId | null;
     /**
      * Diagnostic class.
@@ -160,7 +186,7 @@ export type BackupWorkspaceRequest = {
     /**
      * Retry identity for the backup.
      */
-    idempotency_key: string;
+    idempotency_key: IdempotencyKey;
     /**
      * Workspace whose permissions and storage scope apply.
      */
@@ -225,6 +251,10 @@ export type BlameResponse = {
  * Cancel pending or running work without discarding the uploaded original.
  */
 export type CancelJobRequest = {
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
     /**
      * Job to cancel.
      */
@@ -412,15 +442,22 @@ export type Commit = {
 };
 
 /**
- * Create a named snapshot from saved drafts at a checked base revision.
+ * Snapshot the caller's drafts of the selected items in one commit.
+ *
+ * If any selected item changed after its draft's base, or was deleted, the whole commit is
+ * rejected with a `draft_conflict` error detail. On success the snapshotted drafts are removed.
  */
 export type CommitRequest = {
     /**
-     * Exact revision on which this change is based; stale writes conflict.
+     * Workspace head the editor saw; a moved head conflicts.
      */
-    base_revision: Revision;
+    expected_head: Revision;
     /**
-     * Selected saved drafts; empty means the explicit workspace selection.
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
+     * Items whose drafts by the caller are snapshotted together.
      */
     item_ids: Array<ItemId>;
     /**
@@ -437,6 +474,10 @@ export type CommitRequest = {
  * Verify upload length and hash without silently creating duplicate occurrences.
  */
 export type CompleteUploadRequest = {
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
     /**
      * Expected full-content hash.
      */
@@ -462,11 +503,38 @@ export type Confirmation = {
     /**
      * Opaque session-bound challenge.
      */
-    id: string;
+    id: ConfirmationId;
     /**
      * Bound revision.
      */
     revision: Revision;
+};
+
+/**
+ * The explicit human action a confirmation authorizes; never an arbitrary method.
+ */
+export type ConfirmationAction = 'review' | 'accept_proposal';
+
+/**
+ * Identity of one session-bound human confirmation challenge.
+ */
+export type ConfirmationId = string;
+
+/**
+ * The immutable object a confirmation is bound to.
+ */
+export type ConfirmationTarget = {
+    /**
+     * Reviewed item.
+     */
+    item_id: ItemId;
+    kind: 'item';
+} | {
+    kind: 'proposal';
+    /**
+     * Accepted proposal.
+     */
+    proposal_id: ProposalId;
 };
 
 /**
@@ -521,6 +589,10 @@ export type CorrectDigestRequest = {
      */
     digest: Digest;
     /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
      * Stable application item identity; paths remain the portable OKF identity.
      */
     item_id: ItemId;
@@ -535,21 +607,25 @@ export type CorrectDigestRequest = {
  */
 export type CreateConfirmationRequest = {
     /**
-     * review or `accept_proposal`; not an arbitrary method.
+     * Confirmed action; it determines the required permission.
      */
-    action: string;
+    action: ConfirmationAction;
     /**
      * Displayed content digest.
      */
     content_digest: Digest;
     /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
      * Displayed content revision.
      */
     revision: Revision;
     /**
-     * Item or proposal identity.
+     * Item or proposal being confirmed.
      */
-    target_id: string;
+    target: ConfirmationTarget;
     /**
      * Workspace whose permissions and storage scope apply.
      */
@@ -564,6 +640,10 @@ export type CreateConnectorRequest = {
      * Also grant proposal creation. Review and approval are never grantable to a connector.
      */
     allow_propose: boolean;
+    /**
+     * Retry identity; a replay returns `already_issued`, never the secret again.
+     */
+    idempotency_key: IdempotencyKey;
     /**
      * Owner-chosen name identifying the client, such as the host application.
      */
@@ -587,6 +667,10 @@ export type CreateFolderRequest = {
      */
     folder: WorkspacePath;
     /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
      * Workspace whose permissions and storage scope apply.
      */
     workspace_id: WorkspaceId;
@@ -607,7 +691,7 @@ export type CreateItemRequest = {
     /**
      * Retry identity.
      */
-    idempotency_key: string;
+    idempotency_key: IdempotencyKey;
     /**
      * Built-in role.
      */
@@ -643,15 +727,41 @@ export type CreateReviewRequest = {
     /**
      * Session-bound confirmation issued for this revision.
      */
-    confirmation_id: string;
+    confirmation_id: ConfirmationId;
     /**
      * Digest displayed in the review confirmation.
      */
     content_digest: Digest;
     /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
      * Exact source shown.
      */
     source: SourceReference;
+};
+
+/**
+ * Request a short-lived sandbox-origin URL for one hostile representation.
+ */
+export type CreateSandboxCapabilityRequest = {
+    /**
+     * Stable application item identity; paths remain the portable OKF identity.
+     */
+    item_id: ItemId;
+    /**
+     * Original or derived object served; it must belong to this item revision.
+     */
+    object: Digest;
+    /**
+     * Exact resolved revision whose representation is served.
+     */
+    revision: Revision;
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
 };
 
 /**
@@ -665,11 +775,14 @@ export type CreateUploadRequest = {
     /**
      * Retry identity.
      */
-    idempotency_key: string;
+    idempotency_key: IdempotencyKey;
     /**
      * Supplied folder context.
      */
     relative_path: string;
+    /**
+     * Expected content hash if caller knows it.
+     */
     sha256?: Digest | null;
     /**
      * Expected decimal byte count.
@@ -692,7 +805,7 @@ export type CreateWorkspaceRequest = {
     /**
      * Caller-chosen retry identity.
      */
-    idempotency_key: string;
+    idempotency_key: IdempotencyKey;
     /**
      * Display name.
      */
@@ -709,6 +822,10 @@ export type DateOrder = 'ymd' | 'mdy' | 'dmy' | 'reject_ambiguous';
  */
 export type DeclineProposalRequest = {
     /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
      * Suggestion identity.
      */
     proposal_id: ProposalId;
@@ -723,6 +840,20 @@ export type DeclineProposalRequest = {
 };
 
 /**
+ * Upper bound on what a delegated client may do; it only narrows grants, never adds to them.
+ */
+export type DelegationCeiling = {
+    /**
+     * Capabilities the delegation may exercise; effective permission is the intersection with grants.
+     */
+    permissions: Array<Permission>;
+    /**
+     * Workspaces the delegation is limited to; absent means no restriction beyond the delegator's grants.
+     */
+    workspace_ids?: Array<WorkspaceId> | null;
+};
+
+/**
  * Remove the active item reference while retaining historical objects.
  */
 export type DeleteItemRequest = {
@@ -730,6 +861,10 @@ export type DeleteItemRequest = {
      * Exact revision on which this change is based; stale writes conflict.
      */
     base_revision: Revision;
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
     /**
      * Stable application item identity; paths remain the portable OKF identity.
      */
@@ -766,6 +901,9 @@ export type DiffRequest = {
      * Base version.
      */
     from: Revision;
+    /**
+     * Optional item filter.
+     */
     item_id?: ItemId | null;
     /**
      * Compared version.
@@ -780,11 +918,11 @@ export type DiffRequest = {
 /**
  * A comparison tied to both source revisions.
  */
-export type DiffResponse = {
+export type DiffResponseInput = {
     /**
      * Changed content.
      */
-    changes: Array<FileChange>;
+    changes: Array<FileChangeInput>;
     /**
      * Base commit.
      */
@@ -800,9 +938,46 @@ export type DiffResponse = {
 };
 
 /**
- * A lower-case SHA-256 identifier for immutable bytes.
+ * A comparison tied to both source revisions.
  */
+export type DiffResponseOutput = {
+    /**
+     * Changed content.
+     */
+    changes: Array<FileChangeOutput>;
+    /**
+     * Base commit.
+     */
+    from: Revision;
+    /**
+     * Compared commit.
+     */
+    to: Revision;
+    /**
+     * Limits or unsupported binary comparison details.
+     */
+    warnings: Array<Warning>;
+};
+
 export type Digest = string;
+
+/**
+ * Remove the caller's own draft of one item.
+ */
+export type DiscardDraftRequest = {
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
+     * Stable application item identity; paths remain the portable OKF identity.
+     */
+    item_id: ItemId;
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
+};
 
 /**
  * An authorized export or backup artifact with integrity metadata.
@@ -824,6 +999,52 @@ export type DownloadArtifact = {
      * Byte count as a decimal string to preserve integer precision.
      */
     size: string;
+};
+
+/**
+ * Saved draft metadata; one per (item, editor), and never a revision.
+ */
+export type Draft = {
+    /**
+     * Head revision the draft is based on; a Snapshot conflicts if the item changed since.
+     */
+    base_revision: Revision;
+    /**
+     * Digest of the drafted body and properties.
+     */
+    content_digest: Digest;
+    /**
+     * Server-established subject who owns this draft.
+     */
+    editor: string;
+    /**
+     * Drafted item.
+     */
+    item_id: ItemId;
+    /**
+     * RFC 3339 time of the latest save.
+     */
+    saved_at: string;
+};
+
+/**
+ * The caller's own draft content returned beside committed content.
+ */
+export type DraftContent = {
+    /**
+     * Drafted Markdown body.
+     */
+    body: string;
+    /**
+     * Draft metadata.
+     */
+    draft: Draft;
+    /**
+     * Drafted complete property map.
+     */
+    properties: {
+        [key: string]: unknown;
+    };
 };
 
 /**
@@ -854,7 +1075,52 @@ export type Empty = {
 /**
  * Stable failure classifications; HTTP and MCP adapters preserve these.
  */
-export type ErrorCode = 'invalid_input' | 'unauthenticated' | 'forbidden' | 'not_found' | 'conflict' | 'too_large' | 'unsupported' | 'unavailable' | 'cancelled' | 'internal';
+export type ErrorCode = 'invalid_input' | 'unauthenticated' | 'forbidden' | 'not_found' | 'conflict' | 'already_issued' | 'in_progress' | 'too_large' | 'unsupported' | 'unavailable' | 'cancelled' | 'internal';
+
+/**
+ * Typed failure context the UI and agents can act on without parsing messages.
+ */
+export type ErrorDetail = {
+    /**
+     * Connector created by the original request.
+     */
+    connector_id: ConnectorId;
+    kind: 'already_issued';
+} | {
+    kind: 'in_progress';
+    /**
+     * Mutation holding the lease.
+     */
+    mutation_id: MutationId;
+    /**
+     * Whole seconds the caller should wait before retrying the same request.
+     */
+    retry_after: number;
+} | {
+    /**
+     * Head revision at which the item changed or was deleted.
+     */
+    current_revision: Revision;
+    /**
+     * Structured comparison between the draft base and the current revision.
+     */
+    diff: unknown;
+    /**
+     * Revision the draft was based on.
+     */
+    draft_base: Revision;
+    /**
+     * Item whose draft no longer applies cleanly.
+     */
+    item_id: ItemId;
+    kind: 'draft_conflict';
+} | {
+    kind: 'idempotency_conflict';
+    /**
+     * Operation that first used the key.
+     */
+    operation: OperationName;
+};
 
 /**
  * A resumable workspace change notification, not canonical content.
@@ -864,18 +1130,32 @@ export type Event = {
      * Opaque monotonic event cursor.
      */
     id: string;
+    /**
+     * Affected item.
+     */
     item_id?: ItemId | null;
+    /**
+     * Affected job.
+     */
     job_id?: JobId | null;
     /**
-     * Changed, imported, `job_updated`, reviewed, or `proposal_updated`.
+     * What changed.
      */
-    kind: string;
+    kind: EventKind;
+    /**
+     * Content revision when applicable.
+     */
     revision?: Revision | null;
     /**
      * Workspace whose permissions and storage scope apply.
      */
     workspace_id: WorkspaceId;
 };
+
+/**
+ * Kinds of workspace change notification.
+ */
+export type EventKind = 'changed' | 'imported' | 'job_updated' | 'reviewed' | 'proposal_updated';
 
 /**
  * Export the visual specification, sources, data table, and rendering assets.
@@ -888,7 +1168,7 @@ export type ExportViewRequest = {
     /**
      * Retry identity.
      */
-    idempotency_key: string;
+    idempotency_key: IdempotencyKey;
     /**
      * Stable application item identity; paths remain the portable OKF identity.
      */
@@ -910,7 +1190,7 @@ export type ExportWorkspaceRequest = {
     /**
      * Retry identity for the export job.
      */
-    idempotency_key: string;
+    idempotency_key: IdempotencyKey;
     /**
      * Include retained Git history in addition to the selected state.
      */
@@ -929,7 +1209,7 @@ export type ExtensionPolicy = 'preserve' | 'lowercase' | 'strip';
 /**
  * A changed file with before and after locators.
  */
-export type FileChange = {
+export type FileChangeInput = {
     /**
      * The underlying bytes are binary.
      */
@@ -937,7 +1217,7 @@ export type FileChange = {
     /**
      * Added, modified, moved, or removed.
      */
-    kind: string;
+    kind: FileChangeKind;
     /**
      * New path; absent for deletions.
      */
@@ -946,6 +1226,37 @@ export type FileChange = {
      * Previous path; absent for additions.
      */
     old_path?: string | null;
+    /**
+     * Unified text diff when applicable.
+     */
+    patch: string;
+};
+
+/**
+ * How one file differs between two revisions.
+ */
+export type FileChangeKind = 'added' | 'modified' | 'moved' | 'removed';
+
+/**
+ * A changed file with before and after locators.
+ */
+export type FileChangeOutput = {
+    /**
+     * The underlying bytes are binary.
+     */
+    binary: boolean;
+    /**
+     * Added, modified, moved, or removed.
+     */
+    kind: FileChangeKind;
+    /**
+     * New path; absent for deletions.
+     */
+    new_path: string | null;
+    /**
+     * Previous path; absent for additions.
+     */
+    old_path: string | null;
     /**
      * Unified text diff when applicable.
      */
@@ -1230,8 +1541,29 @@ export type GetSourcesRequest = {
 /**
  * Citations and source appearances for the selected item.
  */
-export type GetSourcesResponse = {
+export type GetSourcesResponseInput = {
+    /**
+     * Occurrence metadata if the item is a source.
+     */
     appearance?: SourceAppearance | null;
+    /**
+     * Resolved version.
+     */
+    revision: Revision;
+    /**
+     * Supporting citations.
+     */
+    sources: Array<SourceReference>;
+};
+
+/**
+ * Citations and source appearances for the selected item.
+ */
+export type GetSourcesResponseOutput = {
+    /**
+     * Occurrence metadata if the item is a source.
+     */
+    appearance: SourceAppearance | null;
     /**
      * Resolved version.
      */
@@ -1282,6 +1614,11 @@ export type HealthResponse = {
 };
 
 /**
+ * Caller-chosen retry identity for one write, scoped to tenant, subject and operation.
+ */
+export type IdempotencyKey = string;
+
+/**
  * A newly issued connector and its secret, which is returned exactly once and never stored in plain text.
  */
 export type IssuedConnector = {
@@ -1304,11 +1641,18 @@ export type ItemDocument = {
      */
     body: string;
     /**
+     * The caller's own uncommitted draft; never another editor's, and never on agent routes.
+     */
+    draft?: DraftContent | null;
+    /**
      * All user and OKF properties; unknown extension values are retained.
      */
     properties: {
         [key: string]: unknown;
     };
+    /**
+     * Source occurrence metadata when applicable.
+     */
     source?: SourceAppearance | null;
     /**
      * Identity and navigation metadata.
@@ -1372,11 +1716,17 @@ export type ItemSummary = {
  * Durable work status; acknowledgement is not a claim of completion.
  */
 export type Job = {
+    /**
+     * Export or backup artifact.
+     */
     artifact?: DownloadArtifact | null;
     /**
      * Execution attempt number.
      */
     attempt: number;
+    /**
+     * Last failure.
+     */
     error?: ApiError | null;
     /**
      * Job identity.
@@ -1390,6 +1740,9 @@ export type Job = {
      * Approximate completion percentage.
      */
     progress: number;
+    /**
+     * Committed result revision.
+     */
     revision?: Revision | null;
     /**
      * Current durable state.
@@ -1441,6 +1794,9 @@ export type Link = {
      * Source line.
      */
     line: number;
+    /**
+     * Resolved target, absent for broken links.
+     */
     to?: ItemId | null;
     /**
      * Target path as written.
@@ -1471,6 +1827,34 @@ export type ListConnectorsResponse = {
      * Matching connectors.
      */
     connectors: Array<Connector>;
+};
+
+/**
+ * List the caller's own drafts in a workspace.
+ */
+export type ListDraftsRequest = {
+    /**
+     * Bounded pagination with an opaque cursor.
+     */
+    page: PageRequest;
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
+};
+
+/**
+ * The caller's drafts, without other editors' drafts.
+ */
+export type ListDraftsResponse = {
+    /**
+     * Draft metadata.
+     */
+    items: Array<Draft>;
+    /**
+     * Continuation cursor.
+     */
+    next_cursor?: string | null;
 };
 
 /**
@@ -1585,6 +1969,9 @@ export type ListProposalsRequest = {
      * Bounded pagination with an opaque cursor.
      */
     page: PageRequest;
+    /**
+     * State filter.
+     */
     status?: ProposalStatus | null;
     /**
      * Workspace whose permissions and storage scope apply.
@@ -1686,6 +2073,9 @@ export type LogRequest = {
      * Requested revision selector; latest is resolved once before reading.
      */
     at: At;
+    /**
+     * Limit history to an item.
+     */
     item_id?: ItemId | null;
     /**
      * Bounded pagination with an opaque cursor.
@@ -1758,6 +2148,10 @@ export type MoveItemRequest = {
      */
     destination: WorkspacePath;
     /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
      * Stable application item identity; paths remain the portable OKF identity.
      */
     item_id: ItemId;
@@ -1766,6 +2160,11 @@ export type MoveItemRequest = {
      */
     workspace_id: WorkspaceId;
 };
+
+/**
+ * Durable server-assigned identity of one write; every store that creates a row enforces it as unique.
+ */
+export type MutationId = string;
 
 /**
  * A persisted change and the resolved revision it produced.
@@ -1876,7 +2275,7 @@ export type OpenProposalRequest = {
     /**
      * Retry identity.
      */
-    idempotency_key: string;
+    idempotency_key: IdempotencyKey;
     /**
      * Proposal title.
      */
@@ -1898,13 +2297,18 @@ export type OpenWorkspaceRequest = {
 };
 
 /**
+ * Closed set of canonical operation identifiers, serialized as the `snake_case` id.
+ */
+export type OperationName = 'list_workspaces' | 'create_workspace' | 'open_workspace' | 'update_workspace' | 'archive_workspace' | 'export_workspace' | 'backup_workspace' | 'restore_workspace' | 'list_items' | 'get_item' | 'create_item' | 'save_draft' | 'list_drafts' | 'discard_draft' | 'move_item' | 'set_lifecycle' | 'delete_item' | 'create_folder' | 'list_types' | 'set_type' | 'read_item' | 'get_sources' | 'get_object' | 'create_sandbox_capability' | 'search_items' | 'get_links' | 'get_graph' | 'log_items' | 'diff_items' | 'commit_items' | 'restore_items' | 'blame_item' | 'open_proposal' | 'list_proposals' | 'get_proposal' | 'accept_proposal' | 'decline_proposal' | 'add_comment' | 'create_confirmation' | 'create_review' | 'list_reviews' | 'create_upload' | 'complete_upload' | 'start_import' | 'get_job' | 'list_jobs' | 'retry_job' | 'cancel_job' | 'redigest_item' | 'correct_digest' | 'get_rules' | 'set_rules' | 'preview_names' | 'apply_names' | 'get_attention' | 'rebuild_index' | 'get_view' | 'present_view' | 'resolve_view' | 'export_view' | 'get_catalog' | 'get_receipt' | 'list_events' | 'get_session' | 'create_connector' | 'list_connectors' | 'revoke_connector' | 'get_health' | 'get_readiness';
+
+/**
  * A navigable structural element from a document.
  */
 export type OutlineEntry = {
     /**
-     * Heading, table, figure, page, or sheet.
+     * Structural element type.
      */
-    kind: string;
+    kind: OutlineEntryKind;
     /**
      * Visible heading or media caption.
      */
@@ -1918,6 +2322,11 @@ export type OutlineEntry = {
      */
     selection: Selection;
 };
+
+/**
+ * Structural element types an outline can point to.
+ */
+export type OutlineEntryKind = 'heading' | 'table' | 'figure' | 'page' | 'sheet';
 
 /**
  * A one-based inclusive document page range.
@@ -1954,6 +2363,8 @@ export type Permission = 'read' | 'write' | 'propose' | 'approve' | 'review' | '
 
 /**
  * Render a candidate from already resolved bindings without saving or approving it.
+ *
+ * Every binding's source workspace is an authorization target, not only `workspace_id`.
  */
 export type PresentRequest = {
     /**
@@ -2012,6 +2423,9 @@ export type PreviewNamesRequest = {
 
 /**
  * Server-established identity; never accepted from a request body.
+ *
+ * Identity is not authorization: effective permissions come from the access-control adapter
+ * as workspace and tenant grants, intersected with any delegation ceiling.
  */
 export type Principal = {
     /**
@@ -2019,9 +2433,9 @@ export type Principal = {
      */
     client_id?: string | null;
     /**
-     * Resolved application capabilities.
+     * Ceiling applied to delegated routes.
      */
-    permissions: Array<Permission>;
+    delegation?: DelegationCeiling | null;
     /**
      * Verified authentication route.
      */
@@ -2031,9 +2445,9 @@ export type Principal = {
      */
     subject: string;
     /**
-     * Explicitly accessible workspaces.
+     * Tenant boundary every storage scope for this principal carries.
      */
-    workspace_ids: Array<WorkspaceId>;
+    tenant_id: TenantId;
 };
 
 /**
@@ -2200,6 +2614,9 @@ export type ReadinessResponse = {
      * All configured mandatory dependencies are ready.
      */
     ready: boolean;
+    /**
+     * Configured sandboxed HTML/artifact origin when isolation is enabled.
+     */
     sandbox_origin?: SandboxOriginConfig | null;
 };
 
@@ -2210,7 +2627,7 @@ export type RebuildIndexRequest = {
     /**
      * Retry identity.
      */
-    idempotency_key: string;
+    idempotency_key: IdempotencyKey;
     /**
      * Workspace whose permissions and storage scope apply.
      */
@@ -2222,9 +2639,9 @@ export type RebuildIndexRequest = {
  */
 export type Receipt = {
     /**
-     * `agent_context` or `human_display`; these are distinct.
+     * Agent context or human display; these are distinct.
      */
-    audience: string;
+    audience: ReceiptAudience;
     /**
      * Durable operation record.
      */
@@ -2232,7 +2649,7 @@ export type Receipt = {
     /**
      * Canonical operation identifier.
      */
-    operation_id: string;
+    operation_id: OperationName;
     /**
      * Authenticated acting principal.
      */
@@ -2260,6 +2677,11 @@ export type Receipt = {
 };
 
 /**
+ * Where returned content went; the two are distinct evidence.
+ */
+export type ReceiptAudience = 'agent_context' | 'human_display';
+
+/**
  * Identity of a durable application operation record.
  */
 export type ReceiptId = string;
@@ -2275,7 +2697,7 @@ export type RedigestRequest = {
     /**
      * Retry identity.
      */
-    idempotency_key: string;
+    idempotency_key: IdempotencyKey;
     /**
      * Stable application item identity; paths remain the portable OKF identity.
      */
@@ -2397,6 +2819,13 @@ export type RestoreRequest = {
      * Exact revision on which this change is based; stale writes conflict.
      */
     base_revision: Revision;
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
+     * Restore only this item when supplied.
+     */
     item_id?: ItemId | null;
     /**
      * Reason for the restore.
@@ -2423,7 +2852,10 @@ export type RestoreWorkspaceRequest = {
     /**
      * Retry identity for the restore job.
      */
-    idempotency_key: string;
+    idempotency_key: IdempotencyKey;
+    /**
+     * Optional integrity check against the artifact digest before restore begins.
+     */
     sha256?: Digest | null;
     /**
      * Workspace whose permissions and storage scope apply.
@@ -2435,6 +2867,10 @@ export type RestoreWorkspaceRequest = {
  * Retry a recoverable job with the same durable work identity.
  */
 export type RetryJobRequest = {
+    /**
+     * Retry identity of this retry request, distinct from the job's durable identity.
+     */
+    idempotency_key: IdempotencyKey;
     /**
      * Existing failed job.
      */
@@ -2485,9 +2921,6 @@ export type ReviewCoverage = 'current' | 'changed' | 'imported' | 'unreviewed';
  */
 export type ReviewId = string;
 
-/**
- * A resolved Git commit, never a branch name or the string `latest`.
- */
 export type Revision = string;
 
 /**
@@ -2498,6 +2931,24 @@ export type RevokeConnectorRequest = {
      * Connector to revoke.
      */
     connector_id: ConnectorId;
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+};
+
+/**
+ * A capability URL on the sandbox origin; the token is the only credential and is never logged.
+ */
+export type SandboxCapability = {
+    /**
+     * RFC 3339 expiry after which the capability resolves nothing.
+     */
+    expires_at: string;
+    /**
+     * Absolute `/sandbox/{capability}` URL on the configured sandbox origin.
+     */
+    url: string;
 };
 
 /**
@@ -2512,6 +2963,41 @@ export type SandboxOriginConfig = {
      * Absolute origin (scheme + host + optional port), never the application origin.
      */
     origin: string;
+};
+
+/**
+ * Save the caller's draft; always succeeds even when the head has moved.
+ *
+ * The first save takes the item's head revision as its base. Later saves keep the draft's
+ * base unless `base_revision` equals the current head, which is the explicit rebase.
+ */
+export type SaveDraftRequest = {
+    /**
+     * Revision the editor saw; equal to the current head to rebase after resolving a conflict.
+     */
+    base_revision: Revision;
+    /**
+     * Drafted Markdown body.
+     */
+    body: string;
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
+     * Stable application item identity; paths remain the portable OKF identity.
+     */
+    item_id: ItemId;
+    /**
+     * Complete preserved property map.
+     */
+    properties: {
+        [key: string]: unknown;
+    };
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
 };
 
 /**
@@ -2638,6 +3124,10 @@ export type SetLifecycleRequest = {
      */
     base_revision: Revision;
     /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
      * Stable application item identity; paths remain the portable OKF identity.
      */
     item_id: ItemId;
@@ -2660,6 +3150,10 @@ export type SetRulesRequest = {
      */
     base_revision: Revision;
     /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
      * Validated rules.
      */
     rules: NamingRules;
@@ -2681,6 +3175,10 @@ export type SetTypeRequest = {
      * Validated property schema and UI hints.
      */
     definition: TypeDefinition;
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
     /**
      * Workspace whose permissions and storage scope apply.
      */
@@ -2709,11 +3207,17 @@ export type SourceAppearance = {
      * Immutable object content hash.
      */
     object: Digest;
+    /**
+     * Container or message parent.
+     */
     parent_item_id?: ItemId | null;
     /**
      * Decimal byte count.
      */
     size: string;
+    /**
+     * Explicit successor relationship; not inferred from arrival time.
+     */
     supersedes?: ItemId | null;
 };
 
@@ -2743,6 +3247,9 @@ export type SourceName = {
  * A precise citation that can be reopened independently of current state.
  */
 export type SourceReference = {
+    /**
+     * Exact derived artifact hash.
+     */
     digest?: Digest | null;
     /**
      * Stable application item identity; paths remain the portable OKF identity.
@@ -2785,7 +3292,7 @@ export type StartImportRequest = {
     /**
      * Durable retry identity.
      */
-    idempotency_key: string;
+    idempotency_key: IdempotencyKey;
     /**
      * Completed upload slots.
      */
@@ -2795,6 +3302,8 @@ export type StartImportRequest = {
      */
     workspace_id: WorkspaceId;
 };
+
+export type TenantId = string;
 
 /**
  * A one-based inclusive line range.
@@ -2833,34 +3342,6 @@ export type TypeDefinition = {
 };
 
 /**
- * Edit content against its base revision, invalidating prior review coverage.
- */
-export type UpdateItemRequest = {
-    /**
-     * Exact revision on which this change is based; stale writes conflict.
-     */
-    base_revision: Revision;
-    /**
-     * Replacement Markdown.
-     */
-    body: string;
-    /**
-     * Stable application item identity; paths remain the portable OKF identity.
-     */
-    item_id: ItemId;
-    /**
-     * Complete preserved property map.
-     */
-    properties: {
-        [key: string]: unknown;
-    };
-    /**
-     * Workspace whose permissions and storage scope apply.
-     */
-    workspace_id: WorkspaceId;
-};
-
-/**
  * Update workspace presentation metadata at a known revision.
  */
 export type UpdateWorkspaceRequest = {
@@ -2872,6 +3353,10 @@ export type UpdateWorkspaceRequest = {
      * Updated purpose.
      */
     description: string;
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
     /**
      * New display name.
      */
@@ -2917,6 +3402,9 @@ export type UploadId = string;
  * A named source selection used by a chart or layout.
  */
 export type ViewBinding = {
+    /**
+     * Retained dataset bytes for reproducibility.
+     */
     materialized?: Digest | null;
     /**
      * Dataset or component binding name.
@@ -2946,6 +3434,12 @@ export type ViewDocument = {
      * Cited input datasets and passages.
      */
     bindings: Array<ViewBinding>;
+    /**
+     * Named Vega-Lite specs referenced by `json_render` Chart components; empty for `vega_lite`.
+     */
+    charts?: {
+        [key: string]: unknown;
+    };
     /**
      * Readable explanation independent of the renderer.
      */
@@ -3020,9 +3514,9 @@ export type Workspace = {
      */
     name: string;
     /**
-     * Whether this principal may only read it.
+     * The caller's effective grant on this workspace after any delegation ceiling.
      */
-    read_only: boolean;
+    permissions: Array<Permission>;
 };
 
 /**
@@ -3030,9 +3524,6 @@ export type Workspace = {
  */
 export type WorkspaceId = string;
 
-/**
- * A normalized relative workspace path; this alone is not filesystem authorization.
- */
 export type WorkspacePath = string;
 
 export type GetResourceMetadataData = {
@@ -3787,7 +4278,7 @@ export type DiffItemsResponses = {
     /**
      * Successful operation result
      */
-    200: DiffResponse;
+    200: DiffResponseOutput;
 };
 
 export type DiffItemsResponse = DiffItemsResponses[keyof DiffItemsResponses];
@@ -4590,6 +5081,63 @@ export type DeleteItemResponses = {
 
 export type DeleteItemResponse = DeleteItemResponses[keyof DeleteItemResponses];
 
+export type DiscardDraftData = {
+    body: DiscardDraftRequest;
+    path?: never;
+    query?: never;
+    url: '/api/items/discard-draft';
+};
+
+export type DiscardDraftErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type DiscardDraftError = DiscardDraftErrors[keyof DiscardDraftErrors];
+
+export type DiscardDraftResponses = {
+    /**
+     * Successful operation result
+     */
+    200: Draft;
+};
+
+export type DiscardDraftResponse = DiscardDraftResponses[keyof DiscardDraftResponses];
+
 export type GetItemData = {
     body: GetItemRequest;
     path?: never;
@@ -4646,6 +5194,63 @@ export type GetItemResponses = {
 };
 
 export type GetItemResponse = GetItemResponses[keyof GetItemResponses];
+
+export type ListDraftsData = {
+    body: ListDraftsRequest;
+    path?: never;
+    query?: never;
+    url: '/api/items/list-drafts';
+};
+
+export type ListDraftsErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type ListDraftsError = ListDraftsErrors[keyof ListDraftsErrors];
+
+export type ListDraftsResponses = {
+    /**
+     * Successful operation result
+     */
+    200: ListDraftsResponse;
+};
+
+export type ListDraftsResponse2 = ListDraftsResponses[keyof ListDraftsResponses];
 
 export type ListItemsData = {
     body: ListItemsRequest;
@@ -4761,6 +5366,63 @@ export type MoveItemResponses = {
 
 export type MoveItemResponse = MoveItemResponses[keyof MoveItemResponses];
 
+export type SaveDraftData = {
+    body: SaveDraftRequest;
+    path?: never;
+    query?: never;
+    url: '/api/items/save-draft';
+};
+
+export type SaveDraftErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type SaveDraftError = SaveDraftErrors[keyof SaveDraftErrors];
+
+export type SaveDraftResponses = {
+    /**
+     * Successful operation result
+     */
+    200: Draft;
+};
+
+export type SaveDraftResponse = SaveDraftResponses[keyof SaveDraftResponses];
+
 export type SetLifecycleData = {
     body: SetLifecycleRequest;
     path?: never;
@@ -4817,63 +5479,6 @@ export type SetLifecycleResponses = {
 };
 
 export type SetLifecycleResponse = SetLifecycleResponses[keyof SetLifecycleResponses];
-
-export type UpdateItemData = {
-    body: UpdateItemRequest;
-    path?: never;
-    query?: never;
-    url: '/api/items/update-item';
-};
-
-export type UpdateItemErrors = {
-    /**
-     * Structured application failure
-     */
-    400: ApiError;
-    /**
-     * Structured application failure
-     */
-    401: ApiError;
-    /**
-     * Structured application failure
-     */
-    403: ApiError;
-    /**
-     * Structured application failure
-     */
-    404: ApiError;
-    /**
-     * Structured application failure
-     */
-    409: ApiError;
-    /**
-     * Structured application failure
-     */
-    413: ApiError;
-    /**
-     * Structured application failure
-     */
-    422: ApiError;
-    /**
-     * Structured application failure
-     */
-    500: ApiError;
-    /**
-     * Structured application failure
-     */
-    503: ApiError;
-};
-
-export type UpdateItemError = UpdateItemErrors[keyof UpdateItemErrors];
-
-export type UpdateItemResponses = {
-    /**
-     * Successful operation result
-     */
-    200: MutationResult;
-};
-
-export type UpdateItemResponse = UpdateItemResponses[keyof UpdateItemResponses];
 
 export type AcceptProposalData = {
     body: AcceptProposalRequest;
@@ -5217,6 +5822,63 @@ export type OpenProposalResponses = {
 
 export type OpenProposalResponse = OpenProposalResponses[keyof OpenProposalResponses];
 
+export type CreateSandboxCapabilityData = {
+    body: CreateSandboxCapabilityRequest;
+    path?: never;
+    query?: never;
+    url: '/api/reads/create-sandbox-capability';
+};
+
+export type CreateSandboxCapabilityErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type CreateSandboxCapabilityError = CreateSandboxCapabilityErrors[keyof CreateSandboxCapabilityErrors];
+
+export type CreateSandboxCapabilityResponses = {
+    /**
+     * Successful operation result
+     */
+    200: SandboxCapability;
+};
+
+export type CreateSandboxCapabilityResponse = CreateSandboxCapabilityResponses[keyof CreateSandboxCapabilityResponses];
+
 export type GetObjectData = {
     body: GetObjectRequest;
     path?: never;
@@ -5326,10 +5988,10 @@ export type GetSourcesResponses = {
     /**
      * Successful operation result
      */
-    200: GetSourcesResponse;
+    200: GetSourcesResponseOutput;
 };
 
-export type GetSourcesResponse2 = GetSourcesResponses[keyof GetSourcesResponses];
+export type GetSourcesResponse = GetSourcesResponses[keyof GetSourcesResponses];
 
 export type ReadItemData = {
     body: ReadItemRequest;
@@ -7004,17 +7666,15 @@ export type McpRequestResponses = {
 export type ServeSandboxRepresentationData = {
     body?: never;
     path: {
-        workspace_id: string;
-        item_id: string;
-        revision: string;
+        capability: string;
     };
     query?: never;
-    url: '/sandbox/workspaces/{workspace_id}/items/{item_id}/revisions/{revision}';
+    url: '/sandbox/{capability}';
 };
 
 export type ServeSandboxRepresentationResponses = {
     /**
-     * Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).
+     * Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. The capability from create_sandbox_capability is the only credential: it binds workspace, item, revision and representation, is stored hashed, expires, and is never logged. No ambient session cookies, credentials, or privileged APIs; respond with no-store, no-referrer and a strict CSP (SPEC sections 7 and 11).
      */
     200: string;
 };

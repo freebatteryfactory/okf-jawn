@@ -31,8 +31,8 @@
           "description": "Affected job."
         },
         "kind": {
-          "description": "Changed, imported, `job_updated`, reviewed, or `proposal_updated`.",
-          "type": "string"
+          "$ref": "#/$defs/EventKind",
+          "description": "What changed."
         },
         "revision": {
           "anyOf": [
@@ -56,6 +56,36 @@
         "kind"
       ],
       "type": "object"
+    },
+    "EventKind": {
+      "description": "Kinds of workspace change notification.",
+      "oneOf": [
+        {
+          "const": "changed",
+          "description": "Committed content changed.",
+          "type": "string"
+        },
+        {
+          "const": "imported",
+          "description": "An import produced items.",
+          "type": "string"
+        },
+        {
+          "const": "job_updated",
+          "description": "A job's durable state changed.",
+          "type": "string"
+        },
+        {
+          "const": "reviewed",
+          "description": "A review was recorded.",
+          "type": "string"
+        },
+        {
+          "const": "proposal_updated",
+          "description": "A proposal's state or discussion changed.",
+          "type": "string"
+        }
+      ]
     },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",

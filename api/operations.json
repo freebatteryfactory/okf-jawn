@@ -122,10 +122,32 @@
   },
   {
     "alias": "",
-    "description": "Save content with a base revision precondition; obsolete reviews do not transfer.",
-    "id": "update_item",
+    "description": "Autosave the caller's own draft against its base revision; never creates a revision, and only a Snapshot commits it.",
+    "id": "save_draft",
     "label": "Save",
-    "path": "/api/items/update-item",
+    "path": "/api/items/save-draft",
+    "permission": "write",
+    "success_status": 200,
+    "ui": "",
+    "visibility": ""
+  },
+  {
+    "alias": "",
+    "description": "List only the caller's own uncommitted drafts.",
+    "id": "list_drafts",
+    "label": "Drafts",
+    "path": "/api/items/list-drafts",
+    "permission": "read",
+    "success_status": 200,
+    "ui": "",
+    "visibility": ""
+  },
+  {
+    "alias": "",
+    "description": "Remove the caller's own draft without changing committed content.",
+    "id": "discard_draft",
+    "label": "Discard draft",
+    "path": "/api/items/discard-draft",
     "permission": "write",
     "success_status": 200,
     "ui": "",
@@ -229,6 +251,17 @@
     "success_status": 200,
     "ui": "",
     "visibility": "app"
+  },
+  {
+    "alias": "",
+    "description": "Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.",
+    "id": "create_sandbox_capability",
+    "label": "Open sandboxed",
+    "path": "/api/reads/create-sandbox-capability",
+    "permission": "read",
+    "success_status": 200,
+    "ui": "",
+    "visibility": ""
   },
   {
     "alias": "grep",

@@ -1,0 +1,43 @@
+{
+  "$defs": {
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Remove the caller's own draft of one item.",
+  "properties": {
+    "idempotency_key": {
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity."
+    },
+    "item_id": {
+      "$ref": "#/$defs/ItemId",
+      "description": "Stable application item identity; paths remain the portable OKF identity."
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "item_id",
+    "idempotency_key"
+  ],
+  "title": "DiscardDraftRequest",
+  "type": "object"
+}

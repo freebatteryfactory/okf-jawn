@@ -1,5 +1,10 @@
 {
   "$defs": {
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
@@ -17,17 +22,22 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Create a named snapshot from saved drafts at a checked base revision.",
+  "description": "Snapshot the caller's drafts of the selected items in one commit.\n\nIf any selected item changed after its draft's base, or was deleted, the whole commit is\nrejected with a `draft_conflict` error detail. On success the snapshotted drafts are removed.",
   "properties": {
-    "base_revision": {
+    "expected_head": {
       "$ref": "#/$defs/Revision",
-      "description": "Exact revision on which this change is based; stale writes conflict."
+      "description": "Workspace head the editor saw; a moved head conflicts."
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity."
     },
     "item_ids": {
-      "description": "Selected saved drafts; empty means the explicit workspace selection.",
+      "description": "Items whose drafts by the caller are snapshotted together.",
       "items": {
         "$ref": "#/$defs/ItemId"
       },
+      "minItems": 1,
       "type": "array"
     },
     "message": {
@@ -41,9 +51,10 @@
   },
   "required": [
     "workspace_id",
-    "base_revision",
+    "expected_head",
+    "item_ids",
     "message",
-    "item_ids"
+    "idempotency_key"
   ],
   "title": "CommitRequest",
   "type": "object"

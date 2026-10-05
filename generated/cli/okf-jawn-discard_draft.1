@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-discard_draft 1  "discard_draft " 
+.SH NAME
+okf\-jawn\-discard_draft \- Remove the caller\*(Aqs own draft without changing committed content.
+.SH SYNOPSIS
+\fBokf\-jawn discard_draft\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Remove the caller\*(Aqs own draft without changing committed content.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

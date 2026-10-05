@@ -1,5 +1,40 @@
 {
   "$defs": {
+    "Permission": {
+      "description": "Application capabilities checked on every operation.",
+      "oneOf": [
+        {
+          "const": "read",
+          "description": "Read authorized workspace data.",
+          "type": "string"
+        },
+        {
+          "const": "write",
+          "description": "Edit authorized workspace content.",
+          "type": "string"
+        },
+        {
+          "const": "propose",
+          "description": "Create or update proposals without merging.",
+          "type": "string"
+        },
+        {
+          "const": "approve",
+          "description": "Accept proposals at exact preconditions.",
+          "type": "string"
+        },
+        {
+          "const": "review",
+          "description": "Record an explicit content review.",
+          "type": "string"
+        },
+        {
+          "const": "admin",
+          "description": "Manage deployment or workspace access.",
+          "type": "string"
+        }
+      ]
+    },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
@@ -28,9 +63,12 @@
           "description": "Human-selected workspace name.",
           "type": "string"
         },
-        "read_only": {
-          "description": "Whether this principal may only read it.",
-          "type": "boolean"
+        "permissions": {
+          "description": "The caller's effective grant on this workspace after any delegation ceiling.",
+          "items": {
+            "$ref": "#/$defs/Permission"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -39,7 +77,7 @@
         "description",
         "head",
         "created_at",
-        "read_only"
+        "permissions"
       ],
       "type": "object"
     },

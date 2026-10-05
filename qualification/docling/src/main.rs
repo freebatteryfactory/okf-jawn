@@ -2,6 +2,9 @@
 //!
 //! Instantiates `docling::DocumentConverter` against real fixtures and assets.
 //! Does not implement `okf_jawn_core::conversion::Converter` or any product port.
+//!
+//! Orchestrator drives one process per fixture via `OKF_DOCLING_ONLY` so peak
+//! RSS is measured on the converter process itself (not `cargo run`).
 
 use docling::{ConversionStatus, DocumentConverter, SourceDocument};
 use serde::Serialize;
@@ -13,14 +16,14 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ErrorReceipt {
     component_type: String,
     error_message: String,
     module_name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct FixtureReceipt {
     converter_version: String,
     elapsed_ms: u128,
@@ -36,7 +39,7 @@ struct FixtureReceipt {
     page_provenance: Vec<PageProvenance>,
     path: PathBuf,
     /// Always null in-process: authored Rust forbids the OS FFI needed to sample RSS.
-    /// The orchestrator may attach a process-level peak separately.
+    /// The orchestrator attaches PeakWorkingSet64 / VmHWM for this process.
     peak_rss_bytes: Option<u64>,
     role: String,
     settings: BTreeMap<String, serde_json::Value>,
@@ -45,7 +48,7 @@ struct FixtureReceipt {
     status: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct PageProvenance {
     page_no: usize,
     has_image: bool,
@@ -66,20 +69,8 @@ struct QualificationReport {
 enum Expected {
     /// Supported extraction: Success, non-empty markdown, optional substring.
     SuccessNonEmpty { must_contain: Option<&'static str> },
-    /// Must surface `ConversionStatus::Failure` (never empty Success).
+    /// Must surface `ConversionStatus::Failure` from the converter stage only.
     ExplicitFailure,
-}
-
-struct ExplicitFailureInput<'a> {
-    path: &'a Path,
-    role: &'a str,
-    expected: Expected,
-    settings: &'a BTreeMap<String, serde_json::Value>,
-    sha_before: String,
-    started: Instant,
-    component_type: &'a str,
-    module_name: &'a str,
-    error_message: String,
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -154,10 +145,10 @@ fn judge_outcome(
             }
         }
         Expected::ExplicitFailure => {
+            // Only ConversionStatus::Failure from convert() is PASS.
+            // Success / PartialSuccess must FAIL (orchestrator records finding; fixture stays).
             if matches!(status, ConversionStatus::Failure) {
                 ("PASS_explicit_failure".to_owned(), None)
-            } else if matches!(status, ConversionStatus::Success) && !nonempty {
-                ("FAIL_empty_success".to_owned(), None)
             } else {
                 ("FAIL_expected_failure".to_owned(), None)
             }
@@ -165,37 +156,52 @@ fn judge_outcome(
     }
 }
 
-fn explicit_failure_receipt(input: ExplicitFailureInput<'_>) -> Result<FixtureReceipt, String> {
-    let elapsed_ms = input.started.elapsed().as_millis();
-    let sha_after = sha256_file(input.path)?;
+/// Pre-converter errors are never PASS for ExplicitFailure — they never reached the converter.
+fn before_converter_receipt(
+    path: &Path,
+    role: &str,
+    expected: Expected,
+    settings: &BTreeMap<String, serde_json::Value>,
+    sha_before: String,
+    started: Instant,
+    component_type: &str,
+    module_name: &str,
+    error_message: String,
+) -> Result<FixtureReceipt, String> {
+    let elapsed_ms = started.elapsed().as_millis();
+    let sha_after = sha256_file(path)?;
+    let outcome = if matches!(expected, Expected::ExplicitFailure) {
+        "FAIL_before_converter".to_owned()
+    } else {
+        "FAIL_unexpected_failure".to_owned()
+    };
     Ok(FixtureReceipt {
         converter_version: converter_version(),
         elapsed_ms,
         errors: vec![ErrorReceipt {
-            component_type: input.component_type.to_owned(),
-            error_message: input.error_message,
-            module_name: input.module_name.to_owned(),
+            component_type: component_type.to_owned(),
+            error_message,
+            module_name: module_name.to_owned(),
         }],
-        expected: expected_label(input.expected).to_owned(),
-        fixture: input
-            .path
+        expected: expected_label(expected).to_owned(),
+        fixture: path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default(),
         markdown_chars: 0,
         markdown_nonempty: false,
         must_contain_ok: None,
-        original_unchanged: input.sha_before == sha_after,
-        outcome: "PASS_explicit_failure".to_owned(),
+        original_unchanged: sha_before == sha_after,
+        outcome,
         page_image_count: 0,
         page_provenance: Vec::new(),
-        path: input.path.to_path_buf(),
+        path: path.to_path_buf(),
         peak_rss_bytes: None,
-        role: input.role.to_owned(),
-        settings: input.settings.clone(),
+        role: role.to_owned(),
+        settings: settings.clone(),
         sha256_after: sha_after,
-        sha256_before: input.sha_before,
-        status: "Failure".to_owned(),
+        sha256_before: sha_before,
+        status: "pre_converter_error".to_owned(),
     })
 }
 
@@ -211,41 +217,33 @@ fn convert_fixture(
     let source = match SourceDocument::from_file(path) {
         Ok(source) => source,
         Err(error) => {
-            return if matches!(expected, Expected::ExplicitFailure) {
-                explicit_failure_receipt(ExplicitFailureInput {
-                    path,
-                    role,
-                    expected,
-                    settings,
-                    sha_before,
-                    started,
-                    component_type: "source",
-                    module_name: "source",
-                    error_message: error.to_string(),
-                })
-            } else {
-                Err(error.to_string())
-            };
+            return before_converter_receipt(
+                path,
+                role,
+                expected,
+                settings,
+                sha_before,
+                started,
+                "source",
+                "source",
+                error.to_string(),
+            );
         }
     };
     let result = match converter.convert(source) {
         Ok(result) => result,
         Err(error) => {
-            return if matches!(expected, Expected::ExplicitFailure) {
-                explicit_failure_receipt(ExplicitFailureInput {
-                    path,
-                    role,
-                    expected,
-                    settings,
-                    sha_before,
-                    started,
-                    component_type: "pipeline",
-                    module_name: "pipeline",
-                    error_message: error.to_string(),
-                })
-            } else {
-                Err(error.to_string())
-            };
+            return before_converter_receipt(
+                path,
+                role,
+                expected,
+                settings,
+                sha_before,
+                started,
+                "pipeline",
+                "pipeline",
+                error.to_string(),
+            );
         }
     };
     let elapsed_ms = started.elapsed().as_millis();
@@ -373,6 +371,117 @@ fn fixture_catalog() -> [(&'static str, &'static str, Expected); 10] {
     ]
 }
 
+const MUST_FAIL_NAME: &str = "must_fail_truncated.pdf";
+
+fn lookup_only(only: &str) -> Result<(&'static str, &'static str, Expected), String> {
+    if only == MUST_FAIL_NAME || only == "must_fail" {
+        return Ok((MUST_FAIL_NAME, "must_fail", Expected::ExplicitFailure));
+    }
+    if only == "timeout_probe" {
+        return Ok((
+            "scanned_image_only.pdf",
+            "timeout_probe",
+            Expected::SuccessNonEmpty { must_contain: None },
+        ));
+    }
+    for (name, role, expected) in fixture_catalog() {
+        if name == only {
+            return Ok((name, role, expected));
+        }
+    }
+    Err(format!(
+        "OKF_DOCLING_ONLY={only} is not a known fixture, must_fail, or timeout_probe"
+    ))
+}
+
+fn write_report(out_dir: &str, report: &QualificationReport) -> Result<PathBuf, String> {
+    fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
+    let report_path = PathBuf::from(out_dir).join("receipt.json");
+    let json = serde_json::to_string_pretty(report).map_err(|error| error.to_string())?;
+    fs::write(&report_path, format!("{json}\n")).map_err(|error| error.to_string())?;
+    writeln!(io::stdout(), "Wrote {}", report_path.display()).map_err(|error| error.to_string())?;
+    Ok(report_path)
+}
+
+fn run_one(
+    only: &str,
+    models_dir: &str,
+    fixtures_dir: &str,
+    out_dir: &str,
+) -> Result<(), String> {
+    let (name, role, expected) = lookup_only(only)?;
+    let artifacts = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let mut settings = BTreeMap::new();
+    settings.insert(
+        "artifacts_dir".to_owned(),
+        serde_json::Value::String(artifacts.path().display().to_string()),
+    );
+    settings.insert(
+        "models_dir".to_owned(),
+        serde_json::Value::String(models_dir.to_owned()),
+    );
+    settings.insert(
+        "ocr_lang".to_owned(),
+        serde_json::Value::String("en".to_owned()),
+    );
+
+    let path = PathBuf::from(fixtures_dir).join(name);
+    if !path.is_file() {
+        return Err(format!("missing fixture {}", path.display()));
+    }
+
+    let is_timeout = only == "timeout_probe" || role == "timeout_probe";
+    let converter = if is_timeout {
+        settings.insert(
+            "document_timeout_ms".to_owned(),
+            serde_json::Value::Number(1.into()),
+        );
+        DocumentConverter::new()
+            .ocr_lang("en")
+            .artifacts_dir(artifacts.path().display().to_string())
+            .document_timeout(Some(Duration::from_millis(1)))
+    } else {
+        DocumentConverter::new()
+            .ocr_lang("en")
+            .artifacts_dir(artifacts.path().display().to_string())
+    };
+
+    let mut receipt = convert_fixture(&converter, &path, role, expected, &settings)?;
+    if is_timeout {
+        let timeout_outcome = if timeout_honoured(&receipt) {
+            "PASS".to_owned()
+        } else {
+            "FAIL_timeout_not_honoured".to_owned()
+        };
+        receipt.outcome.clone_from(&timeout_outcome);
+    }
+
+    let key = if is_timeout {
+        "timeout_probe".to_owned()
+    } else {
+        name.to_owned()
+    };
+    let mut summary = BTreeMap::new();
+    summary.insert(key, receipt.outcome.clone());
+    let (receipts, timeout_case) = if is_timeout {
+        (Vec::new(), Some(receipt))
+    } else {
+        (vec![receipt], None)
+    };
+
+    let report = QualificationReport {
+        converter_crate: converter_version(),
+        fixtures_dir: PathBuf::from(fixtures_dir),
+        models_dir: PathBuf::from(models_dir),
+        receipts,
+        summary,
+        timeout_case,
+    };
+    let _ = write_report(out_dir, &report)?;
+    // Per-fixture process always exits 0 after writing; orchestrator judges outcomes.
+    Ok(())
+}
+
 fn convert_catalog(
     converter: &DocumentConverter,
     fixtures_dir: &str,
@@ -389,8 +498,7 @@ fn convert_catalog(
         summary.insert(name.to_owned(), receipt.outcome.clone());
         receipts.push(receipt);
     }
-    let fail_name = "must_fail_corrupt.bin";
-    let fail_path = PathBuf::from(fixtures_dir).join(fail_name);
+    let fail_path = PathBuf::from(fixtures_dir).join(MUST_FAIL_NAME);
     if !fail_path.is_file() {
         return Err(format!("missing must-fail fixture {}", fail_path.display()));
     }
@@ -401,27 +509,12 @@ fn convert_catalog(
         Expected::ExplicitFailure,
         settings,
     )?;
-    summary.insert(fail_name.to_owned(), receipt.outcome.clone());
+    summary.insert(MUST_FAIL_NAME.to_owned(), receipt.outcome.clone());
     receipts.push(receipt);
     Ok((receipts, summary))
 }
 
-fn run() -> Result<(), String> {
-    let models_dir = env::var("DOCLING_RS_MODELS_DIR")
-        .map_err(|_| "DOCLING_RS_MODELS_DIR must be set to the verified models cache".to_owned())?;
-    let fixtures_dir = env::var("OKF_DOCLING_FIXTURES").unwrap_or_else(|_| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/documents")
-            .to_string_lossy()
-            .into_owned()
-    });
-    let out_dir = env::var("OKF_DOCLING_OUT").unwrap_or_else(|_| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.artifacts/qualification/docling")
-            .to_string_lossy()
-            .into_owned()
-    });
-    fs::create_dir_all(&out_dir).map_err(|error| error.to_string())?;
+fn run_all(models_dir: &str, fixtures_dir: &str, out_dir: &str) -> Result<(), String> {
     let artifacts = tempfile::tempdir().map_err(|error| error.to_string())?;
 
     let mut settings = BTreeMap::new();
@@ -431,7 +524,7 @@ fn run() -> Result<(), String> {
     );
     settings.insert(
         "models_dir".to_owned(),
-        serde_json::Value::String(models_dir.clone()),
+        serde_json::Value::String(models_dir.to_owned()),
     );
     settings.insert(
         "ocr_lang".to_owned(),
@@ -441,7 +534,7 @@ fn run() -> Result<(), String> {
     let converter = DocumentConverter::new()
         .ocr_lang("en")
         .artifacts_dir(artifacts.path().display().to_string());
-    let (receipts, mut summary) = convert_catalog(&converter, &fixtures_dir, &settings)?;
+    let (receipts, mut summary) = convert_catalog(&converter, fixtures_dir, &settings)?;
 
     let timeout_converter = DocumentConverter::new()
         .ocr_lang("en")
@@ -452,7 +545,7 @@ fn run() -> Result<(), String> {
         "document_timeout_ms".to_owned(),
         serde_json::Value::Number(1.into()),
     );
-    let timeout_path = PathBuf::from(&fixtures_dir).join("scanned_image_only.pdf");
+    let timeout_path = PathBuf::from(fixtures_dir).join("scanned_image_only.pdf");
     let mut timeout_case = convert_fixture(
         &timeout_converter,
         &timeout_path,
@@ -476,10 +569,7 @@ fn run() -> Result<(), String> {
         summary,
         timeout_case: Some(timeout_case),
     };
-    let report_path = PathBuf::from(&out_dir).join("receipt.json");
-    let json = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
-    fs::write(&report_path, json).map_err(|error| error.to_string())?;
-    writeln!(io::stdout(), "Wrote {}", report_path.display()).map_err(|error| error.to_string())?;
+    let _ = write_report(out_dir, &report)?;
     if report
         .summary
         .values()
@@ -491,6 +581,30 @@ fn run() -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn run() -> Result<(), String> {
+    let models_dir = env::var("DOCLING_RS_MODELS_DIR")
+        .map_err(|_| "DOCLING_RS_MODELS_DIR must be set to the verified models cache".to_owned())?;
+    let fixtures_dir = env::var("OKF_DOCLING_FIXTURES").unwrap_or_else(|_| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/documents")
+            .to_string_lossy()
+            .into_owned()
+    });
+    let out_dir = env::var("OKF_DOCLING_OUT").unwrap_or_else(|_| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.artifacts/qualification/docling")
+            .to_string_lossy()
+            .into_owned()
+    });
+    if let Ok(only) = env::var("OKF_DOCLING_ONLY") {
+        let trimmed = only.trim();
+        if !trimmed.is_empty() {
+            return run_one(trimmed, &models_dir, &fixtures_dir, &out_dir);
+        }
+    }
+    run_all(&models_dir, &fixtures_dir, &out_dir)
 }
 
 fn main() -> Result<(), String> {

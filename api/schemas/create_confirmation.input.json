@@ -1,7 +1,80 @@
 {
   "$defs": {
+    "ConfirmationAction": {
+      "description": "The explicit human action a confirmation authorizes; never an arbitrary method.",
+      "oneOf": [
+        {
+          "const": "review",
+          "description": "Record a content review; requires the review permission.",
+          "type": "string"
+        },
+        {
+          "const": "accept_proposal",
+          "description": "Accept a proposal; requires the approve permission.",
+          "type": "string"
+        }
+      ]
+    },
+    "ConfirmationTarget": {
+      "description": "The immutable object a confirmation is bound to.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "An item revision being reviewed.",
+          "properties": {
+            "item_id": {
+              "$ref": "#/$defs/ItemId",
+              "description": "Reviewed item."
+            },
+            "kind": {
+              "const": "item",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "item_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A proposal revision being accepted.",
+          "properties": {
+            "kind": {
+              "const": "proposal",
+              "type": "string"
+            },
+            "proposal_id": {
+              "$ref": "#/$defs/ProposalId",
+              "description": "Accepted proposal."
+            }
+          },
+          "required": [
+            "kind",
+            "proposal_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Digest": {
       "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ProposalId": {
+      "description": "Identity of a suggested change set, not a review.",
+      "format": "uuid",
       "type": "string"
     },
     "Revision": {
@@ -19,20 +92,24 @@
   "description": "Prepare explicit human confirmation bound to an action and immutable target.",
   "properties": {
     "action": {
-      "description": "review or `accept_proposal`; not an arbitrary method.",
-      "type": "string"
+      "$ref": "#/$defs/ConfirmationAction",
+      "description": "Confirmed action; it determines the required permission."
     },
     "content_digest": {
       "$ref": "#/$defs/Digest",
       "description": "Displayed content digest."
     },
+    "idempotency_key": {
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity."
+    },
     "revision": {
       "$ref": "#/$defs/Revision",
       "description": "Displayed content revision."
     },
-    "target_id": {
-      "description": "Item or proposal identity.",
-      "type": "string"
+    "target": {
+      "$ref": "#/$defs/ConfirmationTarget",
+      "description": "Item or proposal being confirmed."
     },
     "workspace_id": {
       "$ref": "#/$defs/WorkspaceId",
@@ -42,9 +119,10 @@
   "required": [
     "workspace_id",
     "action",
-    "target_id",
+    "target",
     "revision",
-    "content_digest"
+    "content_digest",
+    "idempotency_key"
   ],
   "title": "CreateConfirmationRequest",
   "type": "object"

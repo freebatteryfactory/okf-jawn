@@ -1,11 +1,13 @@
 //! Structured transport-independent application errors.
+//!
+//! `detail` carries the typed outcome a client can act on; adapters map `conflict`,
+//! `already_issued` and `in_progress` to HTTP 409 with this body.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Stable failure classifications; HTTP and MCP adapters preserve these.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// Input violates the declared contract.
@@ -16,8 +18,12 @@ pub enum ErrorCode {
     Forbidden,
     /// The resource is absent or not visible to this principal.
     NotFound,
-    /// A precondition, revision, or idempotency conflict occurred.
+    /// A precondition, revision, draft-base, or idempotency-key conflict occurred.
     Conflict,
+    /// A secret-bearing write already completed; replaying it never returns the secret again.
+    AlreadyIssued,
+    /// Another attempt with the same idempotency key holds a live lease; retry later.
+    InProgress,
     /// A configured resource limit was exceeded.
     TooLarge,
     /// The requested representation or format is unsupported.
@@ -30,8 +36,42 @@ pub enum ErrorCode {
     Internal,
 }
 
+/// Typed failure context the UI and agents can act on without parsing messages.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ErrorDetail {
+    /// The connector was already issued under this idempotency key; its secret is not replayed.
+    AlreadyIssued {
+        /// Connector created by the original request.
+        connector_id: crate::identity::ConnectorId,
+    },
+    /// An identical request is executing under a live lease.
+    InProgress {
+        /// Mutation holding the lease.
+        mutation_id: crate::identity::MutationId,
+        /// Whole seconds the caller should wait before retrying the same request.
+        retry_after: u32,
+    },
+    /// The head moved under a draft; the editor resolves and saves against the new head.
+    DraftConflict {
+        /// Item whose draft no longer applies cleanly.
+        item_id: crate::identity::ItemId,
+        /// Revision the draft was based on.
+        draft_base: crate::identity::Revision,
+        /// Head revision at which the item changed or was deleted.
+        current_revision: crate::identity::Revision,
+        /// Structured comparison between the draft base and the current revision.
+        diff: serde_json::Value,
+    },
+    /// The idempotency key was reused with a different request body.
+    IdempotencyConflict {
+        /// Operation that first used the key.
+        operation: crate::metadata::OperationName,
+    },
+}
+
 /// A safe error response, not an internal backtrace.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApiError {
     /// Stable code for programmatic handling.
@@ -44,6 +84,9 @@ pub struct ApiError {
     /// Correlation identifier, not a secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// Typed context for conflict, replay, and in-progress outcomes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ErrorDetail>,
 }
 
 impl std::fmt::Display for ApiError {
@@ -61,6 +104,14 @@ impl ApiError {
             message: message.into(),
             field: None,
             request_id: None,
+            detail: None,
         }
+    }
+
+    /// Attach typed context the caller can act on.
+    #[must_use]
+    pub fn with_detail(mut self, detail: ErrorDetail) -> Self {
+        self.detail = Some(detail);
+        self
     }
 }

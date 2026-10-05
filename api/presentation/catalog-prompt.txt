@@ -53,7 +53,7 @@ AVAILABLE COMPONENTS (6):
 - Columns: {  } - Place approved components side by side when space permits. [accepts children]
 - SourceExcerpt: { binding: string } - Read the exact source identified by an authorized binding.
 - DataTable: { binding: string } - Show resolved source data in an accessible table.
-- Chart: { binding: string, title: string } - Display a server-validated chart and its data table.
+- Chart: { binding: string, chart: string, title: string } - Display a server-validated chart and its data table.
 - SourceList: { bindings: Array<string> } - List the exact source references supporting this view.
 
 AVAILABLE ACTIONS:

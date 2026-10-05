@@ -9,8 +9,8 @@
           "type": "boolean"
         },
         "kind": {
-          "description": "Added, modified, moved, or removed.",
-          "type": "string"
+          "$ref": "#/$defs/FileChangeKind",
+          "description": "Added, modified, moved, or removed."
         },
         "new_path": {
           "description": "New path; absent for deletions.",
@@ -39,6 +39,31 @@
         "kind"
       ],
       "type": "object"
+    },
+    "FileChangeKind": {
+      "description": "How one file differs between two revisions.",
+      "oneOf": [
+        {
+          "const": "added",
+          "description": "Present only in the compared revision.",
+          "type": "string"
+        },
+        {
+          "const": "modified",
+          "description": "Same path, different content.",
+          "type": "string"
+        },
+        {
+          "const": "moved",
+          "description": "Different path for the same item.",
+          "type": "string"
+        },
+        {
+          "const": "removed",
+          "description": "Present only in the base revision.",
+          "type": "string"
+        }
+      ]
     },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",

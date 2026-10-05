@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-list_drafts 1  "list_drafts " 
+.SH NAME
+okf\-jawn\-list_drafts \- List only the caller\*(Aqs own uncommitted drafts.
+.SH SYNOPSIS
+\fBokf\-jawn list_drafts\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+List only the caller\*(Aqs own uncommitted drafts.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

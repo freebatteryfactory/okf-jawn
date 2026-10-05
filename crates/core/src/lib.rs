@@ -6,10 +6,16 @@
 pub mod access;
 /// Production application service composed over injected ports.
 pub mod application;
+/// Session-bound confirmation challenges.
+pub mod confirmations;
+/// Per-request authorization context and grants.
+pub mod context;
 /// Connector credentials, sessions, and installation identity.
 pub mod credentials;
 /// JSON-boundary dispatch into typed application methods.
 pub mod dispatch;
+/// Per-editor draft persistence.
+pub mod drafts;
 /// Resumable workspace notification log.
 pub mod events;
 /// Complete typed operation port for parallel implementation lanes.
@@ -19,10 +25,14 @@ pub mod ports;
 pub mod conversion;
 /// Durable job and review record interfaces.
 pub mod jobs;
+/// Durable mutation ledger and abandoned-effect lookup.
+pub mod mutations;
 /// Proposal and comment persistence.
 pub mod proposals;
 /// Configured dependency readiness probe.
 pub mod readiness;
+/// Sandbox-origin capability tokens.
+pub mod sandbox;
 /// Rebuildable search, link, and graph index interface.
 pub mod search;
 /// Scoped byte and version persistence interfaces.

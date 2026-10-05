@@ -55,8 +55,14 @@ Read the editable Markdown and preserved properties of an item.
 okf\-jawn\-create_item(1)
 Create authored content without modifying source bytes.
 .TP
-okf\-jawn\-update_item(1)
-Save content with a base revision precondition; obsolete reviews do not transfer.
+okf\-jawn\-save_draft(1)
+Autosave the caller\*(Aqs own draft against its base revision; never creates a revision, and only a Snapshot commits it.
+.TP
+okf\-jawn\-list_drafts(1)
+List only the caller\*(Aqs own uncommitted drafts.
+.TP
+okf\-jawn\-discard_draft(1)
+Remove the caller\*(Aqs own draft without changing committed content.
 .TP
 okf\-jawn\-move_item(1)
 Move an item and rewrite references in one committed change.
@@ -84,6 +90,9 @@ Show supporting sources and occurrence\-specific provenance.
 .TP
 okf\-jawn\-get_object(1)
 Return a bounded binary block authorized through its source; knowing a hash never grants access.
+.TP
+okf\-jawn\-create_sandbox_capability(1)
+Mint a short\-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.
 .TP
 okf\-jawn\-search_items(1)
 Search authorized content and return cited snippets, not whole\-document dumps.

@@ -2,15 +2,14 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// An empty request object.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Empty {}
 
 /// A bounded page request; the cursor is opaque and scoped to the query.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PageRequest {
     /// Opaque continuation cursor.
@@ -18,40 +17,35 @@ pub struct PageRequest {
     pub cursor: Option<String>,
     /// Maximum results requested; server may return fewer.
     #[schemars(range(min = 1, max = 200))]
-    #[schema(minimum = 1, maximum = 200)]
     pub limit: u16,
 }
 
 /// A one-based inclusive line range.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TextRange {
     /// First line, starting at one.
     #[schemars(range(min = 1))]
-    #[schema(minimum = 1)]
     pub start: u32,
     /// Last line, at least start.
     #[schemars(range(min = 1))]
-    #[schema(minimum = 1)]
     pub end: u32,
 }
 
 /// A one-based inclusive document page range.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PageRange {
     /// First page.
     #[schemars(range(min = 1))]
-    #[schema(minimum = 1)]
     pub start: u32,
     /// Last page.
     #[schemars(range(min = 1))]
-    #[schema(minimum = 1)]
     pub end: u32,
 }
 
 /// A one-based rectangular spreadsheet selection.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CellRange {
     /// Exact sheet name.
@@ -67,7 +61,7 @@ pub struct CellRange {
 }
 
 /// A diagnostic that does not silently discard usable input.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Warning {
     /// Stable diagnostic identifier.
@@ -80,7 +74,7 @@ pub struct Warning {
 }
 
 /// A persisted change and the resolved revision it produced.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MutationResult {
     /// New committed workspace revision.

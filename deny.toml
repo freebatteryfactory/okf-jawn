@@ -2,8 +2,8 @@
 # Duplicate crate versions warn; license and advisory failures deny.
 
 [graph]
-# Qualification crates pull heavier native graphs; still checked for licenses/advisories.
-all-features = false
+# Include runtime feature graphs (storage/ingest/server) in license and advisory checks.
+all-features = true
 
 [advisories]
 version = 2
@@ -21,6 +21,8 @@ allow = [
   "MIT",
   "MIT-0",
   "Apache-2.0",
+  # Appears via winx (cap-std / storage runtime) once all-features pulls the runtime graph.
+  "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
@@ -30,12 +32,15 @@ allow = [
   "MPL-2.0",
   "NCSA",
   "CDLA-Permissive-2.0",
+  # Appears via libbz2-rs-sys (docling/runtime graph) once all-features is enabled.
+  "bzip2-1.0.6",
 ]
 
 [bans]
 multiple-versions = "warn"
-# Path workspace members omit versions; treating them as wildcards is noise.
-wildcards = "warn"
+# Deny wildcard versions; path/git deps in private crates and path/git dev-deps are exempt.
+wildcards = "deny"
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

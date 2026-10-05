@@ -40,7 +40,9 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('ls', 'ls', [CompletionResultType]::ParameterValue, 'List a folder with one-line descriptions at one resolved revision.')
             [CompletionResult]::new('get_item', 'get_item', [CompletionResultType]::ParameterValue, 'Read the editable Markdown and preserved properties of an item.')
             [CompletionResult]::new('create_item', 'create_item', [CompletionResultType]::ParameterValue, 'Create authored content without modifying source bytes.')
-            [CompletionResult]::new('update_item', 'update_item', [CompletionResultType]::ParameterValue, 'Save content with a base revision precondition; obsolete reviews do not transfer.')
+            [CompletionResult]::new('save_draft', 'save_draft', [CompletionResultType]::ParameterValue, 'Autosave the caller''s own draft against its base revision; never creates a revision, and only a Snapshot commits it.')
+            [CompletionResult]::new('list_drafts', 'list_drafts', [CompletionResultType]::ParameterValue, 'List only the caller''s own uncommitted drafts.')
+            [CompletionResult]::new('discard_draft', 'discard_draft', [CompletionResultType]::ParameterValue, 'Remove the caller''s own draft without changing committed content.')
             [CompletionResult]::new('move_item', 'move_item', [CompletionResultType]::ParameterValue, 'Move an item and rewrite references in one committed change.')
             [CompletionResult]::new('set_lifecycle', 'set_lifecycle', [CompletionResultType]::ParameterValue, 'Change lifecycle without approving any claim in the document.')
             [CompletionResult]::new('delete_item', 'delete_item', [CompletionResultType]::ParameterValue, 'Remove the current reference while retaining historical source objects.')
@@ -53,6 +55,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('sources', 'sources', [CompletionResultType]::ParameterValue, 'Show supporting sources and occurrence-specific provenance.')
             [CompletionResult]::new('get_object', 'get_object', [CompletionResultType]::ParameterValue, 'Return a bounded binary block authorized through its source; knowing a hash never grants access.')
             [CompletionResult]::new('read_object', 'read_object', [CompletionResultType]::ParameterValue, 'Return a bounded binary block authorized through its source; knowing a hash never grants access.')
+            [CompletionResult]::new('create_sandbox_capability', 'create_sandbox_capability', [CompletionResultType]::ParameterValue, 'Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.')
             [CompletionResult]::new('search_items', 'search_items', [CompletionResultType]::ParameterValue, 'Search authorized content and return cited snippets, not whole-document dumps.')
             [CompletionResult]::new('grep', 'grep', [CompletionResultType]::ParameterValue, 'Search authorized content and return cited snippets, not whole-document dumps.')
             [CompletionResult]::new('get_links', 'get_links', [CompletionResultType]::ParameterValue, 'Read incoming or outgoing references at the selected revision.')
@@ -210,7 +213,21 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
-        'okf-jawn;update_item' {
+        'okf-jawn;save_draft' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;list_drafts' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;discard_draft' {
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
@@ -295,6 +312,13 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;read_object' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;create_sandbox_capability' {
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
@@ -754,7 +778,9 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('list_items', 'list_items', [CompletionResultType]::ParameterValue, 'List a folder with one-line descriptions at one resolved revision.')
             [CompletionResult]::new('get_item', 'get_item', [CompletionResultType]::ParameterValue, 'Read the editable Markdown and preserved properties of an item.')
             [CompletionResult]::new('create_item', 'create_item', [CompletionResultType]::ParameterValue, 'Create authored content without modifying source bytes.')
-            [CompletionResult]::new('update_item', 'update_item', [CompletionResultType]::ParameterValue, 'Save content with a base revision precondition; obsolete reviews do not transfer.')
+            [CompletionResult]::new('save_draft', 'save_draft', [CompletionResultType]::ParameterValue, 'Autosave the caller''s own draft against its base revision; never creates a revision, and only a Snapshot commits it.')
+            [CompletionResult]::new('list_drafts', 'list_drafts', [CompletionResultType]::ParameterValue, 'List only the caller''s own uncommitted drafts.')
+            [CompletionResult]::new('discard_draft', 'discard_draft', [CompletionResultType]::ParameterValue, 'Remove the caller''s own draft without changing committed content.')
             [CompletionResult]::new('move_item', 'move_item', [CompletionResultType]::ParameterValue, 'Move an item and rewrite references in one committed change.')
             [CompletionResult]::new('set_lifecycle', 'set_lifecycle', [CompletionResultType]::ParameterValue, 'Change lifecycle without approving any claim in the document.')
             [CompletionResult]::new('delete_item', 'delete_item', [CompletionResultType]::ParameterValue, 'Remove the current reference while retaining historical source objects.')
@@ -764,6 +790,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('read_item', 'read_item', [CompletionResultType]::ParameterValue, 'Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.')
             [CompletionResult]::new('get_sources', 'get_sources', [CompletionResultType]::ParameterValue, 'Show supporting sources and occurrence-specific provenance.')
             [CompletionResult]::new('get_object', 'get_object', [CompletionResultType]::ParameterValue, 'Return a bounded binary block authorized through its source; knowing a hash never grants access.')
+            [CompletionResult]::new('create_sandbox_capability', 'create_sandbox_capability', [CompletionResultType]::ParameterValue, 'Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.')
             [CompletionResult]::new('search_items', 'search_items', [CompletionResultType]::ParameterValue, 'Search authorized content and return cited snippets, not whole-document dumps.')
             [CompletionResult]::new('get_links', 'get_links', [CompletionResultType]::ParameterValue, 'Read incoming or outgoing references at the selected revision.')
             [CompletionResult]::new('get_graph', 'get_graph', [CompletionResultType]::ParameterValue, 'Read a bounded graph projection using the same authorized source identities.')
@@ -845,7 +872,13 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
         'okf-jawn;help;create_item' {
             break
         }
-        'okf-jawn;help;update_item' {
+        'okf-jawn;help;save_draft' {
+            break
+        }
+        'okf-jawn;help;list_drafts' {
+            break
+        }
+        'okf-jawn;help;discard_draft' {
             break
         }
         'okf-jawn;help;move_item' {
@@ -873,6 +906,9 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;help;get_object' {
+            break
+        }
+        'okf-jawn;help;create_sandbox_capability' {
             break
         }
         'okf-jawn;help;search_items' {

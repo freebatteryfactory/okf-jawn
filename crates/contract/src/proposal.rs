@@ -2,10 +2,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Permitted proposal mutations; no review or acceptance variants exist.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Change {
     /// Create a note or View with retained properties.
@@ -43,7 +42,7 @@ pub enum Change {
 }
 
 /// Lifecycle of a suggestion, not approval of a fact in it.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProposalStatus {
     /// Available for review.
@@ -57,7 +56,7 @@ pub enum ProposalStatus {
 }
 
 /// A revision-bound proposed change set.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Proposal {
     /// Proposal identity.
@@ -85,7 +84,7 @@ pub struct Proposal {
 }
 
 /// Suggest changes without changing the accepted workspace.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OpenProposalRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -99,11 +98,11 @@ pub struct OpenProposalRequest {
     /// Allowed suggestion mutations.
     pub changes: Vec<Change>,
     /// Retry identity.
-    pub idempotency_key: String,
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// List suggestions for an authorized workspace.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListProposalsRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -116,7 +115,7 @@ pub struct ListProposalsRequest {
 }
 
 /// Paged proposals.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListProposalsResponse {
     /// Visible proposals.
@@ -127,7 +126,7 @@ pub struct ListProposalsResponse {
 }
 
 /// Open one proposal and its exact content.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetProposalRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -137,7 +136,7 @@ pub struct GetProposalRequest {
 }
 
 /// Accept exactly the displayed proposal against an unchanged workspace head.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AcceptProposalRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -149,11 +148,13 @@ pub struct AcceptProposalRequest {
     /// Proposal version shown during confirmation.
     pub proposal_revision: crate::identity::Revision,
     /// Server-issued session-bound confirmation; never a model-supplied reviewer name.
-    pub confirmation_id: String,
+    pub confirmation_id: crate::identity::ConfirmationId,
+    /// Retry identity; a retry with the same mutation may re-consume its own confirmation.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Close a proposal without changing accepted content.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeclineProposalRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -162,10 +163,12 @@ pub struct DeclineProposalRequest {
     pub proposal_id: crate::identity::ProposalId,
     /// Human-readable closure reason.
     pub reason: String,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Add a discussion comment without recording content verification.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddCommentRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -174,13 +177,15 @@ pub struct AddCommentRequest {
     pub proposal_id: crate::identity::ProposalId,
     /// Comment text.
     pub text: String,
-    /// Optional line or range under discussion.
+    /// Optional line or range under discussion; the caller must be able to read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<crate::source::SourceReference>,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// A server-attributed discussion entry.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Comment {
     /// Comment identity.

@@ -5,15 +5,14 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Read liveness for a running process.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HealthRequest {}
 
 /// Basic process metadata only.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HealthResponse {
     /// alive when the process can respond.
@@ -23,12 +22,12 @@ pub struct HealthResponse {
 }
 
 /// Read configured dependency availability.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadinessRequest {}
 
 /// One configured dependency status.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyStatus {
     /// Dependency name.
@@ -44,7 +43,7 @@ pub struct DependencyStatus {
 /// Transport note: the server lane binds a sandbox-origin route that never attaches
 /// ambient session cookies or privileged APIs; the workspace-ui iframe loads this
 /// origin under sandbox constraints (SPEC sections 7 and 11).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxOriginConfig {
     /// Absolute origin (scheme + host + optional port), never the application origin.
@@ -52,7 +51,7 @@ pub struct SandboxOriginConfig {
 }
 
 /// Readiness summary, distinct from acceptance results.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadinessResponse {
     /// All configured mandatory dependencies are ready.

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A capability URL on the sandbox origin; the token is the only credential and is never logged.",
+  "properties": {
+    "expires_at": {
+      "description": "RFC 3339 expiry after which the capability resolves nothing.",
+      "type": "string"
+    },
+    "url": {
+      "description": "Absolute `/sandbox/{capability}` URL on the configured sandbox origin.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "url",
+    "expires_at"
+  ],
+  "title": "SandboxCapability",
+  "type": "object"
+}

@@ -4,13 +4,15 @@ use std::path::Path;
 
 use crate::output::write_json;
 use okf_jawn_contract::common::{PageRange, PageRequest};
-use okf_jawn_contract::identity::{At, ItemId, Revision, WorkspaceId};
+use okf_jawn_contract::identity::{At, IdempotencyKey, ItemId, Revision, WorkspaceId};
 use okf_jawn_contract::read::{ReadItemRequest, ReadView, Selection};
 
 pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let workspace_id: WorkspaceId =
         serde_json::from_str("\"11111111-1111-4111-8111-111111111111\"")?;
     let item_id: ItemId = serde_json::from_str("\"22222222-2222-4222-8222-222222222222\"")?;
+    let idempotency_key: IdempotencyKey =
+        serde_json::from_str("\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"")?;
     let read = ReadItemRequest {
         workspace_id,
         item_id,
@@ -47,7 +49,7 @@ pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn std::error::Error
         &serde_json::to_value(okf_jawn_contract::workspace::CreateWorkspaceRequest {
             name: "My workspace".to_owned(),
             description: "A blank user-organized context workspace".to_owned(),
-            idempotency_key: "example-create".to_owned(),
+            idempotency_key,
         })?,
     )?;
     Ok(())

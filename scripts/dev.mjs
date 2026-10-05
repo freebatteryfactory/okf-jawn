@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** Agent-agnostic task entrypoint. Every task fails honestly when prerequisites are missing. */
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile, mkdir, readdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run, version } from './lib/process.mjs';
@@ -87,6 +87,67 @@ async function lanes() {
   }
 }
 
+/**
+ * Remove empty construction lanes created by `lanes`.
+ *
+ * Refuses if any build/* branch has commits beyond its merge-base with HEAD, or if any
+ * lane worktree is dirty. Otherwise removes the worktrees and deletes the local branches.
+ */
+async function lanesReset() {
+  const parent = resolve(root, '..', 'okf-jawn-lanes');
+  const lanes = ['storage', 'ingest', 'core-cli', 'server', 'mcp-execution', 'workspace-ui', 'views'];
+  for (const lane of lanes) {
+    const branch = `build/${lane}`;
+    const worktree = join(parent, lane);
+    const exists = await run('git', ['rev-parse', '--verify', branch], {
+      cwd: root,
+      capture: true,
+      allowFailure: true,
+    });
+    if (exists.code !== 0) continue;
+    if (await existsPath(worktree)) {
+      const dirty = await run('git', ['status', '--porcelain'], {
+        cwd: worktree,
+        capture: true,
+        allowFailure: true,
+      });
+      if (dirty.code === 0 && dirty.stdout.trim()) {
+        throw new Error(`lanes-reset refused: worktree ${worktree} is dirty`);
+      }
+    }
+    const base = (await run('git', ['merge-base', branch, 'HEAD'], { cwd: root, capture: true })).stdout.trim();
+    const ahead = await run('git', ['rev-list', '--count', `${base}..${branch}`], {
+      cwd: root,
+      capture: true,
+    });
+    if (Number(ahead.stdout.trim()) > 0) {
+      throw new Error(
+        `lanes-reset refused: ${branch} has ${ahead.stdout.trim()} commit(s) beyond its base; reset would discard lane work`,
+      );
+    }
+  }
+  for (const lane of lanes) {
+    const branch = `build/${lane}`;
+    const worktree = join(parent, lane);
+    if (await existsPath(worktree)) {
+      await run('git', ['worktree', 'remove', '--force', worktree], { cwd: root });
+    }
+    const exists = await run('git', ['rev-parse', '--verify', branch], {
+      cwd: root,
+      capture: true,
+      allowFailure: true,
+    });
+    if (exists.code === 0) {
+      await run('git', ['branch', '-D', branch], { cwd: root });
+    }
+  }
+  process.stdout.write('lanes-reset: removed empty build/* worktrees and branches.\n');
+}
+
+async function existsPath(path) {
+  return exists(path);
+}
+
 async function offlineChecks() {
   const tests = (await files(join(root, 'tests/foundation'))).filter(name => name.endsWith('.test.mjs')).map(name => `./tests/foundation/${name}`);
   if (!tests.length) throw new Error('No foundation tests discovered');
@@ -109,6 +170,73 @@ async function audit() {
   if (full.stderr) process.stderr.write(full.stderr);
   process.stdout.write(`Full bun audit exit=${full.code} (informational; lower-severity tooling findings do not fail this task).\n`);
   process.stdout.write(`Ignored high tooling advisory ${bracesException} (shadcn braces path; see vendors.json / verification).\n`);
+}
+
+/**
+ * Validate qualification receipts under qualification/receipts/.
+ *
+ * Expected minimum JSON shape per receipt:
+ *   { "git_sha": "<full sha>", "inputs": ["path/relative/to/repo", ...] }
+ *
+ * Fails when git_sha is not an ancestor of HEAD, or when any listed input path
+ * changed after that SHA (git diff --name-only <sha> HEAD -- <inputs...>).
+ */
+async function checkReceipts() {
+  const receiptsDir = join(root, 'qualification', 'receipts');
+  await mkdir(receiptsDir, { recursive: true });
+  const entries = (await readdir(receiptsDir)).filter((name) => name.endsWith('.json')).sort();
+  if (!entries.length) {
+    process.stdout.write('check-receipts: no *.json receipts under qualification/receipts/ (ok while empty).\n');
+    return;
+  }
+  const failures = [];
+  for (const name of entries) {
+    const path = join(receiptsDir, name);
+    let receipt;
+    try {
+      receipt = JSON.parse(await readFile(path, 'utf8'));
+    } catch (error) {
+      failures.push(`${name}: not valid JSON (${error.message})`);
+      continue;
+    }
+    const sha = receipt.git_sha ?? receipt.commit_sha;
+    if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/i.test(sha)) {
+      failures.push(`${name}: missing git_sha (expected 40-hex); shape is { git_sha, inputs: string[] }`);
+      continue;
+    }
+    if (!Array.isArray(receipt.inputs) || !receipt.inputs.every((item) => typeof item === 'string')) {
+      failures.push(`${name}: inputs must be a string[] of repo-relative paths`);
+      continue;
+    }
+    const ancestor = await run('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], {
+      cwd: root,
+      capture: true,
+      allowFailure: true,
+    });
+    if (ancestor.code !== 0) {
+      failures.push(`${name}: git_sha ${sha} is not an ancestor of HEAD`);
+      continue;
+    }
+    if (receipt.inputs.length === 0) continue;
+    const changed = await run(
+      'git',
+      ['diff', '--name-only', sha, 'HEAD', '--', ...receipt.inputs],
+      { cwd: root, capture: true },
+    );
+    const names = changed.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (names.length) {
+      failures.push(
+        `${name}: inputs changed after ${sha}:\n  ${names.join('\n  ')}`,
+      );
+    }
+  }
+  if (failures.length) {
+    throw new Error(`check-receipts failed:\n${failures.join('\n')}`);
+  }
+  process.stdout.write(`check-receipts: ${entries.length} receipt(s) valid against HEAD.\n`);
 }
 
 async function qualify() {
@@ -140,7 +268,9 @@ async function main() {
     case 'vendor': await vendor(); break;
     case 'tree': process.stdout.write(await tree(root)); break;
     case 'lanes': await lanes(); break;
+    case 'lanes-reset': await lanesReset(); break;
     case 'qualify': await qualify(); break;
+    case 'check-receipts': await checkReceipts(); break;
     case 'audit': await audit(); break;
     case 'check':
       await run('cargo', ['fmt', '--all', '--check'], { cwd: root });
@@ -159,7 +289,7 @@ async function main() {
       await generatedStrictProbe();
       await uiScript('typecheck');
       await offlineChecks(); break;
-    case 'help': process.stdout.write('Tasks: init doctor lock bootstrap gen gen-check check-offline check test foundation vendor tree lanes qualify audit\n'); break;
+    case 'help': process.stdout.write('Tasks: init doctor lock bootstrap gen gen-check check-offline check test foundation vendor tree lanes lanes-reset qualify check-receipts audit\n'); break;
     default: throw new Error(`Unknown task: ${task}. Use help.`);
   }
 }

@@ -2,10 +2,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Supported case transformations.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LetterCase {
     /// Preserve case.
@@ -23,7 +22,7 @@ pub enum LetterCase {
 }
 
 /// Declared date interpretation; ambiguous input is not guessed.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DateOrder {
     /// Year, month, day.
@@ -37,7 +36,7 @@ pub enum DateOrder {
 }
 
 /// How proposed naming collisions are handled.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CollisionPolicy {
     /// Require an explicit decision.
@@ -49,7 +48,7 @@ pub enum CollisionPolicy {
 }
 
 /// How filename extensions are handled when applying a naming rule.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionPolicy {
     /// Leave the extension unchanged.
@@ -61,7 +60,7 @@ pub enum ExtensionPolicy {
 }
 
 /// A typed rule scoped by glob and optional OKF type.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NamingRule {
     /// Match against the supplied relative path.
@@ -96,7 +95,7 @@ pub struct NamingRule {
 }
 
 /// Versioned naming rules rendered as a form and editable as YAML.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NamingRules {
     /// Format version; this release emits 1.
@@ -106,7 +105,7 @@ pub struct NamingRules {
 }
 
 /// Read the workspace conventions at one version.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetRulesRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -116,7 +115,7 @@ pub struct GetRulesRequest {
 }
 
 /// Persist naming conventions as a versioned workspace file.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetRulesRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -125,10 +124,12 @@ pub struct SetRulesRequest {
     pub base_revision: crate::identity::Revision,
     /// Validated rules.
     pub rules: NamingRules,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Calculate a rename plan with no persistent mutation.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewNamesRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -142,7 +143,7 @@ pub struct PreviewNamesRequest {
 }
 
 /// A proposed path change with an explanation.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RenameEntry {
     /// Stable application item identity; paths remain the portable OKF identity.
@@ -156,7 +157,7 @@ pub struct RenameEntry {
 }
 
 /// One path observed as a duplicate during rename preview.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DuplicateObservation {
     /// Path observed more than once.
@@ -168,7 +169,7 @@ pub struct DuplicateObservation {
 }
 
 /// A preview bound to source state and exact conventions.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RenamePlan {
     /// Workspace revision inspected.
@@ -184,7 +185,7 @@ pub struct RenamePlan {
 }
 
 /// Apply a revision-bound preview and rewrite affected links.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyNamesRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -193,4 +194,6 @@ pub struct ApplyNamesRequest {
     pub plan: RenamePlan,
     /// Rules whose digest must match the preview.
     pub rules: NamingRules,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }

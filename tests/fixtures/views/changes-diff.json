@@ -2,7 +2,7 @@
   "changes": [
     {
       "binary": false,
-      "kind": "modify",
+      "kind": "modified",
       "new_path": "fixtures/qualification-source.md",
       "old_path": "fixtures/qualification-source.md",
       "patch": "@@ -1,3 +1,4 @@\n # Qualification source\n+\n+Harness fixture line.\n"

@@ -5,16 +5,37 @@
  * stylesheet is Tailwind source that only the Tailwind compiler turns into real CSS. Any emitted
  * file other than one script and one stylesheet would be unreachable from the inline document and
  * fails the build.
+ *
+ * URI and mimeType must match the committed api/mcp-apps.json declaration.
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath, URL } from 'node:url';
 import { RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps';
 import babel from '@rolldown/plugin-babel';
 import tailwindcss from '@tailwindcss/vite';
 import react, { reactCompilerPreset } from '@vitejs/plugin-react';
 import { build } from 'vite';
+
+const declarationPath = fileURLToPath(new URL('../../api/mcp-apps.json', import.meta.url));
+const declaration = JSON.parse(await readFile(declarationPath, 'utf8'));
+const declared = declaration?.resources?.[0];
+if (!declared || typeof declared.uri !== 'string' || typeof declared.mimeType !== 'string') {
+  throw new Error('api/mcp-apps.json must declare exactly one resource with uri and mimeType');
+}
+if (declaration.resources.length !== 1) {
+  throw new Error(`api/mcp-apps.json must list exactly one resource, got ${declaration.resources.length}`);
+}
+const expectedUri = 'ui://okf-jawn/app.html';
+if (declared.uri !== expectedUri) {
+  throw new Error(`api/mcp-apps.json uri ${declared.uri} !== ${expectedUri}`);
+}
+if (declared.mimeType !== RESOURCE_MIME_TYPE) {
+  throw new Error(
+    `api/mcp-apps.json mimeType ${declared.mimeType} !== SDK ${RESOURCE_MIME_TYPE}`,
+  );
+}
 
 const output = await build({
   configFile: false,
@@ -56,21 +77,18 @@ const safeStyle = style.replaceAll('</style', '<\\/style');
 const policy = `default-src 'none'; script-src 'sha256-${hash(safeScript)}'; style-src 'sha256-${hash(safeStyle)}'; img-src data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`;
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${policy}"><title>okf-jawn source view</title><style>${safeStyle}</style></head><body><div id="root"></div><script>${safeScript}</script></body></html>\n`;
 await mkdir('dist-apps', { recursive: true });
-const resources = [];
-for (const name of ['source', 'changes', 'timeline', 'present']) {
-  const file = `dist-apps/${name}.html`;
-  await writeFile(file, html);
-  const bytes = Buffer.from(html, 'utf8');
-  resources.push({
-    name,
-    uri: `ui://okf-jawn/${name}.html`,
-    mimeType: RESOURCE_MIME_TYPE,
+const file = 'dist-apps/app.html';
+await writeFile(file, html);
+const bytes = Buffer.from(html, 'utf8');
+const resources = [
+  {
+    name: 'app',
+    uri: declared.uri,
+    mimeType: declared.mimeType,
     byteLength: bytes.byteLength,
     sha256: createHash('sha256').update(bytes).digest('hex'),
     csp: policy,
-  });
-}
+  },
+];
 await writeFile('dist-apps/manifest.json', `${JSON.stringify({ resources }, null, 2)}\n`);
-process.stdout.write(
-  'Built source, changes, timeline, and present resources from the shared result-dispatching component.\n',
-);
+process.stdout.write('Built shared ui://okf-jawn/app.html MCP App resource.\n');

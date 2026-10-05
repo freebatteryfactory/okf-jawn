@@ -25,7 +25,11 @@ export const catalog = defineCatalog(schema, {
       description: 'Show resolved source data in an accessible table.',
     },
     Chart: {
-      props: z.object({ binding, title: z.string().max(160) }),
+      props: z.object({
+        binding,
+        chart: binding,
+        title: z.string().min(1).max(160),
+      }),
       description: 'Display a server-validated chart and its data table.',
     },
     SourceList: {

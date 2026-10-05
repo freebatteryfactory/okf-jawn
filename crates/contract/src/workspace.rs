@@ -2,10 +2,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// A user-owned OKF workspace with a resolved head revision.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Workspace {
     /// Stable application identity.
@@ -18,12 +17,12 @@ pub struct Workspace {
     pub head: crate::identity::Revision,
     /// RFC 3339 creation time.
     pub created_at: String,
-    /// Whether this principal may only read it.
-    pub read_only: bool,
+    /// The caller's effective grant on this workspace after any delegation ceiling.
+    pub permissions: Vec<crate::access::Permission>,
 }
 
 /// List only workspaces visible to the authenticated principal.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListWorkspacesRequest {
     /// Bounded pagination with an opaque cursor.
@@ -31,7 +30,7 @@ pub struct ListWorkspacesRequest {
 }
 
 /// A bounded workspace listing.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListWorkspacesResponse {
     /// Authorized workspaces.
@@ -42,7 +41,7 @@ pub struct ListWorkspacesResponse {
 }
 
 /// Create a blank workspace without baked-in example content.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateWorkspaceRequest {
     /// Display name.
@@ -50,11 +49,11 @@ pub struct CreateWorkspaceRequest {
     /// Purpose of this workspace.
     pub description: String,
     /// Caller-chosen retry identity.
-    pub idempotency_key: String,
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Open an existing workspace by application identity.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OpenWorkspaceRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -62,7 +61,7 @@ pub struct OpenWorkspaceRequest {
 }
 
 /// Update workspace presentation metadata at a known revision.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateWorkspaceRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -73,20 +72,24 @@ pub struct UpdateWorkspaceRequest {
     pub name: String,
     /// Updated purpose.
     pub description: String,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Archive the workspace without deleting retained content.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArchiveWorkspaceRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
     /// Exact revision on which this change is based; stale writes conflict.
     pub base_revision: crate::identity::Revision,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Export portable OKF content and all selected referenced assets.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExportWorkspaceRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -96,21 +99,21 @@ pub struct ExportWorkspaceRequest {
     /// Include retained Git history in addition to the selected state.
     pub include_history: bool,
     /// Retry identity for the export job.
-    pub idempotency_key: String,
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Back up content plus application records; distinct from portable export.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BackupWorkspaceRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
     /// Retry identity for the backup.
-    pub idempotency_key: String,
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Restore a workspace from a retained backup artifact (full restore of content and app records).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RestoreWorkspaceRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -121,11 +124,11 @@ pub struct RestoreWorkspaceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<crate::identity::Digest>,
     /// Retry identity for the restore job.
-    pub idempotency_key: String,
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// An authorized export or backup artifact with integrity metadata.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DownloadArtifact {
     /// Stable downloadable artifact.

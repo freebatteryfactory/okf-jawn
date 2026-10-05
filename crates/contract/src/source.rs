@@ -2,10 +2,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// An observed source name and location; not an authority assertion.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceName {
     /// Original supplied filename.
@@ -19,7 +18,7 @@ pub struct SourceName {
 }
 
 /// One source occurrence; identical bytes do not imply identical meaning.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceAppearance {
     /// Immutable object content hash.
@@ -41,7 +40,7 @@ pub struct SourceAppearance {
 }
 
 /// A precise citation that can be reopened independently of current state.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceReference {
     /// Workspace whose permissions and storage scope apply.
@@ -60,7 +59,7 @@ pub struct SourceReference {
 }
 
 /// Retrieve sources and provenance for one item.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetSourcesRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -72,7 +71,7 @@ pub struct GetSourcesRequest {
 }
 
 /// Citations and source appearances for the selected item.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetSourcesResponse {
     /// Resolved version.
@@ -84,7 +83,7 @@ pub struct GetSourcesResponse {
 }
 
 /// Read an authorized stored object through an item reference, never by hash alone.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetObjectRequest {
     /// Authorized provenance path.
@@ -100,7 +99,7 @@ pub struct GetObjectRequest {
 }
 
 /// An authorized bounded binary block.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetObjectResponse {
     /// Whole-object digest.

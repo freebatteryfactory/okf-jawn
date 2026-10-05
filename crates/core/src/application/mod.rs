@@ -10,12 +10,17 @@
 
 use std::sync::Arc;
 
+use crate::access::AccessControl;
+use crate::confirmations::ConfirmationStore;
 use crate::conversion::Converter;
 use crate::credentials::CredentialStore;
+use crate::drafts::DraftStore;
 use crate::events::EventLog;
 use crate::jobs::{JobQueue, RecordStore};
+use crate::mutations::MutationStore;
 use crate::proposals::ProposalStore;
 use crate::readiness::ReadinessProbe;
+use crate::sandbox::SandboxCapabilityStore;
 use crate::search::SearchIndex;
 use crate::storage::{BlobStore, VersionStore, WorkspaceCatalog};
 use crate::uploads::UploadStore;
@@ -26,7 +31,11 @@ use crate::uploads::UploadStore;
 /// that claims leases from `records`/`queue` and executes handlers separately.
 #[derive(Clone)]
 pub struct Ports {
-    /// Workspace metadata, permissions, and storage scope.
+    /// Workspace and tenant grant resolution.
+    pub access: Arc<dyn AccessControl>,
+    /// Idempotency ledger.
+    pub mutations: Arc<dyn MutationStore>,
+    /// Workspace metadata and permissions.
     pub catalog: Arc<dyn WorkspaceCatalog>,
     /// Immutable content-addressed bytes.
     pub blobs: Arc<dyn BlobStore>,
@@ -48,6 +57,12 @@ pub struct Ports {
     pub events: Arc<dyn EventLog>,
     /// Connectors, sessions, and installation identity.
     pub credentials: Arc<dyn CredentialStore>,
+    /// Per-editor drafts.
+    pub drafts: Arc<dyn DraftStore>,
+    /// Session-bound confirmation challenges.
+    pub confirmations: Arc<dyn ConfirmationStore>,
+    /// Sandbox-origin capability tokens.
+    pub sandbox: Arc<dyn SandboxCapabilityStore>,
     /// Configured dependency readiness.
     pub readiness: Arc<dyn ReadinessProbe>,
 }

@@ -316,6 +316,11 @@
           },
           "type": "array"
         },
+        "charts": {
+          "additionalProperties": true,
+          "description": "Named Vega-Lite specs referenced by `json_render` Chart components; empty for `vega_lite`.",
+          "type": "object"
+        },
         "description": {
           "description": "Readable explanation independent of the renderer.",
           "type": "string"

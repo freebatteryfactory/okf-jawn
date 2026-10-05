@@ -1,5 +1,10 @@
 {
   "$defs": {
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
@@ -22,6 +27,10 @@
       "description": "Updated purpose.",
       "type": "string"
     },
+    "idempotency_key": {
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity."
+    },
     "name": {
       "description": "New display name.",
       "type": "string"
@@ -35,7 +44,8 @@
     "workspace_id",
     "base_revision",
     "name",
-    "description"
+    "description",
+    "idempotency_key"
   ],
   "title": "UpdateWorkspaceRequest",
   "type": "object"

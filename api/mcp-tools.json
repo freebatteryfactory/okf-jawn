@@ -277,7 +277,7 @@
     {
       "_meta": {
         "ui": {
-          "resourceUri": "ui://okf-jawn/source.html",
+          "resourceUri": "ui://okf-jawn/app.html",
           "visibility": [
             "model",
             "app"
@@ -724,8 +724,8 @@
             "description": "A navigable structural element from a document.",
             "properties": {
               "kind": {
-                "description": "Heading, table, figure, page, or sheet.",
-                "type": "string"
+                "$ref": "#/$defs/OutlineEntryKind",
+                "description": "Structural element type."
               },
               "label": {
                 "description": "Visible heading or media caption.",
@@ -750,6 +750,36 @@
               "kind"
             ],
             "type": "object"
+          },
+          "OutlineEntryKind": {
+            "description": "Structural element types an outline can point to.",
+            "oneOf": [
+              {
+                "const": "heading",
+                "description": "A document heading.",
+                "type": "string"
+              },
+              {
+                "const": "table",
+                "description": "A table.",
+                "type": "string"
+              },
+              {
+                "const": "figure",
+                "description": "A figure or image.",
+                "type": "string"
+              },
+              {
+                "const": "page",
+                "description": "A document page.",
+                "type": "string"
+              },
+              {
+                "const": "sheet",
+                "description": "A spreadsheet sheet.",
+                "type": "string"
+              }
+            ]
           },
           "PageRange": {
             "additionalProperties": false,
@@ -1084,7 +1114,7 @@
     {
       "_meta": {
         "ui": {
-          "resourceUri": "ui://okf-jawn/source.html",
+          "resourceUri": "ui://okf-jawn/app.html",
           "visibility": [
             "model",
             "app"
@@ -2603,7 +2633,7 @@
     {
       "_meta": {
         "ui": {
-          "resourceUri": "ui://okf-jawn/timeline.html",
+          "resourceUri": "ui://okf-jawn/app.html",
           "visibility": [
             "model",
             "app"
@@ -2807,7 +2837,7 @@
     {
       "_meta": {
         "ui": {
-          "resourceUri": "ui://okf-jawn/changes.html",
+          "resourceUri": "ui://okf-jawn/app.html",
           "visibility": [
             "model",
             "app"
@@ -2886,8 +2916,8 @@
                 "type": "boolean"
               },
               "kind": {
-                "description": "Added, modified, moved, or removed.",
-                "type": "string"
+                "$ref": "#/$defs/FileChangeKind",
+                "description": "Added, modified, moved, or removed."
               },
               "new_path": {
                 "description": "New path; absent for deletions.",
@@ -2916,6 +2946,31 @@
               "kind"
             ],
             "type": "object"
+          },
+          "FileChangeKind": {
+            "description": "How one file differs between two revisions.",
+            "oneOf": [
+              {
+                "const": "added",
+                "description": "Present only in the compared revision.",
+                "type": "string"
+              },
+              {
+                "const": "modified",
+                "description": "Same path, different content.",
+                "type": "string"
+              },
+              {
+                "const": "moved",
+                "description": "Different path for the same item.",
+                "type": "string"
+              },
+              {
+                "const": "removed",
+                "description": "Present only in the base revision.",
+                "type": "string"
+              }
+            ]
           },
           "Revision": {
             "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
@@ -3584,6 +3639,11 @@
               }
             ]
           },
+          "IdempotencyKey": {
+            "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+            "format": "uuid",
+            "type": "string"
+          },
           "ItemId": {
             "description": "Stable item identity independent of its current relative path.",
             "format": "uuid",
@@ -3624,8 +3684,8 @@
             "type": "string"
           },
           "idempotency_key": {
-            "description": "Retry identity.",
-            "type": "string"
+            "$ref": "#/$defs/IdempotencyKey",
+            "description": "Retry identity."
           },
           "title": {
             "description": "Proposal title.",
@@ -3890,7 +3950,7 @@
     {
       "_meta": {
         "ui": {
-          "resourceUri": "ui://okf-jawn/present.html",
+          "resourceUri": "ui://okf-jawn/app.html",
           "visibility": [
             "model",
             "app"
@@ -4217,6 +4277,11 @@
                 },
                 "type": "array"
               },
+              "charts": {
+                "additionalProperties": true,
+                "description": "Named Vega-Lite specs referenced by `json_render` Chart components; empty for `vega_lite`.",
+                "type": "object"
+              },
               "description": {
                 "description": "Readable explanation independent of the renderer.",
                 "type": "string"
@@ -4282,7 +4347,7 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
-        "description": "Render a candidate from already resolved bindings without saving or approving it.",
+        "description": "Render a candidate from already resolved bindings without saving or approving it.\n\nEvery binding's source workspace is an authorization target, not only `workspace_id`.",
         "properties": {
           "view": {
             "$ref": "#/$defs/ViewDocument",
@@ -4618,6 +4683,11 @@
                   "$ref": "#/$defs/ViewBinding"
                 },
                 "type": "array"
+              },
+              "charts": {
+                "additionalProperties": true,
+                "description": "Named Vega-Lite specs referenced by `json_render` Chart components; empty for `vega_lite`.",
+                "type": "object"
               },
               "description": {
                 "description": "Readable explanation independent of the renderer.",

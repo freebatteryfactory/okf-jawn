@@ -2,10 +2,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Search the workspace at one revision with explicit scope and pagination.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -24,7 +23,7 @@ pub struct SearchRequest {
 }
 
 /// A bounded excerpt linked to its exact source.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchHit {
     /// Reopenable citation.
@@ -38,7 +37,7 @@ pub struct SearchHit {
 }
 
 /// A paged authorized search result.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchResponse {
     /// Resolved revision.
@@ -51,7 +50,7 @@ pub struct SearchResponse {
 }
 
 /// Which side of the link graph to inspect.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkDirection {
     /// References made by this item.
@@ -63,7 +62,7 @@ pub enum LinkDirection {
 }
 
 /// A source-level relationship between items.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Link {
     /// Linking item.
@@ -80,7 +79,7 @@ pub struct Link {
 }
 
 /// Read outgoing links or backlinks without loading every document.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetLinksRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -96,7 +95,7 @@ pub struct GetLinksRequest {
 }
 
 /// Links and their resolution at one revision.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetLinksResponse {
     /// Resolved revision.
@@ -109,7 +108,7 @@ pub struct GetLinksResponse {
 }
 
 /// Read a bounded link graph for the human graph projection.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetGraphRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -124,7 +123,7 @@ pub struct GetGraphRequest {
 }
 
 /// Graph nodes and edges from the same authorized revision.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetGraphResponse {
     /// Resolved revision.

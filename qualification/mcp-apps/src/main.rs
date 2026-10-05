@@ -81,13 +81,13 @@ impl QualifyAppsServer {
             .map_err(|error| format!("read {}: {error}", manifest_path.display()))?;
         let manifest: Manifest = serde_json::from_str(&raw)
             .map_err(|error| format!("parse {}: {error}", manifest_path.display()))?;
-        if manifest.resources.len() != 4 {
+        if manifest.resources.len() != 1 {
             return Err(format!(
-                "manifest must list exactly 4 resources, found {}",
+                "manifest must list exactly 1 shared App resource, found {}",
                 manifest.resources.len()
             ));
         }
-        let mut resources = Vec::with_capacity(4);
+        let mut resources = Vec::with_capacity(1);
         let mut by_uri = BTreeMap::new();
         for entry in manifest.resources {
             let path = dist_apps.join(format!("{}.html", entry.name));
@@ -108,6 +108,12 @@ impl QualifyAppsServer {
                     entry.name, entry.sha256, digest
                 ));
             }
+            if entry.uri != "ui://okf-jawn/app.html" {
+                return Err(format!(
+                    "shared App uri must be ui://okf-jawn/app.html, got {}",
+                    entry.uri
+                ));
+            }
             let app = BundledApp {
                 byte_length,
                 bytes: Arc::from(bytes.into_boxed_slice()),
@@ -121,47 +127,43 @@ impl QualifyAppsServer {
             resources.push(app);
         }
 
+        let shared = resources
+            .first()
+            .ok_or_else(|| "manifest missing shared App resource".to_owned())?;
         let fixtures = fixtures_dir();
         let tool_specs = [
             (
                 "render_source",
                 "Render the source excerpt App from a contract-valid ReadItemResponse fixture.",
                 "source-read-item.json",
-                "source",
                 "Qualification source fixture (text fallback).",
             ),
             (
                 "render_changes",
                 "Render the changes App from a contract-valid DiffResponse fixture.",
                 "changes-diff.json",
-                "changes",
                 "Qualification changes fixture (text fallback).",
             ),
             (
                 "render_timeline",
                 "Render the timeline App from a contract-valid LogResponse fixture.",
                 "timeline-log.json",
-                "timeline",
                 "Qualification timeline fixture (text fallback).",
             ),
             (
                 "render_present",
                 "Render the present App from a contract-valid PresentResponse fixture.",
                 "present-response.json",
-                "present",
                 "Qualification present fixture (text fallback).",
             ),
         ];
         let mut tools = Vec::with_capacity(4);
-        for (name, description, fixture_name, resource_name, summary) in tool_specs {
-            let Some(app) = resources.iter().find(|app| app.name == resource_name) else {
-                return Err(format!("manifest missing resource named {resource_name}"));
-            };
+        for (name, description, fixture_name, summary) in tool_specs {
             tools.push(RenderTool {
                 description,
                 fixture: load_fixture(&fixtures.join(fixture_name))?,
                 name,
-                resource_uri: app.uri.clone(),
+                resource_uri: shared.uri.clone(),
                 summary: summary.to_owned(),
             });
         }

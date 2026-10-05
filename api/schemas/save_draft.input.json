@@ -1,5 +1,10 @@
 {
   "$defs": {
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
@@ -17,15 +22,19 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Edit content against its base revision, invalidating prior review coverage.",
+  "description": "Save the caller's draft; always succeeds even when the head has moved.\n\nThe first save takes the item's head revision as its base. Later saves keep the draft's\nbase unless `base_revision` equals the current head, which is the explicit rebase.",
   "properties": {
     "base_revision": {
       "$ref": "#/$defs/Revision",
-      "description": "Exact revision on which this change is based; stale writes conflict."
+      "description": "Revision the editor saw; equal to the current head to rebase after resolving a conflict."
     },
     "body": {
-      "description": "Replacement Markdown.",
+      "description": "Drafted Markdown body.",
       "type": "string"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity."
     },
     "item_id": {
       "$ref": "#/$defs/ItemId",
@@ -46,8 +55,9 @@
     "item_id",
     "base_revision",
     "body",
-    "properties"
+    "properties",
+    "idempotency_key"
   ],
-  "title": "UpdateItemRequest",
+  "title": "SaveDraftRequest",
   "type": "object"
 }

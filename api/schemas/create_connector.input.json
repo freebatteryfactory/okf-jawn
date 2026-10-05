@@ -1,5 +1,10 @@
 {
   "$defs": {
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
     "WorkspaceId": {
       "description": "Stable application identity for one user-organized workspace.",
       "format": "uuid",
@@ -13,6 +18,10 @@
     "allow_propose": {
       "description": "Also grant proposal creation. Review and approval are never grantable to a connector.",
       "type": "boolean"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity; a replay returns `already_issued`, never the secret again."
     },
     "label": {
       "description": "Owner-chosen name identifying the client, such as the host application.",
@@ -29,7 +38,8 @@
   "required": [
     "label",
     "workspace_ids",
-    "allow_propose"
+    "allow_propose",
+    "idempotency_key"
   ],
   "title": "CreateConnectorRequest",
   "type": "object"

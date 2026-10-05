@@ -42,15 +42,27 @@ describe('RulesForm', () => {
     const invalid = JSON.parse('{"schema_version":"not-an-integer","rules":[]}');
     const ajv = validator.validateFormData(invalid, schema);
     expect(ajv.errors.length).toBeGreaterThan(0);
+    const first = ajv.errors[0];
+    expect(first).toBeDefined();
+    expect(first!.message).toMatch(/must be integer/i);
+    expect(first!.stack).toMatch(/schema_version.*must be integer/i);
 
     const { container } = render(
       <RulesForm schema={schema} value={invalid} onPreview={onPreview} />,
     );
-    fireEvent.click(screen.getByRole('button', { name: /preview naming changes/i }));
-    const body = container.textContent ?? '';
-    expect(body).toMatch(/schema_version/i);
-    expect(ajv.errors.map((error) => error.message ?? '').join(' ')).toMatch(
-      /integer|type|must|should/i,
-    );
+    // Clicking the button alone is not reliable in happy-dom; submit the form.
+    const form = container.querySelector('form');
+    expect(form).toBeTruthy();
+    fireEvent.submit(form!);
+
+    // RJSF ErrorList renders error.stack; field error list renders error.message.
+    const errorPanel = container.querySelector('.panel.errors');
+    expect(errorPanel).toBeTruthy();
+    expect(errorPanel!.textContent).toContain(first!.stack!);
+    expect(errorPanel!.textContent).toMatch(/must be integer/i);
+    const fieldErrors = container.querySelector('#root_schema_version__error');
+    expect(fieldErrors).toBeTruthy();
+    expect(fieldErrors!.textContent).toContain(first!.message!);
+    expect(onPreview).not.toHaveBeenCalled();
   });
 });

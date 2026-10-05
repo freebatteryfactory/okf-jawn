@@ -3,8 +3,8 @@
 import { type DefaultError, type InfiniteData, infiniteQueryOptions, queryOptions, type UseMutationOptions } from '@tanstack/react-query';
 
 import { client } from '../client.gen';
-import { acceptProposal, addComment, applyNames, archiveWorkspace, backupWorkspace, beginLocalSession, beginLogin, blameItem, cancelJob, commitItems, completeLogin, completeUpload, correctDigest, createConfirmation, createConnector, createFolder, createItem, createReview, createUpload, createWorkspace, declineProposal, deleteItem, diffItems, downloadArtifact, downloadObject, endSession, exportView, exportWorkspace, getAttention, getCatalog, getFormSchema, getGraph, getHealth, getItem, getJob, getLinks, getObject, getProposal, getReadiness, getReceipt, getResourceMetadata, getRules, getSession, getSources, getView, listConnectors, listEvents, listItems, listJobs, listProposals, listReviews, listTypes, listWorkspaces, liveness, logItems, mcpClose, mcpRequest, moveItem, openProposal, openWorkspace, type Options, presentView, previewNames, readItem, rebuildIndex, redigestItem, resolveView, restoreItems, restoreWorkspace, retryJob, revokeConnector, searchItems, serveSandboxRepresentation, setLifecycle, setRules, setType, startImport, updateItem, updateWorkspace, uploadContent } from '../sdk.gen';
-import type { AcceptProposalData, AcceptProposalError, AcceptProposalResponse, AddCommentData, AddCommentError, AddCommentResponse, ApplyNamesData, ApplyNamesError, ApplyNamesResponse, ArchiveWorkspaceData, ArchiveWorkspaceError, ArchiveWorkspaceResponse, BackupWorkspaceData, BackupWorkspaceError, BackupWorkspaceResponse, BeginLocalSessionData, BeginLoginData, BlameItemData, BlameItemError, BlameItemResponse, CancelJobData, CancelJobError, CancelJobResponse, CommitItemsData, CommitItemsError, CommitItemsResponse, CompleteLoginData, CompleteUploadData, CompleteUploadError, CompleteUploadResponse, CorrectDigestData, CorrectDigestError, CorrectDigestResponse, CreateConfirmationData, CreateConfirmationError, CreateConfirmationResponse, CreateConnectorData, CreateConnectorError, CreateConnectorResponse, CreateFolderData, CreateFolderError, CreateFolderResponse, CreateItemData, CreateItemError, CreateItemResponse, CreateReviewData, CreateReviewError, CreateReviewResponse, CreateUploadData, CreateUploadError, CreateUploadResponse, CreateWorkspaceData, CreateWorkspaceError, CreateWorkspaceResponse, DeclineProposalData, DeclineProposalError, DeclineProposalResponse, DeleteItemData, DeleteItemError, DeleteItemResponse, DiffItemsData, DiffItemsError, DiffItemsResponse, DownloadArtifactData, DownloadArtifactResponse, DownloadObjectData, DownloadObjectResponse, EndSessionData, ExportViewData, ExportViewError, ExportViewResponse, ExportWorkspaceData, ExportWorkspaceError, ExportWorkspaceResponse, GetAttentionData, GetAttentionError, GetAttentionResponse2, GetCatalogData, GetCatalogError, GetCatalogResponse, GetFormSchemaData, GetGraphData, GetGraphError, GetGraphResponse2, GetHealthData, GetHealthError, GetHealthResponse, GetItemData, GetItemError, GetItemResponse, GetJobData, GetJobError, GetJobResponse, GetLinksData, GetLinksError, GetLinksResponse2, GetObjectData, GetObjectError, GetObjectResponse2, GetProposalData, GetProposalError, GetProposalResponse, GetReadinessData, GetReadinessError, GetReadinessResponse, GetReceiptData, GetReceiptError, GetReceiptResponse, GetResourceMetadataData, GetResourceMetadataResponse, GetRulesData, GetRulesError, GetRulesResponse, GetSessionData, GetSessionError, GetSessionResponse, GetSourcesData, GetSourcesError, GetSourcesResponse2, GetViewData, GetViewError, GetViewResponse, ListConnectorsData, ListConnectorsError, ListConnectorsResponse2, ListEventsData, ListEventsError, ListEventsResponse2, ListItemsData, ListItemsError, ListItemsResponse2, ListJobsData, ListJobsError, ListJobsResponse2, ListProposalsData, ListProposalsError, ListProposalsResponse2, ListReviewsData, ListReviewsError, ListReviewsResponse2, ListTypesData, ListTypesError, ListTypesResponse2, ListWorkspacesData, ListWorkspacesError, ListWorkspacesResponse2, LivenessData, LivenessResponse, LogItemsData, LogItemsError, LogItemsResponse, McpCloseData, McpRequestData, MoveItemData, MoveItemError, MoveItemResponse, OpenProposalData, OpenProposalError, OpenProposalResponse, OpenWorkspaceData, OpenWorkspaceError, OpenWorkspaceResponse, PresentViewData, PresentViewError, PresentViewResponse, PreviewNamesData, PreviewNamesError, PreviewNamesResponse, ReadItemData, ReadItemError, ReadItemResponse2, RebuildIndexData, RebuildIndexError, RebuildIndexResponse, RedigestItemData, RedigestItemError, RedigestItemResponse, ResolveViewData, ResolveViewError, ResolveViewResponse, RestoreItemsData, RestoreItemsError, RestoreItemsResponse, RestoreWorkspaceData, RestoreWorkspaceError, RestoreWorkspaceResponse, RetryJobData, RetryJobError, RetryJobResponse, RevokeConnectorData, RevokeConnectorError, RevokeConnectorResponse, SearchItemsData, SearchItemsError, SearchItemsResponse, ServeSandboxRepresentationData, ServeSandboxRepresentationResponse, SetLifecycleData, SetLifecycleError, SetLifecycleResponse, SetRulesData, SetRulesError, SetRulesResponse, SetTypeData, SetTypeError, SetTypeResponse, StartImportData, StartImportError, StartImportResponse, UpdateItemData, UpdateItemError, UpdateItemResponse, UpdateWorkspaceData, UpdateWorkspaceError, UpdateWorkspaceResponse, UploadContentData, UploadContentResponse } from '../types.gen';
+import { acceptProposal, addComment, applyNames, archiveWorkspace, backupWorkspace, beginLocalSession, beginLogin, blameItem, cancelJob, commitItems, completeLogin, completeUpload, correctDigest, createConfirmation, createConnector, createFolder, createItem, createReview, createSandboxCapability, createUpload, createWorkspace, declineProposal, deleteItem, diffItems, discardDraft, downloadArtifact, downloadObject, endSession, exportView, exportWorkspace, getAttention, getCatalog, getFormSchema, getGraph, getHealth, getItem, getJob, getLinks, getObject, getProposal, getReadiness, getReceipt, getResourceMetadata, getRules, getSession, getSources, getView, listConnectors, listDrafts, listEvents, listItems, listJobs, listProposals, listReviews, listTypes, listWorkspaces, liveness, logItems, mcpClose, mcpRequest, moveItem, openProposal, openWorkspace, type Options, presentView, previewNames, readItem, rebuildIndex, redigestItem, resolveView, restoreItems, restoreWorkspace, retryJob, revokeConnector, saveDraft, searchItems, serveSandboxRepresentation, setLifecycle, setRules, setType, startImport, updateWorkspace, uploadContent } from '../sdk.gen';
+import type { AcceptProposalData, AcceptProposalError, AcceptProposalResponse, AddCommentData, AddCommentError, AddCommentResponse, ApplyNamesData, ApplyNamesError, ApplyNamesResponse, ArchiveWorkspaceData, ArchiveWorkspaceError, ArchiveWorkspaceResponse, BackupWorkspaceData, BackupWorkspaceError, BackupWorkspaceResponse, BeginLocalSessionData, BeginLoginData, BlameItemData, BlameItemError, BlameItemResponse, CancelJobData, CancelJobError, CancelJobResponse, CommitItemsData, CommitItemsError, CommitItemsResponse, CompleteLoginData, CompleteUploadData, CompleteUploadError, CompleteUploadResponse, CorrectDigestData, CorrectDigestError, CorrectDigestResponse, CreateConfirmationData, CreateConfirmationError, CreateConfirmationResponse, CreateConnectorData, CreateConnectorError, CreateConnectorResponse, CreateFolderData, CreateFolderError, CreateFolderResponse, CreateItemData, CreateItemError, CreateItemResponse, CreateReviewData, CreateReviewError, CreateReviewResponse, CreateSandboxCapabilityData, CreateSandboxCapabilityError, CreateSandboxCapabilityResponse, CreateUploadData, CreateUploadError, CreateUploadResponse, CreateWorkspaceData, CreateWorkspaceError, CreateWorkspaceResponse, DeclineProposalData, DeclineProposalError, DeclineProposalResponse, DeleteItemData, DeleteItemError, DeleteItemResponse, DiffItemsData, DiffItemsError, DiffItemsResponse, DiscardDraftData, DiscardDraftError, DiscardDraftResponse, DownloadArtifactData, DownloadArtifactResponse, DownloadObjectData, DownloadObjectResponse, EndSessionData, ExportViewData, ExportViewError, ExportViewResponse, ExportWorkspaceData, ExportWorkspaceError, ExportWorkspaceResponse, GetAttentionData, GetAttentionError, GetAttentionResponse2, GetCatalogData, GetCatalogError, GetCatalogResponse, GetFormSchemaData, GetGraphData, GetGraphError, GetGraphResponse2, GetHealthData, GetHealthError, GetHealthResponse, GetItemData, GetItemError, GetItemResponse, GetJobData, GetJobError, GetJobResponse, GetLinksData, GetLinksError, GetLinksResponse2, GetObjectData, GetObjectError, GetObjectResponse2, GetProposalData, GetProposalError, GetProposalResponse, GetReadinessData, GetReadinessError, GetReadinessResponse, GetReceiptData, GetReceiptError, GetReceiptResponse, GetResourceMetadataData, GetResourceMetadataResponse, GetRulesData, GetRulesError, GetRulesResponse, GetSessionData, GetSessionError, GetSessionResponse, GetSourcesData, GetSourcesError, GetSourcesResponse, GetViewData, GetViewError, GetViewResponse, ListConnectorsData, ListConnectorsError, ListConnectorsResponse2, ListDraftsData, ListDraftsError, ListDraftsResponse2, ListEventsData, ListEventsError, ListEventsResponse2, ListItemsData, ListItemsError, ListItemsResponse2, ListJobsData, ListJobsError, ListJobsResponse2, ListProposalsData, ListProposalsError, ListProposalsResponse2, ListReviewsData, ListReviewsError, ListReviewsResponse2, ListTypesData, ListTypesError, ListTypesResponse2, ListWorkspacesData, ListWorkspacesError, ListWorkspacesResponse2, LivenessData, LivenessResponse, LogItemsData, LogItemsError, LogItemsResponse, McpCloseData, McpRequestData, MoveItemData, MoveItemError, MoveItemResponse, OpenProposalData, OpenProposalError, OpenProposalResponse, OpenWorkspaceData, OpenWorkspaceError, OpenWorkspaceResponse, PresentViewData, PresentViewError, PresentViewResponse, PreviewNamesData, PreviewNamesError, PreviewNamesResponse, ReadItemData, ReadItemError, ReadItemResponse2, RebuildIndexData, RebuildIndexError, RebuildIndexResponse, RedigestItemData, RedigestItemError, RedigestItemResponse, ResolveViewData, ResolveViewError, ResolveViewResponse, RestoreItemsData, RestoreItemsError, RestoreItemsResponse, RestoreWorkspaceData, RestoreWorkspaceError, RestoreWorkspaceResponse, RetryJobData, RetryJobError, RetryJobResponse, RevokeConnectorData, RevokeConnectorError, RevokeConnectorResponse, SaveDraftData, SaveDraftError, SaveDraftResponse, SearchItemsData, SearchItemsError, SearchItemsResponse, ServeSandboxRepresentationData, ServeSandboxRepresentationResponse, SetLifecycleData, SetLifecycleError, SetLifecycleResponse, SetRulesData, SetRulesError, SetRulesResponse, SetTypeData, SetTypeError, SetTypeResponse, StartImportData, StartImportError, StartImportResponse, UpdateWorkspaceData, UpdateWorkspaceError, UpdateWorkspaceResponse, UploadContentData, UploadContentResponse } from '../types.gen';
 
 export type QueryKey<TOptions extends Options> = [
     Pick<TOptions, 'baseUrl' | 'body' | 'headers' | 'path' | 'query'> & {
@@ -645,6 +645,25 @@ export const deleteItemMutation = (options?: Partial<Options<DeleteItemData>>): 
     return mutationOptions;
 };
 
+/**
+ * Discard draft
+ *
+ * Remove the caller's own draft without changing committed content.
+ */
+export const discardDraftMutation = (options?: Partial<Options<DiscardDraftData>>): UseMutationOptions<DiscardDraftResponse, DiscardDraftError, Options<DiscardDraftData>> => {
+    const mutationOptions: UseMutationOptions<DiscardDraftResponse, DiscardDraftError, Options<DiscardDraftData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await discardDraft({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
 export const getItemQueryKey = (options: Options<GetItemData>) => createQueryKey('getItem', options);
 
 /**
@@ -663,6 +682,26 @@ export const getItemOptions = (options: Options<GetItemData>) => queryOptions<Ge
         return data;
     },
     queryKey: getItemQueryKey(options)
+});
+
+export const listDraftsQueryKey = (options: Options<ListDraftsData>) => createQueryKey('listDrafts', options);
+
+/**
+ * Drafts
+ *
+ * List only the caller's own uncommitted drafts.
+ */
+export const listDraftsOptions = (options: Options<ListDraftsData>) => queryOptions<ListDraftsResponse2, ListDraftsError, ListDraftsResponse2, ReturnType<typeof listDraftsQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await listDrafts({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: listDraftsQueryKey(options)
 });
 
 export const listItemsQueryKey = (options: Options<ListItemsData>) => createQueryKey('listItems', options);
@@ -705,14 +744,14 @@ export const moveItemMutation = (options?: Partial<Options<MoveItemData>>): UseM
 };
 
 /**
- * Archive
+ * Save
  *
- * Change lifecycle without approving any claim in the document.
+ * Autosave the caller's own draft against its base revision; never creates a revision, and only a Snapshot commits it.
  */
-export const setLifecycleMutation = (options?: Partial<Options<SetLifecycleData>>): UseMutationOptions<SetLifecycleResponse, SetLifecycleError, Options<SetLifecycleData>> => {
-    const mutationOptions: UseMutationOptions<SetLifecycleResponse, SetLifecycleError, Options<SetLifecycleData>> = {
+export const saveDraftMutation = (options?: Partial<Options<SaveDraftData>>): UseMutationOptions<SaveDraftResponse, SaveDraftError, Options<SaveDraftData>> => {
+    const mutationOptions: UseMutationOptions<SaveDraftResponse, SaveDraftError, Options<SaveDraftData>> = {
         mutationFn: async (fnOptions) => {
-            const { data } = await setLifecycle({
+            const { data } = await saveDraft({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -724,14 +763,14 @@ export const setLifecycleMutation = (options?: Partial<Options<SetLifecycleData>
 };
 
 /**
- * Save
+ * Archive
  *
- * Save content with a base revision precondition; obsolete reviews do not transfer.
+ * Change lifecycle without approving any claim in the document.
  */
-export const updateItemMutation = (options?: Partial<Options<UpdateItemData>>): UseMutationOptions<UpdateItemResponse, UpdateItemError, Options<UpdateItemData>> => {
-    const mutationOptions: UseMutationOptions<UpdateItemResponse, UpdateItemError, Options<UpdateItemData>> = {
+export const setLifecycleMutation = (options?: Partial<Options<SetLifecycleData>>): UseMutationOptions<SetLifecycleResponse, SetLifecycleError, Options<SetLifecycleData>> => {
+    const mutationOptions: UseMutationOptions<SetLifecycleResponse, SetLifecycleError, Options<SetLifecycleData>> = {
         mutationFn: async (fnOptions) => {
-            const { data } = await updateItem({
+            const { data } = await setLifecycle({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -858,6 +897,26 @@ export const openProposalMutation = (options?: Partial<Options<OpenProposalData>
     return mutationOptions;
 };
 
+export const createSandboxCapabilityQueryKey = (options: Options<CreateSandboxCapabilityData>) => createQueryKey('createSandboxCapability', options);
+
+/**
+ * Open sandboxed
+ *
+ * Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.
+ */
+export const createSandboxCapabilityOptions = (options: Options<CreateSandboxCapabilityData>) => queryOptions<CreateSandboxCapabilityResponse, CreateSandboxCapabilityError, CreateSandboxCapabilityResponse, ReturnType<typeof createSandboxCapabilityQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await createSandboxCapability({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: createSandboxCapabilityQueryKey(options)
+});
+
 export const getObjectQueryKey = (options: Options<GetObjectData>) => createQueryKey('getObject', options);
 
 /**
@@ -917,7 +976,7 @@ export const getSourcesQueryKey = (options: Options<GetSourcesData>) => createQu
  *
  * Show supporting sources and occurrence-specific provenance.
  */
-export const getSourcesOptions = (options: Options<GetSourcesData>) => queryOptions<GetSourcesResponse2, GetSourcesError, GetSourcesResponse2, ReturnType<typeof getSourcesQueryKey>>({
+export const getSourcesOptions = (options: Options<GetSourcesData>) => queryOptions<GetSourcesResponse, GetSourcesError, GetSourcesResponse, ReturnType<typeof getSourcesQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
         const { data } = await getSources({
             ...options,
@@ -1690,7 +1749,7 @@ export const serveSandboxRepresentationQueryKey = (options: Options<ServeSandbox
 /**
  * serve_sandbox_representation
  *
- * Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).
+ * Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. The capability from create_sandbox_capability is the only credential: it binds workspace, item, revision and representation, is stored hashed, expires, and is never logged. No ambient session cookies, credentials, or privileged APIs; respond with no-store, no-referrer and a strict CSP (SPEC sections 7 and 11).
  */
 export const serveSandboxRepresentationOptions = (options: Options<ServeSandboxRepresentationData>) => queryOptions<ServeSandboxRepresentationResponse, DefaultError, ServeSandboxRepresentationResponse, ReturnType<typeof serveSandboxRepresentationQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {

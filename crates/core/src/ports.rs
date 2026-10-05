@@ -3,8 +3,9 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::ApiError;
+
+use crate::context::OperationContext;
 
 macro_rules! application_port {
     ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal, $visibility:literal,
@@ -13,7 +14,7 @@ macro_rules! application_port {
         pub trait Application: Send + Sync {
             $(#[doc = $description]
             #[doc = "\n# Errors\nReturns a structured validation, permission, conflict, or execution error."]
-            fn $id<'a>(&'a self, principal: &'a Principal, request: $request)
+            fn $id<'a>(&'a self, context: &'a OperationContext, request: $request)
                 -> PortFuture<'a, $response>;)*
         }
     };

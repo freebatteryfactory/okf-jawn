@@ -2,10 +2,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// How recorded review evidence relates to current content.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewCoverage {
     /// The recorded content digest still matches.
@@ -19,7 +18,7 @@ pub enum ReviewCoverage {
 }
 
 /// A review action linked to the content that was actually displayed.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Review {
     /// Durable review identity.
@@ -37,7 +36,7 @@ pub struct Review {
 }
 
 /// Record an explicit review of a displayed revision, without approving its business claims.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateReviewRequest {
     /// Exact source shown.
@@ -45,11 +44,13 @@ pub struct CreateReviewRequest {
     /// Digest displayed in the review confirmation.
     pub content_digest: crate::identity::Digest,
     /// Session-bound confirmation issued for this revision.
-    pub confirmation_id: String,
+    pub confirmation_id: crate::identity::ConfirmationId,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Read review evidence without rewriting it.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListReviewsRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -61,35 +62,63 @@ pub struct ListReviewsRequest {
 }
 
 /// Recorded reviews and current coverage.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListReviewsResponse {
     /// Reviews, including non-current ones.
     pub items: Vec<Review>,
 }
 
+/// The explicit human action a confirmation authorizes; never an arbitrary method.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmationAction {
+    /// Record a content review; requires the review permission.
+    Review,
+    /// Accept a proposal; requires the approve permission.
+    AcceptProposal,
+}
+
+/// The immutable object a confirmation is bound to.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConfirmationTarget {
+    /// An item revision being reviewed.
+    Item {
+        /// Reviewed item.
+        item_id: crate::identity::ItemId,
+    },
+    /// A proposal revision being accepted.
+    Proposal {
+        /// Accepted proposal.
+        proposal_id: crate::identity::ProposalId,
+    },
+}
+
 /// Prepare explicit human confirmation bound to an action and immutable target.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateConfirmationRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
-    /// review or `accept_proposal`; not an arbitrary method.
-    pub action: String,
-    /// Item or proposal identity.
-    pub target_id: String,
+    /// Confirmed action; it determines the required permission.
+    pub action: ConfirmationAction,
+    /// Item or proposal being confirmed.
+    pub target: ConfirmationTarget,
     /// Displayed content revision.
     pub revision: crate::identity::Revision,
     /// Displayed content digest.
     pub content_digest: crate::identity::Digest,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// A short-lived challenge; issuance alone is not a review.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Confirmation {
     /// Opaque session-bound challenge.
-    pub id: String,
+    pub id: crate::identity::ConfirmationId,
     /// RFC 3339 expiration.
     pub expires_at: String,
     /// Bound revision.

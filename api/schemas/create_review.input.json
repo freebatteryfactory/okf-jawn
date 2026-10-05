@@ -42,8 +42,18 @@
       ],
       "type": "object"
     },
+    "ConfirmationId": {
+      "description": "Identity of one session-bound human confirmation challenge.",
+      "format": "uuid",
+      "type": "string"
+    },
     "Digest": {
       "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
       "type": "string"
     },
     "ItemId": {
@@ -257,12 +267,16 @@
   "description": "Record an explicit review of a displayed revision, without approving its business claims.",
   "properties": {
     "confirmation_id": {
-      "description": "Session-bound confirmation issued for this revision.",
-      "type": "string"
+      "$ref": "#/$defs/ConfirmationId",
+      "description": "Session-bound confirmation issued for this revision."
     },
     "content_digest": {
       "$ref": "#/$defs/Digest",
       "description": "Digest displayed in the review confirmation."
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity."
     },
     "source": {
       "$ref": "#/$defs/SourceReference",
@@ -272,7 +286,8 @@
   "required": [
     "source",
     "content_digest",
-    "confirmation_id"
+    "confirmation_id",
+    "idempotency_key"
   ],
   "title": "CreateReviewRequest",
   "type": "object"

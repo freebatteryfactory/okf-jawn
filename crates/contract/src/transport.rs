@@ -4,6 +4,18 @@
 
 use serde::Serialize;
 
+/// How a transport route authenticates its caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportAuth {
+    /// Discovery, liveness and login entry points; no credentials.
+    Public,
+    /// An authenticated `Principal` from a session cookie or bearer token.
+    Principal,
+    /// A short-lived path capability only; ambient session credentials are never accepted.
+    Capability,
+}
+
 /// A transport route whose body is not an application JSON command.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct TransportOperation {
@@ -21,8 +33,8 @@ pub struct TransportOperation {
     pub response_media: &'static str,
     /// Expected response status.
     pub status: u16,
-    /// Public discovery and liveness routes do not require credentials.
-    pub authenticated: bool,
+    /// Credential the route accepts.
+    pub auth: TransportAuth,
 }
 
 /// The additional transport bindings the server lane must implement.
@@ -35,7 +47,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: Some("application/octet-stream"),
         response_media: "application/json",
         status: 200,
-        authenticated: true,
+        auth: TransportAuth::Principal,
     },
     TransportOperation {
         id: "download_object",
@@ -45,7 +57,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "application/octet-stream",
         status: 200,
-        authenticated: true,
+        auth: TransportAuth::Principal,
     },
     TransportOperation {
         id: "download_artifact",
@@ -55,17 +67,17 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "application/zip",
         status: 200,
-        authenticated: true,
+        auth: TransportAuth::Principal,
     },
     TransportOperation {
         id: "serve_sandbox_representation",
         method: "get",
-        path: "/sandbox/workspaces/{workspace_id}/items/{item_id}/revisions/{revision}",
-        description: "Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).",
+        path: "/sandbox/{capability}",
+        description: "Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. The capability from create_sandbox_capability is the only credential: it binds workspace, item, revision and representation, is stored hashed, expires, and is never logged. No ambient session cookies, credentials, or privileged APIs; respond with no-store, no-referrer and a strict CSP (SPEC sections 7 and 11).",
         request_media: None,
         response_media: "text/html",
         status: 200,
-        authenticated: false,
+        auth: TransportAuth::Capability,
     },
     TransportOperation {
         id: "stream_events",
@@ -75,7 +87,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "text/event-stream",
         status: 200,
-        authenticated: true,
+        auth: TransportAuth::Principal,
     },
     TransportOperation {
         id: "get_form_schema",
@@ -85,7 +97,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "application/schema+json",
         status: 200,
-        authenticated: true,
+        auth: TransportAuth::Principal,
     },
     TransportOperation {
         id: "get_resource_metadata",
@@ -95,7 +107,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "application/json",
         status: 200,
-        authenticated: false,
+        auth: TransportAuth::Public,
     },
     TransportOperation {
         id: "begin_local_session",
@@ -105,7 +117,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "text/html",
         status: 302,
-        authenticated: false,
+        auth: TransportAuth::Public,
     },
     TransportOperation {
         id: "begin_login",
@@ -115,7 +127,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "text/html",
         status: 302,
-        authenticated: false,
+        auth: TransportAuth::Public,
     },
     TransportOperation {
         id: "complete_login",
@@ -125,7 +137,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "text/html",
         status: 302,
-        authenticated: false,
+        auth: TransportAuth::Public,
     },
     TransportOperation {
         id: "end_session",
@@ -135,7 +147,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "application/json",
         status: 200,
-        authenticated: true,
+        auth: TransportAuth::Principal,
     },
     TransportOperation {
         id: "liveness",
@@ -145,7 +157,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "application/json",
         status: 200,
-        authenticated: false,
+        auth: TransportAuth::Public,
     },
     TransportOperation {
         id: "mcp_request",
@@ -155,7 +167,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: Some("application/json"),
         response_media: "application/json",
         status: 200,
-        authenticated: true,
+        auth: TransportAuth::Principal,
     },
     TransportOperation {
         id: "mcp_events",
@@ -165,7 +177,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "text/event-stream",
         status: 200,
-        authenticated: true,
+        auth: TransportAuth::Principal,
     },
     TransportOperation {
         id: "mcp_close",
@@ -175,7 +187,7 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         request_media: None,
         response_media: "application/json",
         status: 200,
-        authenticated: true,
+        auth: TransportAuth::Principal,
     },
 ];
 

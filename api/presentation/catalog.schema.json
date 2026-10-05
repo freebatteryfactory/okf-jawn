@@ -1,4 +1,5 @@
 {
+  "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
     "root": {
@@ -7,47 +8,286 @@
     "elements": {
       "type": "object",
       "additionalProperties": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "enum": [
-              "Stack",
-              "Columns",
-              "SourceExcerpt",
-              "DataTable",
-              "Chart",
-              "SourceList"
-            ]
-          },
-          "props": {
+        "oneOf": [
+          {
             "type": "object",
-            "additionalProperties": {}
+            "properties": {
+              "type": {
+                "const": "Stack"
+              },
+              "props": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "maxLength": 160
+                  }
+                },
+                "additionalProperties": false
+              },
+              "children": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "slots": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "visible": {},
+              "repeat": {}
+            },
+            "required": [
+              "type",
+              "props",
+              "children"
+            ],
+            "additionalProperties": false
           },
-          "children": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "slots": {
+          {
             "type": "object",
-            "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
+            "properties": {
+              "type": {
+                "const": "Columns"
+              },
+              "props": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              },
+              "children": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "slots": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "visible": {},
+              "repeat": {}
+            },
+            "required": [
+              "type",
+              "props",
+              "children"
+            ],
+            "additionalProperties": false
           },
-          "visible": {},
-          "repeat": {}
-        },
-        "required": [
-          "type",
-          "props",
-          "children"
-        ],
-        "additionalProperties": false
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "SourceExcerpt"
+              },
+              "props": {
+                "type": "object",
+                "properties": {
+                  "binding": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  }
+                },
+                "required": [
+                  "binding"
+                ],
+                "additionalProperties": false
+              },
+              "children": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "slots": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "visible": {},
+              "repeat": {}
+            },
+            "required": [
+              "type",
+              "props",
+              "children"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "DataTable"
+              },
+              "props": {
+                "type": "object",
+                "properties": {
+                  "binding": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  }
+                },
+                "required": [
+                  "binding"
+                ],
+                "additionalProperties": false
+              },
+              "children": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "slots": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "visible": {},
+              "repeat": {}
+            },
+            "required": [
+              "type",
+              "props",
+              "children"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "Chart"
+              },
+              "props": {
+                "type": "object",
+                "properties": {
+                  "binding": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "chart": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  }
+                },
+                "required": [
+                  "binding",
+                  "chart",
+                  "title"
+                ],
+                "additionalProperties": false
+              },
+              "children": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "slots": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "visible": {},
+              "repeat": {}
+            },
+            "required": [
+              "type",
+              "props",
+              "children"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "SourceList"
+              },
+              "props": {
+                "type": "object",
+                "properties": {
+                  "bindings": {
+                    "maxItems": 50,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    }
+                  }
+                },
+                "required": [
+                  "bindings"
+                ],
+                "additionalProperties": false
+              },
+              "children": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "slots": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "visible": {},
+              "repeat": {}
+            },
+            "required": [
+              "type",
+              "props",
+              "children"
+            ],
+            "additionalProperties": false
+          }
+        ]
       }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": {}
     }
   },
   "required": [

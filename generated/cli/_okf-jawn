@@ -134,7 +134,23 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
-(update_item)
+(save_draft)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(list_drafts)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(discard_draft)
 _arguments "${_arguments_options[@]}" : \
 '--server=[]: :_default' \
 '--json=[JSON request, @file, or - for stdin]: :_default' \
@@ -231,6 +247,14 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (read_object)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(create_sandbox_capability)
 _arguments "${_arguments_options[@]}" : \
 '--server=[]: :_default' \
 '--json=[JSON request, @file, or - for stdin]: :_default' \
@@ -798,7 +822,15 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(update_item)
+(save_draft)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list_drafts)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(discard_draft)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -835,6 +867,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (get_object)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(create_sandbox_capability)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1047,7 +1083,9 @@ _okf-jawn_commands() {
 'ls:List a folder with one-line descriptions at one resolved revision.' \
 'get_item:Read the editable Markdown and preserved properties of an item.' \
 'create_item:Create authored content without modifying source bytes.' \
-'update_item:Save content with a base revision precondition; obsolete reviews do not transfer.' \
+'save_draft:Autosave the caller'\''s own draft against its base revision; never creates a revision, and only a Snapshot commits it.' \
+'list_drafts:List only the caller'\''s own uncommitted drafts.' \
+'discard_draft:Remove the caller'\''s own draft without changing committed content.' \
 'move_item:Move an item and rewrite references in one committed change.' \
 'set_lifecycle:Change lifecycle without approving any claim in the document.' \
 'delete_item:Remove the current reference while retaining historical source objects.' \
@@ -1060,6 +1098,7 @@ _okf-jawn_commands() {
 'sources:Show supporting sources and occurrence-specific provenance.' \
 'get_object:Return a bounded binary block authorized through its source; knowing a hash never grants access.' \
 'read_object:Return a bounded binary block authorized through its source; knowing a hash never grants access.' \
+'create_sandbox_capability:Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.' \
 'search_items:Search authorized content and return cited snippets, not whole-document dumps.' \
 'grep:Search authorized content and return cited snippets, not whole-document dumps.' \
 'get_links:Read incoming or outgoing references at the selected revision.' \
@@ -1202,6 +1241,11 @@ _okf-jawn__subcmd__create_review_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn create_review commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__create_sandbox_capability_commands] )) ||
+_okf-jawn__subcmd__create_sandbox_capability_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn create_sandbox_capability commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__create_upload_commands] )) ||
 _okf-jawn__subcmd__create_upload_commands() {
     local commands; commands=()
@@ -1226,6 +1270,11 @@ _okf-jawn__subcmd__delete_item_commands() {
 _okf-jawn__subcmd__diff_items_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn diff_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__discard_draft_commands] )) ||
+_okf-jawn__subcmd__discard_draft_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn discard_draft commands' commands "$@"
 }
 (( $+functions[_okf-jawn__subcmd__export_view_commands] )) ||
 _okf-jawn__subcmd__export_view_commands() {
@@ -1326,7 +1375,9 @@ _okf-jawn__subcmd__help_commands() {
 'list_items:List a folder with one-line descriptions at one resolved revision.' \
 'get_item:Read the editable Markdown and preserved properties of an item.' \
 'create_item:Create authored content without modifying source bytes.' \
-'update_item:Save content with a base revision precondition; obsolete reviews do not transfer.' \
+'save_draft:Autosave the caller'\''s own draft against its base revision; never creates a revision, and only a Snapshot commits it.' \
+'list_drafts:List only the caller'\''s own uncommitted drafts.' \
+'discard_draft:Remove the caller'\''s own draft without changing committed content.' \
 'move_item:Move an item and rewrite references in one committed change.' \
 'set_lifecycle:Change lifecycle without approving any claim in the document.' \
 'delete_item:Remove the current reference while retaining historical source objects.' \
@@ -1336,6 +1387,7 @@ _okf-jawn__subcmd__help_commands() {
 'read_item:Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.' \
 'get_sources:Show supporting sources and occurrence-specific provenance.' \
 'get_object:Return a bounded binary block authorized through its source; knowing a hash never grants access.' \
+'create_sandbox_capability:Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.' \
 'search_items:Search authorized content and return cited snippets, not whole-document dumps.' \
 'get_links:Read incoming or outgoing references at the selected revision.' \
 'get_graph:Read a bounded graph projection using the same authorized source identities.' \
@@ -1460,6 +1512,11 @@ _okf-jawn__subcmd__help__subcmd__create_review_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help create_review commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__help__subcmd__create_sandbox_capability_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__create_sandbox_capability_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help create_sandbox_capability commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__help__subcmd__create_upload_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__create_upload_commands() {
     local commands; commands=()
@@ -1484,6 +1541,11 @@ _okf-jawn__subcmd__help__subcmd__delete_item_commands() {
 _okf-jawn__subcmd__help__subcmd__diff_items_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help diff_items commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__discard_draft_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__discard_draft_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help discard_draft commands' commands "$@"
 }
 (( $+functions[_okf-jawn__subcmd__help__subcmd__export_view_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__export_view_commands() {
@@ -1579,6 +1641,11 @@ _okf-jawn__subcmd__help__subcmd__help_commands() {
 _okf-jawn__subcmd__help__subcmd__list_connectors_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help list_connectors commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__help__subcmd__list_drafts_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__list_drafts_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help list_drafts commands' commands "$@"
 }
 (( $+functions[_okf-jawn__subcmd__help__subcmd__list_events_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__list_events_commands() {
@@ -1685,6 +1752,11 @@ _okf-jawn__subcmd__help__subcmd__revoke_connector_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help revoke_connector commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__help__subcmd__save_draft_commands] )) ||
+_okf-jawn__subcmd__help__subcmd__save_draft_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn help save_draft commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__help__subcmd__search_items_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__search_items_commands() {
     local commands; commands=()
@@ -1710,11 +1782,6 @@ _okf-jawn__subcmd__help__subcmd__start_import_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn help start_import commands' commands "$@"
 }
-(( $+functions[_okf-jawn__subcmd__help__subcmd__update_item_commands] )) ||
-_okf-jawn__subcmd__help__subcmd__update_item_commands() {
-    local commands; commands=()
-    _describe -t commands 'okf-jawn help update_item commands' commands "$@"
-}
 (( $+functions[_okf-jawn__subcmd__help__subcmd__update_workspace_commands] )) ||
 _okf-jawn__subcmd__help__subcmd__update_workspace_commands() {
     local commands; commands=()
@@ -1724,6 +1791,11 @@ _okf-jawn__subcmd__help__subcmd__update_workspace_commands() {
 _okf-jawn__subcmd__list_connectors_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn list_connectors commands' commands "$@"
+}
+(( $+functions[_okf-jawn__subcmd__list_drafts_commands] )) ||
+_okf-jawn__subcmd__list_drafts_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn list_drafts commands' commands "$@"
 }
 (( $+functions[_okf-jawn__subcmd__list_events_commands] )) ||
 _okf-jawn__subcmd__list_events_commands() {
@@ -1830,6 +1902,11 @@ _okf-jawn__subcmd__revoke_connector_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn revoke_connector commands' commands "$@"
 }
+(( $+functions[_okf-jawn__subcmd__save_draft_commands] )) ||
+_okf-jawn__subcmd__save_draft_commands() {
+    local commands; commands=()
+    _describe -t commands 'okf-jawn save_draft commands' commands "$@"
+}
 (( $+functions[_okf-jawn__subcmd__search_items_commands] )) ||
 _okf-jawn__subcmd__search_items_commands() {
     local commands; commands=()
@@ -1854,11 +1931,6 @@ _okf-jawn__subcmd__set_type_commands() {
 _okf-jawn__subcmd__start_import_commands() {
     local commands; commands=()
     _describe -t commands 'okf-jawn start_import commands' commands "$@"
-}
-(( $+functions[_okf-jawn__subcmd__update_item_commands] )) ||
-_okf-jawn__subcmd__update_item_commands() {
-    local commands; commands=()
-    _describe -t commands 'okf-jawn update_item commands' commands "$@"
 }
 (( $+functions[_okf-jawn__subcmd__update_workspace_commands] )) ||
 _okf-jawn__subcmd__update_workspace_commands() {

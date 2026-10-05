@@ -1,5 +1,10 @@
 {
   "$defs": {
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
     "ItemKind": {
       "description": "Built-in presentation roles; user-defined OKF type names remain unrestricted.",
       "oneOf": [
@@ -48,8 +53,8 @@
       "type": "string"
     },
     "idempotency_key": {
-      "description": "Retry identity.",
-      "type": "string"
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity."
     },
     "kind": {
       "$ref": "#/$defs/ItemKind",

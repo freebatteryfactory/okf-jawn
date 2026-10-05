@@ -1,11 +1,29 @@
 {
   "project": "okf-jawn",
   "delivery": "Full-scope executable foundation source; not a completed or qualified application",
-  "phase_0_qualified": true,
+  "phase_0_qualified": false,
+  "reopened": {
+    "at_utc": "2026-10-05T16:24:00Z",
+    "from_commit": "b13fcd0",
+    "findings": [
+      "Principal carried workspace_ids and permissions as identity; authorize skipped when workspace was absent",
+      "No MutationId / MutationStore; jobs used a separate key+digest and pending_jobs took a tenant_id string",
+      "Sandbox path was authenticated:false without a capability token",
+      "Closed-set fields were free strings; drafts were update_item producing a revision",
+      "OpenAPI components came from utoipa ToSchema while runtime validation used schemars",
+      "catalog.schema.json left component props unconstrained (additionalProperties: {})",
+      "PresentView charts map was never filled; ViewDocument had no charts field",
+      "Four byte-identical MCP App HTML resources; mime test read a gitignored build output",
+      "Docling must_fail used a corrupt bin failing before the converter; peak memory sampled cargo.pid",
+      "Qualification receipts cited dirty-tree SHAs; CI uploaded receipts it did not produce",
+      "mcp-apps-web-hosts was recorded as BOUNDED_UPSTREAM_EXCEPTION instead of acceptance not_run",
+      "cargo-deny all-features=false and wildcards=warn; CI cargo-install for audit/deny"
+    ]
+  },
   "application_implemented": false,
   "current": {
-    "recorded_at_utc": "2026-10-05T14:20:00Z",
-    "base_commit": "e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807 (Phase 0 clean-checkout + CI; qualification receipts cite 32a10ba4125719d4132e29d8679980113b6fc0a6)",
+    "recorded_at_utc": "2026-10-05T16:24:00Z",
+    "base_commit": "b13fcd0 (Phase 0 reopened; foundation repair in progress)",
     "environment": {
       "os": "Windows 10.0.26200 (developer workstation, not CI or the build container)",
       "bun": "1.4.2 (process.versions.bun, C:\\Users\\eayou\\.bun\\bin\\bun.exe)",
@@ -27,7 +45,7 @@
     "project_typescript_passed": true,
     "authored_typescript_error_count": 0,
     "deterministic_foundation_green": true,
-    "phase_0_note": "Phase 0 terminal on observed receipts. Docling PASS; iii REJECTED_WITH_FALLBACK (Tokio+RecordStore selected); MCP Apps protocol+basic-host PASS with host_render BOUNDED_UPSTREAM_EXCEPTION for interactive claude.ai/ChatGPT; json-render ViewDocument serde+Zod PASS; clean-checkout and CI 37322344115 PASS on e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807 including test. Product journeys remain construction/acceptance gates.",
+    "phase_0_note": "Phase 0 reopened. Prior terminal record at b13fcd0 overclaimed harness evidence and left shared contract/port gaps. Foundation repair in progress; requalify on one clean SHA after contract and port repairs. iii REJECTED_WITH_FALLBACK (Tokio+RecordStore) stands. web-host gate moved to acceptance as not_run. Docling and MCP Apps protocol gates return to incomplete pending clean-tree requalification.",
     "direct_versions": {
       "okf-core": "0.2.7",
       "okf-validator": "0.2.7 (default-features=false)",
@@ -67,7 +85,7 @@
         ],
         "exit_code": 0,
         "status": "passed",
-        "log": "%TEMP%/okf-jawn-phase0-logs/gen-check-resume.log (5799109); CI 37257588545"
+        "log": "CI 37322344115 on e3dd8bf (supersedes earlier 37257588545 / 5799109 logs)"
       },
       {
         "command": [
@@ -77,7 +95,7 @@
         ],
         "exit_code": 0,
         "status": "passed",
-        "log": "CI 37257588545 foundation step (4eb2c88)",
+        "log": "CI 37322344115 foundation step on e3dd8bf",
         "meaning": "gen-check, cargo test for contract/core/xtask only, UI build, typecheck and offline."
       },
       {
@@ -101,7 +119,7 @@
         "cwd": "ui",
         "exit_code": 0,
         "status": "passed",
-        "meaning": "0 errors in ui/src (tsc -b, clean checkout 5799109). ui/tests is not type-checked."
+        "meaning": "0 errors in ui/src and ui/tests (tsc -b via ui/tsconfig.json referencing ui/tsconfig.tests.json) on e3dd8bf / CI 37322344115."
       },
       {
         "command": [
@@ -111,7 +129,7 @@
         ],
         "exit_code": 0,
         "status": "passed",
-        "meaning": "Re-run in the clean checkout (5799109) and CI 37257588545. GHSA-vfj7-8cjw-p6xm remains, ignored as build-time tooling."
+        "meaning": "Re-run in the clean checkout and CI 37322344115 on e3dd8bf. GHSA-vfj7-8cjw-p6xm remains, ignored as build-time tooling."
       }
     ],
     "typescript_boundary_fixes": [
@@ -161,21 +179,21 @@
         },
         {
           "id": "docling-library-qualification",
-          "status": "passed",
-          "receipt": ".artifacts/qualification/docling/receipt.json",
-          "meaning": "PASS on 32a10ba4125719d4132e29d8679980113b6fc0a6: DocumentConverter 1.93.5; corpus fixtures; must_fail ExplicitFailure; timeout probe PASS; page_provenance recorded; PeakWorkingSet64 sampled. Receipt .artifacts/qualification/docling/receipt.json."
+          "status": "incomplete",
+          "receipt": null,
+          "meaning": "Reopened: prior PASS cited a dirty-tree SHA, sampled cargo.pid peak memory, and used must_fail_corrupt.bin which failed before the converter. Requalify on a clean SHA with per-fixture peak memory and must_fail_truncated.pdf."
         },
         {
           "id": "iii-library-qualification",
           "status": "rejected_with_fallback",
           "receipt": ".artifacts/qualification/iii/receipt.json",
-          "meaning": "REJECTED_WITH_FALLBACK on 32a10ba4125719d4132e29d8679980113b6fc0a6: engine+queue kill/restart, crash redelivery, effect ledger, blob refs, startup/RSS, ELv2 from tag iii/v0.24.4 observed; DLQ browse empty (inspected=false). Fallback Tokio+RecordStore selected in SPEC/README."
+          "meaning": "REJECTED_WITH_FALLBACK on 32a10ba4125719d4132e29d8679980113b6fc0a6: engine+queue kill/restart, crash redelivery, effect ledger, blob refs, startup/RSS, ELv2 from tag iii/v0.24.4 observed; DLQ browse empty (inspected=false). Fallback Tokio+RecordStore selected in SPEC/README. Decision stands; provenance guard will be added before any re-run."
         },
         {
           "id": "mcp-apps-protocol-qualification",
-          "status": "passed",
-          "receipt": ".artifacts/qualification/mcp-apps/receipt.json",
-          "meaning": "PASS on 32a10ba4125719d4132e29d8679980113b6fc0a6: Streamable HTTP+stdio harness; SDK _meta.ui.csp; four render tools with structuredContent+text fallback; @modelcontextprotocol/client protocol check; ext-apps basic-host Playwright/axe feature render. Receipt .artifacts/qualification/mcp-apps/receipt.json."
+          "status": "incomplete",
+          "receipt": null,
+          "meaning": "Reopened: prior PASS cited a dirty-tree SHA and did not record ngrok lifecycle close. Requalify on a clean SHA with provenance guard and ngrok closed_at."
         },
         {
           "id": "json-render-catalog-round-trip",
@@ -192,54 +210,122 @@
           "id": "clean-checkout-rerun",
           "status": "passed",
           "receipt": ".artifacts/qualification/clean-checkout/receipt.json",
-          "meaning": "Uninterrupted single-SHA run on e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807: bootstrap, gen-check x2 (no drift), foundation, check, test, check-offline, audit all exit 0; git status empty. Logs beside .artifacts/qualification/clean-checkout/receipt.json."
+          "meaning": "Uninterrupted single-SHA run on e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807: bootstrap, gen-check x2 (no drift), foundation, check, test, check-offline, audit all exit 0; git status empty. Logs beside .artifacts/qualification/clean-checkout/receipt.json. Will be re-run on foundation-repair SHA S."
         },
         {
           "id": "github-actions-ci-receipt",
           "status": "passed",
           "receipt": "https://github.com/freebatteryfactory/okf-jawn/actions/runs/37322344115",
-          "meaning": "Push CI 37322344115 on e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807: source-tooling, foundation (bootstrap/foundation/test/check/audit), runtime-clippy all success. Includes Vitest (via bun test task) and workspace cargo tests."
-        },
-        {
-          "id": "mcp-apps-web-hosts",
-          "status": "bounded_upstream_exception",
-          "receipt": ".artifacts/qualification/mcp-apps/receipt.json",
-          "meaning": "BOUNDED_UPSTREAM_EXCEPTION on 32a10ba4125719d4132e29d8679980113b6fc0a6: ngrok session_open and basic-host PASS; claude.ai/ChatGPT custom-connector registration requires the account holder's interactive session. Evidence .artifacts/qualification/mcp-apps/hosts/2026-10-05-bounded-upstream-exception.md. No harness screenshot labelled as a host render."
+          "meaning": "Push CI 37322344115 on e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807: source-tooling, foundation (bootstrap/foundation/test/check/audit), runtime-clippy all success. Includes Vitest (via bun test task) and workspace cargo tests. Will be re-run on foundation-repair SHA S."
         }
       ],
       "construction": [
         {
           "id": "storage-git-cas-sqlite",
           "status": "blocked_on_lanes",
-          "meaning": "Real persistence after storage lane"
+          "owner": "storage",
+          "receipt": "cargo test -p okf-jawn-storage --features runtime",
+          "meaning": "VersionStore (trailer, find_mutation, candidates), BlobStore, WorkspaceCatalog, SQLite stores (Record/Mutation/Draft/Confirmation/SandboxCapability/Proposal/Upload/Event/Credential), SearchIndex (no drafts), local AccessControl"
+        },
+        {
+          "id": "mutation-crash-reconcile",
+          "status": "blocked_on_lanes",
+          "owner": "storage",
+          "receipt": "cargo test -p okf-jawn-storage --features runtime -- mutation_crash_reconcile",
+          "meaning": "Commit succeeds, mutation complete is never written, retry finds the revision through find_mutation and creates no second commit"
+        },
+        {
+          "id": "confirmation-single-use",
+          "status": "blocked_on_lanes",
+          "owner": "storage",
+          "receipt": "cargo test -p okf-jawn-storage --features runtime -- confirmation_single_use",
+          "meaning": "A confirmation cannot be consumed twice, or for a different revision, digest, action or target"
+        },
+        {
+          "id": "draft-per-editor",
+          "status": "blocked_on_lanes",
+          "owner": "storage",
+          "receipt": "cargo test -p okf-jawn-storage --features runtime -- draft_per_editor",
+          "meaning": "Two editors on one item get independent drafts; the second Snapshot conflicts after the first"
         },
         {
           "id": "converter-worker-memory-ceiling",
           "status": "blocked_on_lanes",
+          "owner": "ingest",
+          "receipt": "cargo test -p okf-jawn-ingest --features runtime",
           "meaning": "Production ingest worker hard memory bound; not DOCLING_RS_MAX_MEMORY_MB on DocumentConverter"
         },
         {
           "id": "job-crash-against-record-store",
           "status": "blocked_on_lanes",
-          "meaning": "Same crash semantics against real RecordStore on adopted iii worker (or Tokio fallback path if later rejected in product)"
+          "owner": "ingest",
+          "receipt": ".artifacts/qualification/ or construction receipt for import restart",
+          "meaning": "Kill and restart against the real RecordStore with JobHandler(&ClaimedJob); no duplicate effect. Tokio+RecordStore path (iii rejected)."
         },
         {
           "id": "application-operations",
           "status": "blocked_on_lanes",
-          "meaning": "core Application implements the operation table"
+          "owner": "core-cli",
+          "receipt": "cargo test -p okf-jawn-core -p okf-jawn-cli",
+          "meaning": "ApplicationService implements all 69 operations over OperationContext; CLI against a running server"
+        },
+        {
+          "id": "view-server-validation",
+          "status": "blocked_on_lanes",
+          "owner": "core-cli",
+          "receipt": "cargo test -p okf-jawn-core -- views::",
+          "meaning": "views::validate against catalog.schema.json and vega-lite.schema.json plus referential checks; present and saved-view writes call it first"
+        },
+        {
+          "id": "draft-visibility",
+          "status": "blocked_on_lanes",
+          "owner": "core-cli",
+          "receipt": "cargo test -p okf-jawn-core -- draft_visibility",
+          "meaning": "read_item never returns a draft; get_item returns only the caller's own"
         },
         {
           "id": "server-binary-and-startup",
           "status": "blocked_on_lanes",
-          "meaning": "Authenticated HTTP composition"
+          "owner": "server",
+          "receipt": "cargo test -p okf-jawn-server --features runtime",
+          "meaning": "WorkOS AccessControl, session/CSRF, TransportAuth, sandbox capability origin route, ReadinessProbe and startup composition"
+        },
+        {
+          "id": "grant-cache-ttl",
+          "status": "blocked_on_lanes",
+          "owner": "server",
+          "receipt": "cargo test -p okf-jawn-server --features runtime -- grant_cache_ttl",
+          "meaning": "A revoked WorkOS role is denied within 60 seconds"
         },
         {
           "id": "mcp-server-backed-by-application",
           "status": "blocked_on_lanes",
-          "meaning": "Production ServerHandler over Application, not the qualification harness"
+          "owner": "mcp-execution",
+          "receipt": "bun scripts/dev.mjs qualify mcp-wire",
+          "meaning": "Production ServerHandler over Application serving ui://okf-jawn/app.html from api/mcp-apps.json; no draft-bearing tool"
+        },
+        {
+          "id": "workspace-ui-drafts-and-confirmations",
+          "status": "blocked_on_lanes",
+          "owner": "workspace-ui",
+          "receipt": "bun --bun run --cwd ui test",
+          "meaning": "Autosave through save_draft, Snapshot with Conflict and rebase flow, confirmation for review and accept"
+        },
+        {
+          "id": "views-saved-persist-reopen",
+          "status": "blocked_on_lanes",
+          "owner": "views",
+          "receipt": "bun --bun run --cwd ui test",
+          "meaning": "Saved-view persist and reopen using server diagnostics as the source of truth"
         }
       ],
       "acceptance": [
+        {
+          "id": "mcp-apps-web-hosts",
+          "status": "not_run",
+          "receipt": null,
+          "meaning": "Moved from Phase 0. Interactive claude.ai/ChatGPT custom-connector registration requires the account holder's session. Not a Phase 0 gate; run when a host account is available."
+        },
         {
           "id": "workos-end-to-end",
           "status": "blocked_on_product",

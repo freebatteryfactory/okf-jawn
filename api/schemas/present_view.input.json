@@ -311,6 +311,11 @@
           },
           "type": "array"
         },
+        "charts": {
+          "additionalProperties": true,
+          "description": "Named Vega-Lite specs referenced by `json_render` Chart components; empty for `vega_lite`.",
+          "type": "object"
+        },
         "description": {
           "description": "Readable explanation independent of the renderer.",
           "type": "string"
@@ -376,7 +381,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Render a candidate from already resolved bindings without saving or approving it.",
+  "description": "Render a candidate from already resolved bindings without saving or approving it.\n\nEvery binding's source workspace is an authorization target, not only `workspace_id`.",
   "properties": {
     "view": {
       "$ref": "#/$defs/ViewDocument",

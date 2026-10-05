@@ -11,10 +11,13 @@ import { spawn } from 'node:child_process';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { requireCleanTree } from '../../scripts/lib/provenance.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const PROTOCOL_ONLY =
+  process.env.OKF_MCP_APPS_PROTOCOL_ONLY === '1' ||
+  process.env.OKF_MCP_APPS_PROTOCOL_ONLY === 'true';
 const uiDir = join(root, 'ui');
 const distApps = join(uiDir, 'dist-apps');
 const manifestPath = join(distApps, 'manifest.json');
@@ -72,7 +75,12 @@ function killProcessTree(child) {
         windowsHide: true,
       });
     } else {
-      child.kill('SIGTERM');
+      // Negative PID signals the process group started with detached:true.
+      try {
+        process.kill(-child.pid, 'SIGTERM');
+      } catch {
+        child.kill('SIGTERM');
+      }
     }
   } catch {
     // ignore
@@ -86,6 +94,7 @@ function spawnDetached(cmd, args, options = {}) {
     stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'],
     shell: options.shell ?? false,
     windowsHide: true,
+    detached: process.platform !== 'win32',
   });
   let stdout = '';
   let stderr = '';
@@ -150,8 +159,15 @@ async function protocolCheck(mcpUrl, manifest) {
         throw new Error(`tool ${tool.name} missing _meta.ui.resourceUri`);
       }
     }
-    if (!Array.isArray(resources.resources) || resources.resources.length !== 4) {
-      throw new Error(`resources/list expected 4 resources, got ${resources.resources?.length}`);
+    if (!Array.isArray(resources.resources) || resources.resources.length !== 1) {
+      throw new Error(
+        `resources/list expected 1 shared App resource, got ${resources.resources?.length}`,
+      );
+    }
+    if (resources.resources[0]?.uri !== 'ui://okf-jawn/app.html') {
+      throw new Error(
+        `resources/list uri must be ui://okf-jawn/app.html, got ${resources.resources[0]?.uri}`,
+      );
     }
     const reads = [];
     for (const resource of resources.resources) {
@@ -409,6 +425,7 @@ async function maybeNgrok(port) {
   if (!NGROK_ENABLED) {
     return { status: 'not_run', reason: 'OKF_MCP_APPS_NGROK not set' };
   }
+  const opened_at = new Date().toISOString();
   const ngrok = spawnDetached('ngrok', ['http', String(port), '--log=stdout'], {
     env: process.env,
   });
@@ -428,9 +445,11 @@ async function maybeNgrok(port) {
     await new Promise((r) => setTimeout(r, 500));
   }
   if (!publicUrl) {
-    ngrok.child.kill();
+    killProcessTree(ngrok.child);
     return {
-      status: 'failed',
+      status: 'closed',
+      opened_at,
+      closed_at: new Date().toISOString(),
       reason: 'ngrok started but no public https URL appeared on 127.0.0.1:4040',
       stderr: ngrok.getStderr().slice(0, 1000),
     };
@@ -438,6 +457,7 @@ async function maybeNgrok(port) {
   // Leave ngrok running only for the remainder of this process; kill before exit.
   return {
     status: 'session_open',
+    opened_at,
     public_url: `${publicUrl}/mcp`,
     local_port: port,
     child: ngrok.child,
@@ -475,6 +495,8 @@ async function hostRenderFromEvidence() {
   };
 }
 
+const commitSha = await requireCleanTree(root);
+
 await mkdir(outDir, { recursive: true });
 await mkdir(hostsDir, { recursive: true });
 
@@ -485,8 +507,11 @@ if (build.code !== 0) {
 
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 const resources = Array.isArray(manifest.resources) ? manifest.resources : [];
-if (resources.length !== 4) {
-  throw new Error(`manifest must list 4 resources, found ${resources.length}`);
+if (resources.length !== 1) {
+  throw new Error(`manifest must list 1 shared App resource, found ${resources.length}`);
+}
+if (resources[0]?.uri !== 'ui://okf-jawn/app.html') {
+  throw new Error(`manifest uri must be ui://okf-jawn/app.html, got ${resources[0]?.uri}`);
 }
 
 const mimeMismatches = resources.filter((resource) => resource.mimeType !== RESOURCE_MIME_TYPE);
@@ -530,10 +555,8 @@ try {
 const readable = Object.fromEntries(
   (check.resources ?? []).map((resource) => [resource.name, Boolean(resource.readable)]),
 );
-for (const name of ['source', 'changes', 'timeline', 'present']) {
-  if (!readable[name]) {
-    throw new Error(`resource ${name} was not reported readable by the harness`);
-  }
+if (!readable.app) {
+  throw new Error('shared App resource was not reported readable by the harness');
 }
 
 const harnessEnv = {
@@ -549,8 +572,8 @@ const harness = spawnDetached(
 );
 
 let protocol = { status: 'not_run' };
-let basicHost = { status: 'not_run' };
-let ngrok = { status: 'not_run' };
+let basicHost = { status: 'not_run', reason: PROTOCOL_ONLY ? 'skipped: protocol-only' : undefined };
+let ngrok = { status: 'not_run', reason: PROTOCOL_ONLY ? 'skipped: protocol-only' : undefined };
 let fatal = null;
 
 try {
@@ -562,21 +585,28 @@ try {
     fatal = fatal ?? error;
   }
 
-  try {
-    ngrok = await maybeNgrok(HTTP_PORT);
-  } catch (error) {
-    ngrok = { status: 'failed', error: String(error.message || error) };
-  }
+  if (!PROTOCOL_ONLY) {
+    try {
+      ngrok = await maybeNgrok(HTTP_PORT);
+    } catch (error) {
+      ngrok = {
+        status: 'closed',
+        opened_at: null,
+        closed_at: new Date().toISOString(),
+        error: String(error.message || error),
+      };
+    }
 
-  try {
-    basicHost = await runBasicHostCheck(MCP_URL);
-  } catch (error) {
-    basicHost = {
-      status: 'failed',
-      error: String(error.message || error),
-      note: '@modelcontextprotocol/ext-apps npm package does not ship basic-host; attempted official v2.0.3 GitHub example.',
-    };
-    // basic-host failure is recorded; do not abort receipt write.
+    try {
+      basicHost = await runBasicHostCheck(MCP_URL);
+    } catch (error) {
+      basicHost = {
+        status: 'failed',
+        error: String(error.message || error),
+        note: '@modelcontextprotocol/ext-apps npm package does not ship basic-host; attempted official v2.0.3 GitHub example.',
+      };
+      // basic-host failure is recorded; do not abort receipt write.
+    }
   }
 } catch (error) {
   fatal = error;
@@ -585,21 +615,30 @@ try {
   if (ngrok.child) {
     killProcessTree(ngrok.child);
     delete ngrok.child;
+    ngrok.closed_at = new Date().toISOString();
+    ngrok.status = 'closed';
   }
   killProcessTree(harness.child);
 }
 
-const commit = (
-  await run('git', ['rev-parse', 'HEAD'], { stdio: ['ignore', 'pipe', 'pipe'], echo: false })
-).stdout.trim();
-
-const host_render = await hostRenderFromEvidence();
+const host_render = PROTOCOL_ONLY
+  ? { status: 'not_run', reason: 'skipped: protocol-only' }
+  : await hostRenderFromEvidence();
 
 const receipt = {
   component: 'mcp-apps-web-hosts',
   gate: 'mcp-apps-web-hosts',
-  commit_sha: commit,
+  commit_sha: commitSha,
+  git_sha: commitSha,
+  inputs: [
+    'qualification/mcp-apps',
+    'ui/src/mcp-apps',
+    'ui/scripts/bundle-app.mjs',
+    'Cargo.toml',
+    'Cargo.lock',
+  ],
   harness: 'okf-qualify-mcp-apps',
+  protocol_only: PROTOCOL_ONLY,
   transport: {
     stdio: 'default',
     http: MCP_URL,
@@ -615,6 +654,8 @@ const receipt = {
   basic_host: basicHost,
   ngrok: {
     status: ngrok.status,
+    opened_at: ngrok.opened_at ?? null,
+    closed_at: ngrok.closed_at ?? null,
     public_url: ngrok.public_url ?? null,
     local_port: ngrok.local_port ?? HTTP_PORT,
     note: ngrok.note ?? ngrok.reason ?? ngrok.error ?? null,

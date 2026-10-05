@@ -1,16 +1,19 @@
 //! Storage interfaces preserve byte identity, occurrence identity, and revision preconditions.
 //!
 //! Implementations use selected libraries; they do not infer domain approval from a Git merge.
+//! Every commit carries an `Okf-Jawn-Mutation:` trailer naming the durable write identity.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 
 use okf_jawn_contract::{
-    access::Principal,
+    access::{Permission, Principal},
     common::MutationResult,
     history::{BlameRequest, BlameResponse, DiffRequest, DiffResponse, LogRequest, LogResponse},
-    identity::{At, Digest, ItemId, Revision, WorkspaceId, WorkspacePath},
+    identity::{
+        At, Digest, ItemId, MutationId, ProposalId, Revision, TenantId, WorkspaceId, WorkspacePath,
+    },
     item::{ItemDocument, ItemSummary},
     proposal::Change,
     workspace::{ArchiveWorkspaceRequest, UpdateWorkspaceRequest, Workspace},
@@ -26,9 +29,47 @@ pub type ByteReader = Pin<Box<dyn AsyncRead + Send + Unpin + 'static>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageScope {
     /// Tenant namespace; an object hash never substitutes for this scope.
-    pub tenant_id: String,
+    pub tenant_id: TenantId,
     /// Workspace to which the operation belongs.
     pub workspace_id: WorkspaceId,
+}
+
+/// Where `find_mutation` scans for an `Okf-Jawn-Mutation:` trailer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VersionTarget {
+    /// The accepted workspace head.
+    Head,
+    /// A retained proposal candidate ref.
+    Proposal(ProposalId),
+}
+
+/// Commit authorship retained in Git metadata; not a claim of review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provenance {
+    /// Validated identity-provider subject.
+    pub subject: String,
+    /// Verified authentication route, as a stable label.
+    pub route: String,
+    /// OAuth client when delegation is present.
+    pub client_id: Option<String>,
+}
+
+impl Provenance {
+    /// Derive commit authorship from the authenticated principal.
+    #[must_use]
+    pub fn from_principal(principal: &Principal) -> Self {
+        let route = match principal.route {
+            okf_jawn_contract::access::AccessRoute::BrowserSession => "browser_session",
+            okf_jawn_contract::access::AccessRoute::McpDelegation => "mcp_delegation",
+            okf_jawn_contract::access::AccessRoute::LocalOwner => "local_owner",
+            okf_jawn_contract::access::AccessRoute::Service => "service",
+        };
+        Self {
+            subject: principal.subject.clone(),
+            route: route.to_owned(),
+            client_id: principal.client_id.clone(),
+        }
+    }
 }
 
 /// Retained byte metadata; occurrence-specific names live in source cards instead.
@@ -89,13 +130,15 @@ pub trait BlobStore: Send + Sync {
     ) -> PortFuture<'a, LocalSource>;
 }
 
-/// Complete atomic Git change intent with an explicit expected head.
+/// Complete atomic Git change intent with an explicit expected head and mutation trailer.
 #[derive(Debug, Clone)]
 pub struct CommitChanges {
+    /// Durable write identity written as `Okf-Jawn-Mutation:` in the commit.
+    pub mutation_id: MutationId,
     /// Head from which the operation was prepared.
     pub expected_head: Revision,
     /// Human or agent provenance, not a claim of review.
-    pub principal: Principal,
+    pub author: Provenance,
     /// Git commit message.
     pub message: String,
     /// Authored changes to apply and link rewrites to compute.
@@ -126,6 +169,32 @@ pub trait VersionStore: Send + Sync {
         scope: &'a StorageScope,
         changes: CommitChanges,
     ) -> PortFuture<'a, MutationResult>;
+    /// Scan `since..tip(target)` for a commit whose mutation trailer matches.
+    fn find_mutation<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        target: VersionTarget,
+        since: &'a Revision,
+        mutation_id: MutationId,
+    ) -> PortFuture<'a, Option<Revision>>;
+    /// Write a retained proposal candidate at `refs/okf-jawn/proposals/<id>`.
+    fn create_candidate<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        proposal_id: ProposalId,
+        base: &'a Revision,
+        changes: Vec<Change>,
+        mutation_id: MutationId,
+    ) -> PortFuture<'a, Revision>;
+    /// Promote a candidate onto head against `expected_head`.
+    fn promote_candidate<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        proposal_id: ProposalId,
+        expected_head: &'a Revision,
+        candidate: &'a Revision,
+        mutation_id: MutationId,
+    ) -> PortFuture<'a, MutationResult>;
     /// Read retained history.
     fn log<'a>(
         &'a self,
@@ -148,10 +217,11 @@ pub trait VersionStore: Send + Sync {
     fn restore<'a>(
         &'a self,
         scope: &'a StorageScope,
+        mutation_id: MutationId,
         expected: Revision,
         target: Revision,
         paths: Vec<WorkspacePath>,
-        principal: Principal,
+        author: Provenance,
     ) -> PortFuture<'a, MutationResult>;
 }
 
@@ -185,10 +255,14 @@ pub trait WorkspaceCatalog: Send + Sync {
         principal: &'a Principal,
         request: ArchiveWorkspaceRequest,
     ) -> PortFuture<'a, MutationResult>;
-    /// Resolve deployment storage scope only after access was checked.
-    fn scope<'a>(
-        &'a self,
-        principal: &'a Principal,
-        workspace: WorkspaceId,
-    ) -> PortFuture<'a, StorageScope>;
+}
+
+/// Attach the caller's effective permissions onto a workspace summary.
+#[must_use]
+pub fn workspace_with_permissions(
+    mut workspace: Workspace,
+    permissions: Vec<Permission>,
+) -> Workspace {
+    workspace.permissions = permissions;
+    workspace
 }

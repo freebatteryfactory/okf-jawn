@@ -2,13 +2,12 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// How authenticated authority reached the application.
 ///
 /// Local and hosted entry paths both resolve to one of these routes and share the same
 /// authorization rules; no route is granted authority because the connection is loopback.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessRoute {
     /// Hosted Explorer session established through WorkOS AuthKit.
@@ -22,7 +21,9 @@ pub enum AccessRoute {
 }
 
 /// Application capabilities checked on every operation.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
     /// Read authorized workspace data.
@@ -39,25 +40,40 @@ pub enum Permission {
     Admin,
 }
 
+/// Upper bound on what a delegated client may do; it only narrows grants, never adds to them.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationCeiling {
+    /// Capabilities the delegation may exercise; effective permission is the intersection with grants.
+    pub permissions: Vec<Permission>,
+    /// Workspaces the delegation is limited to; absent means no restriction beyond the delegator's grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_ids: Option<Vec<crate::identity::WorkspaceId>>,
+}
+
 /// Server-established identity; never accepted from a request body.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+///
+/// Identity is not authorization: effective permissions come from the access-control adapter
+/// as workspace and tenant grants, intersected with any delegation ceiling.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Principal {
     /// Validated identity-provider subject.
     pub subject: String,
+    /// Tenant boundary every storage scope for this principal carries.
+    pub tenant_id: crate::identity::TenantId,
     /// Verified authentication route.
     pub route: AccessRoute,
-    /// Explicitly accessible workspaces.
-    pub workspace_ids: Vec<crate::identity::WorkspaceId>,
-    /// Resolved application capabilities.
-    pub permissions: Vec<Permission>,
     /// OAuth client when delegation is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// Ceiling applied to delegated routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<DelegationCeiling>,
 }
 
 /// Current identity and capability summary without credentials.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionResponse {
     /// Authenticated caller.
@@ -67,7 +83,7 @@ pub struct SessionResponse {
 }
 
 /// Issue a scoped credential for a local MCP client; read-only unless propose is enabled.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateConnectorRequest {
     /// Owner-chosen name identifying the client, such as the host application.
@@ -76,10 +92,12 @@ pub struct CreateConnectorRequest {
     pub workspace_ids: Vec<crate::identity::WorkspaceId>,
     /// Also grant proposal creation. Review and approval are never grantable to a connector.
     pub allow_propose: bool,
+    /// Retry identity; a replay returns `already_issued`, never the secret again.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// A local MCP connector credential's scope, without its secret.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Connector {
     /// Stable connector identity.
@@ -98,7 +116,7 @@ pub struct Connector {
 }
 
 /// A newly issued connector and its secret, which is returned exactly once and never stored in plain text.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IssuedConnector {
     /// The issued connector's scope.
@@ -108,7 +126,7 @@ pub struct IssuedConnector {
 }
 
 /// List the installation's connector credentials.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListConnectorsRequest {
     /// Include revoked connectors for audit.
@@ -116,7 +134,7 @@ pub struct ListConnectorsRequest {
 }
 
 /// Connector scopes, without secrets.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListConnectorsResponse {
     /// Matching connectors.
@@ -124,15 +142,17 @@ pub struct ListConnectorsResponse {
 }
 
 /// Revoke one connector credential immediately.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RevokeConnectorRequest {
     /// Connector to revoke.
     pub connector_id: crate::identity::ConnectorId,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// OAuth protected-resource metadata for external MCP clients.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceMetadata {
     /// Canonical externally reachable MCP resource URI.

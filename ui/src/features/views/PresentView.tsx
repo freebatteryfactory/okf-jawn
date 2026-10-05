@@ -71,17 +71,40 @@ async function dataset(
   return rowsSchema.parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(merged)));
 }
 
+function chartsFromView(view: z.infer<typeof zPresentResponse>['view']): {
+  charts: Map<string, TopLevelSpec>;
+  chartError: string | null;
+} {
+  const charts = new Map<string, TopLevelSpec>();
+  for (const [name, value] of Object.entries(view.charts ?? {})) {
+    try {
+      charts.set(name, parseVegaLiteSpec(value));
+    } catch (cause) {
+      return {
+        charts: new Map(),
+        chartError:
+          cause instanceof Error
+            ? `Chart "${name}" failed validation: ${cause.message}`
+            : `Chart "${name}" failed validation`,
+      };
+    }
+  }
+  return { charts, chartError: null };
+}
+
 export function PresentView({ response, callTool }: PresentViewProps) {
   const [bindings, setBindings] = useState<ResolvedPresentation | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
     const load = async () => {
+      const { charts, chartError } = chartsFromView(response.view);
+      if (chartError) throw new Error(chartError);
       const resolved: ResolvedPresentation = {
         sources: new Map(),
         bindings: new Map(),
         tables: new Map(),
-        charts: new Map(),
+        charts,
       };
       const sources = new Map(resolved.sources);
       const definitions = new Map(resolved.bindings);
@@ -106,7 +129,7 @@ export function PresentView({ response, callTool }: PresentViewProps) {
         const rows = await dataset(binding, callTool);
         if (rows) tables.set(binding.name, rows);
       }
-      if (active) setBindings({ ...resolved, sources, bindings: definitions, tables });
+      if (active) setBindings({ ...resolved, sources, bindings: definitions, tables, charts });
     };
     load().catch((cause) => {
       if (active) setError(cause instanceof Error ? cause.message : 'Source resolution failed');

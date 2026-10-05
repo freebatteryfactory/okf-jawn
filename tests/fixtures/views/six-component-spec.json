@@ -25,7 +25,7 @@
     },
     "chart": {
       "type": "Chart",
-      "props": { "binding": "metrics", "title": "Metrics chart" },
+      "props": { "binding": "metrics", "chart": "metrics_chart", "title": "Metrics chart" },
       "children": []
     },
     "sources": {

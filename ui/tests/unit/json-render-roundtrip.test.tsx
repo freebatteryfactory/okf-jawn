@@ -69,6 +69,7 @@ describe('json-render catalog round-trip', () => {
     expect(first.spec.elements.table?.props).toEqual({ binding: 'metrics' });
     expect(first.spec.elements.chart?.props).toEqual({
       binding: 'metrics',
+      chart: 'metrics_chart',
       title: 'Metrics chart',
     });
     expect(first.spec.elements.sources?.props).toEqual({

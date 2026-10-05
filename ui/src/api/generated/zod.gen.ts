@@ -8,11 +8,11 @@ import * as z from 'zod';
  * Local and hosted entry paths both resolve to one of these routes and share the same
  * authorization rules; no route is granted authority because the connection is loopback.
  */
-export const zAccessRoute = z.enum([
-    'browser_session',
-    'mcp_delegation',
-    'local_owner',
-    'service'
+export const zAccessRoute = z.union([
+    z.literal('browser_session'),
+    z.literal('mcp_delegation'),
+    z.literal('local_owner'),
+    z.literal('service')
 ]);
 
 /**
@@ -23,15 +23,15 @@ export const zArtifactId = z.uuid();
 /**
  * Known maintenance conditions.
  */
-export const zAttentionKind = z.enum([
-    'broken_link',
-    'stale',
-    'unreviewed',
-    'duplicate',
-    'missing_description',
-    'extraction',
-    'newer_source',
-    'instruction_like'
+export const zAttentionKind = z.union([
+    z.literal('broken_link'),
+    z.literal('stale'),
+    z.literal('unreviewed'),
+    z.literal('duplicate'),
+    z.literal('missing_description'),
+    z.literal('extraction'),
+    z.literal('newer_source'),
+    z.literal('instruction_like')
 ]);
 
 /**
@@ -49,7 +49,7 @@ export const zCatalogComponent = z.object({
  */
 export const zCatalogResponse = z.object({
     components: z.array(zCatalogComponent),
-    schema_version: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    schema_version: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     view_schema: z.unknown()
 });
 
@@ -57,20 +57,20 @@ export const zCatalogResponse = z.object({
  * A one-based rectangular spreadsheet selection.
  */
 export const zCellRange = z.object({
-    column_end: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
-    column_start: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
-    row_end: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
-    row_start: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    column_end: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+    column_start: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+    row_end: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+    row_start: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     sheet: z.string()
 });
 
 /**
  * How proposed naming collisions are handled.
  */
-export const zCollisionPolicy = z.enum([
-    'reject',
-    'suffix',
-    'keep_existing'
+export const zCollisionPolicy = z.union([
+    z.literal('reject'),
+    z.literal('suffix'),
+    z.literal('keep_existing')
 ]);
 
 /**
@@ -84,27 +84,31 @@ export const zComment = z.object({
 });
 
 /**
+ * The explicit human action a confirmation authorizes; never an arbitrary method.
+ */
+export const zConfirmationAction = z.union([
+    z.literal('review'),
+    z.literal('accept_proposal')
+]);
+
+/**
+ * Identity of one session-bound human confirmation challenge.
+ */
+export const zConfirmationId = z.uuid();
+
+/**
  * Identity of one local MCP connector credential, never the owner's browser session.
  */
 export const zConnectorId = z.uuid();
 
 /**
- * Create a blank workspace without baked-in example content.
- */
-export const zCreateWorkspaceRequest = z.object({
-    description: z.string(),
-    idempotency_key: z.string(),
-    name: z.string()
-});
-
-/**
  * Declared date interpretation; ambiguous input is not guessed.
  */
-export const zDateOrder = z.enum([
-    'ymd',
-    'mdy',
-    'dmy',
-    'reject_ambiguous'
+export const zDateOrder = z.union([
+    z.literal('ymd'),
+    z.literal('mdy'),
+    z.literal('dmy'),
+    z.literal('reject_ambiguous')
 ]);
 
 /**
@@ -116,9 +120,6 @@ export const zDependencyStatus = z.object({
     ready: z.boolean()
 });
 
-/**
- * A lower-case SHA-256 identifier for immutable bytes.
- */
 export const zDigest = z.string().regex(/^[0-9a-f]{64}$/);
 
 /**
@@ -139,46 +140,70 @@ export const zEmpty = z.record(z.string(), z.never());
 /**
  * Stable failure classifications; HTTP and MCP adapters preserve these.
  */
-export const zErrorCode = z.enum([
-    'invalid_input',
-    'unauthenticated',
-    'forbidden',
-    'not_found',
-    'conflict',
-    'too_large',
-    'unsupported',
-    'unavailable',
-    'cancelled',
-    'internal'
+export const zErrorCode = z.union([
+    z.literal('invalid_input'),
+    z.literal('unauthenticated'),
+    z.literal('forbidden'),
+    z.literal('not_found'),
+    z.literal('conflict'),
+    z.literal('already_issued'),
+    z.literal('in_progress'),
+    z.literal('too_large'),
+    z.literal('unsupported'),
+    z.literal('unavailable'),
+    z.literal('cancelled'),
+    z.literal('internal')
 ]);
 
 /**
- * A safe error response, not an internal backtrace.
+ * Kinds of workspace change notification.
  */
-export const zApiError = z.object({
-    code: zErrorCode,
-    field: z.string().nullish(),
-    message: z.string(),
-    request_id: z.string().nullish()
-});
+export const zEventKind = z.union([
+    z.literal('changed'),
+    z.literal('imported'),
+    z.literal('job_updated'),
+    z.literal('reviewed'),
+    z.literal('proposal_updated')
+]);
 
 /**
  * How filename extensions are handled when applying a naming rule.
  */
-export const zExtensionPolicy = z.enum([
-    'preserve',
-    'lowercase',
-    'strip'
+export const zExtensionPolicy = z.union([
+    z.literal('preserve'),
+    z.literal('lowercase'),
+    z.literal('strip')
+]);
+
+/**
+ * How one file differs between two revisions.
+ */
+export const zFileChangeKind = z.union([
+    z.literal('added'),
+    z.literal('modified'),
+    z.literal('moved'),
+    z.literal('removed')
 ]);
 
 /**
  * A changed file with before and after locators.
  */
-export const zFileChange = z.object({
+export const zFileChangeInput = z.object({
     binary: z.boolean(),
-    kind: z.string(),
+    kind: zFileChangeKind,
     new_path: z.string().nullish(),
     old_path: z.string().nullish(),
+    patch: z.string()
+});
+
+/**
+ * A changed file with before and after locators.
+ */
+export const zFileChangeOutput = z.object({
+    binary: z.boolean(),
+    kind: zFileChangeKind,
+    new_path: z.string().nullable(),
+    old_path: z.string().nullable(),
     patch: z.string()
 });
 
@@ -213,27 +238,31 @@ export const zHealthResponse = z.object({
 });
 
 /**
+ * Caller-chosen retry identity for one write, scoped to tenant, subject and operation.
+ */
+export const zIdempotencyKey = z.uuid();
+
+/**
+ * Create a blank workspace without baked-in example content.
+ */
+export const zCreateWorkspaceRequest = z.object({
+    description: z.string(),
+    idempotency_key: zIdempotencyKey,
+    name: z.string()
+});
+
+/**
  * Stable item identity independent of its current relative path.
  */
 export const zItemId = z.uuid();
 
 /**
- * An observation with a useful next action.
- */
-export const zAttentionItem = z.object({
-    action: z.string(),
-    item_id: zItemId.nullish(),
-    kind: zAttentionKind,
-    message: z.string()
-});
-
-/**
  * Built-in presentation roles; user-defined OKF type names remain unrestricted.
  */
-export const zItemKind = z.enum([
-    'note',
-    'source',
-    'view'
+export const zItemKind = z.union([
+    z.literal('note'),
+    z.literal('source'),
+    z.literal('view')
 ]);
 
 /**
@@ -244,33 +273,33 @@ export const zJobId = z.uuid();
 /**
  * Job progress retained independently of diagnostic traces.
  */
-export const zJobState = z.enum([
-    'queued',
-    'running',
-    'succeeded',
-    'failed',
-    'cancelled'
+export const zJobState = z.union([
+    z.literal('queued'),
+    z.literal('running'),
+    z.literal('succeeded'),
+    z.literal('failed'),
+    z.literal('cancelled')
 ]);
 
 /**
  * Supported case transformations.
  */
-export const zLetterCase = z.enum([
-    'preserve',
-    'lower',
-    'upper',
-    'title',
-    'snake',
-    'kebab'
+export const zLetterCase = z.union([
+    z.literal('preserve'),
+    z.literal('lower'),
+    z.literal('upper'),
+    z.literal('title'),
+    z.literal('snake'),
+    z.literal('kebab')
 ]);
 
 /**
  * Application lifecycle distinct from business approval.
  */
-export const zLifecycle = z.enum([
-    'active',
-    'deprecated',
-    'archived'
+export const zLifecycle = z.union([
+    z.literal('active'),
+    z.literal('deprecated'),
+    z.literal('archived')
 ]);
 
 /**
@@ -279,7 +308,7 @@ export const zLifecycle = z.enum([
 export const zLink = z.object({
     from: zItemId,
     label: z.string(),
-    line: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    line: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     to: zItemId.nullish(),
     to_path: z.string()
 });
@@ -287,10 +316,10 @@ export const zLink = z.object({
 /**
  * Which side of the link graph to inspect.
  */
-export const zLinkDirection = z.enum([
-    'outgoing',
-    'incoming',
-    'both'
+export const zLinkDirection = z.union([
+    z.literal('outgoing'),
+    z.literal('incoming'),
+    z.literal('both')
 ]);
 
 /**
@@ -299,6 +328,11 @@ export const zLinkDirection = z.enum([
 export const zListConnectorsRequest = z.object({
     include_revoked: z.boolean()
 });
+
+/**
+ * Durable server-assigned identity of one write; every store that creates a row enforces it as unique.
+ */
+export const zMutationId = z.uuid();
 
 /**
  * A typed rule scoped by glob and optional OKF type.
@@ -324,15 +358,111 @@ export const zNamingRule = z.object({
  */
 export const zNamingRules = z.object({
     rules: z.array(zNamingRule),
-    schema_version: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' })
+    schema_version: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
 });
+
+/**
+ * Closed set of canonical operation identifiers, serialized as the `snake_case` id.
+ */
+export const zOperationName = z.union([
+    z.literal('list_workspaces'),
+    z.literal('create_workspace'),
+    z.literal('open_workspace'),
+    z.literal('update_workspace'),
+    z.literal('archive_workspace'),
+    z.literal('export_workspace'),
+    z.literal('backup_workspace'),
+    z.literal('restore_workspace'),
+    z.literal('list_items'),
+    z.literal('get_item'),
+    z.literal('create_item'),
+    z.literal('save_draft'),
+    z.literal('list_drafts'),
+    z.literal('discard_draft'),
+    z.literal('move_item'),
+    z.literal('set_lifecycle'),
+    z.literal('delete_item'),
+    z.literal('create_folder'),
+    z.literal('list_types'),
+    z.literal('set_type'),
+    z.literal('read_item'),
+    z.literal('get_sources'),
+    z.literal('get_object'),
+    z.literal('create_sandbox_capability'),
+    z.literal('search_items'),
+    z.literal('get_links'),
+    z.literal('get_graph'),
+    z.literal('log_items'),
+    z.literal('diff_items'),
+    z.literal('commit_items'),
+    z.literal('restore_items'),
+    z.literal('blame_item'),
+    z.literal('open_proposal'),
+    z.literal('list_proposals'),
+    z.literal('get_proposal'),
+    z.literal('accept_proposal'),
+    z.literal('decline_proposal'),
+    z.literal('add_comment'),
+    z.literal('create_confirmation'),
+    z.literal('create_review'),
+    z.literal('list_reviews'),
+    z.literal('create_upload'),
+    z.literal('complete_upload'),
+    z.literal('start_import'),
+    z.literal('get_job'),
+    z.literal('list_jobs'),
+    z.literal('retry_job'),
+    z.literal('cancel_job'),
+    z.literal('redigest_item'),
+    z.literal('correct_digest'),
+    z.literal('get_rules'),
+    z.literal('set_rules'),
+    z.literal('preview_names'),
+    z.literal('apply_names'),
+    z.literal('get_attention'),
+    z.literal('rebuild_index'),
+    z.literal('get_view'),
+    z.literal('present_view'),
+    z.literal('resolve_view'),
+    z.literal('export_view'),
+    z.literal('get_catalog'),
+    z.literal('get_receipt'),
+    z.literal('list_events'),
+    z.literal('get_session'),
+    z.literal('create_connector'),
+    z.literal('list_connectors'),
+    z.literal('revoke_connector'),
+    z.literal('get_health'),
+    z.literal('get_readiness')
+]);
+
+/**
+ * An observation with a useful next action.
+ */
+export const zAttentionItem = z.object({
+    action: zOperationName,
+    item_id: zItemId.nullish(),
+    kind: zAttentionKind,
+    message: z.string()
+});
+
+/**
+ * Structural element types an outline can point to.
+ */
+export const zOutlineEntryKind = z.union([
+    z.literal('heading'),
+    z.literal('table'),
+    z.literal('figure'),
+    z.literal('page'),
+    z.literal('sheet')
+]);
 
 /**
  * A one-based inclusive document page range.
  */
 export const zPageRange = z.object({
-    end: z.int().gte(1).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
-    start: z.int().gte(1).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' })
+    end: z.int().gte(1).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+    start: z.int().gte(1).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
 });
 
 /**
@@ -353,13 +483,13 @@ export const zListWorkspacesRequest = z.object({
 /**
  * Application capabilities checked on every operation.
  */
-export const zPermission = z.enum([
-    'read',
-    'write',
-    'propose',
-    'approve',
-    'review',
-    'admin'
+export const zPermission = z.union([
+    z.literal('read'),
+    z.literal('write'),
+    z.literal('propose'),
+    z.literal('approve'),
+    z.literal('review'),
+    z.literal('admin')
 ]);
 
 /**
@@ -368,30 +498,52 @@ export const zPermission = z.enum([
 export const zProposalId = z.uuid();
 
 /**
+ * The immutable object a confirmation is bound to.
+ */
+export const zConfirmationTarget = z.union([
+    z.object({
+        item_id: zItemId,
+        kind: z.literal('item')
+    }),
+    z.object({
+        kind: z.literal('proposal'),
+        proposal_id: zProposalId
+    })
+]);
+
+/**
  * Lifecycle of a suggestion, not approval of a fact in it.
  */
-export const zProposalStatus = z.enum([
-    'open',
-    'accepted',
-    'declined',
-    'conflict'
+export const zProposalStatus = z.union([
+    z.literal('open'),
+    z.literal('accepted'),
+    z.literal('declined'),
+    z.literal('conflict')
 ]);
 
 /**
  * Select a representation rather than silently truncating a source.
  */
-export const zReadView = z.enum([
-    'outline',
-    'text',
-    'multimodal',
-    'pages',
-    'original'
+export const zReadView = z.union([
+    z.literal('outline'),
+    z.literal('text'),
+    z.literal('multimodal'),
+    z.literal('pages'),
+    z.literal('original')
 ]);
 
 /**
  * Read configured dependency availability.
  */
 export const zReadinessRequest = z.record(z.string(), z.never());
+
+/**
+ * Where returned content went; the two are distinct evidence.
+ */
+export const zReceiptAudience = z.union([
+    z.literal('agent_context'),
+    z.literal('human_display')
+]);
 
 /**
  * Identity of a durable application operation record.
@@ -401,7 +553,10 @@ export const zReceiptId = z.uuid();
 /**
  * Supported declarative presentation formats.
  */
-export const zRenderGrammar = z.enum(['vega_lite', 'json_render']);
+export const zRenderGrammar = z.union([
+    z.literal('vega_lite'),
+    z.literal('json_render')
+]);
 
 /**
  * OAuth protected-resource metadata for external MCP clients.
@@ -416,11 +571,11 @@ export const zResourceMetadata = z.object({
 /**
  * How recorded review evidence relates to current content.
  */
-export const zReviewCoverage = z.enum([
-    'current',
-    'changed',
-    'imported',
-    'unreviewed'
+export const zReviewCoverage = z.union([
+    z.literal('current'),
+    z.literal('changed'),
+    z.literal('imported'),
+    z.literal('unreviewed')
 ]);
 
 /**
@@ -428,9 +583,6 @@ export const zReviewCoverage = z.enum([
  */
 export const zReviewId = z.uuid();
 
-/**
- * A resolved Git commit, never a branch name or the string `latest`.
- */
 export const zRevision = z.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/);
 
 /**
@@ -438,10 +590,10 @@ export const zRevision = z.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/);
  */
 export const zAt = z.union([
     z.object({
-        kind: z.enum(['latest'])
+        kind: z.literal('latest')
     }),
     z.object({
-        kind: z.enum(['revision']),
+        kind: z.literal('revision'),
         revision: zRevision
     })
 ]);
@@ -462,7 +614,7 @@ export const zCommit = z.object({
  */
 export const zBlameLine = z.object({
     commit: zCommit,
-    line: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    line: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     text: z.string()
 });
 
@@ -471,8 +623,65 @@ export const zBlameLine = z.object({
  */
 export const zConfirmation = z.object({
     expires_at: z.string(),
-    id: z.string(),
+    id: zConfirmationId,
     revision: zRevision
+});
+
+/**
+ * Saved draft metadata; one per (item, editor), and never a revision.
+ */
+export const zDraft = z.object({
+    base_revision: zRevision,
+    content_digest: zDigest,
+    editor: z.string(),
+    item_id: zItemId,
+    saved_at: z.string()
+});
+
+/**
+ * The caller's own draft content returned beside committed content.
+ */
+export const zDraftContent = z.object({
+    body: z.string(),
+    draft: zDraft,
+    properties: z.record(z.string(), z.unknown())
+});
+
+/**
+ * Typed failure context the UI and agents can act on without parsing messages.
+ */
+export const zErrorDetail = z.union([
+    z.object({
+        connector_id: zConnectorId,
+        kind: z.literal('already_issued')
+    }),
+    z.object({
+        kind: z.literal('in_progress'),
+        mutation_id: zMutationId,
+        retry_after: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    }),
+    z.object({
+        current_revision: zRevision,
+        diff: z.unknown(),
+        draft_base: zRevision,
+        item_id: zItemId,
+        kind: z.literal('draft_conflict')
+    }),
+    z.object({
+        kind: z.literal('idempotency_conflict'),
+        operation: zOperationName
+    })
+]);
+
+/**
+ * A safe error response, not an internal backtrace.
+ */
+export const zApiError = z.object({
+    code: zErrorCode,
+    detail: zErrorDetail.nullish(),
+    field: z.string().nullish(),
+    message: z.string(),
+    request_id: z.string().nullish()
 });
 
 /**
@@ -494,6 +703,14 @@ export const zGetLinksResponse = z.object({
 });
 
 /**
+ * The caller's drafts, without other editors' drafts.
+ */
+export const zListDraftsResponse = z.object({
+    items: z.array(zDraft),
+    next_cursor: z.string().nullish()
+});
+
+/**
  * Version history with pagination.
  */
 export const zLogResponse = z.object({
@@ -505,7 +722,16 @@ export const zLogResponse = z.object({
  * Revoke one connector credential immediately.
  */
 export const zRevokeConnectorRequest = z.object({
-    connector_id: zConnectorId
+    connector_id: zConnectorId,
+    idempotency_key: zIdempotencyKey
+});
+
+/**
+ * A capability URL on the sandbox origin; the token is the only credential and is never logged.
+ */
+export const zSandboxCapability = z.object({
+    expires_at: z.string(),
+    url: z.string()
 });
 
 /**
@@ -551,12 +777,14 @@ export const zSourceAppearance = z.object({
     supersedes: zItemId.nullish()
 });
 
+export const zTenantId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
+
 /**
  * A one-based inclusive line range.
  */
 export const zTextRange = z.object({
-    end: z.int().gte(1).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
-    start: z.int().gte(1).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' })
+    end: z.int().gte(1).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+    start: z.int().gte(1).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
 });
 
 /**
@@ -564,23 +792,23 @@ export const zTextRange = z.object({
  */
 export const zSelection = z.union([
     z.object({
-        kind: z.enum(['all'])
+        kind: z.literal('all')
     }),
     z.object({
-        kind: z.enum(['lines']),
+        kind: z.literal('lines'),
         range: zTextRange
     }),
     z.object({
-        kind: z.enum(['pages']),
+        kind: z.literal('pages'),
         range: zPageRange
     }),
     z.object({
-        kind: z.enum(['cells']),
+        kind: z.literal('cells'),
         range: zCellRange
     }),
     z.object({
         heading: z.string(),
-        kind: z.enum(['section'])
+        kind: z.literal('section')
     })
 ]);
 
@@ -588,9 +816,9 @@ export const zSelection = z.union([
  * A navigable structural element from a document.
  */
 export const zOutlineEntry = z.object({
-    kind: z.string(),
+    kind: zOutlineEntryKind,
     label: z.string(),
-    level: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    level: z.int().gte(0).lte(65535),
     selection: zSelection
 });
 
@@ -600,7 +828,7 @@ export const zOutlineEntry = z.object({
 export const zTypeDefinition = z.object({
     name: z.string(),
     properties_schema: z.unknown(),
-    schema_version: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    schema_version: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     ui_schema: z.unknown()
 });
 
@@ -619,7 +847,10 @@ export const zUploadId = z.uuid();
 /**
  * Pinned historical views and explicit live refresh have different semantics.
  */
-export const zViewMode = z.enum(['pinned', 'live']);
+export const zViewMode = z.union([
+    z.literal('pinned'),
+    z.literal('live')
+]);
 
 /**
  * A diagnostic that does not silently discard usable input.
@@ -633,8 +864,18 @@ export const zWarning = z.object({
 /**
  * A comparison tied to both source revisions.
  */
-export const zDiffResponse = z.object({
-    changes: z.array(zFileChange),
+export const zDiffResponseInput = z.object({
+    changes: z.array(zFileChangeInput),
+    from: zRevision,
+    to: zRevision,
+    warnings: z.array(zWarning)
+});
+
+/**
+ * A comparison tied to both source revisions.
+ */
+export const zDiffResponseOutput = z.object({
+    changes: z.array(zFileChangeOutput),
     from: zRevision,
     to: zRevision,
     warnings: z.array(zWarning)
@@ -658,8 +899,9 @@ export const zWorkspaceId = z.uuid();
  * Accept exactly the displayed proposal against an unchanged workspace head.
  */
 export const zAcceptProposalRequest = z.object({
-    confirmation_id: z.string(),
+    confirmation_id: zConfirmationId,
     expected_head: zRevision,
+    idempotency_key: zIdempotencyKey,
     proposal_id: zProposalId,
     proposal_revision: zRevision,
     workspace_id: zWorkspaceId
@@ -670,6 +912,7 @@ export const zAcceptProposalRequest = z.object({
  */
 export const zArchiveWorkspaceRequest = z.object({
     base_revision: zRevision,
+    idempotency_key: zIdempotencyKey,
     workspace_id: zWorkspaceId
 });
 
@@ -677,7 +920,7 @@ export const zArchiveWorkspaceRequest = z.object({
  * Back up content plus application records; distinct from portable export.
  */
 export const zBackupWorkspaceRequest = z.object({
-    idempotency_key: z.string(),
+    idempotency_key: zIdempotencyKey,
     workspace_id: zWorkspaceId
 });
 
@@ -695,16 +938,21 @@ export const zBlameRequest = z.object({
  * Cancel pending or running work without discarding the uploaded original.
  */
 export const zCancelJobRequest = z.object({
+    idempotency_key: zIdempotencyKey,
     job_id: zJobId,
     workspace_id: zWorkspaceId
 });
 
 /**
- * Create a named snapshot from saved drafts at a checked base revision.
+ * Snapshot the caller's drafts of the selected items in one commit.
+ *
+ * If any selected item changed after its draft's base, or was deleted, the whole commit is
+ * rejected with a `draft_conflict` error detail. On success the snapshotted drafts are removed.
  */
 export const zCommitRequest = z.object({
-    base_revision: zRevision,
-    item_ids: z.array(zItemId),
+    expected_head: zRevision,
+    idempotency_key: zIdempotencyKey,
+    item_ids: z.array(zItemId).min(1),
     message: z.string(),
     workspace_id: zWorkspaceId
 });
@@ -713,6 +961,7 @@ export const zCommitRequest = z.object({
  * Verify upload length and hash without silently creating duplicate occurrences.
  */
 export const zCompleteUploadRequest = z.object({
+    idempotency_key: zIdempotencyKey,
     sha256: zDigest,
     upload_id: zUploadId,
     workspace_id: zWorkspaceId
@@ -737,6 +986,7 @@ export const zCorrectDigestRequest = z.object({
     base_revision: zRevision,
     corrected_markdown: z.string(),
     digest: zDigest,
+    idempotency_key: zIdempotencyKey,
     item_id: zItemId,
     workspace_id: zWorkspaceId
 });
@@ -745,10 +995,11 @@ export const zCorrectDigestRequest = z.object({
  * Prepare explicit human confirmation bound to an action and immutable target.
  */
 export const zCreateConfirmationRequest = z.object({
-    action: z.string(),
+    action: zConfirmationAction,
     content_digest: zDigest,
+    idempotency_key: zIdempotencyKey,
     revision: zRevision,
-    target_id: z.string(),
+    target: zConfirmationTarget,
     workspace_id: zWorkspaceId
 });
 
@@ -757,8 +1008,19 @@ export const zCreateConfirmationRequest = z.object({
  */
 export const zCreateConnectorRequest = z.object({
     allow_propose: z.boolean(),
+    idempotency_key: zIdempotencyKey,
     label: z.string(),
     workspace_ids: z.array(zWorkspaceId)
+});
+
+/**
+ * Request a short-lived sandbox-origin URL for one hostile representation.
+ */
+export const zCreateSandboxCapabilityRequest = z.object({
+    item_id: zItemId,
+    object: zDigest,
+    revision: zRevision,
+    workspace_id: zWorkspaceId
 });
 
 /**
@@ -766,7 +1028,7 @@ export const zCreateConnectorRequest = z.object({
  */
 export const zCreateUploadRequest = z.object({
     filename: z.string(),
-    idempotency_key: z.string(),
+    idempotency_key: zIdempotencyKey,
     relative_path: z.string(),
     sha256: zDigest.nullish(),
     size: z.string(),
@@ -777,9 +1039,18 @@ export const zCreateUploadRequest = z.object({
  * Close a proposal without changing accepted content.
  */
 export const zDeclineProposalRequest = z.object({
+    idempotency_key: zIdempotencyKey,
     proposal_id: zProposalId,
     reason: z.string(),
     workspace_id: zWorkspaceId
+});
+
+/**
+ * Upper bound on what a delegated client may do; it only narrows grants, never adds to them.
+ */
+export const zDelegationCeiling = z.object({
+    permissions: z.array(zPermission),
+    workspace_ids: z.array(zWorkspaceId).nullish()
 });
 
 /**
@@ -787,6 +1058,7 @@ export const zDeclineProposalRequest = z.object({
  */
 export const zDeleteItemRequest = z.object({
     base_revision: zRevision,
+    idempotency_key: zIdempotencyKey,
     item_id: zItemId,
     workspace_id: zWorkspaceId
 });
@@ -802,13 +1074,22 @@ export const zDiffRequest = z.object({
 });
 
 /**
+ * Remove the caller's own draft of one item.
+ */
+export const zDiscardDraftRequest = z.object({
+    idempotency_key: zIdempotencyKey,
+    item_id: zItemId,
+    workspace_id: zWorkspaceId
+});
+
+/**
  * A resumable workspace change notification, not canonical content.
  */
 export const zEvent = z.object({
     id: z.string(),
     item_id: zItemId.nullish(),
     job_id: zJobId.nullish(),
-    kind: z.string(),
+    kind: zEventKind,
     revision: zRevision.nullish(),
     workspace_id: zWorkspaceId
 });
@@ -818,7 +1099,7 @@ export const zEvent = z.object({
  */
 export const zExportViewRequest = z.object({
     at: zAt,
-    idempotency_key: z.string(),
+    idempotency_key: zIdempotencyKey,
     item_id: zItemId,
     workspace_id: zWorkspaceId
 });
@@ -828,7 +1109,7 @@ export const zExportViewRequest = z.object({
  */
 export const zExportWorkspaceRequest = z.object({
     at: zAt,
-    idempotency_key: z.string(),
+    idempotency_key: zIdempotencyKey,
     include_history: z.boolean(),
     workspace_id: zWorkspaceId
 });
@@ -848,7 +1129,7 @@ export const zGetAttentionRequest = z.object({
 export const zGetGraphRequest = z.object({
     at: zAt,
     folder: z.string().nullish(),
-    max_nodes: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    max_nodes: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     workspace_id: zWorkspaceId
 });
 
@@ -935,11 +1216,11 @@ export const zIssuedConnector = z.object({
  */
 export const zJob = z.object({
     artifact: zDownloadArtifact.nullish(),
-    attempt: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    attempt: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     error: zApiError.nullish(),
     id: zJobId,
     item_ids: z.array(zItemId),
-    progress: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    progress: z.int().gte(0).lte(255),
     revision: zRevision.nullish(),
     state: zJobState,
     warnings: z.array(zWarning),
@@ -951,6 +1232,14 @@ export const zJob = z.object({
  */
 export const zListConnectorsResponse = z.object({
     connectors: z.array(zConnector)
+});
+
+/**
+ * List the caller's own drafts in a workspace.
+ */
+export const zListDraftsRequest = z.object({
+    page: zPageRequest,
+    workspace_id: zWorkspaceId
 });
 
 /**
@@ -1050,13 +1339,16 @@ export const zPreviewNamesRequest = z.object({
 
 /**
  * Server-established identity; never accepted from a request body.
+ *
+ * Identity is not authorization: effective permissions come from the access-control adapter
+ * as workspace and tenant grants, intersected with any delegation ceiling.
  */
 export const zPrincipal = z.object({
     client_id: z.string().nullish(),
-    permissions: z.array(zPermission),
+    delegation: zDelegationCeiling.nullish(),
     route: zAccessRoute,
     subject: z.string(),
-    workspace_ids: z.array(zWorkspaceId)
+    tenant_id: zTenantId
 });
 
 /**
@@ -1077,7 +1369,7 @@ export const zReadItemRequest = z.object({
  * Rebuild derived search and link indexes without deleting application records.
  */
 export const zRebuildIndexRequest = z.object({
-    idempotency_key: z.string(),
+    idempotency_key: zIdempotencyKey,
     workspace_id: zWorkspaceId
 });
 
@@ -1086,7 +1378,7 @@ export const zRebuildIndexRequest = z.object({
  */
 export const zRedigestRequest = z.object({
     base_revision: zRevision,
-    idempotency_key: z.string(),
+    idempotency_key: zIdempotencyKey,
     item_id: zItemId,
     settings: z.record(z.string(), z.unknown()),
     workspace_id: zWorkspaceId
@@ -1107,6 +1399,7 @@ export const zResolveViewRequest = z.object({
  */
 export const zRestoreRequest = z.object({
     base_revision: zRevision,
+    idempotency_key: zIdempotencyKey,
     item_id: zItemId.nullish(),
     message: z.string(),
     target: zRevision,
@@ -1118,7 +1411,7 @@ export const zRestoreRequest = z.object({
  */
 export const zRestoreWorkspaceRequest = z.object({
     artifact_id: zArtifactId,
-    idempotency_key: z.string(),
+    idempotency_key: zIdempotencyKey,
     sha256: zDigest.nullish(),
     workspace_id: zWorkspaceId
 });
@@ -1127,7 +1420,23 @@ export const zRestoreWorkspaceRequest = z.object({
  * Retry a recoverable job with the same durable work identity.
  */
 export const zRetryJobRequest = z.object({
+    idempotency_key: zIdempotencyKey,
     job_id: zJobId,
+    workspace_id: zWorkspaceId
+});
+
+/**
+ * Save the caller's draft; always succeeds even when the head has moved.
+ *
+ * The first save takes the item's head revision as its base. Later saves keep the draft's
+ * base unless `base_revision` equals the current head, which is the explicit rebase.
+ */
+export const zSaveDraftRequest = z.object({
+    base_revision: zRevision,
+    body: z.string(),
+    idempotency_key: zIdempotencyKey,
+    item_id: zItemId,
+    properties: z.record(z.string(), z.unknown()),
     workspace_id: zWorkspaceId
 });
 
@@ -1156,6 +1465,7 @@ export const zSessionResponse = z.object({
  */
 export const zSetLifecycleRequest = z.object({
     base_revision: zRevision,
+    idempotency_key: zIdempotencyKey,
     item_id: zItemId,
     lifecycle: zLifecycle,
     workspace_id: zWorkspaceId
@@ -1166,6 +1476,7 @@ export const zSetLifecycleRequest = z.object({
  */
 export const zSetRulesRequest = z.object({
     base_revision: zRevision,
+    idempotency_key: zIdempotencyKey,
     rules: zNamingRules,
     workspace_id: zWorkspaceId
 });
@@ -1176,6 +1487,7 @@ export const zSetRulesRequest = z.object({
 export const zSetTypeRequest = z.object({
     base_revision: zRevision,
     definition: zTypeDefinition,
+    idempotency_key: zIdempotencyKey,
     workspace_id: zWorkspaceId
 });
 
@@ -1186,19 +1498,8 @@ export const zStartImportRequest = z.object({
     apply_naming_rules: z.boolean(),
     base_revision: zRevision,
     destination: z.string(),
-    idempotency_key: z.string(),
+    idempotency_key: zIdempotencyKey,
     upload_ids: z.array(zUploadId),
-    workspace_id: zWorkspaceId
-});
-
-/**
- * Edit content against its base revision, invalidating prior review coverage.
- */
-export const zUpdateItemRequest = z.object({
-    base_revision: zRevision,
-    body: z.string(),
-    item_id: zItemId,
-    properties: z.record(z.string(), z.unknown()),
     workspace_id: zWorkspaceId
 });
 
@@ -1208,6 +1509,7 @@ export const zUpdateItemRequest = z.object({
 export const zUpdateWorkspaceRequest = z.object({
     base_revision: zRevision,
     description: z.string(),
+    idempotency_key: zIdempotencyKey,
     name: z.string(),
     workspace_id: zWorkspaceId
 });
@@ -1232,7 +1534,7 @@ export const zWorkspace = z.object({
     head: zRevision,
     id: zWorkspaceId,
     name: z.string(),
-    read_only: z.boolean()
+    permissions: z.array(zPermission)
 });
 
 /**
@@ -1243,9 +1545,6 @@ export const zListWorkspacesResponse = z.object({
     next_cursor: z.string().nullish()
 });
 
-/**
- * A normalized relative workspace path; this alone is not filesystem authorization.
- */
 export const zWorkspacePath = z.string().min(1).max(4096);
 
 /**
@@ -1254,7 +1553,7 @@ export const zWorkspacePath = z.string().min(1).max(4096);
 export const zChange = z.union([
     z.object({
         body: z.string(),
-        kind: z.enum(['create']),
+        kind: z.literal('create'),
         path: zWorkspacePath,
         properties: z.record(z.string(), z.unknown()),
         type_name: z.string()
@@ -1262,17 +1561,17 @@ export const zChange = z.union([
     z.object({
         body: z.string(),
         item_id: zItemId,
-        kind: z.enum(['edit']),
+        kind: z.literal('edit'),
         properties: z.record(z.string(), z.unknown())
     }),
     z.object({
         destination: zWorkspacePath,
         item_id: zItemId,
-        kind: z.enum(['move'])
+        kind: z.literal('move')
     }),
     z.object({
         item_id: zItemId,
-        kind: z.enum(['archive'])
+        kind: z.literal('archive')
     })
 ]);
 
@@ -1282,6 +1581,7 @@ export const zChange = z.union([
 export const zCreateFolderRequest = z.object({
     base_revision: zRevision,
     folder: zWorkspacePath,
+    idempotency_key: zIdempotencyKey,
     workspace_id: zWorkspaceId
 });
 
@@ -1291,7 +1591,7 @@ export const zCreateFolderRequest = z.object({
 export const zCreateItemRequest = z.object({
     base_revision: zRevision,
     body: z.string(),
-    idempotency_key: z.string(),
+    idempotency_key: zIdempotencyKey,
     kind: zItemKind,
     path: zWorkspacePath,
     properties: z.record(z.string(), z.unknown()),
@@ -1339,6 +1639,7 @@ export const zGetGraphResponse = z.object({
  */
 export const zItemDocument = z.object({
     body: z.string(),
+    draft: zDraftContent.nullish(),
     properties: z.record(z.string(), z.unknown()),
     source: zSourceAppearance.nullish(),
     summary: zItemSummary
@@ -1360,6 +1661,7 @@ export const zListItemsResponse = z.object({
 export const zMoveItemRequest = z.object({
     base_revision: zRevision,
     destination: zWorkspacePath,
+    idempotency_key: zIdempotencyKey,
     item_id: zItemId,
     workspace_id: zWorkspaceId
 });
@@ -1371,7 +1673,7 @@ export const zOpenProposalRequest = z.object({
     base_revision: zRevision,
     changes: z.array(zChange),
     description: z.string(),
-    idempotency_key: z.string(),
+    idempotency_key: zIdempotencyKey,
     title: z.string(),
     workspace_id: zWorkspaceId
 });
@@ -1426,6 +1728,7 @@ export const zRenamePlan = z.object({
  * Apply a revision-bound preview and rewrite affected links.
  */
 export const zApplyNamesRequest = z.object({
+    idempotency_key: zIdempotencyKey,
     plan: zRenamePlan,
     rules: zNamingRules,
     workspace_id: zWorkspaceId
@@ -1447,6 +1750,7 @@ export const zSourceReference = z.object({
  * Add a discussion comment without recording content verification.
  */
 export const zAddCommentRequest = z.object({
+    idempotency_key: zIdempotencyKey,
     proposal_id: zProposalId,
     source: zSourceReference.nullish(),
     text: z.string(),
@@ -1465,8 +1769,9 @@ export const zBlameResponse = z.object({
  * Record an explicit review of a displayed revision, without approving its business claims.
  */
 export const zCreateReviewRequest = z.object({
-    confirmation_id: z.string(),
+    confirmation_id: zConfirmationId,
     content_digest: zDigest,
+    idempotency_key: zIdempotencyKey,
     source: zSourceReference
 });
 
@@ -1474,7 +1779,7 @@ export const zCreateReviewRequest = z.object({
  * Read an authorized stored object through an item reference, never by hash alone.
  */
 export const zGetObjectRequest = z.object({
-    length: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }).nullish(),
+    length: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }).nullish(),
     object: zDigest,
     offset: z.string().nullish(),
     source: zSourceReference
@@ -1483,8 +1788,17 @@ export const zGetObjectRequest = z.object({
 /**
  * Citations and source appearances for the selected item.
  */
-export const zGetSourcesResponse = z.object({
+export const zGetSourcesResponseInput = z.object({
     appearance: zSourceAppearance.nullish(),
+    revision: zRevision,
+    sources: z.array(zSourceReference)
+});
+
+/**
+ * Citations and source appearances for the selected item.
+ */
+export const zGetSourcesResponseOutput = z.object({
+    appearance: zSourceAppearance.nullable(),
     revision: zRevision,
     sources: z.array(zSourceReference)
 });
@@ -1495,11 +1809,11 @@ export const zGetSourcesResponse = z.object({
 export const zMediaReference = z.object({
     caption: z.string(),
     caption_origin: z.string(),
-    height: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    height: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     media_type: z.string(),
     object: zDigest,
     source: zSourceReference,
-    width: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' })
+    width: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
 });
 
 /**
@@ -1521,9 +1835,9 @@ export const zReadItemResponse = z.object({
  * What this application returned, not what an external model retained.
  */
 export const zReceipt = z.object({
-    audience: z.string(),
+    audience: zReceiptAudience,
     id: zReceiptId,
-    operation_id: z.string(),
+    operation_id: zOperationName,
     principal_subject: z.string(),
     returned_at: z.string(),
     route: zAccessRoute,
@@ -1586,16 +1900,19 @@ export const zViewBinding = z.object({
  */
 export const zViewDocument = z.object({
     bindings: z.array(zViewBinding),
+    charts: z.record(z.string(), z.unknown()).optional(),
     description: z.string(),
     grammar: zRenderGrammar,
     mode: zViewMode,
-    schema_version: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    schema_version: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
     spec: z.unknown(),
     title: z.string()
 });
 
 /**
  * Render a candidate from already resolved bindings without saving or approving it.
+ *
+ * Every binding's source workspace is an authorization target, not only `workspace_id`.
  */
 export const zPresentRequest = z.object({
     view: zViewDocument,
@@ -1706,7 +2023,7 @@ export const zDiffItemsBody = zDiffRequest;
 /**
  * Successful operation result
  */
-export const zDiffItemsResponse = zDiffResponse;
+export const zDiffItemsResponse = zDiffResponseOutput;
 
 export const zLogItemsBody = zLogRequest;
 
@@ -1806,12 +2123,26 @@ export const zDeleteItemBody = zDeleteItemRequest;
  */
 export const zDeleteItemResponse = zMutationResult;
 
+export const zDiscardDraftBody = zDiscardDraftRequest;
+
+/**
+ * Successful operation result
+ */
+export const zDiscardDraftResponse = zDraft;
+
 export const zGetItemBody = zGetItemRequest;
 
 /**
  * Successful operation result
  */
 export const zGetItemResponse = zItemDocument;
+
+export const zListDraftsBody = zListDraftsRequest;
+
+/**
+ * Successful operation result
+ */
+export const zListDraftsResponse2 = zListDraftsResponse;
 
 export const zListItemsBody = zListItemsRequest;
 
@@ -1827,19 +2158,19 @@ export const zMoveItemBody = zMoveItemRequest;
  */
 export const zMoveItemResponse = zMutationResult;
 
+export const zSaveDraftBody = zSaveDraftRequest;
+
+/**
+ * Successful operation result
+ */
+export const zSaveDraftResponse = zDraft;
+
 export const zSetLifecycleBody = zSetLifecycleRequest;
 
 /**
  * Successful operation result
  */
 export const zSetLifecycleResponse = zMutationResult;
-
-export const zUpdateItemBody = zUpdateItemRequest;
-
-/**
- * Successful operation result
- */
-export const zUpdateItemResponse = zMutationResult;
 
 export const zAcceptProposalBody = zAcceptProposalRequest;
 
@@ -1883,6 +2214,13 @@ export const zOpenProposalBody = zOpenProposalRequest;
  */
 export const zOpenProposalResponse = zProposal;
 
+export const zCreateSandboxCapabilityBody = zCreateSandboxCapabilityRequest;
+
+/**
+ * Successful operation result
+ */
+export const zCreateSandboxCapabilityResponse = zSandboxCapability;
+
 export const zGetObjectBody = zGetObjectRequest;
 
 /**
@@ -1895,7 +2233,7 @@ export const zGetSourcesBody = zGetSourcesRequest;
 /**
  * Successful operation result
  */
-export const zGetSourcesResponse2 = zGetSourcesResponse;
+export const zGetSourcesResponse = zGetSourcesResponseOutput;
 
 export const zReadItemBody = zReadItemRequest;
 
@@ -2139,12 +2477,10 @@ export const zMcpEventsResponse = z.string();
 export const zMcpRequestBody = z.unknown();
 
 export const zServeSandboxRepresentationPath = z.object({
-    workspace_id: z.string(),
-    item_id: z.string(),
-    revision: z.string()
+    capability: z.string()
 });
 
 /**
- * Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).
+ * Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. The capability from create_sandbox_capability is the only credential: it binds workspace, item, revision and representation, is stored hashed, expires, and is never logged. No ambient session cookies, credentials, or privileged APIs; respond with no-store, no-referrer and a strict CSP (SPEC sections 7 and 11).
  */
 export const zServeSandboxRepresentationResponse = z.string();

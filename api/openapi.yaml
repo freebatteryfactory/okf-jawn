@@ -5,11 +5,14 @@ components:
       description: Accept exactly the displayed proposal against an unchanged workspace head.
       properties:
         confirmation_id:
+          $ref: '#/components/schemas/ConfirmationId'
           description: Server-issued session-bound confirmation; never a model-supplied reviewer name.
-          type: string
         expected_head:
           $ref: '#/components/schemas/Revision'
           description: Workspace head shown during confirmation.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity; a retry with the same mutation may re-consume its own confirmation.
         proposal_id:
           $ref: '#/components/schemas/ProposalId'
           description: Suggestion identity.
@@ -25,6 +28,7 @@ components:
       - expected_head
       - proposal_revision
       - confirmation_id
+      - idempotency_key
       type: object
     AccessRoute:
       description: |-
@@ -32,24 +36,34 @@ components:
 
         Local and hosted entry paths both resolve to one of these routes and share the same
         authorization rules; no route is granted authority because the connection is loopback.
-      enum:
-      - browser_session
-      - mcp_delegation
-      - local_owner
-      - service
-      type: string
+      oneOf:
+      - const: browser_session
+        description: Hosted Explorer session established through WorkOS AuthKit.
+        type: string
+      - const: mcp_delegation
+        description: 'External agent: a WorkOS Connect token when hosted, a local connector credential when local.'
+        type: string
+      - const: local_owner
+        description: The installation-local owner identity, authenticated through the local browser session.
+        type: string
+      - const: service
+        description: Configured internal service identity.
+        type: string
     AddCommentRequest:
       additionalProperties: false
       description: Add a discussion comment without recording content verification.
       properties:
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         proposal_id:
           $ref: '#/components/schemas/ProposalId'
           description: Suggestion being discussed.
         source:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/SourceReference'
-            description: Optional line or range under discussion.
           - type: 'null'
+          description: Optional line or range under discussion; the caller must be able to read it.
         text:
           description: Comment text.
           type: string
@@ -60,6 +74,7 @@ components:
       - workspace_id
       - proposal_id
       - text
+      - idempotency_key
       type: object
     ApiError:
       additionalProperties: false
@@ -68,6 +83,11 @@ components:
         code:
           $ref: '#/components/schemas/ErrorCode'
           description: Stable code for programmatic handling.
+        detail:
+          anyOf:
+          - $ref: '#/components/schemas/ErrorDetail'
+          - type: 'null'
+          description: Typed context for conflict, replay, and in-progress outcomes.
         field:
           description: Input field needing correction.
           type:
@@ -89,6 +109,9 @@ components:
       additionalProperties: false
       description: Apply a revision-bound preview and rewrite affected links.
       properties:
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         plan:
           $ref: '#/components/schemas/RenamePlan'
           description: Plan revalidated before any writes.
@@ -102,6 +125,7 @@ components:
       - workspace_id
       - plan
       - rules
+      - idempotency_key
       type: object
     ArchiveWorkspaceRequest:
       additionalProperties: false
@@ -110,12 +134,16 @@ components:
         base_revision:
           $ref: '#/components/schemas/Revision'
           description: Exact revision on which this change is based; stale writes conflict.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         workspace_id:
           $ref: '#/components/schemas/WorkspaceId'
           description: Workspace whose permissions and storage scope apply.
       required:
       - workspace_id
       - base_revision
+      - idempotency_key
       type: object
     ArtifactId:
       description: Identity of a retained export or backup artifact.
@@ -124,40 +152,40 @@ components:
     At:
       description: A requested version selector; resolved responses contain a `Revision` instead.
       oneOf:
-      - description: Resolve the current accepted workspace head exactly once.
+      - additionalProperties: false
+        description: Resolve the current accepted workspace head exactly once.
         properties:
           kind:
-            enum:
-            - latest
+            const: latest
             type: string
         required:
         - kind
         type: object
-      - description: Read an explicitly identified historical snapshot.
+      - additionalProperties: false
+        description: Read an explicitly identified historical snapshot.
         properties:
           kind:
-            enum:
-            - revision
+            const: revision
             type: string
           revision:
             $ref: '#/components/schemas/Revision'
             description: Exact resolved commit identity.
         required:
-        - revision
         - kind
+        - revision
         type: object
     AttentionItem:
       additionalProperties: false
       description: An observation with a useful next action.
       properties:
         action:
+          $ref: '#/components/schemas/OperationName'
           description: Suggested existing operation, never executable code.
-          type: string
         item_id:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/ItemId'
-            description: Relevant item.
           - type: 'null'
+          description: Relevant item.
         kind:
           $ref: '#/components/schemas/AttentionKind'
           description: Diagnostic class.
@@ -171,23 +199,38 @@ components:
       type: object
     AttentionKind:
       description: Known maintenance conditions.
-      enum:
-      - broken_link
-      - stale
-      - unreviewed
-      - duplicate
-      - missing_description
-      - extraction
-      - newer_source
-      - instruction_like
-      type: string
+      oneOf:
+      - const: broken_link
+        description: A reference does not resolve.
+        type: string
+      - const: stale
+        description: '`stale_after` requires checking.'
+        type: string
+      - const: unreviewed
+        description: Agent-authored content has no covering review.
+        type: string
+      - const: duplicate
+        description: Identical bytes have multiple visible appearances.
+        type: string
+      - const: missing_description
+        description: Navigation summary is absent.
+        type: string
+      - const: extraction
+        description: Extraction has warnings or failed.
+        type: string
+      - const: newer_source
+        description: A pinned View has newer source data available.
+        type: string
+      - const: instruction_like
+        description: Possible instruction-like source text; advisory only.
+        type: string
     BackupWorkspaceRequest:
       additionalProperties: false
       description: Back up content plus application records; distinct from portable export.
       properties:
         idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
           description: Retry identity for the backup.
-          type: string
         workspace_id:
           $ref: '#/components/schemas/WorkspaceId'
           description: Workspace whose permissions and storage scope apply.
@@ -204,7 +247,7 @@ components:
           description: Last recorded change.
         line:
           description: One-based line.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         text:
@@ -257,6 +300,9 @@ components:
       additionalProperties: false
       description: Cancel pending or running work without discarding the uploaded original.
       properties:
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         job_id:
           $ref: '#/components/schemas/JobId'
           description: Job to cancel.
@@ -266,6 +312,7 @@ components:
       required:
       - workspace_id
       - job_id
+      - idempotency_key
       type: object
     CatalogComponent:
       additionalProperties: false
@@ -301,7 +348,7 @@ components:
           type: array
         schema_version:
           description: Catalog version.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         view_schema:
@@ -317,22 +364,22 @@ components:
       properties:
         column_end:
           description: Last column, inclusive.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         column_start:
           description: First column, inclusive.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         row_end:
           description: Last row, inclusive.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         row_start:
           description: First row, inclusive.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         sheet:
@@ -348,35 +395,34 @@ components:
     Change:
       description: Permitted proposal mutations; no review or acceptance variants exist.
       oneOf:
-      - description: Create a note or View with retained properties.
+      - additionalProperties: false
+        description: Create a note or View with retained properties.
         properties:
           body:
             description: Body.
             type: string
           kind:
-            enum:
-            - create
+            const: create
             type: string
           path:
             $ref: '#/components/schemas/WorkspacePath'
             description: Path.
           properties:
-            additionalProperties: {}
+            additionalProperties: true
             description: Properties.
-            propertyNames:
-              type: string
             type: object
           type_name:
             description: Type name.
             type: string
         required:
+        - kind
         - path
         - type_name
         - body
         - properties
-        - kind
         type: object
-      - description: Replace authored content with preconditions.
+      - additionalProperties: false
+        description: Replace authored content with preconditions.
         properties:
           body:
             description: Body.
@@ -385,22 +431,20 @@ components:
             $ref: '#/components/schemas/ItemId'
             description: Item id.
           kind:
-            enum:
-            - edit
+            const: edit
             type: string
           properties:
-            additionalProperties: {}
+            additionalProperties: true
             description: Properties.
-            propertyNames:
-              type: string
             type: object
         required:
+        - kind
         - item_id
         - body
         - properties
-        - kind
         type: object
-      - description: Move and rewrite links.
+      - additionalProperties: false
+        description: Move and rewrite links.
         properties:
           destination:
             $ref: '#/components/schemas/WorkspacePath'
@@ -409,34 +453,38 @@ components:
             $ref: '#/components/schemas/ItemId'
             description: Item id.
           kind:
-            enum:
-            - move
+            const: move
             type: string
         required:
+        - kind
         - item_id
         - destination
-        - kind
         type: object
-      - description: Retire an item without deleting retained objects.
+      - additionalProperties: false
+        description: Retire an item without deleting retained objects.
         properties:
           item_id:
             $ref: '#/components/schemas/ItemId'
             description: Item id.
           kind:
-            enum:
-            - archive
+            const: archive
             type: string
         required:
-        - item_id
         - kind
+        - item_id
         type: object
     CollisionPolicy:
       description: How proposed naming collisions are handled.
-      enum:
-      - reject
-      - suffix
-      - keep_existing
-      type: string
+      oneOf:
+      - const: reject
+        description: Require an explicit decision.
+        type: string
+      - const: suffix
+        description: Add a deterministic suffix.
+        type: string
+      - const: keep_existing
+        description: Keep the original name and report the collision.
+        type: string
     Comment:
       additionalProperties: false
       description: A server-attributed discussion entry.
@@ -489,15 +537,23 @@ components:
       type: object
     CommitRequest:
       additionalProperties: false
-      description: Create a named snapshot from saved drafts at a checked base revision.
+      description: |-
+        Snapshot the caller's drafts of the selected items in one commit.
+
+        If any selected item changed after its draft's base, or was deleted, the whole commit is
+        rejected with a `draft_conflict` error detail. On success the snapshotted drafts are removed.
       properties:
-        base_revision:
+        expected_head:
           $ref: '#/components/schemas/Revision'
-          description: Exact revision on which this change is based; stale writes conflict.
+          description: Workspace head the editor saw; a moved head conflicts.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         item_ids:
-          description: Selected saved drafts; empty means the explicit workspace selection.
+          description: Items whose drafts by the caller are snapshotted together.
           items:
             $ref: '#/components/schemas/ItemId'
+          minItems: 1
           type: array
         message:
           description: Human-readable snapshot name.
@@ -507,14 +563,18 @@ components:
           description: Workspace whose permissions and storage scope apply.
       required:
       - workspace_id
-      - base_revision
-      - message
+      - expected_head
       - item_ids
+      - message
+      - idempotency_key
       type: object
     CompleteUploadRequest:
       additionalProperties: false
       description: Verify upload length and hash without silently creating duplicate occurrences.
       properties:
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         sha256:
           $ref: '#/components/schemas/Digest'
           description: Expected full-content hash.
@@ -528,6 +588,7 @@ components:
       - workspace_id
       - upload_id
       - sha256
+      - idempotency_key
       type: object
     Confirmation:
       additionalProperties: false
@@ -537,8 +598,8 @@ components:
           description: RFC 3339 expiration.
           type: string
         id:
+          $ref: '#/components/schemas/ConfirmationId'
           description: Opaque session-bound challenge.
-          type: string
         revision:
           $ref: '#/components/schemas/Revision'
           description: Bound revision.
@@ -547,6 +608,48 @@ components:
       - expires_at
       - revision
       type: object
+    ConfirmationAction:
+      description: The explicit human action a confirmation authorizes; never an arbitrary method.
+      oneOf:
+      - const: review
+        description: Record a content review; requires the review permission.
+        type: string
+      - const: accept_proposal
+        description: Accept a proposal; requires the approve permission.
+        type: string
+    ConfirmationId:
+      description: Identity of one session-bound human confirmation challenge.
+      format: uuid
+      type: string
+    ConfirmationTarget:
+      description: The immutable object a confirmation is bound to.
+      oneOf:
+      - additionalProperties: false
+        description: An item revision being reviewed.
+        properties:
+          item_id:
+            $ref: '#/components/schemas/ItemId'
+            description: Reviewed item.
+          kind:
+            const: item
+            type: string
+        required:
+        - kind
+        - item_id
+        type: object
+      - additionalProperties: false
+        description: A proposal revision being accepted.
+        properties:
+          kind:
+            const: proposal
+            type: string
+          proposal_id:
+            $ref: '#/components/schemas/ProposalId'
+            description: Accepted proposal.
+        required:
+        - kind
+        - proposal_id
+        type: object
     Connector:
       additionalProperties: false
       description: A local MCP connector credential's scope, without its secret.
@@ -599,6 +702,9 @@ components:
         digest:
           $ref: '#/components/schemas/Digest'
           description: Digest being corrected.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         item_id:
           $ref: '#/components/schemas/ItemId'
           description: Stable application item identity; paths remain the portable OKF identity.
@@ -611,32 +717,37 @@ components:
       - base_revision
       - digest
       - corrected_markdown
+      - idempotency_key
       type: object
     CreateConfirmationRequest:
       additionalProperties: false
       description: Prepare explicit human confirmation bound to an action and immutable target.
       properties:
         action:
-          description: review or `accept_proposal`; not an arbitrary method.
-          type: string
+          $ref: '#/components/schemas/ConfirmationAction'
+          description: Confirmed action; it determines the required permission.
         content_digest:
           $ref: '#/components/schemas/Digest'
           description: Displayed content digest.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         revision:
           $ref: '#/components/schemas/Revision'
           description: Displayed content revision.
-        target_id:
-          description: Item or proposal identity.
-          type: string
+        target:
+          $ref: '#/components/schemas/ConfirmationTarget'
+          description: Item or proposal being confirmed.
         workspace_id:
           $ref: '#/components/schemas/WorkspaceId'
           description: Workspace whose permissions and storage scope apply.
       required:
       - workspace_id
       - action
-      - target_id
+      - target
       - revision
       - content_digest
+      - idempotency_key
       type: object
     CreateConnectorRequest:
       additionalProperties: false
@@ -645,6 +756,9 @@ components:
         allow_propose:
           description: Also grant proposal creation. Review and approval are never grantable to a connector.
           type: boolean
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity; a replay returns `already_issued`, never the secret again.
         label:
           description: Owner-chosen name identifying the client, such as the host application.
           type: string
@@ -657,6 +771,7 @@ components:
       - label
       - workspace_ids
       - allow_propose
+      - idempotency_key
       type: object
     CreateFolderRequest:
       additionalProperties: false
@@ -668,6 +783,9 @@ components:
         folder:
           $ref: '#/components/schemas/WorkspacePath'
           description: New relative folder path.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         workspace_id:
           $ref: '#/components/schemas/WorkspaceId'
           description: Workspace whose permissions and storage scope apply.
@@ -675,6 +793,7 @@ components:
       - workspace_id
       - base_revision
       - folder
+      - idempotency_key
       type: object
     CreateItemRequest:
       additionalProperties: false
@@ -687,8 +806,8 @@ components:
           description: Markdown content.
           type: string
         idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
           description: Retry identity.
-          type: string
         kind:
           $ref: '#/components/schemas/ItemKind'
           description: Built-in role.
@@ -696,10 +815,8 @@ components:
           $ref: '#/components/schemas/WorkspacePath'
           description: Destination relative path.
         properties:
-          additionalProperties: {}
+          additionalProperties: true
           description: Preserved extension properties.
-          propertyNames:
-            type: string
           type: object
         title:
           description: Display title.
@@ -726,11 +843,14 @@ components:
       description: Record an explicit review of a displayed revision, without approving its business claims.
       properties:
         confirmation_id:
+          $ref: '#/components/schemas/ConfirmationId'
           description: Session-bound confirmation issued for this revision.
-          type: string
         content_digest:
           $ref: '#/components/schemas/Digest'
           description: Digest displayed in the review confirmation.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         source:
           $ref: '#/components/schemas/SourceReference'
           description: Exact source shown.
@@ -738,6 +858,29 @@ components:
       - source
       - content_digest
       - confirmation_id
+      - idempotency_key
+      type: object
+    CreateSandboxCapabilityRequest:
+      additionalProperties: false
+      description: Request a short-lived sandbox-origin URL for one hostile representation.
+      properties:
+        item_id:
+          $ref: '#/components/schemas/ItemId'
+          description: Stable application item identity; paths remain the portable OKF identity.
+        object:
+          $ref: '#/components/schemas/Digest'
+          description: Original or derived object served; it must belong to this item revision.
+        revision:
+          $ref: '#/components/schemas/Revision'
+          description: Exact resolved revision whose representation is served.
+        workspace_id:
+          $ref: '#/components/schemas/WorkspaceId'
+          description: Workspace whose permissions and storage scope apply.
+      required:
+      - workspace_id
+      - item_id
+      - revision
+      - object
       type: object
     CreateUploadRequest:
       additionalProperties: false
@@ -747,16 +890,16 @@ components:
           description: Original filename, preserved.
           type: string
         idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
           description: Retry identity.
-          type: string
         relative_path:
           description: Supplied folder context.
           type: string
         sha256:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/Digest'
-            description: Expected content hash if caller knows it.
           - type: 'null'
+          description: Expected content hash if caller knows it.
         size:
           description: Expected decimal byte count.
           type: string
@@ -778,8 +921,8 @@ components:
           description: Purpose of this workspace.
           type: string
         idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
           description: Caller-chosen retry identity.
-          type: string
         name:
           description: Display name.
           type: string
@@ -790,16 +933,26 @@ components:
       type: object
     DateOrder:
       description: Declared date interpretation; ambiguous input is not guessed.
-      enum:
-      - ymd
-      - mdy
-      - dmy
-      - reject_ambiguous
-      type: string
+      oneOf:
+      - const: ymd
+        description: Year, month, day.
+        type: string
+      - const: mdy
+        description: Month, day, year.
+        type: string
+      - const: dmy
+        description: Day, month, year.
+        type: string
+      - const: reject_ambiguous
+        description: Require unambiguous dates or a human choice.
+        type: string
     DeclineProposalRequest:
       additionalProperties: false
       description: Close a proposal without changing accepted content.
       properties:
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         proposal_id:
           $ref: '#/components/schemas/ProposalId'
           description: Suggestion identity.
@@ -813,6 +966,26 @@ components:
       - workspace_id
       - proposal_id
       - reason
+      - idempotency_key
+      type: object
+    DelegationCeiling:
+      additionalProperties: false
+      description: Upper bound on what a delegated client may do; it only narrows grants, never adds to them.
+      properties:
+        permissions:
+          description: Capabilities the delegation may exercise; effective permission is the intersection with grants.
+          items:
+            $ref: '#/components/schemas/Permission'
+          type: array
+        workspace_ids:
+          description: Workspaces the delegation is limited to; absent means no restriction beyond the delegator's grants.
+          items:
+            $ref: '#/components/schemas/WorkspaceId'
+          type:
+          - array
+          - 'null'
+      required:
+      - permissions
       type: object
     DeleteItemRequest:
       additionalProperties: false
@@ -821,6 +994,9 @@ components:
         base_revision:
           $ref: '#/components/schemas/Revision'
           description: Exact revision on which this change is based; stale writes conflict.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         item_id:
           $ref: '#/components/schemas/ItemId'
           description: Stable application item identity; paths remain the portable OKF identity.
@@ -831,6 +1007,7 @@ components:
       - workspace_id
       - item_id
       - base_revision
+      - idempotency_key
       type: object
     DependencyStatus:
       additionalProperties: false
@@ -858,10 +1035,10 @@ components:
           $ref: '#/components/schemas/Revision'
           description: Base version.
         item_id:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/ItemId'
-            description: Optional item filter.
           - type: 'null'
+          description: Optional item filter.
         to:
           $ref: '#/components/schemas/Revision'
           description: Compared version.
@@ -873,14 +1050,40 @@ components:
       - from
       - to
       type: object
-    DiffResponse:
+    DiffResponseInput:
       additionalProperties: false
       description: A comparison tied to both source revisions.
       properties:
         changes:
           description: Changed content.
           items:
-            $ref: '#/components/schemas/FileChange'
+            $ref: '#/components/schemas/FileChangeInput'
+          type: array
+        from:
+          $ref: '#/components/schemas/Revision'
+          description: Base commit.
+        to:
+          $ref: '#/components/schemas/Revision'
+          description: Compared commit.
+        warnings:
+          description: Limits or unsupported binary comparison details.
+          items:
+            $ref: '#/components/schemas/Warning'
+          type: array
+      required:
+      - from
+      - to
+      - changes
+      - warnings
+      type: object
+    DiffResponseOutput:
+      additionalProperties: false
+      description: A comparison tied to both source revisions.
+      properties:
+        changes:
+          description: Changed content.
+          items:
+            $ref: '#/components/schemas/FileChangeOutput'
           type: array
         from:
           $ref: '#/components/schemas/Revision'
@@ -900,9 +1103,26 @@ components:
       - warnings
       type: object
     Digest:
-      description: A lower-case SHA-256 identifier for immutable bytes.
       pattern: ^[0-9a-f]{64}$
       type: string
+    DiscardDraftRequest:
+      additionalProperties: false
+      description: Remove the caller's own draft of one item.
+      properties:
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
+        item_id:
+          $ref: '#/components/schemas/ItemId'
+          description: Stable application item identity; paths remain the portable OKF identity.
+        workspace_id:
+          $ref: '#/components/schemas/WorkspaceId'
+          description: Workspace whose permissions and storage scope apply.
+      required:
+      - workspace_id
+      - item_id
+      - idempotency_key
+      type: object
     DownloadArtifact:
       additionalProperties: false
       description: An authorized export or backup artifact with integrity metadata.
@@ -924,6 +1144,51 @@ components:
       - sha256
       - size
       - download_path
+      type: object
+    Draft:
+      additionalProperties: false
+      description: Saved draft metadata; one per (item, editor), and never a revision.
+      properties:
+        base_revision:
+          $ref: '#/components/schemas/Revision'
+          description: Head revision the draft is based on; a Snapshot conflicts if the item changed since.
+        content_digest:
+          $ref: '#/components/schemas/Digest'
+          description: Digest of the drafted body and properties.
+        editor:
+          description: Server-established subject who owns this draft.
+          type: string
+        item_id:
+          $ref: '#/components/schemas/ItemId'
+          description: Drafted item.
+        saved_at:
+          description: RFC 3339 time of the latest save.
+          type: string
+      required:
+      - item_id
+      - editor
+      - base_revision
+      - content_digest
+      - saved_at
+      type: object
+    DraftContent:
+      additionalProperties: false
+      description: The caller's own draft content returned beside committed content.
+      properties:
+        body:
+          description: Drafted Markdown body.
+          type: string
+        draft:
+          $ref: '#/components/schemas/Draft'
+          description: Draft metadata.
+        properties:
+          additionalProperties: true
+          description: Drafted complete property map.
+          type: object
+      required:
+      - draft
+      - body
+      - properties
       type: object
     DuplicateObservation:
       additionalProperties: false
@@ -951,18 +1216,115 @@ components:
       type: object
     ErrorCode:
       description: Stable failure classifications; HTTP and MCP adapters preserve these.
-      enum:
-      - invalid_input
-      - unauthenticated
-      - forbidden
-      - not_found
-      - conflict
-      - too_large
-      - unsupported
-      - unavailable
-      - cancelled
-      - internal
-      type: string
+      oneOf:
+      - const: invalid_input
+        description: Input violates the declared contract.
+        type: string
+      - const: unauthenticated
+        description: No acceptable identity was established.
+        type: string
+      - const: forbidden
+        description: The principal lacks the required capability.
+        type: string
+      - const: not_found
+        description: The resource is absent or not visible to this principal.
+        type: string
+      - const: conflict
+        description: A precondition, revision, draft-base, or idempotency-key conflict occurred.
+        type: string
+      - const: already_issued
+        description: A secret-bearing write already completed; replaying it never returns the secret again.
+        type: string
+      - const: in_progress
+        description: Another attempt with the same idempotency key holds a live lease; retry later.
+        type: string
+      - const: too_large
+        description: A configured resource limit was exceeded.
+        type: string
+      - const: unsupported
+        description: The requested representation or format is unsupported.
+        type: string
+      - const: unavailable
+        description: A configured integration is unavailable.
+        type: string
+      - const: cancelled
+        description: The operation was cancelled.
+        type: string
+      - const: internal
+        description: An unexpected server failure occurred without exposing secrets.
+        type: string
+    ErrorDetail:
+      description: Typed failure context the UI and agents can act on without parsing messages.
+      oneOf:
+      - additionalProperties: false
+        description: The connector was already issued under this idempotency key; its secret is not replayed.
+        properties:
+          connector_id:
+            $ref: '#/components/schemas/ConnectorId'
+            description: Connector created by the original request.
+          kind:
+            const: already_issued
+            type: string
+        required:
+        - kind
+        - connector_id
+        type: object
+      - additionalProperties: false
+        description: An identical request is executing under a live lease.
+        properties:
+          kind:
+            const: in_progress
+            type: string
+          mutation_id:
+            $ref: '#/components/schemas/MutationId'
+            description: Mutation holding the lease.
+          retry_after:
+            description: Whole seconds the caller should wait before retrying the same request.
+            format: uint32
+            minimum: 0
+            type: integer
+        required:
+        - kind
+        - mutation_id
+        - retry_after
+        type: object
+      - additionalProperties: false
+        description: The head moved under a draft; the editor resolves and saves against the new head.
+        properties:
+          current_revision:
+            $ref: '#/components/schemas/Revision'
+            description: Head revision at which the item changed or was deleted.
+          diff:
+            description: Structured comparison between the draft base and the current revision.
+          draft_base:
+            $ref: '#/components/schemas/Revision'
+            description: Revision the draft was based on.
+          item_id:
+            $ref: '#/components/schemas/ItemId'
+            description: Item whose draft no longer applies cleanly.
+          kind:
+            const: draft_conflict
+            type: string
+        required:
+        - kind
+        - item_id
+        - draft_base
+        - current_revision
+        - diff
+        type: object
+      - additionalProperties: false
+        description: The idempotency key was reused with a different request body.
+        properties:
+          kind:
+            const: idempotency_conflict
+            type: string
+          operation:
+            $ref: '#/components/schemas/OperationName'
+            description: Operation that first used the key.
+        required:
+        - kind
+        - operation
+        type: object
     Event:
       additionalProperties: false
       description: A resumable workspace change notification, not canonical content.
@@ -971,23 +1333,23 @@ components:
           description: Opaque monotonic event cursor.
           type: string
         item_id:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/ItemId'
-            description: Affected item.
           - type: 'null'
+          description: Affected item.
         job_id:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/JobId'
-            description: Affected job.
           - type: 'null'
+          description: Affected job.
         kind:
-          description: Changed, imported, `job_updated`, reviewed, or `proposal_updated`.
-          type: string
+          $ref: '#/components/schemas/EventKind'
+          description: What changed.
         revision:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/Revision'
-            description: Content revision when applicable.
           - type: 'null'
+          description: Content revision when applicable.
         workspace_id:
           $ref: '#/components/schemas/WorkspaceId'
           description: Workspace whose permissions and storage scope apply.
@@ -996,6 +1358,24 @@ components:
       - workspace_id
       - kind
       type: object
+    EventKind:
+      description: Kinds of workspace change notification.
+      oneOf:
+      - const: changed
+        description: Committed content changed.
+        type: string
+      - const: imported
+        description: An import produced items.
+        type: string
+      - const: job_updated
+        description: A job's durable state changed.
+        type: string
+      - const: reviewed
+        description: A review was recorded.
+        type: string
+      - const: proposal_updated
+        description: A proposal's state or discussion changed.
+        type: string
     ExportViewRequest:
       additionalProperties: false
       description: Export the visual specification, sources, data table, and rendering assets.
@@ -1004,8 +1384,8 @@ components:
           $ref: '#/components/schemas/At'
           description: Requested revision selector; latest is resolved once before reading.
         idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
           description: Retry identity.
-          type: string
         item_id:
           $ref: '#/components/schemas/ItemId'
           description: Stable application item identity; paths remain the portable OKF identity.
@@ -1026,8 +1406,8 @@ components:
           $ref: '#/components/schemas/At'
           description: Requested revision selector; latest is resolved once before reading.
         idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
           description: Retry identity for the export job.
-          type: string
         include_history:
           description: Include retained Git history in addition to the selected state.
           type: boolean
@@ -1042,12 +1422,17 @@ components:
       type: object
     ExtensionPolicy:
       description: How filename extensions are handled when applying a naming rule.
-      enum:
-      - preserve
-      - lowercase
-      - strip
-      type: string
-    FileChange:
+      oneOf:
+      - const: preserve
+        description: Leave the extension unchanged.
+        type: string
+      - const: lowercase
+        description: Lower-case the extension.
+        type: string
+      - const: strip
+        description: Drop the extension from the normalized note path (never from originals).
+        type: string
+    FileChangeInput:
       additionalProperties: false
       description: A changed file with before and after locators.
       properties:
@@ -1055,8 +1440,8 @@ components:
           description: The underlying bytes are binary.
           type: boolean
         kind:
+          $ref: '#/components/schemas/FileChangeKind'
           description: Added, modified, moved, or removed.
-          type: string
         new_path:
           description: New path; absent for deletions.
           type:
@@ -1071,6 +1456,51 @@ components:
           description: Unified text diff when applicable.
           type: string
       required:
+      - patch
+      - binary
+      - kind
+      type: object
+    FileChangeKind:
+      description: How one file differs between two revisions.
+      oneOf:
+      - const: added
+        description: Present only in the compared revision.
+        type: string
+      - const: modified
+        description: Same path, different content.
+        type: string
+      - const: moved
+        description: Different path for the same item.
+        type: string
+      - const: removed
+        description: Present only in the base revision.
+        type: string
+    FileChangeOutput:
+      additionalProperties: false
+      description: A changed file with before and after locators.
+      properties:
+        binary:
+          description: The underlying bytes are binary.
+          type: boolean
+        kind:
+          $ref: '#/components/schemas/FileChangeKind'
+          description: Added, modified, moved, or removed.
+        new_path:
+          description: New path; absent for deletions.
+          type:
+          - string
+          - 'null'
+        old_path:
+          description: Previous path; absent for additions.
+          type:
+          - string
+          - 'null'
+        patch:
+          description: Unified text diff when applicable.
+          type: string
+      required:
+      - old_path
+      - new_path
       - patch
       - binary
       - kind
@@ -1132,7 +1562,7 @@ components:
           - 'null'
         max_nodes:
           description: Node limit; truncation is explicit.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         workspace_id:
@@ -1254,7 +1684,7 @@ components:
       properties:
         length:
           description: Bounded requested byte length.
-          format: int32
+          format: uint32
           minimum: 0
           type:
           - integer
@@ -1364,15 +1794,15 @@ components:
       - item_id
       - at
       type: object
-    GetSourcesResponse:
+    GetSourcesResponseInput:
       additionalProperties: false
       description: Citations and source appearances for the selected item.
       properties:
         appearance:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/SourceAppearance'
-            description: Occurrence metadata if the item is a source.
           - type: 'null'
+          description: Occurrence metadata if the item is a source.
         revision:
           $ref: '#/components/schemas/Revision'
           description: Resolved version.
@@ -1384,6 +1814,28 @@ components:
       required:
       - revision
       - sources
+      type: object
+    GetSourcesResponseOutput:
+      additionalProperties: false
+      description: Citations and source appearances for the selected item.
+      properties:
+        appearance:
+          anyOf:
+          - $ref: '#/components/schemas/SourceAppearance'
+          - type: 'null'
+          description: Occurrence metadata if the item is a source.
+        revision:
+          $ref: '#/components/schemas/Revision'
+          description: Resolved version.
+        sources:
+          description: Supporting citations.
+          items:
+            $ref: '#/components/schemas/SourceReference'
+          type: array
+      required:
+      - revision
+      - sources
+      - appearance
       type: object
     GetViewRequest:
       additionalProperties: false
@@ -1421,6 +1873,10 @@ components:
       - status
       - version
       type: object
+    IdempotencyKey:
+      description: Caller-chosen retry identity for one write, scoped to tenant, subject and operation.
+      format: uuid
+      type: string
     IssuedConnector:
       additionalProperties: false
       description: A newly issued connector and its secret, which is returned exactly once and never stored in plain text.
@@ -1442,17 +1898,20 @@ components:
         body:
           description: Markdown body, preserving source locators.
           type: string
+        draft:
+          anyOf:
+          - $ref: '#/components/schemas/DraftContent'
+          - type: 'null'
+          description: The caller's own uncommitted draft; never another editor's, and never on agent routes.
         properties:
-          additionalProperties: {}
+          additionalProperties: true
           description: All user and OKF properties; unknown extension values are retained.
-          propertyNames:
-            type: string
           type: object
         source:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/SourceAppearance'
-            description: Source occurrence metadata when applicable.
           - type: 'null'
+          description: Source occurrence metadata when applicable.
         summary:
           $ref: '#/components/schemas/ItemSummary'
           description: Identity and navigation metadata.
@@ -1467,11 +1926,16 @@ components:
       type: string
     ItemKind:
       description: Built-in presentation roles; user-defined OKF type names remain unrestricted.
-      enum:
-      - note
-      - source
-      - view
-      type: string
+      oneOf:
+      - const: note
+        description: Human or agent-authored Markdown knowledge.
+        type: string
+      - const: source
+        description: An appearance of immutable source bytes.
+        type: string
+      - const: view
+        description: A source-bound declarative visual artifact.
+        type: string
     ItemSummary:
       additionalProperties: false
       description: A navigable item description bound to a resolved workspace revision.
@@ -1520,20 +1984,20 @@ components:
       description: Durable work status; acknowledgement is not a claim of completion.
       properties:
         artifact:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/DownloadArtifact'
-            description: Export or backup artifact.
           - type: 'null'
+          description: Export or backup artifact.
         attempt:
           description: Execution attempt number.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         error:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/ApiError'
-            description: Last failure.
           - type: 'null'
+          description: Last failure.
         id:
           $ref: '#/components/schemas/JobId'
           description: Job identity.
@@ -1544,14 +2008,15 @@ components:
           type: array
         progress:
           description: Approximate completion percentage.
-          format: int32
+          format: uint8
+          maximum: 255
           minimum: 0
           type: integer
         revision:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/Revision'
-            description: Committed result revision.
           - type: 'null'
+          description: Committed result revision.
         state:
           $ref: '#/components/schemas/JobState'
           description: Current durable state.
@@ -1578,30 +2043,55 @@ components:
       type: string
     JobState:
       description: Job progress retained independently of diagnostic traces.
-      enum:
-      - queued
-      - running
-      - succeeded
-      - failed
-      - cancelled
-      type: string
+      oneOf:
+      - const: queued
+        description: Durably registered for execution.
+        type: string
+      - const: running
+        description: Execution attempt in progress.
+        type: string
+      - const: succeeded
+        description: Committed output is available.
+        type: string
+      - const: failed
+        description: Failure retained with retry information.
+        type: string
+      - const: cancelled
+        description: Explicit cancellation completed.
+        type: string
     LetterCase:
       description: Supported case transformations.
-      enum:
-      - preserve
-      - lower
-      - upper
-      - title
-      - snake
-      - kebab
-      type: string
+      oneOf:
+      - const: preserve
+        description: Preserve case.
+        type: string
+      - const: lower
+        description: Lower case.
+        type: string
+      - const: upper
+        description: Upper case.
+        type: string
+      - const: title
+        description: Title case.
+        type: string
+      - const: snake
+        description: Snake case.
+        type: string
+      - const: kebab
+        description: Kebab case.
+        type: string
     Lifecycle:
       description: Application lifecycle distinct from business approval.
-      enum:
-      - active
-      - deprecated
-      - archived
-      type: string
+      oneOf:
+      - const: active
+        description: Current and usable content.
+        type: string
+      - const: deprecated
+        description: Retained historical content.
+        type: string
+      - const: archived
+        description: Hidden from ordinary current listings; still retrievable.
+        type: string
     Link:
       additionalProperties: false
       description: A source-level relationship between items.
@@ -1614,14 +2104,14 @@ components:
           type: string
         line:
           description: Source line.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         to:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/ItemId'
-            description: Resolved target, absent for broken links.
           - type: 'null'
+          description: Resolved target, absent for broken links.
         to_path:
           description: Target path as written.
           type: string
@@ -1633,11 +2123,16 @@ components:
       type: object
     LinkDirection:
       description: Which side of the link graph to inspect.
-      enum:
-      - outgoing
-      - incoming
-      - both
-      type: string
+      oneOf:
+      - const: outgoing
+        description: References made by this item.
+        type: string
+      - const: incoming
+        description: References pointing to this item.
+        type: string
+      - const: both
+        description: Both directions.
+        type: string
     ListConnectorsRequest:
       additionalProperties: false
       description: List the installation's connector credentials.
@@ -1659,6 +2154,37 @@ components:
           type: array
       required:
       - connectors
+      type: object
+    ListDraftsRequest:
+      additionalProperties: false
+      description: List the caller's own drafts in a workspace.
+      properties:
+        page:
+          $ref: '#/components/schemas/PageRequest'
+          description: Bounded pagination with an opaque cursor.
+        workspace_id:
+          $ref: '#/components/schemas/WorkspaceId'
+          description: Workspace whose permissions and storage scope apply.
+      required:
+      - workspace_id
+      - page
+      type: object
+    ListDraftsResponse:
+      additionalProperties: false
+      description: The caller's drafts, without other editors' drafts.
+      properties:
+        items:
+          description: Draft metadata.
+          items:
+            $ref: '#/components/schemas/Draft'
+          type: array
+        next_cursor:
+          description: Continuation cursor.
+          type:
+          - string
+          - 'null'
+      required:
+      - items
       type: object
     ListEventsRequest:
       additionalProperties: false
@@ -1784,10 +2310,10 @@ components:
           $ref: '#/components/schemas/PageRequest'
           description: Bounded pagination with an opaque cursor.
         status:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/ProposalStatus'
-            description: State filter.
           - type: 'null'
+          description: State filter.
         workspace_id:
           $ref: '#/components/schemas/WorkspaceId'
           description: Workspace whose permissions and storage scope apply.
@@ -1899,10 +2425,10 @@ components:
           $ref: '#/components/schemas/At'
           description: Requested revision selector; latest is resolved once before reading.
         item_id:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/ItemId'
-            description: Limit history to an item.
           - type: 'null'
+          description: Limit history to an item.
         page:
           $ref: '#/components/schemas/PageRequest'
           description: Bounded pagination with an opaque cursor.
@@ -1943,7 +2469,7 @@ components:
           type: string
         height:
           description: Pixel height.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         media_type:
@@ -1957,7 +2483,7 @@ components:
           description: Original source location.
         width:
           description: Pixel width.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
       required:
@@ -1979,6 +2505,9 @@ components:
         destination:
           $ref: '#/components/schemas/WorkspacePath'
           description: New relative path.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         item_id:
           $ref: '#/components/schemas/ItemId'
           description: Stable application item identity; paths remain the portable OKF identity.
@@ -1990,7 +2519,12 @@ components:
       - item_id
       - base_revision
       - destination
+      - idempotency_key
       type: object
+    MutationId:
+      description: Durable server-assigned identity of one write; every store that creates a row enforces it as unique.
+      format: uuid
+      type: string
     MutationResult:
       additionalProperties: false
       description: A persisted change and the resolved revision it produced.
@@ -2083,7 +2617,7 @@ components:
           type: array
         schema_version:
           description: Format version; this release emits 1.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
       required:
@@ -2106,8 +2640,8 @@ components:
           description: Reason and limitations.
           type: string
         idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
           description: Retry identity.
-          type: string
         title:
           description: Proposal title.
           type: string
@@ -2132,19 +2666,230 @@ components:
       required:
       - workspace_id
       type: object
+    OperationName:
+      description: Closed set of canonical operation identifiers, serialized as the `snake_case` id.
+      oneOf:
+      - const: list_workspaces
+        description: The `list_workspaces` operation.
+        type: string
+      - const: create_workspace
+        description: The `create_workspace` operation.
+        type: string
+      - const: open_workspace
+        description: The `open_workspace` operation.
+        type: string
+      - const: update_workspace
+        description: The `update_workspace` operation.
+        type: string
+      - const: archive_workspace
+        description: The `archive_workspace` operation.
+        type: string
+      - const: export_workspace
+        description: The `export_workspace` operation.
+        type: string
+      - const: backup_workspace
+        description: The `backup_workspace` operation.
+        type: string
+      - const: restore_workspace
+        description: The `restore_workspace` operation.
+        type: string
+      - const: list_items
+        description: The `list_items` operation.
+        type: string
+      - const: get_item
+        description: The `get_item` operation.
+        type: string
+      - const: create_item
+        description: The `create_item` operation.
+        type: string
+      - const: save_draft
+        description: The `save_draft` operation.
+        type: string
+      - const: list_drafts
+        description: The `list_drafts` operation.
+        type: string
+      - const: discard_draft
+        description: The `discard_draft` operation.
+        type: string
+      - const: move_item
+        description: The `move_item` operation.
+        type: string
+      - const: set_lifecycle
+        description: The `set_lifecycle` operation.
+        type: string
+      - const: delete_item
+        description: The `delete_item` operation.
+        type: string
+      - const: create_folder
+        description: The `create_folder` operation.
+        type: string
+      - const: list_types
+        description: The `list_types` operation.
+        type: string
+      - const: set_type
+        description: The `set_type` operation.
+        type: string
+      - const: read_item
+        description: The `read_item` operation.
+        type: string
+      - const: get_sources
+        description: The `get_sources` operation.
+        type: string
+      - const: get_object
+        description: The `get_object` operation.
+        type: string
+      - const: create_sandbox_capability
+        description: The `create_sandbox_capability` operation.
+        type: string
+      - const: search_items
+        description: The `search_items` operation.
+        type: string
+      - const: get_links
+        description: The `get_links` operation.
+        type: string
+      - const: get_graph
+        description: The `get_graph` operation.
+        type: string
+      - const: log_items
+        description: The `log_items` operation.
+        type: string
+      - const: diff_items
+        description: The `diff_items` operation.
+        type: string
+      - const: commit_items
+        description: The `commit_items` operation.
+        type: string
+      - const: restore_items
+        description: The `restore_items` operation.
+        type: string
+      - const: blame_item
+        description: The `blame_item` operation.
+        type: string
+      - const: open_proposal
+        description: The `open_proposal` operation.
+        type: string
+      - const: list_proposals
+        description: The `list_proposals` operation.
+        type: string
+      - const: get_proposal
+        description: The `get_proposal` operation.
+        type: string
+      - const: accept_proposal
+        description: The `accept_proposal` operation.
+        type: string
+      - const: decline_proposal
+        description: The `decline_proposal` operation.
+        type: string
+      - const: add_comment
+        description: The `add_comment` operation.
+        type: string
+      - const: create_confirmation
+        description: The `create_confirmation` operation.
+        type: string
+      - const: create_review
+        description: The `create_review` operation.
+        type: string
+      - const: list_reviews
+        description: The `list_reviews` operation.
+        type: string
+      - const: create_upload
+        description: The `create_upload` operation.
+        type: string
+      - const: complete_upload
+        description: The `complete_upload` operation.
+        type: string
+      - const: start_import
+        description: The `start_import` operation.
+        type: string
+      - const: get_job
+        description: The `get_job` operation.
+        type: string
+      - const: list_jobs
+        description: The `list_jobs` operation.
+        type: string
+      - const: retry_job
+        description: The `retry_job` operation.
+        type: string
+      - const: cancel_job
+        description: The `cancel_job` operation.
+        type: string
+      - const: redigest_item
+        description: The `redigest_item` operation.
+        type: string
+      - const: correct_digest
+        description: The `correct_digest` operation.
+        type: string
+      - const: get_rules
+        description: The `get_rules` operation.
+        type: string
+      - const: set_rules
+        description: The `set_rules` operation.
+        type: string
+      - const: preview_names
+        description: The `preview_names` operation.
+        type: string
+      - const: apply_names
+        description: The `apply_names` operation.
+        type: string
+      - const: get_attention
+        description: The `get_attention` operation.
+        type: string
+      - const: rebuild_index
+        description: The `rebuild_index` operation.
+        type: string
+      - const: get_view
+        description: The `get_view` operation.
+        type: string
+      - const: present_view
+        description: The `present_view` operation.
+        type: string
+      - const: resolve_view
+        description: The `resolve_view` operation.
+        type: string
+      - const: export_view
+        description: The `export_view` operation.
+        type: string
+      - const: get_catalog
+        description: The `get_catalog` operation.
+        type: string
+      - const: get_receipt
+        description: The `get_receipt` operation.
+        type: string
+      - const: list_events
+        description: The `list_events` operation.
+        type: string
+      - const: get_session
+        description: The `get_session` operation.
+        type: string
+      - const: create_connector
+        description: The `create_connector` operation.
+        type: string
+      - const: list_connectors
+        description: The `list_connectors` operation.
+        type: string
+      - const: revoke_connector
+        description: The `revoke_connector` operation.
+        type: string
+      - const: get_health
+        description: The `get_health` operation.
+        type: string
+      - const: get_readiness
+        description: The `get_readiness` operation.
+        type: string
     OutlineEntry:
       additionalProperties: false
       description: A navigable structural element from a document.
       properties:
         kind:
-          description: Heading, table, figure, page, or sheet.
-          type: string
+          $ref: '#/components/schemas/OutlineEntryKind'
+          description: Structural element type.
         label:
           description: Visible heading or media caption.
           type: string
         level:
           description: Heading depth or zero for non-heading elements.
-          format: int32
+          format: uint16
+          maximum: 65535
           minimum: 0
           type: integer
         selection:
@@ -2156,18 +2901,36 @@ components:
       - selection
       - kind
       type: object
+    OutlineEntryKind:
+      description: Structural element types an outline can point to.
+      oneOf:
+      - const: heading
+        description: A document heading.
+        type: string
+      - const: table
+        description: A table.
+        type: string
+      - const: figure
+        description: A figure or image.
+        type: string
+      - const: page
+        description: A document page.
+        type: string
+      - const: sheet
+        description: A spreadsheet sheet.
+        type: string
     PageRange:
       additionalProperties: false
       description: A one-based inclusive document page range.
       properties:
         end:
           description: Last page.
-          format: int32
+          format: uint32
           minimum: 1
           type: integer
         start:
           description: First page.
-          format: int32
+          format: uint32
           minimum: 1
           type: integer
       required:
@@ -2185,7 +2948,7 @@ components:
           - 'null'
         limit:
           description: Maximum results requested; server may return fewer.
-          format: int32
+          format: uint16
           maximum: 200
           minimum: 1
           type: integer
@@ -2194,17 +2957,31 @@ components:
       type: object
     Permission:
       description: Application capabilities checked on every operation.
-      enum:
-      - read
-      - write
-      - propose
-      - approve
-      - review
-      - admin
-      type: string
+      oneOf:
+      - const: read
+        description: Read authorized workspace data.
+        type: string
+      - const: write
+        description: Edit authorized workspace content.
+        type: string
+      - const: propose
+        description: Create or update proposals without merging.
+        type: string
+      - const: approve
+        description: Accept proposals at exact preconditions.
+        type: string
+      - const: review
+        description: Record an explicit content review.
+        type: string
+      - const: admin
+        description: Manage deployment or workspace access.
+        type: string
     PresentRequest:
       additionalProperties: false
-      description: Render a candidate from already resolved bindings without saving or approving it.
+      description: |-
+        Render a candidate from already resolved bindings without saving or approving it.
+
+        Every binding's source workspace is an authorization target, not only `workspace_id`.
       properties:
         view:
           $ref: '#/components/schemas/ViewDocument'
@@ -2268,34 +3045,35 @@ components:
       type: object
     Principal:
       additionalProperties: false
-      description: Server-established identity; never accepted from a request body.
+      description: |-
+        Server-established identity; never accepted from a request body.
+
+        Identity is not authorization: effective permissions come from the access-control adapter
+        as workspace and tenant grants, intersected with any delegation ceiling.
       properties:
         client_id:
           description: OAuth client when delegation is present.
           type:
           - string
           - 'null'
-        permissions:
-          description: Resolved application capabilities.
-          items:
-            $ref: '#/components/schemas/Permission'
-          type: array
+        delegation:
+          anyOf:
+          - $ref: '#/components/schemas/DelegationCeiling'
+          - type: 'null'
+          description: Ceiling applied to delegated routes.
         route:
           $ref: '#/components/schemas/AccessRoute'
           description: Verified authentication route.
         subject:
           description: Validated identity-provider subject.
           type: string
-        workspace_ids:
-          description: Explicitly accessible workspaces.
-          items:
-            $ref: '#/components/schemas/WorkspaceId'
-          type: array
+        tenant_id:
+          $ref: '#/components/schemas/TenantId'
+          description: Tenant boundary every storage scope for this principal carries.
       required:
       - subject
+      - tenant_id
       - route
-      - workspace_ids
-      - permissions
       type: object
     Proposal:
       additionalProperties: false
@@ -2355,12 +3133,19 @@ components:
       type: string
     ProposalStatus:
       description: Lifecycle of a suggestion, not approval of a fact in it.
-      enum:
-      - open
-      - accepted
-      - declined
-      - conflict
-      type: string
+      oneOf:
+      - const: open
+        description: Available for review.
+        type: string
+      - const: accepted
+        description: Merged by an authorized action.
+        type: string
+      - const: declined
+        description: Closed without applying changes.
+        type: string
+      - const: conflict
+        description: Base state changed; reconciliation required.
+        type: string
     ReadItemRequest:
       additionalProperties: false
       description: Read an item using an explicit representation and a single revision resolution.
@@ -2378,13 +3163,13 @@ components:
           description: Stable application item identity; paths remain the portable OKF identity.
         max_bytes:
           description: Response text budget; partial reads are marked and have continuation.
-          format: int32
+          format: uint32
           maximum: 1048576
           minimum: 256
           type: integer
         max_images:
           description: Maximum selected images.
-          format: int32
+          format: uint16
           maximum: 16
           minimum: 0
           type: integer
@@ -2457,13 +3242,22 @@ components:
       type: object
     ReadView:
       description: Select a representation rather than silently truncating a source.
-      enum:
-      - outline
-      - text
-      - multimodal
-      - pages
-      - original
-      type: string
+      oneOf:
+      - const: outline
+        description: Headings, pages, and media descriptions.
+        type: string
+      - const: text
+        description: Structured Markdown and source locators.
+        type: string
+      - const: multimodal
+        description: Markdown and selected images.
+        type: string
+      - const: pages
+        description: Selected rendered page images.
+        type: string
+      - const: original
+        description: Authorized access to original bytes.
+        type: string
     ReadinessRequest:
       additionalProperties: false
       description: Read configured dependency availability.
@@ -2481,10 +3275,10 @@ components:
           description: All configured mandatory dependencies are ready.
           type: boolean
         sandbox_origin:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/SandboxOriginConfig'
-            description: Configured sandboxed HTML/artifact origin when isolation is enabled.
           - type: 'null'
+          description: Configured sandboxed HTML/artifact origin when isolation is enabled.
       required:
       - ready
       - dependencies
@@ -2494,8 +3288,8 @@ components:
       description: Rebuild derived search and link indexes without deleting application records.
       properties:
         idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
           description: Retry identity.
-          type: string
         workspace_id:
           $ref: '#/components/schemas/WorkspaceId'
           description: Workspace whose permissions and storage scope apply.
@@ -2508,14 +3302,14 @@ components:
       description: What this application returned, not what an external model retained.
       properties:
         audience:
-          description: '`agent_context` or `human_display`; these are distinct.'
-          type: string
+          $ref: '#/components/schemas/ReceiptAudience'
+          description: Agent context or human display; these are distinct.
         id:
           $ref: '#/components/schemas/ReceiptId'
           description: Durable operation record.
         operation_id:
+          $ref: '#/components/schemas/OperationName'
           description: Canonical operation identifier.
-          type: string
         principal_subject:
           description: Authenticated acting principal.
           type: string
@@ -2548,6 +3342,15 @@ components:
       - returned_at
       - audience
       type: object
+    ReceiptAudience:
+      description: Where returned content went; the two are distinct evidence.
+      oneOf:
+      - const: agent_context
+        description: Supplied to an agent's context through a tool result.
+        type: string
+      - const: human_display
+        description: Shown to a person in the workspace.
+        type: string
     ReceiptId:
       description: Identity of a durable application operation record.
       format: uuid
@@ -2560,16 +3363,14 @@ components:
           $ref: '#/components/schemas/Revision'
           description: Exact revision on which this change is based; stale writes conflict.
         idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
           description: Retry identity.
-          type: string
         item_id:
           $ref: '#/components/schemas/ItemId'
           description: Stable application item identity; paths remain the portable OKF identity.
         settings:
-          additionalProperties: {}
+          additionalProperties: true
           description: Converter options that participate in the digest cache key.
-          propertyNames:
-            type: string
           type: object
         workspace_id:
           $ref: '#/components/schemas/WorkspaceId'
@@ -2639,10 +3440,13 @@ components:
       type: object
     RenderGrammar:
       description: Supported declarative presentation formats.
-      enum:
-      - vega_lite
-      - json_render
-      type: string
+      oneOf:
+      - const: vega_lite
+        description: Charts over application-resolved named datasets.
+        type: string
+      - const: json_render
+        description: Compositions of the approved component catalog.
+        type: string
     ResolveViewRequest:
       additionalProperties: false
       description: Resolve and materialize a View without silently changing its saved specification.
@@ -2700,11 +3504,14 @@ components:
         base_revision:
           $ref: '#/components/schemas/Revision'
           description: Exact revision on which this change is based; stale writes conflict.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         item_id:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/ItemId'
-            description: Restore only this item when supplied.
           - type: 'null'
+          description: Restore only this item when supplied.
         message:
           description: Reason for the restore.
           type: string
@@ -2719,6 +3526,7 @@ components:
       - base_revision
       - target
       - message
+      - idempotency_key
       type: object
     RestoreWorkspaceRequest:
       additionalProperties: false
@@ -2728,13 +3536,13 @@ components:
           $ref: '#/components/schemas/ArtifactId'
           description: Retained backup artifact to restore from.
         idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
           description: Retry identity for the restore job.
-          type: string
         sha256:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/Digest'
-            description: Optional integrity check against the artifact digest before restore begins.
           - type: 'null'
+          description: Optional integrity check against the artifact digest before restore begins.
         workspace_id:
           $ref: '#/components/schemas/WorkspaceId'
           description: Workspace whose permissions and storage scope apply.
@@ -2747,6 +3555,9 @@ components:
       additionalProperties: false
       description: Retry a recoverable job with the same durable work identity.
       properties:
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity of this retry request, distinct from the job's durable identity.
         job_id:
           $ref: '#/components/schemas/JobId'
           description: Existing failed job.
@@ -2756,6 +3567,7 @@ components:
       required:
       - workspace_id
       - job_id
+      - idempotency_key
       type: object
     Review:
       additionalProperties: false
@@ -2789,18 +3601,24 @@ components:
       type: object
     ReviewCoverage:
       description: How recorded review evidence relates to current content.
-      enum:
-      - current
-      - changed
-      - imported
-      - unreviewed
-      type: string
+      oneOf:
+      - const: current
+        description: The recorded content digest still matches.
+        type: string
+      - const: changed
+        description: Content changed after this review.
+        type: string
+      - const: imported
+        description: Imported metadata has no authenticated in-app review event.
+        type: string
+      - const: unreviewed
+        description: No covering review exists.
+        type: string
     ReviewId:
       description: Identity of an explicit revision-bound review action.
       format: uuid
       type: string
     Revision:
-      description: A resolved Git commit, never a branch name or the string `latest`.
       pattern: ^([0-9a-f]{40}|[0-9a-f]{64})$
       type: string
     RevokeConnectorRequest:
@@ -2810,8 +3628,26 @@ components:
         connector_id:
           $ref: '#/components/schemas/ConnectorId'
           description: Connector to revoke.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
       required:
       - connector_id
+      - idempotency_key
+      type: object
+    SandboxCapability:
+      additionalProperties: false
+      description: A capability URL on the sandbox origin; the token is the only credential and is never logged.
+      properties:
+        expires_at:
+          description: RFC 3339 expiry after which the capability resolves nothing.
+          type: string
+        url:
+          description: Absolute `/sandbox/{capability}` URL on the configured sandbox origin.
+          type: string
+      required:
+      - url
+      - expires_at
       type: object
     SandboxOriginConfig:
       additionalProperties: false
@@ -2827,6 +3663,41 @@ components:
           type: string
       required:
       - origin
+      type: object
+    SaveDraftRequest:
+      additionalProperties: false
+      description: |-
+        Save the caller's draft; always succeeds even when the head has moved.
+
+        The first save takes the item's head revision as its base. Later saves keep the draft's
+        base unless `base_revision` equals the current head, which is the explicit rebase.
+      properties:
+        base_revision:
+          $ref: '#/components/schemas/Revision'
+          description: Revision the editor saw; equal to the current head to rebase after resolving a conflict.
+        body:
+          description: Drafted Markdown body.
+          type: string
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
+        item_id:
+          $ref: '#/components/schemas/ItemId'
+          description: Stable application item identity; paths remain the portable OKF identity.
+        properties:
+          additionalProperties: true
+          description: Complete preserved property map.
+          type: object
+        workspace_id:
+          $ref: '#/components/schemas/WorkspaceId'
+          description: Workspace whose permissions and storage scope apply.
+      required:
+      - workspace_id
+      - item_id
+      - base_revision
+      - body
+      - properties
+      - idempotency_key
       type: object
     SearchHit:
       additionalProperties: false
@@ -2906,66 +3777,66 @@ components:
     Selection:
       description: Explicit bounded source selection.
       oneOf:
-      - description: The complete source, subject to a visible response budget.
+      - additionalProperties: false
+        description: The complete source, subject to a visible response budget.
         properties:
           kind:
-            enum:
-            - all
+            const: all
             type: string
         required:
         - kind
         type: object
-      - description: Inclusive line range.
+      - additionalProperties: false
+        description: Inclusive line range.
         properties:
           kind:
-            enum:
-            - lines
+            const: lines
             type: string
           range:
             $ref: '#/components/schemas/TextRange'
             description: Range.
         required:
-        - range
         - kind
+        - range
         type: object
-      - description: Inclusive page range.
+      - additionalProperties: false
+        description: Inclusive page range.
         properties:
           kind:
-            enum:
-            - pages
+            const: pages
             type: string
           range:
             $ref: '#/components/schemas/PageRange'
             description: Range.
         required:
-        - range
         - kind
+        - range
         type: object
-      - description: Rectangular sheet range.
+      - additionalProperties: false
+        description: Rectangular sheet range.
         properties:
           kind:
-            enum:
-            - cells
+            const: cells
             type: string
           range:
             $ref: '#/components/schemas/CellRange'
             description: Range.
         required:
-        - range
         - kind
+        - range
         type: object
-      - description: An unambiguous heading identifier.
+      - additionalProperties: false
+        description: An unambiguous heading identifier.
         properties:
           heading:
             description: Heading.
             type: string
           kind:
-            enum:
-            - section
+            const: section
             type: string
         required:
-        - heading
         - kind
+        - heading
         type: object
     SessionResponse:
       additionalProperties: false
@@ -2988,6 +3859,9 @@ components:
         base_revision:
           $ref: '#/components/schemas/Revision'
           description: Exact revision on which this change is based; stale writes conflict.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         item_id:
           $ref: '#/components/schemas/ItemId'
           description: Stable application item identity; paths remain the portable OKF identity.
@@ -3002,6 +3876,7 @@ components:
       - item_id
       - base_revision
       - lifecycle
+      - idempotency_key
       type: object
     SetRulesRequest:
       additionalProperties: false
@@ -3010,6 +3885,9 @@ components:
         base_revision:
           $ref: '#/components/schemas/Revision'
           description: Exact revision on which this change is based; stale writes conflict.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         rules:
           $ref: '#/components/schemas/NamingRules'
           description: Validated rules.
@@ -3020,6 +3898,7 @@ components:
       - workspace_id
       - base_revision
       - rules
+      - idempotency_key
       type: object
     SetTypeRequest:
       additionalProperties: false
@@ -3031,6 +3910,9 @@ components:
         definition:
           $ref: '#/components/schemas/TypeDefinition'
           description: Validated property schema and UI hints.
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         workspace_id:
           $ref: '#/components/schemas/WorkspaceId'
           description: Workspace whose permissions and storage scope apply.
@@ -3038,6 +3920,7 @@ components:
       - workspace_id
       - base_revision
       - definition
+      - idempotency_key
       type: object
     SourceAppearance:
       additionalProperties: false
@@ -3047,10 +3930,8 @@ components:
           description: Sniffed MIME type.
           type: string
         metadata:
-          additionalProperties: {}
+          additionalProperties: true
           description: Extracted metadata with original field names preserved.
-          propertyNames:
-            type: string
           type: object
         names:
           description: Observed aliases associated with this occurrence.
@@ -3061,18 +3942,18 @@ components:
           $ref: '#/components/schemas/Digest'
           description: Immutable object content hash.
         parent_item_id:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/ItemId'
-            description: Container or message parent.
           - type: 'null'
+          description: Container or message parent.
         size:
           description: Decimal byte count.
           type: string
         supersedes:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/ItemId'
-            description: Explicit successor relationship; not inferred from arrival time.
           - type: 'null'
+          description: Explicit successor relationship; not inferred from arrival time.
       required:
       - object
       - names
@@ -3107,10 +3988,10 @@ components:
       description: A precise citation that can be reopened independently of current state.
       properties:
         digest:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/Digest'
-            description: Exact derived artifact hash.
           - type: 'null'
+          description: Exact derived artifact hash.
         item_id:
           $ref: '#/components/schemas/ItemId'
           description: Stable application item identity; paths remain the portable OKF identity.
@@ -3147,8 +4028,8 @@ components:
           description: Relative destination folder; empty for root.
           type: string
         idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
           description: Durable retry identity.
-          type: string
         upload_ids:
           description: Completed upload slots.
           items:
@@ -3165,18 +4046,21 @@ components:
       - idempotency_key
       - apply_naming_rules
       type: object
+    TenantId:
+      pattern: ^[A-Za-z0-9_-]{1,128}$
+      type: string
     TextRange:
       additionalProperties: false
       description: A one-based inclusive line range.
       properties:
         end:
           description: Last line, at least start.
-          format: int32
+          format: uint32
           minimum: 1
           type: integer
         start:
           description: First line, starting at one.
-          format: int32
+          format: uint32
           minimum: 1
           type: integer
       required:
@@ -3194,7 +4078,7 @@ components:
           description: JSON Schema for type-specific properties.
         schema_version:
           description: Application format version.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         ui_schema:
@@ -3204,35 +4088,6 @@ components:
       - schema_version
       - properties_schema
       - ui_schema
-      type: object
-    UpdateItemRequest:
-      additionalProperties: false
-      description: Edit content against its base revision, invalidating prior review coverage.
-      properties:
-        base_revision:
-          $ref: '#/components/schemas/Revision'
-          description: Exact revision on which this change is based; stale writes conflict.
-        body:
-          description: Replacement Markdown.
-          type: string
-        item_id:
-          $ref: '#/components/schemas/ItemId'
-          description: Stable application item identity; paths remain the portable OKF identity.
-        properties:
-          additionalProperties: {}
-          description: Complete preserved property map.
-          propertyNames:
-            type: string
-          type: object
-        workspace_id:
-          $ref: '#/components/schemas/WorkspaceId'
-          description: Workspace whose permissions and storage scope apply.
-      required:
-      - workspace_id
-      - item_id
-      - base_revision
-      - body
-      - properties
       type: object
     UpdateWorkspaceRequest:
       additionalProperties: false
@@ -3244,6 +4099,9 @@ components:
         description:
           description: Updated purpose.
           type: string
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+          description: Retry identity.
         name:
           description: New display name.
           type: string
@@ -3255,6 +4113,7 @@ components:
       - base_revision
       - name
       - description
+      - idempotency_key
       type: object
     Upload:
       additionalProperties: false
@@ -3291,10 +4150,10 @@ components:
       description: A named source selection used by a chart or layout.
       properties:
         materialized:
-          oneOf:
+          anyOf:
           - $ref: '#/components/schemas/Digest'
-            description: Retained dataset bytes for reproducibility.
           - type: 'null'
+          description: Retained dataset bytes for reproducibility.
         name:
           description: Dataset or component binding name.
           type: string
@@ -3303,14 +4162,12 @@ components:
           description: Resolved cited input.
         transforms:
           description: Declared allowed data transformations; validated against the selected grammar.
-          items: {}
+          items: true
           type: array
         units:
           additionalProperties:
             type: string
           description: Column or field units.
-          propertyNames:
-            type: string
           type: object
       required:
       - name
@@ -3327,6 +4184,10 @@ components:
           items:
             $ref: '#/components/schemas/ViewBinding'
           type: array
+        charts:
+          additionalProperties: true
+          description: Named Vega-Lite specs referenced by `json_render` Chart components; empty for `vega_lite`.
+          type: object
         description:
           description: Readable explanation independent of the renderer.
           type: string
@@ -3338,7 +4199,7 @@ components:
           description: Pinned or explicitly live.
         schema_version:
           description: App-owned format version, currently 1.
-          format: int32
+          format: uint32
           minimum: 0
           type: integer
         spec:
@@ -3357,10 +4218,13 @@ components:
       type: object
     ViewMode:
       description: Pinned historical views and explicit live refresh have different semantics.
-      enum:
-      - pinned
-      - live
-      type: string
+      oneOf:
+      - const: pinned
+        description: All bindings reference retained immutable source revisions.
+        type: string
+      - const: live
+        description: Bindings request current sources and disclose each resolved revision.
+        type: string
     Warning:
       additionalProperties: false
       description: A diagnostic that does not silently discard usable input.
@@ -3399,23 +4263,24 @@ components:
         name:
           description: Human-selected workspace name.
           type: string
-        read_only:
-          description: Whether this principal may only read it.
-          type: boolean
+        permissions:
+          description: The caller's effective grant on this workspace after any delegation ceiling.
+          items:
+            $ref: '#/components/schemas/Permission'
+          type: array
       required:
       - id
       - name
       - description
       - head
       - created_at
-      - read_only
+      - permissions
       type: object
     WorkspaceId:
       description: Stable application identity for one user-organized workspace.
       format: uuid
       type: string
     WorkspacePath:
-      description: A normalized relative workspace path; this alone is not filesystem authorization.
       maxLength: 4096
       minLength: 1
       type: string
@@ -4512,7 +5377,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DiffResponse'
+                $ref: '#/components/schemas/DiffResponseOutput'
           description: Successful operation result
         '400':
           content:
@@ -4583,7 +5448,7 @@ paths:
         openWorldHint: false
         readOnlyHint: true
       x-tool-visibility: model
-      x-ui-resource: ui://okf-jawn/changes.html
+      x-ui-resource: ui://okf-jawn/app.html
   /api/history/log-items:
     post:
       description: Read content snapshots; Git history is not the complete application event log.
@@ -4670,7 +5535,7 @@ paths:
         openWorldHint: false
         readOnlyHint: true
       x-tool-visibility: model
-      x-ui-resource: ui://okf-jawn/timeline.html
+      x-ui-resource: ui://okf-jawn/app.html
   /api/history/restore-items:
     post:
       description: Restore selected historical content as a new commit without rewriting history.
@@ -5802,6 +6667,93 @@ paths:
         readOnlyHint: false
       x-tool-visibility: ''
       x-ui-resource: null
+  /api/items/discard-draft:
+    post:
+      description: Remove the caller's own draft without changing committed content.
+      operationId: discard_draft
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiscardDraftRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Draft'
+          description: Successful operation result
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+      summary: Discard draft
+      tags:
+      - items
+      x-agent-alias: ''
+      x-agent-tool: false
+      x-cli-alias: null
+      x-mcp-tool: false
+      x-operator-label: Discard draft
+      x-permission: write
+      x-tool-annotations:
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: false
+        readOnlyHint: false
+      x-tool-visibility: ''
+      x-ui-resource: null
   /api/items/get-item:
     post:
       description: Read the editable Markdown and preserved properties of an item.
@@ -5881,6 +6833,93 @@ paths:
       x-cli-alias: null
       x-mcp-tool: false
       x-operator-label: Properties
+      x-permission: read
+      x-tool-annotations:
+        destructiveHint: false
+        idempotentHint: true
+        openWorldHint: false
+        readOnlyHint: true
+      x-tool-visibility: ''
+      x-ui-resource: null
+  /api/items/list-drafts:
+    post:
+      description: List only the caller's own uncommitted drafts.
+      operationId: list_drafts
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ListDraftsRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListDraftsResponse'
+          description: Successful operation result
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+      summary: Drafts
+      tags:
+      - items
+      x-agent-alias: ''
+      x-agent-tool: false
+      x-cli-alias: null
+      x-mcp-tool: false
+      x-operator-label: Drafts
       x-permission: read
       x-tool-annotations:
         destructiveHint: false
@@ -6063,6 +7102,93 @@ paths:
         readOnlyHint: false
       x-tool-visibility: ''
       x-ui-resource: null
+  /api/items/save-draft:
+    post:
+      description: Autosave the caller's own draft against its base revision; never creates a revision, and only a Snapshot commits it.
+      operationId: save_draft
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveDraftRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Draft'
+          description: Successful operation result
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+      summary: Save
+      tags:
+      - items
+      x-agent-alias: ''
+      x-agent-tool: false
+      x-cli-alias: null
+      x-mcp-tool: false
+      x-operator-label: Save
+      x-permission: write
+      x-tool-annotations:
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: false
+        readOnlyHint: false
+      x-tool-visibility: ''
+      x-ui-resource: null
   /api/items/set-lifecycle:
     post:
       description: Change lifecycle without approving any claim in the document.
@@ -6142,93 +7268,6 @@ paths:
       x-cli-alias: null
       x-mcp-tool: false
       x-operator-label: Archive
-      x-permission: write
-      x-tool-annotations:
-        destructiveHint: false
-        idempotentHint: false
-        openWorldHint: false
-        readOnlyHint: false
-      x-tool-visibility: ''
-      x-ui-resource: null
-  /api/items/update-item:
-    post:
-      description: Save content with a base revision precondition; obsolete reviews do not transfer.
-      operationId: update_item
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateItemRequest'
-        required: true
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MutationResult'
-          description: Successful operation result
-        '400':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-          description: Structured application failure
-        '401':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-          description: Structured application failure
-        '403':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-          description: Structured application failure
-        '404':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-          description: Structured application failure
-        '409':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-          description: Structured application failure
-        '413':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-          description: Structured application failure
-        '422':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-          description: Structured application failure
-        '500':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-          description: Structured application failure
-        '503':
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-          description: Structured application failure
-      summary: Save
-      tags:
-      - items
-      x-agent-alias: ''
-      x-agent-tool: false
-      x-cli-alias: null
-      x-mcp-tool: false
-      x-operator-label: Save
       x-permission: write
       x-tool-annotations:
         destructiveHint: false
@@ -6759,6 +7798,93 @@ paths:
         readOnlyHint: false
       x-tool-visibility: model
       x-ui-resource: null
+  /api/reads/create-sandbox-capability:
+    post:
+      description: Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.
+      operationId: create_sandbox_capability
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSandboxCapabilityRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxCapability'
+          description: Successful operation result
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '403':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '413':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+          description: Structured application failure
+      summary: Open sandboxed
+      tags:
+      - reads
+      x-agent-alias: ''
+      x-agent-tool: false
+      x-cli-alias: null
+      x-mcp-tool: false
+      x-operator-label: Open sandboxed
+      x-permission: read
+      x-tool-annotations:
+        destructiveHint: false
+        idempotentHint: true
+        openWorldHint: false
+        readOnlyHint: true
+      x-tool-visibility: ''
+      x-ui-resource: null
   /api/reads/get-object:
     post:
       description: Return a bounded binary block authorized through its source; knowing a hash never grants access.
@@ -6861,7 +7987,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GetSourcesResponse'
+                $ref: '#/components/schemas/GetSourcesResponseOutput'
           description: Successful operation result
         '400':
           content:
@@ -6932,7 +8058,7 @@ paths:
         openWorldHint: false
         readOnlyHint: true
       x-tool-visibility: model
-      x-ui-resource: ui://okf-jawn/source.html
+      x-ui-resource: ui://okf-jawn/app.html
   /api/reads/read-item:
     post:
       description: Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation.
@@ -7019,7 +8145,7 @@ paths:
         openWorldHint: false
         readOnlyHint: true
       x-tool-visibility: model
-      x-ui-resource: ui://okf-jawn/source.html
+      x-ui-resource: ui://okf-jawn/app.html
   /api/reviews/create-confirmation:
     post:
       description: Create a session-bound confirmation for explicit human action; issuance is not review.
@@ -8432,7 +9558,7 @@ paths:
         openWorldHint: false
         readOnlyHint: true
       x-tool-visibility: model
-      x-ui-resource: ui://okf-jawn/present.html
+      x-ui-resource: ui://okf-jawn/app.html
   /api/views/resolve-view:
     post:
       description: Resolve pinned inputs or explicitly refresh a live view without silently modifying saved state.
@@ -9476,23 +10602,13 @@ paths:
       - transport
       x-agent-tool: false
       x-transport-binding: true
-  /sandbox/workspaces/{workspace_id}/items/{item_id}/revisions/{revision}:
+  /sandbox/{capability}:
     get:
-      description: Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).
+      description: 'Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. The capability from create_sandbox_capability is the only credential: it binds workspace, item, revision and representation, is stored hashed, expires, and is never logged. No ambient session cookies, credentials, or privileged APIs; respond with no-store, no-referrer and a strict CSP (SPEC sections 7 and 11).'
       operationId: serve_sandbox_representation
       parameters:
       - in: path
-        name: workspace_id
-        required: true
-        schema:
-          type: string
-      - in: path
-        name: item_id
-        required: true
-        schema:
-          type: string
-      - in: path
-        name: revision
+        name: capability
         required: true
         schema:
           type: string
@@ -9502,8 +10618,7 @@ paths:
             text/html:
               schema:
                 type: string
-          description: Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).
-      security: []
+          description: 'Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. The capability from create_sandbox_capability is the only credential: it binds workspace, item, revision and representation, is stored hashed, expires, and is never logged. No ambient session cookies, credentials, or privileged APIs; respond with no-store, no-referrer and a strict CSP (SPEC sections 7 and 11).'
       summary: serve_sandbox_representation
       tags:
       - transport

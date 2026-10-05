@@ -9,6 +9,11 @@
       "pattern": "^[0-9a-f]{64}$",
       "type": "string"
     },
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
     "WorkspaceId": {
       "description": "Stable application identity for one user-organized workspace.",
       "format": "uuid",
@@ -24,8 +29,8 @@
       "description": "Retained backup artifact to restore from."
     },
     "idempotency_key": {
-      "description": "Retry identity for the restore job.",
-      "type": "string"
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity for the restore job."
     },
     "sha256": {
       "anyOf": [

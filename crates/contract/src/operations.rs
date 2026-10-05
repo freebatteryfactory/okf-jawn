@@ -1,6 +1,9 @@
 //! Canonical operation declarations consumed by Rust and generated interface adapters.
 //!
 //! Every entry is an application operation, not a handler stub or a second schema language.
+//! Every `$request` implements `scope::RequestScope`; `metadata` enforces that at compile time.
+//! The `permission` column is the minimum capability; `create_confirmation` requires a
+//! stronger, action-specific one through its `targets()`.
 
 /// Expand the complete typed operation table into an adapter-specific consumer.
 #[macro_export]
@@ -18,7 +21,9 @@ macro_rules! for_each_operation {
             (list_items, $crate::item::ListItemsRequest, $crate::item::ListItemsResponse, "/api/items/list-items", "Browse", "ls", "model", Read, "", 200, "List a folder with one-line descriptions at one resolved revision."),
             (get_item, $crate::item::GetItemRequest, $crate::item::ItemDocument, "/api/items/get-item", "Properties", "", "", Read, "", 200, "Read the editable Markdown and preserved properties of an item."),
             (create_item, $crate::item::CreateItemRequest, $crate::item::ItemDocument, "/api/items/create-item", "New note", "", "", Write, "", 200, "Create authored content without modifying source bytes."),
-            (update_item, $crate::item::UpdateItemRequest, $crate::common::MutationResult, "/api/items/update-item", "Save", "", "", Write, "", 200, "Save content with a base revision precondition; obsolete reviews do not transfer."),
+            (save_draft, $crate::item::SaveDraftRequest, $crate::item::Draft, "/api/items/save-draft", "Save", "", "", Write, "", 200, "Autosave the caller's own draft against its base revision; never creates a revision, and only a Snapshot commits it."),
+            (list_drafts, $crate::item::ListDraftsRequest, $crate::item::ListDraftsResponse, "/api/items/list-drafts", "Drafts", "", "", Read, "", 200, "List only the caller's own uncommitted drafts."),
+            (discard_draft, $crate::item::DiscardDraftRequest, $crate::item::Draft, "/api/items/discard-draft", "Discard draft", "", "", Write, "", 200, "Remove the caller's own draft without changing committed content."),
             (move_item, $crate::item::MoveItemRequest, $crate::common::MutationResult, "/api/items/move-item", "Move", "", "", Write, "", 200, "Move an item and rewrite references in one committed change."),
             (set_lifecycle, $crate::item::SetLifecycleRequest, $crate::common::MutationResult, "/api/items/set-lifecycle", "Archive", "", "", Write, "", 200, "Change lifecycle without approving any claim in the document."),
             (delete_item, $crate::item::DeleteItemRequest, $crate::common::MutationResult, "/api/items/delete-item", "Remove", "", "", Write, "", 200, "Remove the current reference while retaining historical source objects."),
@@ -28,6 +33,7 @@ macro_rules! for_each_operation {
             (read_item, $crate::read::ReadItemRequest, $crate::read::ReadItemResponse, "/api/reads/read-item", "Read", "show", "model", Read, "source", 200, "Read an outline, Markdown, selected images, pages, or original. Resolve latest once; return exact citations and visible continuation."),
             (get_sources, $crate::source::GetSourcesRequest, $crate::source::GetSourcesResponse, "/api/reads/get-sources", "Sources", "sources", "model", Read, "source", 200, "Show supporting sources and occurrence-specific provenance."),
             (get_object, $crate::source::GetObjectRequest, $crate::source::GetObjectResponse, "/api/reads/get-object", "Original", "read_object", "app", Read, "", 200, "Return a bounded binary block authorized through its source; knowing a hash never grants access."),
+            (create_sandbox_capability, $crate::read::CreateSandboxCapabilityRequest, $crate::read::SandboxCapability, "/api/reads/create-sandbox-capability", "Open sandboxed", "", "", Read, "", 200, "Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only."),
             (search_items, $crate::search::SearchRequest, $crate::search::SearchResponse, "/api/search/search-items", "Search", "grep", "model", Read, "", 200, "Search authorized content and return cited snippets, not whole-document dumps."),
             (get_links, $crate::search::GetLinksRequest, $crate::search::GetLinksResponse, "/api/search/get-links", "Links", "links", "model", Read, "", 200, "Read incoming or outgoing references at the selected revision."),
             (get_graph, $crate::search::GetGraphRequest, $crate::search::GetGraphResponse, "/api/search/get-graph", "Graph", "", "", Read, "", 200, "Read a bounded graph projection using the same authorized source identities."),

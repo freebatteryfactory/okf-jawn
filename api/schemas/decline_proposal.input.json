@@ -1,5 +1,10 @@
 {
   "$defs": {
+    "IdempotencyKey": {
+      "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
     "ProposalId": {
       "description": "Identity of a suggested change set, not a review.",
       "format": "uuid",
@@ -15,6 +20,10 @@
   "additionalProperties": false,
   "description": "Close a proposal without changing accepted content.",
   "properties": {
+    "idempotency_key": {
+      "$ref": "#/$defs/IdempotencyKey",
+      "description": "Retry identity."
+    },
     "proposal_id": {
       "$ref": "#/$defs/ProposalId",
       "description": "Suggestion identity."
@@ -31,7 +40,8 @@
   "required": [
     "workspace_id",
     "proposal_id",
-    "reason"
+    "reason",
+    "idempotency_key"
   ],
   "title": "DeclineProposalRequest",
   "type": "object"

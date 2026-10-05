@@ -2,10 +2,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Select a representation rather than silently truncating a source.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadView {
     /// Headings, pages, and media descriptions.
@@ -20,8 +19,24 @@ pub enum ReadView {
     Original,
 }
 
+/// Structural element types an outline can point to.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutlineEntryKind {
+    /// A document heading.
+    Heading,
+    /// A table.
+    Table,
+    /// A figure or image.
+    Figure,
+    /// A document page.
+    Page,
+    /// A spreadsheet sheet.
+    Sheet,
+}
+
 /// Explicit bounded source selection.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Selection {
     /// The complete source, subject to a visible response budget.
@@ -49,7 +64,7 @@ pub enum Selection {
 }
 
 /// Read an item using an explicit representation and a single revision resolution.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadItemRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -64,11 +79,9 @@ pub struct ReadItemRequest {
     pub selection: Selection,
     /// Response text budget; partial reads are marked and have continuation.
     #[schemars(range(min = 256, max = 1_048_576))]
-    #[schema(minimum = 256, maximum = 1_048_576)]
     pub max_bytes: u32,
     /// Maximum selected images.
     #[schemars(range(max = 16))]
-    #[schema(maximum = 16)]
     pub max_images: u16,
     /// Opaque continuation tied to revision and representation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,7 +89,7 @@ pub struct ReadItemRequest {
 }
 
 /// A navigable structural element from a document.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutlineEntry {
     /// Visible heading or media caption.
@@ -85,12 +98,36 @@ pub struct OutlineEntry {
     pub level: u16,
     /// Precise location to request next.
     pub selection: Selection,
-    /// Heading, table, figure, page, or sheet.
-    pub kind: String,
+    /// Structural element type.
+    pub kind: OutlineEntryKind,
+}
+
+/// Request a short-lived sandbox-origin URL for one hostile representation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSandboxCapabilityRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Stable application item identity; paths remain the portable OKF identity.
+    pub item_id: crate::identity::ItemId,
+    /// Exact resolved revision whose representation is served.
+    pub revision: crate::identity::Revision,
+    /// Original or derived object served; it must belong to this item revision.
+    pub object: crate::identity::Digest,
+}
+
+/// A capability URL on the sandbox origin; the token is the only credential and is never logged.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxCapability {
+    /// Absolute `/sandbox/{capability}` URL on the configured sandbox origin.
+    pub url: String,
+    /// RFC 3339 expiry after which the capability resolves nothing.
+    pub expires_at: String,
 }
 
 /// An authorized image or artifact associated with a source range.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MediaReference {
     /// Retained image bytes.
@@ -110,7 +147,7 @@ pub struct MediaReference {
 }
 
 /// What the tool actually returned, not a claim about the host model context.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadItemResponse {
     /// Exact source resolution.

@@ -8,6 +8,17 @@
           "$ref": "#/$defs/ErrorCode",
           "description": "Stable code for programmatic handling."
         },
+        "detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Typed context for conflict, replay, and in-progress outcomes."
+        },
         "field": {
           "description": "Input field needing correction.",
           "type": [
@@ -35,6 +46,11 @@
     },
     "ArtifactId": {
       "description": "Identity of a retained export or backup artifact.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ConnectorId": {
+      "description": "Identity of one local MCP connector credential, never the owner's browser session.",
       "format": "uuid",
       "type": "string"
     },
@@ -96,7 +112,17 @@
         },
         {
           "const": "conflict",
-          "description": "A precondition, revision, or idempotency conflict occurred.",
+          "description": "A precondition, revision, draft-base, or idempotency-key conflict occurred.",
+          "type": "string"
+        },
+        {
+          "const": "already_issued",
+          "description": "A secret-bearing write already completed; replaying it never returns the secret again.",
+          "type": "string"
+        },
+        {
+          "const": "in_progress",
+          "description": "Another attempt with the same idempotency key holds a live lease; retry later.",
           "type": "string"
         },
         {
@@ -123,6 +149,108 @@
           "const": "internal",
           "description": "An unexpected server failure occurred without exposing secrets.",
           "type": "string"
+        }
+      ]
+    },
+    "ErrorDetail": {
+      "description": "Typed failure context the UI and agents can act on without parsing messages.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The connector was already issued under this idempotency key; its secret is not replayed.",
+          "properties": {
+            "connector_id": {
+              "$ref": "#/$defs/ConnectorId",
+              "description": "Connector created by the original request."
+            },
+            "kind": {
+              "const": "already_issued",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "connector_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An identical request is executing under a live lease.",
+          "properties": {
+            "kind": {
+              "const": "in_progress",
+              "type": "string"
+            },
+            "mutation_id": {
+              "$ref": "#/$defs/MutationId",
+              "description": "Mutation holding the lease."
+            },
+            "retry_after": {
+              "description": "Whole seconds the caller should wait before retrying the same request.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "mutation_id",
+            "retry_after"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The head moved under a draft; the editor resolves and saves against the new head.",
+          "properties": {
+            "current_revision": {
+              "$ref": "#/$defs/Revision",
+              "description": "Head revision at which the item changed or was deleted."
+            },
+            "diff": {
+              "description": "Structured comparison between the draft base and the current revision."
+            },
+            "draft_base": {
+              "$ref": "#/$defs/Revision",
+              "description": "Revision the draft was based on."
+            },
+            "item_id": {
+              "$ref": "#/$defs/ItemId",
+              "description": "Item whose draft no longer applies cleanly."
+            },
+            "kind": {
+              "const": "draft_conflict",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "item_id",
+            "draft_base",
+            "current_revision",
+            "diff"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The idempotency key was reused with a different request body.",
+          "properties": {
+            "kind": {
+              "const": "idempotency_conflict",
+              "type": "string"
+            },
+            "operation": {
+              "$ref": "#/$defs/OperationName",
+              "description": "Operation that first used the key."
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -162,6 +290,361 @@
         {
           "const": "cancelled",
           "description": "Explicit cancellation completed.",
+          "type": "string"
+        }
+      ]
+    },
+    "MutationId": {
+      "description": "Durable server-assigned identity of one write; every store that creates a row enforces it as unique.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "OperationName": {
+      "description": "Closed set of canonical operation identifiers, serialized as the `snake_case` id.",
+      "oneOf": [
+        {
+          "const": "list_workspaces",
+          "description": "The `list_workspaces` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_workspace",
+          "description": "The `create_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "open_workspace",
+          "description": "The `open_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "update_workspace",
+          "description": "The `update_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "archive_workspace",
+          "description": "The `archive_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "export_workspace",
+          "description": "The `export_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "backup_workspace",
+          "description": "The `backup_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "restore_workspace",
+          "description": "The `restore_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_items",
+          "description": "The `list_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_item",
+          "description": "The `get_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_item",
+          "description": "The `create_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "save_draft",
+          "description": "The `save_draft` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_drafts",
+          "description": "The `list_drafts` operation.",
+          "type": "string"
+        },
+        {
+          "const": "discard_draft",
+          "description": "The `discard_draft` operation.",
+          "type": "string"
+        },
+        {
+          "const": "move_item",
+          "description": "The `move_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "set_lifecycle",
+          "description": "The `set_lifecycle` operation.",
+          "type": "string"
+        },
+        {
+          "const": "delete_item",
+          "description": "The `delete_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_folder",
+          "description": "The `create_folder` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_types",
+          "description": "The `list_types` operation.",
+          "type": "string"
+        },
+        {
+          "const": "set_type",
+          "description": "The `set_type` operation.",
+          "type": "string"
+        },
+        {
+          "const": "read_item",
+          "description": "The `read_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_sources",
+          "description": "The `get_sources` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_object",
+          "description": "The `get_object` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_sandbox_capability",
+          "description": "The `create_sandbox_capability` operation.",
+          "type": "string"
+        },
+        {
+          "const": "search_items",
+          "description": "The `search_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_links",
+          "description": "The `get_links` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_graph",
+          "description": "The `get_graph` operation.",
+          "type": "string"
+        },
+        {
+          "const": "log_items",
+          "description": "The `log_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "diff_items",
+          "description": "The `diff_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "commit_items",
+          "description": "The `commit_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "restore_items",
+          "description": "The `restore_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "blame_item",
+          "description": "The `blame_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "open_proposal",
+          "description": "The `open_proposal` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_proposals",
+          "description": "The `list_proposals` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_proposal",
+          "description": "The `get_proposal` operation.",
+          "type": "string"
+        },
+        {
+          "const": "accept_proposal",
+          "description": "The `accept_proposal` operation.",
+          "type": "string"
+        },
+        {
+          "const": "decline_proposal",
+          "description": "The `decline_proposal` operation.",
+          "type": "string"
+        },
+        {
+          "const": "add_comment",
+          "description": "The `add_comment` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_confirmation",
+          "description": "The `create_confirmation` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_review",
+          "description": "The `create_review` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_reviews",
+          "description": "The `list_reviews` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_upload",
+          "description": "The `create_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "complete_upload",
+          "description": "The `complete_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "start_import",
+          "description": "The `start_import` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_job",
+          "description": "The `get_job` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_jobs",
+          "description": "The `list_jobs` operation.",
+          "type": "string"
+        },
+        {
+          "const": "retry_job",
+          "description": "The `retry_job` operation.",
+          "type": "string"
+        },
+        {
+          "const": "cancel_job",
+          "description": "The `cancel_job` operation.",
+          "type": "string"
+        },
+        {
+          "const": "redigest_item",
+          "description": "The `redigest_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "correct_digest",
+          "description": "The `correct_digest` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_rules",
+          "description": "The `get_rules` operation.",
+          "type": "string"
+        },
+        {
+          "const": "set_rules",
+          "description": "The `set_rules` operation.",
+          "type": "string"
+        },
+        {
+          "const": "preview_names",
+          "description": "The `preview_names` operation.",
+          "type": "string"
+        },
+        {
+          "const": "apply_names",
+          "description": "The `apply_names` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_attention",
+          "description": "The `get_attention` operation.",
+          "type": "string"
+        },
+        {
+          "const": "rebuild_index",
+          "description": "The `rebuild_index` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_view",
+          "description": "The `get_view` operation.",
+          "type": "string"
+        },
+        {
+          "const": "present_view",
+          "description": "The `present_view` operation.",
+          "type": "string"
+        },
+        {
+          "const": "resolve_view",
+          "description": "The `resolve_view` operation.",
+          "type": "string"
+        },
+        {
+          "const": "export_view",
+          "description": "The `export_view` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_catalog",
+          "description": "The `get_catalog` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_receipt",
+          "description": "The `get_receipt` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_events",
+          "description": "The `list_events` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_session",
+          "description": "The `get_session` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_connector",
+          "description": "The `create_connector` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_connectors",
+          "description": "The `list_connectors` operation.",
+          "type": "string"
+        },
+        {
+          "const": "revoke_connector",
+          "description": "The `revoke_connector` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_health",
+          "description": "The `get_health` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_readiness",
+          "description": "The `get_readiness` operation.",
           "type": "string"
         }
       ]

@@ -2,10 +2,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Job progress retained independently of diagnostic traces.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
     /// Durably registered for execution.
@@ -21,7 +20,7 @@ pub enum JobState {
 }
 
 /// Durable work status; acknowledgement is not a claim of completion.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Job {
     /// Job identity.
@@ -50,7 +49,7 @@ pub struct Job {
 }
 
 /// Register immutable upload intent before streaming bytes.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateUploadRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -65,11 +64,11 @@ pub struct CreateUploadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<crate::identity::Digest>,
     /// Retry identity.
-    pub idempotency_key: String,
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// An authenticated upload slot for a specific source occurrence.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Upload {
     /// Upload identity.
@@ -85,7 +84,7 @@ pub struct Upload {
 }
 
 /// Verify upload length and hash without silently creating duplicate occurrences.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CompleteUploadRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -94,10 +93,12 @@ pub struct CompleteUploadRequest {
     pub upload_id: crate::identity::UploadId,
     /// Expected full-content hash.
     pub sha256: crate::identity::Digest,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Convert finalized uploads into source cards in the user-selected folder.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StartImportRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -109,13 +110,13 @@ pub struct StartImportRequest {
     /// Relative destination folder; empty for root.
     pub destination: String,
     /// Durable retry identity.
-    pub idempotency_key: String,
+    pub idempotency_key: crate::identity::IdempotencyKey,
     /// Apply the explicit workspace conventions after preview acceptance.
     pub apply_naming_rules: bool,
 }
 
 /// Read durable job state.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetJobRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -125,7 +126,7 @@ pub struct GetJobRequest {
 }
 
 /// List workspace background work.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListJobsRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -135,7 +136,7 @@ pub struct ListJobsRequest {
 }
 
 /// A bounded list of jobs.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListJobsResponse {
     /// Job records.
@@ -146,27 +147,31 @@ pub struct ListJobsResponse {
 }
 
 /// Retry a recoverable job with the same durable work identity.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RetryJobRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
     /// Existing failed job.
     pub job_id: crate::identity::JobId,
+    /// Retry identity of this retry request, distinct from the job's durable identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Cancel pending or running work without discarding the uploaded original.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CancelJobRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
     /// Job to cancel.
     pub job_id: crate::identity::JobId,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Reconvert an original with explicitly selected settings, preserving human corrections.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RedigestRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -178,11 +183,11 @@ pub struct RedigestRequest {
     /// Converter options that participate in the digest cache key.
     pub settings: std::collections::BTreeMap<String, serde_json::Value>,
     /// Retry identity.
-    pub idempotency_key: String,
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
 /// Record human corrections separately from the generated extraction.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CorrectDigestRequest {
     /// Workspace whose permissions and storage scope apply.
@@ -195,4 +200,6 @@ pub struct CorrectDigestRequest {
     pub digest: crate::identity::Digest,
     /// Corrected text kept separate from generated text.
     pub corrected_markdown: String,
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
