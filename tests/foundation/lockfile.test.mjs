@@ -31,3 +31,9 @@ test('Docling sibling crates stay on the release the records name',async()=>{
  const pinned=/^docling = \{ version = "=([^"]+)"/m.exec(await read('Cargo.toml'))?.[1];
  assert.equal(locked.find(p=>p.name==='docling')?.version,pinned,'Cargo.lock docling differs from the Cargo.toml pin');
 });
+test('the lock task updates minimally and never re-resolves the whole graph',async()=>{
+ const source=await read('scripts/dev.mjs');
+ assert.doesNotMatch(source,/generate-lockfile/);
+ assert.match(source,/run\('cargo', \['update', '--workspace'\]/);
+ for(const file of ['README.md','AGENTS.md','justfile'])assert.doesNotMatch(await read(file),/generate-lockfile/,file);
+});

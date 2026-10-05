@@ -36,9 +36,11 @@ async function prerequisites() {
 
 async function lock() {
   await prerequisites();
-  await run('cargo', ['generate-lockfile'], { cwd: root });
+  // Minimal update: workspace members' own entries follow their manifests; every package already
+  // in Cargo.lock keeps its version unless a manifest requirement no longer admits it.
+  await run('cargo', ['update', '--workspace'], { cwd: root });
   await run(bun(), ['install', '--lockfile-only'], { cwd: root });
-  process.stdout.write('Resolved Cargo.lock and bun.lock with the selected tools. Review and commit them; nothing was installed.\n');
+  process.stdout.write('Updated Cargo.lock and bun.lock for manifest changes only; already locked versions were kept. Review `git diff Cargo.lock bun.lock` and commit; nothing was installed.\n');
 }
 
 async function uiScript(name) {
