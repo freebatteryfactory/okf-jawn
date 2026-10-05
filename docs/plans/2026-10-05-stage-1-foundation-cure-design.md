@@ -310,3 +310,19 @@ Questions for the owner before Stage 2 (none block Stage 1):
 - On a Snapshot conflict, does the editor get a merge view or "reload and reapply"?
 - Do exported files use the product's lifecycle words or OKF's, and are app reviews exported as
   OKF `verified`?
+
+## 11. Amendments made while writing the implementation plan
+
+- §5 D: the generator does not synthesize an instance of every request and response. Schemars is
+  the single source for both outputs, so that check would compare a thing with itself. It checks
+  that every per-operation schema compiles, every `$ref` resolves, and every shipped example
+  validates.
+- §5 A: jsdom was already removed; `tower-http` and `tokio-util` features are left to the server
+  lane; `REPOSITORY-TREE.txt` is deleted in favour of `dev.mjs tree`.
+- §5 E/F: after `release`, a retry is a resumed attempt. `VersionStore::find_commit` stays for
+  `commit_items`. `ReplayPolicy::AlreadyIssued` carries a JSON pointer to the created id.
+- §5 H: `router` keeps its current single-argument signature.
+- §4 phase 3: requalification runs in a dedicated worktree on `D:`; receipts recorded are
+  docling, mcp-apps and iii, and the clean-checkout receipt stays under `.artifacts/`.
+- The implementation plan is `docs/plans/stage-1a/` (one file per package). Phases 5–6 get their
+  own plan at commit R.
