@@ -5,6 +5,7 @@
 //! ledger never inspects other stores: a resumed attempt re-runs the handler under the same
 //! `MutationId`.
 
+use jsonschema::error::ValidationErrorKind;
 use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{ConnectorId, MutationId, WorkspaceId};
@@ -301,8 +302,28 @@ fn decode_validated<T: DeserializeOwned + JsonSchema>(
         .map_err(|message| ApiError::new(ErrorCode::Internal, message.clone()))?;
     validator
         .validate(&value)
-        .map_err(|error| ApiError::new(ErrorCode::InvalidInput, error.to_string()))?;
+        .map_err(|error| invalid_input(&error))?;
     decode(value)
+}
+
+/// Report a schema failure and name the offending field as a JSON Pointer into the request.
+///
+/// A missing required property is reported at the parent object, so its name is appended.
+fn invalid_input(error: &jsonschema::ValidationError<'_>) -> ApiError {
+    let location = if let ValidationErrorKind::Required {
+        property: Value::String(name),
+    } = error.kind()
+    {
+        error.instance_path().join(name)
+    } else {
+        error.instance_path().clone()
+    };
+    let refused = ApiError::new(ErrorCode::InvalidInput, error.to_string());
+    if location.is_empty() {
+        refused
+    } else {
+        refused.with_field(location.as_str())
+    }
 }
 
 /// Allocate a fresh mutation identity for adapters and fixtures.

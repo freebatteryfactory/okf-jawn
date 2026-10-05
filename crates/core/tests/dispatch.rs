@@ -712,6 +712,30 @@ async fn a_tenant_grant_for_another_tenant_is_refused_before_the_handler() -> Te
     Ok(())
 }
 
+#[tokio::test]
+async fn a_schema_failure_names_the_offending_field() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+
+    let mistyped = json!({
+        "workspace_id": WORKSPACE_A,
+        "at": { "kind": "latest" },
+        "folder": "",
+        "page": { "limit": "ten" }
+    });
+    let refused = err_of(call(&app, &ports, &alice, "list_items", mistyped).await)?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("/page/limit"));
+
+    let keyless = json!({ "name": "n", "description": "d" });
+    let refused = err_of(call(&app, &ports, &alice, "create_workspace", keyless).await)?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("/idempotency_key"));
+    assert_eq!(app.call_count("list_items")?, 0);
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
 mod support;
