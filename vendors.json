@@ -2,13 +2,12 @@
   "schema_version": 1,
   "project": "okf-jawn",
   "scope": "Offline navigation notes and exact lookup instructions, not a licensed mirror of vendor documentation or a compatibility certification. use_sites exist in the repository now; planned_use_sites are where a lane will integrate the library; generated_sites are written by gen. context7_queries_executed counts the lookups whose library and query are recorded here.",
-  "context7_queries_executed": 7,
+  "context7_queries_executed": 6,
   "vendors": [
     {
       "name": "utoipa",
       "use_sites": [
-        "xtask/src/api.rs",
-        "crates/contract/src"
+        "xtask/src/api.rs"
       ],
       "official_sources": [
         "https://docs.rs/utoipa/6.0.0/utoipa/",
