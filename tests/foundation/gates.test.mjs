@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { laneSteps, runLane } from '../../scripts/lib/gates.mjs';
+import { laneSteps, premergeSteps, runLane, runPremerge } from '../../scripts/lib/gates.mjs';
 import { laneNamed, lanes } from '../../scripts/lib/lanes.mjs';
 import { fixtureRepo, git } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
@@ -64,4 +64,30 @@ test('a failing step stops the lane gate and is named; an uncommitted tree is ne
  await writeFile(join(repo,'README.md'),'edited, not committed\n');
  assert.equal((await runLane(repo,'storage',{execute:passing,...quiet})).line,`PASS storage ${sha}-dirty`);
  await assert.rejects(runLane(repo,'no-such-lane',{execute:passing,...quiet}),/Unknown lane: no-such-lane/);
+});
+test('premerge is the whole CI sequence with every feature, and includes check-receipts',()=>{
+ const steps=premergeSteps('/repo');
+ assert.deepEqual(steps.map(step=>step.id),['check-offline','gen-check','fmt','clippy','source-policy','test','ui-lint','ui-build','ui-typecheck','ui-test','check-receipts']);
+ const args=id=>steps.find(step=>step.id===id).args;
+ assert.deepEqual(args('clippy'),['clippy','--locked','--workspace','--all-features','--all-targets','--','-D','warnings']);
+ assert.deepEqual(args('test'),['test','--locked','--workspace','--all-features']);
+ assert.deepEqual(args('gen-check'),['scripts/dev.mjs','gen-check']);
+ assert.deepEqual(args('check-receipts'),['scripts/dev.mjs','check-receipts']);
+});
+test('premerge runs every step and reports all failures, not the first',async t=>{
+ const {root:repo}=await fixtureRepo(t,fixture);const sha=await git(repo,'rev-parse','HEAD');
+ const ran=[];
+ const execute=async(step,write)=>{ran.push(step.id);write(`ran ${step.id}\n`);return ['fmt','ui-test'].includes(step.id)?1:0;};
+ const result=await runPremerge(repo,{execute,...quiet});
+ assert.deepEqual(ran,premergeSteps(repo).map(step=>step.id));
+ assert.equal(result.passed,false);assert.equal(result.line,`FAIL premerge ${sha} fmt,ui-test`);
+ assert.equal(await lastLine(result.logPath),`FAIL premerge ${sha} fmt,ui-test`);
+ assert.equal((await runPremerge(repo,{execute:passing,...quiet})).line,`PASS premerge ${sha}`);
+ await assert.rejects(runPremerge(repo,{only:'no-such-step'}),/Unknown premerge step: no-such-step/);
+});
+test('check and test are subsets of premerge, so the cargo flags are written once',async()=>{
+ const entry=await read('scripts/dev.mjs');
+ assert.match(entry,/case 'check': await runNamed\(\['fmt', 'clippy', 'source-policy', 'ui-lint', 'ui-typecheck', 'gen-check'\]\); break;/);
+ assert.match(entry,/case 'test': await runNamed\(\['test', 'ui-test'\]\); break;/);
+ assert.doesNotMatch(entry,/'--all-targets'|'--all-features'/);
 });

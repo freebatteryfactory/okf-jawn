@@ -11,7 +11,7 @@ import { tree } from './lib/tree.mjs';
 import { bun, pins } from './lib/toolchain.mjs';
 import { checkScope, createLanes, resetLanes, syncLaneTable } from './lib/lanes.mjs';
 import { checkReceipts } from './lib/receipts.mjs';
-import { runLane } from './lib/gates.mjs';
+import { premergeSteps, runLane, runPremerge } from './lib/gates.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ui = join(root, 'ui');
@@ -145,6 +145,16 @@ async function qualify() {
   }
 }
 
+/** Run named premerge steps in order, stopping at the first failure. */
+async function runNamed(ids) {
+  const steps = premergeSteps(root);
+  for (const id of ids) {
+    const step = steps.find(entry => entry.id === id);
+    if (!step) throw new Error(`No premerge step named ${id}.`);
+    await run(step.command, step.args, { cwd: step.cwd });
+  }
+}
+
 async function main() {
   switch (task) {
     case 'doctor': await doctor(); break;
@@ -169,20 +179,17 @@ async function main() {
       if (!result.passed) process.exitCode = 1;
       break;
     }
+    case 'premerge': {
+      const result = await runPremerge(root, { only: option('--step') });
+      if (!result.passed) process.exitCode = 1;
+      break;
+    }
     case 'lanes-reset': process.stdout.write(`${await resetLanes(root)}\n`); break;
     case 'qualify': await qualify(); break;
     case 'check-receipts': process.stdout.write(`${await checkReceipts(root)}\n`); break;
     case 'audit': await audit(); break;
-    case 'check':
-      await run('cargo', ['fmt', '--all', '--check'], { cwd: root });
-      await run('cargo', ['clippy', '--locked', '--workspace', '--all-targets', '--', '-D', 'warnings'], { cwd: root });
-      await run('cargo', ['xtask', 'source-policy', '--root', root], { cwd: root });
-      await uiScript('lint');
-      await uiScript('typecheck');
-      await generate(root, true); break;
-    case 'test':
-      await run('cargo', ['test', '--locked', '--workspace'], { cwd: root });
-      await uiScript('test'); break;
+    case 'check': await runNamed(['fmt', 'clippy', 'source-policy', 'ui-lint', 'ui-typecheck', 'gen-check']); break;
+    case 'test': await runNamed(['test', 'ui-test']); break;
     case 'foundation':
       await generate(root, true);
       await run('cargo', ['test', '--locked', '-p', 'okf-jawn-contract', '-p', 'okf-jawn-core', '-p', 'xtask'], { cwd: root });

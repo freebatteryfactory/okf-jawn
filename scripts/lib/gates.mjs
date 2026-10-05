@@ -78,3 +78,39 @@ export async function runLane(root, name, { execute, echo } = {}) {
   write(`\n${line}\n`);
   return { passed: failed.length === 0, line, logPath };
 }
+
+/**
+ * Everything CI runs after bootstrap, in CI's order, with every feature. CI executes these one
+ * step at a time (`premerge --step <id>`); tests/foundation/ci.test.mjs keeps the two identical.
+ */
+export function premergeSteps(root) {
+  return [
+    dev(root, 'check-offline', 'check-offline'),
+    dev(root, 'gen-check', 'gen-check'),
+    cargo(root, 'fmt', 'fmt', '--all', '--check'),
+    cargo(root, 'clippy', 'clippy', '--locked', '--workspace', '--all-features', '--all-targets', '--', '-D', 'warnings'),
+    cargo(root, 'source-policy', 'xtask', 'source-policy', '--root', root),
+    cargo(root, 'test', 'test', '--locked', '--workspace', '--all-features'),
+    uiScript(root, 'ui-lint', 'lint'),
+    uiScript(root, 'ui-build', 'build'),
+    uiScript(root, 'ui-typecheck', 'typecheck'),
+    uiScript(root, 'ui-test', 'test'),
+    dev(root, 'check-receipts', 'check-receipts'),
+  ];
+}
+
+export async function runPremerge(root, { only, execute, echo } = {}) {
+  const steps = premergeSteps(root);
+  if (only !== undefined) {
+    const step = steps.find(entry => entry.id === only);
+    if (!step) throw new Error(`Unknown premerge step: ${only}. Steps: ${steps.map(entry => entry.id).join(', ')}.`);
+    await run(step.command, step.args, { cwd: step.cwd });
+    return { passed: true, line: `PASS premerge ${only}`, logPath: null };
+  }
+  const label = await revisionLabel(root);
+  const logPath = join(root, '.artifacts', 'premerge', `${label}.log`);
+  const { failed, write } = await runSteps(steps, { logPath, failFast: false, execute, echo });
+  const line = failed.length ? `FAIL premerge ${label} ${failed.join(',')}` : `PASS premerge ${label}`;
+  write(`\n${line}\n`);
+  return { passed: failed.length === 0, line, logPath };
+}
