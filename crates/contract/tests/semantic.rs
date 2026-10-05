@@ -1,7 +1,7 @@
 //! Semantic controls for serialization and validation; not whole-product acceptance.
 
 use okf_jawn_contract::history::CommitRequest;
-use okf_jawn_contract::identity::{At, Digest, Revision, WorkspacePath};
+use okf_jawn_contract::identity::{At, Digest, Revision, WorkspaceId, WorkspacePath};
 use okf_jawn_contract::import::{Job, JobKind};
 use okf_jawn_contract::metadata::operations;
 use okf_jawn_contract::read::ReadItemRequest;
@@ -21,6 +21,21 @@ const JOB_KINDS: &[&str] = &[
     "rebuild_index",
     "export_view",
 ];
+
+fn binding(name: &str, workspace: &str) -> serde_json::Value {
+    json!({
+        "name": name,
+        "source": {
+            "workspace_id": workspace,
+            "item_id": "22222222-2222-4222-8222-222222222222",
+            "path": "data/metrics.csv",
+            "revision": "a".repeat(40),
+            "selection": {"kind": "all"}
+        },
+        "units": {},
+        "transforms": []
+    })
+}
 
 #[test]
 fn revision_does_not_accept_a_selector() -> Result<(), Box<dyn Error>> {
@@ -169,4 +184,34 @@ fn every_operation_that_starts_a_job_has_a_kind() {
         JOB_KINDS.len(),
         "202 operations: {starters:?}"
     );
+}
+
+#[test]
+fn a_view_reports_the_bindings_outside_its_workspace() -> Result<(), Box<dyn Error>> {
+    let home = "11111111-1111-4111-8111-111111111111";
+    let elsewhere = "33333333-3333-4333-8333-333333333333";
+    let view: ViewDocument = serde_json::from_value(json!({
+        "schema_version": 1,
+        "title": "Metrics",
+        "description": "Quarterly metrics",
+        "mode": "pinned",
+        "grammar": "vega_lite",
+        "bindings": [binding("local", home), binding("foreign", elsewhere)],
+        "spec": {}
+    }))?;
+    let workspace: WorkspaceId = serde_json::from_value(json!(home))?;
+    let outside: Vec<&str> = view
+        .bindings_outside(workspace)
+        .into_iter()
+        .map(|found| found.name.as_str())
+        .collect();
+    assert_eq!(outside, ["foreign"]);
+    let other: WorkspaceId = serde_json::from_value(json!(elsewhere))?;
+    let outside_other: Vec<&str> = view
+        .bindings_outside(other)
+        .into_iter()
+        .map(|found| found.name.as_str())
+        .collect();
+    assert_eq!(outside_other, ["local"]);
+    Ok(())
 }

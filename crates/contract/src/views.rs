@@ -24,6 +24,9 @@ pub enum RenderGrammar {
 }
 
 /// A named source selection used by a chart or layout.
+///
+/// A saved View binds only to sources in its own workspace: `source.workspace_id` must equal
+/// the workspace the View is saved or presented in (`ViewDocument::bindings_outside`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ViewBinding {
@@ -65,7 +68,9 @@ pub struct ViewDocument {
 
 /// Render a candidate from already resolved bindings without saving or approving it.
 ///
-/// Every binding's source workspace is an authorization target, not only `workspace_id`.
+/// Every binding must name `workspace_id`; the handler rejects a view for which
+/// `view.bindings_outside(workspace_id)` is not empty. Each binding's source workspace is
+/// still an authorization target, so a foreign binding is refused before the handler runs.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PresentRequest {
@@ -158,4 +163,15 @@ pub struct CatalogResponse {
     pub components: Vec<CatalogComponent>,
     /// Schema for persisted View documents.
     pub view_schema: serde_json::Value,
+}
+
+impl ViewDocument {
+    /// Bindings whose source lives outside `workspace`; a saved or presented View must have none.
+    #[must_use]
+    pub fn bindings_outside(&self, workspace: crate::identity::WorkspaceId) -> Vec<&ViewBinding> {
+        self.bindings
+            .iter()
+            .filter(|binding| binding.source.workspace_id != workspace)
+            .collect()
+    }
 }
