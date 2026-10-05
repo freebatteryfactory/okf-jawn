@@ -16,8 +16,6 @@ tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "
 tokio-util = { version = "=0.7.19" }
 tower = { version = "=0.5.3" }
 tower-http = { version = "=0.7.1" }
-utoipa = { version = "=6.0.0", features = ["uuid", "yaml"] }
-utoipa-axum = { version = "=0.3.0" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151" }
 schemars = { version = "=1.2.2", features = ["uuid1"] }

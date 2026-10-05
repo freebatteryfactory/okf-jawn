@@ -16,8 +16,6 @@ use okf_jawn_contract::metadata::{OperationInfo, operations};
 use okf_jawn_contract::transport::{TransportAuth, TransportOperation};
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde_json::{Map, Value, json};
-use utoipa::openapi::OpenApiBuilder;
-use utoipa::openapi::info::InfoBuilder;
 
 use crate::output::write_json;
 
@@ -66,6 +64,7 @@ struct SharedTypes {
 
 const COMPONENT_PREFIX: &str = "#/components/schemas/";
 const DEFINITION_PREFIX: &str = "#/$defs/";
+const TRANSPORT_METHODS: [&str; 4] = ["get", "put", "post", "delete"];
 
 pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn Error>> {
     let typed = typed_operations()?;
@@ -75,6 +74,49 @@ pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn Error>> {
         resource_metadata: register::<ResourceMetadata>()?,
         health: register::<HealthResponse>()?,
     };
+    let document = openapi_document(&typed, &shared)?;
+    write_json(&directory.join("openapi.json"), &document)?;
+    std::fs::write(
+        directory.join("openapi.yaml"),
+        yaml_serde::to_string(&document)?,
+    )?;
+    let schemas = directory.join("schemas");
+    for operation in &typed {
+        let id = operation.info.id;
+        write_json(
+            &schemas.join(format!("{id}.input.json")),
+            &operation.request.document,
+        )?;
+        write_json(
+            &schemas.join(format!("{id}.output.json")),
+            &operation.response.document,
+        )?;
+    }
+    write_json(
+        &directory.join("operations.json"),
+        &serde_json::to_value(operations())?,
+    )?;
+    write_json(
+        &directory.join("transports.json"),
+        &serde_json::to_value(okf_jawn_contract::transport::operations())?,
+    )?;
+    let tools: Vec<Value> = typed
+        .iter()
+        .filter(|operation| !operation.info.alias.is_empty())
+        .map(tool_definition)
+        .collect();
+    write_json(&directory.join("mcp-tools.json"), &json!({"tools": tools}))?;
+    write_json(&directory.join("mcp-apps.json"), &app_resources())?;
+    write_forms(&directory.join("forms"))?;
+    crate::fixtures::generate(&directory.join("examples"))?;
+    Ok(())
+}
+
+/// Assemble the OpenAPI 3.1 document from the registered schemas and both route tables.
+fn openapi_document(
+    typed: &[TypedOperation],
+    shared: &SharedTypes,
+) -> Result<Value, Box<dyn Error>> {
     let mut schemas = BTreeMap::new();
     let outside = [
         &shared.api_error,
@@ -90,119 +132,89 @@ pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn Error>> {
             insert_schema(&mut schemas, name.clone(), schema.clone())?;
         }
     }
-    let mut api = OpenApiBuilder::new()
-        .info(
-            InfoBuilder::new()
-                .title("okf-jawn")
-                .version(env!("CARGO_PKG_VERSION"))
-                .description(Some(
-                    "Complete intended API. A declared route is not a claim of implemented application behavior.",
-                ))
-                .build(),
-        )
-        .build();
-    for operation in &typed {
-        let path: utoipa::openapi::path::PathItem =
-            serde_json::from_value(json!({"post": path_operation(operation, &shared)}))
-                .map_err(|error| format!("operation {}: {error}", operation.info.id))?;
-        api.paths.paths.insert(operation.info.path.to_owned(), path);
-        write_json(
-            &directory
-                .join("schemas")
-                .join(format!("{}.input.json", operation.info.id)),
-            &operation.request.document,
-        )?;
-        write_json(
-            &directory
-                .join("schemas")
-                .join(format!("{}.output.json", operation.info.id)),
-            &operation.response.document,
-        )?;
-    }
-    for transport in okf_jawn_contract::transport::operations() {
-        let path: utoipa::openapi::path::PathItem = serde_json::from_value(
-            json!({(transport.method): transport_operation(&transport, &shared)}),
-        )
-        .map_err(|error| format!("transport {}: {error}", transport.id))?;
-        let current = api
-            .paths
-            .paths
-            .entry(transport.path.to_owned())
-            .or_default();
-        match transport.method {
-            "get" => current.get = path.get,
-            "put" => current.put = path.put,
-            "post" => current.post = path.post,
-            "delete" => current.delete = path.delete,
-            _ => return Err("Unsupported declared transport method".into()),
+    let mut paths: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
+    for operation in typed {
+        let item = paths.entry(operation.info.path.to_owned()).or_default();
+        if item
+            .insert("post".to_owned(), path_operation(operation, shared))
+            .is_some()
+        {
+            return Err(format!("{} is declared twice", operation.info.path).into());
         }
     }
-    let mut document = serde_json::to_value(api)?;
-    let root = document
-        .as_object_mut()
-        .ok_or("OpenAPI must serialize to an object")?;
-    root.insert(
-        "security".to_owned(),
-        json!([{"bearerAuth": []},{"browserSession":[]}]),
-    );
-    let mut components = Map::new();
-    components.insert(
-        "schemas".to_owned(),
-        Value::Object(schemas.into_iter().collect()),
-    );
-    components.insert(
-        "securitySchemes".to_owned(),
-        json!({
-            "bearerAuth":{"type":"http","scheme":"bearer","description":"Hosted: a WorkOS Connect access token. Local: an opaque connector secret issued by create_connector."},
-            "browserSession":{"type":"apiKey","in":"cookie","name":"okf-session","description":"Local-owner or WorkOS browser session; cookie-authenticated writes also require the CSRF token."}
-        }),
-    );
-    root.insert("components".to_owned(), Value::Object(components));
-    write_json(&directory.join("openapi.json"), &document)?;
-    std::fs::write(
-        directory.join("openapi.yaml"),
-        yaml_serde::to_string(&document)?,
-    )?;
-    write_json(
-        &directory.join("operations.json"),
-        &serde_json::to_value(operations())?,
-    )?;
-    write_json(
-        &directory.join("transports.json"),
-        &serde_json::to_value(okf_jawn_contract::transport::operations())?,
-    )?;
-    let tools: Vec<Value> = typed
-        .iter()
-        .filter(|op| !op.info.alias.is_empty())
-        .map(tool_definition)
-        .collect();
-    write_json(&directory.join("mcp-tools.json"), &json!({"tools":tools}))?;
-    write_json(
-        &directory.join("mcp-apps.json"),
-        &json!({
-            "resources": [{
-                "uri": "ui://okf-jawn/app.html",
-                "mimeType": "text/html;profile=mcp-app",
-                "csp": {
-                    "connectDomains": [],
-                    "resourceDomains": []
+    for transport in okf_jawn_contract::transport::operations() {
+        if !TRANSPORT_METHODS.contains(&transport.method) {
+            return Err(format!(
+                "transport {} declares unsupported method {}",
+                transport.id, transport.method
+            )
+            .into());
+        }
+        let item = paths.entry(transport.path.to_owned()).or_default();
+        if item
+            .insert(
+                transport.method.to_owned(),
+                transport_operation(&transport, shared),
+            )
+            .is_some()
+        {
+            return Err(
+                format!("{} {} is declared twice", transport.method, transport.path).into(),
+            );
+        }
+    }
+    Ok(json!({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "okf-jawn",
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": "Complete intended API. A declared route is not a claim of implemented application behavior."
+        },
+        "paths": paths,
+        "security": [{"bearerAuth": []}, {"browserSession": []}],
+        "components": {
+            "schemas": schemas,
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "description": "Hosted: a WorkOS Connect access token. Local: an opaque connector secret issued by create_connector."
+                },
+                "browserSession": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": "okf-session",
+                    "description": "Local-owner or WorkOS browser session; cookie-authenticated writes also require the CSRF token."
                 }
-            }]
-        }),
-    )?;
+            }
+        }
+    }))
+}
+
+/// The MCP App resources this build declares.
+fn app_resources() -> Value {
+    json!({
+        "resources": [{
+            "uri": "ui://okf-jawn/app.html",
+            "mimeType": "text/html;profile=mcp-app",
+            "csp": {"connectDomains": [], "resourceDomains": []}
+        }]
+    })
+}
+
+fn write_forms(directory: &Path) -> Result<(), Box<dyn Error>> {
     write_json(
-        &directory.join("forms/naming-rules.schema.json"),
+        &directory.join("naming-rules.schema.json"),
         &form_schema::<okf_jawn_contract::conventions::NamingRules>()?,
     )?;
     write_json(
-        &directory.join("forms/view.schema.json"),
+        &directory.join("view.schema.json"),
         &form_schema::<okf_jawn_contract::views::ViewDocument>()?,
     )?;
     write_json(
-        &directory.join("forms/type.schema.json"),
+        &directory.join("type.schema.json"),
         &form_schema::<okf_jawn_contract::item::TypeDefinition>()?,
     )?;
-    crate::fixtures::generate(&directory.join("examples"))?;
     Ok(())
 }
 
@@ -463,7 +475,7 @@ fn transport_operation(operation: &TransportOperation, shared: &SharedTypes) -> 
             let schema = if media == "application/octet-stream" {
                 json!({"type":"string","format":"binary"})
             } else {
-                any_value_schema()
+                json!({})
             };
             map.insert(
                 "requestBody".to_owned(),
@@ -480,15 +492,9 @@ fn transport_response_schema(operation: &TransportOperation, shared: &SharedType
         "upload_content" => component_reference(&shared.upload.name),
         "get_resource_metadata" => component_reference(&shared.resource_metadata.name),
         "liveness" => component_reference(&shared.health.name),
-        _ if operation.response_media.contains("json") => any_value_schema(),
+        _ if operation.response_media.contains("json") => json!({}),
         _ => json!({"type": "string"}),
     }
-}
-
-fn any_value_schema() -> Value {
-    // utoipa 6 omits `type` when serializing SchemaType::AnyValue but requires the field when
-    // deserializing; null is that untagged unit variant and is published as `{}`.
-    json!({"type": null})
 }
 
 #[cfg(test)]
