@@ -200,9 +200,10 @@
           "receipt": "https://github.com/freebatteryfactory/okf-jawn/actions/runs/37257588545"
         },
         {
-          "id": "mcp-apps-claude-desktop",
+          "id": "mcp-apps-web-hosts",
           "status": "not_run",
-          "meaning": "Required by the Phase 0 plan (section C). No MCP Apps host evidence exists yet."
+          "receipt": ".artifacts/qualification/mcp-apps/receipt.json",
+          "meaning": "Renamed from mcp-apps-claude-desktop. Requires observed claude.ai / ChatGPT render or rejection under .artifacts/qualification/mcp-apps/hosts/; harness screenshots are not host renders."
         }
       ],
       "construction": [

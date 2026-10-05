@@ -11,11 +11,19 @@
 use std::sync::Arc;
 
 use crate::conversion::Converter;
+use crate::credentials::CredentialStore;
+use crate::events::EventLog;
 use crate::jobs::{JobQueue, RecordStore};
+use crate::proposals::ProposalStore;
+use crate::readiness::ReadinessProbe;
 use crate::search::SearchIndex;
 use crate::storage::{BlobStore, VersionStore, WorkspaceCatalog};
+use crate::uploads::UploadStore;
 
 /// The complete set of adapters the application service coordinates.
+///
+/// `JobHandler` is intentionally not injected here: ingest owns the Tokio worker
+/// that claims leases from `records`/`queue` and executes handlers separately.
 #[derive(Clone)]
 pub struct Ports {
     /// Workspace metadata, permissions, and storage scope.
@@ -32,6 +40,16 @@ pub struct Ports {
     pub search: Arc<dyn SearchIndex>,
     /// Bounded document conversion.
     pub converter: Arc<dyn Converter>,
+    /// Suggested change sets and discussion.
+    pub proposals: Arc<dyn ProposalStore>,
+    /// Authenticated upload occurrence slots.
+    pub uploads: Arc<dyn UploadStore>,
+    /// Resumable workspace notifications.
+    pub events: Arc<dyn EventLog>,
+    /// Connectors, sessions, and installation identity.
+    pub credentials: Arc<dyn CredentialStore>,
+    /// Configured dependency readiness.
+    pub readiness: Arc<dyn ReadinessProbe>,
 }
 
 /// Coordinates authorization, revision resolution, and port calls for every declared operation.

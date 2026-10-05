@@ -109,6 +109,21 @@ pub struct BackupWorkspaceRequest {
     pub idempotency_key: String,
 }
 
+/// Restore a workspace from a retained backup artifact (full restore of content and app records).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreWorkspaceRequest {
+    /// Workspace whose permissions and storage scope apply.
+    pub workspace_id: crate::identity::WorkspaceId,
+    /// Retained backup artifact to restore from.
+    pub artifact_id: crate::identity::ArtifactId,
+    /// Optional integrity check against the artifact digest before restore begins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<crate::identity::Digest>,
+    /// Retry identity for the restore job.
+    pub idempotency_key: String,
+}
+
 /// An authorized export or backup artifact with integrity metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]

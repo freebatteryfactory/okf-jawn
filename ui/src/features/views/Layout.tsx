@@ -3,11 +3,12 @@
  *
  * Order is fixed: materialize slots → construct Spec → catalog.validate → validateSpec →
  * Renderer. Never validate a pre-normalized shape and mutate afterward. Never auto-fix.
+ * `visible` is passed through unchanged so validateSpec judges the authored condition.
+ * `on` and `watch` are rejected: the catalog has no actions.
  */
 import {
   type Spec,
   type UIElement,
-  VisibilityConditionSchema,
   validateSpec,
 } from '@json-render/core';
 import { defineRegistry, JSONUIProvider, Renderer } from '@json-render/react';
@@ -77,11 +78,11 @@ const { registry } = defineRegistry(catalog, {
 });
 
 const slotsSchema = z.record(z.string(), z.array(z.string()));
-const repeatSchema = z.object({
+const repeatSchema = z.strictObject({
   statePath: z.union([z.string(), z.object({ $item: z.string() })]),
   key: z.string().optional(),
 });
-const rawElementSchema = z.object({
+const rawElementSchema = z.strictObject({
   type: z.string().min(1),
   props: z.record(z.string(), z.unknown()).default({}),
   children: z.array(z.string()).optional(),
@@ -89,7 +90,7 @@ const rawElementSchema = z.object({
   visible: z.unknown().optional(),
   repeat: z.unknown().optional(),
 });
-const rawSpecSchema = z.object({
+const rawSpecSchema = z.strictObject({
   root: z.string().min(1),
   elements: z.record(z.string(), rawElementSchema),
   state: z.record(z.string(), z.unknown()).optional(),
@@ -124,10 +125,9 @@ function normalizeElement(key: string, raw: z.infer<typeof rawElementSchema>): U
   };
   const slots = materializeSlots(raw.slots, raw.children);
   if (slots !== undefined) next.slots = slots;
+  // Pass authored visibility through unchanged so validateSpec judges the original.
   if (raw.visible !== undefined) {
-    const visible = VisibilityConditionSchema.safeParse(raw.visible);
-    if (!visible.success) throw new Error(`Element ${key} has an invalid visibility condition`);
-    next.visible = visible.data;
+    next.visible = raw.visible as UIElement['visible'];
   }
   if (raw.repeat !== undefined) {
     const repeat = repeatSchema.safeParse(raw.repeat);

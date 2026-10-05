@@ -41,6 +41,7 @@ function App() {
   const callTool = useCallback(
     async (name: string, input: Record<string, unknown>) => {
       if (!app) throw new Error('Host connection unavailable');
+      // Single wire-boundary omit: PresentView must pass fields through unchanged.
       return app.callServerTool({ name, arguments: omitUndefined(input) });
     },
     [app],

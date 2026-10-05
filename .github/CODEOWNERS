@@ -1,14 +1,56 @@
-# Enable branch protection and required review on the actual repository.
-# This file is a review routing template, not a local filesystem access boundary.
-# Replace OWNER with the confirmed GitHub handle/team before activating.
-# /crates/contract/ @OWNER
-# /xtask/ @OWNER
-# /api/ @OWNER
-# /Cargo.toml @OWNER
-# /Cargo.lock @OWNER
-# /bun.lock @OWNER
-# /package.json @OWNER
-# /ui/package.json @OWNER
-# /tests/integration/ @OWNER
-# /ui/src/api/generated/ @OWNER
-# /deploy/ @OWNER
+# Review routing only — not a local filesystem lock. No branch protection is configured yet.
+# Placeholder handles: replace with real GitHub teams/users before enabling required reviews.
+# Lane comments match AGENTS.md ownership.
+
+# Integration owner
+/AGENTS.md @okf-jawn-integration-owner
+/README.md @okf-jawn-integration-owner
+/SPEC.md @okf-jawn-integration-owner
+/verification.json @okf-jawn-integration-owner
+/vendors.json @okf-jawn-integration-owner
+/Cargo.toml @okf-jawn-integration-owner
+/Cargo.lock @okf-jawn-integration-owner
+/deny.toml @okf-jawn-integration-owner
+/package.json @okf-jawn-integration-owner
+/bun.lock @okf-jawn-integration-owner
+/bunfig.toml @okf-jawn-integration-owner
+/.bun-version @okf-jawn-integration-owner
+/rust-toolchain.toml @okf-jawn-integration-owner
+/Justfile @okf-jawn-integration-owner
+/REPOSITORY-TREE.txt @okf-jawn-integration-owner
+/scripts/ @okf-jawn-integration-owner
+/crates/contract/ @okf-jawn-integration-owner
+/xtask/ @okf-jawn-integration-owner
+/api/ @okf-jawn-integration-owner
+/generated/ @okf-jawn-integration-owner
+/ui/src/api/generated/ @okf-jawn-integration-owner
+/ui/package.json @okf-jawn-integration-owner
+/deploy/ @okf-jawn-integration-owner
+/tests/integration/ @okf-jawn-integration-owner
+/tests/foundation/ @okf-jawn-integration-owner
+/.github/ @okf-jawn-integration-owner
+/.agents/ @okf-jawn-integration-owner
+/qualification/ @okf-jawn-integration-owner
+
+# storage lane
+/crates/storage/ @okf-jawn-integration-owner # lane: storage
+
+# ingest lane (JobHandler + Tokio runtime adapter)
+/crates/ingest/ @okf-jawn-integration-owner # lane: ingest
+
+# core-cli lane
+/crates/core/ @okf-jawn-integration-owner # lane: core-cli
+/crates/cli/ @okf-jawn-integration-owner # lane: core-cli
+
+# server lane (HTTP/auth + sandbox origin serving)
+/crates/server/ @okf-jawn-integration-owner # lane: server
+
+# mcp-execution lane (MCP tool execution)
+/crates/mcp/ @okf-jawn-integration-owner # lane: mcp-execution
+
+# workspace-ui lane (Explorer, WebMCP, HTML sandbox viewer)
+/ui/ @okf-jawn-integration-owner # lane: workspace-ui
+
+# views lane (saved Views + MCP Apps bundles) — more specific paths win
+/ui/src/features/views/ @okf-jawn-integration-owner # lane: views
+/ui/src/mcp-apps/ @okf-jawn-integration-owner # lane: views

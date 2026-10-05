@@ -174,7 +174,7 @@
         "App-only read_object fetches are still workspace scoped; never assume a URI itself grants permission."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Partial: bundle manifest mimeType equals SDK RESOURCE_MIME_TYPE. No host has rendered the bundles (static-server screenshots show a host-connection failure); _meta.ui not yet SDK-conformant."
+      "qualification": "mcp-apps-web-hosts: Streamable HTTP+stdio harness serves four ui://okf-jawn resources with SDK _meta.ui.csp object and four render tools. Receipt records protocol_check passed, basic-host feature render passed, ngrok session_open, host_render BOUNDED_UPSTREAM_EXCEPTION (interactive claude.ai/ChatGPT connector registration). Evidence hosts/2026-10-05-bounded-upstream-exception.md under .artifacts/qualification/mcp-apps/."
     },
     {
       "name": "json-render",
@@ -326,7 +326,32 @@
         "Run installed CLIs with bun --bun run so Node-shebang entrypoints execute under Bun and nothing is downloaded. Bun transpiling TypeScript is not type checking; tsc remains separate."
       ],
       "version_authority": "package.json packageManager and .bun-version; bun.lock for resolved packages",
-      "qualification": "Installed and exercised locally at 1.4.2 (install, lockfile, bun test, audit); CI and container use are not yet run"
+      "qualification": "Installed and exercised locally at 1.4.2 (install, lockfile, bun test, audit); CI uses oven-sh/setup-bun with bun-version-file; container image pin remains a deployment concern"
+    },
+    {
+      "name": "happy-dom",
+      "use_sites": [
+        "ui/package.json",
+        "ui/vitest.config.ts"
+      ],
+      "official_sources": [
+        "https://github.com/capricorn86/happy-dom",
+        "https://vitest.dev/guide/environment.html"
+      ],
+      "symbols": [
+        "happy-dom",
+        "environment: 'happy-dom'"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; pin matches ui/package.json",
+      "offline_notes": [
+        "Pinned at 20.8.4 as the Vitest DOM environment under Bun.",
+        "Vitest environment selection is separate from Bun's own test runner used by check-offline.",
+        "Prefer happy-dom over jsdom for Vitest unit tests when the UI lane selects it; do not invent a second DOM environment."
+      ],
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": "PASS under Bun 1.4.2: Vitest 5.0.3 environment happy-dom 20.8.4; ui `bun --bun run test` 6 files / 23 tests. Node jsdom special-case removed from scripts/dev.mjs and ui test script."
     },
     {
       "name": "tanstack",
@@ -536,7 +561,7 @@
         "Converter API and native/model assets still need an executed qualification. Retain originals; record converter version/settings."
       ],
       "version_authority": "Cargo.toml and Cargo.lock",
-      "qualification": "Partial: DocumentConverter 1.93.5 converted six self-generated fixtures (all Success) and document_timeout produced PartialSuccess; originals unchanged. Peak RSS, page provenance, failure case and corpus fixtures not yet qualified. Receipt .artifacts/qualification/docling/receipt.json."
+      "qualification": "PASS on commit 32a10ba (orchestrator receipt SHA at run time): DocumentConverter 1.93.5; 10 Success fixtures incl. docling-project corpus at 4e650af5; must_fail_corrupt.bin ExplicitFailure; timeout probe PASS; page_provenance recorded; PeakWorkingSet64=31416320. Receipt .artifacts/qualification/docling/receipt.json."
     },
     {
       "name": "git2",
@@ -613,7 +638,7 @@
       "context7_query": null,
       "knowledge_source": "Official documentation reference; qualify installed version before use",
       "offline_notes": [
-        "Local filesystem is the only configured backend in this build.",
+        "Local filesystem is the only configured backend in this build; workspace Cargo.toml enables the object_store `fs` feature.",
         "Hash-addressed objects are immutable and tenant-scoped; authorization checks source/workspace membership, not only hash possession.",
         "Retained history references protect bytes from premature cleanup."
       ],
@@ -644,12 +669,12 @@
       "context7_query": null,
       "knowledge_source": "Official documentation reference; qualify installed version before use",
       "offline_notes": [
-        "Provisionally selected runtime (engine iii/v0.24.4, iii-sdk 0.24.4, builtin file_based queue). Phase 0 iii qualification is incomplete; product-level RecordStore crash qualification is a construction gate.",
-        "Registry schemas are metadata; typed deserialization and application validation still run.",
-        "Test crash immediately after acknowledgment with the exact worker/adapter/config; inspect ELv2 terms."
+        "REJECTED WITH FALLBACK (commit 32a10ba receipt): engine+queue+worker SIGKILL before Ok, effect ledger, blob paths, startup/RSS and ELv2 from tag iii/v0.24.4 observed; dlq_messages browse empty so inspected DLQ could not be claimed. Selected runtime is Tokio+RecordStore.",
+        "Pinned artifact sha256: engine tar b1dd2714e1411bb2c59f7aa0f76edc2f2655857e1cbe692d3dce9deec745628b; worker tar f7b95e6103f6fedd5d9cf730c418f0ceb8a482c7534fabcd55bb96a5b345f514; ELv2 text aa94db7315d297192247f2254026cacbdb433a7742d841f27506a4d974c42c85.",
+        "Registry schemas are metadata; typed deserialization and application validation still run."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Partial: worker-process kill before Ok (redelivery + idempotent effect) and topic redrive observed on engine iii/v0.24.4 + builtin file_based queue + iii-sdk 0.24.4. Engine/queue kill-restart, observed DLQ inspection, blob references and startup cost not yet qualified. Receipt .artifacts/qualification/iii/receipt.json."
+      "qualification": "REJECTED_WITH_FALLBACK on commit 32a10ba: crash redelivery and effect-ledger passed; channel blob refs passed; DLQ browse empty (inspected=false). Fallback Tokio+RecordStore. Receipt .artifacts/qualification/iii/receipt.json."
     },
     {
       "name": "pdfjs",

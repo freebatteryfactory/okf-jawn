@@ -109,8 +109,8 @@ describe('Layout', () => {
               root: {
                 type: 'Stack',
                 props: {},
-                children: ['ghost'],
-                slots: { default: ['ghost'] },
+                children: [],
+                slots: ['ghost'],
               },
             },
           }}
@@ -118,6 +118,43 @@ describe('Layout', () => {
       </BindingsContext.Provider>,
     );
     expect(screen.getByRole('alert').textContent).toMatch(/structural validation|missing_child/i);
+  });
+
+  it('rejects on and watch because the catalog has no actions', () => {
+    const withOn = prepareSpec({
+      root: 'root',
+      elements: {
+        root: { type: 'Stack', props: {}, on: { click: 'noop' } },
+      },
+    });
+    expect(withOn.ok).toBe(false);
+    const withWatch = prepareSpec({
+      root: 'root',
+      elements: {
+        root: { type: 'Stack', props: {}, watch: ['state.x'] },
+      },
+    });
+    expect(withWatch.ok).toBe(false);
+  });
+
+  it('passes visible through unchanged for validateSpec', () => {
+    const visible = { $state: '/show' };
+    const result = prepareSpec({
+      root: 'root',
+      elements: {
+        root: {
+          type: 'Stack',
+          props: { title: 'Conditional' },
+          visible,
+        },
+      },
+    });
+    // Invalid visibility shape must survive normalization so structural validation can judge it.
+    if (result.ok) {
+      expect(result.spec.elements.root?.visible).toEqual(visible);
+    } else {
+      expect(result.error).toMatch(/structural|visibility|visible|validation/i);
+    }
   });
 });
 

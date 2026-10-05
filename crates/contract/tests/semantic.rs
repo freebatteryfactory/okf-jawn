@@ -2,8 +2,11 @@
 
 use okf_jawn_contract::identity::{At, Digest, Revision, WorkspacePath};
 use okf_jawn_contract::read::ReadItemRequest;
+use okf_jawn_contract::views::ViewDocument;
 use serde_json::json;
 use std::error::Error;
+use std::fs;
+use std::path::PathBuf;
 
 #[test]
 fn revision_does_not_accept_a_selector() -> Result<(), Box<dyn Error>> {
@@ -57,5 +60,27 @@ fn optional_cursor_is_omitted_or_null_without_changing_semantics() -> Result<(),
 fn content_identity_cannot_be_a_filename() -> Result<(), Box<dyn Error>> {
     assert!(Digest::try_from("FINAL.pdf".to_owned()).is_err());
     assert_eq!(Digest::try_from("b".repeat(64))?.as_str(), "b".repeat(64));
+    Ok(())
+}
+
+#[test]
+fn view_document_six_component_round_trips_with_deny_unknown_fields() -> Result<(), Box<dyn Error>> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/views/view-document-six-component.json");
+    let raw = fs::read_to_string(&path)?;
+    let parsed: ViewDocument = serde_json::from_str(&raw)?;
+    assert_eq!(parsed.schema_version, 1);
+    assert_eq!(parsed.grammar, okf_jawn_contract::views::RenderGrammar::JsonRender);
+    assert_eq!(parsed.spec["root"], "root");
+    assert_eq!(parsed.spec["elements"]["root"]["type"], "Stack");
+    let reserialized = serde_json::to_value(&parsed)?;
+    let again: ViewDocument = serde_json::from_value(reserialized.clone())?;
+    assert_eq!(serde_json::to_value(&again)?, reserialized);
+    let mut unknown = serde_json::from_str::<serde_json::Value>(&raw)?;
+    unknown
+        .as_object_mut()
+        .ok_or("fixture must be object")?
+        .insert("unexpected_field".to_owned(), json!(true));
+    assert!(serde_json::from_value::<ViewDocument>(unknown).is_err());
     Ok(())
 }

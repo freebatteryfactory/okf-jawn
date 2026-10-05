@@ -47,6 +47,26 @@
         }
       ]
     },
+    "ExtensionPolicy": {
+      "description": "How filename extensions are handled when applying a naming rule.",
+      "oneOf": [
+        {
+          "const": "preserve",
+          "description": "Leave the extension unchanged.",
+          "type": "string"
+        },
+        {
+          "const": "lowercase",
+          "description": "Lower-case the extension.",
+          "type": "string"
+        },
+        {
+          "const": "strip",
+          "description": "Drop the extension from the normalized note path (never from originals).",
+          "type": "string"
+        }
+      ]
+    },
     "LetterCase": {
       "description": "Supported case transformations.",
       "oneOf": [
@@ -86,6 +106,10 @@
       "additionalProperties": false,
       "description": "A typed rule scoped by glob and optional OKF type.",
       "properties": {
+        "alias_preservation": {
+          "description": "When true, preserve existing path aliases while renaming the primary path.",
+          "type": "boolean"
+        },
         "case": {
           "allOf": [
             {
@@ -121,6 +145,14 @@
             "null"
           ]
         },
+        "extension_policy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ExtensionPolicy"
+            }
+          ],
+          "description": "How the filename extension is transformed on normalized notes."
+        },
         "glob": {
           "description": "Match against the supplied relative path.",
           "type": "string"
@@ -136,6 +168,13 @@
         "strip_version_suffix": {
           "description": "Remove filename suffixes only from normalized notes, never originals.",
           "type": "boolean"
+        },
+        "suffix": {
+          "description": "Optional literal suffix applied to the normalized base name.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "type_name": {
           "description": "Optional OKF type selector.",
@@ -153,6 +192,8 @@
         "date_order",
         "date_format",
         "strip_version_suffix",
+        "extension_policy",
+        "alias_preservation",
         "collision"
       ],
       "type": "object"

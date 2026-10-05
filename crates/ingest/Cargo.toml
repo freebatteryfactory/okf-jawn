@@ -13,8 +13,9 @@ workspace = true
 okf-jawn-contract = { path = "../contract" }
 okf-jawn-core = { path = "../core" }
 
-# Resolve the complete intended integration graph without making code generation
-# link native conversion/storage libraries. The runtime implementations are not present yet.
+# Resolve the intended integration graph without making code generation link native
+# conversion libraries. Selected job runtime is in-process Tokio over durable RecordStore
+# (iii was REJECTED_WITH_FALLBACK; do not add iii-sdk as a product dependency).
 docling = { workspace = true, optional = true }
 okf-core = { workspace = true, optional = true }
 calamine = { workspace = true, optional = true }

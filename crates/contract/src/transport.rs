@@ -58,6 +58,16 @@ pub const TRANSPORTS: &[TransportOperation] = &[
         authenticated: true,
     },
     TransportOperation {
+        id: "serve_sandbox_representation",
+        method: "get",
+        path: "/sandbox/workspaces/{workspace_id}/items/{item_id}/revisions/{revision}",
+        description: "Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).",
+        request_media: None,
+        response_media: "text/html",
+        status: 200,
+        authenticated: false,
+    },
+    TransportOperation {
         id: "stream_events",
         method: "get",
         path: "/api/workspaces/{workspace_id}/events",

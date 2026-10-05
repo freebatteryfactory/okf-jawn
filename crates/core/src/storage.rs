@@ -13,7 +13,7 @@ use okf_jawn_contract::{
     identity::{At, Digest, ItemId, Revision, WorkspaceId, WorkspacePath},
     item::{ItemDocument, ItemSummary},
     proposal::Change,
-    workspace::Workspace,
+    workspace::{ArchiveWorkspaceRequest, UpdateWorkspaceRequest, Workspace},
 };
 use tokio::io::AsyncRead;
 
@@ -167,6 +167,24 @@ pub trait WorkspaceCatalog: Send + Sync {
         description: String,
         properties: BTreeMap<String, serde_json::Value>,
     ) -> PortFuture<'a, Workspace>;
+    /// Open an existing authorized workspace.
+    fn open<'a>(
+        &'a self,
+        principal: &'a Principal,
+        workspace: WorkspaceId,
+    ) -> PortFuture<'a, Workspace>;
+    /// Update workspace presentation metadata at a known revision.
+    fn update<'a>(
+        &'a self,
+        principal: &'a Principal,
+        request: UpdateWorkspaceRequest,
+    ) -> PortFuture<'a, MutationResult>;
+    /// Archive without deleting retained historical content.
+    fn archive<'a>(
+        &'a self,
+        principal: &'a Principal,
+        request: ArchiveWorkspaceRequest,
+    ) -> PortFuture<'a, MutationResult>;
     /// Resolve deployment storage scope only after access was checked.
     fn scope<'a>(
         &'a self,

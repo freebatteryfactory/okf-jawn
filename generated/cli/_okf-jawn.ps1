@@ -35,6 +35,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('export_workspace', 'export_workspace', [CompletionResultType]::ParameterValue, 'Build a portable export with resolvable referenced assets.')
             [CompletionResult]::new('export', 'export', [CompletionResultType]::ParameterValue, 'Build a portable export with resolvable referenced assets.')
             [CompletionResult]::new('backup_workspace', 'backup_workspace', [CompletionResultType]::ParameterValue, 'Back up content and durable application records.')
+            [CompletionResult]::new('restore_workspace', 'restore_workspace', [CompletionResultType]::ParameterValue, 'Restore content and durable application records from a retained backup artifact.')
             [CompletionResult]::new('list_items', 'list_items', [CompletionResultType]::ParameterValue, 'List a folder with one-line descriptions at one resolved revision.')
             [CompletionResult]::new('ls', 'ls', [CompletionResultType]::ParameterValue, 'List a folder with one-line descriptions at one resolved revision.')
             [CompletionResult]::new('get_item', 'get_item', [CompletionResultType]::ParameterValue, 'Read the editable Markdown and preserved properties of an item.')
@@ -168,6 +169,13 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;backup_workspace' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;restore_workspace' {
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
@@ -742,6 +750,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('archive_workspace', 'archive_workspace', [CompletionResultType]::ParameterValue, 'Archive without deleting historical content.')
             [CompletionResult]::new('export_workspace', 'export_workspace', [CompletionResultType]::ParameterValue, 'Build a portable export with resolvable referenced assets.')
             [CompletionResult]::new('backup_workspace', 'backup_workspace', [CompletionResultType]::ParameterValue, 'Back up content and durable application records.')
+            [CompletionResult]::new('restore_workspace', 'restore_workspace', [CompletionResultType]::ParameterValue, 'Restore content and durable application records from a retained backup artifact.')
             [CompletionResult]::new('list_items', 'list_items', [CompletionResultType]::ParameterValue, 'List a folder with one-line descriptions at one resolved revision.')
             [CompletionResult]::new('get_item', 'get_item', [CompletionResultType]::ParameterValue, 'Read the editable Markdown and preserved properties of an item.')
             [CompletionResult]::new('create_item', 'create_item', [CompletionResultType]::ParameterValue, 'Create authored content without modifying source bytes.')
@@ -822,6 +831,9 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;help;backup_workspace' {
+            break
+        }
+        'okf-jawn;help;restore_workspace' {
             break
         }
         'okf-jawn;help;list_items' {

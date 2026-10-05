@@ -15,7 +15,9 @@ okf-jawn/
 │   └── config.toml
 ├── .cursor/
 │   └── plans/
-│       └── dependency_qualification_pass_e1c8326b.plan.md
+│       ├── dependency_qualification_pass_e1c8326b.plan.md
+│       ├── phase_0_closure_fcef5bc8.plan.md
+│       └── phase_0_completion_797789a1.plan.md
 ├── .dockerignore
 ├── .editorconfig
 ├── .gitattributes
@@ -164,6 +166,8 @@ okf-jawn/
 │   │   ├── resolve_view.output.json
 │   │   ├── restore_items.input.json
 │   │   ├── restore_items.output.json
+│   │   ├── restore_workspace.input.json
+│   │   ├── restore_workspace.output.json
 │   │   ├── retry_job.input.json
 │   │   ├── retry_job.output.json
 │   │   ├── revoke_connector.input.json
@@ -231,12 +235,17 @@ okf-jawn/
 │   │   │   ├── application/
 │   │   │   │   └── mod.rs
 │   │   │   ├── conversion.rs
+│   │   │   ├── credentials.rs
 │   │   │   ├── dispatch.rs
+│   │   │   ├── events.rs
 │   │   │   ├── jobs.rs
 │   │   │   ├── lib.rs
 │   │   │   ├── ports.rs
+│   │   │   ├── proposals.rs
+│   │   │   ├── readiness.rs
 │   │   │   ├── search.rs
-│   │   │   └── storage.rs
+│   │   │   ├── storage.rs
+│   │   │   └── uploads.rs
 │   │   └── tests/
 │   │       └── authorization.rs
 │   ├── ingest/
@@ -332,6 +341,7 @@ okf-jawn/
 │       ├── okf-jawn-redigest_item.1
 │       ├── okf-jawn-resolve_view.1
 │       ├── okf-jawn-restore_items.1
+│       ├── okf-jawn-restore_workspace.1
 │       ├── okf-jawn-retry_job.1
 │       ├── okf-jawn-revoke_connector.1
 │       ├── okf-jawn-search_items.1
@@ -347,6 +357,22 @@ okf-jawn/
 ├── justfile
 ├── lefthook.yml
 ├── package.json
+├── qualification/
+│   ├── docling/
+│   │   ├── Cargo.toml
+│   │   ├── run.mjs
+│   │   └── src/
+│   │       └── main.rs
+│   ├── iii/
+│   │   ├── Cargo.toml
+│   │   ├── run.mjs
+│   │   └── src/
+│   │       └── main.rs
+│   └── mcp-apps/
+│       ├── Cargo.toml
+│       ├── run.mjs
+│       └── src/
+│           └── main.rs
 ├── rust-toolchain.toml
 ├── rustfmt.toml
 ├── samples/
@@ -369,9 +395,24 @@ okf-jawn/
 ├── tests/
 │   ├── fixtures/
 │   │   ├── documents/
+│   │   │   ├── SOURCES.json
+│   │   │   ├── born_digital_text.pdf
+│   │   │   ├── corpus/
+│   │   │   │   ├── powerpoint_sample.pptx
+│   │   │   │   ├── redp5110_sampled.pdf
+│   │   │   │   ├── word_sample.docx
+│   │   │   │   └── xlsx_01.xlsx
+│   │   │   ├── must_fail_corrupt.bin
+│   │   │   ├── sample_image.png
+│   │   │   ├── sample_sheet.xlsx
+│   │   │   ├── sample_with_image.docx
+│   │   │   ├── scanned_image_only.pdf
+│   │   │   └── table_heavy.pdf
 │   │   ├── expected/
 │   │   ├── okf/
 │   │   └── views/
+│   │       ├── six-component-spec.json
+│   │       └── view-document-six-component.json
 │   ├── foundation/
 │   │   ├── files.test.mjs
 │   │   ├── generation.test.mjs
@@ -447,6 +488,8 @@ okf-jawn/
 │   │   │       ├── Layout.tsx
 │   │   │       ├── PresentView.tsx
 │   │   │       └── catalog.ts
+│   │   ├── lib/
+│   │   │   └── wire.ts
 │   │   ├── main.tsx
 │   │   ├── mcp-apps/
 │   │   │   ├── AGENTS.md
@@ -457,9 +500,25 @@ okf-jawn/
 │   │   ├── styles.css
 │   │   └── webmcp/
 │   │       └── register.ts
+│   ├── test-results/
+│   │   └── .last-run.json
+│   ├── tests/
+│   │   ├── e2e/
+│   │   │   └── mcp-apps-static-bundle-smoke.spec.ts
+│   │   ├── fixtures/
+│   │   │   └── six-component-spec.json
+│   │   └── unit/
+│   │       ├── json-render-roundtrip.test.tsx
+│   │       ├── layout.test.tsx
+│   │       ├── mcp-apps-mime.test.ts
+│   │       ├── rules-form.test.tsx
+│   │       ├── setup.ts
+│   │       ├── view-document-roundtrip.test.tsx
+│   │       └── wire.test.ts
 │   ├── tsconfig.generated-strict.json
 │   ├── tsconfig.generated.json
 │   ├── tsconfig.json
+│   ├── tsconfig.tests.json
 │   ├── tsconfig.tooling.json
 │   ├── vite.config.ts
 │   └── vitest.config.ts

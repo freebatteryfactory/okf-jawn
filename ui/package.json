@@ -10,7 +10,7 @@
     "typecheck": "tsc -b",
     "typecheck:generated-strict": "tsc -p tsconfig.generated-strict.json",
     "check": "biome check . && tsc -b",
-    "test": "node ./node_modules/vitest/vitest.mjs run",
+    "test": "vitest run",
     "test:e2e": "playwright test",
     "lint": "biome check ."
   },
@@ -78,6 +78,7 @@
     "@typescript/native": "npm:typescript@7.0.2",
     "@vitejs/plugin-react": "6.1.1",
     "babel-plugin-react-compiler": "1.0.0",
+    "happy-dom": "20.8.4",
     "jsdom": "30.1.1",
     "shadcn": "4.21.1",
     "swagger-ui-dist": "5.33.1",

@@ -8,18 +8,21 @@ const validator = customizeValidator<NamingRules>();
 
 export interface RulesFormProps {
   schema: RJSFSchema;
-  value: NamingRules;
+  /** Valid NamingRules or candidate form data for AJV to reject. */
+  value: NamingRules | Record<string, unknown>;
   onPreview: (value: NamingRules) => void;
 }
 
 export function RulesForm({ schema, value, onPreview }: RulesFormProps) {
   return (
-    <Form<NamingRules>
+    <Form
       schema={schema}
       formData={value}
+      liveValidate
+      showErrorList="top"
       validator={validator}
       onSubmit={(event) => {
-        if (event.formData) onPreview(event.formData);
+        if (event.formData) onPreview(event.formData as NamingRules);
       }}
     >
       <button type="submit">Preview naming changes</button>

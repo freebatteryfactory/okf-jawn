@@ -11,7 +11,7 @@ const pattern=/\((\w+),\s*\$crate::([\w:]+),\s*\$crate::([\w:]+),\s*"([^"]+)",\s
 const operations=[...declarations.matchAll(pattern)].map(m=>({id:m[1],request:m[2],response:m[3],path:m[4],label:m[5],alias:m[6],visibility:m[7],permission:m[8],ui:m[9]}));
 
 test('complete operation surface has unique canonical identifiers and paths',()=>{
- assert.equal(operations.length,65);assert.equal(new Set(operations.map(o=>o.id)).size,operations.length);
+ assert.equal(operations.length,66);assert.equal(new Set(operations.map(o=>o.id)).size,operations.length);
  assert.equal(new Set(operations.map(o=>o.path)).size,operations.length);
  for(const o of operations)assert.match(o.id,/^[a-z]+(?:_[a-z]+)*$/);
 });
@@ -31,7 +31,7 @@ test('agent exposure cannot include human approval or verification',()=>{
  assert.equal(operations.find(o=>o.id==='accept_proposal').alias,'');
 });
 test('saved views, human naming UX, and full reading surfaces remain declared',()=>{
- for(const id of ['read_item','preview_names','apply_names','get_graph','get_view','present_view','resolve_view','export_view','create_review','accept_proposal','backup_workspace','get_object'])assert.ok(operations.some(o=>o.id===id),id);
+ for(const id of ['read_item','preview_names','apply_names','get_graph','get_view','present_view','resolve_view','export_view','create_review','accept_proposal','backup_workspace','restore_workspace','get_object'])assert.ok(operations.some(o=>o.id===id),id);
 });
 test('connector credentials are owner-administered and never agent tools',()=>{
  for(const id of ['create_connector','list_connectors','revoke_connector']){

@@ -1,0 +1,23 @@
+{
+  "markdown": "# Qualification source\n\nContract-valid ReadItemResponse fixture for the MCP Apps harness.",
+  "media": [],
+  "outline": [
+    {
+      "kind": "heading",
+      "label": "Qualification source",
+      "level": 1,
+      "selection": { "kind": "all" }
+    }
+  ],
+  "receipt_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+  "source": {
+    "item_id": "11111111-2222-4333-8444-555555555555",
+    "path": "fixtures/qualification-source.md",
+    "revision": "0123456789abcdef0123456789abcdef01234567",
+    "selection": { "kind": "all" },
+    "workspace_id": "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
+  },
+  "truncated": false,
+  "view": "text",
+  "warnings": []
+}

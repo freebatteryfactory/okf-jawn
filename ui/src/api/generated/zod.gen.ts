@@ -163,6 +163,15 @@ export const zApiError = z.object({
 });
 
 /**
+ * How filename extensions are handled when applying a naming rule.
+ */
+export const zExtensionPolicy = z.enum([
+    'preserve',
+    'lowercase',
+    'strip'
+]);
+
+/**
  * A changed file with before and after locators.
  */
 export const zFileChange = z.object({
@@ -295,15 +304,18 @@ export const zListConnectorsRequest = z.object({
  * A typed rule scoped by glob and optional OKF type.
  */
 export const zNamingRule = z.object({
+    alias_preservation: z.boolean(),
     case: zLetterCase,
     collision: zCollisionPolicy,
     date_format: z.string(),
     date_order: zDateOrder,
     destination: z.string().nullish(),
+    extension_policy: zExtensionPolicy,
     glob: z.string(),
     prefix: z.string(),
     separator: z.string(),
     strip_version_suffix: z.boolean(),
+    suffix: z.string().nullish(),
     type_name: z.string().nullish()
 });
 
@@ -380,14 +392,6 @@ export const zReadView = z.enum([
  * Read configured dependency availability.
  */
 export const zReadinessRequest = z.record(z.string(), z.never());
-
-/**
- * Readiness summary, distinct from acceptance results.
- */
-export const zReadinessResponse = z.object({
-    dependencies: z.array(zDependencyStatus),
-    ready: z.boolean()
-});
 
 /**
  * Identity of a durable application operation record.
@@ -502,6 +506,26 @@ export const zLogResponse = z.object({
  */
 export const zRevokeConnectorRequest = z.object({
     connector_id: zConnectorId
+});
+
+/**
+ * Configured separate origin used to serve sandboxed HTML and hostile artifacts.
+ *
+ * Transport note: the server lane binds a sandbox-origin route that never attaches
+ * ambient session cookies or privileged APIs; the workspace-ui iframe loads this
+ * origin under sandbox constraints (SPEC sections 7 and 11).
+ */
+export const zSandboxOriginConfig = z.object({
+    origin: z.string()
+});
+
+/**
+ * Readiness summary, distinct from acceptance results.
+ */
+export const zReadinessResponse = z.object({
+    dependencies: z.array(zDependencyStatus),
+    ready: z.boolean(),
+    sandbox_origin: zSandboxOriginConfig.nullish()
 });
 
 /**
@@ -1090,6 +1114,16 @@ export const zRestoreRequest = z.object({
 });
 
 /**
+ * Restore a workspace from a retained backup artifact (full restore of content and app records).
+ */
+export const zRestoreWorkspaceRequest = z.object({
+    artifact_id: zArtifactId,
+    idempotency_key: z.string(),
+    sha256: zDigest.nullish(),
+    workspace_id: zWorkspaceId
+});
+
+/**
  * Retry a recoverable job with the same durable work identity.
  */
 export const zRetryJobRequest = z.object({
@@ -1267,6 +1301,15 @@ export const zCreateItemRequest = z.object({
 });
 
 /**
+ * One path observed as a duplicate during rename preview.
+ */
+export const zDuplicateObservation = z.object({
+    item_ids: z.array(zItemId),
+    message: z.string(),
+    path: zWorkspacePath
+});
+
+/**
  * A navigable item description bound to a resolved workspace revision.
  */
 export const zItemSummary = z.object({
@@ -1373,6 +1416,7 @@ export const zRenameEntry = z.object({
  */
 export const zRenamePlan = z.object({
     base_revision: zRevision,
+    duplicate_observations: z.array(zDuplicateObservation),
     entries: z.array(zRenameEntry),
     rules_digest: zDigest,
     warnings: z.array(zWarning)
@@ -2025,6 +2069,13 @@ export const zOpenWorkspaceBody = zOpenWorkspaceRequest;
  */
 export const zOpenWorkspaceResponse = zWorkspace;
 
+export const zRestoreWorkspaceBody = zRestoreWorkspaceRequest;
+
+/**
+ * Successful operation result
+ */
+export const zRestoreWorkspaceResponse = zJob;
+
 export const zUpdateWorkspaceBody = zUpdateWorkspaceRequest;
 
 /**
@@ -2086,3 +2137,14 @@ export const zLivenessResponse = zHealthResponse;
 export const zMcpEventsResponse = z.string();
 
 export const zMcpRequestBody = z.unknown();
+
+export const zServeSandboxRepresentationPath = z.object({
+    workspace_id: z.string(),
+    item_id: z.string(),
+    revision: z.string()
+});
+
+/**
+ * Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).
+ */
+export const zServeSandboxRepresentationResponse = z.string();

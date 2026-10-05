@@ -113,11 +113,26 @@ receipt.orchestrator = {
   assets_manifest: assetsPath,
   stdout_sha256: createHash('sha256').update(stdout).digest('hex'),
 };
+if (Array.isArray(receipt.receipts)) {
+  for (const fixture of receipt.receipts) {
+    fixture.peak_rss_bytes = peakWorkingSet;
+    fixture.peak_rss_note = sampleNote;
+  }
+  if (receipt.timeout_case && typeof receipt.timeout_case === 'object') {
+    receipt.timeout_case.peak_rss_bytes = peakWorkingSet;
+    receipt.timeout_case.peak_rss_note = sampleNote;
+  }
+}
 await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
 
 if (exitCode !== 0) {
   process.exitCode = exitCode || 1;
   throw new Error(`okf-qualify-docling exited ${exitCode}`);
+}
+
+if (peakWorkingSet == null) {
+  process.exitCode = 1;
+  throw new Error(`Docling peak RSS ${sampleNote}; gate incomplete without a measured PeakWorkingSet64`);
 }
 
 const failed = Object.values(receipt.summary).some((value) => String(value).startsWith('FAIL'));

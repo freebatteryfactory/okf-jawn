@@ -61,7 +61,7 @@ The authored source of operation meaning is `crates/contract/src/operations.rs`,
 | `ui/dist-apps/*.html` | Actual frontend bundling of shared feature components |
 | `ui/dist/docs/*` | Locally copied swagger-ui-dist assets and the canonical `api/openapi.yaml` |
 
-There are 65 typed JSON application commands and 14 distinct transport declarations. Eleven tools are model-facing; the scoped binary-read tool is app-only. Human approval, verification and connector management are never model tools. The raw transport declarations are documented schema obligations, not bound handlers yet.
+There are 66 typed JSON application commands and 15 distinct transport declarations. Eleven tools are model-facing; the scoped binary-read tool is app-only. Human approval, verification and connector management are never model tools. The raw transport declarations are documented schema obligations, not bound handlers yet.
 
 A candidate `present` operation selects or composes approved views. Source components receive source bindings, not model-authored replacement evidence. The frontend includes source excerpts, Changes, Timeline, naming forms, a constrained composition catalog, and chart/table rendering source. The rest of the full UI is assigned in `SPEC.md`, not replaced by demo data.
 
@@ -97,6 +97,6 @@ The intended release is the complete product in `SPEC.md`, not a succession of c
 
 `bun scripts/dev.mjs qualify mcp-wire` checks a supplied running MCP endpoint. It does not certify that a host rendered the iframe. `qualify application` exercises a disposable test deployment; it refuses to run without explicit credentials and a test-environment opt-in. No secret or external endpoint is supplied by default.
 
-Jobs run on iii (engine v0.24.4, iii-sdk 0.24.4, builtin `file_based` queue), provisionally selected while its Phase 0 qualification is completed; RecordStore remains the durable source of job truth. Engine and queue artifacts are pinned by hash outside git; no mutable image tag, fake worker lockfile, or parallel Tokio executor is included. The product is not crash-durable until the construction restart check passes against the real RecordStore and import path.
+Jobs run on an in-process Tokio worker over durable RecordStore after iii Phase 0 qualification ended REJECTED WITH FALLBACK (DLQ message browse empty despite crash redelivery and effect-ledger checks; receipt `.artifacts/qualification/iii/receipt.json`). RecordStore remains the durable source of job truth. iii engine/worker artifacts stay pinned by hash for that qualification evidence only; no mutable image tag or fake worker lockfile is included. The product is not crash-durable until the construction restart check passes against the real RecordStore and import path.
 
 Our source is dual licensed under MIT OR Apache-2.0. Dependencies retain their own licenses. This repository is not a license/security/compliance certification.

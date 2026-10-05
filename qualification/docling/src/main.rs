@@ -162,10 +162,82 @@ fn convert_fixture(
 ) -> Result<FixtureReceipt, String> {
     let sha_before = sha256_file(path)?;
     let started = Instant::now();
-    let source = SourceDocument::from_file(path).map_err(|error| error.to_string())?;
-    let result = converter
-        .convert(source)
-        .map_err(|error| error.to_string())?;
+    let source = match SourceDocument::from_file(path) {
+        Ok(source) => source,
+        Err(error) => {
+            if matches!(expected, Expected::ExplicitFailure) {
+                let elapsed_ms = started.elapsed().as_millis();
+                let sha_after = sha256_file(path)?;
+                return Ok(FixtureReceipt {
+                    converter_version: converter_version(),
+                    elapsed_ms,
+                    errors: vec![ErrorReceipt {
+                        component_type: "source".to_owned(),
+                        error_message: error.to_string(),
+                        module_name: "source".to_owned(),
+                    }],
+                    expected: expected_label(expected).to_owned(),
+                    fixture: path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    markdown_chars: 0,
+                    markdown_nonempty: false,
+                    must_contain_ok: None,
+                    original_unchanged: sha_before == sha_after,
+                    outcome: "PASS_explicit_failure".to_owned(),
+                    page_image_count: 0,
+                    page_provenance: Vec::new(),
+                    path: path.to_path_buf(),
+                    peak_rss_bytes: None,
+                    role: role.to_owned(),
+                    settings: settings.clone(),
+                    sha256_after: sha_after,
+                    sha256_before: sha_before,
+                    status: "Failure".to_owned(),
+                });
+            }
+            return Err(error.to_string());
+        }
+    };
+    let result = match converter.convert(source) {
+        Ok(result) => result,
+        Err(error) => {
+            if matches!(expected, Expected::ExplicitFailure) {
+                let elapsed_ms = started.elapsed().as_millis();
+                let sha_after = sha256_file(path)?;
+                return Ok(FixtureReceipt {
+                    converter_version: converter_version(),
+                    elapsed_ms,
+                    errors: vec![ErrorReceipt {
+                        component_type: "pipeline".to_owned(),
+                        error_message: error.to_string(),
+                        module_name: "pipeline".to_owned(),
+                    }],
+                    expected: expected_label(expected).to_owned(),
+                    fixture: path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    markdown_chars: 0,
+                    markdown_nonempty: false,
+                    must_contain_ok: None,
+                    original_unchanged: sha_before == sha_after,
+                    outcome: "PASS_explicit_failure".to_owned(),
+                    page_image_count: 0,
+                    page_provenance: Vec::new(),
+                    path: path.to_path_buf(),
+                    peak_rss_bytes: None,
+                    role: role.to_owned(),
+                    settings: settings.clone(),
+                    sha256_after: sha_after,
+                    sha256_before: sha_before,
+                    status: "Failure".to_owned(),
+                });
+            }
+            return Err(error.to_string());
+        }
+    };
     let elapsed_ms = started.elapsed().as_millis();
     let sha_after = sha256_file(path)?;
     let markdown = result.document.export_to_markdown();
@@ -257,8 +329,7 @@ fn run() -> Result<(), String> {
         .artifacts_dir(artifacts.path().display().to_string());
 
     // must_contain needles are stable tokens from the MIT fixtures / corpus notes.
-    // Corpus fixtures added in the docling-rerun step keep the same needles where possible.
-    let fixtures: [(&str, &str, Expected); 6] = [
+    let fixtures: [(&str, &str, Expected); 10] = [
         (
             "sample_with_image.docx",
             "docx_with_images",
@@ -297,6 +368,34 @@ fn run() -> Result<(), String> {
             "image",
             Expected::SuccessNonEmpty { must_contain: None },
         ),
+        (
+            "corpus/word_sample.docx",
+            "corpus_docx",
+            Expected::SuccessNonEmpty {
+                must_contain: Some("Summer"),
+            },
+        ),
+        (
+            "corpus/xlsx_01.xlsx",
+            "corpus_xlsx",
+            Expected::SuccessNonEmpty {
+                must_contain: Some("col-1"),
+            },
+        ),
+        (
+            "corpus/powerpoint_sample.pptx",
+            "corpus_pptx",
+            Expected::SuccessNonEmpty {
+                must_contain: Some("Test Table"),
+            },
+        ),
+        (
+            "corpus/redp5110_sampled.pdf",
+            "corpus_pdf",
+            Expected::SuccessNonEmpty {
+                must_contain: Some("IBM"),
+            },
+        ),
     ];
 
     let mut receipts = Vec::new();
@@ -311,20 +410,21 @@ fn run() -> Result<(), String> {
         receipts.push(receipt);
     }
 
-    // Optional must-fail fixture (added in docling-rerun). Absent is OK until that step.
+    // Must-fail fixture: non-document bytes must surface explicit Failure.
     let fail_name = "must_fail_corrupt.bin";
     let fail_path = PathBuf::from(&fixtures_dir).join(fail_name);
-    if fail_path.is_file() {
-        let receipt = convert_fixture(
-            &converter,
-            &fail_path,
-            "must_fail",
-            Expected::ExplicitFailure,
-            &settings,
-        )?;
-        summary.insert(fail_name.to_owned(), receipt.outcome.clone());
-        receipts.push(receipt);
+    if !fail_path.is_file() {
+        return Err(format!("missing must-fail fixture {}", fail_path.display()));
     }
+    let receipt = convert_fixture(
+        &converter,
+        &fail_path,
+        "must_fail",
+        Expected::ExplicitFailure,
+        &settings,
+    )?;
+    summary.insert(fail_name.to_owned(), receipt.outcome.clone());
+    receipts.push(receipt);
 
     let timeout_converter = DocumentConverter::new()
         .ocr_lang("en")

@@ -827,6 +827,24 @@ export type DownloadArtifact = {
 };
 
 /**
+ * One path observed as a duplicate during rename preview.
+ */
+export type DuplicateObservation = {
+    /**
+     * Item identities that collide on that path.
+     */
+    item_ids: Array<ItemId>;
+    /**
+     * Human-readable observation without mutating content.
+     */
+    message: string;
+    /**
+     * Path observed more than once.
+     */
+    path: WorkspacePath;
+};
+
+/**
  * An empty request object.
  */
 export type Empty = {
@@ -902,6 +920,11 @@ export type ExportWorkspaceRequest = {
      */
     workspace_id: WorkspaceId;
 };
+
+/**
+ * How filename extensions are handled when applying a naming rule.
+ */
+export type ExtensionPolicy = 'preserve' | 'lowercase' | 'strip';
 
 /**
  * A changed file with before and after locators.
@@ -1767,6 +1790,10 @@ export type MutationResult = {
  */
 export type NamingRule = {
     /**
+     * When true, preserve existing path aliases while renaming the primary path.
+     */
+    alias_preservation: boolean;
+    /**
      * Case transformation.
      */
     case: LetterCase;
@@ -1787,6 +1814,10 @@ export type NamingRule = {
      */
     destination?: string | null;
     /**
+     * How the filename extension is transformed on normalized notes.
+     */
+    extension_policy: ExtensionPolicy;
+    /**
      * Match against the supplied relative path.
      */
     glob: string;
@@ -1802,6 +1833,10 @@ export type NamingRule = {
      * Remove filename suffixes only from normalized notes, never originals.
      */
     strip_version_suffix: boolean;
+    /**
+     * Optional literal suffix applied to the normalized base name.
+     */
+    suffix?: string | null;
     /**
      * Optional OKF type selector.
      */
@@ -2165,6 +2200,7 @@ export type ReadinessResponse = {
      * All configured mandatory dependencies are ready.
      */
     ready: boolean;
+    sandbox_origin?: SandboxOriginConfig | null;
 };
 
 /**
@@ -2287,6 +2323,10 @@ export type RenamePlan = {
      */
     base_revision: Revision;
     /**
+     * Duplicate path observations recorded during preview.
+     */
+    duplicate_observations: Array<DuplicateObservation>;
+    /**
      * Proposed changes.
      */
     entries: Array<RenameEntry>;
@@ -2373,6 +2413,25 @@ export type RestoreRequest = {
 };
 
 /**
+ * Restore a workspace from a retained backup artifact (full restore of content and app records).
+ */
+export type RestoreWorkspaceRequest = {
+    /**
+     * Retained backup artifact to restore from.
+     */
+    artifact_id: ArtifactId;
+    /**
+     * Retry identity for the restore job.
+     */
+    idempotency_key: string;
+    sha256?: Digest | null;
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
+};
+
+/**
  * Retry a recoverable job with the same durable work identity.
  */
 export type RetryJobRequest = {
@@ -2439,6 +2498,20 @@ export type RevokeConnectorRequest = {
      * Connector to revoke.
      */
     connector_id: ConnectorId;
+};
+
+/**
+ * Configured separate origin used to serve sandboxed HTML and hostile artifacts.
+ *
+ * Transport note: the server lane binds a sandbox-origin route that never attaches
+ * ambient session cookies or privileged APIs; the workspace-ui iframe loads this
+ * origin under sandbox constraints (SPEC sections 7 and 11).
+ */
+export type SandboxOriginConfig = {
+    /**
+     * Absolute origin (scheme + host + optional port), never the application origin.
+     */
+    origin: string;
 };
 
 /**
@@ -6642,6 +6715,63 @@ export type OpenWorkspaceResponses = {
 
 export type OpenWorkspaceResponse = OpenWorkspaceResponses[keyof OpenWorkspaceResponses];
 
+export type RestoreWorkspaceData = {
+    body: RestoreWorkspaceRequest;
+    path?: never;
+    query?: never;
+    url: '/api/workspaces/restore-workspace';
+};
+
+export type RestoreWorkspaceErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type RestoreWorkspaceError = RestoreWorkspaceErrors[keyof RestoreWorkspaceErrors];
+
+export type RestoreWorkspaceResponses = {
+    /**
+     * Successful operation result
+     */
+    202: Job;
+};
+
+export type RestoreWorkspaceResponse = RestoreWorkspaceResponses[keyof RestoreWorkspaceResponses];
+
 export type UpdateWorkspaceData = {
     body: UpdateWorkspaceRequest;
     path?: never;
@@ -6870,3 +7000,23 @@ export type McpRequestResponses = {
      */
     200: unknown;
 };
+
+export type ServeSandboxRepresentationData = {
+    body?: never;
+    path: {
+        workspace_id: string;
+        item_id: string;
+        revision: string;
+    };
+    query?: never;
+    url: '/sandbox/workspaces/{workspace_id}/items/{item_id}/revisions/{revision}';
+};
+
+export type ServeSandboxRepresentationResponses = {
+    /**
+     * Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).
+     */
+    200: string;
+};
+
+export type ServeSandboxRepresentationResponse = ServeSandboxRepresentationResponses[keyof ServeSandboxRepresentationResponses];

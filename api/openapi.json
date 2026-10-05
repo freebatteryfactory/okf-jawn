@@ -1252,6 +1252,33 @@
         ],
         "type": "object"
       },
+      "DuplicateObservation": {
+        "additionalProperties": false,
+        "description": "One path observed as a duplicate during rename preview.",
+        "properties": {
+          "item_ids": {
+            "description": "Item identities that collide on that path.",
+            "items": {
+              "$ref": "#/components/schemas/ItemId"
+            },
+            "type": "array"
+          },
+          "message": {
+            "description": "Human-readable observation without mutating content.",
+            "type": "string"
+          },
+          "path": {
+            "$ref": "#/components/schemas/WorkspacePath",
+            "description": "Path observed more than once."
+          }
+        },
+        "required": [
+          "path",
+          "item_ids",
+          "message"
+        ],
+        "type": "object"
+      },
       "Empty": {
         "additionalProperties": false,
         "description": "An empty request object.",
@@ -1387,6 +1414,15 @@
           "idempotency_key"
         ],
         "type": "object"
+      },
+      "ExtensionPolicy": {
+        "description": "How filename extensions are handled when applying a naming rule.",
+        "enum": [
+          "preserve",
+          "lowercase",
+          "strip"
+        ],
+        "type": "string"
       },
       "FileChange": {
         "additionalProperties": false,
@@ -2718,6 +2754,10 @@
         "additionalProperties": false,
         "description": "A typed rule scoped by glob and optional OKF type.",
         "properties": {
+          "alias_preservation": {
+            "description": "When true, preserve existing path aliases while renaming the primary path.",
+            "type": "boolean"
+          },
           "case": {
             "$ref": "#/components/schemas/LetterCase",
             "description": "Case transformation."
@@ -2741,6 +2781,10 @@
               "null"
             ]
           },
+          "extension_policy": {
+            "$ref": "#/components/schemas/ExtensionPolicy",
+            "description": "How the filename extension is transformed on normalized notes."
+          },
           "glob": {
             "description": "Match against the supplied relative path.",
             "type": "string"
@@ -2756,6 +2800,13 @@
           "strip_version_suffix": {
             "description": "Remove filename suffixes only from normalized notes, never originals.",
             "type": "boolean"
+          },
+          "suffix": {
+            "description": "Optional literal suffix applied to the normalized base name.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "type_name": {
             "description": "Optional OKF type selector.",
@@ -2773,6 +2824,8 @@
           "date_order",
           "date_format",
           "strip_version_suffix",
+          "extension_policy",
+          "alias_preservation",
           "collision"
         ],
         "type": "object"
@@ -3309,6 +3362,17 @@
           "ready": {
             "description": "All configured mandatory dependencies are ready.",
             "type": "boolean"
+          },
+          "sandbox_origin": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SandboxOriginConfig",
+                "description": "Configured sandboxed HTML/artifact origin when isolation is enabled."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -3478,6 +3542,13 @@
             "$ref": "#/components/schemas/Revision",
             "description": "Workspace revision inspected."
           },
+          "duplicate_observations": {
+            "description": "Duplicate path observations recorded during preview.",
+            "items": {
+              "$ref": "#/components/schemas/DuplicateObservation"
+            },
+            "type": "array"
+          },
           "entries": {
             "description": "Proposed changes.",
             "items": {
@@ -3501,6 +3572,7 @@
           "base_revision",
           "rules_digest",
           "entries",
+          "duplicate_observations",
           "warnings"
         ],
         "type": "object"
@@ -3620,6 +3692,41 @@
         ],
         "type": "object"
       },
+      "RestoreWorkspaceRequest": {
+        "additionalProperties": false,
+        "description": "Restore a workspace from a retained backup artifact (full restore of content and app records).",
+        "properties": {
+          "artifact_id": {
+            "$ref": "#/components/schemas/ArtifactId",
+            "description": "Retained backup artifact to restore from."
+          },
+          "idempotency_key": {
+            "description": "Retry identity for the restore job.",
+            "type": "string"
+          },
+          "sha256": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Digest",
+                "description": "Optional integrity check against the artifact digest before restore begins."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "artifact_id",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
       "RetryJobRequest": {
         "additionalProperties": false,
         "description": "Retry a recoverable job with the same durable work identity.",
@@ -3709,6 +3816,20 @@
         },
         "required": [
           "connector_id"
+        ],
+        "type": "object"
+      },
+      "SandboxOriginConfig": {
+        "additionalProperties": false,
+        "description": "Configured separate origin used to serve sandboxed HTML and hostile artifacts.\n\nTransport note: the server lane binds a sandbox-origin route that never attaches\nambient session cookies or privileged APIs; the workspace-ui iframe loads this\norigin under sandbox constraints (SPEC sections 7 and 11).",
+        "properties": {
+          "origin": {
+            "description": "Absolute origin (scheme + host + optional port), never the application origin.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "origin"
         ],
         "type": "object"
       },
@@ -13308,6 +13429,142 @@
         "x-ui-resource": null
       }
     },
+    "/api/workspaces/restore-workspace": {
+      "post": {
+        "description": "Restore content and durable application records from a retained backup artifact.",
+        "operationId": "restore_workspace",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Restore",
+        "tags": [
+          "workspaces"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-cli-alias": null,
+        "x-mcp-tool": false,
+        "x-operator-label": "Restore",
+        "x-permission": "admin",
+        "x-tool-annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
     "/api/workspaces/update-workspace": {
       "post": {
         "description": "Update workspace metadata at the supplied base revision.",
@@ -13826,6 +14083,57 @@
           }
         },
         "summary": "mcp_request",
+        "tags": [
+          "transport"
+        ],
+        "x-agent-tool": false,
+        "x-transport-binding": true
+      }
+    },
+    "/sandbox/workspaces/{workspace_id}/items/{item_id}/revisions/{revision}": {
+      "get": {
+        "description": "Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).",
+        "operationId": "serve_sandbox_representation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11)."
+          }
+        },
+        "security": [],
+        "summary": "serve_sandbox_representation",
         "tags": [
           "transport"
         ],

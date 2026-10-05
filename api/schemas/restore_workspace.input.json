@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "ArtifactId": {
+      "description": "Identity of a retained export or backup artifact.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Restore a workspace from a retained backup artifact (full restore of content and app records).",
+  "properties": {
+    "artifact_id": {
+      "$ref": "#/$defs/ArtifactId",
+      "description": "Retained backup artifact to restore from."
+    },
+    "idempotency_key": {
+      "description": "Retry identity for the restore job.",
+      "type": "string"
+    },
+    "sha256": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Digest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional integrity check against the artifact digest before restore begins."
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/WorkspaceId",
+      "description": "Workspace whose permissions and storage scope apply."
+    }
+  },
+  "required": [
+    "workspace_id",
+    "artifact_id",
+    "idempotency_key"
+  ],
+  "title": "RestoreWorkspaceRequest",
+  "type": "object"
+}

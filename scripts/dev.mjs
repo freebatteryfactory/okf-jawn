@@ -42,11 +42,6 @@ async function lock() {
 }
 
 async function uiScript(name) {
-  // Vitest + jsdom must run under Node on Windows; Bun's --bun runtime breaks jsdom EventTarget.
-  if (name === 'test') {
-    await run(bun(), ['run', name], { cwd: ui });
-    return;
-  }
   await run(bun(), ['--bun', 'run', name], { cwd: ui });
 }
 
@@ -104,6 +99,8 @@ async function audit() {
   // move past braces 3.0.3, or braces publishes a patched release.
   const bracesException = 'GHSA-vfj7-8cjw-p6xm';
   await run('cargo', ['audit'], { cwd: root });
+  // deny.toml is the cargo-deny policy; require the tool on PATH (CI installs it).
+  await run('cargo', ['deny', 'check'], { cwd: root });
   await run(bun(), ['audit', '--prod'], { cwd: root });
   await run(bun(), ['audit', '--audit-level=high', '--ignore', bracesException], { cwd: root });
   // Full audit is informational for lower-severity tooling; never fail the task on it alone.

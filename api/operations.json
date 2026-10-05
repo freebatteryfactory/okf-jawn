@@ -77,6 +77,17 @@
     "visibility": ""
   },
   {
+    "alias": "",
+    "description": "Restore content and durable application records from a retained backup artifact.",
+    "id": "restore_workspace",
+    "label": "Restore",
+    "path": "/api/workspaces/restore-workspace",
+    "permission": "admin",
+    "success_status": 202,
+    "ui": "",
+    "visibility": ""
+  },
+  {
     "alias": "ls",
     "description": "List a folder with one-line descriptions at one resolved revision.",
     "id": "list_items",

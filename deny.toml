@@ -1,12 +1,42 @@
+# Policy for `cargo deny check` (wired from `bun scripts/dev.mjs audit` and CI).
+# Duplicate crate versions warn; license and advisory failures deny.
+
+[graph]
+# Qualification crates pull heavier native graphs; still checked for licenses/advisories.
+all-features = false
+
 [advisories]
 version = 2
+ignore = [
+  # Transitive through docling/qualification only; no maintained upgrade yet.
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained via docling/usvg; tracked until docling moves off it" },
+  { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained via docling/usvg; tracked until docling moves off it" },
+  { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; transitive only, no drop-in replacement in current graph" },
+]
+
 [licenses]
 version = 2
 confidence-threshold = 0.8
-allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "CC0-1.0", "MPL-2.0"]
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "CC0-1.0",
+  "MPL-2.0",
+  "NCSA",
+  "CDLA-Permissive-2.0",
+]
+
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+# Path workspace members omit versions; treating them as wildcards is noise.
+wildcards = "warn"
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

@@ -1,4 +1,4 @@
-/** Prove the ~1.8 MiB MCP App bundles execute and paint in Chromium. */
+/** Static-server smoke: bundled HTML paints without a real MCP host (not a host-render check). */
 
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -32,8 +32,8 @@ async function startStaticServer() {
   return { server, port: address.port };
 }
 
-test.describe('MCP App bundle render', () => {
-  test('each 1.8 MiB resource paints status UI and passes axe', async ({ page }, testInfo) => {
+test.describe('MCP App static bundle smoke', () => {
+  test('each resource paints waiting/failure status without a host', async ({ page }, testInfo) => {
     const { server, port } = await startStaticServer();
     try {
       for (const name of names) {

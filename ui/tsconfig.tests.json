@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "types": ["vitest/globals"],
+    "rootDir": ".",
+    "outDir": "./.tsbuild/tests",
+    "tsBuildInfoFile": "./.tsbuild/tests.tsbuildinfo"
+  },
+  "include": ["tests/**/*.ts", "tests/**/*.tsx"],
+  "exclude": ["tests/e2e/**"],
+  "references": [{ "path": "./tsconfig.json" }, { "path": "./tsconfig.generated.json" }]
+}

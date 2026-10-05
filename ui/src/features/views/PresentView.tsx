@@ -1,13 +1,12 @@
 /** Resolve a saved presentation through host tools and preserve exact source bindings. */
 import { useEffect, useState } from 'react';
-import type { TopLevelSpec } from 'vega-lite';
+import { compile, type TopLevelSpec } from 'vega-lite';
 import { z } from 'zod';
 import {
   zGetObjectResponse,
   type zPresentResponse,
   zReadItemResponse,
 } from '../../api/generated/zod.gen';
-import { omitUndefined } from '../../lib/wire';
 import type { ResolvedPresentation } from './Bindings';
 import { BindingsContext } from './Bindings';
 import { Chart } from './Chart';
@@ -15,12 +14,23 @@ import { Layout } from './Layout';
 
 export interface PresentViewProps {
   response: z.infer<typeof zPresentResponse>;
+  /** Host tool call; the Apps bridge applies omitUndefined once at the wire boundary. */
   callTool: (name: string, input: Record<string, unknown>) => Promise<unknown>;
 }
 const rowsSchema = z
   .array(z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])))
   .max(100000);
 const toolResult = z.object({ structuredContent: z.unknown() });
+
+/** Runtime-validate a Vega-Lite grammar value (SPEC §10); never cast untrusted specs. */
+export function parseVegaLiteSpec(value: unknown): TopLevelSpec {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Vega-Lite specification must be a JSON object');
+  }
+  const candidate = value as TopLevelSpec;
+  compile(candidate);
+  return candidate;
+}
 
 async function dataset(
   binding: z.infer<typeof zPresentResponse>['resolved_bindings'][number],
@@ -32,15 +42,12 @@ async function dataset(
   let more = true;
   while (more) {
     const output = toolResult.parse(
-      await callTool(
-        'read_object',
-        omitUndefined({
-          source: binding.source,
-          object: binding.materialized,
-          offset: offset.toString(),
-          length: 1048576,
-        }),
-      ),
+      await callTool('read_object', {
+        source: binding.source,
+        object: binding.materialized,
+        offset: offset.toString(),
+        length: 1048576,
+      }),
     );
     const part = zGetObjectResponse.parse(output.structuredContent);
     if (part.sha256 !== binding.materialized || BigInt(part.offset) !== offset)
@@ -82,18 +89,15 @@ export function PresentView({ response, callTool }: PresentViewProps) {
       for (const binding of response.resolved_bindings) {
         definitions.set(binding.name, binding);
         const output = toolResult.parse(
-          await callTool(
-            'show',
-            omitUndefined({
-              workspace_id: binding.source.workspace_id,
-              item_id: binding.source.item_id,
-              at: { kind: 'revision', revision: binding.source.revision },
-              view: 'text',
-              selection: binding.source.selection,
-              max_bytes: 65536,
-              max_images: 0,
-            }),
-          ),
+          await callTool('show', {
+            workspace_id: binding.source.workspace_id,
+            item_id: binding.source.item_id,
+            at: { kind: 'revision', revision: binding.source.revision },
+            view: 'text',
+            selection: binding.source.selection,
+            max_bytes: 65536,
+            max_images: 0,
+          }),
         );
         const source = zReadItemResponse.parse(output.structuredContent);
         if (source.source.revision !== binding.source.revision)
@@ -129,12 +133,21 @@ export function PresentView({ response, callTool }: PresentViewProps) {
         A chart requires a retained materialized dataset. No model-provided data was substituted.
       </p>
     );
-  // The service must validate the pinned Vega-Lite grammar before returning this tagged response.
+  let chartSpec: TopLevelSpec;
+  try {
+    chartSpec = parseVegaLiteSpec(view.spec);
+  } catch (cause) {
+    return (
+      <p role="alert">
+        {cause instanceof Error ? cause.message : 'Vega-Lite specification failed runtime validation'}
+      </p>
+    );
+  }
   return (
     <section>
       <h2>{view.title}</h2>
       <p>{view.description}</p>
-      <Chart spec={view.spec as TopLevelSpec} rows={rows} bindingName={first.name} />
+      <Chart spec={chartSpec} rows={rows} bindingName={first.name} />
       <p>
         {first.source.path} @ <code>{first.source.revision}</code>
       </p>

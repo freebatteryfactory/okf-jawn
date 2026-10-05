@@ -23,6 +23,20 @@
         "message"
       ],
       "type": "object"
+    },
+    "SandboxOriginConfig": {
+      "additionalProperties": false,
+      "description": "Configured separate origin used to serve sandboxed HTML and hostile artifacts.\n\nTransport note: the server lane binds a sandbox-origin route that never attaches\nambient session cookies or privileged APIs; the workspace-ui iframe loads this\norigin under sandbox constraints (SPEC sections 7 and 11).",
+      "properties": {
+        "origin": {
+          "description": "Absolute origin (scheme + host + optional port), never the application origin.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -39,6 +53,17 @@
     "ready": {
       "description": "All configured mandatory dependencies are ready.",
       "type": "boolean"
+    },
+    "sandbox_origin": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SandboxOriginConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Configured sandboxed HTML/artifact origin when isolation is enabled."
     }
   },
   "required": [

@@ -30,6 +30,16 @@
     "status": 200
   },
   {
+    "authenticated": false,
+    "description": "Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. No ambient session cookies, credentials, or privileged APIs; authorization uses a short-lived capability, not the Explorer session (SPEC sections 7 and 11).",
+    "id": "serve_sandbox_representation",
+    "method": "get",
+    "path": "/sandbox/workspaces/{workspace_id}/items/{item_id}/revisions/{revision}",
+    "request_media": null,
+    "response_media": "text/html",
+    "status": 200
+  },
+  {
     "authenticated": true,
     "description": "Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content.",
     "id": "stream_events",

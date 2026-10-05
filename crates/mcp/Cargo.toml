@@ -14,3 +14,6 @@ okf-jawn-contract = { path = "../contract" }
 okf-jawn-core = { path = "../core" }
 rmcp.workspace = true
 serde_json.workspace = true
+# Streamable HTTP composition uses the same Tokio/Axum stack as the server lane.
+tokio.workspace = true
+axum.workspace = true

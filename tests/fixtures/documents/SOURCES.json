@@ -1,7 +1,13 @@
 {
-  "generated_at": "2026-10-05T01:39:26.058768+00:00",
-  "generator": "okf-jawn qualification fixture builder (Python stdlib)",
-  "license_note": "All fixtures are original minimal files generated for MIT-licensed qualification use; no third-party corpus download was required.",
+  "generated_at": "2026-10-05T12:00:00+00:00",
+  "generator": "okf-jawn qualification fixture builder + docling-project corpus fetch",
+  "license_note": "Self-generated fixtures remain MIT for qualification. Corpus files are copied from docling-project/docling (MIT) at commit 4e650af5.",
+  "corpus_source": {
+    "repository": "https://github.com/docling-project/docling",
+    "commit": "4e650af5",
+    "license": "MIT",
+    "license_url": "https://github.com/docling-project/docling/blob/4e650af5/LICENSE"
+  },
   "files": {
     "sample_image.png": {
       "role": "image",
@@ -50,6 +56,51 @@
       "notes": "Born-digital PDF with multi-column tabular text + stroked grid",
       "sha256": "01ac9dc21954a7842c1bcba748ad8c7b32dbf7e62acad9d691f69da316503906",
       "bytes": 2621
+    },
+    "must_fail_corrupt.bin": {
+      "role": "must_fail",
+      "url": "generated://okf-jawn/fixtures/must_fail_corrupt.bin",
+      "license": "MIT (generated for qualification)",
+      "notes": "Non-document bytes that must surface ConversionStatus::Failure",
+      "sha256": "fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108",
+      "bytes": 64,
+      "expected": "ExplicitFailure"
+    },
+    "corpus/word_sample.docx": {
+      "role": "corpus_docx",
+      "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/docx/word_sample.docx",
+      "license": "MIT (docling-project/docling)",
+      "source_commit": "4e650af5",
+      "notes": "Upstream word_sample.docx; must_contain Summer",
+      "sha256": "ae4f3f6edd7ccd636b893ec8355d5eade6b0413fa779606452c561e334f390f7",
+      "bytes": 103966
+    },
+    "corpus/xlsx_01.xlsx": {
+      "role": "corpus_xlsx",
+      "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/xlsx/xlsx_01.xlsx",
+      "license": "MIT (docling-project/docling)",
+      "source_commit": "4e650af5",
+      "notes": "Upstream xlsx_01.xlsx; must_contain col-1",
+      "sha256": "fd4e67c4474e6d8308b1e9a9006500bd8e055c1aa2a337d54e641c3b1f506cf2",
+      "bytes": 170934
+    },
+    "corpus/powerpoint_sample.pptx": {
+      "role": "corpus_pptx",
+      "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/pptx/powerpoint_sample.pptx",
+      "license": "MIT (docling-project/docling)",
+      "source_commit": "4e650af5",
+      "notes": "Upstream powerpoint_sample.pptx; must_contain Test Table",
+      "sha256": "24191d47fda511e11984e875f8676506da5ae1fbcaefcc63d81be377d3a3950c",
+      "bytes": 45849
+    },
+    "corpus/redp5110_sampled.pdf": {
+      "role": "corpus_pdf",
+      "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/pdf/redp5110_sampled.pdf",
+      "license": "MIT (docling-project/docling; sample content from IBM Redbooks materials used in upstream tests)",
+      "source_commit": "4e650af5",
+      "notes": "Upstream redp5110_sampled.pdf; must_contain IBM",
+      "sha256": "2f6bc92861997d1434c069040dc63447c3e415e8e9eadbd1a8129ba2327ddba5",
+      "bytes": 1277938
     }
   }
 }

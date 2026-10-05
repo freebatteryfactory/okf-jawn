@@ -48,6 +48,18 @@ pub enum CollisionPolicy {
     KeepExisting,
 }
 
+/// How filename extensions are handled when applying a naming rule.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionPolicy {
+    /// Leave the extension unchanged.
+    Preserve,
+    /// Lower-case the extension.
+    Lowercase,
+    /// Drop the extension from the normalized note path (never from originals).
+    Strip,
+}
+
 /// A typed rule scoped by glob and optional OKF type.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -63,12 +75,19 @@ pub struct NamingRule {
     pub separator: String,
     /// Optional literal prefix.
     pub prefix: String,
+    /// Optional literal suffix applied to the normalized base name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
     /// Declared incoming date convention.
     pub date_order: DateOrder,
     /// Explicit output format.
     pub date_format: String,
     /// Remove filename suffixes only from normalized notes, never originals.
     pub strip_version_suffix: bool,
+    /// How the filename extension is transformed on normalized notes.
+    pub extension_policy: ExtensionPolicy,
+    /// When true, preserve existing path aliases while renaming the primary path.
+    pub alias_preservation: bool,
     /// Relative destination template.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<String>,
@@ -136,6 +155,18 @@ pub struct RenameEntry {
     pub warnings: Vec<crate::common::Warning>,
 }
 
+/// One path observed as a duplicate during rename preview.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicateObservation {
+    /// Path observed more than once.
+    pub path: crate::identity::WorkspacePath,
+    /// Item identities that collide on that path.
+    pub item_ids: Vec<crate::identity::ItemId>,
+    /// Human-readable observation without mutating content.
+    pub message: String,
+}
+
 /// A preview bound to source state and exact conventions.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -146,6 +177,8 @@ pub struct RenamePlan {
     pub rules_digest: crate::identity::Digest,
     /// Proposed changes.
     pub entries: Vec<RenameEntry>,
+    /// Duplicate path observations recorded during preview.
+    pub duplicate_observations: Vec<DuplicateObservation>,
     /// Plan-level warnings.
     pub warnings: Vec<crate::common::Warning>,
 }

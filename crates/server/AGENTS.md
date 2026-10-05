@@ -2,6 +2,16 @@
 
 Read root AGENTS.md and SPEC.md.
 
-Supply executable startup that constructs the storage and ingest adapters, injects them into `core::application::ApplicationService`, and serves it; startup wires dependencies and holds no operation behavior. Implement both authentication entry paths from SPEC section 11: local (persistent installation identity, single-use launch token exchanged at `/auth/local` for the session cookie, Host/Origin/CSRF checks, connector-secret bearer auth for local MCP) and hosted (WorkOS AuthKit browser sessions and Connect validation). Hosted mode with missing or invalid configuration fails startup; it never falls back to local. Also supply static assets, declared binary/SSE/OAuth/MCP routes, readiness and graceful shutdown. Existing JSON router expects a real Application and authenticated Principal. No guest-owner fallback and no trust granted for loopback.
+**Directories:** `crates/server/`
+
+**Gate:** `cargo test -p okf-jawn-server --features runtime`
+
+**Receipt:** startup composes storage/ingest/mcp adapters; local and hosted auth paths; sandbox-origin serving; readiness/liveness
+
+Supply executable startup that constructs the storage and ingest adapters, injects them into `core::application::ApplicationService`, and serves it; startup wires dependencies and holds no operation behavior. Implement both authentication entry paths from SPEC section 11: local (persistent installation identity, single-use launch token exchanged at `/auth/local` for the session cookie, Host/Origin/CSRF checks, connector-secret bearer auth for local MCP) and hosted (WorkOS AuthKit browser sessions and Connect validation). Hosted mode with missing or invalid configuration fails startup; it never falls back to local. Also supply static assets, declared binary/SSE/OAuth/MCP routes, sandbox-origin HTML serving (`serve_sandbox_representation` transport; WebMCP and the sandbox viewer UI live in workspace-ui), readiness and graceful shutdown. Existing JSON router expects a real Application and authenticated Principal. No guest-owner fallback and no trust granted for loopback.
+
+TODO: select and vendor session/cookie crates only after a recorded vendor note exists; do not invent cookie-jar dependencies here.
+
+Generator-input rule: change only this lane's authored inputs; run `gen` and commit outputs; gen-check must pass; integration owner regenerates at merge.
 
 Do not alter shared manifests, operation declarations, generator output, or protected acceptance as a private workaround. Return concrete boundary changes to the integration owner.

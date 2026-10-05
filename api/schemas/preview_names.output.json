@@ -4,6 +4,33 @@
       "pattern": "^[0-9a-f]{64}$",
       "type": "string"
     },
+    "DuplicateObservation": {
+      "additionalProperties": false,
+      "description": "One path observed as a duplicate during rename preview.",
+      "properties": {
+        "item_ids": {
+          "description": "Item identities that collide on that path.",
+          "items": {
+            "$ref": "#/$defs/ItemId"
+          },
+          "type": "array"
+        },
+        "message": {
+          "description": "Human-readable observation without mutating content.",
+          "type": "string"
+        },
+        "path": {
+          "$ref": "#/$defs/WorkspacePath",
+          "description": "Path observed more than once."
+        }
+      },
+      "required": [
+        "path",
+        "item_ids",
+        "message"
+      ],
+      "type": "object"
+    },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
@@ -85,6 +112,13 @@
       "$ref": "#/$defs/Revision",
       "description": "Workspace revision inspected."
     },
+    "duplicate_observations": {
+      "description": "Duplicate path observations recorded during preview.",
+      "items": {
+        "$ref": "#/$defs/DuplicateObservation"
+      },
+      "type": "array"
+    },
     "entries": {
       "description": "Proposed changes.",
       "items": {
@@ -108,6 +142,7 @@
     "base_revision",
     "rules_digest",
     "entries",
+    "duplicate_observations",
     "warnings"
   ],
   "title": "RenamePlan",

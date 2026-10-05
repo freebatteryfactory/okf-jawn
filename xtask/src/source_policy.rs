@@ -36,6 +36,7 @@ pub(crate) fn check(root: &Path) -> Result<(), Box<dyn Error>> {
     let mut paths = Vec::new();
     collect(&root.join("crates"), &mut paths)?;
     collect(&root.join("xtask/src"), &mut paths)?;
+    collect(&root.join("qualification"), &mut paths)?;
     let mut failures = Vec::new();
     for path in paths {
         let source = std::fs::read_to_string(&path)?;

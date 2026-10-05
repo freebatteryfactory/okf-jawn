@@ -35,7 +35,7 @@ docling = { version = "=1.93.5", default-features = false, features = ["pdf"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rusqlite_migration = { version = "=2.6.0" }
 git2 = { version = "=0.21.0", default-features = false, features = ["vendored-libgit2"] }
-object_store = { version = "=0.14.2", default-features = false }
+object_store = { version = "=0.14.2", default-features = false, features = ["fs"] }
 bytes = { version = "=1.12.1" }
 uuid = { version = "=1.27.0", features = ["serde", "v4"] }
 time = { version = "=0.3.55" }

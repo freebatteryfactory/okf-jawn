@@ -14,8 +14,11 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+axum = { workspace = true }
 rmcp = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+tower-http = { workspace = true, features = ["cors"] }

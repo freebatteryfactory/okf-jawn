@@ -18,12 +18,16 @@
     "skipLibCheck": true,
     "tsBuildInfoFile": "./.tsbuild/app.tsbuildinfo",
     "allowImportingTsExtensions": true,
-    "types": ["vite/client", "vitest/globals"],
+    "types": ["vite/client"],
     "paths": {
       "@/*": ["./src/*"]
     }
   },
   "include": ["src"],
   "exclude": ["src/api/generated/client", "src/api/generated/core"],
-  "references": [{ "path": "./tsconfig.generated.json" }, { "path": "./tsconfig.tooling.json" }]
+  "references": [
+    { "path": "./tsconfig.generated.json" },
+    { "path": "./tsconfig.tooling.json" },
+    { "path": "./tsconfig.tests.json" }
+  ]
 }
