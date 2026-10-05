@@ -33,3 +33,22 @@ test('verification.json records no pass while Phase 0 is reopened, and only term
  for(const gate of gates)assert.notEqual(gate.status,'passed',`${gate.id} is recorded as passed while Phase 0 is reopened`);
  for(const check of record.current.checks)assert.notEqual(check.status,'passed',`${check.command.join(' ')} is recorded as passed while Phase 0 is reopened`);
 });
+test('the acceptance script calls only declared operations, and edits through a draft and a Snapshot',async()=>{
+ const paths=new Set(JSON.parse(await read('api/operations.json')).map(operation=>operation.path));
+ const source=await read('tests/integration/acceptance.mjs');
+ const calls=[...source.matchAll(/call\('([a-z]+)','([a-z_]+)'/g)];
+ assert.ok(calls.length>0);
+ for(const [,domain,id] of calls)assert.ok(paths.has(`/api/${domain}/${id.replaceAll('_','-')}`),`acceptance.mjs calls ${domain}/${id}, which is not a declared operation`);
+ assert.match(source,/call\('items','save_draft'/);
+ assert.match(source,/call\('history','commit_items',\{workspace_id,item_ids:\[item_id\],message:/);
+});
+test('the deployment example declares and describes every image the compose file and Dockerfile require',async()=>{
+ const example=await read('deploy/.env.example');
+ const required=[...(await read('deploy/compose.yaml')).matchAll(/\$\{([A-Z_]+):\?/g)].map(match=>match[1]);
+ const images=[...(await read('deploy/Dockerfile')).matchAll(/^ARG ([A-Z_]+)$/gm)].map(match=>match[1]);
+ assert.ok(required.length>0&&images.length>0);
+ for(const name of new Set([...required,...images]))assert.match(example,new RegExp(`^${name}=`,'m'),`deploy/.env.example does not declare ${name}`);
+ const described=name=>example.split(/\r?\n/).find(line=>line.startsWith(`# ${name}:`))??'';
+ for(const name of images)assert.ok(described(name).length>0,`${name} has no description`);
+ assert.match(described('BUN_IMAGE'),/\.bun-version/,'BUN_IMAGE must be described the way compose.yaml and the Dockerfile require it');
+});
