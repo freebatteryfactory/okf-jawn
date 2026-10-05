@@ -258,10 +258,7 @@ async fn handle_channel_recv(job: ChannelJob) -> Result<ChannelResult, Error> {
     })
 }
 
-fn register_qualify_functions(
-    worker: &iii_sdk::IIIClient,
-    namespace: &str,
-) -> Result<(), Error> {
+fn register_qualify_functions(worker: &iii_sdk::IIIClient, namespace: &str) -> Result<(), Error> {
     worker.register_function(
         "qualify::import",
         RegisterFunction::new(|job: ImportJob| handle_import(&job)),
