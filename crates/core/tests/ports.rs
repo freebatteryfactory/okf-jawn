@@ -6,11 +6,12 @@
 
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
+use okf_jawn_contract::access::{AccessRoute, Connector, IssuedConnector, Permission, Principal};
 use okf_jawn_contract::common::{PageRequest, TextRange, Warning};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::Receipt;
@@ -25,6 +26,9 @@ use okf_jawn_contract::review::Review;
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::conversion::{
     ConversionInput, ConversionSettings, ConversionStatus, Converter, OcrPolicy,
+};
+use okf_jawn_core::credentials::{
+    ConnectorIssue, CredentialStore, NewConnector, SessionRecord, secret_hash,
 };
 use okf_jawn_core::jobs::{
     ClaimedJob, JobCompletion, JobHandler, JobLease, JobQueue, JobSpec, NewJob, RecordStore,
@@ -368,6 +372,47 @@ async fn job_runtime_calls(
     handler.handle(claimed).await
 }
 
+fn hex(bytes: &[u8]) -> Result<String, std::fmt::Error> {
+    let mut text = String::new();
+    for byte in bytes {
+        write!(text, "{byte:02x}")?;
+    }
+    Ok(text)
+}
+
+/// The rule a resumed `create_connector` follows: an existing row gets a fresh secret.
+async fn issue_connector(
+    credentials: &dyn CredentialStore,
+    mutation_id: MutationId,
+    connector: NewConnector,
+) -> Result<IssuedConnector, ApiError> {
+    match credentials.create_connector(mutation_id, connector).await? {
+        ConnectorIssue::Issued(issued) => Ok(issued),
+        ConnectorIssue::Existing(existing) => {
+            credentials
+                .rotate_connector_secret(existing.connector_id)
+                .await
+        }
+    }
+}
+
+async fn credential_store_calls(
+    credentials: &dyn CredentialStore,
+    session: SessionRecord,
+    presented_secret: &str,
+) -> Result<Option<Connector>, ApiError> {
+    credentials.installation_identity().await?;
+    let stored = credentials.insert_session(session).await?;
+    credentials.get_session(&stored.session_id).await?;
+    credentials.revoke_session(&stored.session_id).await?;
+    for connector in credentials.list_connectors(true).await? {
+        credentials.revoke_connector(connector.connector_id).await?;
+    }
+    credentials
+        .lookup_connector(secret_hash(presented_secret))
+        .await
+}
+
 #[test]
 fn provenance_keeps_the_typed_route_and_client() -> TestResult {
     let principal = Principal {
@@ -639,5 +684,17 @@ fn a_commit_is_built_from_a_claimed_job_alone() -> TestResult {
     );
     assert!(type_checked(&record_store_calls));
     assert!(type_checked(&job_runtime_calls));
+    Ok(())
+}
+
+#[test]
+fn connector_secrets_are_hashed_with_sha256_in_one_place() -> TestResult {
+    assert_eq!(
+        hex(&secret_hash("abc"))?,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_ne!(secret_hash("abc"), secret_hash("abd"));
+    assert!(type_checked(&issue_connector));
+    assert!(type_checked(&credential_store_calls));
     Ok(())
 }
