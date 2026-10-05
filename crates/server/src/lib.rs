@@ -72,6 +72,7 @@ fn error_response(error: ApiError) -> Response {
         ErrorCode::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
         ErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::NotImplemented => StatusCode::NOT_IMPLEMENTED,
     };
     (status, Json(error)).into_response()
 }

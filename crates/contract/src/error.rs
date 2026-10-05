@@ -35,6 +35,8 @@ pub enum ErrorCode {
     Cancelled,
     /// An unexpected server failure occurred without exposing secrets.
     Internal,
+    /// The operation is declared but this build does not implement it; never a success.
+    NotImplemented,
 }
 
 /// Typed failure context the UI and agents can act on without parsing messages.

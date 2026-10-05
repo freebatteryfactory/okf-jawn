@@ -39,3 +39,14 @@ fn with_field_names_the_input_to_correct() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
+
+#[test]
+fn not_implemented_is_a_wire_code_of_its_own() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        serde_json::to_value(ErrorCode::NotImplemented)?,
+        json!("not_implemented")
+    );
+    let decoded: ErrorCode = serde_json::from_value(json!("not_implemented"))?;
+    assert_eq!(decoded, ErrorCode::NotImplemented);
+    Ok(())
+}
