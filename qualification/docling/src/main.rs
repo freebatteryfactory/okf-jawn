@@ -66,7 +66,7 @@ struct QualificationReport {
 enum Expected {
     /// Supported extraction: Success, non-empty markdown, optional substring.
     SuccessNonEmpty { must_contain: Option<&'static str> },
-    /// Must surface ConversionStatus::Failure (never empty Success).
+    /// Must surface `ConversionStatus::Failure` (never empty Success).
     ExplicitFailure,
 }
 
@@ -153,6 +153,52 @@ fn judge_outcome(
     }
 }
 
+struct ExplicitFailureInput<'a> {
+    path: &'a Path,
+    role: &'a str,
+    expected: Expected,
+    settings: &'a BTreeMap<String, serde_json::Value>,
+    sha_before: String,
+    started: Instant,
+    component_type: &'a str,
+    module_name: &'a str,
+    error_message: String,
+}
+
+fn explicit_failure_receipt(input: ExplicitFailureInput<'_>) -> Result<FixtureReceipt, String> {
+    let elapsed_ms = input.started.elapsed().as_millis();
+    let sha_after = sha256_file(input.path)?;
+    Ok(FixtureReceipt {
+        converter_version: converter_version(),
+        elapsed_ms,
+        errors: vec![ErrorReceipt {
+            component_type: input.component_type.to_owned(),
+            error_message: input.error_message,
+            module_name: input.module_name.to_owned(),
+        }],
+        expected: expected_label(input.expected).to_owned(),
+        fixture: input
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        markdown_chars: 0,
+        markdown_nonempty: false,
+        must_contain_ok: None,
+        original_unchanged: input.sha_before == sha_after,
+        outcome: "PASS_explicit_failure".to_owned(),
+        page_image_count: 0,
+        page_provenance: Vec::new(),
+        path: input.path.to_path_buf(),
+        peak_rss_bytes: None,
+        role: input.role.to_owned(),
+        settings: input.settings.clone(),
+        sha256_after: sha_after,
+        sha256_before: input.sha_before,
+        status: "Failure".to_owned(),
+    })
+}
+
 fn convert_fixture(
     converter: &DocumentConverter,
     path: &Path,
@@ -165,77 +211,41 @@ fn convert_fixture(
     let source = match SourceDocument::from_file(path) {
         Ok(source) => source,
         Err(error) => {
-            if matches!(expected, Expected::ExplicitFailure) {
-                let elapsed_ms = started.elapsed().as_millis();
-                let sha_after = sha256_file(path)?;
-                return Ok(FixtureReceipt {
-                    converter_version: converter_version(),
-                    elapsed_ms,
-                    errors: vec![ErrorReceipt {
-                        component_type: "source".to_owned(),
-                        error_message: error.to_string(),
-                        module_name: "source".to_owned(),
-                    }],
-                    expected: expected_label(expected).to_owned(),
-                    fixture: path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    markdown_chars: 0,
-                    markdown_nonempty: false,
-                    must_contain_ok: None,
-                    original_unchanged: sha_before == sha_after,
-                    outcome: "PASS_explicit_failure".to_owned(),
-                    page_image_count: 0,
-                    page_provenance: Vec::new(),
-                    path: path.to_path_buf(),
-                    peak_rss_bytes: None,
-                    role: role.to_owned(),
-                    settings: settings.clone(),
-                    sha256_after: sha_after,
-                    sha256_before: sha_before,
-                    status: "Failure".to_owned(),
-                });
-            }
-            return Err(error.to_string());
+            return if matches!(expected, Expected::ExplicitFailure) {
+                explicit_failure_receipt(ExplicitFailureInput {
+                    path,
+                    role,
+                    expected,
+                    settings,
+                    sha_before,
+                    started,
+                    component_type: "source",
+                    module_name: "source",
+                    error_message: error.to_string(),
+                })
+            } else {
+                Err(error.to_string())
+            };
         }
     };
     let result = match converter.convert(source) {
         Ok(result) => result,
         Err(error) => {
-            if matches!(expected, Expected::ExplicitFailure) {
-                let elapsed_ms = started.elapsed().as_millis();
-                let sha_after = sha256_file(path)?;
-                return Ok(FixtureReceipt {
-                    converter_version: converter_version(),
-                    elapsed_ms,
-                    errors: vec![ErrorReceipt {
-                        component_type: "pipeline".to_owned(),
-                        error_message: error.to_string(),
-                        module_name: "pipeline".to_owned(),
-                    }],
-                    expected: expected_label(expected).to_owned(),
-                    fixture: path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    markdown_chars: 0,
-                    markdown_nonempty: false,
-                    must_contain_ok: None,
-                    original_unchanged: sha_before == sha_after,
-                    outcome: "PASS_explicit_failure".to_owned(),
-                    page_image_count: 0,
-                    page_provenance: Vec::new(),
-                    path: path.to_path_buf(),
-                    peak_rss_bytes: None,
-                    role: role.to_owned(),
-                    settings: settings.clone(),
-                    sha256_after: sha_after,
-                    sha256_before: sha_before,
-                    status: "Failure".to_owned(),
-                });
-            }
-            return Err(error.to_string());
+            return if matches!(expected, Expected::ExplicitFailure) {
+                explicit_failure_receipt(ExplicitFailureInput {
+                    path,
+                    role,
+                    expected,
+                    settings,
+                    sha_before,
+                    started,
+                    component_type: "pipeline",
+                    module_name: "pipeline",
+                    error_message: error.to_string(),
+                })
+            } else {
+                Err(error.to_string())
+            };
         }
     };
     let elapsed_ms = started.elapsed().as_millis();
@@ -292,44 +302,8 @@ fn timeout_honoured(timeout_case: &FixtureReceipt) -> bool {
             .any(|item| item.error_message.to_lowercase().contains("timeout")))
 }
 
-fn run() -> Result<(), String> {
-    let models_dir = env::var("DOCLING_RS_MODELS_DIR")
-        .map_err(|_| "DOCLING_RS_MODELS_DIR must be set to the verified models cache".to_owned())?;
-    let fixtures_dir = env::var("OKF_DOCLING_FIXTURES").unwrap_or_else(|_| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/documents")
-            .to_string_lossy()
-            .into_owned()
-    });
-    let out_dir = env::var("OKF_DOCLING_OUT").unwrap_or_else(|_| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.artifacts/qualification/docling")
-            .to_string_lossy()
-            .into_owned()
-    });
-    fs::create_dir_all(&out_dir).map_err(|error| error.to_string())?;
-    let artifacts = tempfile::tempdir().map_err(|error| error.to_string())?;
-
-    let mut settings = BTreeMap::new();
-    settings.insert(
-        "artifacts_dir".to_owned(),
-        serde_json::Value::String(artifacts.path().display().to_string()),
-    );
-    settings.insert(
-        "models_dir".to_owned(),
-        serde_json::Value::String(models_dir.clone()),
-    );
-    settings.insert(
-        "ocr_lang".to_owned(),
-        serde_json::Value::String("en".to_owned()),
-    );
-
-    let converter = DocumentConverter::new()
-        .ocr_lang("en")
-        .artifacts_dir(artifacts.path().display().to_string());
-
-    // must_contain needles are stable tokens from the MIT fixtures / corpus notes.
-    let fixtures: [(&str, &str, Expected); 10] = [
+fn fixture_catalog() -> [(&'static str, &'static str, Expected); 10] {
+    [
         (
             "sample_with_image.docx",
             "docx_with_images",
@@ -396,35 +370,78 @@ fn run() -> Result<(), String> {
                 must_contain: Some("IBM"),
             },
         ),
-    ];
+    ]
+}
 
+fn convert_catalog(
+    converter: &DocumentConverter,
+    fixtures_dir: &str,
+    settings: &BTreeMap<String, serde_json::Value>,
+) -> Result<(Vec<FixtureReceipt>, BTreeMap<String, String>), String> {
     let mut receipts = Vec::new();
     let mut summary = BTreeMap::new();
-    for (name, role, expected) in fixtures {
-        let path = PathBuf::from(&fixtures_dir).join(name);
+    for (name, role, expected) in fixture_catalog() {
+        let path = PathBuf::from(fixtures_dir).join(name);
         if !path.is_file() {
             return Err(format!("missing fixture {}", path.display()));
         }
-        let receipt = convert_fixture(&converter, &path, role, expected, &settings)?;
+        let receipt = convert_fixture(converter, &path, role, expected, settings)?;
         summary.insert(name.to_owned(), receipt.outcome.clone());
         receipts.push(receipt);
     }
-
-    // Must-fail fixture: non-document bytes must surface explicit Failure.
     let fail_name = "must_fail_corrupt.bin";
-    let fail_path = PathBuf::from(&fixtures_dir).join(fail_name);
+    let fail_path = PathBuf::from(fixtures_dir).join(fail_name);
     if !fail_path.is_file() {
         return Err(format!("missing must-fail fixture {}", fail_path.display()));
     }
     let receipt = convert_fixture(
-        &converter,
+        converter,
         &fail_path,
         "must_fail",
         Expected::ExplicitFailure,
-        &settings,
+        settings,
     )?;
     summary.insert(fail_name.to_owned(), receipt.outcome.clone());
     receipts.push(receipt);
+    Ok((receipts, summary))
+}
+
+fn run() -> Result<(), String> {
+    let models_dir = env::var("DOCLING_RS_MODELS_DIR")
+        .map_err(|_| "DOCLING_RS_MODELS_DIR must be set to the verified models cache".to_owned())?;
+    let fixtures_dir = env::var("OKF_DOCLING_FIXTURES").unwrap_or_else(|_| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/documents")
+            .to_string_lossy()
+            .into_owned()
+    });
+    let out_dir = env::var("OKF_DOCLING_OUT").unwrap_or_else(|_| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.artifacts/qualification/docling")
+            .to_string_lossy()
+            .into_owned()
+    });
+    fs::create_dir_all(&out_dir).map_err(|error| error.to_string())?;
+    let artifacts = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+    let mut settings = BTreeMap::new();
+    settings.insert(
+        "artifacts_dir".to_owned(),
+        serde_json::Value::String(artifacts.path().display().to_string()),
+    );
+    settings.insert(
+        "models_dir".to_owned(),
+        serde_json::Value::String(models_dir.clone()),
+    );
+    settings.insert(
+        "ocr_lang".to_owned(),
+        serde_json::Value::String("en".to_owned()),
+    );
+
+    let converter = DocumentConverter::new()
+        .ocr_lang("en")
+        .artifacts_dir(artifacts.path().display().to_string());
+    let (receipts, mut summary) = convert_catalog(&converter, &fixtures_dir, &settings)?;
 
     let timeout_converter = DocumentConverter::new()
         .ocr_lang("en")
@@ -443,13 +460,12 @@ fn run() -> Result<(), String> {
         Expected::SuccessNonEmpty { must_contain: None },
         &timeout_settings,
     )?;
-    let timeout_ok = timeout_honoured(&timeout_case);
-    let timeout_outcome = if timeout_ok {
+    let timeout_outcome = if timeout_honoured(&timeout_case) {
         "PASS".to_owned()
     } else {
         "FAIL_timeout_not_honoured".to_owned()
     };
-    timeout_case.outcome = timeout_outcome.clone();
+    timeout_case.outcome.clone_from(&timeout_outcome);
     summary.insert("timeout_probe".to_owned(), timeout_outcome);
 
     let report = QualificationReport {
@@ -464,11 +480,11 @@ fn run() -> Result<(), String> {
     let json = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
     fs::write(&report_path, json).map_err(|error| error.to_string())?;
     writeln!(io::stdout(), "Wrote {}", report_path.display()).map_err(|error| error.to_string())?;
-    let failed = report
+    if report
         .summary
         .values()
-        .any(|value| value.starts_with("FAIL"));
-    if failed {
+        .any(|value| value.starts_with("FAIL"))
+    {
         return Err(format!(
             "one or more fixtures failed qualification rules: {:?}",
             report.summary
