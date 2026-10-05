@@ -61,7 +61,8 @@
       "role": "must_fail",
       "url": "generated://okf-jawn/fixtures/must_fail_truncated.pdf",
       "license": "MIT (generated for qualification)",
-      "notes": "Valid PDF-1.4 header truncated mid-stream; only ConversionStatus::Failure from the converter stage counts as PASS. Success/PartialSuccess is FAIL with finding recorded; fixture is not altered to force a pass.",
+      "notes": "Valid PDF-1.4 header truncated mid-stream. PASS only when the converter itself refuses it: DocumentConverter::convert returns Err (stage converter_error) or Ok with ConversionStatus::Failure (stage converter_status). A SourceDocument::from_file error (stage source) is FAIL: the fixture never reached the converter. Success or PartialSuccess is FAIL with the finding \"converter accepts truncated PDF\". The fixture is never altered to force a pass.",
+      "pass_when": ["converter_error", "converter_status:Failure"],
       "sha256": "6493e95ce39d3f7de423a9578c5f67a864cdc839d1048f38f04b1b1ec9a52b20",
       "bytes": 330,
       "expected": "ExplicitFailure"

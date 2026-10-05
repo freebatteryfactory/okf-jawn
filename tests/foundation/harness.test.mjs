@@ -29,6 +29,13 @@ import {
   runFixtureProcess,
   samplePeakRss,
 } from '../../qualification/docling/lib/runner.mjs';
+import {
+  DOCLING_INPUTS,
+  FIXTURE_RUNS,
+  MUST_FAIL,
+  TIMEOUT_PROBE,
+  buildDoclingReceipt,
+} from '../../qualification/docling/lib/receipt.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -337,4 +344,151 @@ test('the platform sampler reads a real high-water mark and reports why when it 
     bytes: null,
     note: 'no peak RSS source on platform sunos',
   });
+});
+
+const DOCLING_HEADER = {
+  git_sha: 'a'.repeat(40),
+  inputs: DOCLING_INPUTS,
+  produced_at: '2026-10-05T18:00:00.000Z',
+};
+const DOCLING_CONVERTER = {
+  crate: 'docling',
+  version: '1.93.5',
+  checksum: 'abc',
+  docling_core_versions: ['1.93.6'],
+  source: 'Cargo.lock',
+};
+
+/** A fixture process that behaved: exit 0, measured, receipt on disk. `over` replaces parts. */
+function doclingRun(only, over = {}) {
+  const fixture = {
+    fixture: only,
+    outcome: only === MUST_FAIL ? 'PASS_explicit_failure' : 'PASS',
+    stage: only === MUST_FAIL ? 'converter_error' : 'converter_status',
+    status: only === MUST_FAIL ? null : only === TIMEOUT_PROBE ? 'PartialSuccess' : 'Success',
+    finding: null,
+    peak_rss_bytes: null,
+    ...over.fixture,
+  };
+  return {
+    only,
+    run: {
+      exitCode: 0,
+      signal: null,
+      spawnError: null,
+      timedOut: false,
+      done: { okf_docling: 'done', only },
+      peakRssBytes: 1_048_576,
+      peakRssNote: 'stub source',
+      stderr: '',
+      stdoutSha256: 'f'.repeat(64),
+      ...over.run,
+    },
+    report:
+      'report' in over
+        ? over.report
+        : only === TIMEOUT_PROBE
+          ? { receipts: [], timeout_case: fixture }
+          : { receipts: [fixture], timeout_case: null },
+  };
+}
+
+function doclingReceipt(overrides = {}) {
+  const runs = FIXTURE_RUNS.map((only) => doclingRun(only, overrides[only]));
+  return buildDoclingReceipt({
+    header: DOCLING_HEADER,
+    converter: DOCLING_CONVERTER,
+    platform: 'win32',
+    modelsDir: 'models',
+    runs,
+    finishedAt: '2026-10-05T18:10:00.000Z',
+  });
+}
+
+test('a Docling receipt carries the shared header at its top level and passes when every rule holds', () => {
+  const receipt = doclingReceipt();
+  assert.deepEqual(receiptHeaderProblems(receipt), []);
+  assert.deepEqual(Object.keys(receipt).slice(0, 3), ['git_sha', 'inputs', 'produced_at']);
+  assert.equal(receipt.orchestrator, undefined);
+  assert.equal(receipt.result, 'PASS');
+  assert.equal(receipt.receipts.length, FIXTURE_RUNS.length - 1);
+  assert.equal(receipt.timeout_case.outcome, 'PASS');
+  assert.deepEqual(Object.keys(receipt.summary), FIXTURE_RUNS);
+});
+
+test('a fixture whose peak was not measured fails the memory criterion without throwing', () => {
+  const receipt = doclingReceipt({
+    'sample_sheet.xlsx': { run: { peakRssBytes: null, peakRssNote: 'Get-Process reported no PeakWorkingSet64' } },
+  });
+  const entry = receipt.receipts.find((item) => item.fixture === 'sample_sheet.xlsx');
+  assert.equal(entry.peak_rss_bytes, null);
+  assert.equal(entry.peak_rss_note, 'Get-Process reported no PeakWorkingSet64');
+  assert.equal(entry.memory, 'FAIL_not_measured');
+  assert.equal(entry.outcome, 'PASS');
+  assert.equal(receipt.memory_summary['sample_sheet.xlsx'], 'FAIL_not_measured');
+  assert.equal(receipt.result, 'FAIL');
+});
+
+test('a truncated PDF the converter accepts is a finding and a FAIL, recorded as observed', () => {
+  const receipt = doclingReceipt({
+    [MUST_FAIL]: {
+      fixture: {
+        outcome: 'FAIL_expected_failure',
+        stage: 'converter_status',
+        status: 'Success',
+        finding: 'converter accepts truncated PDF',
+      },
+    },
+  });
+  assert.equal(receipt.finding, 'converter accepts truncated PDF');
+  assert.equal(receipt.summary[MUST_FAIL], 'FAIL_expected_failure');
+  assert.equal(receipt.result, 'FAIL');
+});
+
+test('a refusal counts only when another PDF converted in the same run', () => {
+  const pdfs = FIXTURE_RUNS.filter((only) => only.endsWith('.pdf') && only !== MUST_FAIL);
+  const overrides = Object.fromEntries(
+    pdfs.map((only) => [only, { fixture: { outcome: 'FAIL_converter_error', stage: 'converter_error', status: null } }]),
+  );
+  const receipt = doclingReceipt(overrides);
+  assert.equal(receipt.summary[MUST_FAIL], 'FAIL_refusal_unproven');
+  assert.match(receipt.receipts.find((item) => item.fixture === MUST_FAIL).refusal_note, /no other PDF fixture converted/);
+  assert.equal(receipt.result, 'FAIL');
+});
+
+test('a fixture process that wrote no receipt, or never ran, is a harness FAIL', () => {
+  const crashed = doclingReceipt({
+    'table_heavy.pdf': { report: null, run: { exitCode: 1, stderr: 'okf-qualify-docling: missing fixture' } },
+  });
+  const entry = crashed.receipts.find((item) => item.fixture === 'table_heavy.pdf');
+  assert.equal(entry.outcome, 'FAIL_harness');
+  assert.equal(entry.harness_exit_code, 1);
+  assert.match(entry.harness_error, /missing fixture/);
+  assert.equal(crashed.result, 'FAIL');
+
+  const partial = buildDoclingReceipt({
+    header: DOCLING_HEADER,
+    converter: DOCLING_CONVERTER,
+    platform: 'win32',
+    modelsDir: 'models',
+    runs: [doclingRun('sample_sheet.xlsx')],
+    finishedAt: '2026-10-05T18:10:00.000Z',
+  });
+  assert.equal(partial.summary[TIMEOUT_PROBE], 'FAIL_not_run');
+  assert.equal(partial.result, 'FAIL');
+});
+
+test('every fixture run is a recorded source whose bytes are unchanged, and must_fail states its stage rule', async () => {
+  const dir = join(root, 'tests/fixtures/documents');
+  const sources = JSON.parse(await readFile(join(dir, 'SOURCES.json'), 'utf8'));
+  assert.deepEqual(
+    FIXTURE_RUNS.filter((only) => only !== TIMEOUT_PROBE).sort(),
+    Object.keys(sources.files).sort(),
+  );
+  for (const [name, entry] of Object.entries(sources.files)) {
+    const bytes = await readFile(join(dir, name));
+    assert.equal(bytes.length, entry.bytes, name);
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), entry.sha256, name);
+  }
+  assert.deepEqual(sources.files[MUST_FAIL].pass_when, ['converter_error', 'converter_status:Failure']);
 });
