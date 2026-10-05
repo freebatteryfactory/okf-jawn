@@ -69,6 +69,10 @@ const TRANSPORT_METHODS: [&str; 4] = ["get", "put", "post", "delete"];
 const ERROR_STATUSES: [&str; 10] = [
     "400", "401", "403", "404", "409", "413", "422", "500", "501", "503",
 ];
+/// The one shared MCP App resource; `structuredContent` selects the feature surface.
+const APP_RESOURCE_NAME: &str = "app";
+const APP_RESOURCE_URI: &str = "ui://okf-jawn/app.html";
+const APP_RESOURCE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 
 pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn Error>> {
     let typed = typed_operations()?;
@@ -195,13 +199,14 @@ fn openapi_document(
     }))
 }
 
-/// The MCP App resources this build declares.
+/// The MCP App resources this build declares, in the shape `rmcp::model::Resource` reads.
 fn app_resources() -> Value {
     json!({
         "resources": [{
-            "uri": "ui://okf-jawn/app.html",
-            "mimeType": "text/html;profile=mcp-app",
-            "csp": {"connectDomains": [], "resourceDomains": []}
+            "uri": APP_RESOURCE_URI,
+            "name": APP_RESOURCE_NAME,
+            "mimeType": APP_RESOURCE_MIME_TYPE,
+            "_meta": {"ui": {"csp": {"connectDomains": [], "resourceDomains": []}}}
         }]
     })
 }
@@ -435,13 +440,8 @@ fn tool_definition(operation: &TypedOperation) -> Value {
     tool
 }
 
-fn resource_uri(key: &str) -> Option<String> {
-    if key.is_empty() {
-        None
-    } else {
-        // One shared App resource; structuredContent selects the feature surface.
-        Some("ui://okf-jawn/app.html".to_owned())
-    }
+fn resource_uri(key: &str) -> Option<&'static str> {
+    (!key.is_empty()).then_some(APP_RESOURCE_URI)
 }
 
 okf_jawn_contract::for_each_operation!(generate_operations);
@@ -734,6 +734,46 @@ mod tests {
             destructive = destructive.saturating_add(usize::from(operation.destructive));
         }
         assert!(destructive > 0, "the table marks destructive operations");
+        Ok(())
+    }
+
+    #[test]
+    fn the_app_declaration_is_an_mcp_resource() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        super::generate(directory.path())?;
+        let declaration = read(&directory.path().join("mcp-apps.json"))?;
+        let resources = declaration
+            .get("resources")
+            .and_then(Value::as_array)
+            .ok_or("resources")?;
+        assert_eq!(resources.len(), 1);
+        let resource = resources.first().ok_or("one resource")?;
+        assert_eq!(
+            resource,
+            &json!({
+                "uri": "ui://okf-jawn/app.html",
+                "name": "app",
+                "mimeType": "text/html;profile=mcp-app",
+                "_meta": {"ui": {"csp": {"connectDomains": [], "resourceDomains": []}}}
+            })
+        );
+        let tools = read(&directory.path().join("mcp-tools.json"))?;
+        let mut bound = 0_usize;
+        for tool in tools
+            .get("tools")
+            .and_then(Value::as_array)
+            .ok_or("tools")?
+        {
+            if let Some(uri) = tool.pointer("/_meta/ui/resourceUri") {
+                assert_eq!(
+                    Some(uri),
+                    resource.get("uri"),
+                    "tool resource is the declared one"
+                );
+                bound = bound.saturating_add(1);
+            }
+        }
+        assert!(bound > 0, "at least one tool renders in the App");
         Ok(())
     }
 
