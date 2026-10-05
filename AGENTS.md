@@ -31,7 +31,7 @@ bun scripts/dev.mjs check-offline
 bun scripts/dev.mjs vendor <library-or-concept>
 ```
 
-Then, on the selected toolchain, `bootstrap`, `gen-check`, `foundation`. These require committed `Cargo.lock` and `bun.lock`; a missing lockfile is an error. Only `lock` resolves dependencies, and only when deliberately run. Read failures. No fake lockfiles or generated-looking artifacts. Vendor notes include three executed Context7 lookups and other clearly marked references. Use the exact installed API, not memory of a similar version.
+Then, on the selected toolchain, `bootstrap`, `gen-check`, `foundation`. These require committed `Cargo.lock` and `bun.lock`; a missing lockfile is an error. Only `lock` resolves dependencies, and only when deliberately run. Read failures. No fake lockfiles or generated-looking artifacts. Vendor notes mark which entries record an executed Context7 lookup; the rest are clearly marked references. Use the exact installed API, not memory of a similar version.
 
 ## Construction
 
@@ -45,11 +45,15 @@ Classify a failure before repair: your defect, unfinished neighboring work, or a
 
 Do not suppress lints, fake success, discard unsupported data, alter expected output to match implementation, or declare a partial test to be the full suite. Honest limitation comments are encouraged. Refactors for elegance and speculative optimizations wait until connected behavior exists.
 
-The integration owner holds Cargo.toml/Cargo.lock, package.json/bun.lock and other package manifests, contract, xtask, scripts, api, generated outputs, deployment and independent acceptance. Ownership is enforced locally by isolated worktrees; CODEOWNERS is review routing, not a local editing lock, and no branch protection is configured yet. Never independently rewrite another lane's worktree.
+The integration owner holds Cargo.toml/Cargo.lock, package.json/bun.lock and other package manifests, contract, xtask, scripts, api, generated outputs, deployment and independent acceptance. Ownership is enforced locally by isolated worktrees; CODEOWNERS is review routing, not a local editing lock, and no branch protection is configured yet. Never independently rewrite another lane's worktree. `bun scripts/dev.mjs scope`, part of every lane gate and of pre-push, fails when a lane branch changes a path outside its directories, a manifest, or a lockfile.
 
 ## Conventions
 
 Use `//!` purpose and non-obvious invariant headers. Imports, coherent types/traits, constants, implementations, functions/helpers, tests. Use canonical library terms, resolved Revision versus At selectors, and fallible APIs. No authored unsafe, allow, expect or conditional lint suppression. Do not force unrelated types into contract merely to avoid duplication.
+
+Rust tests use one idiom. Include `tests/support/check.rs` with `#[path]`; a test returns `TestResult` (`Result<(), Box<dyn std::error::Error>>`) and uses `?`, `assert!`/`assert_eq!`, `err_of(result)` for a result that must have failed and `some(option, "what")` for a value that must be present. No `unwrap`, `expect`, `expect_err`, `panic!`, `unreachable!` or `[]` indexing (use `.get(..)` with `some`), and no `#[allow]` or `#[expect]` anywhere.
+
+Operating rules. Only the integration owner merges, always `git merge --no-ff`; never rebase, squash, amend a pushed commit or force-push. Work only in the files your brief allows: never change shared contracts, tests you did not write, manifests, lockfiles, lint config or records; stop and report the symbol (file:line), the SPEC sentence, the proposed change and the failing output. Commit at every green step, one concern each: subject `type(scope): what.`, body `Why:`, `What changed:`, `Verified:` (command and result), then `Next:` or `Blocked:`. Take `main` with `git merge main` at task boundaries on a clean tree; on a conflict in a generated directory or a lockfile take `main`'s side, run `gen` and commit, never editing conflict markers there. An attempt is one edit-and-gate cycle on the same failing check. A review finding blocks only if it cites a failing command or a named SPEC or AGENTS sentence; at most two review rounds per task. On Windows run cargo from PowerShell, never Git Bash.
 
 Generated directories are `api/`, `generated/cli/`, `ui/src/api/generated/`, the router-generated tree and frontend build outputs. Change their authored inputs and run the generator. Source-policy AST checks, actual strict Clippy and TypeScript 7 type checking remain separate from dependency-free smoke checks; Bun executing or transpiling TypeScript is not type checking.
 

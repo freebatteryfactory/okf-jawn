@@ -52,3 +52,21 @@ test('the deployment example declares and describes every image the compose file
  for(const name of images)assert.ok(described(name).length>0,`${name} has no description`);
  assert.match(described('BUN_IMAGE'),/\.bun-version/,'BUN_IMAGE must be described the way compose.yaml and the Dockerfile require it');
 });
+test('README states the generated counts and tool names, and neither prose file remembers a number',async()=>{
+ const readme=await read('README.md'),agents=await read('AGENTS.md');
+ const operations=JSON.parse(await read('api/operations.json')),transports=JSON.parse(await read('api/transports.json'));
+ const tools=JSON.parse(await read('api/mcp-tools.json')).tools;
+ assert.ok(readme.includes(`There are ${operations.length} typed JSON application commands and ${transports.length} distinct transport declarations.`),'README operation and transport counts differ from api/');
+ for(const tool of tools.filter(entry=>entry._meta.ui.visibility.includes('model')))assert.ok(readme.includes(`\`${tool.name}\``),`README does not name the model tool ${tool.name}`);
+ assert.doesNotMatch(readme,/Utoipa schema types/);
+ for(const [name,text] of [['README.md',readme],['AGENTS.md',agents]])assert.doesNotMatch(text,/\b(?:three|3)\b[^.\n]*Context7/i,name);
+ for(const term of ['TestResult','err_of','git merge --no-ff','Why:','PowerShell'])assert.ok(agents.includes(term),`AGENTS.md does not state ${term}`);
+});
+test('help names every task the entrypoint accepts, and just mirrors the gates',async()=>{
+ const entry=await read('scripts/dev.mjs');
+ const cases=[...entry.matchAll(/^\s+case '([a-z-]+)':/gm)].map(match=>match[1]).filter(name=>name!=='help');
+ const help=/case 'help': process\.stdout\.write\('Tasks: ([^\\]+)\\n'\)/.exec(entry)?.[1].split(' ')??[];
+ assert.deepEqual([...help].sort(),[...cases].sort());
+ const just=await read('justfile');
+ for(const recipe of ['lane','premerge','clean-checkout','lanes-reset','check-receipts'])assert.match(just,new RegExp(`^${recipe}\\b`,'m'),`justfile has no ${recipe} recipe`);
+});

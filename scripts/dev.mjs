@@ -204,7 +204,7 @@ async function main() {
       await generatedStrictProbe();
       await uiScript('typecheck');
       await offlineChecks(); break;
-    case 'help': process.stdout.write('Tasks: init doctor lock bootstrap gen gen-check check-offline check test foundation vendor tree lanes lanes-reset qualify check-receipts audit\n'); break;
+    case 'help': process.stdout.write('Tasks: init doctor lock bootstrap gen gen-check routes check-offline check test foundation premerge lane scope vendor tree lanes lanes-table lanes-reset clean-checkout qualify check-receipts audit\n'); break;
     default: throw new Error(`Unknown task: ${task}. Use help.`);
   }
 }
