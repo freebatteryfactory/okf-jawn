@@ -1,5 +1,6 @@
 //! Semantic controls for serialization and validation; not whole-product acceptance.
 
+use okf_jawn_contract::history::CommitRequest;
 use okf_jawn_contract::identity::{At, Digest, Revision, WorkspacePath};
 use okf_jawn_contract::read::ReadItemRequest;
 use okf_jawn_contract::views::ViewDocument;
@@ -89,5 +90,27 @@ fn view_document_six_component_round_trips_with_deny_unknown_fields() -> Result<
         .ok_or("fixture must be object")?
         .insert("unexpected_field".to_owned(), json!(true));
     assert!(serde_json::from_value::<ViewDocument>(unknown).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_snapshot_request_carries_no_expected_head() -> Result<(), Box<dyn Error>> {
+    let request = json!({
+        "workspace_id": "11111111-1111-4111-8111-111111111111",
+        "item_ids": ["22222222-2222-4222-8222-222222222222"],
+        "message": "Quarterly numbers",
+        "idempotency_key": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    });
+    let decoded: CommitRequest = serde_json::from_value(request.clone())?;
+    assert_eq!(decoded.item_ids.len(), 1);
+    let mut with_head = request;
+    with_head
+        .as_object_mut()
+        .ok_or("request must be an object")?
+        .insert("expected_head".to_owned(), json!("a".repeat(40)));
+    assert!(
+        serde_json::from_value::<CommitRequest>(with_head).is_err(),
+        "head movement alone is not a Snapshot precondition"
+    );
     Ok(())
 }

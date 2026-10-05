@@ -108,15 +108,16 @@ pub struct DiffResponse {
 
 /// Snapshot the caller's drafts of the selected items in one commit.
 ///
-/// If any selected item changed after its draft's base, or was deleted, the whole commit is
-/// rejected with a `draft_conflict` error detail. On success the snapshotted drafts are removed.
+/// Each draft's own base revision is the precondition. The Snapshot is blocked only when an
+/// item being snapshotted was itself changed or deleted since its draft's base; head movement
+/// that did not touch a selected item never blocks. When blocked, nothing is committed and the
+/// `draft_conflict` error detail lists every conflicting item, not only the first. On success
+/// the snapshotted drafts are removed.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommitRequest {
     /// Workspace whose permissions and storage scope apply.
     pub workspace_id: crate::identity::WorkspaceId,
-    /// Workspace head the editor saw; a moved head conflicts.
-    pub expected_head: crate::identity::Revision,
     /// Items whose drafts by the caller are snapshotted together.
     #[schemars(length(min = 1))]
     pub item_ids: Vec<crate::identity::ItemId>,

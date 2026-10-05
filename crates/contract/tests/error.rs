@@ -3,6 +3,7 @@
 use std::error::Error;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+use okf_jawn_contract::history::FileChangeKind;
 use serde_json::json;
 
 // Clippy's `result_large_err` fires at 128 bytes; every `Result<_, ApiError>` relies on this.
@@ -49,4 +50,72 @@ fn not_implemented_is_a_wire_code_of_its_own() -> Result<(), Box<dyn Error>> {
     let decoded: ErrorCode = serde_json::from_value(json!("not_implemented"))?;
     assert_eq!(decoded, ErrorCode::NotImplemented);
     Ok(())
+}
+
+#[test]
+fn a_draft_conflict_lists_every_conflicting_item_with_typed_changes() -> Result<(), Box<dyn Error>>
+{
+    let wire = json!({
+        "code": "conflict",
+        "message": "Two selected items changed after their drafts were based",
+        "detail": {
+            "kind": "draft_conflict",
+            "items": [
+                {
+                    "item_id": "22222222-2222-4222-8222-222222222222",
+                    "draft_base": "a".repeat(40),
+                    "current_revision": "b".repeat(40),
+                    "deleted": false,
+                    "changes": [{
+                        "old_path": "notes/a.md",
+                        "new_path": "notes/a.md",
+                        "patch": "@@ -1 +1 @@
+-old
++new
+",
+                        "binary": false,
+                        "kind": "modified"
+                    }]
+                },
+                {
+                    "item_id": "33333333-3333-4333-8333-333333333333",
+                    "draft_base": "a".repeat(40),
+                    "current_revision": "b".repeat(40),
+                    "deleted": true,
+                    "changes": [{
+                        "old_path": "notes/b.md",
+                        "patch": "",
+                        "binary": false,
+                        "kind": "removed"
+                    }]
+                }
+            ]
+        }
+    });
+    let error: ApiError = serde_json::from_value(wire.clone())?;
+    let Some(ErrorDetail::DraftConflict { items }) = error.detail.as_deref() else {
+        return Err("expected a draft_conflict detail".into());
+    };
+    let deleted: Vec<bool> = items.iter().map(|item| item.deleted).collect();
+    assert_eq!(deleted, [false, true]);
+    let kinds: Vec<&FileChangeKind> = items
+        .iter()
+        .flat_map(|item| &item.changes)
+        .map(|change| &change.kind)
+        .collect();
+    assert_eq!(kinds, [&FileChangeKind::Modified, &FileChangeKind::Removed]);
+    assert_eq!(serde_json::to_value(&error)?, wire);
+    Ok(())
+}
+
+#[test]
+fn an_untyped_diff_is_not_a_draft_conflict() {
+    let old = json!({
+        "kind": "draft_conflict",
+        "item_id": "22222222-2222-4222-8222-222222222222",
+        "draft_base": "a".repeat(40),
+        "current_revision": "b".repeat(40),
+        "diff": {"anything": true}
+    });
+    assert!(serde_json::from_value::<ErrorDetail>(old).is_err());
 }

@@ -179,3 +179,11 @@ fn the_workspaces_tool_tells_the_agent_to_pin_reads() -> Result<(), Box<dyn Erro
     }
     Ok(())
 }
+
+#[test]
+fn snapshot_states_the_per_item_precondition() -> Result<(), Box<dyn Error>> {
+    let commit = declared("commit_items")?;
+    assert!(commit.description.contains("since its draft's base"));
+    assert!(!commit.description.contains("unchanged base"));
+    Ok(())
+}
