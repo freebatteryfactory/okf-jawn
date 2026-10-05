@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir, platform } from 'node:os';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
-import { requireCleanTree } from '../../scripts/lib/provenance.mjs';
+import { receiptHeader, recordReceipt } from '../../scripts/lib/provenance.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const outDir = join(root, '.artifacts/qualification/iii');
@@ -485,7 +485,7 @@ async function writeReceipt(receipt) {
 }
 
 async function main() {
-  const commitSha = await requireCleanTree(root);
+  const header = await receiptHeader(root, ['qualification/iii', 'Cargo.toml', 'Cargo.lock']);
   await mkdir(outDir, { recursive: true });
   const started = new Date().toISOString();
   // Gate/marker dirs stay on the Windows filesystem for the Windows-built worker.
@@ -798,14 +798,8 @@ async function main() {
   }
 
   const receipt = {
+    ...header,
     component: 'iii-phase0',
-    commit_sha: commitSha,
-    git_sha: commitSha,
-    inputs: [
-      'qualification/iii',
-      'Cargo.toml',
-      'Cargo.lock',
-    ],
     decision,
     reason,
     fallback: decision === 'PASS' ? null : FALLBACK,
@@ -835,6 +829,9 @@ async function main() {
     product_ports: 'Not implemented (no RecordStore/JobQueue product wiring).',
   };
   await writeReceipt(receipt);
+  if (process.argv.includes('--record')) {
+    process.stdout.write(`iii receipt recorded: ${await recordReceipt(root, 'iii', receipt)}\n`);
+  }
   process.stdout.write(`iii qualification receipt: ${receiptPath}\n`);
   process.stdout.write(`decision: ${decision}\n`);
   if (decision !== 'PASS') process.exitCode = 1;
