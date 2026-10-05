@@ -32,8 +32,6 @@
         }
       },
       "required": [
-        "old_path",
-        "new_path",
         "patch",
         "binary",
         "kind"

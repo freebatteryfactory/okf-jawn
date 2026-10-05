@@ -27,7 +27,8 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('-V', '-V ', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('--version', '--version', [CompletionResultType]::ParameterName, 'Print version')
-            [CompletionResult]::new('list_workspaces', 'list_workspaces', [CompletionResultType]::ParameterValue, 'List only workspaces visible to the authenticated principal.')
+            [CompletionResult]::new('list_workspaces', 'list_workspaces', [CompletionResultType]::ParameterValue, 'List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {"kind": "revision", "revision": head} so every call sees one consistent state, and compare it with a later listing to detect change.')
+            [CompletionResult]::new('workspaces', 'workspaces', [CompletionResultType]::ParameterValue, 'List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {"kind": "revision", "revision": head} so every call sees one consistent state, and compare it with a later listing to detect change.')
             [CompletionResult]::new('create_workspace', 'create_workspace', [CompletionResultType]::ParameterValue, 'Create a blank workspace; no example content is inserted.')
             [CompletionResult]::new('open_workspace', 'open_workspace', [CompletionResultType]::ParameterValue, 'Open an existing authorized workspace.')
             [CompletionResult]::new('update_workspace', 'update_workspace', [CompletionResultType]::ParameterValue, 'Update workspace metadata at the supplied base revision.')
@@ -67,8 +68,8 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('diff_items', 'diff_items', [CompletionResultType]::ParameterValue, 'Compare two explicit versions and retain both references.')
             [CompletionResult]::new('diff', 'diff', [CompletionResultType]::ParameterValue, 'Compare two explicit versions and retain both references.')
             [CompletionResult]::new('changes', 'changes', [CompletionResultType]::ParameterValue, 'Compare two explicit versions and retain both references.')
-            [CompletionResult]::new('commit_items', 'commit_items', [CompletionResultType]::ParameterValue, 'Name a snapshot from saved drafts against an unchanged base.')
-            [CompletionResult]::new('snapshot', 'snapshot', [CompletionResultType]::ParameterValue, 'Name a snapshot from saved drafts against an unchanged base.')
+            [CompletionResult]::new('commit_items', 'commit_items', [CompletionResultType]::ParameterValue, 'Name a snapshot from the caller''s saved drafts; blocked only when a selected item was changed or deleted since its draft''s base.')
+            [CompletionResult]::new('snapshot', 'snapshot', [CompletionResultType]::ParameterValue, 'Name a snapshot from the caller''s saved drafts; blocked only when a selected item was changed or deleted since its draft''s base.')
             [CompletionResult]::new('restore_items', 'restore_items', [CompletionResultType]::ParameterValue, 'Restore selected historical content as a new commit without rewriting history.')
             [CompletionResult]::new('rewind', 'rewind', [CompletionResultType]::ParameterValue, 'Restore selected historical content as a new commit without rewriting history.')
             [CompletionResult]::new('blame_item', 'blame_item', [CompletionResultType]::ParameterValue, 'Show which commit last changed each selected line, not the origin of each fact.')
@@ -123,6 +124,13 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;list_workspaces' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;workspaces' {
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
@@ -767,7 +775,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;help' {
-            [CompletionResult]::new('list_workspaces', 'list_workspaces', [CompletionResultType]::ParameterValue, 'List only workspaces visible to the authenticated principal.')
+            [CompletionResult]::new('list_workspaces', 'list_workspaces', [CompletionResultType]::ParameterValue, 'List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {"kind": "revision", "revision": head} so every call sees one consistent state, and compare it with a later listing to detect change.')
             [CompletionResult]::new('create_workspace', 'create_workspace', [CompletionResultType]::ParameterValue, 'Create a blank workspace; no example content is inserted.')
             [CompletionResult]::new('open_workspace', 'open_workspace', [CompletionResultType]::ParameterValue, 'Open an existing authorized workspace.')
             [CompletionResult]::new('update_workspace', 'update_workspace', [CompletionResultType]::ParameterValue, 'Update workspace metadata at the supplied base revision.')
@@ -796,7 +804,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('get_graph', 'get_graph', [CompletionResultType]::ParameterValue, 'Read a bounded graph projection using the same authorized source identities.')
             [CompletionResult]::new('log_items', 'log_items', [CompletionResultType]::ParameterValue, 'Read content snapshots; Git history is not the complete application event log.')
             [CompletionResult]::new('diff_items', 'diff_items', [CompletionResultType]::ParameterValue, 'Compare two explicit versions and retain both references.')
-            [CompletionResult]::new('commit_items', 'commit_items', [CompletionResultType]::ParameterValue, 'Name a snapshot from saved drafts against an unchanged base.')
+            [CompletionResult]::new('commit_items', 'commit_items', [CompletionResultType]::ParameterValue, 'Name a snapshot from the caller''s saved drafts; blocked only when a selected item was changed or deleted since its draft''s base.')
             [CompletionResult]::new('restore_items', 'restore_items', [CompletionResultType]::ParameterValue, 'Restore selected historical content as a new commit without rewriting history.')
             [CompletionResult]::new('blame_item', 'blame_item', [CompletionResultType]::ParameterValue, 'Show which commit last changed each selected line, not the origin of each fact.')
             [CompletionResult]::new('open_proposal', 'open_proposal', [CompletionResultType]::ParameterValue, 'Create a suggested change set without merging or marking anything reviewed.')

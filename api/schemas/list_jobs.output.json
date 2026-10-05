@@ -87,6 +87,43 @@
       ],
       "type": "object"
     },
+    "DraftConflictItem": {
+      "additionalProperties": false,
+      "description": "One snapshotted item whose committed content moved after its draft's base.",
+      "properties": {
+        "changes": {
+          "description": "The item's committed changes from `draft_base` to `current_revision`.",
+          "items": {
+            "$ref": "#/$defs/FileChange"
+          },
+          "type": "array"
+        },
+        "current_revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Head revision at which the item was found changed or deleted."
+        },
+        "deleted": {
+          "description": "The item no longer exists at `current_revision`.",
+          "type": "boolean"
+        },
+        "draft_base": {
+          "$ref": "#/$defs/Revision",
+          "description": "Revision the draft was based on."
+        },
+        "item_id": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Item whose draft no longer applies cleanly."
+        }
+      },
+      "required": [
+        "item_id",
+        "draft_base",
+        "current_revision",
+        "deleted",
+        "changes"
+      ],
+      "type": "object"
+    },
     "ErrorCode": {
       "description": "Stable failure classifications; HTTP and MCP adapters preserve these.",
       "oneOf": [
@@ -149,6 +186,11 @@
           "const": "internal",
           "description": "An unexpected server failure occurred without exposing secrets.",
           "type": "string"
+        },
+        {
+          "const": "not_implemented",
+          "description": "The operation is declared but this build does not implement it; never a success.",
+          "type": "string"
         }
       ]
     },
@@ -202,22 +244,15 @@
         },
         {
           "additionalProperties": false,
-          "description": "The head moved under a draft; the editor resolves and saves against the new head.",
+          "description": "One or more snapshotted items changed or were deleted after their drafts' bases.",
           "properties": {
-            "current_revision": {
-              "$ref": "#/$defs/Revision",
-              "description": "Head revision at which the item changed or was deleted."
-            },
-            "diff": {
-              "description": "Structured comparison between the draft base and the current revision."
-            },
-            "draft_base": {
-              "$ref": "#/$defs/Revision",
-              "description": "Revision the draft was based on."
-            },
-            "item_id": {
-              "$ref": "#/$defs/ItemId",
-              "description": "Item whose draft no longer applies cleanly."
+            "items": {
+              "description": "Every conflicting item, never only the first.",
+              "items": {
+                "$ref": "#/$defs/DraftConflictItem"
+              },
+              "minItems": 1,
+              "type": "array"
             },
             "kind": {
               "const": "draft_conflict",
@@ -226,10 +261,7 @@
           },
           "required": [
             "kind",
-            "item_id",
-            "draft_base",
-            "current_revision",
-            "diff"
+            "items"
           ],
           "type": "object"
         },
@@ -251,6 +283,69 @@
             "operation"
           ],
           "type": "object"
+        }
+      ]
+    },
+    "FileChange": {
+      "additionalProperties": false,
+      "description": "A changed file with before and after locators.",
+      "properties": {
+        "binary": {
+          "description": "The underlying bytes are binary.",
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/FileChangeKind",
+          "description": "Added, modified, moved, or removed."
+        },
+        "new_path": {
+          "description": "New path; absent for deletions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old_path": {
+          "description": "Previous path; absent for additions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "patch": {
+          "description": "Unified text diff when applicable.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "patch",
+        "binary",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "FileChangeKind": {
+      "description": "How one file differs between two revisions.",
+      "oneOf": [
+        {
+          "const": "added",
+          "description": "Present only in the compared revision.",
+          "type": "string"
+        },
+        {
+          "const": "modified",
+          "description": "Same path, different content.",
+          "type": "string"
+        },
+        {
+          "const": "moved",
+          "description": "Different path for the same item.",
+          "type": "string"
+        },
+        {
+          "const": "removed",
+          "description": "Present only in the base revision.",
+          "type": "string"
         }
       ]
     },
@@ -302,6 +397,10 @@
           },
           "type": "array"
         },
+        "kind": {
+          "$ref": "#/$defs/JobKind",
+          "description": "What this job does."
+        },
         "progress": {
           "description": "Approximate completion percentage.",
           "format": "uint8",
@@ -339,6 +438,7 @@
       "required": [
         "id",
         "workspace_id",
+        "kind",
         "state",
         "progress",
         "attempt",
@@ -351,6 +451,46 @@
       "description": "Durable background work identity retained across retries.",
       "format": "uuid",
       "type": "string"
+    },
+    "JobKind": {
+      "description": "What a durable job does; fixed when the job is accepted.",
+      "oneOf": [
+        {
+          "const": "import",
+          "description": "Convert finalized uploads into source cards.",
+          "type": "string"
+        },
+        {
+          "const": "redigest",
+          "description": "Re-run extraction for one item.",
+          "type": "string"
+        },
+        {
+          "const": "export_workspace",
+          "description": "Build a portable export.",
+          "type": "string"
+        },
+        {
+          "const": "backup_workspace",
+          "description": "Back up content and durable application records.",
+          "type": "string"
+        },
+        {
+          "const": "restore_workspace",
+          "description": "Restore content and durable application records from a backup.",
+          "type": "string"
+        },
+        {
+          "const": "rebuild_index",
+          "description": "Rebuild derived search and link data.",
+          "type": "string"
+        },
+        {
+          "const": "export_view",
+          "description": "Export one View with its sources, data table and rendering.",
+          "type": "string"
+        }
+      ]
     },
     "JobState": {
       "description": "Job progress retained independently of diagnostic traces.",
