@@ -10,7 +10,7 @@
     "typecheck": "tsc -b",
     "typecheck:generated-strict": "tsc -p tsconfig.generated-strict.json",
     "check": "biome check . && tsc -b",
-    "test": "vitest run",
+    "test": "node ./node_modules/vitest/vitest.mjs run",
     "test:e2e": "playwright test",
     "lint": "biome check ."
   },
