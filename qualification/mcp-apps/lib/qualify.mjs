@@ -11,6 +11,8 @@
  * - Once the tree is known clean, every run writes a receipt. A step the machine could not
  *   do (build, start, connect, launch) is recorded as harness_error; the criteria it would
  *   have judged are listed not_judged, and the result folds to INCOMPLETE, never FAIL.
+ *   harness_error is one sentence per stopped step (what stopped, and the first line of why);
+ *   harness_error_detail keeps the whole message for whoever has to repair the machine.
  * - The receipt is complete and sealed before it is written or recorded; its result is the
  *   fold of its criteria. --record records any result, but never an envelope that
  *   envelopeFailures does not trust.
@@ -33,8 +35,10 @@ import { judgeProtocol } from './protocol.mjs';
 import { APP_ONLY_TOOLS, APP_RESOURCE_URI, UPSTREAM_HOST_RULES, VIEWS, appBundleBuild, ngrokRecord, transportRecord } from './views.mjs';
 
 const SKIPPED = 'skipped: protocol-only run';
-/** One line of an error, bounded: a harness_error is a sentence, not a log. */
-const sentence = (error) => String(error?.message ?? error).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(' | ').slice(0, 600);
+/** The first line of a message, bounded: a harness_error is a sentence, not a log. */
+const firstLine = (text) => (String(text).split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? '').slice(0, 300);
+/** The sentence for one stopped step. */
+const sentence = ({ what, detail }) => (detail === null || firstLine(detail) === '' ? what : `${what}: ${firstLine(detail)}`);
 
 /**
  * Run the qualification through `effects` and return `{ receipt, exitCode, recorded }`.
@@ -47,13 +51,15 @@ export async function qualify(effects, { record = false, protocolOnly = false, p
   // A dirty tree throws here: there is no commit a receipt could cite.
   const header = await effects.header();
 
+  /** What the machine could not do, in order: `what` stopped and, where there is one, the whole message. */
   const harnessErrors = [];
+  const stopped = (what, detail = null) => harnessErrors.push({ what, detail: detail === null ? null : String(detail).slice(0, 4000) });
   const judgedCriteria = [];
   const attempt = async (what, effect) => {
     try {
       return await effect();
     } catch (error) {
-      harnessErrors.push(`${what}: ${sentence(error)}`);
+      stopped(what, error?.message ?? error);
       return null;
     }
   };
@@ -86,10 +92,10 @@ export async function qualify(effects, { record = false, protocolOnly = false, p
     const checked = expectations && (await attempt('the harness --check did not run', () => effects.checkHarness(harness)));
     if (checked) {
       const unreadable = (checked.report?.resources ?? []).some((resource) => resource.readable !== true);
-      if (!checked.report) harnessErrors.push(`the harness --check printed no report (exit ${checked.code}): ${sentence(checked.stderr)}`);
-      else if (checked.code !== 0 && !unreadable) harnessErrors.push(`the harness --check exited ${checked.code}: ${sentence(checked.stderr)}`);
+      if (!checked.report) stopped(`the harness --check printed no report (exit ${checked.code})`, checked.stderr);
+      else if (checked.code !== 0 && !unreadable) stopped(`the harness --check exited ${checked.code}`, checked.stderr);
       else if (checked.report.dataset?.sha256 !== expectations.dataset.digest) {
-        harnessErrors.push(`the harness serves dataset ${checked.report.dataset?.sha256}; the committed fixture is ${expectations.dataset.digest}`);
+        stopped(`the harness serves dataset ${checked.report.dataset?.sha256}; the committed fixture is ${expectations.dataset.digest}`);
       }
       check = checked.report ?? null;
     }
@@ -127,7 +133,7 @@ export async function qualify(effects, { record = false, protocolOnly = false, p
           if (!observation) continue;
           const viewed = viewCriteria(view, view.dataset ? expectations.dataset : null, observation);
           judgedCriteria.push(...viewed.criteria);
-          harnessErrors.push(...viewed.harness_errors);
+          for (const error of viewed.harness_errors) stopped(error);
           viewRecords.push(viewed.record);
         }
       }
@@ -141,16 +147,17 @@ export async function qualify(effects, { record = false, protocolOnly = false, p
 
   const why = (id) => {
     if (protocolOnly && isRenderCriterion(id)) return SKIPPED;
-    return harnessErrors.length ? `not reached: ${harnessErrors[0]}` : 'this run made no judgement for it';
+    return harnessErrors.length ? `not reached: ${harnessErrors[0].what}` : 'this run made no judgement for it';
   };
   const criteria = completeCriteria(judgedCriteria, why, views);
-  const envelope = sealEnvelope({ criteria, harnessErrors, pinned });
+  const envelope = sealEnvelope({ criteria, harnessErrors: harnessErrors.map(sentence), pinned });
   const skipped = protocolOnly ? SKIPPED : 'OKF_MCP_APPS_NGROK is not 1';
 
   const receipt = {
     ...header,
     component: GATE,
     ...envelope,
+    harness_error_detail: harnessErrors,
     finished_at: new Date().toISOString(),
     scope: SCOPE,
     rules: criterionRules(views),

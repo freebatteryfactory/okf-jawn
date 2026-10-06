@@ -1782,6 +1782,7 @@ test('the MCP Apps receipt carries the shared envelope, and its result is the fo
   assert.equal(receipt.gate, 'mcp-apps-protocol-qualification');
   assert.equal(receipt.result, 'PASS');
   assert.equal(receipt.harness_error, null);
+  assert.deepEqual(receipt.harness_error_detail, []);
   assert.deepEqual(receipt.not_judged, []);
   assert.deepEqual(receipt.criteria.map((criterion) => criterion.id), criterionIds());
   assert.ok(receipt.criteria.every((criterion) => criterion.required === true && criterion.result === 'pass'));
@@ -1890,10 +1891,10 @@ test('what the machine could not do is a harness error: INCOMPLETE, a receipt fo
     ['checkHarness', boom('spawn EACCES'), /^the harness --check did not run: spawn EACCES$/, 3],
     ['checkHarness', async () => ({ code: 1, report: null, stderr: 'okf-qualify-mcp-apps: manifest must list exactly 1 shared App resource' }), /^the harness --check printed no report \(exit 1\): okf-qualify-mcp-apps: manifest must list/, 3],
     ['checkHarness', async () => ({ code: 0, report: { resources: [{ name: 'app', readable: true }], dataset: { sha256: 'e'.repeat(64) } }, stderr: '' }), /^the harness serves dataset e{64}; the committed fixture is [0-9a-f]{64}$/, 4],
-    ['startHarness', boom('okf-qualify-mcp-apps exited before listening (exit 1)\nstderr:\nbind 127.0.0.1:18765: access denied'), /^the harness server did not start: okf-qualify-mcp-apps exited before listening \(exit 1\) \| stderr: \| bind/, 4],
+    ['startHarness', boom('okf-qualify-mcp-apps exited before listening (exit 1)\nstderr:\nbind 127.0.0.1:18765: access denied'), /^the harness server did not start: okf-qualify-mcp-apps exited before listening \(exit 1\)$/, 4],
     ['observeProtocol', boom('fetch failed'), /^the MCP client could not reach the harness server: fetch failed$/, 4],
     ['startHost', boom('fetch basic-host package.json: HTTP 503'), /^the reference host \(basic-host\) did not start: fetch basic-host package\.json: HTTP 503$/, 17],
-    ['launchBrowser', boom(noBrowser), /^Chromium did not start: browserType\.launch: Executable doesn't exist at .* \| Looks like Playwright was just installed or updated\.$/, 17],
+    ['launchBrowser', boom(noBrowser), /^Chromium did not start: browserType\.launch: Executable doesn't exist at D:\\empty\\chromium-1243\\chrome-win\\chrome\.exe$/, 17],
   ];
   for (const [effect, behaviour, sentence, judgedCount] of stages) {
     const double = await qualifyDouble({ change: { [effect]: behaviour } });
@@ -1906,7 +1907,13 @@ test('what the machine could not do is a harness error: INCOMPLETE, a receipt fo
     assert.equal(receipt.criteria.filter((criterion) => criterion.result === 'pass').length, judgedCount, label);
     assert.deepEqual(receipt.not_judged, receipt.criteria.filter((criterion) => criterion.result === 'not_judged').map((criterion) => criterion.id), label);
     assert.equal(receipt.not_judged.length, criterionIds().length - judgedCount, label);
-    assert.ok(receipt.criteria.filter((criterion) => criterion.result === 'not_judged').every((criterion) => criterion.detail.startsWith('not reached: ')), label);
+    // The sentence is one line; the whole message is kept beside it; a criterion says only which step stopped.
+    assert.doesNotMatch(receipt.harness_error, /\n/, label);
+    assert.equal(receipt.harness_error_detail.length, 1, label);
+    assert.ok(receipt.harness_error.startsWith(receipt.harness_error_detail[0].what), label);
+    assert.ok(receipt.criteria.filter((criterion) => criterion.result === 'not_judged').every((criterion) => criterion.detail === `not reached: ${receipt.harness_error_detail[0].what}`), label);
+    if (effect === 'startHarness') assert.match(receipt.harness_error_detail[0].detail, /stderr:\nbind 127\.0\.0\.1:18765: access denied$/);
+    if (effect === 'launchBrowser') assert.match(receipt.harness_error_detail[0].detail, /Looks like Playwright was just installed or updated\.$/);
     assert.deepEqual(mcpAppsEnvelopeFailures(receipt, MCP_APPS_GATE, double.pinned), [], label);
     // The old receipt goes before anything else, and this run writes its own, once, after everything was stopped.
     assert.equal(double.calls[0], 'removeReceipt', label);
