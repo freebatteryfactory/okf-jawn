@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { delimiter, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
-import { fixtureRepo } from './fixture-repo.mjs';
+import { fixtureRepo, posixShell } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const read=file=>readFile(join(root,file),'utf8');
 
@@ -53,7 +53,7 @@ test('pre-push scope-checks each pushed build/* ref at its pushed commit and ign
  const zero='0'.repeat(40),sha='a'.repeat(40),other='c'.repeat(40);
  const stdin=[`refs/heads/build/storage ${sha} refs/heads/build/storage ${zero}`,`refs/heads/feature/x ${'b'.repeat(40)} refs/heads/feature/x ${zero}`,
   `refs/heads/build/views ${other} refs/heads/build/views ${zero}`,`(delete) ${zero} refs/heads/build/ingest ${sha}`].join('\n')+'\n';
- const result=spawnSync('sh',[posix(join(root,'scripts/hooks/pre-push'))],{cwd:repo,input:stdin,encoding:'utf8',env:{...process.env,PATH:`${stubs}${delimiter}${process.env.PATH}`}});
+ const result=spawnSync(posixShell(),[posix(join(root,'scripts/hooks/pre-push'))],{cwd:repo,input:stdin,encoding:'utf8',env:{...process.env,PATH:`${stubs}${delimiter}${process.env.PATH}`}});
  assert.equal(result.status,0,result.stderr);
  assert.deepEqual((await readFile(log,'utf8')).trim().split(/\r?\n/),[
   'bun scripts/dev.mjs check-offline','cargo fmt --all --check',
