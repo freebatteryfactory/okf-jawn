@@ -6,6 +6,9 @@
  * file other than one script and one stylesheet would be unreachable from the inline document and
  * fails the build.
  *
+ * OKF_APP_OUT overrides the output directory (default `dist-apps`, relative to the working
+ * directory); app.html and manifest.json are written there.
+ *
  * NODE_ENV is forced to production before the build, whatever the caller exports.
  *
  * The manifest is built from the generated api/mcp-apps.json alone (OKF_MCP_APPS overrides the
@@ -14,6 +17,7 @@
 
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { env } from 'node:process';
 import { fileURLToPath, URL } from 'node:url';
 import { RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps';
@@ -36,15 +40,12 @@ const declared = parseAppResource(
 // larger development bundle (and different CSP hashes).
 env.NODE_ENV = 'production';
 
+const outDir = env.OKF_APP_OUT ?? 'dist-apps';
+
 const output = await build({
   configFile: false,
   logLevel: 'warn',
   mode: 'production',
-  // The Tailwind plugin scans its base, which is the Vite root, for class words. Rooting the build
-  // at ui/src keeps the stylesheet a function of UI source: a test, README or scratch file elsewhere
-  // under ui/ must not change the App's bytes. (The directive form, `@import "tailwindcss"
-  // source("./")`, is not parsed by the pinned Biome without css.parser.tailwindDirectives.)
-  root: fileURLToPath(new URL('../src', import.meta.url)),
   plugins: [react(), babel({ presets: [reactCompilerPreset()] }), tailwindcss()],
   resolve: { alias: { '@': fileURLToPath(new URL('../src', import.meta.url)) } },
   build: {
@@ -80,12 +81,12 @@ const safeScript = script.replaceAll('</script', '<\\/script');
 const safeStyle = style.replaceAll('</style', '<\\/style');
 const policy = `default-src 'none'; script-src 'sha256-${hash(safeScript)}'; style-src 'sha256-${hash(safeStyle)}'; img-src data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`;
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${policy}"><title>okf-jawn source view</title><style>${safeStyle}</style></head><body><div id="root"></div><script>${safeScript}</script></body></html>\n`;
-await mkdir('dist-apps', { recursive: true });
-const file = `dist-apps/${declared.name}.html`;
+await mkdir(outDir, { recursive: true });
+const file = join(outDir, `${declared.name}.html`);
 await writeFile(file, html);
 const bytes = Buffer.from(html, 'utf8');
 const resources = [
   manifestEntry(declared, bytes.byteLength, createHash('sha256').update(bytes).digest('hex')),
 ];
-await writeFile('dist-apps/manifest.json', `${JSON.stringify({ resources }, null, 2)}\n`);
+await writeFile(join(outDir, 'manifest.json'), `${JSON.stringify({ resources }, null, 2)}\n`);
 process.stdout.write(`Built shared ${declared.uri} MCP App resource.\n`);

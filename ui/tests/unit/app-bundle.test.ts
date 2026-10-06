@@ -28,20 +28,77 @@ const insideWord = ['line', 'through'].join('-');
 // Strings present only in React's development build (verified against a NODE_ENV=development bundle).
 const developmentMarkers = ['Download the React DevTools', 'react-stack-top-frame'];
 
-function buildApp(nodeEnv: string | undefined) {
+function bundleEnv(nodeEnv: string | undefined) {
   const env: Record<string, string | undefined> = { ...process.env };
+  delete env.OKF_APP_OUT;
   if (nodeEnv === undefined) delete env.NODE_ENV;
   else env.NODE_ENV = nodeEnv;
-  const run = spawnSync('bun', ['scripts/bundle-app.mjs'], {
-    cwd: uiRoot,
+  return env;
+}
+
+function runBundle(cwd: string, env: Record<string, string | undefined>) {
+  const run = spawnSync('bun', [join(uiRoot, 'scripts', 'bundle-app.mjs')], {
+    cwd,
     env,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
   });
   if (run.status !== 0) throw new Error(`bundle-app failed: ${run.stderr}${run.error ?? ''}`);
-  const html = readFileSync(join(uiRoot, 'dist-apps', 'app.html'), 'utf8');
-  return { html, sha256: createHash('sha256').update(html).digest('hex') };
 }
+
+/** Build the App into a temporary OKF_APP_OUT directory that is removed afterwards. */
+function buildApp(nodeEnv: string | undefined) {
+  const outDir = mkdtempSync(join(tmpdir(), 'okf-app-out-'));
+  try {
+    runBundle(uiRoot, { ...bundleEnv(nodeEnv), OKF_APP_OUT: outDir });
+    const html = readFileSync(join(outDir, 'app.html'), 'utf8');
+    const manifest = readFileSync(join(outDir, 'manifest.json'), 'utf8');
+    return { html, manifest, sha256: createHash('sha256').update(html).digest('hex') };
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+}
+
+/** Build the workspace UI into a temporary directory and return its stylesheet text. */
+function buildWorkspaceCss() {
+  const outDir = mkdtempSync(join(tmpdir(), 'okf-ui-css-'));
+  try {
+    const run = spawnSync('bunx', ['vite', 'build', '--outDir', outDir, '--emptyOutDir'], {
+      cwd: uiRoot,
+      env: bundleEnv('production'),
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (run.status !== 0) throw new Error(`vite build failed: ${run.stderr}${run.error ?? ''}`);
+    const assets = join(outDir, 'assets');
+    const css = readdirSync(assets).filter((name) => name.endsWith('.css'));
+    return css.map((name) => readFileSync(join(assets, name), 'utf8')).join('\n');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+}
+
+describe('MCP App bundle output directory', () => {
+  it(
+    'writes app.html and manifest.json to OKF_APP_OUT, and to ./dist-apps of the working directory by default',
+    () => {
+      const override = buildApp('production');
+      expect(JSON.parse(override.manifest).resources[0].sha256).toBe(override.sha256);
+      const cwd = mkdtempSync(join(tmpdir(), 'okf-app-cwd-'));
+      try {
+        runBundle(cwd, bundleEnv('production'));
+        const html = readFileSync(join(cwd, 'dist-apps', 'app.html'), 'utf8');
+        expect(createHash('sha256').update(html).digest('hex')).toBe(override.sha256);
+        expect(readFileSync(join(cwd, 'dist-apps', 'manifest.json'), 'utf8')).toBe(
+          override.manifest,
+        );
+      } finally {
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+    buildTimeoutMs,
+  );
+});
 
 describe('MCP App bundle environment independence', () => {
   it(
@@ -98,7 +155,7 @@ describe('workspace UI build environment independence', () => {
   );
 });
 
-describe('MCP App stylesheet source scope', () => {
+describe('stylesheet source scope', () => {
   const scratch: string[] = [];
   afterEach(() => {
     for (const path of scratch.splice(0)) rmSync(path, { force: true });
@@ -118,6 +175,17 @@ describe('MCP App stylesheet source scope', () => {
       expect(baseline.html).toContain('.view-columns');
       plant('tests/zz-scratch-outside.txt', `${outsideWords}\n`);
       expect(buildApp('production').sha256).toBe(baseline.sha256);
+    },
+    buildTimeoutMs,
+  );
+
+  it(
+    'leaves the workspace UI stylesheet unchanged by class words outside ui/src',
+    () => {
+      const baseline = buildWorkspaceCss();
+      expect(baseline).toContain('.view-stack');
+      plant('tests/zz-scratch-workspace.txt', `${outsideWords}\n`);
+      expect(buildWorkspaceCss()).toBe(baseline);
     },
     buildTimeoutMs,
   );
