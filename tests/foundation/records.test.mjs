@@ -244,6 +244,12 @@ test('a ci gate names a job of the workflow by its check name, and that job runs
    }else assert.fail(`${where}: no rule says which CI step runs a file of this sort`);
   }
  }
+ // "and the checkout" in deterministic-foundation is held by a workflow step that is no dev.mjs
+ // task (bootstrap regenerates before gen-check runs), so the test that pins that step is its evidence.
+ const foundation=gates.find(gate=>gate.id==='deterministic-foundation');
+ assert.match(foundation.covers,/requires both passes and the checkout to agree byte for byte/);
+ assert.ok(foundation.enforced_by.evidence.includes('tests/foundation/ci.test.mjs'),'deterministic-foundation does not name the test that pins the clean-tree step');
+ assert.match(await read('tests/foundation/ci.test.mjs'),/^test\('the job that runs the real generators fails when generation changed the checkout, before any gated step'/m);
  // The ruleset lives on GitHub, not in the tree. It requires these two contexts by name, so a
  // renamed job would never report its required check; each one has a job and a gate here.
  const names=Object.values(Bun.YAML.parse(await read('.github/workflows/ci.yml')).jobs).map(job=>job.name);

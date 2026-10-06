@@ -95,7 +95,8 @@
               "bun scripts/dev.mjs premerge --step ui-lint",
               "bun scripts/dev.mjs premerge --step ui-build",
               "bun scripts/dev.mjs premerge --step ui-typecheck",
-              "bun scripts/dev.mjs premerge --step ui-test"
+              "bun scripts/dev.mjs premerge --step ui-test",
+              "tests/foundation/ci.test.mjs"
             ]
           },
           "covers": "On every push the foundation job runs the pinned generators twice from the committed lockfiles and requires both passes and the checkout to agree byte for byte; it then requires the workspace to format, pass strict Clippy and the source policy, pass every crate's tests with every feature, and the UI to lint, build, type-check and pass its unit tests. It does not prove a library qualification, any behaviour against a running server, or dependency advisories: the audit job runs on main, nightly and on dispatch and is not a required check."
@@ -160,7 +161,7 @@
               "bun scripts/dev.mjs bootstrap"
             ]
           },
-          "covers": "Every CI run starts from a fresh clone of the pushed commit: bootstrap installs from the committed lockfiles only, builds the generator, generates, and builds and type-checks the UI before the gated steps run, so nothing can depend on an uncommitted file. Cargo's registry and target directory and Bun's cache are restored from caches keyed on the lockfiles, and CI neither asserts that the tree is still clean afterwards nor runs the audit; `bun scripts/dev.mjs clean-checkout` does both locally and is a tool, not a gate."
+          "covers": "Every CI run starts from a fresh clone of the pushed commit: bootstrap installs from the committed lockfiles only, builds the generator, generates, and builds and type-checks the UI before the gated steps run, so nothing can depend on an uncommitted file. Cargo's registry and target directory and Bun's cache are restored from caches keyed on the lockfiles. CI asserts that the checkout is unchanged directly after bootstrap (the deterministic-foundation gate) and not again after the gated steps, and it does not run the audit; `bun scripts/dev.mjs clean-checkout` asserts a clean tree after the whole sequence and runs the audit locally, and is a tool, not a gate."
         },
         {
           "id": "github-actions-ci-receipt",
