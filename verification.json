@@ -1,6 +1,5 @@
 {
   "project": "okf-jawn",
-  "delivery": "Full-scope executable foundation source; not a completed or qualified application",
   "phase_0_qualified": false,
   "reopened": {
     "decision": "Phase 0 was reopened because the terminal record made before it claimed more than its harnesses had tested and the shared contract and ports had gaps. The web-host check moved to acceptance, and both library qualifications are run again on a clean commit.",

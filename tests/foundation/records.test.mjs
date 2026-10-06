@@ -33,11 +33,11 @@ const unconverted={
  * the tree by a test below, or a decision with a date and a role. A field in neither list fails.
  */
 const recordFields={
- top:['project','delivery','phase_0_qualified','reopened','application_implemented','current','historical_archive_record'],
+ top:['project','phase_0_qualified','reopened','application_implemented','current','historical_archive_record'],
  current:['direct_versions','typescript_policy','typescript_boundary_fixes','advisories_remaining','gates'],
 };
-/** Fields that were typed claims CI enforces, a tool derives or history narrates; none may come back. */
-const removedFields=['recorded_at_utc','base_commit','environment','lockfiles_resolved','lockfile_provenance','rust_compiled','rust_generator_executed','frontend_generation_executed',
+/** Fields that were typed claims CI enforces, a tool derives or history narrates; none may come back. `delivery` restated a status in prose ("not a ... qualified application") that phase_0_qualified derives. */
+const removedFields=['delivery','recorded_at_utc','base_commit','environment','lockfiles_resolved','lockfile_provenance','rust_compiled','rust_generator_executed','frontend_generation_executed',
  'generation_deterministic','project_typescript_checked','project_typescript_passed','authored_typescript_error_count','deterministic_foundation_green','phase_0_note','checks','code_tested_commits'];
 /** SHA-256 of the file's text from the `historical_archive_record` key to its end, as first committed. */
 const archiveDigest='8a2e38568aa78c9292d722e09c89e31cbd2e72e953c742d1c457565d52a1a1f2';
