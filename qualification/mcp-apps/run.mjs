@@ -40,6 +40,7 @@ import {
   VIEWS,
   basicHostUrl,
   basicHostVerdict,
+  chartForBinding,
   datasetExpectation,
   judgePresentDataset,
   judgeView,
@@ -447,10 +448,13 @@ async function readFrame(frame) {
 /** The dataset fixture as the App must show it: digest of its exact bytes and its rows. */
 async function loadDatasetExpectation(dataset) {
   const bytes = await readFile(join(root, dataset.fixture));
+  const present = JSON.parse(await readFile(join(root, dataset.present), 'utf8'));
   return datasetExpectation({
     binding: dataset.binding,
     digest: createHash('sha256').update(bytes).digest('hex'),
     rows: JSON.parse(bytes.toString('utf8')),
+    bytes: bytes.length,
+    chart: chartForBinding(present, dataset.binding),
   });
 }
 

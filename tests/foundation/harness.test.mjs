@@ -61,11 +61,14 @@ import {
   appBundleBuild,
   basicHostUrl,
   basicHostVerdict,
+  chartForBinding,
   datasetExpectation,
+  expectedChartMarks,
   judgePresentDataset,
   judgeView,
   ngrokRecord,
   partitionAxe,
+  readResolutions,
   runProblems,
   toolCallsFrom,
   transportRecord,
@@ -1290,12 +1293,15 @@ test('harness tool-call reports are read back in order and nothing else on stder
 async function committedDataset() {
   const bytes = await readFile(join(root, PRESENT_DATASET.fixture));
   const digest = createHash('sha256').update(bytes).digest('hex');
-  return { bytes, digest, expected: datasetExpectation({ binding: PRESENT_DATASET.binding, digest, rows: JSON.parse(bytes.toString('utf8')) }) };
+  const present = JSON.parse(await readFile(join(root, PRESENT_DATASET.present), 'utf8'));
+  const chart = chartForBinding(present, PRESENT_DATASET.binding);
+  const rows = JSON.parse(bytes.toString('utf8'));
+  return { bytes, digest, present, chart, rows, expected: datasetExpectation({ binding: PRESENT_DATASET.binding, digest, rows, bytes: bytes.length, chart }) };
 }
 
 test('the present fixture retains exactly the committed dataset, and the expectation is the table DataTable draws', async () => {
-  const { bytes, digest, expected } = await committedDataset();
-  const present = JSON.parse(await readFile(join(root, 'tests/fixtures/views/present-response.json'), 'utf8'));
+  const { bytes, digest, present, chart, expected } = await committedDataset();
+  assert.equal(PRESENT_DATASET.present, 'tests/fixtures/views/present-response.json');
   const retained = (bindings) => bindings.filter((binding) => binding.materialized !== undefined).map((binding) => [binding.name, binding.materialized]);
   assert.deepEqual(retained(present.resolved_bindings), [[PRESENT_DATASET.binding, digest]]);
   assert.deepEqual(retained(present.view.bindings), [[PRESENT_DATASET.binding, digest]]);
@@ -1307,103 +1313,198 @@ test('the present fixture retains exactly the committed dataset, and the expecta
   assert.deepEqual(expected, {
     binding: 'metrics',
     digest,
+    bytes: 223,
     rows: 5,
     columns: ['category', 'value'],
     cells: [['Ingested', '412'], ['Converted', '397'], ['Indexed', '389'], ['Reviewed', '127'], ['Published', '61']],
+    chart_marks: 5,
   });
+  assert.equal(expected.bytes, bytes.length);
   // The chart specification reads the dataset under the binding's name, as Chart.tsx injects it.
-  const chart = present.view.charts.metrics_chart;
+  assert.equal(chart, present.view.charts.metrics_chart);
   assert.equal(chart.data.name, PRESENT_DATASET.binding);
   assert.deepEqual([chart.encoding.x.field, chart.encoding.y.field], expected.columns);
   assert.deepEqual(present.view.spec.elements.chart.props, { binding: 'metrics', chart: 'metrics_chart', title: 'Metrics chart' });
   assert.deepEqual(present.view.spec.elements.table.props, { binding: 'metrics' });
+  assert.throws(() => chartForBinding(present, 'venue'), /exactly one Chart element bound to venue; found 0/);
+  assert.throws(() => chartForBinding({ view: { spec: { elements: { c: { type: 'Chart', props: { binding: 'b', chart: 'gone' } } } }, charts: {} } }, 'b'), /no chart named gone/);
 
   // Columns come in first-seen order and a missing or null cell is the empty string.
+  const bar = { mark: 'bar', encoding: { x: { field: 'a', type: 'nominal' }, y: { field: 'n', type: 'quantitative' } } };
   assert.deepEqual(
-    datasetExpectation({ binding: 'b', digest: 'd', rows: [{ a: 1 }, { b: null, a: false }] }),
-    { binding: 'b', digest: 'd', rows: 2, columns: ['a', 'b'], cells: [['1', ''], ['false', '']] },
+    datasetExpectation({ binding: 'b', digest: 'd', bytes: 9, chart: bar, rows: [{ a: 1, n: 1 }, { b: null, a: false, n: 2 }] }),
+    { binding: 'b', digest: 'd', bytes: 9, rows: 2, columns: ['a', 'n', 'b'], cells: [['1', '1', ''], ['false', '2', '']], chart_marks: 2 },
   );
-  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', rows: [] }), /non-empty JSON array/);
-  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', rows: { a: 1 } }), /non-empty JSON array/);
+  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', bytes: 9, chart: bar, rows: [] }), /non-empty JSON array/);
+  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', bytes: 9, chart: bar, rows: { a: 1 } }), /non-empty JSON array/);
+  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', chart: bar, rows: [{ a: 1, n: 1 }] }), /byte length must be a positive integer/);
+});
+
+test('the chart draws one mark per dataset row only for the shape the fixture has, and any other shape is refused', async () => {
+  const { chart, rows } = await committedDataset();
+  // The fixture: one unit bar, a nominal field against a quantitative one, nothing that merges or drops rows.
+  assert.equal(chart.mark, 'bar');
+  assert.deepEqual(chart.encoding, { x: { field: 'category', type: 'nominal' }, y: { field: 'value', type: 'quantitative' } });
+  assert.equal(expectedChartMarks(chart, rows), rows.length);
+  assert.equal(expectedChartMarks(chart, rows.slice(0, 1)), 1);
+  const refused = [
+    [{ ...chart, mark: 'line' }, /its mark is "line", not "bar"/],
+    [{ ...chart, mark: { type: 'bar' } }, /not "bar"/],
+    [{ ...chart, transform: [{ filter: 'datum.value > 100' }] }, /it has transform/],
+    [{ ...chart, layer: [] }, /it has layer/],
+    [{ ...chart, encoding: { ...chart.encoding, y: { field: 'value', type: 'quantitative', aggregate: 'sum' } } }, /channel y is .*aggregate.*not a plain \{ field, type \}/],
+    [{ ...chart, encoding: { ...chart.encoding, x: { field: 'category', type: 'nominal', bin: true } } }, /channel x/],
+    [{ ...chart, encoding: { ...chart.encoding, color: { field: 'category', type: 'nominal' } } }, /not exactly x and y/],
+    [{ ...chart, encoding: { x: chart.encoding.x, y: { field: 'value', type: 'nominal' } } }, /not one category and one quantity/],
+    [null, /not an object/],
+  ];
+  for (const [spec, why] of refused) assert.throws(() => expectedChartMarks(spec, rows), why, JSON.stringify(spec));
+  // Vega-Lite drops a row whose quantity is not a number: then marks would be fewer than rows.
+  assert.throws(() => expectedChartMarks(chart, [...rows, { category: 'Void', value: null }]), /row 5 has no finite value/);
+  assert.throws(() => expectedChartMarks(chart, [{ value: 1 }]), /row 0 has no category/);
+});
+
+test('reads of one binding are contiguous from offset 0 to the size of the dataset, each resolution on its own', () => {
+  const read = (offset, bytes, has_more) => ({ tool: 'read_object', ok: true, object: 'ab', offset, bytes, total_size: '223', has_more });
+  const whole = [read('0', 64, true), read('64', 64, true), read('128', 64, true), read('192', 31, false)];
+  assert.deepEqual(readResolutions(whole, 223), { complete: 1, problems: [] });
+  // A development build of React resolves the binding twice; the blocks interleave.
+  const doubled = whole.flatMap((block) => [block, block]);
+  assert.deepEqual(readResolutions(doubled, 223), { complete: 2, problems: [] });
+  assert.deepEqual(readResolutions([...whole, ...whole], 223), { complete: 2, problems: [] });
+  assert.deepEqual(readResolutions([], 223), { complete: 0, problems: [] });
+
+  const broken = [
+    ['the middle skipped', [read('0', 64, true), read('192', 31, false)], /block starts at 192, where no read from offset 0 had arrived/],
+    ['an overlap', [read('0', 64, true), read('32', 64, true), read('96', 127, false)], /block starts at 32/],
+    ['a read that does not start at 0', [read('64', 64, true), read('128', 95, false)], /block starts at 64/],
+    ['a read that stops early', [read('0', 64, true), read('64', 64, false)], /a read ended at byte 128 of 223/],
+    ['a read that runs past the end', [read('0', 64, true), read('64', 200, false)], /a read ended at byte 264 of 223/],
+    ['a read that never finishes', [read('0', 64, true), read('64', 64, true)], /stopped at byte 128 of 223 without a final block/],
+    ['the dataset in one block', [read('0', 223, false)], /in one block; the ranged loop was not exercised/],
+    ['a block without progress', [read('0', 0, true), read('0', 64, true)], /made no progress/],
+    ['another total size', [read('0', 64, true), { ...read('64', 159, false), total_size: '999' }], /reported total_size "999", the dataset has 223 bytes/],
+    ['a report without a block length', [{ ...read('0', 64, true), bytes: undefined }], /carries no usable range/],
+    ['a report without a decimal offset', [read('0x0', 64, true)], /carries no usable range/],
+  ];
+  for (const [label, reads, problem] of broken) {
+    const judged = readResolutions(reads, 223);
+    assert.ok(judged.problems.some((item) => problem.test(item)), `${label}: ${JSON.stringify(judged)}`);
+    assert.equal(judged.complete, 0, label);
+  }
 });
 
 test('the present dataset counts as exercised only when the chart, the table, the reads and the alerts all agree', async () => {
   const { digest, expected } = await committedDataset();
   const table = (extra) => ({ caption: 'metrics', visible: true, in_details: false, columns: expected.columns, rows: expected.cells, ...extra });
-  const read = (offset, has_more) => ({ tool: 'read_object', ok: true, object: digest, offset, has_more });
+  const chartTable = (extra) => table({ visible: false, in_details: true, ...extra });
+  const read = (offset, has_more, bytes = 64) => ({ tool: 'read_object', ok: true, object: digest, offset, bytes, total_size: '223', has_more });
   const good = {
     text: VIEW_TEXT.render_present,
     alerts: [],
     svgs: 1,
     svg_marks: 5,
-    tables: [table(), table({ visible: false, in_details: true })],
+    tables: [table(), chartTable()],
     tool_calls: [
       { tool: 'render_present', ok: true },
       { tool: 'show', ok: true },
       { tool: 'show', ok: true },
-      read('0', true), read('64', true), read('128', true), read('192', false),
+      read('0', true), read('64', true), read('128', true), read('192', false, 31),
     ],
   };
   const verdict = judgePresentDataset(expected, good);
   assert.deepEqual(verdict.problems, []);
   assert.equal(verdict.ok, true);
+  assert.deepEqual(verdict.checks, {
+    observed: [], no_alert: [], chart_marks: [], table_rows: [], chart_source_table: [], show_calls: [], read_object_calls: [], no_refused_call: [],
+  });
   assert.deepEqual(verdict.record, {
     status: 'exercised',
-    binding: 'metrics',
-    digest,
-    rows: 5,
+    expected_binding: 'metrics',
+    expected_digest: digest,
+    expected_bytes: 223,
+    expected_rows: 5,
+    expected_chart_marks: 5,
+    table_captions: ['metrics', 'metrics'],
+    read_object_digests: [digest],
     read_object_calls: 4,
     read_object_offsets: ['0', '64', '128', '192'],
+    read_object_bytes: [64, 64, 64, 31],
+    read_object_total_sizes: ['223'],
+    read_object_resolutions: 1,
     show_calls: 2,
-    chart_svg: true,
+    chart_svgs: 1,
     chart_marks: 5,
     table_rows: 5,
     chart_table_rows: 5,
     alerts: [],
     problems: [],
   });
+  // Nothing in the record is the expectation unless its name says so.
+  for (const [field, value] of Object.entries(verdict.record)) {
+    if (!field.startsWith('expected_')) continue;
+    assert.equal(value, expected[field.slice('expected_'.length)], field);
+  }
+  assert.deepEqual(Object.keys(verdict.record).filter((field) => ['binding', 'digest', 'rows', 'bytes'].includes(field)), []);
 
   const without = (tool) => good.tool_calls.filter((call) => call.tool !== tool);
   const fourRows = expected.cells.slice(0, 4);
   const wrongCell = expected.cells.map((row) => row.map((cell) => (cell === 'Published' ? 'Unpublished' : cell)));
+  const foreignRows = [['a', '1'], ['b', '2'], ['c', '3'], ['d', '4'], ['e', '5']];
   const failures = [
-    ['the frame was never observed', null, /App frame was not observed/],
-    ['a dataset-unavailable alert', { alerts: [DATASET_UNAVAILABLE[0]] }, /shows alerts: \["Dataset unavailable: metrics"\]/],
-    ['a chart-unavailable alert', { alerts: [DATASET_UNAVAILABLE[1]] }, /shows alerts/],
-    ['any other alert', { alerts: ['Dataset digest verification failed'] }, /shows alerts/],
-    ['no svg', { svgs: 0, svg_marks: 0 }, /no chart svg/],
-    ['an svg without marks', { svg_marks: 0 }, /chart svg has no mark element/],
-    ['no table', { tables: [table({ visible: false, in_details: true })] }, /no visible data table captioned metrics/],
-    ['a table for another binding', { tables: [table({ caption: 'venue' }), table({ visible: false, in_details: true })] }, /no visible data table/],
-    ['one row too few', { tables: [table({ rows: fourRows }), table({ visible: false, in_details: true })] }, /data table has 4 body rows, the dataset has 5/],
-    ['one row too many', { tables: [table({ rows: [...expected.cells, ['Extra', '1']] }), table({ visible: false, in_details: true })] }, /data table has 6 body rows/],
-    ['a missing cell value', { tables: [table({ rows: wrongCell }), table({ visible: false, in_details: true })] }, /does not show the dataset values \["Published"\]/],
-    ['rows out of order', { tables: [table({ rows: [...expected.cells].reverse() }), table({ visible: false, in_details: true })] }, /not the dataset rows in order/],
-    ['other columns', { tables: [table({ columns: ['value', 'category'] }), table({ visible: false, in_details: true })] }, /data table columns are/],
-    ['a value that is in the DOM but not in the visible text', { text: VIEW_TEXT.render_present.replaceAll('Published', '') }, /"Published"\] are not in the visible text/],
-    ['a chart without its own table', { tables: [table()] }, /chart has no data table of its own/],
-    ['a chart table with the wrong rows', { tables: [table(), table({ visible: false, in_details: true, rows: fourRows })] }, /chart's own data table has 4 body rows/],
-    ['read_object never called', { tool_calls: without('read_object') }, /read_object for [0-9a-f]{64} 0 time\(s\)/],
-    ['read_object called once', { tool_calls: [...without('read_object'), read('0', false)] }, /1 time\(s\); a ranged read needs at least 2/],
-    ['reads of another object', { tool_calls: good.tool_calls.map((call) => (call.tool === 'read_object' ? { ...call, object: '0'.repeat(64) } : call)) }, /0 time\(s\)/],
-    ['no block reporting has_more', { tool_calls: [...without('read_object'), read('0', false), read('0', false)] }, /no read_object block reported has_more/],
-    ['a last block that still has more', { tool_calls: [...without('read_object'), read('0', true), read('64', true)] }, /last read_object block still reported has_more/],
-    ['a read that does not start at 0', { tool_calls: [...without('read_object'), read('64', true), read('128', false)] }, /first read_object block starts at 64/],
-    ['show never called', { tool_calls: without('show') }, /did not call show/],
-    ['a refused tool call', { tool_calls: [...good.tool_calls, { tool: 'read_object', ok: false }] }, /harness refused tool calls/],
+    ['the frame was never observed', null, 'observed', /App frame was not observed/],
+    ['a dataset-unavailable alert', { alerts: [DATASET_UNAVAILABLE[0]] }, 'no_alert', /shows alerts: \["Dataset unavailable: metrics"\]/],
+    ['a chart-unavailable alert', { alerts: [DATASET_UNAVAILABLE[1]] }, 'no_alert', /shows alerts/],
+    ['any other alert', { alerts: ['Dataset digest verification failed'] }, 'no_alert', /shows alerts/],
+    ['no svg', { svgs: 0, svg_marks: 0 }, 'chart_marks', /no chart svg/],
+    ['an svg without marks', { svg_marks: 0 }, 'chart_marks', /chart svg has 0 mark element\(s\); the dataset's 5 rows draw 5/],
+    ['one mark for five rows', { svg_marks: 1 }, 'chart_marks', /chart svg has 1 mark element\(s\)/],
+    ['axes counted as marks', { svg_marks: 40 }, 'chart_marks', /chart svg has 40 mark element\(s\)/],
+    ['no table', { tables: [chartTable()] }, 'table_rows', /no visible data table captioned metrics/],
+    ['a table for another binding', { tables: [table({ caption: 'venue' }), chartTable()] }, 'table_rows', /no visible data table/],
+    ['one row too few', { tables: [table({ rows: fourRows }), chartTable()] }, 'table_rows', /data table has 4 body rows, the dataset has 5/],
+    ['one row too many', { tables: [table({ rows: [...expected.cells, ['Extra', '1']] }), chartTable()] }, 'table_rows', /data table has 6 body rows/],
+    ['a missing cell value', { tables: [table({ rows: wrongCell }), chartTable()] }, 'table_rows', /does not show the dataset values \["Published"\]/],
+    ['rows out of order', { tables: [table({ rows: [...expected.cells].reverse() }), chartTable()] }, 'table_rows', /not the dataset rows in order/],
+    ['other columns', { tables: [table({ columns: ['value', 'category'] }), chartTable()] }, 'table_rows', /data table columns are/],
+    ['a value that is in the DOM but not in the visible text', { text: VIEW_TEXT.render_present.replaceAll('Published', '') }, 'table_rows', /"Published"\] are not in the visible text/],
+    ['a chart without its own table', { tables: [table()] }, 'chart_source_table', /chart has no data table of its own/],
+    ['a chart table with too few rows', { tables: [table(), chartTable({ rows: fourRows })] }, 'chart_source_table', /chart's own data table has 4 body rows/],
+    ['a chart table with five foreign rows', { tables: [table(), chartTable({ rows: foreignRows })] }, 'chart_source_table', /chart's own data table does not show the dataset values/],
+    ['a chart table with foreign columns', { tables: [table(), chartTable({ columns: ['k', 'v'] })] }, 'chart_source_table', /chart's own data table columns are \["k","v"\]/],
+    ['a chart table with one changed cell', { tables: [table(), chartTable({ rows: wrongCell })] }, 'chart_source_table', /chart's own data table does not show the dataset values \["Published"\]/],
+    ['a chart table out of order', { tables: [table(), chartTable({ rows: [...expected.cells].reverse() })] }, 'chart_source_table', /chart's own data table cells are not the dataset rows in order/],
+    ['read_object never called', { tool_calls: without('read_object') }, 'read_object_calls', /read_object for [0-9a-f]{64} 0 time\(s\)/],
+    ['read_object called once for everything', { tool_calls: [...without('read_object'), read('0', false, 223)] }, 'read_object_calls', /in one block; the ranged loop was not exercised/],
+    ['reads of another object', { tool_calls: good.tool_calls.map((call) => (call.tool === 'read_object' ? { ...call, object: '0'.repeat(64) } : call)) }, 'read_object_calls', /0 time\(s\)/],
+    ['reads that skip the middle', { tool_calls: [...without('read_object'), read('0', true), read('192', false, 31)] }, 'read_object_calls', /block starts at 192/],
+    ['a last block that still has more', { tool_calls: [...without('read_object'), read('0', true), read('64', true)] }, 'read_object_calls', /without a final block/],
+    ['a read that does not start at 0', { tool_calls: [...without('read_object'), read('64', true), read('128', false, 95)] }, 'read_object_calls', /block starts at 64/],
+    ['a read that ends before the last byte', { tool_calls: [...without('read_object'), read('0', true), read('64', false)] }, 'read_object_calls', /ended at byte 128 of 223/],
+    ['show never called', { tool_calls: without('show') }, 'show_calls', /did not call show/],
+    ['a refused tool call', { tool_calls: [...good.tool_calls, { tool: 'read_object', ok: false }] }, 'no_refused_call', /harness refused tool calls/],
   ];
-  for (const [label, change, problem] of failures) {
+  for (const [label, change, check, problem] of failures) {
     const judged = judgePresentDataset(expected, change === null ? null : { ...good, ...change });
     assert.equal(judged.ok, false, `${label}: judged exercised`);
     assert.equal(judged.record.status, 'failed', label);
-    assert.ok(judged.problems.some((item) => problem.test(item)), `${label}: ${JSON.stringify(judged.problems)}`);
+    assert.ok(judged.checks[check].some((item) => problem.test(item)), `${label}: ${check} is ${JSON.stringify(judged.checks)}`);
     assert.deepEqual(judged.record.problems, judged.problems, label);
+    assert.deepEqual(judged.problems, Object.values(judged.checks).flat(), label);
   }
   // What the record states is what was seen, not what was hoped for.
-  assert.equal(judgePresentDataset(expected, { ...good, svg_marks: 0 }).record.chart_svg, false);
+  assert.equal(judgePresentDataset(expected, { ...good, svg_marks: 0 }).record.chart_marks, 0);
+  assert.equal(judgePresentDataset(expected, { ...good, svgs: 0 }).record.chart_svgs, 0);
   assert.equal(judgePresentDataset(expected, { ...good, tables: [] }).record.table_rows, null);
+  assert.deepEqual(judgePresentDataset(expected, { ...good, tables: [table({ caption: 'venue' })] }).record.table_captions, ['venue']);
   assert.equal(judgePresentDataset(expected, { ...good, tool_calls: without('read_object') }).record.read_object_calls, 0);
+  assert.deepEqual(judgePresentDataset(expected, { ...good, tool_calls: without('read_object') }).record.read_object_digests, []);
   assert.equal(judgePresentDataset(expected, null).record.show_calls, 0);
+  // A development build resolves the binding twice: accepted, and the record says two.
+  const doubled = judgePresentDataset(expected, { ...good, tool_calls: good.tool_calls.flatMap((call) => [call, call]) });
+  assert.equal(doubled.ok, true, JSON.stringify(doubled.problems));
+  assert.equal(doubled.record.read_object_resolutions, 2);
+  assert.equal(doubled.record.read_object_calls, 8);
 });
 
 test('axe exclusions cover host chrome only; the App frame is judged by every rule', () => {
