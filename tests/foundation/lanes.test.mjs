@@ -1,15 +1,20 @@
 /** One lane table drives worktrees, gates, scope, the AGENTS.md table and CODEOWNERS. */
-import test from 'node:test';
+import { afterAll } from 'bun:test';
+import test from './concurrent-test.mjs';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { cpSync, existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LANE_TABLE_BEGIN, LANE_TABLE_END, checkScope, createLanes, laneNamed, lanes, lanesParent, outOfScope, renderLaneTable, resetLanes, scopeFor } from '../../scripts/lib/lanes.mjs';
 import * as lanesModule from '../../scripts/lib/lanes.mjs';
 import { run } from '../../scripts/lib/process.mjs';
-import { commit, fixtureRepo, git } from './fixture-repo.mjs';
+import { commit, eachCase, git, sharedRepos } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
+// Every test starts from a copy of a repository prepared once for this file.
+const shared=sharedRepos();
+afterAll(shared.dispose);
+const fixtureRepo=shared.fixtureRepo;
 const read=file=>readFile(join(root,file),'utf8');
 
 /** Case-sensitive existence, so `/Justfile` cannot stand in for `justfile` on Windows or macOS. */
@@ -165,4 +170,100 @@ test('the scope check can address a pushed commit instead of HEAD, and then igno
  assert.deepEqual((await checkScope(root,{lane:'storage',head:good})).changed,['crates/storage/src/lib.rs']);
  await assert.rejects(checkScope(root,{lane:'storage',head:bad}),/scope check failed for storage: 1 path\(s\) outside its scope:\n  crates\/core\/src\/lib\.rs/);
  await assert.rejects(checkScope(root,{lane:'storage'}),/stray\.txt/,'without a head the working tree still counts');
+});
+
+/** The real scripts/dev.mjs run inside a repository (a copy of one), as a user runs it; its stderr one entry per line. */
+async function devIn(repo,...args){
+ const result=await run(process.execPath,['scripts/dev.mjs',...args],{cwd:repo,capture:true,allowFailure:true});
+ return {...result,said:result.stderr.trim().split(/\r?\n/)};
+}
+async function repoWithTools(t,files){
+ const {root:repo}=await fixtureRepo(t,files);
+ cpSync(join(root,'scripts'),join(repo,'scripts'),{recursive:true});
+ return repo;
+}
+
+test('every option that takes a value takes it as --name value and as --name=value, in scope and premerge',async t=>{
+ const repo=await repoWithTools(t,{'crates/storage/src/lib.rs':'//! storage\n','crates/core/src/lib.rs':'//! core\n','.gitignore':'scripts/\n'});
+ await git(repo,'checkout','--quiet','-b','build/storage');
+ const good=await commit(repo,{'crates/storage/src/lib.rs':'//! storage, changed\n'},'in lane');
+ const bad=await commit(repo,{'crates/core/src/lib.rs':'//! core, changed from the storage lane\n'},'out of lane');
+ // HEAD is the good commit, so a --head that is dropped judges the good one and passes; the pushed commit is the bad one.
+ await git(repo,'checkout','--quiet','--detach',good);
+ for(const spelling of [['--head',bad],[`--head=${bad}`]]){
+  const result=await devIn(repo,'scope','storage',...spelling);
+  assert.equal(result.code,1,spelling.join(' '));
+  assert.match(result.stderr,/scope check failed for storage: 1 path\(s\) outside its scope:\n {2}crates\/core\/src\/lib\.rs/,spelling.join(' '));
+ }
+ for(const spelling of [['--base','no-such-ref'],['--base=no-such-ref']]){
+  const result=await devIn(repo,'scope','storage',...spelling);
+  assert.equal(result.code,1,spelling.join(' '));
+  assert.deepEqual(result.said,['scope check needs no-such-ref or origin/no-such-ref to compare against; neither exists here.'],spelling.join(' '));
+ }
+ for(const spelling of [['--step','no-such-step'],['--step=no-such-step']]){
+  const result=await devIn(repo,'premerge',...spelling);
+  assert.equal(result.code,1,spelling.join(' '));
+  assert.match(result.stderr,/^Unknown premerge step: no-such-step\. Steps: /m,spelling.join(' '));
+ }
+});
+
+test('a value-taking option given no value, or twice, is an error that says so, never ignored',async t=>{
+ const repo=await repoWithTools(t,{'README.md':'fixture\n','.gitignore':'scripts/\n'});
+ const sha=await git(repo,'rev-parse','HEAD');
+ for(const [args,said] of [
+  [['scope','storage','--base'],'scope --base needs a commit: bun scripts/dev.mjs scope --base <sha>'],
+  [['scope','storage','--base='],'scope --base needs a commit: bun scripts/dev.mjs scope --base <sha>'],
+  [['scope','storage','--head','--base',sha],'scope --head needs a commit: bun scripts/dev.mjs scope --head <sha>'],
+  [['scope','storage','--head='],'scope --head needs a commit: bun scripts/dev.mjs scope --head <sha>'],
+  [['premerge','--step'],'premerge --step needs a step id: bun scripts/dev.mjs premerge --step <id>'],
+  [['premerge','--step='],'premerge --step needs a step id: bun scripts/dev.mjs premerge --step <id>'],
+  [['premerge','--step=a','--step','b'],'premerge --step was given more than once; name one step id'],
+  [['scope','storage','--base',sha,'--base='+sha],'scope --base was given more than once; name one commit'],
+ ]){
+  const result=await devIn(repo,...args);
+  assert.equal(result.code,1,args.join(' '));
+  assert.deepEqual(result.said,[said],args.join(' '));
+  assert.equal(result.stdout,'',args.join(' '));
+ }
+});
+
+test('the lane named on the command line is the same lane wherever the options stand and however they are written',async t=>{
+ // On main there is no lane row, so a lane that is dropped from the arguments is an error and one that is seen succeeds.
+ const repo=await repoWithTools(t,{'README.md':'fixture\n','.gitignore':'scripts/\n'});
+ const head=await git(repo,'rev-parse','HEAD');
+ for(const args of [['--head='+head,'storage'],['storage','--head='+head],['--head',head,'storage'],['storage','--head',head],
+  ['--base=main','storage'],['--base','main','storage'],['--unknown-flag','storage']]){
+  const result=await devIn(repo,'scope',...args);
+  assert.equal(result.code,0,args.join(" ")+": "+result.stderr);
+  assert.match(result.stdout,/^scope: 0 changed path\(s\) since [0-9a-f]{40}, all inside storage\.$/m,args.join(' '));
+ }
+ // The value of a two-token option is not a lane.
+ const lonely=await devIn(repo,'scope','--head',head);
+ assert.equal(lonely.code,1);
+ assert.match(lonely.stderr,/No scope row for branch main/);
+});
+
+test('concurrent cases settle before cleanup, and every failing case is named',async()=>{
+ // A stand-in for the test: its cleanups run when this test says, after the cases.
+ const cleanups=[];
+ const scope={after:cleanup=>{cleanups.push(cleanup);}};
+ const bases=[];
+ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+ const cases=[['fails at once',0],['succeeds slowly',300],['fails while a sibling is still copying',50]];
+ const failure=await eachCase(cases,async ([name,delay])=>{
+  const {base}=await fixtureRepo(scope);
+  bases.push(base);
+  await sleep(delay);
+  if(name.startsWith('fails'))throw new Error(name+' on purpose');
+  return name;
+ }).then(()=>null,error=>error);
+ assert.ok(failure,'two of three cases failed, so the call fails');
+ assert.match(failure.message,/^2 of 3 cases failed:\n- fails at once: fails at once on purpose\n- fails while a sibling is still copying: fails while a sibling is still copying on purpose$/);
+ assert.equal(failure.errors.length,2);
+ // Every case, including the slow sibling that outlived both failures, had finished before the call returned.
+ assert.equal(bases.length,3);
+ assert.ok(bases.every(base=>existsSync(base)),'the copies are still there until the cleanup runs');
+ for(const cleanup of cleanups.reverse())await cleanup();
+ assert.deepEqual(bases.filter(base=>existsSync(base)),[],'no scratch directory of any case is left behind');
+ assert.deepEqual(await eachCase(['a','b'],async name=>name+name),['aa','bb'],'when every case passes the results come back in order');
 });

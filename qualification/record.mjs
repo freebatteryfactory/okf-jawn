@@ -73,9 +73,29 @@ async function finishedReceipt(root, name) {
   }
 }
 
+/**
+ * Fails, saying why, when verification.json cannot be read as JSON. Without it there are no
+ * harnesses to name, and "no harness of that name" would blame the argument for a missing file.
+ */
+async function requireReadableRecord(root) {
+  let text;
+  try {
+    text = await readFile(join(root, 'verification.json'), 'utf8');
+  } catch (error) {
+    throw new Refused(`verification.json could not be read: ${error.code === 'ENOENT' ? `it does not exist in ${root}` : error.message}`);
+  }
+  try {
+    JSON.parse(text.replace(/^\uFEFF/, ''));
+  } catch (error) {
+    throw new Refused(`verification.json could not be read: it is not valid JSON (${error.message})`);
+  }
+}
+
 async function record(root, names) {
+  await requireReadableRecord(root);
   // The harnesses are the ones the Phase 0 gates of kind receipt name in verification.json.
   const known = (await derivedRecord(root)).gates.map((gate) => gate.harness);
+  if (known.length === 0) throw new Refused('verification.json has no Phase 0 gate of kind receipt, so there is no harness to record');
   const unknown = names.filter((name) => !known.includes(name));
   if (unknown.length) {
     throw new Refused(`${unknown.join(', ')}: no harness of that name. Usage: bun qualification/record.mjs [<name>...] where name is one of ${known.join(', ')}; with no name only the derived statuses are rewritten`);

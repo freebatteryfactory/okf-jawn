@@ -20,10 +20,29 @@ const [task = 'help', ...args] = process.argv.slice(2);
 // the offline tests create disposable repositories; an inherited GIT_DIR or GIT_INDEX_FILE
 // would aim their git commands at this repository.
 for (const name of gitLocalEnvironment) delete process.env[name];
-/** The value following `--name`, or undefined. */
-const option = name => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
-/** Arguments that are neither a `--flag` nor the value of one. */
-const positional = args.filter((value, index) => !value.startsWith('--') && !args[index - 1]?.startsWith('--'));
+/** The options that take a value, with what the value is (`noun`) and how the usage shows it (`hint`): the one list `option()` and `positional` read. */
+const valueOptions = Object.freeze({
+  '--base': { noun: 'commit', hint: 'sha' },
+  '--head': { noun: 'commit', hint: 'sha' },
+  '--step': { noun: 'step id', hint: 'id' },
+});
+/**
+ * The value of the option `--name`, written `--name value` or `--name=value`, or undefined when it is not
+ * given. An option that is given with no value (nothing after it, an empty `=`, or another flag), or
+ * given twice, is an error: it is never ignored and never quietly takes the next argument.
+ * The option must be one of `valueOptions`.
+ */
+function option(name) {
+  const { noun, hint } = valueOptions[name];
+  const given = args.filter(value => value === name || value.startsWith(`${name}=`));
+  if (given.length > 1) throw new Error(`${task} ${name} was given more than once; name one ${noun}`);
+  if (given.length === 0) return undefined;
+  const value = given[0] === name ? args[args.indexOf(name) + 1] : given[0].slice(name.length + 1);
+  if (value === undefined || value === '' || value.startsWith('--')) throw new Error(`${task} ${name} needs a ${noun}: bun scripts/dev.mjs ${task} ${name} <${hint}>`);
+  return value;
+}
+/** Arguments that are neither a `--flag` nor the value of a value-taking option written in two tokens (`--head HEAD`); what follows `--head=HEAD` or a flag with no value (`--fast`) is positional. */
+const positional = args.filter((value, index) => !value.startsWith('--') && !Object.hasOwn(valueOptions, args[index - 1] ?? ''));
 
 async function doctor() {
   const selected = await pins(root);
@@ -196,8 +215,6 @@ async function main() {
     case 'qualify': await qualify(); break;
     case 'check-receipts': {
       const head = option('--head');
-      // `--head` asks about a commit; without one it must not quietly check the working tree instead.
-      if (args.includes('--head') && (head === undefined || head.startsWith('--'))) throw new Error('check-receipts --head needs a commit: bun scripts/dev.mjs check-receipts --head <sha>');
       if (head === undefined) { process.stdout.write(`${await checkReceipts(root)}\n`); break; }
       const lines = await staleReceiptLines(root, head);
       if (lines.length) { process.stderr.write(`${lines.join('\n')}\n`); process.exitCode = 1; }

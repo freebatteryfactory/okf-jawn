@@ -1,5 +1,6 @@
 /** Gate sequences are data; the runner logs every step and ends with one verdict line. */
-import test from 'node:test';
+import { afterAll } from 'bun:test';
+import test from './concurrent-test.mjs';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
@@ -8,8 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { cleanCheckout, cleanCheckoutTasks, foundationTests, laneSteps, premergeSteps, revisionLabel, runLane, runPremerge } from '../../scripts/lib/gates.mjs';
 import { laneNamed, lanes } from '../../scripts/lib/lanes.mjs';
 import { run } from '../../scripts/lib/process.mjs';
-import { fixtureRepo, git } from './fixture-repo.mjs';
+import { git, sharedRepos } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
+// Every test starts from a copy of a repository prepared once for this file.
+const shared=sharedRepos();
+afterAll(shared.dispose);
+const fixtureRepo=shared.fixtureRepo;
 const read=file=>readFile(join(root,file),'utf8');
 const fixture={'.gitignore':'/.artifacts/\n','README.md':'fixture\n'};
 const passing=async(step,write)=>{write(`ran ${step.id}\n`);return 0;};
