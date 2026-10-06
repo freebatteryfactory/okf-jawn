@@ -6,6 +6,8 @@
  * file other than one script and one stylesheet would be unreachable from the inline document and
  * fails the build.
  *
+ * NODE_ENV is forced to production before the build, whatever the caller exports.
+ *
  * The manifest is built from the generated api/mcp-apps.json alone (OKF_MCP_APPS overrides the
  * path for a scratch generation); a uri or mimeType that disagrees with this build fails it.
  */
@@ -28,6 +30,11 @@ const declared = parseAppResource(
   declarationPath,
   RESOURCE_MIME_TYPE,
 );
+
+// The bundle is the production build on every machine: Vite takes React's dev/prod switch from
+// NODE_ENV, not from `mode`, so a caller that exports NODE_ENV=development would otherwise get a
+// larger development bundle (and different CSP hashes).
+env.NODE_ENV = 'production';
 
 const output = await build({
   configFile: false,
