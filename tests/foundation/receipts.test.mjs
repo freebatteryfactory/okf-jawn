@@ -1,5 +1,6 @@
 /** check-receipts: receipt-backed statuses and phase_0_qualified are derived, and a receipt describes HEAD. */
-import test from 'node:test';
+import { afterAll } from 'bun:test';
+import test from './concurrent-test.mjs';
 import assert from 'node:assert/strict';
 import { cpSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -7,9 +8,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
 import { acceptedFailureFields, acceptingRole, checkReceipts, derivedLines, derivedRecord, gateKinds, qualifyingStatuses, receiptGateStatuses, rewriteCommand, staleLines, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
-import { commit, fixtureAcceptance, fixtureCriteria, fixtureGates, fixturePinned, fixtureReceipt, fixtureRecord, fixtureRecordFiles, fixtureRepo, fixtureTracker, git } from './fixture-repo.mjs';
+import { commit, copyRepo, fixtureAcceptance, fixtureCriteria, fixtureGates, fixturePinned, fixtureReceipt, fixtureRecord, fixtureRecordFiles, fixtureTracker, git, sharedRepos } from './fixture-repo.mjs';
 
 const source = fileURLToPath(new URL('../../', import.meta.url));
+// Every test starts from a copy of a repository prepared once for this file.
+const shared = sharedRepos();
+afterAll(shared.dispose);
+const fixtureRepo = shared.fixtureRepo;
 const docling = fixtureGates.docling;
 const apps = fixtureGates['mcp-apps'];
 const at = harness => `qualification/receipts/${harness}.json`;
@@ -398,63 +403,83 @@ test('a FAIL receipt whose every failing criterion the owner accepted derives ac
 test('nothing but a trusted FAIL with every failing criterion accepted is upgraded', async t => {
   const { root, sha } = await recorded(t);
   const other = { [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha) };
+  // Each derivation is made in its own copy of the repository, so all of them run at once; the
+  // judgements below are made in the order they were written, on what each copy derived.
+  const prepared = root;
   const derive = async (receipt, entries, why) => {
+    const { root } = await copyRepo(t, prepared);
     await commit(root, { ...other, [at('docling')]: receipt, 'verification.json': accepting(entries) }, why);
     return derivedRecord(root);
   };
+  /** Start a derivation now; a failure surfaces where its result is awaited, not as an unhandled rejection. */
+  const start = (receipt, entries, why) => { const pending = derive(receipt, entries, why); pending.catch(() => {}); return pending; };
+
+  const measured = [...failing, { id: 'memory/peak', required: false, result: 'not_judged' }];
+  const optionalFail = [{ id: 'corpus/a.pdf/content', required: true, result: 'pass' }, { id: 'corpus/a.pdf/provenance', required: true, result: 'pass' }, { id: 'memory/peak', required: false, result: 'fail' }];
+  const cutShort = [
+    ['a harness error beside the accepted failure', { criteria: failing, harness_error: 'the converter process for b.pdf was killed at the harness timeout' }, 'it records a harness error'],
+    ['a required criterion nobody judged', { criteria: [{ id: 'corpus/a.pdf/content', required: true, result: 'not_judged' }, failing[1]] }, '1 required criterion was not judged'],
+    ['both', { criteria: [{ id: 'corpus/a.pdf/content', required: true, result: 'not_judged' }, failing[1]], harness_error: 'the peak memory was not measured' }, 'it records a harness error and 1 required criterion was not judged'],
+  ];
+  const started = {
+    oneOfTwo: start(fixtureReceipt('docling', sha, { criteria: failingBoth }), [fixtureAcceptance()], 'one failure nobody accepted'),
+    both: start(fixtureReceipt('docling', sha, { criteria: failingBoth }), [fixtureAcceptance(), fixtureAcceptance('corpus/a.pdf/content')], 'both accepted'),
+    unfinished: start(fixtureReceipt('docling', sha, { criteria: unjudged }), [fixtureAcceptance()], 'an unfinished run'),
+    incompleteTyped: start(fixtureReceipt('docling', sha, { criteria: failing, harness_error: 'the model file was missing', result: 'INCOMPLETE' }), [fixtureAcceptance()], 'INCOMPLETE typed over a failing criterion'),
+    cutShort: cutShort.map(([why, overrides]) => start(fixtureReceipt('docling', sha, overrides), [fixtureAcceptance()], why)),
+    errorBesideUnaccepted: start(fixtureReceipt('docling', sha, { criteria: failingBoth, harness_error: 'the peak memory was not measured' }), [fixtureAcceptance()], 'a harness error beside a failure nobody accepted'),
+    optional: start(fixtureReceipt('docling', sha, { criteria: measured }), [fixtureAcceptance()], 'an optional criterion not judged'),
+    wrongNotJudged: start(fixtureReceipt('docling', sha, { criteria: failing, not_judged: ['corpus/a.pdf/content'] }), [fixtureAcceptance()], 'a FAIL with a wrong not_judged list'),
+    lacksPinned: start(fixtureReceipt('docling', sha, { criteria: [failing[1]] }), [fixtureAcceptance()], 'a FAIL that lacks a pinned criterion'),
+    optionalFailure: start(fixtureReceipt('docling', sha, { criteria: optionalFail }), [], 'an optional failure'),
+  };
 
   // One of two failing criteria is not accepted: the gate is failed.
-  let derived = await derive(fixtureReceipt('docling', sha, { criteria: failingBoth }), [fixtureAcceptance()], 'one failure nobody accepted');
+  let derived = await started.oneOfTwo;
   assert.deepEqual(statuses(derived), { [docling]: 'failed', [apps]: 'passed', qualified: false });
   assert.deepEqual(derived.failures, [], 'the acceptance itself is sound; the receipt simply fails more');
   assert.deepEqual(derived.pending, [`${docling} is failed`]);
   // Both accepted: upgraded.
-  derived = await derive(fixtureReceipt('docling', sha, { criteria: failingBoth }), [fixtureAcceptance(), fixtureAcceptance('corpus/a.pdf/content')], 'both accepted');
+  derived = await started.both;
   assert.deepEqual(statuses(derived), { [docling]: accepted, [apps]: 'passed', qualified: true });
   assert.match(derived.gates[0].basis, /the owner accepted every failing criterion: corpus\/a\.pdf\/content, corpus\/a\.pdf\/provenance$/);
 
   // An INCOMPLETE receipt is never upgraded. A criterion it did not judge says nothing about the acceptance.
-  derived = await derive(fixtureReceipt('docling', sha, { criteria: unjudged }), [fixtureAcceptance()], 'an unfinished run');
+  derived = await started.unfinished;
   assert.deepEqual(statuses(derived), { [docling]: 'incomplete', [apps]: 'passed', qualified: false });
   assert.deepEqual(derived.failures, []);
-  derived = await derive(fixtureReceipt('docling', sha, { criteria: failing, harness_error: 'the model file was missing', result: 'INCOMPLETE' }), [fixtureAcceptance()], 'INCOMPLETE typed over a failing criterion');
+  derived = await started.incompleteTyped;
   assert.equal(derived.gates[0].status, 'incomplete');
   assert.match(derivedFailureText(derived), /^docling\.json: result is INCOMPLETE but its criteria fold to FAIL$/m);
 
   // A FAIL whose one failure is accepted is still not upgraded when its run did not judge everything:
   // a required failure outranks a harness error in the fold, so the result word cannot tell the two apart.
-  for (const [why, overrides, basis] of [
-    ['a harness error beside the accepted failure', { criteria: failing, harness_error: 'the converter process for b.pdf was killed at the harness timeout' }, 'it records a harness error'],
-    ['a required criterion nobody judged', { criteria: [{ id: 'corpus/a.pdf/content', required: true, result: 'not_judged' }, failing[1]] }, '1 required criterion was not judged'],
-    ['both', { criteria: [{ id: 'corpus/a.pdf/content', required: true, result: 'not_judged' }, failing[1]], harness_error: 'the peak memory was not measured' }, 'it records a harness error and 1 required criterion was not judged'],
-  ]) {
+  for (const [index, [why, overrides, basis]] of cutShort.entries()) {
     const receipt = fixtureReceipt('docling', sha, overrides);
     assert.equal(JSON.parse(receipt).result, 'FAIL', `${why}: the fold says FAIL, as the harness wrote it`);
-    derived = await derive(receipt, [fixtureAcceptance()], why);
+    derived = await started.cutShort[index];
     assert.deepEqual(derived.failures, [], `${why}: the receipt is clean evidence`);
     assert.deepEqual(statuses(derived), { [docling]: 'incomplete', [apps]: 'passed', qualified: false }, why);
     assert.deepEqual(derived.limitations, [], why);
     assert.equal(derived.gates[0].basis, `${at('docling')} result FAIL with every failing criterion accepted, but the run did not judge everything: ${basis}`, why);
   }
   // A failure nobody accepted is a failure whatever else the run did not judge.
-  derived = await derive(fixtureReceipt('docling', sha, { criteria: failingBoth, harness_error: 'the peak memory was not measured' }), [fixtureAcceptance()], 'a harness error beside a failure nobody accepted');
+  derived = await started.errorBesideUnaccepted;
   assert.deepEqual(statuses(derived), { [docling]: 'failed', [apps]: 'passed', qualified: false });
   // A measurement recorded without a verdict (not required) holds nothing back.
-  const measured = [...failing, { id: 'memory/peak', required: false, result: 'not_judged' }];
-  derived = await derive(fixtureReceipt('docling', sha, { criteria: measured }), [fixtureAcceptance()], 'an optional criterion not judged');
+  derived = await started.optional;
   assert.deepEqual(statuses(derived), { [docling]: accepted, [apps]: 'passed', qualified: true });
 
   // A receipt whose envelope cannot be trusted is not upgraded, whatever is accepted.
-  derived = await derive(fixtureReceipt('docling', sha, { criteria: failing, not_judged: ['corpus/a.pdf/content'] }), [fixtureAcceptance()], 'a FAIL with a wrong not_judged list');
+  derived = await started.wrongNotJudged;
   assert.deepEqual(statuses(derived), { [docling]: 'incomplete', [apps]: 'passed', qualified: false });
   assert.match(derivedFailureText(derived), /^docling\.json: not_judged is \["corpus\/a\.pdf\/content"\] but its criteria derive \[\]$/m);
-  derived = await derive(fixtureReceipt('docling', sha, { criteria: [failing[1]] }), [fixtureAcceptance()], 'a FAIL that lacks a pinned criterion');
+  derived = await started.lacksPinned;
   assert.equal(derived.gates[0].status, 'incomplete');
   assert.match(derivedFailureText(derived), /^docling\.json: pinned criterion corpus\/a\.pdf\/content is missing$/m);
 
   // A failing criterion that is not required does not fail the receipt, so there is nothing to accept.
-  const optionalFail = [{ id: 'corpus/a.pdf/content', required: true, result: 'pass' }, { id: 'corpus/a.pdf/provenance', required: true, result: 'pass' }, { id: 'memory/peak', required: false, result: 'fail' }];
-  derived = await derive(fixtureReceipt('docling', sha, { criteria: optionalFail }), [], 'an optional failure');
+  derived = await started.optionalFailure;
   assert.deepEqual(statuses(derived), { [docling]: 'passed', [apps]: 'passed', qualified: true });
 });
 
@@ -487,7 +512,10 @@ test('an acceptance that outlived its cause is a failure that says to remove it'
 test('an accepted failure must be whole, decided by the owner and tracked by a gate that exists', async t => {
   const { root, sha } = await recorded(t);
   const receipts = { [at('docling')]: fixtureReceipt('docling', sha, { criteria: failing }), [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha) };
+  // Each entry list is judged in its own copy of the repository: they are independent, so they run at once.
+  const prepared = root;
   const problems = async (entries, why, files = receipts) => {
+    const { root } = await copyRepo(t, prepared);
     await commit(root, { ...files, 'verification.json': accepting(entries) }, why);
     const derived = await derivedRecord(root);
     // An acceptance that is not sound upgrades nothing.
@@ -498,23 +526,26 @@ test('an accepted failure must be whole, decided by the owner and tracked by a g
   };
   const without = field => { const { [field]: _dropped, ...rest } = fixtureAcceptance(); return rest; };
 
-  for (const field of acceptedFailureFields) {
-    assert.deepEqual(await problems([without(field)], `no ${field}`), [`accepted_failures[0] lacks ${field}`]);
-    assert.deepEqual(await problems([fixtureAcceptance(undefined, { [field]: '' })], `empty ${field}`), [`accepted_failures[0] lacks ${field}`]);
-  }
-  assert.deepEqual(await problems([fixtureAcceptance(undefined, { decided_by: 'integration-owner' })], 'decided by a lane'), ['accepted_failures[0] is decided by "integration-owner"; only the owner accepts a failing criterion']);
-  assert.deepEqual(await problems([fixtureAcceptance(undefined, { decided_by: 'Owner' })], 'decided by a name'), ['accepted_failures[0] is decided by "Owner"; only the owner accepts a failing criterion']);
-  assert.deepEqual(await problems([fixtureAcceptance(undefined, { tracked_by: 'no-such-gate' })], 'tracked by nothing'), ['accepted_failures[0].tracked_by "no-such-gate" is not the id of a gate in verification.json']);
-  assert.deepEqual(await problems([fixtureAcceptance(undefined, { decided_on: 'yesterday' })], 'no date'), ['accepted_failures[0].decided_on "yesterday" is not a calendar day (YYYY-MM-DD)']);
-  assert.deepEqual(await problems([fixtureAcceptance(undefined, { decided_on: '2026-02-30' })], 'no such day'), ['accepted_failures[0].decided_on "2026-02-30" is not a calendar day (YYYY-MM-DD)']);
-  assert.deepEqual(await problems([fixtureAcceptance(undefined, { waived: 'yes' })], 'an unknown field'), ['accepted_failures[0] has the unknown field(s) waived']);
-  assert.deepEqual(await problems(['corpus/a.pdf/provenance'], 'a bare id'), ['accepted_failures[0] must be an object with criterion, decision, decided_on, decided_by, tracked_by']);
-  assert.deepEqual(await problems({ criterion: 'corpus/a.pdf/provenance' }, 'not a list'), ['accepted_failures must be an array of entries']);
-  assert.deepEqual(await problems([fixtureAcceptance(), fixtureAcceptance()], 'the same criterion twice'), ['accepted_failures[1] repeats the criterion corpus/a.pdf/provenance']);
-  assert.deepEqual(await problems([fixtureAcceptance('corpus/a.pdf/tables')], 'a criterion nothing pins'), ['accepted_failures[0] accepts corpus/a.pdf/tables, which qualification/docling/criteria.json does not pin']);
-  // Several things wrong with one entry are all said.
-  assert.deepEqual(await problems([{ criterion: 'corpus/a.pdf/provenance', decided_by: 'agent', tracked_by: 'nothing' }], 'three things wrong'),
-    ['accepted_failures[0] lacks decision, decided_on', 'accepted_failures[0] is decided by "agent"; only the owner accepts a failing criterion', 'accepted_failures[0].tracked_by "nothing" is not the id of a gate in verification.json']);
+  /** [entries, why, the problems said about them] */
+  const unsound = [
+    ...acceptedFailureFields.flatMap(field => [
+      [[without(field)], `no ${field}`, [`accepted_failures[0] lacks ${field}`]],
+      [[fixtureAcceptance(undefined, { [field]: '' })], `empty ${field}`, [`accepted_failures[0] lacks ${field}`]]]),
+    [[fixtureAcceptance(undefined, { decided_by: 'integration-owner' })], 'decided by a lane', ['accepted_failures[0] is decided by "integration-owner"; only the owner accepts a failing criterion']],
+    [[fixtureAcceptance(undefined, { decided_by: 'Owner' })], 'decided by a name', ['accepted_failures[0] is decided by "Owner"; only the owner accepts a failing criterion']],
+    [[fixtureAcceptance(undefined, { tracked_by: 'no-such-gate' })], 'tracked by nothing', ['accepted_failures[0].tracked_by "no-such-gate" is not the id of a gate in verification.json']],
+    [[fixtureAcceptance(undefined, { decided_on: 'yesterday' })], 'no date', ['accepted_failures[0].decided_on "yesterday" is not a calendar day (YYYY-MM-DD)']],
+    [[fixtureAcceptance(undefined, { decided_on: '2026-02-30' })], 'no such day', ['accepted_failures[0].decided_on "2026-02-30" is not a calendar day (YYYY-MM-DD)']],
+    [[fixtureAcceptance(undefined, { waived: 'yes' })], 'an unknown field', ['accepted_failures[0] has the unknown field(s) waived']],
+    [['corpus/a.pdf/provenance'], 'a bare id', ['accepted_failures[0] must be an object with criterion, decision, decided_on, decided_by, tracked_by']],
+    [{ criterion: 'corpus/a.pdf/provenance' }, 'not a list', ['accepted_failures must be an array of entries']],
+    [[fixtureAcceptance(), fixtureAcceptance()], 'the same criterion twice', ['accepted_failures[1] repeats the criterion corpus/a.pdf/provenance']],
+    [[fixtureAcceptance('corpus/a.pdf/tables')], 'a criterion nothing pins', ['accepted_failures[0] accepts corpus/a.pdf/tables, which qualification/docling/criteria.json does not pin']],
+    // Several things wrong with one entry are all said.
+    [[{ criterion: 'corpus/a.pdf/provenance', decided_by: 'agent', tracked_by: 'nothing' }], 'three things wrong',
+      ['accepted_failures[0] lacks decision, decided_on', 'accepted_failures[0] is decided by "agent"; only the owner accepts a failing criterion', 'accepted_failures[0].tracked_by "nothing" is not the id of a gate in verification.json']],
+  ];
+  await Promise.all(unsound.map(async ([entries, why, expectedProblems]) => assert.deepEqual(await problems(entries, why), expectedProblems)));
   // The tracking gate may stand in any group of the record, and it must be there.
   await commit(root, { ...receipts, 'verification.json': fixtureRecord({ accepted: { docling: [fixtureAcceptance()] } }) }, 'the tracking gate is gone');
   assert.deepEqual((await derivedRecord(root)).failures.map(failure => failure.message), ['accepted_failures[0].tracked_by "converter-font-run-spacing" is not the id of a gate in verification.json']);
@@ -616,6 +647,10 @@ async function commandsIn(root) {
   cpSync(join(source, 'scripts'), join(root, 'scripts'), { recursive: true });
   await mkdir(join(root, 'qualification'), { recursive: true });
   cpSync(join(source, 'qualification', 'record.mjs'), join(root, 'qualification', 'record.mjs'));
+  return commandsFor(root);
+}
+/** The two commands run in a repository that already holds the copied scripts (see commandsIn), or a copy of one. */
+function commandsFor(root) {
   const command = script => (...args) => run(process.execPath, [...script, ...args], { cwd: root, capture: true, allowFailure: true });
   return { record: command(['qualification/record.mjs']), check: command(['scripts/dev.mjs', 'check-receipts']) };
 }
@@ -626,8 +661,9 @@ const assertNoStack = result => assert.doesNotMatch(`${result.stdout}\n${result.
 
 test('a receipt that fails any check leaves its gate incomplete on every path, whatever result it types', async t => {
   const { root, sha } = await recorded(t);
-  const { record, check } = await commandsIn(root);
+  await commandsIn(root);
   await commit(root, {}, 'the commands');
+  const prepared = root;
   const other = { [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha) };
   const passing = fixturePinned.map(id => ({ id, required: true, result: 'pass' }));
   // Every one of these types or folds to PASS; none of them is evidence of a pass.
@@ -642,7 +678,10 @@ test('a receipt that fails any check leaves its gate incomplete on every path, w
     ['JSON that is no object', 'null\n', 'not a receipt: its JSON is null, not an object'],
   ];
   const expected = { [docling]: 'incomplete', [apps]: 'passed', qualified: false };
-  for (const [why, receipt, reason] of untrusted) {
+  // Each case judges its own copy of the repository, so the eight run at once; within a case every step is as it was.
+  await Promise.all(untrusted.map(async ([why, receipt, reason]) => {
+    const { root } = await copyRepo(t, prepared);
+    const { record, check } = commandsFor(root);
     const head = await commit(root, { ...other, [at('docling')]: receipt, 'verification.json': passedRecord() }, why);
     // derivedRecord, for the working tree and for the commit.
     const derived = await derivedRecord(root);
@@ -667,7 +706,7 @@ test('a receipt that fails any check leaves its gate incomplete on every path, w
     assert.ok(said(rewritten).some(line => line.startsWith(`docling.json: ${reason}`)), `${why}: ${rewritten.stderr}`);
     assert.equal(await readFile(join(root, 'verification.json'), 'utf8'), fixtureRecord({ statuses: { 'mcp-apps': 'passed' } }), why);
     assertNoStack(rewritten);
-  }
+  }));
 });
 
 test('when an input of a recorded receipt changes, check-receipts fails until the harness is recorded again or record.mjs writes the gate back to incomplete', async t => {
