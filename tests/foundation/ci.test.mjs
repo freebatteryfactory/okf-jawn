@@ -67,4 +67,7 @@ test('a pull request from this repository runs CI once, and an upload that finds
  const uploads=Object.values(qualify.jobs).flatMap(job=>job.steps).filter(step=>step.uses?.startsWith('actions/upload-artifact@'));
  assert.ok(uploads.length>0);
  for(const upload of uploads)assert.equal(upload.with['if-no-files-found'],'error',upload.with.name);
+ const ciUploads=Object.values(workflow.jobs).flatMap(job=>job.steps).filter(step=>step.uses?.startsWith('actions/upload-artifact@'));
+ assert.ok(ciUploads.length>0);
+ for(const upload of ciUploads)assert.equal(upload.with['if-no-files-found'],'error',`ci.yml ${upload.with.name}`);
 });
