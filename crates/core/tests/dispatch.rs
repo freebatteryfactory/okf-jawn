@@ -1047,6 +1047,43 @@ async fn reordered_keys_replay_instead_of_conflicting() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn an_omitted_optional_field_and_an_explicit_null_replay_each_other() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response(
+        "add_comment",
+        json!({
+            "id": "comment-1",
+            "author": "alice",
+            "text": "hello",
+            "created_at": "2026-01-01T00:00:00Z"
+        }),
+    )?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let omitted = json!({
+        "workspace_id": WORKSPACE_A,
+        "proposal_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "text": "hello",
+        "idempotency_key": KEY_ONE
+    });
+    let explicit_null = json!({
+        "workspace_id": WORKSPACE_A,
+        "proposal_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "text": "hello",
+        "source": null,
+        "idempotency_key": KEY_ONE
+    });
+    // Precondition: the two inputs are different JSON documents that decode to one request.
+    assert_ne!(omitted, explicit_null);
+
+    let commented = call(&app, &ports, &alice, "add_comment", omitted).await?;
+    let replayed = call(&app, &ports, &alice, "add_comment", explicit_null).await?;
+    assert_eq!(replayed, commented);
+    assert_eq!(app.call_count("add_comment")?, 1);
+    Ok(())
+}
+
 #[test]
 fn request_digest_sorts_keys_at_every_depth() -> TestResult {
     let scrambled = json!({ "b": [{ "k": 1, "j": 2 }], "a": { "y": 2, "x": 1 } });
