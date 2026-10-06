@@ -202,6 +202,56 @@ function provenanceJudgement(kind, doc, blocked) {
   return notJudged(`not a PDF or image fixture: the locator the library gives is recorded as observed and no rule is applied (${located})`, observed);
 }
 
+/** Whether the files a converter process wrote are the ones it recorded. */
+function evidenceJudgement(only, base, evidence) {
+  if (base.document === null || typeof base.document !== 'object') {
+    return notJudged('the converter returned no document, so the process wrote no file to read');
+  }
+  if (!Array.isArray(evidence?.problems)) return stopped(`the files the converter process for ${only} wrote were not re-read`);
+  if (evidence.problems.length > 0) {
+    return stopped(`${evidence.problems.length} file(s) the converter process for ${only} wrote are not the ones it recorded${examples(evidence.problems)}`, {
+      problems: evidence.problems,
+    });
+  }
+  return pass();
+}
+
+/** Pages and located-or-not items of a converted document: what a spent budget can reduce. */
+function extent(document) {
+  const doc = describeDocument(document);
+  return { pages: doc.pages.length, items: doc.texts.length + doc.tables.length + doc.pictures.length };
+}
+
+/**
+ * Did the 1 ms budget change the result? Compared with the conversion of the same bytes
+ * without a budget in the same run. Elapsed time is not judged: the library gives no bound
+ * to hold it to.
+ * @param {object} criteria the probe's criteria judged so far
+ * @param {object|null} full { fixture, converted, document } of the run that converted the same bytes
+ */
+function budgetJudgement(criteria, base, evidence, full) {
+  if (criteria.timeout_reported.result !== 'pass') return notJudged('the converter did not report a spent budget, so there is no effect to compare');
+  if (base.document === null || typeof base.document !== 'object') {
+    return notJudged('the library returned no document for the probe, so nothing distinguishes it from the full conversion');
+  }
+  if (criteria.evidence.result !== 'pass') return notJudged('the files the probe process wrote are not the ones it recorded (see evidence), so nothing is judged from them');
+  if (!full) return notJudged('no fixture of this run converted the same bytes without a budget, so there is nothing to compare the probe with');
+  if (!full.converted) return notJudged(`the full conversion of ${full.fixture} did not succeed in this run, so there is nothing to compare the probe with`);
+  const probe = extent(evidence.document);
+  const whole = extent(full.document);
+  const compared = { probe, full: { fixture: full.fixture, ...whole } };
+  if (probe.pages < whole.pages || probe.items < whole.items) {
+    return pass({
+      detail: `the probe returned ${probe.pages} of ${whole.pages} page(s) and ${probe.items} of ${whole.items} item(s) of the full conversion of ${full.fixture}`,
+      ...compared,
+    });
+  }
+  return fail(
+    `the probe reported a spent budget and still returned ${probe.pages} page(s) and ${probe.items} item(s), no fewer than the full conversion of ${full.fixture} (${whole.pages} page(s), ${whole.items} item(s)): the budget had no visible effect`,
+    compared,
+  );
+}
+
 /** The must-fail refusal as observed, and whether it can be attributed to the truncated input. */
 function refusalOf(base, build, otherPdfsConverted) {
   const errorText = (base.errors ?? []).map((item) => item.error_message).join(' | ');
@@ -239,8 +289,9 @@ function refusalOf(base, build, otherPdfsConverted) {
  * @param {object} [item.evidence] { markdown, document, pageFiles, problems } re-read from the files the harness wrote
  * @param {object} [item.build] buildFacts() of this run
  * @param {string[]} [item.otherPdfsConverted] the other PDF fixtures that converted in this run
+ * @param {object|null} [item.full] for the timeout probe: the run that converted the same bytes without a budget
  */
-export function fixtureEntry({ only, run, report, source, evidence, build, otherPdfsConverted = [] }) {
+export function fixtureEntry({ only, run, report, source, evidence, build, otherPdfsConverted = [], full = null }) {
   const list = fixtureAspects(only, source);
   const { memory, judgement: memoryJudgement } = judgeMemory(only, run);
   const base = only === TIMEOUT_PROBE ? report?.timeout_case : report?.receipts?.[0];
@@ -284,6 +335,8 @@ export function fixtureEntry({ only, run, report, source, evidence, build, other
       base.outcome === 'PASS'
         ? pass(observedOutcome)
         : fail(`the converter did not report the spent budget as documented: ${base.outcome}, status ${base.status ?? 'none'}${errors ? `, errors: ${errors}` : ', no error item'}`, observedOutcome);
+    criteria.evidence = evidenceJudgement(only, base, evidence);
+    criteria.budget_had_effect = budgetJudgement(criteria, base, evidence, full);
   } else if (source?.role === 'must_fail') {
     criteria.refused =
       base.outcome === 'PASS_explicit_failure'
@@ -302,18 +355,7 @@ export function fixtureEntry({ only, run, report, source, evidence, build, other
       base.outcome === 'PASS'
         ? pass(observedOutcome)
         : fail(`the converter did not convert the fixture: ${base.outcome}${errors ? `: ${errors}` : ''}`, observedOutcome);
-    if (base.document === null || typeof base.document !== 'object') {
-      criteria.evidence = notJudged('the converter returned no document, so the process wrote no file to read');
-    } else if (!Array.isArray(evidence?.problems)) {
-      criteria.evidence = stopped(`the files the converter process for ${only} wrote were not re-read`);
-    } else if (evidence.problems.length > 0) {
-      criteria.evidence = stopped(
-        `${evidence.problems.length} file(s) the converter process for ${only} wrote are not the ones it recorded${examples(evidence.problems)}`,
-        { problems: evidence.problems },
-      );
-    } else {
-      criteria.evidence = pass();
-    }
+    criteria.evidence = evidenceJudgement(only, base, evidence);
     criteria.format_recognised =
       base.input_format === kind.format
         ? pass({ declared_kind: source.kind, reported_format: base.input_format })
@@ -380,6 +422,19 @@ function convertedPdfs(runs, sources) {
     .map((item) => item.only);
 }
 
+/**
+ * The run that converted the timeout probe's bytes without a budget: the fixture whose
+ * process recorded the same input hash. Null when no run of this receipt did.
+ */
+function fullConversionOf(probe, runs) {
+  const hash = probe?.report?.timeout_case?.sha256_before;
+  const match = typeof hash === 'string' ? runs.find((item) => item.only !== TIMEOUT_PROBE && item.report?.receipts?.[0]?.sha256_before === hash) : null;
+  if (!match) return null;
+  const base = match.report.receipts[0];
+  const converted = processProblem(match.run, base) === null && base.outcome === 'PASS' && Array.isArray(match.evidence?.problems) && match.evidence.problems.length === 0;
+  return { fixture: match.only, converted, document: converted ? match.evidence.document : null };
+}
+
 function assetsJudgement(assets) {
   if (!assets || !Array.isArray(assets.files)) return notJudged('no asset was hashed in this run');
   const counted = assetsMatched(assets.files);
@@ -428,6 +483,7 @@ export function buildDoclingReceipt({
       source: sources?.files?.[item.only],
       build,
       otherPdfsConverted: converted.filter((name) => name !== item.only),
+      full: item.only === TIMEOUT_PROBE ? fullConversionOf(item, runs) : null,
     }),
   }));
   const entryOf = (only) => entries.find((item) => item.only === only)?.entry ?? null;

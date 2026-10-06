@@ -1084,18 +1084,25 @@ function doclingRun(only, over = {}) {
         ? [{ component_type: 'converter', module_name: 'DocumentConverter::convert', error_message: NO_FALLBACK_ERROR }]
         : [],
     settings: { converter_debug: CONVERTER_DEBUG },
-    document: supported
-      ? { markdown_file: 'document.md', json_file: 'document.json', page_images: paginated ? [PAGE_IMAGE] : [] }
-      : null,
+    // The probe converts the bytes of scanned_image_only.pdf, as the Rust harness does.
+    sha256_before: createHash('sha256').update(only === TIMEOUT_PROBE ? 'scanned_image_only.pdf' : only).digest('hex'),
+    document:
+      only === MUST_FAIL
+        ? null
+        : { markdown_file: 'document.md', json_file: 'document.json', page_images: supported && paginated ? [PAGE_IMAGE] : [] },
     ...over.fixture,
   };
-  const evidence = {
-    markdown: '## Title\n\nHello   world\n',
-    document: stubDocument(paginated ? {} : { pages: {}, texts: stubDocument().texts.map((item) => ({ ...item, prov: [] })), tables: stubDocument().tables.map((item) => ({ ...item, prov: [] })) }),
-    pageFiles: { 'page-1.png': PAGE_FILE },
-    problems: [],
-    ...over.evidence,
-  };
+  // The spent budget of the real run returned an empty document: no page, no item.
+  const evidence =
+    only === TIMEOUT_PROBE
+      ? { markdown: '', document: { pages: {}, texts: [], tables: [], pictures: [], groups: [] }, pageFiles: {}, problems: [], ...over.evidence }
+      : {
+          markdown: '## Title\n\nHello   world\n',
+          document: stubDocument(paginated ? {} : { pages: {}, texts: stubDocument().texts.map((item) => ({ ...item, prov: [] })), tables: stubDocument().tables.map((item) => ({ ...item, prov: [] })) }),
+          pageFiles: { 'page-1.png': PAGE_FILE },
+          problems: [],
+          ...over.evidence,
+        };
   return {
     only,
     run: {
@@ -1116,7 +1123,7 @@ function doclingRun(only, over = {}) {
         : only === TIMEOUT_PROBE
           ? { model_inventory: DOCLING_INVENTORY, receipts: [], timeout_case: fixture }
           : { model_inventory: DOCLING_INVENTORY, receipts: [fixture], timeout_case: null },
-    evidence: 'evidence' in over && over.evidence === undefined ? undefined : supported ? evidence : undefined,
+    evidence: 'evidence' in over && over.evidence === undefined ? undefined : only === MUST_FAIL ? undefined : evidence,
   };
 }
 
@@ -1171,7 +1178,7 @@ test('a Docling receipt carries the shared header and envelope, and passes when 
   assert.equal(receipt.timeout_case.outcome, 'PASS');
   assert.deepEqual(Object.keys(receipt.summary), FIXTURE_RUNS);
   assert.deepEqual([...new Set(Object.values(receipt.summary))], ['PASS']);
-  assert.deepEqual(Object.keys(receipt.criteria_summary), ['conversion', 'evidence', 'format_recognised', 'content', 'page_renders', 'provenance', 'memory_measured', 'refused', 'refusal_attributed', 'timeout_reported']);
+  assert.deepEqual(Object.keys(receipt.criteria_summary), ['conversion', 'evidence', 'format_recognised', 'content', 'page_renders', 'provenance', 'memory_measured', 'refused', 'refusal_attributed', 'timeout_reported', 'budget_had_effect']);
   const pdf = entryOf(receipt, 'born_digital_text.pdf');
   assert.deepEqual(Object.keys(pdf.criteria), ['conversion', 'evidence', 'format_recognised', 'content', 'page_renders', 'provenance', 'memory_measured']);
   assert.deepEqual([...new Set(Object.values(pdf.criteria).map((item) => item.result))], ['pass']);
@@ -1610,6 +1617,62 @@ test('a fixture that shows no glyphs is judged for invented text, by a criterion
     assert.equal(invented.result, 'FAIL');
   }
   assert.equal(receipt('<!-- WATER 47 -->\n').result, 'PASS', 'a placeholder comment is not text');
+});
+
+test('the timeout probe passes only when the budget changed the result, compared with the same bytes converted in full', () => {
+  const budget = (receipt) => doclingCriterion(receipt, `${TIMEOUT_PROBE}/budget_had_effect`);
+  const good = doclingReceipt();
+  assert.deepEqual(Object.keys(good.timeout_case.criteria), ['timeout_reported', 'evidence', 'budget_had_effect', 'memory_measured']);
+  assert.equal(good.timeout_case.sha256_before, entryOf(good, 'scanned_image_only.pdf').sha256_before, 'the probe converts the bytes of a fixture that is also converted in full');
+  assert.deepEqual(budget(good), {
+    id: `${TIMEOUT_PROBE}/budget_had_effect`,
+    required: true,
+    result: 'pass',
+    detail: 'the probe returned 0 of 1 page(s) and 0 of 3 item(s) of the full conversion of scanned_image_only.pdf',
+  });
+  assert.deepEqual(good.timeout_case.criteria.budget_had_effect.full, { fixture: 'scanned_image_only.pdf', pages: 1, items: 3 });
+  assert.match(good.criterion_rules.budget_had_effect, /fewer pages or fewer items than the conversion of the same bytes without a budget/);
+  assert.match(good.criterion_rules.budget_had_effect, /elapsed time is recorded and not judged/);
+
+  // A timeout that did nothing: the status and the error item are there, and so is the whole document.
+  const noop = doclingReceipt({ [TIMEOUT_PROBE]: { evidence: { document: stubDocument() } } });
+  assert.equal(doclingCriterion(noop, `${TIMEOUT_PROBE}/timeout_reported`).result, 'pass');
+  assert.equal(budget(noop).result, 'fail');
+  assert.equal(
+    budget(noop).detail,
+    'the probe reported a spent budget and still returned 1 page(s) and 3 item(s), no fewer than the full conversion of scanned_image_only.pdf (1 page(s), 3 item(s)): the budget had no visible effect',
+  );
+  assert.equal(noop.summary[TIMEOUT_PROBE], 'FAIL');
+  assert.equal(noop.result, 'FAIL');
+  // Fewer items on the same page count is an effect.
+  assert.equal(budget(doclingReceipt({ [TIMEOUT_PROBE]: { evidence: { document: stubDocument({ tables: [] }) } } })).detail, 'the probe returned 1 of 1 page(s) and 2 of 3 item(s) of the full conversion of scanned_image_only.pdf');
+
+  // Nothing to compare with is not judged, with the reason; it is never a pass.
+  const unjudged = (overrides, reason, result = 'INCOMPLETE') => {
+    const receipt = doclingReceipt(overrides);
+    assert.deepEqual([budget(receipt).result, budget(receipt).detail], ['not_judged', reason]);
+    assert.equal(receipt.result, result, reason);
+  };
+  unjudged(
+    { 'scanned_image_only.pdf': { fixture: { outcome: 'FAIL_converter_error', stage: 'converter_error', status: null, document: null } } },
+    'the full conversion of scanned_image_only.pdf did not succeed in this run, so there is nothing to compare the probe with',
+    'FAIL',
+  );
+  unjudged({ 'scanned_image_only.pdf': { run: { exitCode: 1 } } }, 'the full conversion of scanned_image_only.pdf did not succeed in this run, so there is nothing to compare the probe with');
+  // A process that left no receipt recorded no input hash: which fixture held the same bytes is not known.
+  unjudged({ 'scanned_image_only.pdf': { report: null, run: { exitCode: 1 } } }, 'no fixture of this run converted the same bytes without a budget, so there is nothing to compare the probe with');
+  unjudged({ 'scanned_image_only.pdf': { fixture: { sha256_before: '0'.repeat(64) } } }, 'no fixture of this run converted the same bytes without a budget, so there is nothing to compare the probe with');
+  unjudged({ [TIMEOUT_PROBE]: { fixture: { document: null } } }, 'the library returned no document for the probe, so nothing distinguishes it from the full conversion');
+  unjudged({ [TIMEOUT_PROBE]: { evidence: { problems: ['document.json: hash on disk differs from the receipt'] } } }, 'the files the probe process wrote are not the ones it recorded (see evidence), so nothing is judged from them');
+  unjudged(
+    { [TIMEOUT_PROBE]: { fixture: { outcome: 'FAIL_timeout_not_honoured', status: 'Success' }, evidence: { document: stubDocument() } } },
+    'the converter did not report a spent budget, so there is no effect to compare',
+    'FAIL',
+  );
+  const silent = doclingReceipt({ [TIMEOUT_PROBE]: { fixture: { outcome: 'FAIL_timeout_not_honoured', status: 'Success' }, evidence: { document: stubDocument() } } });
+  assert.equal(doclingCriterion(silent, `${TIMEOUT_PROBE}/timeout_reported`).detail, 'the converter did not report the spent budget as documented: FAIL_timeout_not_honoured, status Success, no error item');
+  assert.deepEqual(doclingFailedIds(silent), [`${TIMEOUT_PROBE}/timeout_reported`]);
+  assert.deepEqual(good.timeout_case.criteria.budget_had_effect.probe, { pages: 0, items: 0 });
 });
 
 test('evidence that is not what the process recorded stops the judgements made from it', () => {

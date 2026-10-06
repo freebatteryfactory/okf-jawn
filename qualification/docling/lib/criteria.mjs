@@ -76,6 +76,8 @@ export const CRITERION_RULES = Object.freeze({
     'another PDF fixture converted in the same run, so the refusal is not a broken PDF pipeline, and what the refusal text says about the build agrees with what cargo resolved',
   timeout_reported:
     'with a 1 ms document budget the converter returns PartialSuccess with a pipeline error that names the timeout',
+  budget_had_effect:
+    'the budget changed the result in a way a timeout that did nothing could not: the probe reported the spent budget and its document holds fewer pages or fewer items than the conversion of the same bytes without a budget in the same run; elapsed time is recorded and not judged',
 });
 
 const aspects = (list) => list.map((entry) => (typeof entry === 'string' ? { aspect: entry, required: true } : entry));
@@ -95,7 +97,7 @@ export function contentAspect(source) {
  * @returns {{ aspect: string, required: boolean }[]}
  */
 export function fixtureAspects(name, source) {
-  if (name === TIMEOUT_PROBE) return aspects(['timeout_reported', 'memory_measured']);
+  if (name === TIMEOUT_PROBE) return aspects(['timeout_reported', 'evidence', 'budget_had_effect', 'memory_measured']);
   if (source?.role === 'must_fail') return aspects(['refused', 'refusal_attributed', 'memory_measured']);
   const kind = KINDS[source?.kind];
   if (!kind) {

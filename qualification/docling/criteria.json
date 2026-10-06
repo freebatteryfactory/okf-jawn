@@ -89,6 +89,8 @@
     "text_image.png/memory_measured",
     "text_image.png/page_renders",
     "text_image.png/provenance",
+    "timeout_probe/budget_had_effect",
+    "timeout_probe/evidence",
     "timeout_probe/memory_measured",
     "timeout_probe/timeout_reported"
   ]
