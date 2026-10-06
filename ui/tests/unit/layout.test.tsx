@@ -388,3 +388,179 @@ describe('PresentView refused dataset read', () => {
     expect(alert.textContent).toBe('The host refused to read the source.');
   });
 });
+
+describe('PresentView dataset integrity checks', () => {
+  const source = {
+    item_id: '11111111-2222-4333-8444-555555555555',
+    path: 'fixtures/metrics.json',
+    revision: '0123456789abcdef0123456789abcdef01234567',
+    selection: { kind: 'all' as const },
+    workspace_id: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
+  };
+  const rows = [
+    { category: 'a', value: 1 },
+    { category: 'b', value: 2 },
+  ];
+  const payload = new TextEncoder().encode(JSON.stringify(rows));
+  const chartSpec = {
+    $schema: 'https://vega.github.io/schema/vega-lite/v6.json',
+    data: { name: 'metrics' },
+    mark: 'bar',
+    encoding: {
+      x: { field: 'category', type: 'nominal' },
+      y: { field: 'value', type: 'quantitative' },
+    },
+  };
+
+  interface Block {
+    bytes: Uint8Array;
+    offset: number;
+    sha256?: string;
+    hasMore: boolean;
+  }
+
+  async function sha256Hex(bytes: BufferSource) {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  function base64(bytes: Uint8Array) {
+    let binary = '';
+    for (let index = 0; index < bytes.length; index += 8192)
+      binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
+    return btoa(binary);
+  }
+
+  function responseFor(materialized: string) {
+    return {
+      view: {
+        schema_version: 1,
+        title: 'Chart board',
+        description: 'Dataset integrity',
+        mode: 'pinned',
+        grammar: 'json_render',
+        bindings: [],
+        charts: { metrics_chart: chartSpec },
+        spec: {
+          root: 'root',
+          elements: {
+            root: {
+              type: 'Chart',
+              props: { binding: 'metrics', chart: 'metrics_chart', title: 'Metrics chart' },
+              children: [],
+            },
+          },
+        },
+      },
+      resolved_bindings: [{ name: 'metrics', source, units: {}, transforms: [], materialized }],
+      warnings: [],
+      receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    } as z.infer<typeof zPresentResponse>;
+  }
+
+  /** `show` succeeds; each `read_object` call returns the next scripted block. */
+  function serving(blocks: Block[], materialized: string) {
+    let next = 0;
+    return async (name: string) => {
+      if (name === 'show') {
+        return {
+          structuredContent: {
+            markdown: 'metrics',
+            media: [],
+            outline: [],
+            receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+            source,
+            truncated: false,
+            view: 'text',
+            warnings: [],
+          },
+        };
+      }
+      const block = blocks[next];
+      next += 1;
+      if (!block) throw new Error('the host was asked for more blocks than scripted');
+      return {
+        structuredContent: {
+          data_base64: base64(block.bytes),
+          has_more: block.hasMore,
+          media_type: 'application/json',
+          offset: String(block.offset),
+          sha256: block.sha256 ?? materialized,
+          total_size: String(payload.byteLength),
+        },
+      };
+    };
+  }
+
+  async function renderServing(blocks: Block[], materialized?: string) {
+    const digest = materialized ?? (await sha256Hex(payload));
+    const view = render(
+      <PresentView response={responseFor(digest)} callTool={serving(blocks, digest)} />,
+    );
+    return view.container;
+  }
+
+  async function expectRefusal(container: HTMLElement, message: string) {
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(message);
+    expect(container.querySelector('svg')).toBeNull();
+    expect(container.querySelector('table')).toBeNull();
+  }
+
+  it('accepts honest blocks, split across two reads', async () => {
+    const cut = 7;
+    const container = await renderServing([
+      { bytes: payload.subarray(0, cut), offset: 0, hasMore: true },
+      { bytes: payload.subarray(cut), offset: cut, hasMore: false },
+    ]);
+    await expect
+      .poll(() => container.querySelector('svg') !== null, { timeout: 15_000 })
+      .toBe(true);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('refuses bytes that do not hash to the materialized digest', async () => {
+    const tampered = payload.slice();
+    tampered[tampered.length - 3] = (tampered[tampered.length - 3] ?? 0) === 49 ? 50 : 49;
+    const container = await renderServing([{ bytes: tampered, offset: 0, hasMore: false }]);
+    await expectRefusal(container, 'Dataset digest verification failed');
+  });
+
+  it('refuses a block that reports a different sha256 than the materialized digest', async () => {
+    const container = await renderServing([
+      { bytes: payload, offset: 0, hasMore: false, sha256: 'b'.repeat(64) },
+    ]);
+    await expectRefusal(container, 'Dataset identity or range changed');
+  });
+
+  it('refuses a block whose offset is not where the previous block ended', async () => {
+    const cut = 7;
+    const container = await renderServing([
+      { bytes: payload.subarray(0, cut), offset: 0, hasMore: true },
+      { bytes: payload.subarray(cut), offset: cut + 1, hasMore: false },
+    ]);
+    await expectRefusal(container, 'Dataset identity or range changed');
+  });
+
+  it('refuses an empty block that claims more data follows', async () => {
+    const container = await renderServing([
+      { bytes: new Uint8Array(0), offset: 0, hasMore: true },
+      { bytes: payload, offset: 0, hasMore: false },
+    ]);
+    await expectRefusal(container, 'Dataset read made no progress');
+  });
+
+  it('refuses more than 4 MiB in total', async () => {
+    const mebibyte = 1_048_576;
+    const big = new Uint8Array(mebibyte);
+    // Four full blocks reach the budget exactly; one more byte exceeds it.
+    const blocks: Block[] = [0, 1, 2, 3].map((index) => ({
+      bytes: big,
+      offset: index * mebibyte,
+      hasMore: true,
+    }));
+    blocks.push({ bytes: new Uint8Array(1), offset: 4 * mebibyte, hasMore: false });
+    const container = await renderServing(blocks, 'c'.repeat(64));
+    await expectRefusal(container, 'Dataset exceeds the inline display budget');
+  });
+});
