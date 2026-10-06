@@ -11,12 +11,13 @@
  * Needs .artifacts/qualification/docling/assets.json naming the verified model assets; a
  * missing or changed asset stops the run before the build.
  * Writes .artifacts/qualification/docling/receipt.json; --record also copies it to
- * qualification/receipts/docling.json. Exits non-zero unless the receipt result is PASS.
+ * qualification/receipts/docling.json. Exit code: 0 PASS, 2 FAIL, 3 INCOMPLETE (lib/criteria.mjs
+ * EXIT_CODES); 1 is a run that stopped without writing a receipt.
  *
  * Single-fixture mode, for iterating without the large fixtures: set OKF_DOCLING_ONLY to one
  * or more names from FIXTURE_RUNS, comma-separated. Only those run; the receipt goes to
- * .artifacts/qualification/docling/only/receipt.json, says so in `scope`, reports every
- * other fixture as FAIL_not_run (so it is never PASS) and cannot be recorded.
+ * .artifacts/qualification/docling/only/receipt.json, says so in `scope`, leaves every
+ * other fixture's criteria not_judged (so it is INCOMPLETE, never PASS) and cannot be recorded.
  */
 
 import { createHash } from 'node:crypto';
@@ -27,6 +28,7 @@ import { receiptHeader, recordReceipt } from '../../scripts/lib/provenance.mjs';
 import { buildRelease, exec, lockedPackage, lockedPackages } from '../lib/cargo.mjs';
 import { verifyAssets } from './lib/assets.mjs';
 import { TREE_ARGS, buildFacts } from './lib/build.mjs';
+import { exitCodeFor } from './lib/criteria.mjs';
 import { loadEvidence } from './lib/evidence.mjs';
 import { DOCLING_INPUTS, FIXTURE_RUNS, TIMEOUT_PROBE, buildDoclingReceipt } from './lib/receipt.mjs';
 import { runFixtureProcess } from './lib/runner.mjs';
@@ -116,7 +118,7 @@ for (const name of selected) {
   try {
     report = JSON.parse(await readFile(join(fixtureOut, 'receipt.json'), 'utf8'));
   } catch {
-    report = null; // judged as FAIL_harness by lib/receipt.mjs
+    report = null; // lib/receipt.mjs records a process without a receipt as a harness error
   }
   const written = name === TIMEOUT_PROBE ? report?.timeout_case?.document : report?.receipts?.[0]?.document;
   runs.push({
@@ -148,11 +150,15 @@ if (record) {
   process.stdout.write(`Docling receipt recorded: ${await recordReceipt(root, 'docling', receipt)}\n`);
 }
 
-if (receipt.result !== 'PASS') {
-  const finding = receipt.finding
-    ? ` Finding for the owner: ${receipt.finding}. Fixture must_fail_truncated.pdf was not altered.`
-    : '';
-  throw new Error(
-    `Docling qualification FAIL.${finding} ${JSON.stringify({ summary: receipt.summary, failures: receipt.failures.map((item) => `${item.fixture ?? 'run'}: ${item.criterion} ${item.status}`) })}`,
-  );
+// The receipt's result is the fold of its criteria (lib/criteria.mjs); this file only reports it.
+process.stdout.write(`Docling qualification result: ${receipt.result}
+`);
+if (receipt.harness_error) process.stderr.write(`Harness error: ${receipt.harness_error}
+`);
+if (receipt.finding) process.stderr.write(`Finding for the owner: ${receipt.finding}. Fixture must_fail_truncated.pdf was not altered.
+`);
+for (const item of receipt.failures) {
+  process.stderr.write(`${item.result} ${item.fixture ?? 'run'}${item.criterion ? ` ${item.criterion}` : ''}: ${item.detail}
+`);
 }
+process.exitCode = exitCodeFor(receipt.result);
