@@ -8,7 +8,6 @@
   - `qualification/docling/lib/runner.mjs`, `qualification/docling/lib/receipt.mjs` (new)
   - `qualification/mcp-apps/run.mjs`, `qualification/mcp-apps/src/main.rs`
   - `qualification/mcp-apps/lib/process.mjs`, `qualification/mcp-apps/lib/views.mjs` (new)
-  - `qualification/iii/run.mjs`
   - `qualification/lib/cargo.mjs`, `qualification/record.mjs` (new)
   - `scripts/lib/provenance.mjs`
   - `tests/foundation/harness.test.mjs`
@@ -20,7 +19,7 @@
   - SPEC §12: "the gate ended REJECTED WITH FALLBACK and the selected runtime is Tokio + RecordStore".
   - SPEC §13: Phase 0 "is complete only after … architecture-relevant external library/host qualification."
   - AGENTS.md: "Do not inherit a claim of green from file presence; only the recorded results of the selected tools count."; "Do not suppress lints, fake success, discard unsupported data, alter expected output to match implementation, or declare a partial test to be the full suite."
-  - `verification.json` gates: `docling-library-qualification` ("Requalify on a clean SHA with per-fixture peak memory and must_fail_truncated.pdf."), `mcp-apps-protocol-qualification` ("Requalify on a clean SHA with provenance guard and ngrok closed_at."), `iii-library-qualification` ("Decision stands; provenance guard will be added before any re-run.").
+  - `verification.json` gates: `docling-library-qualification` ("Requalify on a clean SHA with per-fixture peak memory and must_fail_truncated.pdf."), `mcp-apps-protocol-qualification` ("Requalify on a clean SHA with provenance guard and ngrok closed_at.").
 
 **Working rules for every task**
 
@@ -63,7 +62,7 @@
   - `receiptHeaderProblems(receipt: unknown): string[]` — empty when the top level carries the header.
   - `recordReceipt(root: string, name: string, receipt: object): Promise<string>` — writes `qualification/receipts/<name>.json` (2-space JSON + newline) and returns the path; rejects a bad name, a missing header, or `receipt.git_sha !== HEAD`.
 - Receipt header shape (top level of every receipt): `{ "git_sha": "<40 hex>", "inputs": ["repo/relative/path", …], "produced_at": "2026-10-05T18:00:00.000Z" }`.
-- CLI: `bun qualification/record.mjs <name>…` with names from `docling`, `mcp-apps`, `iii`; copies `.artifacts/qualification/<name>/receipt.json` through `recordReceipt`.
+- CLI: `bun qualification/record.mjs <name>…` with names from `docling`, `mcp-apps`; copies `.artifacts/qualification/<name>/receipt.json` through `recordReceipt`.
 
 - [ ] **Step 1: write the failing tests.** Replace lines 1-5 of `tests/foundation/harness.test.mjs` with the block below (the three existing HTTP tests on lines 7-24 stay untouched), then append the tests after line 24.
 
@@ -404,10 +403,10 @@ Create `qualification/record.mjs`:
 /**
  * Copy finished qualification receipts into qualification/receipts/.
  *
- * Usage: bun qualification/record.mjs <name>...   (docling | mcp-apps | iii)
+ * Usage: bun qualification/record.mjs <name>...   (docling | mcp-apps)
  *
- * Each harness needs a clean tree and a recorded receipt is an untracked file, so three
- * harnesses cannot each record on the same commit. Run all three first (their receipts
+ * Each harness needs a clean tree and a recorded receipt is an untracked file, so two
+ * harnesses cannot each record on the same commit. Run both first (their receipts
  * land in the ignored .artifacts/qualification/<name>/receipt.json), then record them
  * together. recordReceipt refuses a receipt without the shared header or one that cites
  * a commit other than HEAD.
@@ -418,7 +417,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { recordReceipt } from '../scripts/lib/provenance.mjs';
 
-const KNOWN = ['docling', 'mcp-apps', 'iii'];
+const KNOWN = ['docling', 'mcp-apps'];
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const names = process.argv.slice(2);
 
@@ -437,7 +436,7 @@ for (const name of names) {
   Run: `bun test ./tests/foundation/harness.test.mjs`
   Expected: `9 pass`, `0 fail`.
   Run: `bun qualification/record.mjs nonsense`
-  Expected: exit 1, `Usage: bun qualification/record.mjs <name>... where name is one of docling, mcp-apps, iii`.
+  Expected: exit 1, `Usage: bun qualification/record.mjs <name>... where name is one of docling, mcp-apps`.
 
 - [ ] **Step 5: commit.**
 
@@ -2670,8 +2669,8 @@ const TUNNEL_ENV: &str = "OKF_MCP_APPS_NGROK";
 ```
 
 - [ ] **Step 4: run the Rust gate (PowerShell).**
-  Run: `cargo fmt -p okf-qualify-mcp-apps` then `cargo fmt --check -p okf-qualify-docling -p okf-qualify-mcp-apps -p okf-qualify-iii`
-  Expected: exit 0 with no output. If the check names `qualification/iii/src/main.rs`, run `cargo fmt -p okf-qualify-iii` and include that file in this commit; it is inside your allowed files.
+  Run: `cargo fmt -p okf-qualify-mcp-apps` then `cargo fmt --check -p okf-qualify-docling -p okf-qualify-mcp-apps`
+  Expected: exit 0 with no output.
   Run: `cargo clippy --locked -p okf-qualify-docling -p okf-qualify-mcp-apps --all-targets -- -D warnings`
   Expected: `Finished` with no warnings or errors (fix code, never suppress).
   Run: `cargo test --locked -p okf-qualify-docling -p okf-qualify-mcp-apps`
@@ -2694,8 +2693,8 @@ What changed: only the exact value 1 lifts Host protection. The harness lists a
 fifth, app-only, read-only tool `show` (_meta.ui.visibility ["app"]) that
 returns the source fixture under the bound source reference and refuses items
 or revisions the present fixture does not bind. --check reports app_tools.
-Verified: cargo fmt --check -p okf-qualify-docling -p okf-qualify-mcp-apps -p
-okf-qualify-iii -> clean; cargo clippy --locked -p okf-qualify-docling -p
+Verified: cargo fmt --check -p okf-qualify-docling -p okf-qualify-mcp-apps
+-> clean; cargo clippy --locked -p okf-qualify-docling -p
 okf-qualify-mcp-apps --all-targets -- -D warnings -> clean; cargo test --locked
 -p okf-qualify-docling -p okf-qualify-mcp-apps -> 4 passed, 3 passed.
 Next: Task B.7 adds process-group handling for the orchestrator.
@@ -3965,7 +3964,7 @@ OKF_MCP_APPS_NGROK must be exactly 1. component/gate are
 mcp-apps-protocol-qualification.
 Verified: bun test ./tests/foundation/harness.test.mjs -> 34 pass, 0 fail;
 bun build --no-bundle qualification/mcp-apps/run.mjs -> exit 0.
-Next: protocol-only run on this commit, then Task B.10 (iii header).
+Next: protocol-only run on this commit.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01LoZr4ME3crLYjcTNn5GcAC
@@ -3978,109 +3977,9 @@ MSG
 
 ---
 
-### Task B.10: iii orchestrator — shared header only
+### Task B.10: removed
 
-**Files:**
-- Modify: `qualification/iii/run.mjs:17` (import), `:488` (header), `:800-808` (receipt head), `:837-838` (record)
-- Test: `tests/foundation/harness.test.mjs` (one appended test)
-
-**Interfaces:**
-- Consumes: `receiptHeader`, `recordReceipt` (B.1).
-- Produces: `.artifacts/qualification/iii/receipt.json` starts with `{ git_sha, inputs: ["qualification/iii", "Cargo.toml", "Cargo.lock"], produced_at }`; `commit_sha` is gone. CLI: `bun qualification/iii/run.mjs [--record]`. **Unchanged and expected:** `decision: "REJECTED_WITH_FALLBACK"` and exit code 1. The orchestrator-failure receipt written by the `.catch` handler (`:843-856`) has no header and therefore can never be recorded.
-
-- [ ] **Step 1: write the failing test.** Append to `tests/foundation/harness.test.mjs`:
-
-```js
-test('all three orchestrators take their header from receiptHeader and record only through recordReceipt', async () => {
-  for (const name of ['docling', 'mcp-apps', 'iii']) {
-    const source = await readFile(join(root, 'qualification', name, 'run.mjs'), 'utf8');
-    assert.match(source, /= await receiptHeader\(root, /, name);
-    assert.match(source, new RegExp(`recordReceipt\\(root, '${name}', receipt\\)`), name);
-    assert.match(source, /process\.argv\.includes\('--record'\)/, name);
-    assert.doesNotMatch(source, /requireCleanTree|commit_sha|writeFile\([^)]*qualification\/receipts/, name);
-  }
-});
-```
-
-- [ ] **Step 2: run and see the failure.**
-  Run: `bun test ./tests/foundation/harness.test.mjs`
-  Expected: `34 pass`, `1 fail`; the message names `iii`.
-
-- [ ] **Step 3: implement.** In `qualification/iii/run.mjs`, bottom upward:
-
-`:837-838` — after `await writeReceipt(receipt);` and before the `process.stdout.write(\`iii qualification receipt: …` line, insert:
-
-```js
-  if (process.argv.includes('--record')) {
-    process.stdout.write(`iii receipt recorded: ${await recordReceipt(root, 'iii', receipt)}\n`);
-  }
-```
-
-`:800-808` — replace
-
-```js
-  const receipt = {
-    component: 'iii-phase0',
-    commit_sha: commitSha,
-    git_sha: commitSha,
-    inputs: [
-      'qualification/iii',
-      'Cargo.toml',
-      'Cargo.lock',
-    ],
-```
-
-with
-
-```js
-  const receipt = {
-    ...header,
-    component: 'iii-phase0',
-```
-
-`:488` — replace `  const commitSha = await requireCleanTree(root);` with:
-
-```js
-  const header = await receiptHeader(root, ['qualification/iii', 'Cargo.toml', 'Cargo.lock']);
-```
-
-`:17` — replace the import with:
-
-```js
-import { receiptHeader, recordReceipt } from '../../scripts/lib/provenance.mjs';
-```
-
-Nothing else in this file changes.
-
-- [ ] **Step 4: run and see it pass.**
-  Run: `bun test ./tests/foundation/harness.test.mjs`
-  Expected: `35 pass`, `0 fail`.
-  Run: `bun build --no-bundle qualification/iii/run.mjs --outfile .artifacts/syntax/iii-run.js`
-  Expected: exit 0.
-  Run: `git diff --stat -- qualification/iii/run.mjs`
-  Expected: one file, about 6 insertions and 9 deletions.
-
-- [ ] **Step 5: commit.**
-
-```sh
-git add qualification/iii/run.mjs tests/foundation/harness.test.mjs
-git commit -F - <<'MSG'
-fix(qualify): give the iii receipt the shared header.
-
-Why: the iii orchestrator built its own commit_sha/git_sha/inputs block
-(run.mjs:802-808). verification.json: "Decision stands; provenance guard will be
-added before any re-run."
-What changed: the receipt starts with receiptHeader's { git_sha, inputs,
-produced_at } and --record copies it to qualification/receipts/iii.json. The
-REJECTED_WITH_FALLBACK decision logic and exit code 1 are untouched.
-Verified: bun test ./tests/foundation/harness.test.mjs -> 35 pass, 0 fail;
-bun build --no-bundle qualification/iii/run.mjs -> exit 0.
-Next: package B is ready for independent verification (Package B acceptance).
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LoZr4ME3crLYjcTNn5GcAC
-MSG
-```
+Removed at the owner's instruction (package J); the receipt header test now covers the two remaining harnesses, `docling` and `mcp-apps`.
 
 ---
 
@@ -4094,13 +3993,13 @@ MSG
 | 2 | any | `git diff 678f919 HEAD --stat -- tests/fixtures/documents` | Exactly one file: `SOURCES.json` (2 insertions, 1 deletion). |
 | 3 | any | `bun test ./tests/foundation/harness.test.mjs` | `35 pass`, `0 fail`. |
 | 4 | any | `bun scripts/dev.mjs check-offline` | No failure in `harness.test.mjs`. On a branch without package A, exactly the two known failures in `policy.test.mjs` (operation count) and `vendor.test.mjs` (lookup count) remain. |
-| 5 | PowerShell | `cargo fmt --check -p okf-qualify-docling -p okf-qualify-mcp-apps -p okf-qualify-iii` | Exit 0, no output. |
+| 5 | PowerShell | `cargo fmt --check -p okf-qualify-docling -p okf-qualify-mcp-apps` | Exit 0, no output. |
 | 6 | PowerShell | `cargo clippy --locked -p okf-qualify-docling -p okf-qualify-mcp-apps --all-targets -- -D warnings` | `Finished`, no warnings, no errors. |
 | 7 | PowerShell | `cargo test --locked -p okf-qualify-docling -p okf-qualify-mcp-apps` | `4 passed` and `3 passed`, `0 failed`. |
 | 8 | PowerShell | `cargo build --locked --release -p okf-qualify-docling` | `Finished \`release\` profile`. |
 | 9 | any | The `git grep` command in the code block below this table | No output (exit 1). |
 | 10 | PowerShell | The `bun -e` hold smoke from Task B.4 Step 5 | `"exit":0`, the done marker for `sample_sheet.xlsx`, a positive `peak`; smoke receipt has `stage: "converter_status"`, `status: "Success"`, `outcome: "PASS"`. |
-| 11 | any | `bun build --no-bundle qualification/docling/run.mjs --outfile .artifacts/syntax/a.js` and the same for `qualification/mcp-apps/run.mjs`, `qualification/iii/run.mjs`, `qualification/record.mjs` | Each exits 0. |
+| 11 | any | `bun build --no-bundle qualification/docling/run.mjs --outfile .artifacts/syntax/a.js` and the same for `qualification/mcp-apps/run.mjs`, `qualification/record.mjs` | Each exits 0. |
 | 12 | PowerShell | `$env:OKF_MCP_APPS_PROTOCOL_ONLY='1'; bun qualification/mcp-apps/run.mjs; $LASTEXITCODE` (needs `ui/node_modules`; no network) | Exit 0; receipt as described in Task B.9 Step 5; `git status --porcelain` empty afterwards. |
 | 13 | any | `bun qualification/record.mjs mcp-apps` after row 12, then `bun scripts/dev.mjs check-receipts`, then delete `qualification/receipts/mcp-apps.json` | `recorded … -> …qualification\receipts\mcp-apps.json`; `check-receipts: 1 receipt(s) valid against HEAD.`; after the delete `git status --porcelain` is empty. This proves the header shape against the real checker. A protocol-only receipt is never committed. |
 
@@ -4117,22 +4016,19 @@ Removal checks the verifier may repeat (each must turn the named test red, then 
 Prerequisites, checked before starting:
 - **Docling:** model assets downloaded and `.artifacts/qualification/docling/assets.json` present with `DOCLING_RS_MODELS_DIR` and `recommended_env` pointing at them (the file is ignored and machine-local; the existing one names `C:\Users\eayou\.cache\okf-jawn\docling\models`). Package A has restored the `docling-core` pin, so the receipt's `converter.docling_core_versions` reads `["1.93.6"]`.
 - **MCP Apps:** `bun scripts/dev.mjs bootstrap` done; Playwright Chromium installed for the pinned `@playwright/test` 1.63.0 (`bun x --cwd ui playwright install chromium`; the last recorded attempt failed with "Executable doesn't exist … chromium_headless_shell-1243"); network access to `raw.githubusercontent.com` and the npm registry unless `.artifacts/qualification/mcp-apps/basic-host/` is already populated; ports 8080, 8081 and 18765 free. Optional: `ngrok` on PATH with `OKF_MCP_APPS_NGROK=1`.
-- **iii:** WSL with a Linux distribution; network access to `github.com` releases; `CARGO_TARGET_DIR` unset or the build output under `<root>\target` (see Deviations, item 8).
 
 Commands, in this order, without `--record` (a recorded receipt is an untracked file and the next harness needs a clean tree):
 
 ```powershell
 bun qualification/docling/run.mjs      # expect exit 0 and result PASS, or exit 1 with a recorded finding
 bun qualification/mcp-apps/run.mjs     # expect exit 0 and result PASS
-bun qualification/iii/run.mjs          # expect exit 1 and decision REJECTED_WITH_FALLBACK
-bun qualification/record.mjs docling mcp-apps iii
-bun scripts/dev.mjs check-receipts     # expect: check-receipts: 3 receipt(s) valid against HEAD.
+bun qualification/record.mjs docling mcp-apps
+bun scripts/dev.mjs check-receipts     # expect: check-receipts: 2 receipt(s) valid against HEAD.
 ```
 
 What an independent reader checks in each receipt before commit R:
 - **docling:** all three header fields at the top level with `git_sha` = S; `summary` has 12 keys; every `memory_summary` value is `PASS` and every `peak_rss_bytes` is a positive integer; for `must_fail_truncated.pdf` the `stage` is `converter_error` (or `converter_status` with `Failure`) **and** `errors[0].error_message` names a PDF read/parse failure, not a missing model or library; `timeout_case.status` is `PartialSuccess` with a `pipeline` error containing "timeout". If the must-fail fixture was accepted, `result` is `FAIL`, `finding` is "converter accepts truncated PDF", the gate stays non-terminal and the owner decides (design §8); the fixture is not changed.
 - **mcp-apps:** `basic_host.views` has four entries, each `status: "passed"`, `app_frame_depth: 2`, `axe.app_frame_analysed: true`, `axe.app_frame: []`, `axe.host_blocking: []`; `render_present` lists exactly the two expected alerts; four screenshots `basic-host-render_*.png` exist and show the views; `ngrok.status` is `not_run` or `closed`; `harness_process.exited_before_teardown` is `false`; `host_render` is not a PASS.
-- **iii:** `decision: "REJECTED_WITH_FALLBACK"` with a `reason` about DLQ browse or crash tests, not about a missing binary, WSL or network.
 
 ---
 
@@ -4143,10 +4039,10 @@ What an independent reader checks in each receipt before commit R:
 3. **Line numbers in the brief are a few lines off** for `qualification/mcp-apps`: allowed-hosts check is `main.rs:447` (not ~445); the axe `disableRules` call is `run.mjs:396-398` (not ~381); `session_open` is `run.mjs:459` (not ~440). The plan uses the real numbers.
 4. **The present view cannot render against the HEAD harness, so a fifth tool was added.** `PresentView.tsx:117-129` calls host tool `show` for each resolved binding; the harness answered only `render_*` (`main.rs:220-226` → `invalid_params "unknown tool"`), so the App shows an error alert. Asserting that alert as "distinguishing text" would be a fake pass. B.6 adds an app-only, read-only `show` fixture tool; `tools/list` now returns 5 tools (4 render + 1 app-only) and the protocol check asserts exactly that split.
 5. **The present view's DataTable and Chart are not exercised.** `tests/fixtures/views/present-response.json` has no `materialized` dataset and no `read_object` tool exists in the harness; that fixture is outside package B. The view therefore shows two honest alerts ("Dataset unavailable: metrics", "Resolved chart data or specification unavailable."), which the plan pins as the only alerts allowed and records as `basic_host.present_dataset: "not_exercised: …"`. Chart rendering under the sandbox CSP stays unproven by this gate; a fixture with a materialized dataset plus a `read_object` fixture tool would be needed, and the owner of `tests/fixtures/views` decides.
-6. **`--record` cannot be used on all three harnesses in sequence.** `requireCleanTree` stays absolute (any porcelain output fails), and `qualification/receipts/<name>.json` written by one harness makes the tree dirty for the next. Rather than add an exception to the guard, B.1 adds `qualification/record.mjs`, which records finished receipts after all three ran and refuses a receipt whose `git_sha` is not HEAD. `--record` on each `run.mjs` is implemented as briefed and works for a single harness.
+6. **`--record` cannot be used on both harnesses in sequence.** `requireCleanTree` stays absolute (any porcelain output fails), and `qualification/receipts/<name>.json` written by one harness makes the tree dirty for the next. Rather than add an exception to the guard, B.1 adds `qualification/record.mjs`, which records finished receipts after both ran and refuses a receipt whose `git_sha` is not HEAD. `--record` on each `run.mjs` is implemented as briefed and works for a single harness.
 7. **`scripts/dev.mjs qualify <name>` does not forward `--record`** (`dev.mjs:249-253` passes no arguments) and package B may not edit that file. Acceptance uses `bun qualification/<name>/run.mjs` directly. If the orchestrator wants `qualify <name> --record`, package A must forward `args.slice(1)`.
-8. **`qualification/iii/run.mjs:385` hard-codes `<root>/target/release`.** The brief limits iii to "the shared receipt header only", so this is untouched. If Rust build output is pointed at `D:` through `CARGO_TARGET_DIR`, `buildWorker` throws "missing worker binary" and the receipt says `REJECTED_WITH_FALLBACK` for the wrong reason. Docling and MCP Apps resolve the directory through `cargo metadata` (B.2). Either run iii with the default target directory or allow a one-line change to use `buildRelease`.
-9. **`cargo fmt --all --check` is not this package's gate.** The design (§1) records `cargo fmt --check` failing in 11 files at HEAD, most outside package B. The plan uses `cargo fmt --check -p okf-qualify-docling -p okf-qualify-mcp-apps -p okf-qualify-iii`; `--all` goes green only after packages A, C and E merge.
+8. **Withdrawn.** It concerned the removed job-engine harness (package J).
+9. **`cargo fmt --all --check` is not this package's gate.** The design (§1) records `cargo fmt --check` failing in 11 files at HEAD, most outside package B. The plan uses `cargo fmt --check -p okf-qualify-docling -p okf-qualify-mcp-apps`; `--all` goes green only after packages A, C and E merge.
 10. **`ConversionStatus::Failure` is unreachable in docling 1.93.5** (declared at `result.rs:13`, never constructed; `converter.rs:1218-1222` yields only `Success` or `PartialSuccess`). The brief's "`converter_status` with Failure" branch is kept because the enum allows it, but the only PASS the must-fail fixture can actually produce is `converter_error`.
 11. **A must-fail PASS is additionally conditioned on another PDF converting in the same run** (`FAIL_refusal_unproven` otherwise). Not in the brief. Reason: `ml_pipeline()` loads models before reading the file, so with missing assets every PDF errors and the truncated fixture would "pass" for the wrong reason.
 12. **The single-process all-fixtures mode of the Docling harness is removed** (`run_all`, `convert_catalog`, old `main.rs:485-584`). It could not provide per-fixture peak memory, which the gate requires, and keeping it meant maintaining a second judgement path. `OKF_DOCLING_ONLY` is now required.

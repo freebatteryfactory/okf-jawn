@@ -4936,7 +4936,7 @@ Read root AGENTS.md and SPEC.md.
 - **Docling through its real API.** Build `DocumentConverter` from `ConversionSettings` and `ConversionInput.timeout` (`document_timeout`), and open the source with `SourceDocument::from_bytes` using the format from `ConversionInput.file_name`: a retained object's path has no extension. Keep `DoclingDocument::export_to_json` as `ConvertedDocument.structured` beside the Markdown. No Python runtime; do not enable `asr`, `fetch-images` or `vlm` without a deliberate shared change. Record real native and model asset requirements with verified sources, versions and hashes.
 - **Progress and cancellation.** Call `update_progress` between units of work and stop when the returned job is cancelled. `document_timeout` is checked only between PDF pages; the worker supervisor enforces the hard time and memory bound.
 - **OKF validity is not decided here.** Use `okf-core` to build concept content; the `CandidateCheck` the application supplies runs before the commit.
-- iii Phase 0 qualification ended REJECTED_WITH_FALLBACK; do not re-adopt iii or add `iii-sdk` as a product dependency. Durable job truth is `RecordStore`; queue delivery is not completion. Reconcile unfinished work through `pending_jobs()` (no tenant argument).
+- Durable job truth is `RecordStore`; queue delivery is not completion. Run a job only under the lease `claim_job` returns, and write progress, completion and failure through that lease. Reconcile unfinished work through `expire_leases()` and `pending_jobs()` (no tenant argument). No external job engine or queue service is added as a dependency.
 
 Generator-input rule: change only this lane's authored inputs; run `gen` and commit outputs; gen-check must pass; integration owner regenerates at merge.
 

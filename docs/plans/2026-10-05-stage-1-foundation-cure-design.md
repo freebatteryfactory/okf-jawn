@@ -73,8 +73,8 @@ WorkOS end to end; the Explorer; real MCP host rendering (an acceptance gate, `n
 1. **Setup** (orchestrator). Remove the seven empty lane worktrees and branches, recreate later
    on `D:`. Point Rust build output at `D:`. Apply the `main` ruleset.
 2. **Paper cure** (section 5). Ends at one commit **S** on the integration branch with CI green.
-3. **Requalify on S** from a clean tree: `qualify docling`, `qualify mcp-apps`, `qualify iii`
-   (expected `REJECTED_WITH_FALLBACK`), and the clean-checkout run. An agent that did none of
+3. **Requalify on S** from a clean tree: `qualify docling`, `qualify mcp-apps`
+   and the clean-checkout run. An agent that did none of
    the cure work checks each receipt against what it claims. The orchestrator checks CI.
 4. **Record R.** One commit adding receipts under `qualification/receipts/` and updating
    `verification.json` and `vendors.json` only. `check-receipts` passes. Then the integration
@@ -287,7 +287,7 @@ what is a projection of the table; hand-write what carries behaviour.
 - **Wave 2 packages disagree at compile time.** The integrate step owns cross-package breaks.
 - **Schema split check blocks generation.** If a type legitimately differs between input and
   output, the contract package gives it two named types rather than relaxing the check.
-- **Requalification prerequisites:** Playwright Chromium, network for basic-host, WSL for iii,
+- **Requalification prerequisites:** Playwright Chromium, network for basic-host,
   model assets for Docling. Checked before phase 3 starts.
 
 ## 9. Evidence
@@ -323,7 +323,7 @@ Questions for the owner before Stage 2 (none block Stage 1):
   `commit_items`. `ReplayPolicy::AlreadyIssued` carries a JSON pointer to the created id.
 - ยง5 H: `router` keeps its current single-argument signature.
 - ยง4 phase 3: requalification runs in a dedicated worktree on `D:`; receipts recorded are
-  docling, mcp-apps and iii, and the clean-checkout receipt stays under `.artifacts/`.
+  docling and mcp-apps, and the clean-checkout receipt stays under `.artifacts/`.
 - The implementation plan is `docs/plans/stage-1a/` (one file per package). Phases 5โ€“6 get their
   own plan at commit R.
 - Packages E2, T and P were added during execution: E2 hardened dispatch, T the test follow-ups,
@@ -331,3 +331,4 @@ Questions for the owner before Stage 2 (none block Stage 1):
 - The `main` ruleset (the two always-running CI jobs required, force-push and deletion blocked,
   merge commits only) was applied before commit S.
 - The 27 guesses from the store-ports verification open the storage-lane plan.
+- The rejected external job engine, its harness, workspace member and receipt gate were removed at the owner's instruction (package J); SPEC ง5 and ง12 now state the Tokio-over-RecordStore design directly.
