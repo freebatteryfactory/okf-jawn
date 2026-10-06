@@ -318,6 +318,105 @@ async fn create_workspace_without_a_tenant_grant_is_forbidden() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_tenant_grant_without_admin_cannot_create_a_workspace() -> TestResult {
+    let mut table = GrantTable::default();
+    table.tenants.insert(
+        "bob".to_owned(),
+        vec![
+            Permission::Read,
+            Permission::Write,
+            Permission::Propose,
+            Permission::Approve,
+            Permission::Review,
+        ],
+    );
+    let ports = FixturePorts::new(table);
+    let app = CountingApplication::new();
+    app.set_response("create_workspace", created_workspace())?;
+    let bob = principal("bob", AccessRoute::BrowserSession)?;
+    let input = create_workspace_body(KEY_ONE);
+    let refused = err_of(call(&app, &ports, &bob, "create_workspace", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    // The adapter was asked and answered with Bob's grant: the refusal is the product's.
+    assert_eq!(ports.access.lookups(), 1);
+    assert_eq!(app.call_count("create_workspace")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_connector_of_a_tenant_admin_cannot_create_a_workspace() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_workspace", created_workspace())?;
+    // Alice's tenant grant and the connector's ceiling both include Admin, so the route rule is
+    // the only one left to refuse.
+    let agent = connector("alice", all_permissions())?;
+    let input = create_workspace_body(KEY_ONE);
+    let refused = err_of(call(&app, &ports, &agent, "create_workspace", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    assert_eq!(ports.access.lookups(), 1);
+    assert_eq!(app.call_count("create_workspace")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_delegation_ceiling_decides_whether_a_tenant_admin_grant_applies() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_workspace", created_workspace())?;
+
+    // A service route may administer, and Alice's tenant grant includes Admin, so the ceiling
+    // is the only rule left to refuse.
+    let mut narrowed = principal("alice", AccessRoute::Service)?;
+    narrowed.delegation = Some(DelegationCeiling {
+        permissions: vec![Permission::Read, Permission::Write],
+        workspace_ids: None,
+    });
+    let input = create_workspace_body(KEY_ONE);
+    let refused = err_of(call(&app, &ports, &narrowed, "create_workspace", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    assert_eq!(ports.access.lookups(), 1);
+    assert_eq!(app.call_count("create_workspace")?, 0);
+
+    let mut administering = principal("alice", AccessRoute::Service)?;
+    administering.delegation = Some(DelegationCeiling {
+        permissions: vec![Permission::Read, Permission::Admin],
+        workspace_ids: None,
+    });
+    let input = create_workspace_body(KEY_TWO);
+    let created = call(&app, &ports, &administering, "create_workspace", input).await?;
+    assert_eq!(created.get("id"), Some(&json!(WORKSPACE_A)));
+    let seen = app.contexts("create_workspace")?;
+    let context = some(seen.first(), "the handler context")?;
+    let tenant_grant = some(context.tenant.as_ref(), "the tenant grant")?;
+    // The handler sees the grant already narrowed to the ceiling.
+    assert_eq!(
+        tenant_grant.permissions,
+        vec![Permission::Read, Permission::Admin]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_tenant_admin_creates_a_workspace() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_workspace", created_workspace())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = create_workspace_body(KEY_ONE);
+    let created = call(&app, &ports, &alice, "create_workspace", input).await?;
+    assert_eq!(created.get("id"), Some(&json!(WORKSPACE_A)));
+    assert_eq!(app.call_count("create_workspace")?, 1);
+    let seen = app.contexts("create_workspace")?;
+    let context = some(seen.first(), "the handler context")?;
+    let tenant_grant = some(context.tenant.as_ref(), "the tenant grant")?;
+    assert_eq!(tenant_grant.tenant_id, alice.tenant_id);
+    assert!(tenant_grant.allows(Permission::Admin));
+    assert_eq!(context.grants, Vec::new());
+    Ok(())
+}
+
+#[tokio::test]
 async fn delegation_ceiling_decides_whether_a_connector_may_propose() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
