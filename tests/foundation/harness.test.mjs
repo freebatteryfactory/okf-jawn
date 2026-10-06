@@ -47,6 +47,7 @@ import {
   judgeProvenance,
   pngSize,
 } from '../../qualification/docling/lib/document.mjs';
+import { loadEvidence } from '../../qualification/docling/lib/evidence.mjs';
 import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
 import { OCR_FIXTURES, decodeFixture, encodePng, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
 import { pngInk } from '../../qualification/docling/lib/png.mjs';
@@ -731,6 +732,63 @@ test('page renders: a render that is one flat colour fails unless the fixture de
   assert.deepEqual(unread.undecoded, ['page 2: the pixels could not be read (bit depth 1)']);
   assert.equal(judge([shown(1, PAGE_PNG), { ...shown(2, PAGE_PNG), mimetype: 'image/jpeg' }]).status, 'not_judged');
   assert.equal(judge([shown(1, BLANK_PNG), { ...shown(2, PAGE_PNG), mimetype: 'image/jpeg' }]).status, 'FAIL', 'a flat page fails whatever else could not be read');
+});
+
+test('evidence is what is on disk: every file a converter process wrote is re-read and re-hashed', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'okf-docling-evidence-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  const markdown = Buffer.from('## Title\n\nHello world\n');
+  const json = Buffer.from(JSON.stringify(stubDocument()));
+  const written = {
+    markdown_file: 'document.md',
+    markdown_sha256: sha(markdown),
+    json_file: 'document.json',
+    json_sha256: sha(json),
+    page_images: [{ ...PAGE_IMAGE, file: 'page-1.png' }],
+  };
+  const write = async (over = {}) => {
+    const files = { 'document.md': markdown, 'document.json': json, 'page-1.png': PAGE_PNG, ...over };
+    for (const [name, bytes] of Object.entries(files)) {
+      if (bytes === null) await rm(join(dir, name), { force: true });
+      else await writeFile(join(dir, name), bytes);
+    }
+  };
+
+  await write();
+  const good = await loadEvidence(dir, written);
+  assert.deepEqual(good.problems, []);
+  assert.equal(good.markdown, markdown.toString('utf8'));
+  assert.deepEqual(good.document, stubDocument());
+  assert.deepEqual(good.pageFiles, { 'page-1.png': pageFile(PAGE_PNG) });
+  assert.equal(good.pageFiles['page-1.png'].ink.uniform, false, 'the pixels of the file on disk are read');
+
+  // The bytes on disk changed after the process recorded their hash.
+  await write({ 'document.md': Buffer.from('## Title\n\nGoodbye\n') });
+  assert.deepEqual((await loadEvidence(dir, written)).problems, ['document.md: hash on disk differs from the receipt']);
+  await write({ 'document.json': Buffer.from(JSON.stringify(stubDocument({ texts: [] }))) });
+  assert.deepEqual((await loadEvidence(dir, written)).problems, ['document.json: hash on disk differs from the receipt']);
+  await write({ 'page-1.png': BLANK_PNG });
+  const swapped = await loadEvidence(dir, written);
+  assert.deepEqual(swapped.problems, ['page-1.png: hash on disk differs from the receipt']);
+  assert.equal(swapped.pageFiles['page-1.png'].sha256, sha(BLANK_PNG), 'what is recorded is the file as found');
+
+  // A file that is not there, or not what its name says.
+  await write({ 'document.md': null, 'page-1.png': null });
+  const missing = await loadEvidence(dir, written);
+  assert.equal(missing.markdown, null);
+  assert.equal(missing.pageFiles['page-1.png'], null);
+  assert.equal(missing.problems.length, 2);
+  assert.match(missing.problems[0], /^document\.md: .*ENOENT/);
+  assert.match(missing.problems[1], /^page-1\.png: .*ENOENT/);
+  const notJson = Buffer.from('{ not json');
+  await write({ 'document.json': notJson });
+  const broken = await loadEvidence(dir, { ...written, json_sha256: sha(notJson) });
+  assert.equal(broken.document, null);
+  assert.match(broken.problems.join(' | '), /document\.json: not JSON/);
+
+  // A process that returned no document wrote nothing to read.
+  assert.deepEqual(await loadEvidence(dir, null), { markdown: null, document: null, pageFiles: {}, problems: [] });
 });
 
 /** One PNG row filtered the way an encoder would write it (PNG specification, filter types 0 to 4). */

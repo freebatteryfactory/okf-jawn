@@ -17,6 +17,8 @@ const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
  * @param {string} dir the fixture's output directory
  * @param {object|null|undefined} written the `document` block of the fixture's Rust receipt
  * @returns {Promise<{ markdown: string|null, document: object|null, pageFiles: object, problems: string[] }>}
+ *   `problems` names every file that is unreadable or whose hash differs from the one the
+ *   process recorded; a fixture with a problem is not judged from its files
  */
 export async function loadEvidence(dir, written) {
   const evidence = { markdown: null, document: null, pageFiles: {}, problems: [] };
@@ -42,12 +44,9 @@ export async function loadEvidence(dir, written) {
     }
   }
   for (const image of written.page_images ?? []) {
-    try {
-      const bytes = await readFile(join(dir, image.file));
-      evidence.pageFiles[image.file] = { sha256: sha256(bytes), bytes: bytes.length, png: pngSize(bytes), ink: pngInk(bytes) };
-    } catch {
-      evidence.pageFiles[image.file] = null; // judged by judgePageRenders as "could not be re-read"
-    }
+    const bytes = await read(image.file, image.sha256);
+    // Recorded as found, changed or not; a file that could not be read is null.
+    evidence.pageFiles[image.file] = bytes ? { sha256: sha256(bytes), bytes: bytes.length, png: pngSize(bytes), ink: pngInk(bytes) } : null;
   }
   return evidence;
 }
