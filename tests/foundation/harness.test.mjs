@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,14 +38,24 @@ import {
 } from '../../qualification/docling/lib/receipt.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 import {
+  APP_ONLY_TOOLS,
+  MCP_APPS_INPUTS,
+  PRESENT_DATASET,
+  REACT_DEVELOPMENT_MARKER,
+  TOOL_CALL_LOG_PREFIX,
   UPSTREAM_HOST_RULES,
   VIEWS,
+  appBundleBuild,
   basicHostUrl,
   basicHostVerdict,
+  datasetExpectation,
+  judgePresentDataset,
   judgeView,
   ngrokRecord,
   partitionAxe,
   runProblems,
+  toolCallsFrom,
+  transportRecord,
 } from '../../qualification/mcp-apps/lib/views.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -586,8 +596,12 @@ const VIEW_TEXT = {
   render_source: `fixtures/qualification-source.md ${REVISION}\nQualification source\nContract-valid ReadItemResponse fixture for the MCP Apps harness.`,
   render_changes: `Changes\n${REVISION} → 89abcdef0123456789abcdef0123456789abcdef\nfixtures/qualification-source.md\n@@ -1,3 +1,4 @@\n # Qualification source\n+\n+Harness fixture line.`,
   render_timeline: `Timeline\nQualification timeline fixture\nokf-qualify-mcp-apps · 2026-10-05T12:00:00Z\n89abcdef0123456789abcdef0123456789abcdef`,
-  render_present: `Six-component catalog\nfixtures/qualification-source.md ${REVISION}\nQualification source\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\nDataset unavailable: metrics\nMetrics chart\nResolved chart data or specification unavailable.\nfixtures/qualification-source.md @ ${REVISION}\nfixtures/qualification-metrics.json @ ${REVISION}`,
+  render_present: `Six-component catalog\nfixtures/qualification-source.md ${REVISION}\nQualification source\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\nmetrics\ncategory\tvalue\nIngested\t412\nConverted\t397\nIndexed\t389\nReviewed\t127\nPublished\t61\nMetrics chart\nConverted\nIndexed\nIngested\nPublished\nReviewed\ncategory\nvalue\nSource data\nfixtures/qualification-source.md @ ${REVISION}\nfixtures/qualification-metrics.json @ ${REVISION}`,
 };
+/** The two alerts the present view showed while the fixture retained no dataset; never accepted again. */
+const DATASET_UNAVAILABLE = ['Dataset unavailable: metrics', 'Resolved chart data or specification unavailable.'];
+/** The present frame as it was then: the table and the chart replaced by those alerts. */
+const PRESENT_TEXT_WITHOUT_DATASET = `Six-component catalog\nfixtures/qualification-source.md ${REVISION}\nQualification source\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\nDataset unavailable: metrics\nMetrics chart\nResolved chart data or specification unavailable.\nfixtures/qualification-source.md @ ${REVISION}\nfixtures/qualification-metrics.json @ ${REVISION}`;
 
 test('each of the four views is recognised by its own text and by no other view', () => {
   assert.deepEqual(VIEWS.map((view) => view.tool), ['render_source', 'render_changes', 'render_timeline', 'render_present']);
@@ -615,7 +629,170 @@ test('a view that is waiting, disconnected, unparsed or showing an unexpected al
   const broken = judgeView(present, { text: VIEW_TEXT.render_present, alerts: ['MCP error -32602: unknown tool: show'] });
   assert.equal(broken.ok, false);
   assert.deepEqual(broken.alerts, ['MCP error -32602: unknown tool: show']);
-  assert.equal(judgeView(present, { text: VIEW_TEXT.render_present, alerts: [] }).ok, false);
+});
+
+test('the present view is rendered only with its chart and table, and never again with a dataset-unavailable alert', () => {
+  const present = VIEWS[3];
+  assert.equal(present.tool, 'render_present');
+  assert.deepEqual(present.alerts, [], 'the present view tolerates no alert at all');
+  const rendered = judgeView(present, { text: VIEW_TEXT.render_present, alerts: [] });
+  assert.equal(rendered.ok, true, JSON.stringify(rendered));
+  assert.deepEqual(rendered.expected_alerts, []);
+
+  // Either alert, alone or together, on an otherwise complete frame: not rendered.
+  for (const alerts of [[DATASET_UNAVAILABLE[0]], [DATASET_UNAVAILABLE[1]], DATASET_UNAVAILABLE]) {
+    const verdict = judgeView(present, { text: VIEW_TEXT.render_present, alerts });
+    assert.equal(verdict.ok, false, `accepted ${JSON.stringify(alerts)}`);
+    assert.deepEqual(verdict.missing, []);
+  }
+  // The frame this harness used to accept, with its two alerts and without them.
+  for (const alerts of [DATASET_UNAVAILABLE, []]) {
+    const verdict = judgeView(present, { text: PRESENT_TEXT_WITHOUT_DATASET, alerts });
+    assert.equal(verdict.ok, false, `accepted the dataset-less frame with alerts ${JSON.stringify(alerts)}`);
+    assert.deepEqual(verdict.foreign, ['Dataset unavailable', 'chart data or specification unavailable']);
+    assert.deepEqual(verdict.missing, ['Source data']);
+  }
+});
+
+test('harness tool-call reports are read back in order and nothing else on stderr is', () => {
+  assert.deepEqual([...APP_ONLY_TOOLS].sort(), ['read_object', 'show']);
+  const stderr = [
+    'okf-qualify-mcp-apps listening on http://127.0.0.1:18765/mcp',
+    `${TOOL_CALL_LOG_PREFIX}{"ok":true,"tool":"render_present"}`,
+    `${TOOL_CALL_LOG_PREFIX}{"ok":true,"tool":"show"}\r`,
+    `${TOOL_CALL_LOG_PREFIX}{"has_more":true,"object":"ab","offset":"0","ok":true,"tool":"read_object"}`,
+    `  ${TOOL_CALL_LOG_PREFIX}{"ok":true,"tool":"indented"}`,
+    `${TOOL_CALL_LOG_PREFIX}["not","a","record"]`,
+    `${TOOL_CALL_LOG_PREFIX}{"ok":true}`,
+    `${TOOL_CALL_LOG_PREFIX}{"has_more":false,"object":"ab","off`,
+  ].join('\n');
+  assert.deepEqual(toolCallsFrom(stderr), [
+    { ok: true, tool: 'render_present' },
+    { ok: true, tool: 'show' },
+    { has_more: true, object: 'ab', offset: '0', ok: true, tool: 'read_object' },
+  ]);
+  assert.deepEqual(toolCallsFrom(''), []);
+  assert.deepEqual(toolCallsFrom(undefined), []);
+});
+
+/** The committed dataset as the App must show it, with the digest of its exact bytes. */
+async function committedDataset() {
+  const bytes = await readFile(join(root, PRESENT_DATASET.fixture));
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  return { bytes, digest, expected: datasetExpectation({ binding: PRESENT_DATASET.binding, digest, rows: JSON.parse(bytes.toString('utf8')) }) };
+}
+
+test('the present fixture retains exactly the committed dataset, and the expectation is the table DataTable draws', async () => {
+  const { bytes, digest, expected } = await committedDataset();
+  const present = JSON.parse(await readFile(join(root, 'tests/fixtures/views/present-response.json'), 'utf8'));
+  const retained = (bindings) => bindings.filter((binding) => binding.materialized !== undefined).map((binding) => [binding.name, binding.materialized]);
+  assert.deepEqual(retained(present.resolved_bindings), [[PRESENT_DATASET.binding, digest]]);
+  assert.deepEqual(retained(present.view.bindings), [[PRESENT_DATASET.binding, digest]]);
+  // One flipped byte is another object: the fixture would no longer retain it.
+  const corrupted = Buffer.from(bytes);
+  corrupted[corrupted.length - 2] ^= 1;
+  assert.notEqual(createHash('sha256').update(corrupted).digest('hex'), digest);
+
+  assert.deepEqual(expected, {
+    binding: 'metrics',
+    digest,
+    rows: 5,
+    columns: ['category', 'value'],
+    cells: [['Ingested', '412'], ['Converted', '397'], ['Indexed', '389'], ['Reviewed', '127'], ['Published', '61']],
+  });
+  // The chart specification reads the dataset under the binding's name, as Chart.tsx injects it.
+  const chart = present.view.charts.metrics_chart;
+  assert.equal(chart.data.name, PRESENT_DATASET.binding);
+  assert.deepEqual([chart.encoding.x.field, chart.encoding.y.field], expected.columns);
+  assert.deepEqual(present.view.spec.elements.chart.props, { binding: 'metrics', chart: 'metrics_chart', title: 'Metrics chart' });
+  assert.deepEqual(present.view.spec.elements.table.props, { binding: 'metrics' });
+
+  // Columns come in first-seen order and a missing or null cell is the empty string.
+  assert.deepEqual(
+    datasetExpectation({ binding: 'b', digest: 'd', rows: [{ a: 1 }, { b: null, a: false }] }),
+    { binding: 'b', digest: 'd', rows: 2, columns: ['a', 'b'], cells: [['1', ''], ['false', '']] },
+  );
+  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', rows: [] }), /non-empty JSON array/);
+  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', rows: { a: 1 } }), /non-empty JSON array/);
+});
+
+test('the present dataset counts as exercised only when the chart, the table, the reads and the alerts all agree', async () => {
+  const { digest, expected } = await committedDataset();
+  const table = (extra) => ({ caption: 'metrics', visible: true, in_details: false, columns: expected.columns, rows: expected.cells, ...extra });
+  const read = (offset, has_more) => ({ tool: 'read_object', ok: true, object: digest, offset, has_more });
+  const good = {
+    text: VIEW_TEXT.render_present,
+    alerts: [],
+    svgs: 1,
+    svg_marks: 5,
+    tables: [table(), table({ visible: false, in_details: true })],
+    tool_calls: [
+      { tool: 'render_present', ok: true },
+      { tool: 'show', ok: true },
+      { tool: 'show', ok: true },
+      read('0', true), read('64', true), read('128', true), read('192', false),
+    ],
+  };
+  const verdict = judgePresentDataset(expected, good);
+  assert.deepEqual(verdict.problems, []);
+  assert.equal(verdict.ok, true);
+  assert.deepEqual(verdict.record, {
+    status: 'exercised',
+    binding: 'metrics',
+    digest,
+    rows: 5,
+    read_object_calls: 4,
+    read_object_offsets: ['0', '64', '128', '192'],
+    show_calls: 2,
+    chart_svg: true,
+    chart_marks: 5,
+    table_rows: 5,
+    chart_table_rows: 5,
+    alerts: [],
+    problems: [],
+  });
+
+  const without = (tool) => good.tool_calls.filter((call) => call.tool !== tool);
+  const fourRows = expected.cells.slice(0, 4);
+  const wrongCell = expected.cells.map((row) => row.map((cell) => (cell === 'Published' ? 'Unpublished' : cell)));
+  const failures = [
+    ['the frame was never observed', null, /App frame was not observed/],
+    ['a dataset-unavailable alert', { alerts: [DATASET_UNAVAILABLE[0]] }, /shows alerts: \["Dataset unavailable: metrics"\]/],
+    ['a chart-unavailable alert', { alerts: [DATASET_UNAVAILABLE[1]] }, /shows alerts/],
+    ['any other alert', { alerts: ['Dataset digest verification failed'] }, /shows alerts/],
+    ['no svg', { svgs: 0, svg_marks: 0 }, /no chart svg/],
+    ['an svg without marks', { svg_marks: 0 }, /chart svg has no mark element/],
+    ['no table', { tables: [table({ visible: false, in_details: true })] }, /no visible data table captioned metrics/],
+    ['a table for another binding', { tables: [table({ caption: 'venue' }), table({ visible: false, in_details: true })] }, /no visible data table/],
+    ['one row too few', { tables: [table({ rows: fourRows }), table({ visible: false, in_details: true })] }, /data table has 4 body rows, the dataset has 5/],
+    ['one row too many', { tables: [table({ rows: [...expected.cells, ['Extra', '1']] }), table({ visible: false, in_details: true })] }, /data table has 6 body rows/],
+    ['a missing cell value', { tables: [table({ rows: wrongCell }), table({ visible: false, in_details: true })] }, /does not show the dataset values \["Published"\]/],
+    ['rows out of order', { tables: [table({ rows: [...expected.cells].reverse() }), table({ visible: false, in_details: true })] }, /not the dataset rows in order/],
+    ['other columns', { tables: [table({ columns: ['value', 'category'] }), table({ visible: false, in_details: true })] }, /data table columns are/],
+    ['a value that is in the DOM but not in the visible text', { text: VIEW_TEXT.render_present.replaceAll('Published', '') }, /"Published"\] are not in the visible text/],
+    ['a chart without its own table', { tables: [table()] }, /chart has no data table of its own/],
+    ['a chart table with the wrong rows', { tables: [table(), table({ visible: false, in_details: true, rows: fourRows })] }, /chart's own data table has 4 body rows/],
+    ['read_object never called', { tool_calls: without('read_object') }, /read_object for [0-9a-f]{64} 0 time\(s\)/],
+    ['read_object called once', { tool_calls: [...without('read_object'), read('0', false)] }, /1 time\(s\); a ranged read needs at least 2/],
+    ['reads of another object', { tool_calls: good.tool_calls.map((call) => (call.tool === 'read_object' ? { ...call, object: '0'.repeat(64) } : call)) }, /0 time\(s\)/],
+    ['no block reporting has_more', { tool_calls: [...without('read_object'), read('0', false), read('0', false)] }, /no read_object block reported has_more/],
+    ['a last block that still has more', { tool_calls: [...without('read_object'), read('0', true), read('64', true)] }, /last read_object block still reported has_more/],
+    ['a read that does not start at 0', { tool_calls: [...without('read_object'), read('64', true), read('128', false)] }, /first read_object block starts at 64/],
+    ['show never called', { tool_calls: without('show') }, /did not call show/],
+    ['a refused tool call', { tool_calls: [...good.tool_calls, { tool: 'read_object', ok: false }] }, /harness refused tool calls/],
+  ];
+  for (const [label, change, problem] of failures) {
+    const judged = judgePresentDataset(expected, change === null ? null : { ...good, ...change });
+    assert.equal(judged.ok, false, `${label}: judged exercised`);
+    assert.equal(judged.record.status, 'failed', label);
+    assert.ok(judged.problems.some((item) => problem.test(item)), `${label}: ${JSON.stringify(judged.problems)}`);
+    assert.deepEqual(judged.record.problems, judged.problems, label);
+  }
+  // What the record states is what was seen, not what was hoped for.
+  assert.equal(judgePresentDataset(expected, { ...good, svg_marks: 0 }).record.chart_svg, false);
+  assert.equal(judgePresentDataset(expected, { ...good, tables: [] }).record.table_rows, null);
+  assert.equal(judgePresentDataset(expected, { ...good, tool_calls: without('read_object') }).record.read_object_calls, 0);
+  assert.equal(judgePresentDataset(expected, null).record.show_calls, 0);
 });
 
 test('axe exclusions cover host chrome only; the App frame is judged by every rule', () => {
@@ -662,6 +839,56 @@ test('the run fails when one view fails, when a view is missing, or when the pro
   assert.match(runProblems({ protocol: { status: 'failed', error: 'x' }, basicHost: verdict, protocolOnly: true })[0], /protocol_check failed: x/);
 });
 
+test('the MCP Apps receipt states what ran: stdio not_run, HTTP as the harness reported it, and no literal posing as an observation', async () => {
+  const url = 'http://127.0.0.1:18765/mcp';
+  assert.deepEqual(transportRecord({ requested: url, reported: url }), {
+    stdio: { status: 'not_run', reason: 'this orchestrator drives the harness over Streamable HTTP only' },
+    http: { status: 'listening', endpoint: url, requested: url },
+  });
+  for (const reported of [null, undefined, '']) {
+    const record = transportRecord({ requested: url, reported });
+    assert.deepEqual(record.http, { status: 'not_listening', endpoint: null, requested: url });
+    assert.equal(record.stdio.status, 'not_run');
+  }
+
+  const source = await readFile(join(root, 'qualification/mcp-apps/run.mjs'), 'utf8');
+  // Values the receipt once stated without having seen them, and instructions it carried.
+  assert.doesNotMatch(source, /stdio: 'default'|cspObject: true|has_structured_content: true|build_command|serve_command|how_to_http_ngrok/);
+  assert.match(source, /transport: transportRecord\(\{ requested: MCP_URL, reported: listeningOn \}\)/);
+  assert.match(source, /listeningOn = listening\[1\]/);
+  assert.match(source, /static_bundle_smoke: \{\s*status: 'not_run'/);
+  assert.match(source, /host_package: ensured\.package/);
+
+  // The harness's check report reads resource metadata and the tool list back from its handlers.
+  const harness = await readFile(join(root, 'qualification/mcp-apps/src/main.rs'), 'utf8');
+  const report = harness.slice(harness.indexOf('fn check_report'), harness.indexOf('impl ServerHandler'));
+  assert.match(report, /read_catalog\(&app\.uri\)/);
+  assert.match(report, /self\.tool_definitions\(\)/);
+  assert.match(report, /self\s*\.call_render_tool\(name\)/);
+  assert.doesNotMatch(report, /prefersBorder|connectDomains|SHOW_TOOL|READ_OBJECT_TOOL|tool\.fixture/);
+});
+
+test('the receipt says which React build the rendered App bundle carries', async () => {
+  const production = '<!doctype html><html><body><div id="root"></div><script>var a=1</script></body></html>';
+  const development = production.replace('var a=1', `console.info("${REACT_DEVELOPMENT_MARKER} for a better development experience")`);
+  assert.deepEqual(appBundleBuild({ html: production, nodeEnv: undefined }), {
+    node_env: null,
+    react_development_build: false,
+    marker: 'Download the React DevTools',
+  });
+  assert.deepEqual(appBundleBuild({ html: development, nodeEnv: 'development' }), {
+    node_env: 'development',
+    react_development_build: true,
+    marker: 'Download the React DevTools',
+  });
+  // The bundle decides, not the environment variable.
+  assert.equal(appBundleBuild({ html: development, nodeEnv: 'production' }).react_development_build, true);
+  assert.equal(appBundleBuild({ html: production, nodeEnv: 'development' }).react_development_build, false);
+  const source = await readFile(join(root, 'qualification/mcp-apps/run.mjs'), 'utf8');
+  assert.match(source, /app_bundle: appBundle,/);
+  assert.match(source, /appBundleBuild\(\{\s*html: await readFile\(join\(distApps,/);
+});
+
 test('a receipt never records an open tunnel', () => {
   const base = { public_url: 'https://x.ngrok.app/mcp', local_port: 18765, note: 'n' };
   assert.deepEqual(ngrokRecord({ ...base, enabled: false, opened_at: 't1', closed_at: 't2' }), {
@@ -685,6 +912,113 @@ test('the MCP Apps orchestrator renders every view, fails on any failure and nev
   assert.match(source, /recordReceipt\(root, 'mcp-apps', receipt\)/);
   assert.doesNotMatch(source, /disableRules\(|session_open|spawnDetached|waitForTcp|requireCleanTree|commit_sha/);
   assert.doesNotMatch(source, /'cargo',\s*\[\s*'run'/);
+  // present_dataset is the judged record of what the App frame showed, never a sentence or a literal status.
+  assert.match(source, /judgePresentDataset\(\s*expected,/);
+  assert.match(source, /toolCallsFrom\(toolLog\(\)\.slice\(logStart\)\)/);
+  assert.match(source, /present_dataset: dataset\.record/);
+  assert.doesNotMatch(source, /not_exercised|status: 'exercised'|unavailable/);
+});
+
+/** Repo-relative files reachable from `entry` through relative or `@/` imports and `new URL(..., import.meta.url)`. */
+async function repoImportGraph(entry) {
+  const seen = new Set();
+  const queue = [entry];
+  const candidates = (path) => ['', '.ts', '.tsx', '.mjs', '/index.ts', '/index.tsx'].map((suffix) => `${path}${suffix}`);
+  while (queue.length) {
+    const file = queue.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    if (!/\.(mjs|ts|tsx)$/.test(file)) continue;
+    const text = await readFile(join(root, file), 'utf8');
+    const specifiers = [
+      ...text.matchAll(/\bfrom\s+'([^']+)'/g),
+      ...text.matchAll(/\bimport\s+'([^']+)'/g),
+      ...text.matchAll(/new URL\('([^']+)',\s*import\.meta\.url\)/g),
+    ].map((match) => match[1]);
+    for (const specifier of specifiers) {
+      const base = specifier.startsWith('@/')
+        ? `ui/src/${specifier.slice(2)}`
+        : specifier.startsWith('.')
+          ? join(file, '..', specifier).replaceAll('\\', '/')
+          : null;
+      if (base === null) continue; // a package, pinned by bun.lock
+      for (const candidate of candidates(base)) {
+        const isFile = await stat(join(root, candidate)).then((entryStat) => entryStat.isFile(), () => false);
+        if (isFile) {
+          queue.push(candidate);
+          break;
+        }
+      }
+    }
+  }
+  return [...seen].sort();
+}
+
+test('the MCP Apps receipt inputs cover everything the run renders and executes', async () => {
+  assert.deepEqual(MCP_APPS_INPUTS, [...MCP_APPS_INPUTS].sort(), 'inputs are sorted');
+  assert.equal(new Set(MCP_APPS_INPUTS).size, MCP_APPS_INPUTS.length, 'inputs are unique');
+  for (const input of MCP_APPS_INPUTS) {
+    assert.doesNotMatch(input, /\\|^\/|^[A-Za-z]:|(^|\/)\.\.?(\/|$)|\/$/, `${input} is not a plain repo-relative path`);
+    await stat(join(root, input)); // receiptHeader refuses an input the commit does not contain
+  }
+  const covered = (path) => MCP_APPS_INPUTS.some((input) => path === input || path.startsWith(`${input}/`));
+
+  // The App bundle: its import graph from the entry, the bundler script and what that reads.
+  const app = await repoImportGraph('ui/src/mcp-apps/main.tsx');
+  for (const module of ['ui/src/features/views/PresentView.tsx', 'ui/src/features/views/Chart.tsx', 'ui/src/features/views/DataTable.tsx', 'ui/src/lib/wire.ts', 'ui/src/api/generated/zod.gen.ts', 'ui/src/styles.css']) {
+    assert.ok(app.includes(module), `the import walk did not reach ${module}: ${app.join(', ')}`);
+  }
+  const bundler = await repoImportGraph('ui/scripts/bundle-app.mjs');
+  for (const file of ['api/mcp-apps.json', 'ui/scripts/app-declaration.ts', 'ui/src/mcp-apps/main.tsx']) {
+    assert.ok(bundler.includes(file), `the bundler walk did not reach ${file}: ${bundler.join(', ')}`);
+  }
+  // The orchestrator itself and the repository modules it imports.
+  const orchestrator = await repoImportGraph('qualification/mcp-apps/run.mjs');
+  for (const file of ['qualification/mcp-apps/lib/views.mjs', 'qualification/lib/cargo.mjs', 'scripts/lib/provenance.mjs']) {
+    assert.ok(orchestrator.includes(file), `the orchestrator walk did not reach ${file}`);
+  }
+  const uncovered = [...app, ...bundler, ...orchestrator].filter((file) => !covered(file));
+  assert.deepEqual(uncovered, [], 'files the run executes or renders that are not receipt inputs');
+
+  // What no import statement names: fixtures, lockfiles, manifests, toolchains, and the rest
+  // of ui/ (Tailwind turns words in any tracked ui file into rules of the App's stylesheet).
+  for (const path of [
+    'tests/fixtures/views/present-response.json',
+    'tests/fixtures/views/present-metrics-dataset.json',
+    'qualification/mcp-apps/src/main.rs',
+    'qualification/mcp-apps/Cargo.toml',
+    'Cargo.toml',
+    'Cargo.lock',
+    'rust-toolchain.toml',
+    'bun.lock',
+    'package.json',
+    '.bun-version',
+    'ui/package.json',
+    'ui/vite.config.ts',
+    'ui/tsconfig.json',
+    'ui/scripts/bundle-docs.mjs',
+    'ui/tests/e2e/mcp-apps-static-bundle-smoke.spec.ts',
+  ]) {
+    await stat(join(root, path));
+    assert.ok(covered(path), `${path} is not covered by the receipt inputs`);
+  }
+
+  const source = await readFile(join(root, 'qualification/mcp-apps/run.mjs'), 'utf8');
+  assert.doesNotMatch(source, /const MCP_APPS_INPUTS/, 'the orchestrator must use the tested list');
+});
+
+test('the MCP Apps harness serves the committed fixtures and bundle whatever environment the caller inherited', async () => {
+  const source = await readFile(join(root, 'qualification/mcp-apps/run.mjs'), 'utf8');
+  // tests/fixtures/views is a receipt input; an inherited OKF_MCP_APPS_FIXTURES must not swap it.
+  assert.ok(MCP_APPS_INPUTS.includes('tests/fixtures/views'));
+  assert.ok(PRESENT_DATASET.fixture.startsWith('tests/fixtures/views/'));
+  assert.match(source, /const fixturesDir = join\(root, 'tests\/fixtures\/views'\);/);
+  assert.match(source, /const harnessEnv = \{ \.\.\.process\.env, OKF_MCP_APPS_DIST: distApps, OKF_MCP_APPS_FIXTURES: fixturesDir \};/);
+  assert.match(source, /run\(harnessBin, \['--check'\], \{\s*env: harnessEnv,/);
+  assert.match(source, /spawnGroup\(harnessBin, harnessArgs, \{\s*env: \{\s*\.\.\.harnessEnv,/);
+  assert.equal(source.match(/OKF_MCP_APPS_(DIST|FIXTURES):/g).length, 2, 'no second place builds the harness environment');
+  // And what the harness says it serves is compared with the committed dataset before anything renders.
+  assert.match(source, /check\.dataset\?\.sha256 !== committedDataset\.digest/);
 });
 
 test('both orchestrators take their header from receiptHeader and record only through recordReceipt', async () => {
