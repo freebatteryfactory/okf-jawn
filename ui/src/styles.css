@@ -1,4 +1,4 @@
-@import "tailwindcss" source("./");
+@import "tailwindcss";
 :root {
   font-family: system-ui, sans-serif;
   color-scheme: light dark;

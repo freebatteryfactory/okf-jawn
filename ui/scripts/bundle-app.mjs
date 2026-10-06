@@ -40,6 +40,11 @@ const output = await build({
   configFile: false,
   logLevel: 'warn',
   mode: 'production',
+  // The Tailwind plugin scans its base, which is the Vite root, for class words. Rooting the build
+  // at ui/src keeps the stylesheet a function of UI source: a test, README or scratch file elsewhere
+  // under ui/ must not change the App's bytes. (The directive form, `@import "tailwindcss"
+  // source("./")`, is not parsed by the pinned Biome without css.parser.tailwindDirectives.)
+  root: fileURLToPath(new URL('../src', import.meta.url)),
   plugins: [react(), babel({ presets: [reactCompilerPreset()] }), tailwindcss()],
   resolve: { alias: { '@': fileURLToPath(new URL('../src', import.meta.url)) } },
   build: {
