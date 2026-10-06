@@ -112,7 +112,7 @@
           "accepted_failures": [
             {
               "criterion": "corpus/redp5110_sampled.pdf/content_across_font_runs",
-              "decision": "Docling stays the converter. Where a phrase changes font the library ends a text cell and joins cells with a space, so \"(WRKFCNUSG)\" is extracted as \"( WRKFCNUSG )\". Accepted for now; no newer version, option or pdfium changes it. An upstream report is drafted and is not filed yet.",
+              "decision": "Docling stays the converter. Where a phrase changes font the library ends a text cell and joins cells with a space, so \"(WRKFCNUSG)\" is extracted as \"( WRKFCNUSG )\". Accepted for now; no newer version, option or pdfium changes it.",
               "decided_on": "2026-10-06",
               "decided_by": "owner",
               "tracked_by": "converter-font-run-spacing"
@@ -310,7 +310,7 @@
           "status": "blocked_upstream",
           "owner": "integration-owner",
           "receipt": "bun qualification/docling/run.mjs with corpus/redp5110_sampled.pdf/content_across_font_runs passing",
-          "meaning": "The Docling library ends a text cell at every font change and joins cells with a space, so a phrase set in more than one font is extracted with spaces the page does not show. No rule on our side cures it. An upstream report is drafted and is not filed yet; this gate names the issue once it is. Closes when a library release fixes it: the criterion then passes, check-receipts reports the acceptance on docling-library-qualification as stale, and the acceptance entry is removed"
+          "meaning": "The Docling library ends a text cell at every font change and joins cells with a space, so a phrase set in more than one font is extracted with spaces the page does not show. No rule on our side cures it. Python Docling's reference output for the same file has read \"(WRKFCNUSG)\" since 2026-09-30 and the Rust library follows that reference, so the fix is expected with an upstream sync; no upstream issue is filed for it. Closes when a library release fixes it: the criterion then passes, check-receipts reports the acceptance on docling-library-qualification as stale, and the acceptance entry is removed"
         }
       ],
       "acceptance": [
