@@ -9,14 +9,18 @@ behaviour the owner changed. This package makes both true.
 - **Files allowed (exact):** `SPEC.md`, `README.md`, `AGENTS.md`, `.github/CODEOWNERS`,
   `.github/workflows/ci.yml` (one line), `vendors.json`, `verification.json`,
   `.agents/skills/regenerate-api/SKILL.md`, `crates/core/AGENTS.md`, `crates/server/AGENTS.md`,
+  `crates/storage/AGENTS.md`, `crates/core/src/mutations.rs` (doc comments only — no code),
+  `docs/plans/stage-1a/00-shared-interfaces.md` (the `MutationStore` block's comments only),
   `docs/plans/2026-10-05-stage-1-foundation-cure-design.md`, the UI files Biome reports
   (`ui/scripts/bundle-app.mjs` and files under `ui/tests/unit/`), `tests/foundation/*.test.mjs`
   (only where a corrected sentence or count is asserted).
-- **Must not touch:** any `crates/*/src`, `crates/*/tests`, `xtask/**`, `scripts/**`,
+- **Must not touch:** any `crates/*/src` (except doc comments in `crates/core/src/mutations.rs`
+  for Task P.5), `crates/*/tests`, `xtask/**`, `scripts/**`,
   `qualification/**`, manifests, lockfiles, generated directories, `ui/src/**`.
 
 Commits use the shared format with both trailers, one concern per commit. `bun scripts/dev.mjs
-check-offline` must be green after every commit. No cargo is needed.
+check-offline` must be green after every commit. cargo (PowerShell only) is needed only for
+Task P.5's check that the doc-comment edit still compiles and lints.
 
 ### Task P.1: `ui-lint` green
 
@@ -116,6 +120,39 @@ Replace or add exactly these sentences (find each place by the quoted text, not 
   commit S; the 27 guesses from the store-ports verification open the storage-lane plan.
 - [ ] `bun scripts/dev.mjs check-offline` → 0 fail. Commit.
 
+### Task P.5: The ledger port says what dispatch relies on
+
+From the verification of package E2 (no code changes; doc comments and briefs only).
+
+- [ ] `crates/core/src/mutations.rs`, doc of `MutationStore::complete`: add "`Conflict` is
+  returned for a lost lease and for nothing else; any other failure uses another code
+  (`Unavailable` or `Internal`). Dispatch treats `Conflict` here as 'another attempt holds this
+  mutation' and does not release." Doc of `release`: keep "releasing a completed mutation
+  changes nothing" and add "this is what keeps a row completed when `complete` committed and
+  then reported an error".
+- [ ] Same file, module doc, Retention section: the seven-day clock starts when the row is
+  completed or released. Replace the reason given for dropping released rows ("nothing is left
+  to reconcile") with: "a released attempt may have left effects, and those are safe to leave
+  because every creating store keys them by MutationId; the row itself is no longer needed once
+  the retry window has passed." Add one sentence: "SPEC §8's 'abandoned mutations stay until
+  reconciled' means a row whose lease expired without `complete` or `release`;
+  `BeginOutcome::Abandoned` is also returned for a released row, which does expire." Add: "A
+  lease must expire. Its length is set by the storage implementation and recorded in
+  `crates/storage/AGENTS.md`; three exits other than a crash leave a live lease until then — a
+  dropped request future, a failed `release`, and a store that wrongly returns `Conflict`."
+- [ ] `crates/storage/AGENTS.md`, the ledger bullet: repeat the two rules above (`Conflict` only
+  for a lost lease; releasing a completed mutation is a no-op) and add the construction gate
+  `mutation-lease-compare-and-set` with "both takeover orders" beside
+  `mutation-crash-reconcile`.
+- [ ] `docs/plans/stage-1a/00-shared-interfaces.md`, `MutationStore` block: the same two
+  sentences as comments on `complete` and `release`.
+- [ ] `SPEC.md` §8: "scoped to tenant, subject and operation" becomes "scoped to tenant,
+  subject, client and operation".
+- [ ] PowerShell: `cargo fmt --check -p okf-jawn-core`,
+  `cargo clippy --locked -p okf-jawn-core --all-targets -- -D warnings`,
+  `cargo test --locked -p okf-jawn-core --doc` → all exit 0 (`doc_markdown` is denied: put code
+  identifiers in backticks). Commit.
+
 ### Package P acceptance
 
 | # | Command | Expected |
@@ -127,6 +164,8 @@ Replace or add exactly these sentences (find each place by the quoted text, not 
 | 5 | `git grep -n -i "utoipa" -- README.md AGENTS.md vendors.json .agents crates/*/AGENTS.md` | no output |
 | 6 | `git grep -n "find_mutation\|no branch protection\|head moved under a draft" -- SPEC.md README.md AGENTS.md verification.json .github crates/*/AGENTS.md` | no output |
 | 7 | `git grep -n "biome-ignore\|@ts-ignore\|@ts-expect-error" -- ui/scripts ui/tests` | no output |
+| 8 | `git diff <base> HEAD -- crates/core/src/mutations.rs` | only lines starting `///` or `//!` change |
+| 9 | PowerShell: `cargo clippy --locked -p okf-jawn-core --all-targets -- -D warnings` | exit 0 |
 
 ### Deviations
 
