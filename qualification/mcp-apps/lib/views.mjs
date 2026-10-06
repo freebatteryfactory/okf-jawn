@@ -28,6 +28,7 @@ export const MCP_APPS_INPUTS = [
   'Cargo.lock', // crate versions the harness binary is built from
   'Cargo.toml', // workspace dependency pins, lints and release profile of the harness
   'api/mcp-apps.json', // the App declaration ui/scripts/bundle-app.mjs builds the manifest from
+  'api/mcp-tools.json', // the product read_object declaration compiled into the harness binary
   'bun.lock', // versions of the App's packages, the MCP client, Playwright and axe
   'package.json', // the workspace and overrides bun.lock is resolved under
   'qualification/lib', // cargo.mjs: how the harness binary is built and found

@@ -8,6 +8,10 @@
 //! is reported on stderr as one `TOOL_CALL_LOG_PREFIX` line; the orchestrator counts the
 //! App's calls from those lines. This is not the product `ServerHandler` and must not be
 //! linked from product crates.
+//!
+//! `read_object` is declared with the product tool's own `inputSchema` and `outputSchema`,
+//! taken from the generated `api/mcp-tools.json` at build time, and refuses any argument that
+//! schema does not name, as the product request type does (`deny_unknown_fields`).
 
 use axum::Router;
 use rmcp::handler::server::ServerHandler;
@@ -76,6 +80,7 @@ struct RenderTool {
 struct QualifyAppsServer {
     by_uri: BTreeMap<String, BundledApp>,
     dataset: Dataset,
+    read_object: ProductDeclaration,
     resources: Vec<BundledApp>,
     show: ShowFixtures,
     tools: Vec<RenderTool>,
@@ -95,8 +100,19 @@ struct Dataset {
     sha256: String,
 }
 
+/// What the product declares for one tool: the schemas this harness serves under the same name.
+#[derive(Clone, Debug)]
+struct ProductDeclaration {
+    /// The argument names the product request type has; any other key is refused.
+    arguments: Vec<String>,
+    input_schema: Arc<JsonObject>,
+    output_schema: Arc<JsonObject>,
+}
+
 const DATASET_FIXTURE: &str = "present-metrics-dataset.json";
 const DATASET_MEDIA_TYPE: &str = "application/json";
+/// The generated product tool catalog, as committed when this binary was built.
+const PRODUCT_TOOLS: &str = include_str!("../../../api/mcp-tools.json");
 const READ_OBJECT_DESCRIPTION: &str = "App-only fixture read: returns one bounded block of the dataset a present-fixture binding retains, authorized through that binding's source reference; a digest alone is refused.";
 /// Largest block one `read_object` call returns; smaller than the dataset on purpose.
 const READ_OBJECT_MAX_BYTES: usize = 64;
@@ -156,6 +172,44 @@ impl Dataset {
         Ok(Self {
             bytes: Arc::from(bytes.into_boxed_slice()),
             sha256,
+        })
+    }
+}
+
+impl ProductDeclaration {
+    /// The product's declaration of `name` in the generated tool catalog `catalog`.
+    fn of(catalog: &str, name: &str) -> Result<Self, String> {
+        let catalog: Value = serde_json::from_str(catalog)
+            .map_err(|error| format!("parse api/mcp-tools.json: {error}"))?;
+        let tool = catalog
+            .get("tools")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+            .ok_or_else(|| format!("api/mcp-tools.json declares no tool {name}"))?;
+        let schema = |key: &str| {
+            tool.get(key)
+                .and_then(Value::as_object)
+                .cloned()
+                .map(Arc::new)
+                .ok_or_else(|| format!("api/mcp-tools.json: {name} has no {key} object"))
+        };
+        let input_schema = schema("inputSchema")?;
+        if input_schema.get("additionalProperties") != Some(&json!(false)) {
+            return Err(format!(
+                "api/mcp-tools.json: {name} no longer refuses unknown arguments; this harness must follow the product"
+            ));
+        }
+        let arguments = input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|properties| properties.keys().cloned().collect())
+            .ok_or_else(|| format!("api/mcp-tools.json: {name} inputSchema has no properties"))?;
+        Ok(Self {
+            arguments,
+            input_schema,
+            output_schema: schema("outputSchema")?,
         })
     }
 }
@@ -237,6 +291,7 @@ impl QualifyAppsServer {
         Ok(Self {
             by_uri,
             dataset,
+            read_object: ProductDeclaration::of(PRODUCT_TOOLS, READ_OBJECT_TOOL)?,
             resources,
             show,
             tools,
@@ -293,8 +348,9 @@ impl QualifyAppsServer {
             Tool::new(
                 READ_OBJECT_TOOL,
                 READ_OBJECT_DESCRIPTION,
-                read_object_schema(),
+                Arc::clone(&self.read_object.input_schema),
             )
+            .with_raw_output_schema(Arc::clone(&self.read_object.output_schema))
             .with_annotations(ToolAnnotations::new().read_only(true))
             .with_meta(app_only_meta()),
         );
@@ -325,7 +381,12 @@ impl QualifyAppsServer {
 
     /// A refused read is a tool error (`isError`), as the product MCP binding reports one.
     fn call_read_object(&self, arguments: Option<&JsonObject>) -> CallToolResult {
-        match read_object_block(&self.dataset, &self.show.present, arguments) {
+        match read_object_block(
+            &self.dataset,
+            &self.show.present,
+            &self.read_object.arguments,
+            arguments,
+        ) {
             Ok(block) => {
                 let mut result = CallToolResult::success(vec![ContentBlock::text(
                     "Qualification read_object block (text fallback).".to_owned(),
@@ -524,24 +585,6 @@ fn show_schema() -> Arc<JsonObject> {
     Arc::new(schema)
 }
 
-/// The input shape of the product `read_object` tool (`GetObjectRequest` in `api/mcp-tools.json`).
-fn read_object_schema() -> Arc<JsonObject> {
-    let mut schema = Map::new();
-    schema.insert("type".to_owned(), json!("object"));
-    schema.insert(
-        "properties".to_owned(),
-        json!({
-            "source": { "type": "object" },
-            "object": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-            "offset": { "type": ["string", "null"] },
-            "length": { "type": ["integer", "null"], "minimum": 0 },
-        }),
-    );
-    schema.insert("required".to_owned(), json!(["source", "object"]));
-    schema.insert("additionalProperties".to_owned(), json!(false));
-    Arc::new(schema)
-}
-
 /// The bindings the present fixture hands the App.
 fn resolved_bindings(present: &Value) -> impl Iterator<Item = &Value> {
     present
@@ -588,12 +631,18 @@ fn requested_length(input: &JsonObject) -> Result<usize, String> {
 /// One block of the dataset as a `GetObjectResponse`, for a request shaped like the product's
 /// `GetObjectRequest`. The object must be the dataset's digest and `source` must be the source
 /// of a present-fixture binding that retains it: a digest alone never grants the read.
+/// `allowed` are the argument names the product request has; any other key is refused, as
+/// `deny_unknown_fields` refuses it there.
 fn read_object_block(
     dataset: &Dataset,
     present: &Value,
+    allowed: &[String],
     arguments: Option<&JsonObject>,
 ) -> Result<Value, String> {
     let input = arguments.ok_or_else(|| "read_object requires arguments".to_owned())?;
+    if let Some(unknown) = input.keys().find(|key| !allowed.contains(key)) {
+        return Err(format!("read_object: unknown argument `{unknown}`"));
+    }
     let object = input
         .get("object")
         .and_then(Value::as_str)
@@ -666,9 +715,22 @@ fn base64_digit(bits: u32) -> char {
     }
 }
 
+/// The number of bytes a padded base64 text decodes to.
+fn base64_decoded_len(encoded: &str) -> usize {
+    let padding = encoded
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'=')
+        .count();
+    (encoded.len() / 4)
+        .saturating_mul(3)
+        .saturating_sub(padding)
+}
+
 /// What one tool call is reported as on stderr: the tool, whether it succeeded and, for a
-/// `read_object` block, which object and range it served. `result` is `None` for a call the
-/// server rejected at the protocol level.
+/// `read_object` block, which object and range it served (`offset`, the `bytes` of this
+/// block, the `total_size` of the object). `result` is `None` for a call the server rejected
+/// at the protocol level.
 fn tool_call_record(name: &str, result: Option<&CallToolResult>) -> Value {
     let ok = result.is_some_and(|result| result.is_error != Some(true));
     let mut record = Map::new();
@@ -681,11 +743,15 @@ fn tool_call_record(name: &str, result: Option<&CallToolResult>) -> Value {
         for (field, key) in [
             ("object", "sha256"),
             ("offset", "offset"),
+            ("total_size", "total_size"),
             ("has_more", "has_more"),
         ] {
             if let Some(value) = block.get(key) {
                 record.insert(field.to_owned(), value.clone());
             }
+        }
+        if let Some(data) = block.get("data_base64").and_then(Value::as_str) {
+            record.insert("bytes".to_owned(), json!(base64_decoded_len(data)));
         }
     }
     Value::Object(record)
@@ -892,17 +958,17 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        BundledApp, DATASET_FIXTURE, Dataset, QualifyAppsServer, READ_OBJECT_MAX_BYTES,
-        READ_OBJECT_TOOL, RenderTool, SHOW_TOOL, ShowFixtures, base64_encode, fixtures_dir,
-        load_fixture, read_object_block, resolved_bindings, resource_ui_meta, show_fixture,
-        tool_call_record, tunnel_hosts_allowed,
+        BundledApp, DATASET_FIXTURE, Dataset, PRODUCT_TOOLS, ProductDeclaration, QualifyAppsServer,
+        READ_OBJECT_MAX_BYTES, READ_OBJECT_TOOL, RenderTool, SHOW_TOOL, ShowFixtures,
+        base64_decoded_len, base64_encode, fixtures_dir, load_fixture, read_object_block,
+        resolved_bindings, resource_ui_meta, show_fixture, tool_call_record, tunnel_hosts_allowed,
     };
     use rmcp::model::{CallToolResult, ContentBlock};
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -937,6 +1003,11 @@ mod tests {
             fields.insert("offset".to_owned(), json!(offset));
         }
         request
+    }
+
+    /// The product's `read_object` declaration, as this binary was built with it.
+    fn product_read_object() -> Result<ProductDeclaration, String> {
+        ProductDeclaration::of(PRODUCT_TOOLS, READ_OBJECT_TOOL)
     }
 
     fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, String> {
@@ -1000,6 +1071,7 @@ mod tests {
         let fixtures = fixtures()?;
         let dataset = Dataset::load(&fixtures_dir(), &fixtures.present)?;
         let binding = metrics_binding(&fixtures.present)?;
+        let product = product_read_object()?;
         let total = dataset.bytes.len();
         assert!(total > READ_OBJECT_MAX_BYTES);
 
@@ -1014,7 +1086,12 @@ mod tests {
                 Some(&offset.to_string()),
                 1_048_576,
             );
-            let block = read_object_block(&dataset, &fixtures.present, request.as_object())?;
+            let block = read_object_block(
+                &dataset,
+                &fixtures.present,
+                &product.arguments,
+                request.as_object(),
+            )?;
             let expected = expected_blocks.next().ok_or("more blocks than bytes")?;
             assert_eq!(field(&block, "sha256")?, &json!(dataset.sha256));
             assert_eq!(field(&block, "offset")?, &json!(offset.to_string()));
@@ -1044,8 +1121,15 @@ mod tests {
         let dataset = Dataset::load(&fixtures_dir(), &fixtures.present)?;
         let binding = metrics_binding(&fixtures.present)?;
         let total = dataset.bytes.len();
-        let read =
-            |request: &Value| read_object_block(&dataset, &fixtures.present, request.as_object());
+        let product = product_read_object()?;
+        let read = |request: &Value| {
+            read_object_block(
+                &dataset,
+                &fixtures.present,
+                &product.arguments,
+                request.as_object(),
+            )
+        };
 
         let ranged = read(&read_request(binding, &dataset.sha256, Some("10"), 5))?;
         let expected = dataset.bytes.get(10..15).ok_or("dataset is too short")?;
@@ -1103,8 +1187,15 @@ mod tests {
         let fixtures = fixtures()?;
         let dataset = Dataset::load(&fixtures_dir(), &fixtures.present)?;
         let binding = metrics_binding(&fixtures.present)?;
-        let read =
-            |request: &Value| read_object_block(&dataset, &fixtures.present, request.as_object());
+        let product = product_read_object()?;
+        let read = |request: &Value| {
+            read_object_block(
+                &dataset,
+                &fixtures.present,
+                &product.arguments,
+                request.as_object(),
+            )
+        };
 
         let unknown = format!("{:x}", Sha256::digest(b"not the dataset"));
         let refused = read(&read_request(binding, &unknown, Some("0"), 64));
@@ -1118,7 +1209,96 @@ mod tests {
         assert!(read(&read_request(venue, &dataset.sha256, Some("0"), 64)).is_err());
         assert!(read(&json!({ "object": dataset.sha256 })).is_err());
         assert!(read(&json!({ "source": binding.get("source") })).is_err());
-        assert!(read_object_block(&dataset, &fixtures.present, None).is_err());
+        assert!(read_object_block(&dataset, &fixtures.present, &product.arguments, None).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn read_object_refuses_an_argument_the_product_request_does_not_have() -> TestResult {
+        let fixtures = fixtures()?;
+        let dataset = Dataset::load(&fixtures_dir(), &fixtures.present)?;
+        let binding = metrics_binding(&fixtures.present)?;
+        let product = product_read_object()?;
+        let read = |request: &Value| {
+            read_object_block(
+                &dataset,
+                &fixtures.present,
+                &product.arguments,
+                request.as_object(),
+            )
+        };
+
+        // The request PresentView.tsx sends is served; the same request with one more key is not.
+        let sent = read_request(binding, &dataset.sha256, Some("0"), 1_048_576);
+        assert!(read(&sent).is_ok());
+        let mut extra = sent.clone();
+        extra
+            .as_object_mut()
+            .ok_or("request is not an object")?
+            .insert("bogus".to_owned(), json!(true));
+        let message = read(&extra).err().ok_or("an unknown argument was served")?;
+        assert_eq!(message, "read_object: unknown argument `bogus`");
+
+        // The arguments accepted are exactly the ones the product request names.
+        assert_eq!(product.arguments, ["length", "object", "offset", "source"]);
+        // An unknown key inside the source reference is refused as well: the source must be
+        // exactly the binding's.
+        let mut nested = sent;
+        nested
+            .pointer_mut("/source")
+            .and_then(Value::as_object_mut)
+            .ok_or("request has no source object")?
+            .insert("bogus".to_owned(), json!(true));
+        assert!(read(&nested).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn read_object_is_declared_with_the_product_input_and_output_schema() -> TestResult {
+        // Read the catalog from the repository, not from the text compiled into the binary.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../api/mcp-tools.json");
+        let catalog: Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        let product = catalog
+            .get("tools")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|tool| tool.get("name") == Some(&json!(READ_OBJECT_TOOL)))
+            .ok_or("api/mcp-tools.json declares no read_object")?;
+        assert_eq!(
+            product.pointer("/inputSchema/additionalProperties"),
+            Some(&json!(false))
+        );
+        assert!(product.get("outputSchema").is_some_and(Value::is_object));
+
+        let show = fixtures()?;
+        let dataset = Dataset::load(&fixtures_dir(), &show.present)?;
+        let server = QualifyAppsServer {
+            by_uri: BTreeMap::new(),
+            dataset,
+            read_object: product_read_object()?,
+            resources: Vec::new(),
+            show,
+            tools: Vec::new(),
+        };
+        let listed = serde_json::to_value(server.tool_definitions())?;
+        let declared = listed
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|tool| tool.get("name") == Some(&json!(READ_OBJECT_TOOL)))
+            .ok_or("the harness lists no read_object")?;
+        assert_eq!(declared.get("inputSchema"), product.get("inputSchema"));
+        assert_eq!(declared.get("outputSchema"), product.get("outputSchema"));
+        assert_eq!(
+            declared.pointer("/_meta/ui/visibility"),
+            product.pointer("/_meta/ui/visibility")
+        );
+
+        // A catalog that stops refusing unknown arguments, or loses the tool, is refused.
+        assert!(ProductDeclaration::of(r#"{"tools":[]}"#, READ_OBJECT_TOOL).is_err());
+        let open = r#"{"tools":[{"name":"read_object","inputSchema":{"properties":{}},"outputSchema":{}}]}"#;
+        assert!(ProductDeclaration::of(open, READ_OBJECT_TOOL).is_err());
         Ok(())
     }
 
@@ -1130,6 +1310,7 @@ mod tests {
         let server = QualifyAppsServer {
             by_uri: BTreeMap::new(),
             dataset: dataset.clone(),
+            read_object: product_read_object()?,
             resources: Vec::new(),
             show,
             tools: Vec::new(),
@@ -1193,6 +1374,7 @@ mod tests {
                 .map(|app| (app.uri.clone(), app))
                 .collect(),
             dataset,
+            read_object: product_read_object()?,
             resources: vec![html.clone(), binary],
             tools: vec![
                 RenderTool {
@@ -1251,12 +1433,22 @@ mod tests {
         let mut block = CallToolResult::success(vec![ContentBlock::text("block".to_owned())]);
         block.structured_content = Some(json!({
             "sha256": "ab", "offset": "64", "total_size": "223", "media_type": "application/json",
-            "data_base64": "", "has_more": true,
+            "data_base64": base64_encode(b"seven b"), "has_more": true,
         }));
         assert_eq!(
             tool_call_record(READ_OBJECT_TOOL, Some(&block)),
-            json!({ "tool": "read_object", "ok": true, "object": "ab", "offset": "64", "has_more": true })
+            json!({
+                "tool": "read_object", "ok": true, "object": "ab", "offset": "64",
+                "total_size": "223", "bytes": 7, "has_more": true,
+            })
         );
+        // The block length is the decoded length, whatever the padding.
+        for plain in ["", "f", "fo", "foo", "foob", "fooba", "foobar"] {
+            assert_eq!(
+                base64_decoded_len(&base64_encode(plain.as_bytes())),
+                plain.len()
+            );
+        }
         // Only read_object blocks carry a range; a render tool's content is not echoed.
         assert_eq!(
             tool_call_record("render_present", Some(&block)),
