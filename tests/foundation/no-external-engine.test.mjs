@@ -58,7 +58,7 @@ test('no workspace member, dependency key or locked package starts with the reje
 test('no tracked text file contains the rejected engine name as a whole word', () => {
   const hits = [];
   for (const path of tracked) {
-    if (/^LICENSE/i.test(basename(path))) continue; // the Apache text has a roman-numeral "(iii)"
+    if (/^LICENSE/i.test(basename(path))) continue; // the Apache text has a roman-numeral list item that matches
     const bytes = read(path);
     if (isBinary(bytes)) continue;
     hits.push(...lineHits(path, bytes.toString('utf8'), line => wholeWord.test(line)));
