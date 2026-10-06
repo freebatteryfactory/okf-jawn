@@ -32,6 +32,7 @@ import {
   MUST_FAIL,
   RUN_CRITERIA,
   TIMEOUT_PROBE,
+  contentAspect,
   envelope,
   expectedCriteria,
   fail,
@@ -152,7 +153,11 @@ function contentJudgement(expect, observed) {
   const judged = judgeContent(expect, observed);
   if (judged.status === 'PASS') return pass(evidenceOf(judged));
   const missed = judged.checks.filter((check) => !check.ok);
-  const named = missed.map((check) => `${check.kind} ${JSON.stringify(check.expected)}${check.observed === undefined ? '' : ` (observed ${JSON.stringify(check.observed)})`}`);
+  const named = missed.map((check) =>
+    check.kind === 'no_text'
+      ? `no_text: ${judged.observed.text_tokens} letter or digit token(s) outside the picture placeholders (${check.observed.slice(0, EXAMPLES_SHOWN).join(' ')})`
+      : `${check.kind} ${JSON.stringify(check.expected)}${check.observed === undefined ? '' : ` (observed ${JSON.stringify(check.observed)})`}`,
+  );
   const detail = judged.reason ?? `${missed.length} of ${judged.total} expectations are not met${examples(named)}`;
   return fail(detail, evidenceOf(judged));
 }
@@ -321,7 +326,7 @@ export function fixtureEntry({ only, run, report, source, evidence, build, other
     const doc = describeDocument(blocked ? null : evidence.document);
     const facts = bodyFacts(doc);
     const images = (base.document?.page_images ?? []).map((image) => ({ ...image, file: evidence?.pageFiles?.[image.file] ?? null }));
-    criteria.content =
+    criteria[contentAspect(source)] =
       blocked ??
       contentJudgement(source.expect, { markdown: evidence.markdown ?? '', ...facts, page_count: kind.page_renders ? null : doc.pages.length });
     if (!kind.page_renders) {
@@ -340,6 +345,11 @@ export function fixtureEntry({ only, run, report, source, evidence, build, other
         });
     }
     criteria.provenance = provenanceJudgement(kind, doc, blocked);
+    if (list.some(({ aspect }) => aspect === 'text_provenance')) {
+      criteria.text_provenance = notApplicable(
+        'the fixture shows no glyphs, so the converter is to produce no text item and there is none whose location could be judged; its pictures and tables are located by provenance',
+      );
+    }
     if (!blocked) {
       entry.structure = {
         tables: facts.tables.length,

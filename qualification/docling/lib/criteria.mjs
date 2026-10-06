@@ -62,8 +62,12 @@ export const CRITERION_RULES = Object.freeze({
     'the format the library reports for the file is the format of the kind SOURCES.json declares for the fixture; what is judged for a fixture follows the declared kind, never the reported format',
   content:
     'every expectation the fixture declares in SOURCES.json holds for the converted document; match_rules says how each kind of expectation is compared',
+  no_invented_text:
+    'the converter invents no text for a page without glyphs: the fixture shows none, so the Markdown with HTML comments (the picture placeholders) removed holds no letter and no digit; every other expectation the fixture declares holds as well',
   page_renders: PAGE_RENDER_RULE,
   provenance: PROVENANCE_RULE,
+  text_provenance:
+    'not applicable by design: the fixture shows no glyphs, so there is no text item whose location could be judged; its pictures and tables are located by provenance and any text the converter produces fails no_invented_text',
   memory_measured:
     'a peak resident set size was read for the converter process; the size is a measurement and no limit is applied',
   refused:
@@ -75,6 +79,14 @@ export const CRITERION_RULES = Object.freeze({
 });
 
 const aspects = (list) => list.map((entry) => (typeof entry === 'string' ? { aspect: entry, required: true } : entry));
+
+/**
+ * The name of the criterion that judges a fixture's `expect` block. A fixture that shows no
+ * glyphs (`no_text`) asserts one thing, that no text is invented, and is named for it.
+ */
+export function contentAspect(source) {
+  return source?.expect?.no_text === true ? 'no_invented_text' : 'content';
+}
 
 /**
  * The criteria one fixture run emits, in the order they are judged.
@@ -89,13 +101,16 @@ export function fixtureAspects(name, source) {
   if (!kind) {
     throw new Error(`SOURCES.json: ${name} must declare kind as one of ${Object.keys(KINDS).join(', ')}; found ${JSON.stringify(source?.kind ?? null)}`);
   }
+  const noText = contentAspect(source) === 'no_invented_text';
   return aspects([
     'conversion',
     'evidence',
     'format_recognised',
-    'content',
+    contentAspect(source),
     'page_renders',
     { aspect: 'provenance', required: kind.provenance !== 'recorded' },
+    // Where locations are judged and the fixture has no text to locate, say so as a criterion.
+    ...(noText && kind.provenance === 'judged' ? ['text_provenance'] : []),
     'memory_measured',
   ]);
 }

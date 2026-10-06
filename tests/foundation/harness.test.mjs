@@ -633,6 +633,9 @@ const PAGE_PNG = pagePng(1224, 1584);
 
 const PAGE_PNG_SHA = createHash('sha256').update(PAGE_PNG).digest('hex');
 
+/** PAGE_PNG as re-read from disk, decoded once: the receipt stubs share it. */
+const PAGE_FILE = pageFile(PAGE_PNG);
+
 /** An all-white render of the right size: the image the review showed passing. */
 const BLANK_PNG = pagePng(1224, 1584, { ink: false });
 
@@ -1089,7 +1092,7 @@ function doclingRun(only, over = {}) {
   const evidence = {
     markdown: '## Title\n\nHello   world\n',
     document: stubDocument(paginated ? {} : { pages: {}, texts: stubDocument().texts.map((item) => ({ ...item, prov: [] })), tables: stubDocument().tables.map((item) => ({ ...item, prov: [] })) }),
-    pageFiles: { 'page-1.png': pageFile(PAGE_PNG) },
+    pageFiles: { 'page-1.png': PAGE_FILE },
     problems: [],
     ...over.evidence,
   };
@@ -1555,6 +1558,58 @@ test('the receipt lists at its top every criterion that was not judged or not ap
   const located = doclingReceipt({ 'sample_with_image.docx': { evidence: { document: stubDocument() } } });
   assert.equal(doclingCriterion(located, 'sample_with_image.docx/provenance').detail, 'the library located 3 of 3 DOCX items; this harness has no rule for a DOCX locator');
   assert.equal(located.result, 'INCOMPLETE');
+});
+
+test('a fixture that shows no glyphs is judged for invented text, by a criterion named for it', async () => {
+  const sources = JSON.parse(await readFile(join(root, 'tests/fixtures/documents/SOURCES.json'), 'utf8'));
+  const ids = doclingCriteria.expectedCriteria(sources).map((item) => item.id);
+  for (const name of ['scanned_image_only.pdf', 'sample_image.png']) {
+    assert.ok(ids.includes(`${name}/no_invented_text`), name);
+    assert.ok(!ids.includes(`${name}/content`), `${name}: "content" would claim more than is asserted`);
+    assert.ok(ids.includes(`${name}/text_provenance`), name);
+    assert.ok(ids.includes(`${name}/provenance`), `${name}: its pictures are still located`);
+  }
+  assert.equal(ids.filter((id) => id.endsWith('/no_invented_text')).length, 2);
+  assert.equal(ids.filter((id) => id.endsWith('/text_provenance')).length, 2);
+
+  // One picture, no text: the stub of a page without glyphs.
+  const stub = structuredClone(DOCLING_SOURCES);
+  stub.files['scanned_image_only.pdf'].expect = { confirmed_by: 'test stub', no_text: true, pages: 1 };
+  const picture = stubDocument({ texts: [], tables: [], pictures: [{ self_ref: '#/pictures/0', label: 'picture', prov: prov(BOX) }] });
+  const receipt = (markdown, document = picture) => doclingReceipt({ 'scanned_image_only.pdf': { evidence: { markdown, document } } }, { sources: stub });
+
+  const silent = receipt('<!-- image -->\n\n<!-- image -->\n');
+  assert.equal(silent.result, 'PASS');
+  const entry = entryOf(silent, 'scanned_image_only.pdf');
+  assert.deepEqual(Object.keys(entry.criteria), ['conversion', 'evidence', 'format_recognised', 'no_invented_text', 'page_renders', 'provenance', 'text_provenance', 'memory_measured']);
+  assert.equal(entry.criteria.no_invented_text.result, 'pass');
+  assert.equal(entry.criteria.provenance.result, 'pass', 'the picture is located');
+  assert.deepEqual(doclingCriterion(silent, 'scanned_image_only.pdf/text_provenance'), {
+    id: 'scanned_image_only.pdf/text_provenance',
+    required: true,
+    result: 'not_applicable',
+    detail: 'the fixture shows no glyphs, so the converter is to produce no text item and there is none whose location could be judged; its pictures and tables are located by provenance',
+  });
+  assert.ok(silent.not_judged.includes('scanned_image_only.pdf/text_provenance'));
+  assert.match(silent.criterion_rules.no_invented_text, /the converter invents no text for a page without glyphs/);
+  assert.match(silent.criterion_rules.no_invented_text, /holds no letter and no digit/);
+  assertDoclingEnvelope(silent, stub);
+
+  // Any letter or digit outside the picture placeholders is invented text.
+  for (const [markdown, tokens, shown] of [
+    ['<!-- image -->\n\nIll\n', 1, 'ill'],
+    ['<!-- image -->\n\n7\n', 1, '7'],
+    ['<!-- image -->\n\nl I 1 | O 0\n', 5, 'l i 1 o 0'],
+  ]) {
+    const invented = receipt(markdown);
+    assert.deepEqual(doclingFailedIds(invented), ['scanned_image_only.pdf/no_invented_text'], markdown);
+    assert.equal(
+      doclingCriterion(invented, 'scanned_image_only.pdf/no_invented_text').detail,
+      `1 of 1 expectations are not met; all: no_text: ${tokens} letter or digit token(s) outside the picture placeholders (${shown})`,
+    );
+    assert.equal(invented.result, 'FAIL');
+  }
+  assert.equal(receipt('<!-- WATER 47 -->\n').result, 'PASS', 'a placeholder comment is not text');
 });
 
 test('evidence that is not what the process recorded stops the judgements made from it', () => {
