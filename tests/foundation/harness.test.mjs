@@ -36,6 +36,7 @@ import {
   TIMEOUT_PROBE,
   buildDoclingReceipt,
 } from '../../qualification/docling/lib/receipt.mjs';
+import { inventoryCheck, parseManifest, unverifiedEnvPaths, verifyAssets } from '../../qualification/docling/lib/assets.mjs';
 import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
 import { OCR_FIXTURES, decodeFixture, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
@@ -630,6 +631,77 @@ test('every supported fixture declares what it contains and how that was confirm
     Object.entries(sources.files).filter(([, entry]) => entry.expect?.no_text === true).map(([name]) => name).sort(),
     ['sample_image.png', 'scanned_image_only.pdf'],
   );
+});
+
+const VERIFIED_MODEL = { file: 'layout.onnx', path: 'C:\\models\\layout.onnx', bytes: 10, sha256: 'd'.repeat(64) };
+
+const DOCLING_INVENTORY = [
+  { stage: 'layout', path: 'C:/models/layout.onnx', found: true, bytes: 10 },
+  { stage: 'pdfium', path: '.pdfium/lib', found: false, bytes: 0 },
+];
+
+async function assetFixture(t) {
+  const dir = await mkdtemp(join(tmpdir(), 'okf-docling-assets-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const files = { 'layout.onnx': Buffer.from('layout model bytes'), 'tableformer/encoder.onnx': Buffer.from('encoder bytes') };
+  await mkdir(join(dir, 'tableformer'));
+  const assets = [];
+  for (const [name, bytes] of Object.entries(files)) {
+    const path = join(dir, ...name.split('/'));
+    await writeFile(path, bytes);
+    assets.push({ path, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });
+  }
+  const manifest = { DOCLING_RS_MODELS_DIR: dir, recommended_env: { DOCLING_RS_MODELS_DIR: dir, DOCLING_LAYOUT_ONNX: assets[0].path }, assets };
+  return { dir, assets, manifest, text: (value = manifest) => `\uFEFF${JSON.stringify(value)}` };
+}
+
+test('model assets are re-hashed at run time and any missing or changed file stops the run by name', async (t) => {
+  const fixture = await assetFixture(t);
+  const text = fixture.text();
+  const { manifest, verified } = await verifyAssets(Buffer.from(text));
+  assert.equal(manifest.DOCLING_RS_MODELS_DIR, fixture.dir);
+  assert.equal(verified.count, 2);
+  assert.equal(verified.all_match, true);
+  assert.equal(verified.hashed_at_run_time, true);
+  assert.equal(verified.manifest_sha256, createHash('sha256').update(Buffer.from(text)).digest('hex'), 'the manifest is hashed as read, BOM included');
+  assert.deepEqual(verified.files.map((file) => file.file), ['layout.onnx', 'tableformer/encoder.onnx']);
+  assert.equal(verified.files[0].sha256, fixture.assets[0].sha256);
+  assert.equal(verified.bytes_total, fixture.assets[0].bytes + fixture.assets[1].bytes);
+
+  const withAsset = (index, change) => fixture.text({ ...fixture.manifest, assets: fixture.manifest.assets.map((asset, at) => (at === index ? { ...asset, ...change } : asset)) });
+  const encoder = fixture.assets[1].path;
+  await assert.rejects(verifyAssets(withAsset(1, { sha256: '0'.repeat(64) })), (error) => error.message.includes(encoder) && /has sha256 [0-9a-f]{64}, manifest says 0{64}/.test(error.message));
+  await assert.rejects(verifyAssets(withAsset(1, { bytes: 5 })), (error) => error.message.includes(encoder) && /is 13 bytes, manifest says 5/.test(error.message));
+  await assert.rejects(verifyAssets(withAsset(0, { path: join(fixture.dir, 'gone.onnx') })), /recommended_env points at files with no verified hash: DOCLING_LAYOUT_ONNX=/);
+  await assert.rejects(
+    verifyAssets(fixture.text({ ...fixture.manifest, recommended_env: {}, assets: [{ ...fixture.assets[0], path: join(fixture.dir, 'gone.onnx') }] })),
+    (error) => /Docling model asset missing: .*gone\.onnx/.test(error.message) && /never qualified/.test(error.message),
+  );
+
+  // The file itself changes after the manifest was written: same length, other bytes.
+  await writeFile(encoder, Buffer.from('ENCODER BYTES'));
+  await assert.rejects(verifyAssets(text), (error) => error.message.includes(encoder) && /Docling model asset changed/.test(error.message));
+
+  await assert.rejects(verifyAssets(fixture.text({ ...fixture.manifest, assets: [] })), /non-empty array/);
+  await assert.rejects(verifyAssets(fixture.text({ ...fixture.manifest, assets: [{ path: encoder, bytes: 13 }] })), /no 64-hex sha256/);
+  await assert.rejects(verifyAssets(fixture.text({ assets: fixture.assets })), /DOCLING_RS_MODELS_DIR/);
+  assert.throws(() => parseManifest('{'), SyntaxError);
+  assert.deepEqual(unverifiedEnvPaths({ ...fixture.manifest, recommended_env: { DOCLING_OCR_DICT: join(fixture.dir, 'en_dict.txt'), DOCLING_RS_EP: 'cpu' } }), [
+    `DOCLING_OCR_DICT=${join(fixture.dir, 'en_dict.txt')}`,
+  ]);
+});
+
+test('the models the library resolves must be verified files', () => {
+  const checked = inventoryCheck(DOCLING_INVENTORY, [VERIFIED_MODEL]);
+  assert.equal(checked.status, 'PASS');
+  assert.equal(checked.pdfium_library_found, false);
+  assert.equal(checked.entries[0].verified_sha256, VERIFIED_MODEL.sha256);
+  assert.equal(checked.entries[1].verified_sha256, null, 'pdfium is the optional native renderer, not a verified model');
+
+  assert.deepEqual(inventoryCheck([{ stage: 'layout', path: 'C:/models/other.onnx', found: true, bytes: 10 }], [VERIFIED_MODEL]).unverified, ['layout']);
+  assert.deepEqual(inventoryCheck([{ stage: 'layout', path: 'C:/models/layout.onnx', found: true, bytes: 11 }], [VERIFIED_MODEL]).unverified, ['layout'], 'same path, other length');
+  assert.equal(inventoryCheck([{ stage: 'ocr.rec', path: 'C:/models/layout.onnx', found: false, bytes: 0 }], [VERIFIED_MODEL]).status, 'FAIL');
+  assert.equal(inventoryCheck(null, [VERIFIED_MODEL]).status, 'FAIL');
 });
 
 const pidAlive = (pid) => {
