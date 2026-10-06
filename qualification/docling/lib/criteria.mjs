@@ -39,9 +39,12 @@ export const TIMEOUT_PROBE = 'timeout_probe';
  * name docling's InputFormat::as_str gives that kind (docling format.rs:118).
  * `provenance`: judged (every item needs a page and a box), none (the library gives the
  * format no locator), recorded (the library's locator is recorded and no rule is applied).
+ * `text_layer`: the file has a text layer the library reads on its own
+ * (docling::pdf_text_layer_pages), so the converter process records, for each item, the
+ * source that located it (src/locate.rs).
  */
 export const KINDS = Object.freeze({
-  pdf: Object.freeze({ format: 'pdf', page_renders: true, provenance: 'judged' }),
+  pdf: Object.freeze({ format: 'pdf', page_renders: true, provenance: 'judged', text_layer: true }),
   image: Object.freeze({ format: 'image', page_renders: true, provenance: 'judged' }),
   docx: Object.freeze({ format: 'docx', page_renders: false, provenance: 'none' }),
   xlsx: Object.freeze({ format: 'xlsx', page_renders: false, provenance: 'recorded' }),

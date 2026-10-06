@@ -44,7 +44,7 @@ import {
   stopped,
   unjudged,
 } from './criteria.mjs';
-import { bodyFacts, converterOptions, describeDocument, judgePageRenders, judgeProvenance } from './document.mjs';
+import { LOCATION_SOURCES, bodyFacts, converterOptions, describeDocument, judgePageRenders, judgeProvenance } from './document.mjs';
 import { MATCH_RULES, judgeContent } from './expect.mjs';
 
 export { MUST_FAIL, TIMEOUT_PROBE };
@@ -183,21 +183,46 @@ function pageRenderJudgement(input) {
   return fail(`${judged.problems.length} problem(s) over ${over}${examples(judged.problems)}`, evidenceOf(judged));
 }
 
-/** "13 of 225 items are not located (13 of 202 text items, ...); first 10: ..." */
-function unlocated(judged) {
+/**
+ * The three counts, always: "225 items: 212 located by the export (189 text items, 6 tables,
+ * 17 pictures), 13 through the text layer (13 text items, 0 tables, 0 pictures), 0 not
+ * located (0 text items, 0 tables, 0 pictures)", then the items that are not located.
+ */
+function locationCounts(judged) {
   const kinds = [['text items', judged.text_items], ['tables', judged.tables], ['pictures', judged.pictures]];
-  const lost = judged.items.total - judged.items.located;
-  const counts = kinds.map(([name, coverage]) => `${coverage.invalid_total} of ${coverage.total} ${name}`).join(', ');
+  const words = { export: 'located by the export', text_layer: 'through the text layer', none: 'not located' };
+  const counts = LOCATION_SOURCES.map(
+    (source) => `${judged.items.located_by[source]} ${words[source]} (${kinds.map(([name, coverage]) => `${coverage.located_by[source]} ${name}`).join(', ')})`,
+  );
   const named = kinds.flatMap(([, coverage]) => coverage.invalid.map((item) => `${item.ref} ${item.label}: ${item.problem}`));
-  return `${lost} of ${judged.items.total} items are not located (${counts})${examples(named, lost)}`;
+  return `${judged.items.total} items: ${counts.join(', ')}${examples(named, judged.items.located_by.none)}`;
 }
 
-function provenanceJudgement(kind, doc, blocked) {
+/**
+ * What the converter process recorded about the items of a PDF (src/locate.rs), by ref, or
+ * the sentence that says why it cannot be used: the record is missing, or it is not the
+ * record of the document the process wrote.
+ */
+function recordedLookups(only, base, doc) {
+  const recorded = base.locations?.items;
+  if (!Array.isArray(recorded)) return { problem: `the converter process for ${only} recorded no item locations for a PDF` };
+  const refs = [...doc.texts, ...doc.tables, ...doc.pictures].map((item) => item.ref);
+  const lookups = new Map(recorded.map((entry) => [entry.item, entry]));
+  if (lookups.size !== recorded.length || recorded.length !== refs.length || !refs.every((ref) => lookups.has(ref))) {
+    return { problem: `the item locations the converter process for ${only} recorded (${recorded.length}) are not those of the ${refs.length} items of the document it wrote` };
+  }
+  return { lookups };
+}
+
+function provenanceJudgement(only, kind, base, doc, blocked) {
   if (kind.provenance === 'judged') {
     if (blocked) return blocked;
-    const judged = judgeProvenance(doc, { paginated: true });
-    if (judged.status === 'PASS') return pass(evidenceOf(judged));
-    if (judged.status === 'FAIL') return fail(unlocated(judged), evidenceOf(judged));
+    // Only a PDF has a text layer to look an unlocated item up in; an image is judged by its export alone.
+    const { lookups = null, problem = null } = kind.text_layer ? recordedLookups(only, base, doc) : {};
+    if (problem) return stopped(problem);
+    const judged = judgeProvenance(doc, { paginated: true, lookups });
+    if (judged.status === 'PASS') return pass({ detail: locationCounts(judged), ...evidenceOf(judged) });
+    if (judged.status === 'FAIL') return fail(locationCounts(judged), evidenceOf(judged));
     return notJudged(judged.reason, evidenceOf(judged));
   }
   // Not a PDF or an image: what the library gives is recorded as observed, when there is a document to read.
@@ -396,7 +421,9 @@ export function fixtureEntry({ only, run, report, source, evidence, build, other
           blankPages: source.expect?.blank_pages ?? [],
         });
     }
-    criteria.provenance = provenanceJudgement(kind, doc, blocked);
+    criteria.provenance = provenanceJudgement(only, kind, base, doc, blocked);
+    // The items are listed once, judged, under criteria.provenance.located_items.
+    if (base.locations) entry.locations = { ...base.locations, items: `${base.locations.items?.length ?? 0} recorded; judged under criteria.provenance.located_items` };
     if (list.some(({ aspect }) => aspect === 'text_provenance')) {
       criteria.text_provenance = notApplicable(
         'the fixture shows no glyphs, so the converter is to produce no text item and there is none whose location could be judged; its pictures and tables are located by provenance',

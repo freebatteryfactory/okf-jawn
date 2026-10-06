@@ -896,8 +896,12 @@ test('provenance: every text item, table and picture of a paginated fixture need
   const judge = (over, paginated = true) => judgeProvenance(describeDocument(stubDocument(over)), { paginated });
   const good = judge();
   assert.equal(good.status, 'PASS');
-  assert.deepEqual(good.text_items, { total: 2, with_provenance: 2, located: 2, invalid_total: 0, invalid: [] });
-  assert.deepEqual(good.tables, { total: 1, with_provenance: 1, located: 1, invalid_total: 0, invalid: [] });
+  assert.deepEqual(good.text_items, { total: 2, with_provenance: 2, located: 2, located_by: { export: 2, text_layer: 0, none: 0 }, invalid_total: 0, invalid: [] });
+  assert.deepEqual(good.tables, { total: 1, with_provenance: 1, located: 1, located_by: { export: 1, text_layer: 0, none: 0 }, invalid_total: 0, invalid: [] });
+  assert.deepEqual(good.items, { total: 3, located: 3, located_by: { export: 3, text_layer: 0, none: 0 } });
+  // Every item is listed once with the source that located it, its page and its box.
+  assert.deepEqual(good.located_items.map((item) => [item.ref, item.kind, item.located_by, item.page_no]), [['#/texts/0', 'text', 'export', 1], ['#/texts/1', 'text', 'export', 1], ['#/tables/0', 'table', 'export', 1]]);
+  assert.deepEqual(good.located_items[0].bbox, { coord_origin: 'BOTTOMLEFT', ...BOX });
   assert.deepEqual(good.page_provenance, [{ page_no: 1, text_items: 2, tables: 1, pictures: 0 }]);
   assert.deepEqual(good.sample.first, { ref: '#/texts/0', label: 'section_header', text: 'Title', page_no: 1, bbox: { coord_origin: 'BOTTOMLEFT', ...BOX } });
   assert.equal(good.sample.last.text, 'Hello world');
@@ -935,14 +939,15 @@ test('provenance: every text item, table and picture of a paginated fixture need
   assert.equal(lostTable.status, 'FAIL', 'a table with empty prov fails although every text item is located');
   assert.deepEqual(lostTable.text_items.invalid, []);
   assert.deepEqual(lostTable.tables.invalid, [{ ref: '#/tables/0', label: 'table', problem: 'no provenance' }]);
-  assert.deepEqual(lostTable.items, { total: 3, located: 2 });
+  assert.deepEqual(lostTable.items, { total: 3, located: 2, located_by: { export: 2, text_layer: 0, none: 1 } });
+  assert.deepEqual(lostTable.located_items.at(-1), { ref: '#/tables/0', kind: 'table', label: 'table', located_by: 'none', page_no: null, bbox: null, problem: 'no provenance' });
   const picture = (provValue) => ({ pictures: [{ self_ref: '#/pictures/0', label: 'picture', prov: provValue }] });
   assert.equal(judge(picture(prov(BOX))).status, 'PASS');
-  assert.deepEqual(judge(picture(prov(BOX))).items, { total: 4, located: 4 });
+  assert.deepEqual(judge(picture(prov(BOX))).items, { total: 4, located: 4, located_by: { export: 4, text_layer: 0, none: 0 } });
   const lostPicture = judge(picture(prov({ l: 0, t: 0, r: 0, b: 0 })));
   assert.equal(lostPicture.status, 'FAIL');
   assert.deepEqual(lostPicture.pictures.invalid, [{ ref: '#/pictures/0', label: 'picture', problem: 'bbox has no area' }]);
-  assert.match(good.rule, /every text item, table and picture has provenance/);
+  assert.match(good.rule, /every text item, table and picture is located: by its own provenance in the export or, for a PDF item the export gives none, by the one text-layer item/);
   assert.doesNotMatch(good.rule, /do not decide/);
 
   // A document without text is still judged by what it does hold; only an empty one is not.
@@ -966,6 +971,59 @@ test('provenance: every text item, table and picture of a paginated fixture need
   const many = judge({ texts: Array.from({ length: 12 }, (_, index) => ({ self_ref: `#/texts/${index}`, label: 'caption', text: 'c', prov: [] })) });
   assert.equal(many.text_items.invalid.length, 10);
   assert.equal(many.text_items.invalid_total, 12);
+  assert.equal(office.located_items, undefined, 'a format that is not judged lists no located items');
+});
+
+/** What src/locate.rs records for an item the export left unlocated: found in the text layer, or not and why. */
+const lookupFound = (item, bbox, page_no = 1) => ({ item, kind: 'text', label: 'caption', located_by: 'text_layer', page_no, bbox: { coord_origin: 'BOTTOMLEFT', ...bbox }, lookup: { basis: 'parent', occurrences: 1, pages: [page_no], reason: null } });
+const lookupMissed = (item, reason, occurrences = 0) => ({ item, kind: 'text', label: 'caption', located_by: 'none', page_no: null, bbox: null, lookup: { basis: 'parent', occurrences, pages: [1], reason } });
+
+test('provenance: an item the export leaves unlocated is located by the text-layer lookup, held to the same rule for its page and box', () => {
+  const caption = { self_ref: '#/texts/2', label: 'caption', text: 'Table 2-1   FUNCTION_USAGE view', prov: [] };
+  const document = describeDocument(stubDocument({ texts: [...stubDocument().texts, caption] }));
+  const judge = (records) => judgeProvenance(document, { paginated: true, lookups: records === null ? null : new Map(records.map((record) => [record.item, record])) });
+  const captionBox = { l: 136.27, t: 512.02, r: 284.48, b: 504.28 };
+
+  // Without a lookup the caption is what it was: not located.
+  assert.equal(judge(null).status, 'FAIL');
+  assert.deepEqual(judge(null).text_items.invalid, [{ ref: '#/texts/2', label: 'caption', problem: 'no provenance' }]);
+
+  const found = judge([lookupFound('#/texts/2', captionBox)]);
+  assert.equal(found.status, 'PASS');
+  assert.deepEqual(found.items, { total: 4, located: 4, located_by: { export: 3, text_layer: 1, none: 0 } });
+  assert.deepEqual(found.text_items.located_by, { export: 2, text_layer: 1, none: 0 });
+  assert.equal(found.text_items.with_provenance, 2, 'the export itself still gives the caption no provenance');
+  assert.deepEqual(found.located_items[2], { ref: '#/texts/2', kind: 'text', label: 'caption', located_by: 'text_layer', page_no: 1, bbox: { coord_origin: 'BOTTOMLEFT', ...captionBox }, problem: null, lookup: { basis: 'parent', occurrences: 1, pages: [1], reason: null } });
+  assert.deepEqual(found.page_provenance, [{ page_no: 1, text_items: 3, tables: 1, pictures: 0 }], 'the page counts the item the text layer put on it');
+
+  // The text occurs twice on the page, or not at all: the lookup found nothing, and the item says why.
+  const twice = judge([lookupMissed('#/texts/2', '2 text-layer items on page [1] have exactly this text', 2)]);
+  assert.equal(twice.status, 'FAIL');
+  assert.deepEqual(twice.text_items.invalid, [{ ref: '#/texts/2', label: 'caption', problem: 'no provenance; text layer: 2 text-layer items on page [1] have exactly this text' }]);
+  assert.deepEqual(twice.items.located_by, { export: 3, text_layer: 0, none: 1 });
+  assert.equal(twice.located_items[2].lookup.occurrences, 2);
+  const absent = judge([lookupMissed('#/texts/2', 'no text-layer item on page [1] has exactly this text')]);
+  assert.equal(absent.text_items.invalid[0].problem, 'no provenance; text layer: no text-layer item on page [1] has exactly this text');
+
+  // A page or a box the text layer gave is judged like an exported one: inside the page, with area, on a page of the document.
+  const problem = (record) => {
+    const judged = judge([record]);
+    assert.equal(judged.status, 'FAIL');
+    assert.deepEqual(judged.items.located_by, { export: 3, text_layer: 0, none: 1 });
+    assert.deepEqual([judged.located_items[2].located_by, judged.located_items[2].page_no, judged.located_items[2].bbox], ['none', null, null]);
+    return judged.text_items.invalid[0].problem;
+  };
+  assert.equal(problem(lookupFound('#/texts/2', { ...captionBox, r: 700 })), 'no provenance; text layer: bbox outside the 612 x 792 page');
+  assert.equal(problem(lookupFound('#/texts/2', { ...captionBox, b: 512.02 })), 'no provenance; text layer: bbox has no area');
+  assert.equal(problem(lookupFound('#/texts/2', { ...captionBox, r: 136.27 })), 'no provenance; text layer: bbox has no area');
+  assert.equal(problem(lookupFound('#/texts/2', captionBox, 2)), 'no provenance; text layer: page_no 2 is not a page of the document (1..=1)');
+  assert.equal(problem({ ...lookupFound('#/texts/2', captionBox), bbox: null }), 'no provenance; text layer: no bbox');
+
+  // The export decides for an item that has provenance: a lookup record cannot rescue a bad exported box.
+  const badExport = describeDocument(stubDocument({ texts: [{ self_ref: '#/texts/0', label: 'text', text: 'x', prov: prov({ l: 0, t: 0, r: 0, b: 0 }) }] }));
+  const rescued = judgeProvenance(badExport, { paginated: true, lookups: new Map([['#/texts/0', lookupFound('#/texts/0', captionBox)]]) });
+  assert.equal(rescued.status, 'FAIL');
+  assert.deepEqual(rescued.text_items.invalid, [{ ref: '#/texts/0', label: 'text', problem: 'bbox has no area' }]);
 });
 
 test('the document facts come from the body layer of the export', () => {
@@ -1091,6 +1149,36 @@ const DOCLING_SOURCES = {
   ),
 };
 
+/** A reason src/locate.rs gives for an item it could not look up. */
+const NO_PAGE_TO_SEARCH = 'no page to search: neither its parent nor an earlier sibling is located';
+
+/**
+ * What src/locate.rs records for a converted PDF whose text layer locates nothing more: each
+ * item is located by its own provenance or by nothing. `found` replaces the entries of items
+ * the text layer did locate.
+ */
+function stubLocations(document, found = []) {
+  const entries = [['texts', 'text'], ['tables', 'table'], ['pictures', 'picture']].flatMap(([list, kind]) =>
+    (document?.[list] ?? []).map((item) => {
+      const located = (item.prov ?? []).length > 0;
+      return {
+        bbox: located ? item.prov[0].bbox : null,
+        item: item.self_ref,
+        kind,
+        label: item.label,
+        located_by: located ? 'export' : 'none',
+        lookup: located || kind !== 'text' ? null : { basis: 'none', occurrences: 0, pages: [], reason: NO_PAGE_TO_SEARCH },
+        page_no: located ? item.prov[0].page_no : null,
+      };
+    }),
+  );
+  return {
+    items: entries.map((entry) => found.find((record) => record.item === entry.item) ?? entry),
+    rule: 'stub',
+    text_layer: { error: null, items: found.length, source: 'docling::pdf_text_layer_pages' },
+  };
+}
+
 /** A fixture process that behaved: exit 0, measured, receipt and evidence on disk. `over` replaces parts. */
 function doclingRun(only, over = {}) {
   const supported = only !== MUST_FAIL && only !== TIMEOUT_PROBE;
@@ -1115,7 +1203,6 @@ function doclingRun(only, over = {}) {
       only === MUST_FAIL
         ? null
         : { markdown_file: 'document.md', json_file: 'document.json', page_images: supported && paginated ? [PAGE_IMAGE] : [] },
-    ...over.fixture,
   };
   // The spent budget of the real run returned an empty document: no page, no item.
   const evidence =
@@ -1128,6 +1215,9 @@ function doclingRun(only, over = {}) {
           problems: [],
           ...over.evidence,
         };
+  // A converted PDF also carries where its items are, for the document the process wrote.
+  if (fixture.input_format === 'pdf' && only !== MUST_FAIL) fixture.locations = stubLocations(evidence.document);
+  Object.assign(fixture, over.fixture);
   return {
     only,
     run: {
@@ -1458,6 +1548,65 @@ test('a run that stopped before any conversion writes an INCOMPLETE envelope wit
   assertDoclingEnvelope(receipt);
 });
 
+test('a PDF item the text layer locates passes provenance, and the detail always states how many items each source located', () => {
+  const captions = [
+    { self_ref: '#/texts/2', label: 'caption', text: 'Table 2-1   FUNCTION_USAGE view', prov: [] },
+    { self_ref: '#/texts/3', label: 'caption', text: 'Figure 1-2   Existing row and column controls', prov: [] },
+  ];
+  const document = stubDocument({ texts: [...stubDocument().texts, ...captions] });
+  const boxes = [{ l: 136.27, t: 512.02, r: 284.48, b: 504.28 }, { l: 136.27, t: 100.55, r: 316.76, b: 91.27 }];
+  const withLocations = (found) => doclingReceipt({ 'born_digital_text.pdf': { evidence: { document }, fixture: { locations: stubLocations(document, found) } } });
+  const zero = '(0 text items, 0 tables, 0 pictures)';
+
+  const receipt = withLocations(captions.map((caption, index) => lookupFound(caption.self_ref, boxes[index])));
+  const entry = entryOf(receipt, 'born_digital_text.pdf');
+  assert.equal(entry.criteria.provenance.result, 'pass');
+  assert.equal(receipt.result, 'PASS');
+  assert.equal(
+    doclingCriterion(receipt, 'born_digital_text.pdf/provenance').detail,
+    `5 items: 3 located by the export (2 text items, 1 tables, 0 pictures), 2 through the text layer (2 text items, 0 tables, 0 pictures), 0 not located ${zero}`,
+  );
+  // Each item records the source that located it, its page and its box; the receipt holds the list once.
+  assert.deepEqual(
+    entry.criteria.provenance.located_items.map((item) => [item.ref, item.located_by, item.page_no, item.bbox?.l ?? null]),
+    [['#/texts/0', 'export', 1, 72], ['#/texts/1', 'export', 1, 72], ['#/texts/2', 'text_layer', 1, 136.27], ['#/texts/3', 'text_layer', 1, 136.27], ['#/tables/0', 'export', 1, 72]],
+  );
+  assert.deepEqual(entry.locations, { items: '5 recorded; judged under criteria.provenance.located_items', rule: 'stub', text_layer: { error: null, items: 2, source: 'docling::pdf_text_layer_pages' } });
+  assert.deepEqual(entry.page_provenance, [{ page_no: 1, text_items: 4, tables: 1, pictures: 0, has_image: true }]);
+  assertDoclingEnvelope(receipt);
+
+  // The three counts are stated whether the criterion passes or fails, for every paginated fixture.
+  const stated = /^\d+ items: \d+ located by the export \(\d+ text items, \d+ tables, \d+ pictures\), \d+ through the text layer \(\d+ text items, \d+ tables, \d+ pictures\), \d+ not located \(\d+ text items, \d+ tables, \d+ pictures\)/;
+  const judged = receipt.criteria.filter((criterion) => criterion.id.endsWith('/provenance') && (criterion.result === 'pass' || criterion.result === 'fail'));
+  assert.deepEqual(judged.map((criterion) => criterion.id), FIXTURE_RUNS.filter((only) => isPaginated(only) && only !== MUST_FAIL).map((only) => `${only}/provenance`));
+  for (const criterion of judged) assert.match(criterion.detail, stated, criterion.id);
+  // An image has no text layer: it is judged by its export alone and needs no record of the lookup.
+  assert.equal(entryOf(receipt, 'text_image.png').locations, undefined);
+  assert.equal(doclingCriterion(receipt, 'text_image.png/provenance').detail, `3 items: 3 located by the export (2 text items, 1 tables, 0 pictures), 0 through the text layer ${zero}, 0 not located ${zero}`);
+
+  // One caption the lookup did not find: the fixture fails, with the counts and the reason.
+  const partly = withLocations([lookupFound('#/texts/2', boxes[0]), lookupMissed('#/texts/3', '2 text-layer items on page [1] have exactly this text', 2)]);
+  assert.equal(partly.result, 'FAIL');
+  assert.deepEqual(doclingFailedIds(partly), ['born_digital_text.pdf/provenance']);
+  assert.equal(
+    doclingCriterion(partly, 'born_digital_text.pdf/provenance').detail,
+    '5 items: 3 located by the export (2 text items, 1 tables, 0 pictures), 1 through the text layer (1 text items, 0 tables, 0 pictures), 1 not located (1 text items, 0 tables, 0 pictures); all: #/texts/3 caption: no provenance; text layer: 2 text-layer items on page [1] have exactly this text',
+  );
+
+  // A converter process that recorded no locations for a PDF, or locations of another document, is a harness error.
+  for (const [locations, sentence] of [
+    [undefined, 'the converter process for born_digital_text.pdf recorded no item locations for a PDF'],
+    [stubLocations(stubDocument()), 'the item locations the converter process for born_digital_text.pdf recorded (3) are not those of the 5 items of the document it wrote'],
+    [{ ...stubLocations(document), items: stubLocations(document).items.map((item) => ({ ...item, item: '#/texts/0' })) }, 'the item locations the converter process for born_digital_text.pdf recorded (5) are not those of the 5 items of the document it wrote'],
+  ]) {
+    const unrecorded = doclingReceipt({ 'born_digital_text.pdf': { evidence: { document }, fixture: { locations } } });
+    assert.equal(unrecorded.result, 'INCOMPLETE', sentence);
+    assert.equal(unrecorded.harness_error, sentence);
+    assert.deepEqual(doclingCriterion(unrecorded, 'born_digital_text.pdf/provenance'), { id: 'born_digital_text.pdf/provenance', required: true, result: 'not_judged', detail: sentence });
+    assert.deepEqual(doclingFailedIds(unrecorded), []);
+  }
+});
+
 test('each content, page-render and provenance failure fails its fixture and the receipt, and its detail gives the total and the examples', () => {
   {
     const receipt = doclingReceipt({ 'corpus/word_sample.docx': { evidence: { markdown: '## Title\n\nGoodbye\n' } } });
@@ -1518,13 +1667,13 @@ test('each content, page-render and provenance failure fails its fixture and the
     assert.equal(entry.criteria.provenance.result, 'fail');
     assert.deepEqual(entry.failed_criteria, ['provenance']);
     assert.equal(entry.outcome, 'FAIL');
-    const shown = captions.slice(0, 10).map((item) => `${item.self_ref} caption: no provenance`).join('; ');
+    const shown = captions.slice(0, 10).map((item) => `${item.self_ref} caption: no provenance; text layer: ${NO_PAGE_TO_SEARCH}`).join('; ');
     assert.deepEqual(receipt.failures, [
       {
         fixture: 'born_digital_text.pdf',
         criterion: 'provenance',
         result: 'fail',
-        detail: `12 of 13 items are not located (12 of 12 text items, 0 of 1 tables, 0 of 0 pictures); first 10: ${shown}`,
+        detail: `13 items: 1 located by the export (0 text items, 1 tables, 0 pictures), 0 through the text layer (0 text items, 0 tables, 0 pictures), 12 not located (12 text items, 0 tables, 0 pictures); first 10: ${shown}`,
       },
     ]);
     assert.equal(entry.criteria.provenance.text_items.invalid_total, 12);
@@ -1533,7 +1682,10 @@ test('each content, page-render and provenance failure fails its fixture and the
     assert.equal(receipt.result, 'FAIL');
     // A table without a location fails the fixture although every text item is located.
     const lostTable = doclingReceipt({ 'table_heavy.pdf': { evidence: { document: stubDocument({ tables: stubDocument().tables.map((table) => ({ ...table, prov: [] })) }) } } });
-    assert.equal(doclingCriterion(lostTable, 'table_heavy.pdf/provenance').detail, '1 of 3 items are not located (0 of 2 text items, 1 of 1 tables, 0 of 0 pictures); all: #/tables/0 table: no provenance');
+    assert.equal(
+      doclingCriterion(lostTable, 'table_heavy.pdf/provenance').detail,
+      '3 items: 2 located by the export (2 text items, 0 tables, 0 pictures), 0 through the text layer (0 text items, 0 tables, 0 pictures), 1 not located (0 text items, 1 tables, 0 pictures); all: #/tables/0 table: no provenance',
+    );
     assert.deepEqual(doclingFailedIds(lostTable), ['table_heavy.pdf/provenance']);
   }
 });

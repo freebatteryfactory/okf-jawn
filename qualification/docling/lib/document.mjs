@@ -12,6 +12,13 @@
  * must give every text item, table and picture a page inside the document and a box inside
  * that page, and one render per page. Other formats are recorded as the library reports them, not judged.
  *
+ * An item is located by one of two sources. The export: the item's own `prov`. Or, for a PDF
+ * item the export gives no `prov` (the library drops a caption's box), the library's own
+ * text-layer document: the converter process looks the item's text up there by the rule of
+ * src/locate.rs and records the page and box it found; this module holds that box to the same
+ * rule as an exported one. An item neither source locates is not located, and nothing here
+ * guesses a box.
+ *
  * A render must also depict its page: the orchestrator decodes each image (lib/png.mjs) and
  * this module fails one that is a single flat colour, unless the fixture's entry in
  * SOURCES.json declares that page blank, in which case the render must be flat.
@@ -26,7 +33,10 @@ const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 /** What a passing provenance criterion asserts; the receipt carries this sentence. */
 export const PROVENANCE_RULE =
-  'every text item, table and picture has provenance, each page_no is a page of the document and each bbox has area and lies inside that page';
+  'every text item, table and picture is located: by its own provenance in the export or, for a PDF item the export gives none, by the one text-layer item on the page of its parent (or of its nearest located earlier sibling) that has exactly its text; each page_no is a page of the document and each bbox has area and lies inside that page; the detail states how many items each source located and how many none did';
+
+/** The sources an item can be located by, in the order the counts are stated. */
+export const LOCATION_SOURCES = Object.freeze(['export', 'text_layer', 'none']);
 
 /** What a passing page_renders criterion asserts; the receipt carries this sentence. */
 export const PAGE_RENDER_RULE =
@@ -117,15 +127,42 @@ function itemProblem(item, pages) {
   return null;
 }
 
-function coverage(items, pages) {
-  const judged = items.map((item) => ({ item, problem: itemProblem(item, pages) }));
-  const invalid = judged.filter((entry) => entry.problem !== null);
+/**
+ * Where one item is and which source says so: `{ located_by, page_no, bbox, problem, lookup }`.
+ * The export decides for an item that has provenance, sound or not. For one that has none,
+ * `lookups` may hold what the converter process found in the text layer; that page and box
+ * are held to the same rule as exported ones.
+ */
+function locate(item, pages, lookups) {
+  const nowhere = (problem, lookup) => ({ located_by: 'none', page_no: null, bbox: null, problem, ...(lookup ? { lookup } : {}) });
+  if (item.prov.length > 0) {
+    const problem = itemProblem(item, pages);
+    if (problem !== null) return nowhere(problem);
+    return { located_by: 'export', page_no: item.prov[0].page_no, bbox: item.prov[0].bbox, problem: null };
+  }
+  const found = lookups?.get(item.ref);
+  if (found?.located_by !== 'text_layer') {
+    const why = found?.lookup?.reason;
+    return nowhere(why ? `no provenance; text layer: ${why}` : 'no provenance', found?.lookup);
+  }
+  const page = pages.find((candidate) => candidate.page_no === found.page_no);
+  const problem = page ? bboxProblem(found.bbox, page) : `page_no ${JSON.stringify(found.page_no ?? null)} is not a page of the document (1..=${pages.length})`;
+  if (problem !== null) return nowhere(`no provenance; text layer: ${problem}`, found.lookup);
+  return { located_by: 'text_layer', page_no: found.page_no, bbox: found.bbox, problem: null, lookup: found.lookup };
+}
+
+function coverage(kind, items, pages, lookups) {
+  const judged = items.map((item) => ({ item, where: locate(item, pages, lookups) }));
+  const invalid = judged.filter((entry) => entry.where.located_by === 'none');
   return {
     total: items.length,
     with_provenance: items.filter((item) => item.prov.length > 0).length,
     located: items.length - invalid.length,
+    located_by: Object.fromEntries(LOCATION_SOURCES.map((source) => [source, judged.filter((entry) => entry.where.located_by === source).length])),
     invalid_total: invalid.length,
-    invalid: invalid.slice(0, INVALID_SHOWN).map(({ item, problem }) => ({ ref: item.ref, label: item.label, problem })),
+    invalid: invalid.slice(0, INVALID_SHOWN).map(({ item, where }) => ({ ref: item.ref, label: item.label, problem: where.problem })),
+    // Every item with the source that located it, its page and its box.
+    items: judged.map(({ item, where }) => ({ ref: item.ref, kind, label: item.label, ...where })),
   };
 }
 
@@ -152,24 +189,39 @@ function tableCellSample(doc) {
 
 /**
  * @param {ReturnType<typeof describeDocument>} doc
- * @param {{ paginated: boolean }} options paginated: the fixture is a PDF or an image
+ * @param {{ paginated: boolean, lookups?: Map<string, object>|null }} options
+ *   paginated: the fixture is a PDF or an image. lookups: for a PDF, the entry the converter
+ *   process recorded for each item (src/locate.rs), by the item's ref; only the entries of
+ *   items the export left without provenance are read
  */
-export function judgeProvenance(doc, { paginated }) {
-  const texts = coverage(doc.texts, doc.pages);
-  const tables = coverage(doc.tables, doc.pages);
-  const pictures = coverage(doc.pictures, doc.pages);
-  const onPage = (items, pageNo) => items.filter((item) => item.prov.some((entry) => entry.page_no === pageNo)).length;
+export function judgeProvenance(doc, { paginated, lookups = null }) {
+  const all = {
+    texts: coverage('text', doc.texts, doc.pages, lookups),
+    tables: coverage('table', doc.tables, doc.pages, lookups),
+    pictures: coverage('picture', doc.pictures, doc.pages, lookups),
+  };
+  // The list of every item is kept once, in document order, beside the per-kind counts.
+  const itemList = Object.values(all).flatMap((kind) => kind.items);
+  const [texts, tables, pictures] = Object.values(all).map(({ items: _listed, ...counts }) => counts);
+  // A page holds the items whose provenance names it and the items the text layer located on it.
+  const onPage = (kind, exported, pageNo) =>
+    exported.filter((item) => item.prov.some((entry) => entry.page_no === pageNo)).length +
+    itemList.filter((item) => item.kind === kind && item.located_by === 'text_layer' && item.page_no === pageNo).length;
   const pageProvenance = doc.pages.map((page) => ({
     page_no: page.page_no,
-    text_items: onPage(doc.texts, page.page_no),
-    tables: onPage(doc.tables, page.page_no),
-    pictures: onPage(doc.pictures, page.page_no),
+    text_items: onPage('text', doc.texts, page.page_no),
+    tables: onPage('table', doc.tables, page.page_no),
+    pictures: onPage('picture', doc.pictures, page.page_no),
   }));
   const items = doc.texts.length + doc.tables.length + doc.pictures.length;
   const located = texts.located + tables.located + pictures.located;
   const base = {
     page_count: doc.pages.length,
-    items: { total: items, located },
+    items: {
+      total: items,
+      located,
+      located_by: Object.fromEntries(LOCATION_SOURCES.map((source) => [source, texts.located_by[source] + tables.located_by[source] + pictures.located_by[source]])),
+    },
     text_items: texts,
     tables,
     pictures,
@@ -180,6 +232,8 @@ export function judgeProvenance(doc, { paginated }) {
       table_cell: tableCellSample(doc),
     },
     page_provenance: pageProvenance,
+    // Paginated fixtures only: each item with the source that located it, its page and its box.
+    ...(paginated ? { located_items: itemList } : {}),
   };
   if (!paginated) {
     return {

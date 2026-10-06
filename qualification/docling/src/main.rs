@@ -20,10 +20,16 @@
 //! `converter_status` (`convert` returned `Ok`). A must-fail fixture passes only at
 //! the last two, and only when the converter refused it. The one judgement made here is
 //! that conversion-level rule, named in `conversion_rule`.
+//!
+//! For a PDF that converted, one more observation is recorded, by a rule that is a pure
+//! function over the document export: `locations` (module `locate`: every item with the
+//! source that located it, the export or the library's own text-layer document). The
+//! orchestrator judges it; the module is the reference behaviour for the ingest lane.
 
 use docling::{
     ConversionResult, ConversionStatus, DocumentConverter, PictureImage, SourceDocument,
 };
+use locate::Locations;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -106,6 +112,9 @@ struct FixtureReceipt {
     input_format: Option<&'static str>,
     /// `docling::pdf_page_count` on the fixture bytes; null for a fixture that is not a PDF.
     library_page_count: Option<PageCount>,
+    /// Where each item of a converted PDF is and which source located it; null for another
+    /// format and when `convert` did not return `Ok`.
+    locations: Option<Locations>,
     original_unchanged: bool,
     outcome: String,
     path: PathBuf,
@@ -149,6 +158,7 @@ struct Observed<'a> {
     errors: Vec<ErrorReceipt>,
     input_format: Option<&'static str>,
     library_page_count: Option<PageCount>,
+    pdf: Option<PdfFacts>,
     reached: Reached<'a>,
 }
 
@@ -157,6 +167,11 @@ struct Observed<'a> {
 struct PageCount {
     error: Option<String>,
     value: Option<usize>,
+}
+
+/// What is observed of a converted PDF beyond its export.
+struct PdfFacts {
+    locations: Locations,
 }
 
 /// One page image as the library returned it; `file` holds its bytes.
@@ -370,6 +385,7 @@ fn build_receipt(run: &FixtureRun<'_>, observed: Observed<'_>) -> Result<Fixture
         Reached::ConverterStatus { status, .. } => Some(status_label(status).to_owned()),
         Reached::Source | Reached::ConverterError => None,
     };
+    let locations = observed.pdf.map(|pdf| pdf.locations);
     Ok(FixtureReceipt {
         conversion_rule: rule_label(run.rule),
         converter: run.session.converter.clone(),
@@ -384,6 +400,7 @@ fn build_receipt(run: &FixtureRun<'_>, observed: Observed<'_>) -> Result<Fixture
             .unwrap_or_default(),
         input_format: observed.input_format,
         library_page_count: observed.library_page_count,
+        locations,
         original_unchanged,
         outcome: judgement.outcome.to_owned(),
         path: run.path.to_path_buf(),
@@ -423,6 +440,7 @@ fn refused(
             }],
             input_format,
             library_page_count,
+            pdf: None,
             reached,
         },
     )
@@ -513,6 +531,20 @@ fn library_page_count(source: &SourceDocument) -> Option<PageCount> {
     })
 }
 
+/// The observations a converted PDF gets beyond its export.
+///
+/// The text layer is read with the library's own entry point, from the same bytes. When the
+/// library cannot read it, every item the export left unlocated stays unlocated and the
+/// error is recorded.
+fn pdf_facts(export: &serde_json::Value, bytes: &[u8], name: &str) -> PdfFacts {
+    let text_layer = docling::pdf_text_layer_pages(bytes, name, None)
+        .map(|document| document.export_to_json_value())
+        .map_err(|error| error.to_string());
+    PdfFacts {
+        locations: locate::locate_items(export, text_layer.as_ref().map_err(String::as_str)),
+    }
+}
+
 fn convert_fixture(
     converter: &DocumentConverter,
     run: &FixtureRun<'_>,
@@ -531,6 +563,9 @@ fn convert_fixture(
     };
     let input_format = source.format.as_str();
     let pages = library_page_count(&source);
+    // The converter takes the source; a PDF's bytes are kept to read its text layer afterwards.
+    let pdf_source = (source.format == docling::InputFormat::Pdf)
+        .then(|| (source.bytes.clone(), source.name.clone()));
     let mut result = match converter.convert(source) {
         Ok(result) => result,
         Err(error) => {
@@ -554,6 +589,9 @@ fn convert_fixture(
         })
         .collect();
     let (document, markdown) = write_evidence(run.out_dir, &mut result)?;
+    // The export read here is the one just written: the page images have left the document.
+    let pdf = pdf_source
+        .map(|(bytes, name)| pdf_facts(&result.document.export_to_json_value(), &bytes, &name));
     build_receipt(
         run,
         Observed {
@@ -562,6 +600,7 @@ fn convert_fixture(
             errors,
             input_format: Some(result.format.as_str()),
             library_page_count: pages,
+            pdf,
             reached: Reached::ConverterStatus {
                 status: result.status,
                 markdown: &markdown,
@@ -787,6 +826,8 @@ fn main() -> Result<(), String> {
         let _ = writeln!(io::stderr(), "okf-qualify-docling: {error}");
     })
 }
+
+mod locate;
 
 #[cfg(test)]
 mod tests {
