@@ -18,9 +18,9 @@ test('a qualified Phase 0 passes with one current receipt per library gate',asyn
  const {root}=await fixtureRepo(t,{'verification.json':verification(false),'harness/run.mjs':'// harness\n'});
  const sha=await git(root,'rev-parse','HEAD');
  await commit(root,{'verification.json':verification(true,paths),...Object.fromEntries(Object.values(paths).map(path=>[path,receipt(sha)]))},'record R');
- assert.match(await checkReceipts(root),/3 receipt\(s\) valid against HEAD; all 3 Phase 0 library gates have one/);
- await commit(root,{'verification.json':verification(true,{...paths,'iii-library-qualification':'.artifacts/qualification/iii/receipt.json'})},'point a gate outside the committed receipts');
- await assert.rejects(checkReceipts(root),/iii-library-qualification: phase_0_qualified is true but its receipt \(\.artifacts\/qualification\/iii\/receipt\.json\)/);
+ assert.match(await checkReceipts(root),/2 receipt\(s\) valid against HEAD; all 2 Phase 0 library gates have one/);
+ await commit(root,{'verification.json':verification(true,{...paths,'docling-library-qualification':'.artifacts/qualification/docling/receipt.json'})},'point a gate outside the committed receipts');
+ await assert.rejects(checkReceipts(root),/docling-library-qualification: phase_0_qualified is true but its receipt \(\.artifacts\/qualification\/docling\/receipt\.json\)/);
 });
 test('a receipt is rejected when an input changed, its commit is foreign, or its header is incomplete',async t=>{
  const {root}=await fixtureRepo(t,{'verification.json':verification(false),'harness/run.mjs':'// v1\n'});
@@ -59,9 +59,9 @@ test('staleReceiptLines judges the given commit and its receipts, whatever is ch
 });
 test('staleReceiptLines names a non-ancestor commit and the harness to re-run',async t=>{
  const {root}=await fixtureRepo(t,{'harness/run.mjs':'// v1\n'});
- const head=await commit(root,{'qualification/receipts/mcp-apps-protocol-qualification.json':receipt('0'.repeat(40)),'qualification/receipts/iii-library-qualification.json':receipt('1'.repeat(40))},'foreign');
+ const head=await commit(root,{'qualification/receipts/mcp-apps-protocol-qualification.json':receipt('0'.repeat(40)),'qualification/receipts/docling-library-qualification.json':receipt('1'.repeat(40))},'foreign');
  const lines=await staleReceiptLines(root,head);
  assert.equal(lines.length,2);
- assert.match(lines.join('\n'),/iii-library-qualification\.json: git_sha 1{40} is not an ancestor of [0-9a-f]{40} -- re-run: bun qualification\/iii\/run\.mjs, then bun qualification\/record\.mjs iii/);
+ assert.match(lines.join('\n'),/docling-library-qualification\.json: git_sha 1{40} is not an ancestor of [0-9a-f]{40} -- re-run: bun qualification\/docling\/run\.mjs, then bun qualification\/record\.mjs docling/);
  assert.match(lines.join('\n'),/mcp-apps-protocol-qualification\.json: .* re-run: bun qualification\/mcp-apps\/run\.mjs, then bun qualification\/record\.mjs mcp-apps/);
 });
