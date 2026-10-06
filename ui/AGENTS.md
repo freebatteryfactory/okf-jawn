@@ -13,3 +13,5 @@ Keep the complete Explorer, tree/search/tabs/split panes, rich viewers/editing/p
 Generator-input rule: a lane may change its own authored generator inputs (for example openapi-ts config owned here), run `bun scripts/dev.mjs gen`, and commit outputs; gen-check must pass on the lane branch; the integration owner regenerates at merge.
 
 Do not alter shared manifests, operation declarations, generator output, or protected acceptance as a private workaround. Return concrete boundary changes to the integration owner.
+
+Stylesheet source detection is limited to `ui/src` (`@import "tailwindcss" source("./")`): a Tailwind class word anywhere else under `ui/` must not change the MCP App bundle.
