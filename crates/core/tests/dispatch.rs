@@ -602,6 +602,43 @@ async fn a_slow_attempt_whose_lease_was_taken_over_cannot_complete() -> TestResu
 }
 
 #[tokio::test]
+async fn a_slow_attempt_cannot_complete_while_its_successor_is_still_running() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    let slow = park_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
+    ports.mutations.expire_leases()?;
+    let current = park_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
+    let seen = app.contexts("create_item")?;
+    let mutation_id = some(
+        seen.first().and_then(|context| context.mutation),
+        "the mutation id",
+    )?;
+
+    // The slow handler returns first and succeeds. The row is leased, but to the other attempt:
+    // only the token tells the two holders apart.
+    app.set_response("create_item", item_document("from the slow attempt"))?;
+    app.resume();
+    let refused = err_of(slow.await)?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    assert_eq!(ports.mutations.stored_body(mutation_id)?, None);
+    let waiting = err_of(call(&app, &ports, &alice, "create_item", body).await)?;
+    assert_eq!(waiting.code, ErrorCode::InProgress);
+
+    app.set_response("create_item", item_document("from the current attempt"))?;
+    app.resume();
+    let finished = current.await?;
+    assert_eq!(
+        finished.get("body"),
+        Some(&json!("from the current attempt"))
+    );
+    assert_eq!(ports.mutations.stored_body(mutation_id)?, Some(finished));
+    assert_eq!(app.call_count("create_item")?, 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_failed_attempt_whose_lease_was_taken_over_leaves_the_new_lease_held() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
