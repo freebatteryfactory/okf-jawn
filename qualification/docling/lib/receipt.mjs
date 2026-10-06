@@ -216,10 +216,20 @@ function contentJudgement(expect, observed) {
   const judged = judgeContent(expect, observed);
   if (judged.status === 'PASS') return pass(evidenceOf(judged));
   const missed = judged.checks.filter((check) => !check.ok);
+  // The observed side of each expectation that is not met: a count, the tokens read, or, for a
+  // string that is not in the Markdown, the closest line of it (expect.mjs closestLine).
+  const observedBeside = (check) => {
+    if (check.kind === 'markdown_contains') {
+      return check.closest
+        ? ` (closest line of the output: ${JSON.stringify(check.closest.line)}, which holds ${check.closest.shared} of its ${check.closest.of} words)`
+        : ' (no line of the output holds half of its words)';
+    }
+    return check.observed === undefined ? '' : ` (observed ${JSON.stringify(check.observed)})`;
+  };
   const named = missed.map((check) =>
     check.kind === 'no_text'
       ? `no_text: ${judged.observed.text_tokens} letter or digit token(s) outside the picture placeholders (${check.observed.slice(0, EXAMPLES_SHOWN).join(' ')})`
-      : `${check.kind} ${JSON.stringify(check.expected)}${check.observed === undefined ? '' : ` (observed ${JSON.stringify(check.observed)})`}`,
+      : `${check.kind} ${JSON.stringify(check.expected)}${observedBeside(check)}`,
   );
   const detail = judged.reason ?? `${missed.length} of ${judged.total} expectations are not met${examples(named)}`;
   return fail(detail, evidenceOf(judged));

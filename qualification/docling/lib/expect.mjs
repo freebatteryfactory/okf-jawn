@@ -10,7 +10,7 @@
 /** How each kind of expectation is compared; the receipt carries these sentences. */
 export const MATCH_RULES = Object.freeze({
   markdown_contains:
-    'each string must occur in the exported Markdown after every run of whitespace is collapsed to one space; case-sensitive unless the entry sets case_insensitive',
+    'each string must occur in the exported Markdown after every run of whitespace is collapsed to one space; case-sensitive unless the entry sets case_insensitive. As an observation that decides nothing, a string that is not found is recorded with the closest line of the output: the line, its whitespace collapsed the same way, that holds the most of the string\'s letter and digit words, when it holds at least half of them',
   table_rows:
     'the cells must occur in this order among the trimmed cell texts of one row of one body-layer table; other cells may sit between them',
   counts:
@@ -35,6 +35,39 @@ export function textTokens(markdown) {
     .toLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
     .filter(Boolean);
+}
+
+/** A line of the output is close to a string that was not found when it holds at least this share of the string's words. */
+const CLOSE_SHARE = 0.5;
+/** The closest line is cut to this many characters. */
+const CLOSEST_SHOWN = 240;
+
+/** The letter and digit words of a text, lower-cased: what is left of it when spacing, case and punctuation are set aside. */
+const words = (text) => String(text ?? '').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+
+/**
+ * What the output holds where a string was expected and not found: `{ line, shared, of }`, or
+ * null when no line is close.
+ *
+ * Each line of the Markdown is read as the matcher reads the whole of it, every run of
+ * whitespace collapsed to one space. A line's closeness is how many of the string's distinct
+ * letter and digit words it holds (`shared` of `of`); a line is close when that is at least
+ * half of them, and the first of the closest lines is the one shown. This is the observed text
+ * beside the expected one. It decides nothing: the check that carries it has already failed by
+ * the matcher's own comparison.
+ */
+export function closestLine(markdown, text) {
+  const wanted = [...new Set(words(text))];
+  if (wanted.length === 0) return null;
+  let best = null;
+  for (const raw of String(markdown ?? '').split(/\r?\n/)) {
+    const line = collapse(raw);
+    if (line.length === 0) continue;
+    const held = new Set(words(line));
+    const shared = wanted.filter((word) => held.has(word)).length;
+    if (best === null || shared > best.shared) best = { line: line.slice(0, CLOSEST_SHOWN), shared, of: wanted.length };
+  }
+  return best !== null && best.shared > 0 && best.shared / best.of >= CLOSE_SHARE ? best : null;
 }
 
 /** True when `cells` occur in order within `row`. */
@@ -70,7 +103,8 @@ export function judgeContent(expect, observed) {
     const insensitive = typeof entry === 'object' && entry.case_insensitive === true;
     const needle = collapse(text);
     const ok = insensitive ? markdown.toLowerCase().includes(needle.toLowerCase()) : markdown.includes(needle);
-    checks.push({ kind: 'markdown_contains', expected: text, case_insensitive: insensitive, ok });
+    // What stands in the output instead is recorded beside a string that was not found.
+    checks.push({ kind: 'markdown_contains', expected: text, case_insensitive: insensitive, ok, ...(ok ? {} : { closest: closestLine(observed.markdown, text) }) });
   }
   for (const cells of expect.table_rows ?? []) {
     const ok = observed.tables.some((grid) => grid.some((row) => rowHasCells(row, cells)));

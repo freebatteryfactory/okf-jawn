@@ -56,7 +56,7 @@ import {
 import { loadEvidence } from '../../qualification/docling/lib/evidence.mjs';
 import { qualify as qualifyDocling } from '../../qualification/docling/lib/orchestrate.mjs';
 import { distRows, onnxRuntimeRecord, ortBuildMessage, readOnnxRuntime } from '../../qualification/docling/lib/native.mjs';
-import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
+import { MATCH_RULES, closestLine, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
 import { OCR_FIXTURES, decodeFixture, encodePng, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
 import { pngInk } from '../../qualification/docling/lib/png.mjs';
 import { deflateSync } from 'node:zlib';
@@ -498,6 +498,29 @@ test('content is matched against the declared expectation, and a missing string,
   assert.equal(judgeContent({ confirmed_by: 'x' }, observed).status, 'FAIL');
   assert.ok(rowHasCells(['R1', 'True', '', 'False'], ['R1', 'False']));
   assert.ok(!rowHasCells(['R1', 'True'], ['R1', 'True', 'True']));
+
+  // A string that is not found is recorded beside what the output holds instead: its closest line, read as the matcher reads it.
+  assert.deepEqual(failing({ markdown_contains: ['hello world'] }), [{ kind: 'markdown_contains', expected: 'hello world', case_insensitive: false, ok: false, closest: { line: 'Hello world', shared: 2, of: 2 } }]);
+  assert.deepEqual(failing({ markdown_contains: ['Hello world', 'Goodbye'] }), [{ kind: 'markdown_contains', expected: 'Goodbye', case_insensitive: false, ok: false, closest: null }]);
+  assert.ok(ok.checks.every((check) => !Object.hasOwn(check, 'closest')), 'a string that was found has nothing to show beside it');
+  const page = '## Limits\n\n- /SM590000 Work  Function\tUsage ( WRKFCNUSG )\n- Work Function Usage is a view\n- unrelated\n';
+  const phrase = 'Work Function Usage (WRKFCNUSG)';
+  // The line that holds the most of the string's letter and digit words, with its whitespace collapsed as the matcher collapses it.
+  assert.deepEqual(closestLine(page, phrase), { line: '- /SM590000 Work Function Usage ( WRKFCNUSG )', shared: 4, of: 4 });
+  assert.deepEqual(closestLine('- unrelated\n- Work Function Usage is a view\n', phrase), { line: '- Work Function Usage is a view', shared: 3, of: 4 });
+  // Half of the words is close; fewer is not, and then nothing is shown as if it were.
+  assert.deepEqual(closestLine('a b\nWork Function\n', phrase), { line: 'Work Function', shared: 2, of: 4 });
+  assert.equal(closestLine('Work on it\nUsage notes\n', phrase), null);
+  assert.equal(closestLine('', phrase), null);
+  assert.equal(closestLine('( )\n', '( )'), null, 'a string without a letter or digit has no word to look for');
+  // Of several equally close lines the first is shown; a word counts once however often the line repeats it.
+  assert.deepEqual(closestLine('Work Function x\nWork Function y\n', phrase), { line: 'Work Function x', shared: 2, of: 4 });
+  assert.deepEqual(closestLine('work work work work\n', phrase), null);
+  // A long line is cut, and the words are compared whatever their case.
+  assert.equal(closestLine(`WORK FUNCTION USAGE WRKFCNUSG ${'x'.repeat(400)}\n`, phrase).line.length, 240);
+  // It is an observation: the check it sits in is exactly as failed as before.
+  assert.deepEqual(judgeContent({ markdown_contains: [phrase] }, { ...observed, markdown: page }).checks.map((check) => check.ok), [false]);
+  assert.match(MATCH_RULES.markdown_contains, /a string that is not found is recorded with the closest line of the output/);
 });
 
 test('OCR text must hold every expected token exactly; only case and whitespace are forgiven', () => {
@@ -1819,13 +1842,15 @@ test('an expectation that crosses a font change is judged by its own criterion, 
     id: 'table_heavy.pdf/content_across_font_runs',
     required: true,
     result: 'fail',
-    detail: `1 of 1 expectations are not met; all: markdown_contains ${JSON.stringify(phrase)}`,
+    detail: `1 of 1 expectations are not met; all: markdown_contains ${JSON.stringify(phrase)} (closest line of the output: "- /SM590000 Work Function Usage ( WRKFCNUSG )", which holds 4 of its 4 words)`,
   });
   assert.equal(today.result, 'FAIL');
   assert.deepEqual(doclingFailedIds(today), ['table_heavy.pdf/content_across_font_runs'], 'exactly the one criterion that names the limitation fails');
   const entry = entryOf(today, 'table_heavy.pdf');
   assert.deepEqual(entry.criteria.content.checks.map((check) => check.expected), ['Hello world', 1], 'content no longer holds the marked phrase');
-  assert.deepEqual(entry.criteria.content_across_font_runs.checks, [{ kind: 'markdown_contains', expected: phrase, case_insensitive: false, ok: false }]);
+  assert.deepEqual(entry.criteria.content_across_font_runs.checks, [{ kind: 'markdown_contains', expected: phrase, case_insensitive: false, ok: false, closest: { line: '- /SM590000 Work Function Usage ( WRKFCNUSG )', shared: 4, of: 4 } }]);
+  // The observed text stands next to the expected one: "( WRKFCNUSG )" beside "(WRKFCNUSG)".
+  assert.ok(of(today, 'content_across_font_runs').detail.includes('(WRKFCNUSG)') && of(today, 'content_across_font_runs').detail.includes('( WRKFCNUSG )'));
   assert.equal(entry.criteria.content_across_font_runs.confirmed_by, 'three font selections in the content stream of the stub');
 
   // The matcher is the one content uses and forgives nothing: only the phrase as the page shows it passes.
@@ -1837,7 +1862,7 @@ test('an expectation that crosses a font change is judged by its own criterion, 
   // A failure of an ordinary expectation still fails content, and only content.
   const lost = converted(`${phrase}\n`);
   assert.deepEqual(doclingFailedIds(lost), ['table_heavy.pdf/content']);
-  assert.equal(of(lost, 'content').detail, '1 of 2 expectations are not met; all: markdown_contains "Hello world"');
+  assert.equal(of(lost, 'content').detail, '1 of 2 expectations are not met; all: markdown_contains "Hello world" (no line of the output holds half of its words)');
   // A conversion that failed leaves both unjudged.
   const failed = doclingReceipt({ 'table_heavy.pdf': { fixture: { outcome: 'FAIL_converter_error', status: null } } }, { sources: marked });
   assert.deepEqual([of(failed, 'content').result, of(failed, 'content_across_font_runs').result], ['not_judged', 'not_judged']);
@@ -1866,7 +1891,7 @@ test('each content, page-render and provenance failure fails its fixture and the
     assert.deepEqual(entry.failed_criteria, ['content']);
     assert.equal(receipt.result, 'FAIL');
     assert.deepEqual(receipt.failures, [
-      { fixture: 'corpus/word_sample.docx', criterion: 'content', result: 'fail', detail: '1 of 2 expectations are not met; all: markdown_contains "Hello world"' },
+      { fixture: 'corpus/word_sample.docx', criterion: 'content', result: 'fail', detail: '1 of 2 expectations are not met; all: markdown_contains "Hello world" (no line of the output holds half of its words)' },
     ]);
     assert.deepEqual(entry.criteria.content.checks.filter((check) => !check.ok).map((check) => check.expected), ['Hello world']);
     const counted = doclingReceipt({ 'table_heavy.pdf': { evidence: { document: stubDocument({ tables: [] }) } } });
