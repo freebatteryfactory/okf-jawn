@@ -18,9 +18,12 @@ export const receiptResults = Object.freeze(['PASS', 'FAIL', 'INCOMPLETE']);
 
 const gateStatuses = Object.freeze({ PASS: 'passed', FAIL: 'failed', INCOMPLETE: 'incomplete' });
 
-/** The gate status a receipt result supports; a gate without a receipt is `incomplete`. */
+/**
+ * The gate status a receipt result supports; a gate without a receipt is `incomplete`, and so is
+ * anything that is not one of `receiptResults` (own keys only: `constructor` is not a result).
+ */
 export function statusOf(result) {
-  return gateStatuses[result] ?? 'incomplete';
+  return Object.hasOwn(gateStatuses, result) ? gateStatuses[result] : 'incomplete';
 }
 
 /**

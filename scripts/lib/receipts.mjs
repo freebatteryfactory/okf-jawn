@@ -186,10 +186,8 @@ export async function derivedRecord(root, head) {
     const found = receipts.find(candidate => candidate.name === file);
     if (!found) continue;
     if (found.receipt === null) { entry.basis = `${gate.receipt} is not valid JSON`; continue; }
-    // statusOf is asked only about a known result: a result named like an inherited object
-    // property would otherwise come back as something that is not a status.
     const known = receiptResults.includes(found.receipt?.result);
-    entry.status = known ? statusOf(found.receipt.result) : 'incomplete';
+    entry.status = statusOf(found.receipt?.result);
     entry.basis = known ? `${gate.receipt} result ${found.receipt.result}` : `${gate.receipt} has no result of ${receiptResults.join(', ')}`;
     // The receipt is read, not only its header: its result must be the fold of its criteria,
     // and every criterion its harness pins must be present and required.

@@ -137,8 +137,6 @@ test('statusOf maps a receipt result to a gate status, and anything else to inco
   assert.equal(statusOf('FAIL'), 'failed');
   assert.equal(statusOf('INCOMPLETE'), 'incomplete');
   for (const value of [undefined, null, '', 'pass', 'passed', 'Pass', 'UNKNOWN', 7]) assert.equal(statusOf(value), 'incomplete', String(value));
-  // Not asserted here: a result spelled like an inherited object property ('constructor',
-  // 'toString') is not mapped to 'incomplete' by the shared module. derivedRecord
-  // (scripts/lib/receipts.mjs) therefore calls statusOf only for a result in receiptResults, and
-  // tests/foundation/receipts.test.mjs holds that.
+  // A result spelled like an inherited object property is no result either: the lookup reads own keys only.
+  for (const value of ['constructor', 'toString', 'hasOwnProperty', 'valueOf', '__proto__']) assert.equal(statusOf(value), 'incomplete', value);
 });
