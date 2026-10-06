@@ -4,8 +4,10 @@
  *
  * Expected strings come from tests/fixtures/views/*.json as rendered by
  * ui/src/features/{documents/SourceExcerpt,history/Changes,history/Timeline,views/Layout}.tsx.
- * The present fixture has no materialized dataset, so its DataTable and Chart show the
- * two honest "unavailable" alerts listed below; any other alert fails the view.
+ * No view tolerates an alert. The present fixture retains a dataset
+ * (tests/fixtures/views/present-metrics-dataset.json), so its DataTable and Chart must be
+ * drawn from it: the "unavailable" text they show without one is refused by name, and
+ * judgePresentDataset decides from the observed chart, tables and tool calls.
  */
 
 export const APP_RESOURCE_URI = 'ui://okf-jawn/app.html';
@@ -57,9 +59,12 @@ export const VIEWS = [
       SOURCE_ONLY,
       `fixtures/qualification-source.md @ ${REVISION}`,
       `fixtures/qualification-metrics.json @ ${REVISION}`,
+      // The summary of the data table Chart.tsx draws under a chart it could resolve.
+      'Source data',
     ],
-    mustNotContain: [CHANGES_ONLY, TIMELINE_ONLY],
-    alerts: ['Dataset unavailable: metrics', 'Resolved chart data or specification unavailable.'],
+    // Layout.tsx's fallbacks for a binding without rows; refused even if they lose role="alert".
+    mustNotContain: [CHANGES_ONLY, TIMELINE_ONLY, 'Dataset unavailable', 'chart data or specification unavailable'],
+    alerts: [],
     dataset: PRESENT_DATASET,
   },
 ];
