@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,6 +39,7 @@ import {
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 import {
   APP_ONLY_TOOLS,
+  MCP_APPS_INPUTS,
   PRESENT_DATASET,
   TOOL_CALL_LOG_PREFIX,
   UPSTREAM_HOST_RULES,
@@ -893,6 +894,94 @@ test('the MCP Apps orchestrator renders every view, fails on any failure and nev
   assert.match(source, /toolCallsFrom\(toolLog\(\)\.slice\(logStart\)\)/);
   assert.match(source, /present_dataset: dataset\.record/);
   assert.doesNotMatch(source, /not_exercised|status: 'exercised'|unavailable/);
+});
+
+/** Repo-relative files reachable from `entry` through relative or `@/` imports and `new URL(..., import.meta.url)`. */
+async function repoImportGraph(entry) {
+  const seen = new Set();
+  const queue = [entry];
+  const candidates = (path) => ['', '.ts', '.tsx', '.mjs', '/index.ts', '/index.tsx'].map((suffix) => `${path}${suffix}`);
+  while (queue.length) {
+    const file = queue.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    if (!/\.(mjs|ts|tsx)$/.test(file)) continue;
+    const text = await readFile(join(root, file), 'utf8');
+    const specifiers = [
+      ...text.matchAll(/\bfrom\s+'([^']+)'/g),
+      ...text.matchAll(/\bimport\s+'([^']+)'/g),
+      ...text.matchAll(/new URL\('([^']+)',\s*import\.meta\.url\)/g),
+    ].map((match) => match[1]);
+    for (const specifier of specifiers) {
+      const base = specifier.startsWith('@/')
+        ? `ui/src/${specifier.slice(2)}`
+        : specifier.startsWith('.')
+          ? join(file, '..', specifier).replaceAll('\\', '/')
+          : null;
+      if (base === null) continue; // a package, pinned by bun.lock
+      for (const candidate of candidates(base)) {
+        const isFile = await stat(join(root, candidate)).then((entryStat) => entryStat.isFile(), () => false);
+        if (isFile) {
+          queue.push(candidate);
+          break;
+        }
+      }
+    }
+  }
+  return [...seen].sort();
+}
+
+test('the MCP Apps receipt inputs cover everything the run renders and executes', async () => {
+  assert.deepEqual(MCP_APPS_INPUTS, [...MCP_APPS_INPUTS].sort(), 'inputs are sorted');
+  assert.equal(new Set(MCP_APPS_INPUTS).size, MCP_APPS_INPUTS.length, 'inputs are unique');
+  for (const input of MCP_APPS_INPUTS) {
+    assert.doesNotMatch(input, /\\|^\/|^[A-Za-z]:|(^|\/)\.\.?(\/|$)|\/$/, `${input} is not a plain repo-relative path`);
+    await stat(join(root, input)); // receiptHeader refuses an input the commit does not contain
+  }
+  const covered = (path) => MCP_APPS_INPUTS.some((input) => path === input || path.startsWith(`${input}/`));
+
+  // The App bundle: its import graph from the entry, the bundler script and what that reads.
+  const app = await repoImportGraph('ui/src/mcp-apps/main.tsx');
+  for (const module of ['ui/src/features/views/PresentView.tsx', 'ui/src/features/views/Chart.tsx', 'ui/src/features/views/DataTable.tsx', 'ui/src/lib/wire.ts', 'ui/src/api/generated/zod.gen.ts', 'ui/src/styles.css']) {
+    assert.ok(app.includes(module), `the import walk did not reach ${module}: ${app.join(', ')}`);
+  }
+  const bundler = await repoImportGraph('ui/scripts/bundle-app.mjs');
+  for (const file of ['api/mcp-apps.json', 'ui/scripts/app-declaration.ts', 'ui/src/mcp-apps/main.tsx']) {
+    assert.ok(bundler.includes(file), `the bundler walk did not reach ${file}: ${bundler.join(', ')}`);
+  }
+  // The orchestrator itself and the repository modules it imports.
+  const orchestrator = await repoImportGraph('qualification/mcp-apps/run.mjs');
+  for (const file of ['qualification/mcp-apps/lib/views.mjs', 'qualification/lib/cargo.mjs', 'scripts/lib/provenance.mjs']) {
+    assert.ok(orchestrator.includes(file), `the orchestrator walk did not reach ${file}`);
+  }
+  const uncovered = [...app, ...bundler, ...orchestrator].filter((file) => !covered(file));
+  assert.deepEqual(uncovered, [], 'files the run executes or renders that are not receipt inputs');
+
+  // What no import statement names: fixtures, lockfiles, manifests, toolchains, and the rest
+  // of ui/ (Tailwind turns words in any tracked ui file into rules of the App's stylesheet).
+  for (const path of [
+    'tests/fixtures/views/present-response.json',
+    'tests/fixtures/views/present-metrics-dataset.json',
+    'qualification/mcp-apps/src/main.rs',
+    'qualification/mcp-apps/Cargo.toml',
+    'Cargo.toml',
+    'Cargo.lock',
+    'rust-toolchain.toml',
+    'bun.lock',
+    'package.json',
+    '.bun-version',
+    'ui/package.json',
+    'ui/vite.config.ts',
+    'ui/tsconfig.json',
+    'ui/scripts/bundle-docs.mjs',
+    'ui/tests/e2e/mcp-apps-static-bundle-smoke.spec.ts',
+  ]) {
+    await stat(join(root, path));
+    assert.ok(covered(path), `${path} is not covered by the receipt inputs`);
+  }
+
+  const source = await readFile(join(root, 'qualification/mcp-apps/run.mjs'), 'utf8');
+  assert.doesNotMatch(source, /const MCP_APPS_INPUTS/, 'the orchestrator must use the tested list');
 });
 
 test('all three orchestrators take their header from receiptHeader and record only through recordReceipt', async () => {

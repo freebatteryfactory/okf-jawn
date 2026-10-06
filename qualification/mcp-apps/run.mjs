@@ -33,6 +33,7 @@ import { killProcessTree, spawnGroup, waitForListening } from './lib/process.mjs
 import {
   APP_ONLY_TOOLS,
   APP_RESOURCE_URI,
+  MCP_APPS_INPUTS,
   UPSTREAM_HOST_RULES,
   VIEWS,
   basicHostUrl,
@@ -65,15 +66,6 @@ const HTTP_PORT = Number(process.env.OKF_MCP_APPS_PORT ?? '18765');
 const HTTP_BIND = `127.0.0.1:${HTTP_PORT}`;
 const MCP_URL = `http://127.0.0.1:${HTTP_PORT}/mcp`;
 const NGROK_ENABLED = process.env.OKF_MCP_APPS_NGROK === '1';
-const MCP_APPS_INPUTS = [
-  'qualification/mcp-apps',
-  'qualification/lib',
-  'tests/fixtures/views',
-  'ui/src/mcp-apps',
-  'ui/scripts/bundle-app.mjs',
-  'Cargo.toml',
-  'Cargo.lock',
-];
 
 const require = createRequire(join(uiDir, 'package.json'));
 const { RESOURCE_MIME_TYPE } = require('@modelcontextprotocol/ext-apps');

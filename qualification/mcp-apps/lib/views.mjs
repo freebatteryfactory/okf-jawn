@@ -19,6 +19,29 @@ export const PRESENT_DATASET = {
   binding: 'metrics',
   fixture: 'tests/fixtures/views/present-metrics-dataset.json',
 };
+/**
+ * Repo-relative paths whose change after the cited commit makes an MCP Apps receipt stale:
+ * everything the run executes or renders. Sorted; the reason stands beside each path.
+ */
+export const MCP_APPS_INPUTS = [
+  '.bun-version', // the Bun that runs the bundler, this orchestrator and basic-host
+  'Cargo.lock', // crate versions the harness binary is built from
+  'Cargo.toml', // workspace dependency pins, lints and release profile of the harness
+  'api/mcp-apps.json', // the App declaration ui/scripts/bundle-app.mjs builds the manifest from
+  'bun.lock', // versions of the App's packages, the MCP client, Playwright and axe
+  'package.json', // the workspace and overrides bun.lock is resolved under
+  'qualification/lib', // cargo.mjs: how the harness binary is built and found
+  'qualification/mcp-apps', // this orchestrator, its rules and the harness server
+  'rust-toolchain.toml', // the compiler that builds the harness
+  'scripts/lib/provenance.mjs', // the receipt header and the clean-tree rule
+  'tests/fixtures/views', // what the render tools, show and read_object serve
+  // All of ui/, not only the App's import graph (src/mcp-apps/main.tsx, three feature
+  // directories, src/lib/wire.ts, src/api/generated/zod.gen.ts, src/styles.css): Tailwind
+  // turns words found in any tracked text file under ui/ into rules of the bundled
+  // stylesheet (".static" comes from a test file's name), and `bun --bun run build` runs
+  // vite build, scripts/bundle-app.mjs and scripts/bundle-docs.mjs before anything renders.
+  'ui',
+];
 /** Rules that fire on the upstream basic-host chrome; tolerated there, never in the App frame. */
 export const UPSTREAM_HOST_RULES = ['color-contrast', 'frame-title'];
 
