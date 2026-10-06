@@ -41,9 +41,11 @@ import {
   APP_ONLY_TOOLS,
   MCP_APPS_INPUTS,
   PRESENT_DATASET,
+  REACT_DEVELOPMENT_MARKER,
   TOOL_CALL_LOG_PREFIX,
   UPSTREAM_HOST_RULES,
   VIEWS,
+  appBundleBuild,
   basicHostUrl,
   basicHostVerdict,
   datasetExpectation,
@@ -864,6 +866,27 @@ test('the MCP Apps receipt states what ran: stdio not_run, HTTP as the harness r
   assert.match(report, /self\.tool_definitions\(\)/);
   assert.match(report, /self\s*\.call_render_tool\(name\)/);
   assert.doesNotMatch(report, /prefersBorder|connectDomains|SHOW_TOOL|READ_OBJECT_TOOL|tool\.fixture/);
+});
+
+test('the receipt says which React build the rendered App bundle carries', async () => {
+  const production = '<!doctype html><html><body><div id="root"></div><script>var a=1</script></body></html>';
+  const development = production.replace('var a=1', `console.info("${REACT_DEVELOPMENT_MARKER} for a better development experience")`);
+  assert.deepEqual(appBundleBuild({ html: production, nodeEnv: undefined }), {
+    node_env: null,
+    react_development_build: false,
+    marker: 'Download the React DevTools',
+  });
+  assert.deepEqual(appBundleBuild({ html: development, nodeEnv: 'development' }), {
+    node_env: 'development',
+    react_development_build: true,
+    marker: 'Download the React DevTools',
+  });
+  // The bundle decides, not the environment variable.
+  assert.equal(appBundleBuild({ html: development, nodeEnv: 'production' }).react_development_build, true);
+  assert.equal(appBundleBuild({ html: production, nodeEnv: 'development' }).react_development_build, false);
+  const source = await readFile(join(root, 'qualification/mcp-apps/run.mjs'), 'utf8');
+  assert.match(source, /app_bundle: appBundle,/);
+  assert.match(source, /appBundleBuild\(\{\s*html: await readFile\(join\(distApps,/);
 });
 
 test('a receipt never records an open tunnel', () => {

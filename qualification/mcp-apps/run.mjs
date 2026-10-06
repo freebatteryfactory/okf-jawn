@@ -34,6 +34,7 @@ import {
   APP_ONLY_TOOLS,
   APP_RESOURCE_URI,
   MCP_APPS_INPUTS,
+  appBundleBuild,
   UPSTREAM_HOST_RULES,
   VIEWS,
   basicHostUrl,
@@ -691,6 +692,12 @@ if (resources[0]?.uri !== APP_RESOURCE_URI) {
   throw new Error(`manifest uri must be ${APP_RESOURCE_URI}, got ${resources[0]?.uri}`);
 }
 
+// The build inherits this process's environment; the bundle itself says what came out.
+const appBundle = appBundleBuild({
+  html: await readFile(join(distApps, `${resources[0].name}.html`), 'utf8'),
+  nodeEnv: process.env.NODE_ENV,
+});
+
 const mimeMismatches = resources.filter((resource) => resource.mimeType !== RESOURCE_MIME_TYPE);
 const mimeCheck = {
   sdk_constant: RESOURCE_MIME_TYPE,
@@ -838,6 +845,7 @@ const receipt = {
   bundle_sizes: Object.fromEntries(
     resources.map((resource) => [resource.name, resource.byteLength]),
   ),
+  app_bundle: appBundle,
   resources_readable: readable,
   check,
   protocol_check: protocol,

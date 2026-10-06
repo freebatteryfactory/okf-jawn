@@ -300,6 +300,23 @@ export function runProblems({ protocol, basicHost, protocolOnly }) {
   return problems;
 }
 
+/** Text that only react-dom's development build carries. */
+export const REACT_DEVELOPMENT_MARKER = 'Download the React DevTools';
+
+/**
+ * Which React build the rendered App bundle contains, read from the bundle itself.
+ * ui/scripts/bundle-app.mjs asks Vite for mode "production" but does not set NODE_ENV, so an
+ * inherited NODE_ENV=development yields React's development build, whose StrictMode runs
+ * every effect twice: the App then resolves each binding, and reads each dataset, twice.
+ */
+export function appBundleBuild({ html, nodeEnv }) {
+  return {
+    node_env: typeof nodeEnv === 'string' ? nodeEnv : null,
+    react_development_build: String(html).includes(REACT_DEVELOPMENT_MARKER),
+    marker: REACT_DEVELOPMENT_MARKER,
+  };
+}
+
 /**
  * Which transports the run exercised. This orchestrator never drives stdio, so the receipt
  * says so instead of naming it; HTTP is the endpoint the harness itself reported, if any.
