@@ -1,13 +1,15 @@
 /**
  * Re-read the files one converter process wrote beside its receipt: the Markdown, the
  * document export and each page image. Every file is hashed again here, so what the
- * orchestrator judges is what is on disk, not what the process said it wrote.
+ * orchestrator judges is what is on disk, not what the process said it wrote. Each page image
+ * is also decoded (lib/png.mjs), so a render can be judged by what it shows.
  */
 
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pngSize } from './document.mjs';
+import { pngInk } from './png.mjs';
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -42,7 +44,7 @@ export async function loadEvidence(dir, written) {
   for (const image of written.page_images ?? []) {
     try {
       const bytes = await readFile(join(dir, image.file));
-      evidence.pageFiles[image.file] = { sha256: sha256(bytes), bytes: bytes.length, png: pngSize(bytes) };
+      evidence.pageFiles[image.file] = { sha256: sha256(bytes), bytes: bytes.length, png: pngSize(bytes), ink: pngInk(bytes) };
     } catch {
       evidence.pageFiles[image.file] = null; // judged by judgePageRenders as "could not be re-read"
     }

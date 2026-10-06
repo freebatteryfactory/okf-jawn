@@ -48,7 +48,9 @@ import {
   pngSize,
 } from '../../qualification/docling/lib/document.mjs';
 import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
-import { OCR_FIXTURES, decodeFixture, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
+import { OCR_FIXTURES, decodeFixture, encodePng, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
+import { pngInk } from '../../qualification/docling/lib/png.mjs';
+import { deflateSync } from 'node:zlib';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 import {
   APP_ONLY_TOOLS,
@@ -519,6 +521,10 @@ test('every supported fixture declares what it contains and how that was confirm
     Object.entries(sources.files).filter(([, entry]) => entry.expect?.no_text === true).map(([name]) => name).sort(),
     ['sample_image.png', 'scanned_image_only.pdf'],
   );
+  // A blank page is a declared fact with its confirmation, and only one page of one fixture is blank.
+  const blank = Object.entries(sources.files).filter(([, entry]) => entry.expect?.blank_pages !== undefined);
+  assert.deepEqual(blank.map(([name, entry]) => [name, entry.expect.blank_pages]), [['corpus/redp5110_sampled.pdf', [17]]]);
+  assert.match(blank[0][1].expect.blank_pages_confirmed_by, /inflates to zero bytes.*pdftotext 4\.06 -f 17 -l 17 prints no character/);
 });
 
 const VERIFIED_MODEL = { file: 'layout.onnx', path: 'C:\\models\\layout.onnx', bytes: 10, sha256: 'd'.repeat(64) };
@@ -595,18 +601,22 @@ test('the models the library resolves must be verified files', () => {
 const CONVERTER_DEBUG =
   'DocumentConverter { allowed_formats: None, strict: false, compact_tables: false, no_table_former: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some("en"), artifacts_dir: "C:\\\\t", document_timeout: None }';
 
-/** The first 24 bytes of a PNG of this size: all pngSize reads. */
-function pngHead(width, height) {
-  const head = Buffer.alloc(24);
-  head.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
-  head.writeUInt32BE(width, 16);
-  head.writeUInt32BE(height, 20);
-  return head;
+/** A greyscale PNG of this size: `paper` everywhere, with one dark bar when `ink` is set. */
+function pagePng(width, height, { paper = 255, ink = true } = {}) {
+  const gray = new Uint8Array(width * height).fill(paper);
+  if (ink) gray.fill(0, width * 10, width * 12);
+  return encodePng({ width, height }, gray);
 }
 
-const PAGE_PNG = pngHead(1224, 1584);
+/** What lib/evidence.mjs records for a page image file it re-read. */
+const pageFile = (bytes) => ({ sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length, png: pngSize(bytes), ink: pngInk(bytes) });
+
+const PAGE_PNG = pagePng(1224, 1584);
 
 const PAGE_PNG_SHA = createHash('sha256').update(PAGE_PNG).digest('hex');
+
+/** An all-white render of the right size: the image the review showed passing. */
+const BLANK_PNG = pagePng(1224, 1584, { ink: false });
 
 const PAGE_IMAGE = { page_no: 1, mimetype: 'image/png', width: 1224, height: 1584, dpi: 144, bytes: PAGE_PNG.length, sha256: PAGE_PNG_SHA, file: 'page-1.png' };
 
@@ -641,14 +651,14 @@ function stubDocument(over = {}) {
 
 test('page renders: one image per page with matching bytes and size, or the criterion fails', () => {
   const pages = [{ page_no: 1, width: 612, height: 792 }];
-  const image = { ...PAGE_IMAGE, file: { sha256: PAGE_PNG_SHA, bytes: PAGE_PNG.length, png: pngSize(PAGE_PNG) } };
+  const image = { ...PAGE_IMAGE, file: pageFile(PAGE_PNG) };
   const judge = (over = {}) =>
     judgePageRenders({ applicable: true, expectedPages: 1, libraryPageCount: { value: 1, error: null }, pages, images: [image], ...over });
 
   const good = judge();
   assert.equal(good.status, 'PASS');
   assert.deepEqual(good.renders, [
-    { page_no: 1, width_px: 1224, height_px: 1584, mimetype: 'image/png', dpi: 144, bytes: 24, sha256: PAGE_PNG_SHA, px_per_page_unit: 2 },
+    { page_no: 1, width_px: 1224, height_px: 1584, mimetype: 'image/png', dpi: 144, bytes: PAGE_PNG.length, sha256: PAGE_PNG_SHA, px_per_page_unit: 2, declared_blank: false, uniform: false, differing_pixels: 2448 },
   ]);
   assert.deepEqual(pngSize(PAGE_PNG), { width: 1224, height: 1584 });
   assert.equal(pngSize(Buffer.from('not a png, but long enough to read')), null);
@@ -673,6 +683,110 @@ test('page renders: one image per page with matching bytes and size, or the crit
   assert.match(problems({ pages: [] }), /no pages map/);
 
   assert.equal(judge({ applicable: false, images: [] }).status, 'not_applicable');
+});
+
+test('page renders: a render that is one flat colour fails unless the fixture declares that page blank', () => {
+  const pages = [{ page_no: 1, width: 612, height: 792 }, { page_no: 2, width: 612, height: 792 }];
+  const shown = (page_no, bytes) => ({ ...PAGE_IMAGE, page_no, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), file: pageFile(bytes) });
+  const judge = (images, blankPages = []) =>
+    judgePageRenders({ applicable: true, expectedPages: 2, libraryPageCount: { value: 2, error: null }, pages, images, blankPages });
+
+  // The right size, the right hash, a valid PNG, and nothing on it.
+  assert.deepEqual(pngSize(BLANK_PNG), { width: 1224, height: 1584 });
+  const flat = judge([shown(1, PAGE_PNG), shown(2, BLANK_PNG)]);
+  assert.equal(flat.status, 'FAIL');
+  assert.deepEqual(flat.problems, ['page 2: the render is one flat colour (sample bytes 255) and SOURCES.json does not declare this page blank']);
+  assert.equal(flat.renders[1].uniform, true);
+  assert.equal(flat.renders[1].differing_pixels, 0);
+
+  // The same render passes when the fixture says the page is blank, and the rule says so.
+  const declared = judge([shown(1, PAGE_PNG), shown(2, BLANK_PNG)], [2]);
+  assert.equal(declared.status, 'PASS');
+  assert.equal(declared.renders[1].declared_blank, true);
+  assert.deepEqual(declared.blank_pages, [2]);
+  assert.match(declared.rule, /single flat colour fails unless SOURCES\.json declares that page blank/);
+  assert.match(declared.rule, /declared blank must render flat/);
+
+  // A declaration is an expectation, not a waiver.
+  assert.match(judge([shown(1, PAGE_PNG), shown(2, PAGE_PNG)], [2]).problems.join('; '), /page 2: declared blank in SOURCES\.json but 2448 of 1938816 pixel\(s\) differ from the first/);
+  assert.match(judge([shown(1, PAGE_PNG), shown(2, PAGE_PNG)], [3]).problems.join('; '), /blank page 3 is declared in SOURCES\.json and is not a page of the document/);
+
+  // Pixels that cannot be read are not judged; they are never taken for ink.
+  const unread = judge([shown(1, PAGE_PNG), { ...shown(2, PAGE_PNG), file: { ...pageFile(PAGE_PNG), ink: { decoded: false, reason: 'bit depth 1' } } }]);
+  assert.equal(unread.status, 'not_judged');
+  assert.deepEqual(unread.undecoded, ['page 2: the pixels could not be read (bit depth 1)']);
+  assert.equal(judge([shown(1, PAGE_PNG), { ...shown(2, PAGE_PNG), mimetype: 'image/jpeg' }]).status, 'not_judged');
+  assert.equal(judge([shown(1, BLANK_PNG), { ...shown(2, PAGE_PNG), mimetype: 'image/jpeg' }]).status, 'FAIL', 'a flat page fails whatever else could not be read');
+});
+
+/** One PNG row filtered the way an encoder would write it (PNG specification, filter types 0 to 4). */
+function filterRow(type, row, previous, step) {
+  const paeth = (a, b, c) => {
+    const p = a + b - c;
+    const [pa, pb, pc] = [Math.abs(p - a), Math.abs(p - b), Math.abs(p - c)];
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+  };
+  return Uint8Array.from(row, (value, i) => {
+    const left = i >= step ? row[i - step] : 0;
+    const up = previous ? previous[i] : 0;
+    const upLeft = previous && i >= step ? previous[i - step] : 0;
+    return [value, value - left, value - up, value - ((left + up) >> 1), value - paeth(left, up, upLeft)][type] & 0xff;
+  });
+}
+
+/** A PNG whose rows all use one filter type. Chunk checksums are zero: the reader under test does not check them. */
+function filteredPng({ width, height, colourType, depth = 8, interlace = 0 }, pixels, type) {
+  const step = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colourType] * (depth / 8);
+  const stride = width * step;
+  const rows = [];
+  for (let y = 0; y < height; y += 1) {
+    const row = pixels.subarray(y * stride, (y + 1) * stride);
+    rows.push(Buffer.from([type]), Buffer.from(filterRow(type, row, y > 0 ? pixels.subarray((y - 1) * stride, y * stride) : null, step)));
+  }
+  const chunk = (tag, data) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(data.length);
+    head.write(tag, 4, 'latin1');
+    return Buffer.concat([head, data, Buffer.alloc(4)]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header.set([depth, colourType, 0, 0, interlace], 8);
+  const data = deflateSync(Buffer.concat(rows));
+  // Two IDAT chunks: the image data of a real file is often split.
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', header), chunk('IDAT', data.subarray(0, 5)), chunk('IDAT', data.subarray(5)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+test('the PNG reader undoes every row filter before it calls an image flat or inked', async () => {
+  const shape = { width: 5, height: 4, colourType: 2 };
+  const flat = new Uint8Array(5 * 4 * 3);
+  for (let i = 0; i < flat.length; i += 3) flat.set([200, 120, 40], i);
+  const dotted = Uint8Array.from(flat);
+  dotted.set([200, 121, 40], (2 * 5 + 3) * 3);
+  for (const type of [0, 1, 2, 3, 4]) {
+    // A flat image written with a filter has rows of unequal bytes: only the unfiltered pixels are flat.
+    assert.deepEqual(pngInk(filteredPng(shape, flat, type)), { decoded: true, width: 5, height: 4, pixels: 20, differing_pixels: 0, uniform: true, first_pixel: [200, 120, 40] }, `filter ${type}`);
+    const inked = pngInk(filteredPng(shape, dotted, type));
+    assert.equal(inked.uniform, false, `filter ${type}`);
+    assert.equal(inked.differing_pixels, 1, `filter ${type}: one pixel differs by one sample`);
+  }
+  assert.equal(pngInk(filteredPng({ width: 2, height: 2, colourType: 6 }, new Uint8Array(16).fill(9), 4)).uniform, true);
+  assert.equal(pngInk(filteredPng({ width: 2, height: 2, colourType: 0, depth: 16 }, Uint8Array.from([1, 2, 1, 2, 1, 2, 1, 3]), 1)).differing_pixels, 1, '16-bit samples are compared whole');
+
+  assert.deepEqual(pngInk(Buffer.from('not a png at all')), { decoded: false, reason: 'the bytes do not start with the PNG signature' });
+  assert.match(pngInk(filteredPng({ width: 2, height: 2, colourType: 3 }, new Uint8Array(4), 0)).reason, /colour type 3.*not a format this reader decodes/);
+  assert.match(pngInk(filteredPng({ width: 2, height: 2, colourType: 2, interlace: 1 }, new Uint8Array(12), 0)).reason, /interlace 1/);
+  assert.equal(pngInk(filteredPng({ width: 3, height: 2, colourType: 2 }, new Uint8Array(18), 0).subarray(0, 50)).reason, 'image data does not inflate: unexpected end of file');
+  assert.equal(pngInk(PAGE_PNG.subarray(0, 60)).reason, 'chunk IDAT is cut short');
+  assert.match(pngInk(filteredPng({ width: 3, height: 2, colourType: 2 }, new Uint8Array(12), 0)).reason, /image data is 14 bytes; 3x2 at 3 byte\(s\) per pixel needs 20/);
+  assert.equal(pngInk(null).decoded, false);
+
+  // The committed OCR fixture is a real file with strokes on it; an all-white page is not.
+  const fixture = pngInk(await readFile(join(root, 'tests/fixtures/documents/text_image.png')));
+  assert.equal(fixture.uniform, false);
+  assert.ok(fixture.differing_pixels > 1000);
+  assert.equal(pngInk(BLANK_PNG).uniform, true);
 });
 
 test('provenance: every text item of a paginated fixture needs a page of the document and a box inside it', () => {
@@ -876,7 +990,7 @@ function doclingRun(only, over = {}) {
   const evidence = {
     markdown: '## Title\n\nHello   world\n',
     document: stubDocument(paginated ? {} : { pages: {}, texts: stubDocument().texts.map((item) => ({ ...item, prov: [] })), tables: stubDocument().tables.map((item) => ({ ...item, prov: [] })) }),
-    pageFiles: { 'page-1.png': { sha256: PAGE_PNG_SHA, bytes: PAGE_PNG.length, png: pngSize(PAGE_PNG) } },
+    pageFiles: { 'page-1.png': pageFile(PAGE_PNG) },
     problems: [],
     ...over.evidence,
   };

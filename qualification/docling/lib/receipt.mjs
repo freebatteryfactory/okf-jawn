@@ -176,6 +176,7 @@ export function fixtureEntry({ only, run, report, source, evidence, build }) {
       libraryPageCount: base.library_page_count ?? null,
       pages: doc.pages,
       images,
+      blankPages: source?.expect?.blank_pages ?? [],
     });
     const provenance = judgeProvenance(doc, { paginated });
     if (evidence?.problems?.length) entry.criteria.evidence = { status: 'FAIL', problems: evidence.problems };
