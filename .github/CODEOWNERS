@@ -1,4 +1,4 @@
-# Review routing only — not a local filesystem lock. No branch protection is configured yet.
+# Review routing only — not a local filesystem lock. A ruleset on `main` requires the CI jobs and blocks force-push; merges are merge commits only.
 # Placeholder handles: replace with real GitHub teams/users before enabling required reviews.
 # Lane rows are checked against scripts/lib/lanes.mjs by tests/foundation/lanes.test.mjs.
 

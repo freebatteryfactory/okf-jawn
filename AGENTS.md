@@ -45,7 +45,7 @@ Classify a failure before repair: your defect, unfinished neighboring work, or a
 
 Do not suppress lints, fake success, discard unsupported data, alter expected output to match implementation, or declare a partial test to be the full suite. Honest limitation comments are encouraged. Refactors for elegance and speculative optimizations wait until connected behavior exists.
 
-The integration owner holds Cargo.toml/Cargo.lock, package.json/bun.lock and other package manifests, contract, xtask, scripts, api, generated outputs, deployment and independent acceptance. Ownership is enforced locally by isolated worktrees; CODEOWNERS is review routing, not a local editing lock, and no branch protection is configured yet. Never independently rewrite another lane's worktree. `bun scripts/dev.mjs scope`, part of every lane gate and of pre-push, fails when a lane branch changes a path outside its directories, a manifest, or a lockfile.
+The integration owner holds Cargo.toml/Cargo.lock, package.json/bun.lock and other package manifests, contract, xtask, scripts, api, generated outputs, deployment and independent acceptance. Ownership is enforced locally by isolated worktrees; CODEOWNERS is review routing, not a local editing lock, and a ruleset on `main` requires the CI jobs and blocks force-push; merges are merge commits only. Never independently rewrite another lane's worktree. `bun scripts/dev.mjs scope`, part of every lane gate and of pre-push, fails when a lane branch changes a path outside its directories, a manifest, or a lockfile.
 
 ## Conventions
 
