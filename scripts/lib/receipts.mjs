@@ -53,7 +53,7 @@ function treeAt(root, head) {
 
 /** `text` as JSON, or the reason it is not. */
 function parsed(text) {
-  try { return { value: JSON.parse(text.replace(/^﻿/, '')) }; }
+  try { return { value: JSON.parse(text.replace(/^\uFEFF/, '')) }; }
   catch (error) { return { error: `not valid JSON (${error.message})` }; }
 }
 

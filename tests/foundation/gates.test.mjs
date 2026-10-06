@@ -204,7 +204,7 @@ test('the text guards read every directory and leave out only what git treats as
  const zip=bytes([0x50,0x4b,0x03,0x04,0x00,0x00,0xff,0xfe,0x08,0x00,0x9c,0xa7]);
  const {root:repo}=await fixtureRepo(t,{
   '.gitattributes':'* text=auto eol=lf\n*.png binary\n',
-  'README.md':'plain text with a tab\tand a section sign § in UTF-8\n',
+  'README.md':'plain text with a tab\tand a section sign \u00a7 in UTF-8\n',
   'crates/storage/src/backspace.rs':bytes('//! a word boundary typed raw: ',[0x08],'\n'),
   'crates/storage/src/zeroes.rs':bytes('//! two NUL bytes ',[0x00,0x00],'\n'),
   'docs/plans/latin1.md':bytes('Section ',[0xa7],' 5, saved as Latin-1\n'),

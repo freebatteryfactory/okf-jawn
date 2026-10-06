@@ -45,7 +45,7 @@ if (import.meta.main) {
   }
   for (const name of names) {
     const source = join(root, '.artifacts', 'qualification', name, 'receipt.json');
-    const receipt = JSON.parse((await readFile(source, 'utf8')).replace(/^﻿/, ''));
+    const receipt = JSON.parse((await readFile(source, 'utf8')).replace(/^\uFEFF/, ''));
     const refusal = recordRefusal(name, receipt);
     if (refusal) throw new Error(`record refused for ${name}: ${refusal}`);
     const target = await recordReceipt(root, name, receipt);
