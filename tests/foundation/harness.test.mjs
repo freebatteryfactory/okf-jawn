@@ -51,7 +51,7 @@ import {
   pngSize,
 } from '../../qualification/docling/lib/document.mjs';
 import { loadEvidence } from '../../qualification/docling/lib/evidence.mjs';
-import { qualify } from '../../qualification/docling/lib/orchestrate.mjs';
+import { qualify as qualifyDocling } from '../../qualification/docling/lib/orchestrate.mjs';
 import { distRows, onnxRuntimeRecord, ortBuildMessage, readOnnxRuntime } from '../../qualification/docling/lib/native.mjs';
 import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
 import { OCR_FIXTURES, decodeFixture, encodePng, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
@@ -72,7 +72,7 @@ import {
   viewCriteria,
 } from '../../qualification/mcp-apps/lib/criteria.mjs';
 import { DOM_SELECTORS, HarnessError, appFrameOf, observeView, readAppDom, viewSettled } from '../../qualification/mcp-apps/lib/observe.mjs';
-import { qualify } from '../../qualification/mcp-apps/lib/qualify.mjs';
+import { qualify as qualifyMcpApps } from '../../qualification/mcp-apps/lib/qualify.mjs';
 import { envelopeFailures as mcpAppsEnvelopeFailures, foldCriteria as mcpAppsFold } from '../../scripts/lib/receipt-envelope.mjs';
 import { PROTOCOL_CRITERIA, PROTOCOL_RULES, canonicalJson, judgeProtocol, observeProtocol } from '../../qualification/mcp-apps/lib/protocol.mjs';
 import {
@@ -1968,7 +1968,7 @@ async function doclingQualify(t, over = {}) {
     now: () => '2026-10-05T18:10:00.000Z',
     ...over.io,
   };
-  const outcome = await qualify({
+  const outcome = await qualifyDocling({
     root,
     header: DOCLING_HEADER,
     outDir,
@@ -2706,7 +2706,7 @@ async function qualifyDouble({ change = {}, observe = (_view, good) => good } = 
   );
   const pinned = JSON.parse(await readFile(join(root, 'qualification/mcp-apps/criteria.json'), 'utf8')).required;
   const config = { harness: 'okf-qualify-mcp-apps', mcp_url: 'http://127.0.0.1:18765/mcp', http_port: 18765, ngrok: false };
-  const run = (options = {}) => qualify(effects, { pinned, config, ...options });
+  const run = (options = {}) => qualifyMcpApps(effects, { pinned, config, ...options });
   return { run, calls, written, recorded, pinned, observations };
 }
 
