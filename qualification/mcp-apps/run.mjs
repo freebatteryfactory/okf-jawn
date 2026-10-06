@@ -11,11 +11,14 @@
  * receipt is written or recorded are in lib/qualify.mjs; what is judged is in lib/criteria.mjs,
  * lib/protocol.mjs and lib/views.mjs; how a view is watched is in lib/observe.mjs.
  *
- * Usage (from PowerShell, cargo on PATH): bun qualification/mcp-apps/run.mjs [--record]
+ * Usage (from PowerShell, cargo on PATH): bun qualification/mcp-apps/run.mjs
+ * Writes .artifacts/qualification/mcp-apps/receipt.json and records nothing: a finished receipt
+ * of any result is recorded by `bun qualification/record.mjs mcp-apps`, the one recording path.
  * Exit code (scripts/lib/receipt-envelope.mjs, the same numbers as every harness): 0 PASS,
  * 2 FAIL (a criterion about the App or the protocol failed), 3 INCOMPLETE (something was not
  * judged: a protocol-only run, a missing browser, a build that broke). 1 is a run refused
- * before it started, with no receipt written: a dirty tree, or a defect in this script. The
+ * before it started, with no receipt written: an argument, a dirty tree, or a defect in this
+ * script. The
  * receipt's result is the fold of its criteria; the receipt of the previous run is removed
  * first, so the file never describes another run.
  * host_render reports only evidence found under .artifacts/.../hosts/ and never a PASS.
@@ -32,7 +35,7 @@ import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { receiptHeader, recordReceipt } from '../../scripts/lib/provenance.mjs';
+import { receiptHeader } from '../../scripts/lib/provenance.mjs';
 import { buildRelease } from '../lib/cargo.mjs';
 import { BASIC_HOST, PATCHED_SERVE, SOURCE_RECORD, lsRemoteArgs, patchServe, rawUrl, sourceProblems, sourceRecord, tagCommit } from './lib/basic-host.mjs';
 import { EXIT_REFUSED } from './lib/criteria.mjs';
@@ -41,6 +44,8 @@ import { killProcessTree, spawnGroup, waitForListening } from './lib/process.mjs
 import { observeProtocol } from './lib/protocol.mjs';
 import { qualify } from './lib/qualify.mjs';
 import { MCP_APPS_INPUTS, PRESENT_DATASET, VIEWS, chartForBinding, datasetExpectation } from './lib/views.mjs';
+
+if (process.argv.length > 2) throw new Error(`run.mjs takes no argument (got ${process.argv.slice(2).join(' ')}). To record a finished receipt: bun qualification/record.mjs mcp-apps`);
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const PROTOCOL_ONLY =
@@ -427,21 +432,16 @@ const effects = {
     await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
     return receiptPath;
   },
-  recordReceipt: (receipt) => recordReceipt(root, 'mcp-apps', receipt),
 };
 
-const record = process.argv.includes('--record');
 try {
   const pinned = JSON.parse(await readFile(criteriaPath, 'utf8')).required;
-  const { receipt, exitCode, recorded } = await qualify(effects, {
-    record,
+  const { receipt, exitCode } = await qualify(effects, {
     protocolOnly: PROTOCOL_ONLY,
     pinned,
     config: { harness: HARNESS_PACKAGE, mcp_url: MCP_URL, http_port: HTTP_PORT, ngrok: NGROK_ENABLED },
   });
   process.stdout.write(`MCP Apps qualification receipt: ${receiptPath}\n`);
-  if (recorded?.path) process.stdout.write(`MCP Apps receipt recorded: ${recorded.path}\n`);
-  if (recorded?.refused) process.stdout.write(`MCP Apps receipt ${recorded.refused}\n`);
   for (const criterion of receipt.criteria.filter((item) => item.result !== 'pass')) {
     process.stdout.write(`${criterion.result} ${criterion.id}: ${criterion.detail ?? ''}\n`);
   }

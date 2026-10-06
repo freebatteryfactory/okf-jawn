@@ -13,12 +13,11 @@
  *   have judged are listed not_judged, and the result folds to INCOMPLETE, never FAIL.
  *   harness_error is one sentence per stopped step (what stopped, and the first line of why);
  *   harness_error_detail keeps the whole message for whoever has to repair the machine.
- * - The receipt is complete and sealed before it is written or recorded; its result is the
- *   fold of its criteria. --record records any result, but never an envelope that
- *   envelopeFailures does not trust.
+ * - The receipt is complete and sealed before it is written; its result is the fold of its
+ *   criteria. A run records nothing: `bun qualification/record.mjs mcp-apps` records a
+ *   finished receipt of any result, and refuses one whose envelope cannot be trusted.
  */
 
-import { envelopeFailures } from '../../../scripts/lib/receipt-envelope.mjs';
 import {
   GATE,
   SCOPE,
@@ -41,12 +40,11 @@ const firstLine = (text) => (String(text).split(/\r?\n/).map((line) => line.trim
 const sentence = ({ what, detail }) => (detail === null || firstLine(detail) === '' ? what : `${what}: ${firstLine(detail)}`);
 
 /**
- * Run the qualification through `effects` and return `{ receipt, exitCode, recorded }`.
- * `options`: `record`, `protocolOnly`, `pinned` (criteria.json's required ids), `config`
+ * Run the qualification through `effects` and return `{ receipt, exitCode }`.
+ * `options`: `protocolOnly`, `pinned` (criteria.json's required ids), `config`
  * (`harness`, `mcp_url`, `http_port`, `ngrok`) and, for tests, `views`.
  */
-export async function qualify(effects, { record = false, protocolOnly = false, pinned, config, views = VIEWS }) {
-  if (record && protocolOnly) throw new Error('--record refused: a protocol-only run is not the gate receipt');
+export async function qualify(effects, { protocolOnly = false, pinned, config, views = VIEWS }) {
   await effects.removeReceipt();
   // A dirty tree throws here: there is no commit a receipt could cite.
   const header = await effects.header();
@@ -207,12 +205,5 @@ export async function qualify(effects, { record = false, protocolOnly = false, p
 
   // Nothing was written until here: the result is known and is the fold of the criteria.
   await effects.writeReceipt(receipt);
-  let recorded = null;
-  if (record) {
-    const distrust = envelopeFailures(receipt, GATE, pinned);
-    recorded = distrust.length
-      ? { path: null, refused: `not recorded: the envelope cannot be trusted (${distrust.join('; ')})` }
-      : { path: await effects.recordReceipt(receipt), refused: null };
-  }
-  return { receipt, exitCode: exitCodeFor(receipt.result), recorded };
+  return { receipt, exitCode: exitCodeFor(receipt.result) };
 }

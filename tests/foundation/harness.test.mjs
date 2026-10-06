@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,6 +58,7 @@ import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '..
 import { OCR_FIXTURES, decodeFixture, encodePng, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
 import { pngInk } from '../../qualification/docling/lib/png.mjs';
 import { deflateSync } from 'node:zlib';
+import { recordRefusal } from '../../qualification/record.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 import { BASIC_HOST, PATCHED_SERVE, SOURCE_RECORD, lsRemoteArgs, patchServe, rawUrl, sourceProblems, sourceRecord, tagCommit } from '../../qualification/mcp-apps/lib/basic-host.mjs';
 import {
@@ -2009,7 +2010,6 @@ test('the Docling run verifies assets before it builds, builds before it convert
   assert.match(harness, /version_source: VERSION_SOURCE/);
   assert.match(harness, /Rule::TimeoutHonoured => "partial_success_with_pipeline_timeout_error"/);
   const run = await readFile(join(root, 'qualification/docling/run.mjs'), 'utf8');
-  assert.match(run, /if \(only\.length && record\) throw new Error/);
   assert.ok(run.indexOf('await receiptHeader(') < run.indexOf('await qualify('), 'the clean-tree guard comes before the run');
   assert.match(run, /process\.exitCode = exitCodeFor\(receipt\.result\);/);
   assert.doesNotMatch(run, /process\.exit\(|throw new Error\(`Docling qualification/, 'run.mjs reports the folded result; it does not decide one');
@@ -2598,7 +2598,6 @@ test('the MCP Apps orchestrator only performs effects; no place but the fold dec
   assert.match(run, /observeProtocol\(client, \{ views: VIEWS \}\)/);
   assert.match(run, /waitForListening\(proc,/);
   assert.match(run, /receiptHeader\(root, MCP_APPS_INPUTS\)/);
-  assert.match(run, /recordReceipt\(root, 'mcp-apps', receipt\)/);
   assert.match(run, /process\.exitCode = exitCode;/);
   assert.doesNotMatch(run, /disableRules\(|session_open|spawnDetached|waitForTcp|requireCleanTree|commit_sha/);
   assert.doesNotMatch(run, /'cargo',\s*\[\s*'run'/);
@@ -2655,7 +2654,6 @@ async function qualifyDouble({ change = {}, observe = (_view, good) => good } = 
   const double = await harnessDouble();
   const calls = [];
   const written = [];
-  const recorded = [];
   const sha = (text) => createHash('sha256').update(text).digest('hex');
   const plain = {
     removeReceipt: async () => {},
@@ -2693,10 +2691,6 @@ async function qualifyDouble({ change = {}, observe = (_view, good) => good } = 
       written.push(JSON.parse(JSON.stringify(receipt)));
       return 'receipt.json';
     },
-    recordReceipt: async (receipt) => {
-      recorded.push(JSON.parse(JSON.stringify(receipt)));
-      return 'qualification/receipts/mcp-apps.json';
-    },
     ...change,
   };
   const effects = Object.fromEntries(
@@ -2708,7 +2702,7 @@ async function qualifyDouble({ change = {}, observe = (_view, good) => good } = 
   const pinned = JSON.parse(await readFile(join(root, 'qualification/mcp-apps/criteria.json'), 'utf8')).required;
   const config = { harness: 'okf-qualify-mcp-apps', mcp_url: 'http://127.0.0.1:18765/mcp', http_port: 18765, ngrok: false };
   const run = (options = {}) => qualifyMcpApps(effects, { pinned, config, ...options });
-  return { run, calls, written, recorded, pinned, observations };
+  return { run, calls, written, pinned, observations };
 }
 
 const byId = (receipt, id) => receipt.criteria.find((criterion) => criterion.id === id);
@@ -2736,20 +2730,20 @@ test('criteria.json pins every criterion the MCP Apps harness can emit as requir
   const withoutDataset = VIEWS.map(({ dataset, ...view }) => view);
   assert.ok(!requiredCriterionIds(withoutDataset).includes('render_present/dataset_exercised'));
   const double = await qualifyDouble();
-  const { receipt, exitCode, recorded } = await double.run({ views: withoutDataset, record: true });
+  const { receipt, exitCode } = await double.run({ views: withoutDataset });
   assert.equal(receipt.result, 'INCOMPLETE');
   assert.match(receipt.harness_error, /not the ones criteria\.json pins: pinned criterion render_present\/chart_marks is missing/);
   assert.match(receipt.harness_error, /pinned criterion render_present\/dataset_exercised is missing/);
   assert.ok(mcpAppsEnvelopeFailures(receipt, MCP_APPS_GATE, double.pinned).includes('pinned criterion render_present/dataset_exercised is missing'));
   assert.equal(receipt.basic_host.present_dataset.status, 'not_observed');
   assert.equal(exitCode, 3);
-  assert.match(recorded.refused, /not recorded: the envelope cannot be trusted/);
-  assert.deepEqual(double.recorded, []);
+  // The one recording path refuses it, for the same reason.
+  assert.match(await recordRefusal(root, 'mcp-apps', receipt), /^its envelope cannot be trusted \(.*pinned criterion render_present\/dataset_exercised is missing/);
 });
 
 test('the MCP Apps receipt carries the shared envelope, and its result is the fold of its criteria', async () => {
   const double = await qualifyDouble();
-  const { receipt, exitCode, recorded } = await double.run();
+  const { receipt, exitCode } = await double.run();
   assert.deepEqual(Object.keys(receipt).slice(0, 9), ['git_sha', 'inputs', 'produced_at', 'component', 'gate', 'result', 'harness_error', 'criteria', 'not_judged']);
   assert.equal(receipt.gate, 'mcp-apps-protocol-qualification');
   assert.equal(receipt.result, 'PASS');
@@ -2761,7 +2755,6 @@ test('the MCP Apps receipt carries the shared envelope, and its result is the fo
   assert.deepEqual(mcpAppsEnvelopeFailures(receipt, MCP_APPS_GATE, double.pinned), []);
   assert.equal(receipt.result, mcpAppsFold(receipt.criteria, receipt.harness_error));
   assert.equal(exitCode, 0);
-  assert.equal(recorded, null);
   assert.deepEqual(receiptHeaderProblems(receipt), []);
   assert.deepEqual(double.written, [JSON.parse(JSON.stringify(receipt))]);
   // The detailed sections say what was seen; their status words are derived from the criteria.
@@ -2948,35 +2941,37 @@ test('a protocol-only run leaves every render criterion not judged and so folds 
   assert.deepEqual(receipt.host_render, { status: 'not_run', reason: 'skipped: protocol-only run' });
   for (const effect of ['startHost', 'launchBrowser', 'openTunnel', 'hostRenderEvidence']) assert.ok(!double.calls.includes(effect), effect);
   assert.deepEqual(mcpAppsEnvelopeFailures(receipt, MCP_APPS_GATE, double.pinned), []);
-  // It is refused as the gate receipt before anything is touched.
-  const refused = await qualifyDouble();
-  await assert.rejects(refused.run({ protocolOnly: true, record: true }), /--record refused: a protocol-only run is not the gate receipt/);
-  assert.deepEqual(refused.calls, []);
+  // Its envelope is clean, so it can be recorded like any other receipt: the gate then says incomplete.
+  assert.equal(await recordRefusal(root, 'mcp-apps', receipt), null);
 });
 
-test('--record writes nothing before the result is known, records any result, and never an envelope that cannot be trusted', async () => {
+test('a run writes its receipt once, when the result is known, and records nothing itself; record.mjs takes a receipt of any result', async () => {
   const passed = await qualifyDouble();
-  const pass = await passed.run({ record: true });
-  assert.deepEqual(pass.recorded, { path: 'qualification/receipts/mcp-apps.json', refused: null });
-  assert.deepEqual(passed.recorded, passed.written);
-  assert.deepEqual(passed.calls.slice(-6), ['closeBrowser', 'stopHost', 'stopHarness', 'hostRenderEvidence', 'writeReceipt', 'recordReceipt']);
-  assert.equal(passed.calls.filter((call) => call === 'writeReceipt' || call === 'recordReceipt').length, 2);
+  const pass = await passed.run();
+  assert.deepEqual(Object.keys(pass).sort(), ['exitCode', 'receipt'], 'a run returns its receipt and its exit code; recording is not its business');
+  assert.deepEqual(passed.calls.slice(-5), ['closeBrowser', 'stopHost', 'stopHarness', 'hostRenderEvidence', 'writeReceipt']);
+  assert.equal(passed.calls.filter((call) => call === 'writeReceipt').length, 1);
 
-  // A failed run is recorded as a failed run: honest evidence, with the result its criteria fold to.
+  // A failed run leaves a failed receipt: honest evidence, with the result its criteria fold to.
   const failed = await qualifyDouble({ observe: (view, good) => (view.dataset ? { ...good, frame: { ...good.frame, svg_marks: 1 } } : good) });
-  const fail = await failed.run({ record: true });
+  const fail = await failed.run();
   assert.equal(fail.exitCode, 2);
-  assert.equal(failed.recorded.length, 1);
-  assert.equal(failed.recorded[0].result, 'FAIL');
-  assert.deepEqual(failed.calls.slice(-2), ['writeReceipt', 'recordReceipt']);
-  // So is one the machine could not finish.
+  assert.equal(failed.written.length, 1);
+  assert.equal(failed.written[0].result, 'FAIL');
+  assert.equal(failed.calls.at(-1), 'writeReceipt');
+  // So does one the machine could not finish; its basic-host section never ran.
   const stopped = await qualifyDouble({ change: { launchBrowser: async () => { throw new Error("Executable doesn't exist"); } } });
-  await stopped.run({ record: true });
-  assert.equal(stopped.recorded[0].result, 'INCOMPLETE');
-  for (const receipt of [...passed.recorded, ...failed.recorded, ...stopped.recorded]) {
+  await stopped.run();
+  assert.equal(stopped.written[0].result, 'INCOMPLETE');
+  assert.equal(stopped.written[0].basic_host.status, 'not_run');
+  for (const receipt of [...passed.written, ...failed.written, ...stopped.written]) {
     assert.equal(receipt.result, mcpAppsFold(receipt.criteria, receipt.harness_error));
     assert.deepEqual(mcpAppsEnvelopeFailures(receipt, MCP_APPS_GATE, passed.pinned), []);
+    // The single recording path takes each of them: PASS, FAIL and INCOMPLETE alike.
+    assert.equal(await recordRefusal(root, 'mcp-apps', receipt), null, receipt.result);
   }
+  // It refuses a receipt whose typed result its criteria do not support, whatever the result says.
+  assert.match(await recordRefusal(root, 'mcp-apps', { ...failed.written[0], result: 'PASS' }), /^its envelope cannot be trusted \(result is PASS but its criteria fold to FAIL\)/);
 
   // The seal: the result is only ever the fold, and criteria that are not the pinned ones are a harness error.
   const criteria = passed.written[0].criteria;
@@ -2995,7 +2990,7 @@ test('--record writes nothing before the result is known, records any result, an
   // A section's word is derived, and says not_run only when nothing in it was judged.
   assert.equal(sectionStatus(criteria, (id) => id.startsWith('protocol/')), 'passed');
   assert.equal(sectionStatus(criteria.map((criterion) => ({ ...criterion, result: 'not_judged' })), () => true), 'not_run');
-  assert.equal(sectionStatus(stopped.recorded[0].criteria, (id) => id.startsWith('render_')), 'not_run');
+  assert.equal(sectionStatus(stopped.written[0].criteria, (id) => id.startsWith('render_')), 'not_run');
 });
 
 /** A document double that answers only the selectors it is given, so the selector text itself is pinned. */
@@ -3504,14 +3499,26 @@ test('the reference host is named by the commit its tag resolved to, and a cache
   assert.match((await mcpAppsSources())['lib/qualify.mjs'], /browser: browser \? \{ name: 'chromium', version: browser\.version \} : null,/);
 });
 
-test('both orchestrators take their header from receiptHeader and record only through recordReceipt', async () => {
+test('both orchestrators take their header from receiptHeader, take no argument and record nothing; record.mjs is the one recording path', async () => {
   for (const name of ['docling', 'mcp-apps']) {
     const source = await readFile(join(root, 'qualification', name, 'run.mjs'), 'utf8');
-    assert.match(source, /= await receiptHeader\(root, /, name);
-    assert.match(source, new RegExp(`recordReceipt\\(root, '${name}', receipt\\)`), name);
-    assert.match(source, /process\.argv\.includes\('--record'\)/, name);
-    assert.doesNotMatch(source, /requireCleanTree|commit_sha|writeFile\([^)]*qualification\/receipts/, name);
+    assert.match(source, / = await receiptHeader\(root, /, name);
+    assert.doesNotMatch(source, /recordReceipt|--record|qualification\/receipts|requireCleanTree|commit_sha/, `${name}/run.mjs records or names the old flag`);
+    // An argument is refused before anything is touched, naming the command that records.
+    const refusal = source.indexOf(`if (process.argv.length > 2) throw new Error(\`run.mjs takes no argument (got \${process.argv.slice(2).join(' ')}). To record a finished receipt: bun qualification/record.mjs ${name}\`);`);
+    assert.ok(refusal > 0, `${name}/run.mjs does not refuse an argument`);
+    assert.ok(refusal < source.indexOf('receiptHeader(root, '), `${name}/run.mjs must refuse an argument before it reads the tree`);
+    assert.ok(refusal < source.indexOf('await qualify('), `${name}/run.mjs must refuse an argument before the run`);
   }
+  // No file of either harness, and no library, copies a receipt: only record.mjs calls recordReceipt.
+  const callers = [];
+  for (const directory of ['qualification', 'qualification/lib', 'qualification/docling', 'qualification/docling/lib', 'qualification/mcp-apps', 'qualification/mcp-apps/lib', 'scripts', 'scripts/lib']) {
+    for (const file of (await readdir(join(root, directory))).filter((entry) => entry.endsWith('.mjs'))) {
+      // A call, not the definition and not the name inside its error message.
+      if (/(?<!function )\brecordReceipt\((?!\$\{)/.test(await readFile(join(root, directory, file), 'utf8'))) callers.push(`${directory}/${file}`);
+    }
+  }
+  assert.deepEqual(callers, ['qualification/record.mjs']);
 });
 
 test('both harnesses end with the same exit code for the same outcome, taken from one place', async () => {
@@ -3550,14 +3557,21 @@ test('no time-budgeted test uses a budget a loaded machine can miss', async () =
   assert.doesNotMatch(source, new RegExp(String.raw`\b${2 * 2000}\b`), 'a 4 s budget failed once under a parallel cargo build');
 });
 
-test('record.mjs refuses a protocol-only MCP Apps receipt and any whose basic-host section did not run', async () => {
-  const { recordRefusal } = await import('../../qualification/record.mjs');
-  const ran = { protocol_only: false, basic_host: { status: 'passed', failed: [] } };
-  assert.equal(recordRefusal('mcp-apps', ran), null);
-  assert.match(recordRefusal('mcp-apps', { ...ran, protocol_only: true }), /protocol-only.*not the gate receipt/);
-  assert.match(recordRefusal('mcp-apps', { ...ran, basic_host: { status: 'not_run', reason: 'skipped: protocol-only' } }), /basic-host section was skipped/);
-  assert.match(recordRefusal('mcp-apps', { protocol_only: false }), /basic-host section was skipped/);
-  assert.equal(recordRefusal('docling', { protocol_only: true }), null, 'only the MCP Apps receipt has a basic-host section');
+test('record.mjs refuses a receipt by its envelope, never by its result or by which sections ran', async () => {
+  // Built by the harness's own code: a full PASS and a protocol-only INCOMPLETE whose basic-host section did not run.
+  const full = (await (await qualifyDouble()).run()).receipt;
+  const protocolOnly = (await (await qualifyDouble()).run({ protocolOnly: true })).receipt;
+  assert.deepEqual([full.result, protocolOnly.result, protocolOnly.protocol_only, protocolOnly.basic_host.status], ['PASS', 'INCOMPLETE', true, 'not_run']);
+  assert.equal(await recordRefusal(root, 'mcp-apps', full), null);
+  assert.equal(await recordRefusal(root, 'mcp-apps', protocolOnly), null, 'an INCOMPLETE receipt is evidence and is recorded; its gate then says incomplete');
+  // What is refused is an envelope that cannot be trusted.
+  const reasons = async (receipt, name = 'mcp-apps') => recordRefusal(root, name, receipt);
+  assert.match(await reasons({ ...protocolOnly, result: 'PASS' }), /result is PASS but its criteria fold to INCOMPLETE/);
+  assert.match(await reasons({ ...full, criteria: full.criteria.slice(1) }), /pinned criterion bundle\/single_app_resource is missing/);
+  assert.match(await reasons({ ...protocolOnly, not_judged: [] }), /not_judged is \[\] but its criteria derive \["render_source\/text"/);
+  assert.match(await reasons(full, 'docling'), /gate is "mcp-apps-protocol-qualification", expected "docling-library-qualification"/);
+  assert.match(await reasons(full, 'no-such-harness'), /no Phase 0 gate of kind receipt names the harness no-such-harness/);
+  assert.match(await reasons({ git_sha: full.git_sha, inputs: full.inputs, produced_at: full.produced_at }), /criteria must be an array/);
   const source = await readFile(join(root, 'qualification/record.mjs'), 'utf8');
-  assert.ok(source.indexOf('recordRefusal(name, receipt)') < source.indexOf('await recordReceipt('), 'the refusal must come before the receipt is recorded');
+  assert.doesNotMatch(source, /protocol_only|basic_host/, 'record.mjs must not look inside a receipt for a reason to refuse it');
 });

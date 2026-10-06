@@ -14,8 +14,8 @@
  *   - the per-fixture evidence directory is emptied before the first step, so the files beside
  *     a receipt are always the ones of the same run.
  *
- * A dirty tree, an unknown fixture name and `--record` on a single-fixture run are refused
- * by run.mjs before the run starts; nothing is written and nothing is removed.
+ * An argument, a dirty tree and an unknown fixture name are refused by run.mjs before the run
+ * starts; nothing is written and nothing is removed.
  *
  * Order: assets are re-hashed before anything is built; the build precedes every conversion.
  */

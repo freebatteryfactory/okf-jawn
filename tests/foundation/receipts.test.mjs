@@ -310,13 +310,40 @@ test('record.mjs copies a receipt of any result and writes the derived statuses,
   // Committed as the record commit, the tree is what check-receipts accepts.
   const head = await commit(root, {}, 'record');
   assert.match(await checkReceipts(root), /^check-receipts: 1 receipt\(s\) valid against HEAD; docling-library-qualification: failed /);
-  // A receipt whose envelope cannot be trusted is still copied, and the script says so and fails.
+  // An INCOMPLETE receipt is recorded like any other, whichever of its sections ran; its gate says incomplete.
+  const appsArtifact = join(root, '.artifacts', 'qualification', 'mcp-apps', 'receipt.json');
   await mkdir(join(root, '.artifacts', 'qualification', 'mcp-apps'), { recursive: true });
-  await writeFile(join(root, '.artifacts', 'qualification', 'mcp-apps', 'receipt.json'), fixtureReceipt('mcp-apps', head, { criteria: failing, result: 'PASS', protocol_only: false, basic_host: { status: 'passed' } }));
-  const untrusted = await record('mcp-apps');
-  assert.equal(untrusted.code, 1, untrusted.stdout);
-  assert.match(untrusted.stderr, /^mcp-apps\.json: result is PASS but its criteria fold to FAIL$/m);
-  assert.match(untrusted.stdout, /^phase_0_qualified: false \(.*1 receipt failure\(s\)\)$/m);
+  await writeFile(appsArtifact, fixtureReceipt('mcp-apps', head, { criteria: unjudged, protocol_only: true, basic_host: { status: 'not_run' } }));
+  const partial = await record('mcp-apps');
+  assert.equal(partial.code, 0, partial.stderr);
+  assert.match(partial.stdout, new RegExp(`^${apps}: incomplete \\(${at('mcp-apps')} result INCOMPLETE\\)$`, 'm'));
+  assert.equal(await readFile(join(root, 'verification.json'), 'utf8'), fixtureRecord({ statuses: { docling: 'failed' } }), 'incomplete was already the typed status');
+  // Right after recording, the tree is one check-receipts accepts: the statuses were written with the copy.
+  const second = await commit(root, {}, 'record the second receipt');
+  assert.match(await checkReceipts(root), /^check-receipts: 2 receipt\(s\) valid against HEAD; /);
+  // A receipt whose envelope cannot be trusted is refused: nothing is copied, not even a sound one named beside it.
+  const recordedApps = await readFile(join(root, at('mcp-apps')), 'utf8');
+  const recordedDocling = await readFile(join(root, at('docling')), 'utf8');
+  await writeFile(appsArtifact, fixtureReceipt('mcp-apps', second, { criteria: failing, result: 'PASS' }));
+  await writeFile(join(artifact, 'receipt.json'), fixtureReceipt('docling', second));
+  const untrusted = await record('docling', 'mcp-apps');
+  assert.notEqual(untrusted.code, 0, untrusted.stdout);
+  assert.match(untrusted.stderr, /record refused for mcp-apps: its envelope cannot be trusted \(result is PASS but its criteria fold to FAIL\)/);
+  assert.doesNotMatch(untrusted.stdout, /^recorded /m);
+  assert.equal(await readFile(join(root, at('mcp-apps')), 'utf8'), recordedApps);
+  assert.equal(await readFile(join(root, at('docling')), 'utf8'), recordedDocling, 'the sound receipt named in the same command is not copied either');
+  // So is one that cites another commit, before anything is copied.
+  await writeFile(appsArtifact, fixtureReceipt('mcp-apps', head));
+  const stale = await record('docling', 'mcp-apps');
+  assert.notEqual(stale.code, 0);
+  assert.match(stale.stderr, new RegExp(`record refused for mcp-apps: receipt cites ${head} but HEAD is ${second}`));
+  assert.equal(await readFile(join(root, at('docling')), 'utf8'), recordedDocling);
+  // A committed receipt that was edited afterwards is not this command's to refuse: it reports it and fails.
+  await writeFile(join(root, at('mcp-apps')), fixtureReceipt('mcp-apps', head, { criteria: failing, result: 'PASS' }));
+  const edited = await record();
+  assert.equal(edited.code, 1, edited.stdout);
+  assert.match(edited.stderr, /^mcp-apps\.json: result is PASS but its criteria fold to FAIL$/m);
+  assert.match(edited.stdout, /^phase_0_qualified: false \(.*1 receipt failure\(s\)\)$/m);
 });
 
 test('a receipt is rejected when an input changed, its commit is foreign, or its header is incomplete', async t => {

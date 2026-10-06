@@ -10,26 +10,27 @@
  *   lib/receipt.mjs   judges every criterion and composes the receipt;
  *   lib/criteria.mjs  declares the criteria and folds them into the result.
  *
- * Usage (from PowerShell, cargo on PATH): bun qualification/docling/run.mjs [--record]
+ * Usage (from PowerShell, cargo on PATH): bun qualification/docling/run.mjs
  * Needs .artifacts/qualification/docling/assets.json naming the verified model assets.
- * Writes .artifacts/qualification/docling/receipt.json; --record also copies it to
- * qualification/receipts/docling.json when the run reached conversion.
+ * Writes .artifacts/qualification/docling/receipt.json and records nothing: a finished receipt
+ * of any result is recorded by `bun qualification/record.mjs docling`, the one recording path.
  *
  * Exit code (lib/criteria.mjs EXIT_CODES): 0 PASS, 2 FAIL (a required criterion failed),
  * 3 INCOMPLETE (the environment stopped a judgement, or a required criterion was not judged).
- * 1 is a run refused before it started, with no receipt written: a dirty tree, an unknown
- * fixture name, --record on a single-fixture run, or a defect in this harness.
+ * 1 is a run refused before it started, with no receipt written: an argument, a dirty tree,
+ * an unknown fixture name, or a defect in this harness.
  *
  * Single-fixture mode, for iterating without the large fixtures: set OKF_DOCLING_ONLY to one
  * or more names from FIXTURE_RUNS, comma-separated. Only those run; the receipt goes to
  * .artifacts/qualification/docling/only/receipt.json, says so in `scope`, leaves every
- * other fixture's criteria not_judged (so it is INCOMPLETE, never PASS) and cannot be recorded.
+ * other fixture's criteria not_judged (so it is INCOMPLETE, never PASS); record.mjs does not
+ * read that path.
  */
 
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { receiptHeader, recordReceipt } from '../../scripts/lib/provenance.mjs';
+import { receiptHeader } from '../../scripts/lib/provenance.mjs';
 import { buildRelease, exec } from '../lib/cargo.mjs';
 import { sha256File, verifyAssets } from './lib/assets.mjs';
 import { exitCodeFor } from './lib/criteria.mjs';
@@ -38,20 +39,20 @@ import { qualify } from './lib/orchestrate.mjs';
 import { DOCLING_INPUTS, FIXTURE_RUNS } from './lib/receipt.mjs';
 import { runFixtureProcess } from './lib/runner.mjs';
 
+if (process.argv.length > 2) throw new Error(`run.mjs takes no argument (got ${process.argv.slice(2).join(' ')}). To record a finished receipt: bun qualification/record.mjs docling`);
+
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const record = process.argv.includes('--record');
 const only = (process.env.OKF_DOCLING_ONLY ?? '')
   .split(',')
   .map((name) => name.trim())
   .filter(Boolean);
 const unknown = only.filter((name) => !FIXTURE_RUNS.includes(name));
 if (unknown.length) throw new Error(`OKF_DOCLING_ONLY names no fixture run: ${unknown.join(', ')}. Known: ${FIXTURE_RUNS.join(', ')}`);
-if (only.length && record) throw new Error('A single-fixture run (OKF_DOCLING_ONLY) is not the qualification and cannot be recorded');
 const selected = only.length ? FIXTURE_RUNS.filter((name) => only.includes(name)) : FIXTURE_RUNS;
 
 const header = await receiptHeader(root, DOCLING_INPUTS);
 
-const { receipt, receiptPath, converted } = await qualify({
+const { receipt, receiptPath } = await qualify({
   root,
   header,
   outDir: join(root, '.artifacts/qualification/docling', ...(only.length ? ['only'] : [])),
@@ -79,11 +80,6 @@ const { receipt, receiptPath, converted } = await qualify({
 });
 
 process.stdout.write(`Docling qualification receipt: ${receiptPath}\n`);
-if (record && converted) {
-  process.stdout.write(`Docling receipt recorded: ${await recordReceipt(root, 'docling', receipt)}\n`);
-} else if (record) {
-  process.stderr.write('Docling receipt not recorded: the run stopped before any conversion.\n');
-}
 
 // The receipt's result is the fold of its criteria (lib/criteria.mjs); this file only reports it.
 process.stdout.write(`Docling qualification result: ${receipt.result}\n`);

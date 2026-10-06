@@ -96,6 +96,35 @@ function notJudgedFailures(receipt) {
 }
 
 /**
+ * Why the content of `receipt` cannot be trusted as the receipt of `gate` in `tree`; empty when
+ * it can. This is the whole content rule, for a receipt about to be recorded and for one already
+ * committed: the gate's criteria file is usable, the envelope is one `envelopeFailures` accepts
+ * against the ids that file pins, and `not_judged` is the list the criteria derive.
+ */
+async function contentFailures(tree, gate, receipt) {
+  const { pinned, problems } = await pinnedCriteria(tree, gate);
+  return [...problems, ...envelopeFailures(receipt, gate.id, pinned), ...notJudgedFailures(receipt)];
+}
+
+/**
+ * Why a finished receipt must not be recorded for harness `name`: the content failures of
+ * `receipt` against the Phase 0 receipt gate that names the harness in the working tree's
+ * verification.json. Empty when it may be recorded, whatever its result: a FAIL or INCOMPLETE
+ * receipt with a clean envelope is evidence, and its gate then says failed or incomplete.
+ */
+export async function recordFailures(root, name, receipt) {
+  const tree = treeAt(root);
+  const text = await tree.read(recordPath);
+  if (text === null) return [`${recordPath} is missing, so no gate names the harness ${name}`];
+  const record = parsed(text);
+  if (record.error) return [`${recordPath} is ${record.error}`];
+  const phase0 = record.value?.current?.gates?.phase_0;
+  const gate = Array.isArray(phase0) ? phase0.find(candidate => candidate?.kind === 'receipt' && candidate.harness === name) : undefined;
+  if (!gate) return [`no Phase 0 gate of kind receipt names the harness ${name} in ${recordPath}`];
+  return contentFailures(tree, gate, receipt);
+}
+
+/**
  * What the receipts in a tree support, and where verification.json there types something else.
  *
  * `head` is a commit, read with git and independent of the checkout; without it the working tree
@@ -164,8 +193,7 @@ export async function derivedRecord(root, head) {
     entry.basis = known ? `${gate.receipt} result ${found.receipt.result}` : `${gate.receipt} has no result of ${receiptResults.join(', ')}`;
     // The receipt is read, not only its header: its result must be the fold of its criteria,
     // and every criterion its harness pins must be present and required.
-    const { pinned, problems } = await pinnedCriteria(tree, gate);
-    for (const message of [...problems, ...envelopeFailures(found.receipt, gate.id, pinned), ...notJudgedFailures(found.receipt)]) failures.push({ name: file, message });
+    for (const message of await contentFailures(tree, gate, found.receipt)) failures.push({ name: file, message });
   }
   // A receipt is recorded only for the gate it closes: one file, one gate.
   const named = result.gates.map(gate => gate.file).filter(file => file !== null);
