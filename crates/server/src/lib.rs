@@ -115,13 +115,13 @@ async fn respond(
         principal: &authenticated.principal,
         session_id: authenticated.session_id.as_deref(),
     };
-    match Box::pin(dispatch(
+    match dispatch(
         bound.application.as_ref(),
         &ports,
         &caller,
         operation_id,
         input,
-    ))
+    )
     .await
     {
         Ok(output) => match StatusCode::from_u16(success_status) {

@@ -2,9 +2,17 @@
 //!
 //! Order: validate, decode, `targets()`, authorize every target, build the context,
 //! `MutationStore::begin`, the handler, then `complete` on success or `release` on error.
+//! "Error" is anything that fails after `begin` granted the lease, not only the handler: a
+//! failure to serialize the response, to build the ledger body, or in `complete` itself also
+//! releases the lease, and the caller receives the first error, never the release's.
+//! A request that declares no target is refused as `Internal` before anything else runs.
 //! A grant is used only when it is for the workspace and tenant that were asked for. The ledger
 //! never inspects other stores: a resumed attempt re-runs the handler under the same
 //! `MutationId`, and what the ledger retains is decided by the request's `ReplayPolicy`.
+//!
+//! Handlers see the `MutationId`; dispatch keeps the `MutationLease` it was granted and closes
+//! the row with it, so an attempt whose lease was taken over cannot complete or release the
+//! attempt that now holds the mutation.
 
 use jsonschema::error::ValidationErrorKind;
 use okf_jawn_contract::access::Principal;
@@ -21,18 +29,16 @@ use uuid::Uuid;
 
 use crate::access::{self, AccessControl};
 use crate::context::{Attempt, OperationContext, TenantGrant, WorkspaceGrant};
-use crate::mutations::{BeginOutcome, MutationKey, MutationStore, request_digest};
+use crate::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore, request_digest};
 use crate::ports::Application;
 
 macro_rules! dispatch_operations {
     ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
         $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
         $destructive:literal, $description:literal)),* $(,)?) => {
-        /// Dispatch one declared JSON operation into its typed implementation.
-        ///
-        /// # Errors
-        /// Returns input, authorization, idempotency, implementation, or serialization errors.
-        pub async fn dispatch(
+        /// Run one declared operation. Its future holds one state per operation in the table
+        /// and is large; [`dispatch`] is the entry point and boxes it.
+        async fn run_declared(
             service: &dyn Application,
             ports: &DispatchPorts<'_>,
             caller: &Caller<'_>,
@@ -48,9 +54,9 @@ macro_rules! dispatch_operations {
                         authorize_targets(ports.access, caller, operation, &request).await?;
                     let replay = <$request as RequestScope>::REPLAY;
                     match prepare_mutation(ports, &mut context, replay, &request).await? {
-                        MutationGate::Run => {
+                        MutationGate::Run(lease) => {
                             let outcome = service.$id(&context, request).await;
-                            finish(ports, &context, replay, outcome).await
+                            finish(ports.mutations, lease, replay, outcome).await
                         }
                         MutationGate::ShortCircuit(value) => Ok(value),
                     }
@@ -79,8 +85,30 @@ pub struct DispatchPorts<'a> {
 }
 
 enum MutationGate {
-    Run,
+    /// Run the handler; a mutation runs under the lease this attempt was granted.
+    Run(Option<MutationLease>),
+    /// Answer from the ledger without running the handler.
     ShortCircuit(Value),
+}
+
+/// Most bytes of validator or decoder text an `InvalidInput` message carries.
+const INVALID_INPUT_ECHO_LIMIT: usize = 512;
+
+/// Dispatch one declared JSON operation into its typed implementation.
+///
+/// The per-operation state is boxed inside, so this future is small and a binding awaits it
+/// inline, without `Box::pin`.
+///
+/// # Errors
+/// Returns input, authorization, idempotency, implementation, or serialization errors.
+pub async fn dispatch(
+    service: &dyn Application,
+    ports: &DispatchPorts<'_>,
+    caller: &Caller<'_>,
+    operation_id: &str,
+    input: Value,
+) -> Result<Value, ApiError> {
+    Box::pin(run_declared(service, ports, caller, operation_id, input)).await
 }
 
 async fn prepare_mutation<Req: RequestScope + Serialize>(
@@ -90,24 +118,25 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
     request: &Req,
 ) -> Result<MutationGate, ApiError> {
     let Some(key) = request.idempotency_key().copied() else {
-        return Ok(MutationGate::Run);
+        return Ok(MutationGate::Run(None));
     };
     let digest = request_digest(request)?;
     let mutation_key = MutationKey {
         tenant_id: context.principal.tenant_id.clone(),
         subject: context.principal.subject.clone(),
+        client_id: context.principal.client_id.clone(),
         operation: context.operation,
         key,
     };
     match ports.mutations.begin(&mutation_key, &digest).await? {
-        BeginOutcome::New(mutation_id) => {
-            context.mutation = Some(mutation_id);
-            Ok(MutationGate::Run)
+        BeginOutcome::New(lease) => {
+            context.mutation = Some(lease.mutation_id);
+            Ok(MutationGate::Run(Some(lease)))
         }
-        BeginOutcome::Abandoned { mutation_id } => {
-            context.mutation = Some(mutation_id);
+        BeginOutcome::Abandoned { lease } => {
+            context.mutation = Some(lease.mutation_id);
             context.attempt = Attempt::Resumed;
-            Ok(MutationGate::Run)
+            Ok(MutationGate::Run(Some(lease)))
         }
         BeginOutcome::Replay(stored) => {
             replay_response(replay, stored.body).map(MutationGate::ShortCircuit)
@@ -132,33 +161,44 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
 }
 
 /// Close the ledger row for a handler outcome and return what the caller receives.
+///
+/// `lease` is the grant this attempt holds. Whatever fails once the handler has run (the
+/// handler itself, serializing its response, building the ledger body, or `complete`), the
+/// lease is released, so a retry resumes at once instead of waiting the lease out, and the
+/// caller receives that first error. The one exception is a lost lease: the store refuses
+/// `complete` with `Conflict` because another attempt holds the mutation, and that attempt's
+/// lease is not this one's to end.
 async fn finish<Res: Serialize>(
-    ports: &DispatchPorts<'_>,
-    context: &OperationContext,
+    mutations: &dyn MutationStore,
+    lease: Option<MutationLease>,
     replay: ReplayPolicy,
     outcome: Result<Res, ApiError>,
 ) -> Result<Value, ApiError> {
-    let response = match outcome {
-        Ok(response) => response,
-        Err(error) => {
-            if let Some(mutation_id) = context.mutation {
-                // The caller must see the handler's error. If the release itself fails, the
-                // lease simply expires into `Abandoned`, which a later attempt resumes safely.
-                let _released = ports.mutations.release(mutation_id).await;
-            }
-            return Err(error);
-        }
+    let Some(lease) = lease else {
+        return outcome.and_then(|response| response_body(&response));
     };
-    let body = serde_json::to_value(response)
-        .map_err(|_| ApiError::new(ErrorCode::Internal, "Response serialization failed"))?;
-    let Some(mutation_id) = context.mutation else {
-        return Ok(body);
+    let prepared = outcome.and_then(|response| {
+        let body = response_body(&response)?;
+        let retained = ledger_body(replay, &body)?;
+        Ok((body, retained))
+    });
+    let error = match prepared {
+        Ok((body, retained)) => match mutations.complete(lease, retained).await {
+            Ok(()) => return Ok(body),
+            Err(lost) if lost.code == ErrorCode::Conflict => return Err(lost),
+            Err(error) => error,
+        },
+        Err(error) => error,
     };
-    ports
-        .mutations
-        .complete(mutation_id, ledger_body(replay, &body)?)
-        .await?;
-    Ok(body)
+    // Best effort: the caller must see the first error. If the release itself fails, the lease
+    // expires into `Abandoned`, which a later attempt resumes safely.
+    let _released = mutations.release(lease).await;
+    Err(error)
+}
+
+fn response_body<Res: Serialize>(response: &Res) -> Result<Value, ApiError> {
+    serde_json::to_value(response)
+        .map_err(|_| ApiError::new(ErrorCode::Internal, "Response serialization failed"))
 }
 
 /// What the ledger retains for a completed mutation, decided by its replay policy.
@@ -212,7 +252,17 @@ async fn authorize_targets(
     let principal = caller.principal;
     let mut grants: Vec<WorkspaceGrant> = Vec::new();
     let mut tenant: Option<TenantGrant> = None;
-    for target in request.targets() {
+    let targets = request.targets();
+    if targets.is_empty() {
+        // Every operation authorizes something, if only sign-in (`Target::Authenticated`). An
+        // empty list is a defect in the request's `RequestScope`; running the handler on it
+        // would run it with no authorization at all.
+        return Err(ApiError::new(
+            ErrorCode::Internal,
+            "Request declares no authorization target",
+        ));
+    }
+    for target in targets {
         match target {
             // Any signed-in principal; the handler filters its result by grants.
             Target::Authenticated => {}
@@ -284,7 +334,21 @@ fn parse_operation(operation_id: &str) -> Result<OperationName, ApiError> {
 
 fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
     serde_json::from_value(value)
-        .map_err(|error| ApiError::new(ErrorCode::InvalidInput, error.to_string()))
+        .map_err(|error| ApiError::new(ErrorCode::InvalidInput, bounded(error.to_string())))
+}
+
+/// Keep at most [`INVALID_INPUT_ECHO_LIMIT`] bytes of `text`, cut on a character boundary and
+/// marked with `…`.
+///
+/// Validator and decoder texts quote the caller's value. Unbounded, a request of megabytes
+/// comes back whole in its own refusal, and from there into logs.
+fn bounded(mut text: String) -> String {
+    if text.len() <= INVALID_INPUT_ECHO_LIMIT {
+        return text;
+    }
+    text.truncate(text.floor_char_boundary(INVALID_INPUT_ECHO_LIMIT));
+    text.push('…');
+    text
 }
 
 fn decode_validated<T: DeserializeOwned + JsonSchema>(
@@ -310,6 +374,7 @@ fn decode_validated<T: DeserializeOwned + JsonSchema>(
 /// Report a schema failure and name the offending field as a JSON Pointer into the request.
 ///
 /// A missing required property is reported at the parent object, so its name is appended.
+/// The validator's text quotes the offending value, so it is [`bounded`].
 fn invalid_input(error: &jsonschema::ValidationError<'_>) -> ApiError {
     let location = if let ValidationErrorKind::Required {
         property: Value::String(name),
@@ -319,7 +384,7 @@ fn invalid_input(error: &jsonschema::ValidationError<'_>) -> ApiError {
     } else {
         error.instance_path().clone()
     };
-    let refused = ApiError::new(ErrorCode::InvalidInput, error.to_string());
+    let refused = ApiError::new(ErrorCode::InvalidInput, bounded(error.to_string()));
     if location.is_empty() {
         refused
     } else {
@@ -337,16 +402,221 @@ okf_jawn_contract::for_each_operation!(dispatch_operations);
 
 #[cfg(test)]
 mod tests {
-    use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-    use okf_jawn_contract::scope::ReplayPolicy;
-    use serde_json::json;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{ledger_body, replay_response};
+    use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
+    use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+    use okf_jawn_contract::identity::{Digest, IdempotencyKey, TenantId, WorkspaceId};
+    use okf_jawn_contract::metadata::OperationName;
+    use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
+    use serde::{Serialize, Serializer};
+    use serde_json::{Value, json};
+
+    use super::{Caller, authorize_targets, finish, ledger_body, new_mutation_id, replay_response};
+    use crate::access::AccessControl;
+    use crate::context::{TenantGrant, WorkspaceGrant};
+    use crate::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore};
+    use crate::ports::PortFuture;
+
+    /// Access double that grants nothing and counts how often it was asked.
+    #[derive(Default)]
+    struct NoAccess {
+        lookups: AtomicUsize,
+    }
+
+    /// A request whose `RequestScope` declares nothing to authorize. No contract request does;
+    /// the dispatch table only reaches contract requests, so this one is checked directly.
+    struct Untargeted;
+
+    /// Ledger double that records the bodies it was asked to keep and the leases it was asked
+    /// to end. `begin` is never reached: these tests enter after the handler.
+    #[derive(Default)]
+    struct RecordingLedger {
+        completed: Mutex<Vec<Value>>,
+        released: Mutex<Vec<MutationLease>>,
+    }
+
+    /// A handler response whose serialization fails.
+    struct Unserializable;
 
     const CONNECTOR: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const POLICY: ReplayPolicy = ReplayPolicy::AlreadyIssued {
         id_pointer: "/issued/id",
     };
+
+    impl NoAccess {
+        fn refuse<T>(&self) -> Result<T, ApiError> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            Err(ApiError::new(ErrorCode::Forbidden, "nothing is granted"))
+        }
+    }
+
+    impl AccessControl for NoAccess {
+        fn authorize<'a>(
+            &'a self,
+            _principal: &'a Principal,
+            _workspace: WorkspaceId,
+            _permission: Permission,
+        ) -> PortFuture<'a, WorkspaceGrant> {
+            Box::pin(async { self.refuse() })
+        }
+
+        fn authorize_tenant<'a>(
+            &'a self,
+            _principal: &'a Principal,
+            _permission: Permission,
+        ) -> PortFuture<'a, TenantGrant> {
+            Box::pin(async { self.refuse() })
+        }
+
+        fn grants<'a>(&'a self, _principal: &'a Principal) -> PortFuture<'a, Vec<WorkspaceGrant>> {
+            Box::pin(async { self.refuse() })
+        }
+
+        fn grant_creator<'a>(
+            &'a self,
+            _principal: &'a Principal,
+            _workspace: WorkspaceId,
+        ) -> PortFuture<'a, WorkspaceGrant> {
+            Box::pin(async { self.refuse() })
+        }
+    }
+
+    impl RequestScope for Untargeted {
+        fn targets(&self) -> Vec<Target> {
+            Vec::new()
+        }
+
+        fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+            None
+        }
+    }
+
+    impl RecordingLedger {
+        fn completed(&self) -> Result<Vec<Value>, ApiError> {
+            Ok(self.completed.lock().map_err(|_| poisoned())?.clone())
+        }
+
+        fn released(&self) -> Result<Vec<MutationLease>, ApiError> {
+            Ok(self.released.lock().map_err(|_| poisoned())?.clone())
+        }
+    }
+
+    impl MutationStore for RecordingLedger {
+        fn begin<'a>(
+            &'a self,
+            _key: &'a MutationKey,
+            _digest: &'a Digest,
+        ) -> PortFuture<'a, BeginOutcome> {
+            Box::pin(async {
+                Err(ApiError::new(
+                    ErrorCode::Internal,
+                    "the recording ledger does not begin mutations",
+                ))
+            })
+        }
+
+        fn complete(&self, _lease: MutationLease, response: Value) -> PortFuture<'_, ()> {
+            Box::pin(async move {
+                self.completed
+                    .lock()
+                    .map_err(|_| poisoned())?
+                    .push(response);
+                Ok(())
+            })
+        }
+
+        fn release(&self, lease: MutationLease) -> PortFuture<'_, ()> {
+            Box::pin(async move {
+                self.released.lock().map_err(|_| poisoned())?.push(lease);
+                Ok(())
+            })
+        }
+    }
+
+    impl Serialize for Unserializable {
+        fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom(
+                "this response cannot be serialized",
+            ))
+        }
+    }
+
+    fn poisoned() -> ApiError {
+        ApiError::new(ErrorCode::Internal, "recording ledger lock poisoned")
+    }
+
+    fn lease() -> MutationLease {
+        MutationLease {
+            mutation_id: new_mutation_id(),
+            token: 7,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_that_declares_no_target_is_refused_as_internal() -> Result<(), ApiError> {
+        let access = NoAccess::default();
+        let principal = Principal {
+            subject: "alice".to_owned(),
+            tenant_id: TenantId::try_from("tenant-local".to_owned())
+                .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?,
+            route: AccessRoute::LocalOwner,
+            client_id: None,
+            delegation: None,
+        };
+        let caller = Caller {
+            principal: &principal,
+            session_id: None,
+        };
+        let refused =
+            authorize_targets(&access, &caller, OperationName::GetHealth, &Untargeted).await;
+        assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
+        assert_eq!(access.lookups.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unbuildable_ledger_body_releases_the_lease_and_stores_nothing()
+    -> Result<(), ApiError> {
+        let ledger = RecordingLedger::default();
+        let held = lease();
+        // The handler succeeded and returned a secret, but not the identity the policy names.
+        let outcome: Result<Value, ApiError> = Ok(json!({ "secret": "s" }));
+        let refused = finish(&ledger, Some(held), POLICY, outcome).await;
+        assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
+        assert_eq!(ledger.released()?, vec![held]);
+        assert_eq!(ledger.completed()?, Vec::<Value>::new());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unserializable_response_releases_the_lease_and_stores_nothing()
+    -> Result<(), ApiError> {
+        let ledger = RecordingLedger::default();
+        let held = lease();
+        let outcome: Result<Unserializable, ApiError> = Ok(Unserializable);
+        let refused = finish(&ledger, Some(held), ReplayPolicy::StoredResponse, outcome).await;
+        assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
+        assert_eq!(ledger.released()?, vec![held]);
+        assert_eq!(ledger.completed()?, Vec::<Value>::new());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_completed_mutation_keeps_its_ledger_body_and_is_not_released() -> Result<(), ApiError>
+    {
+        let ledger = RecordingLedger::default();
+        let body = json!({ "issued": { "id": CONNECTOR }, "secret": "s" });
+        let outcome: Result<Value, ApiError> = Ok(body.clone());
+        assert_eq!(finish(&ledger, Some(lease()), POLICY, outcome).await?, body);
+        assert_eq!(
+            ledger.completed()?,
+            vec![json!({ "connector_id": CONNECTOR })]
+        );
+        assert_eq!(ledger.released()?, Vec::new());
+        Ok(())
+    }
 
     #[test]
     fn stored_response_policy_keeps_the_whole_body() -> Result<(), ApiError> {

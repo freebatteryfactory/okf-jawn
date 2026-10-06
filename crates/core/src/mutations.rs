@@ -1,9 +1,12 @@
-//! Durable mutation ledger: one write identity per (tenant, subject, operation, key).
+//! Durable mutation ledger: one write identity per (tenant, subject, client, operation, key).
 //!
 //! # Retention
-//! Completed mutations are retained for 7 days; a key reused after that starts a new mutation.
-//! A mutation that began and never completed stays until a later attempt completes it; the
-//! 7-day TTL never drops it, or crash protection has a hole.
+//! A completed row is kept for 7 days, and so is a released row: its attempt failed and said
+//! so, and nothing is left to reconcile. A key reused after its row is dropped starts a new
+//! mutation. Only a row whose lease expired without `complete` or `release` (its attempt
+//! crashed, or could not reach the ledger) stays until it is reconciled, that is until a later
+//! attempt resumes it and completes or releases it. The 7-day TTL never drops such a row, or
+//! crash protection has a hole.
 //!
 //! # Resumed attempts
 //! The ledger never looks into another store. Every store that creates a durable row takes the
@@ -12,9 +15,19 @@
 //! re-runs the handler with `Attempt::Resumed` and the same `MutationId`, and each store hands
 //! back what the earlier attempt already wrote instead of writing it twice.
 //!
-//! # Failed handlers
-//! A handler error releases the lease. The row keeps its id and digest and is not completed,
-//! so the same key and body may be sent again at once; that retry runs as a resumed attempt.
+//! # Leases
+//! `begin` grants a lease, and every grant of the same mutation carries a different token. A
+//! slow attempt whose lease expired and the resumed attempt that took the mutation over run
+//! under one `MutationId` at the same time, so `complete` and `release` take the
+//! [`MutationLease`] and act only for the current grant: the slow attempt's `complete` is
+//! refused with `Conflict`, and its `release` changes nothing.
+//!
+//! # Failed attempts
+//! A handler error releases the lease, and so does any failure after a successful handler
+//! (the response cannot be serialized, the ledger body cannot be built, or `complete` fails
+//! for a reason other than a lost lease). The row keeps its id and digest and is not
+//! completed, so the same key and body may be sent again at once; that retry runs as a
+//! resumed attempt.
 
 use std::collections::BTreeMap;
 
@@ -28,23 +41,42 @@ use sha2::{Digest as ShaDigest, Sha256};
 use crate::ports::PortFuture;
 
 /// Ledger key: one caller can never read another caller's stored response.
+///
+/// Subject and client are separate components: a connector acting for a subject is a
+/// different caller from the subject, so it neither replays the subject's stored response nor
+/// conflicts with the subject's key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MutationKey {
     /// Tenant boundary.
     pub tenant_id: TenantId,
     /// Authenticated subject.
     pub subject: String,
+    /// Client the subject acts through (`Principal::client_id`); `None` for a direct caller.
+    pub client_id: Option<String>,
     /// Canonical operation name.
     pub operation: OperationName,
     /// Caller-chosen retry identity.
     pub key: IdempotencyKey,
 }
 
+/// One granted lease on a mutation. `token` is different for every grant of the same mutation.
+///
+/// Two attempts can run under one `MutationId` at once: a slow first attempt whose lease
+/// expired, and the resumed attempt that took the mutation over. Only the holder of the
+/// current grant may complete or release it, so each grant is named by its own token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MutationLease {
+    /// The durable write identity.
+    pub mutation_id: MutationId,
+    /// Changes every time the lease is granted; a stale holder cannot complete or release.
+    pub token: u64,
+}
+
 /// Atomic insert-or-read outcome for one begin attempt.
 #[derive(Debug, Clone)]
 pub enum BeginOutcome {
-    /// No prior row; execute the handler under this identity.
-    New(MutationId),
+    /// No prior row; execute the handler under this lease.
+    New(MutationLease),
     /// Same key and digest already completed; return the stored response (or `AlreadyIssued`).
     Replay(StoredResponse),
     /// Same key, different digest.
@@ -60,11 +92,12 @@ pub enum BeginOutcome {
         retry_after: u32,
     },
     /// An earlier attempt ended without completing: its lease expired, or it was released
-    /// after a handler error. The caller now holds the lease and re-runs the handler under
+    /// after a handler error. The caller now holds a new lease and re-runs the handler under
     /// the same identity.
     Abandoned {
-        /// Mutation whose rows may already exist in the stores the handler writes.
-        mutation_id: MutationId,
+        /// New grant on the mutation whose rows may already exist in the stores the handler
+        /// writes. Its token differs from every earlier grant's.
+        lease: MutationLease,
     },
 }
 
@@ -89,13 +122,18 @@ pub trait MutationStore: Send + Sync {
     ) -> PortFuture<'a, BeginOutcome>;
 
     /// Mark the mutation completed and retain the response for replay.
-    fn complete(&self, mutation_id: MutationId, response: Value) -> PortFuture<'_, ()>;
-
-    /// End the lease after a handler error. The row keeps its id; the same key may begin again.
     ///
-    /// The next `begin` with the same key and digest returns `Abandoned` without waiting for
-    /// the lease to expire. Releasing a completed mutation changes nothing.
-    fn release(&self, mutation_id: MutationId) -> PortFuture<'_, ()>;
+    /// Compare-and-set on the lease: fails with `ErrorCode::Conflict` when `lease` is no longer
+    /// the current grant (it expired and another attempt holds the mutation). Nothing is
+    /// stored in that case; the response of the attempt that holds the grant is the one kept.
+    fn complete(&self, lease: MutationLease, response: Value) -> PortFuture<'_, ()>;
+
+    /// End the lease after a failed attempt. The row keeps its id; the same key may begin again.
+    ///
+    /// Ends the lease only if `lease` is the current grant; a stale lease is a no-op, and so is
+    /// releasing a completed mutation. After a release that took effect, the next `begin` with
+    /// the same key and digest returns `Abandoned` without waiting for the lease to expire.
+    fn release(&self, lease: MutationLease) -> PortFuture<'_, ()>;
 }
 
 /// SHA-256 over the typed request re-serialized with object keys sorted; independent of
