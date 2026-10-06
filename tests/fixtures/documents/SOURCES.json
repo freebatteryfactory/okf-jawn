@@ -4,6 +4,7 @@
   "license_note": "Self-generated fixtures remain MIT for qualification. Corpus files are copied from docling-project/docling (MIT) at commit 4e650af5.",
   "kind_note": "Each fixture declares `kind`: what the file is (pdf, image, docx, xlsx or pptx), read from its bytes and not from what a converter reports. qualification/docling/lib/criteria.mjs decides from the declared kind which criteria are judged for the fixture; the format the library reports is itself judged against it (format_recognised).",
   "expect_note": "Each supported fixture declares `expect`: what its content is, written from the fixture itself (its generator, its XML parts, or an independent text extraction named in confirmed_by) and never from converter output. qualification/docling/lib/expect.mjs holds the comparison rules; the receipt records every expectation with whether it was found. An expectation is not loosened to make a run pass.",
+  "font_runs_note": "An entry of `markdown_contains` may be an object with `crosses_font_runs: true`: the phrase is set in more than one font on the page, as `expect.crosses_font_runs_confirmed_by` says from the file. Such an expectation is judged by the fixture's criterion content_across_font_runs, with the same comparison as every other, and not by content. It is kept apart because the library ends a text cell at every font change and joins cells with a space, so it extracts the phrase with spaces the page does not show; the expectation stays what the page shows.",
   "undecoded_glyphs_note": "A PDF fixture declares under `expect.undecoded_glyphs.pages` how many glyphs each page draws that the file gives no Unicode for: character codes shown in a simple font that has no /ToUnicode map and whose /Encoding /Differences names the code with a placeholder glyph name (g115, SM590000) instead of an Adobe glyph name. The library prints `/` and the name for each (docling-pdf textparse.rs), and the harness must find exactly these numbers on exactly these pages (criterion undecoded_glyphs_reported). The numbers are counted from the file's own font dictionaries and page content streams, never from converter output. A PDF fixture that declares none must show none: born_digital_text.pdf and table_heavy.pdf name one font, the standard Helvetica, with no /Differences; scanned_image_only.pdf and scanned_text.pdf name no font and show no text.",
   "corpus_source": {
     "repository": "https://github.com/docling-project/docling",
@@ -248,11 +249,12 @@
           "Row and Column Access Control",
           "Recent news headlines are filled with reports of data breaches",
           "1.1 Security fundamentals",
-          "Work Function Usage (WRKFCNUSG)",
+          { "text": "Work Function Usage (WRKFCNUSG)", "crosses_font_runs": true },
           "Table 3-1 Special registers and their corresponding values",
           "Figure 3-10 Column masks shown in System i Navigator",
           "The authorization ID that initiated the connection."
         ],
+        "crosses_font_runs_confirmed_by": "reading the content stream of page 8 (object 324) without any converter: the phrase is shown by three operators in three font selections, /F2 (Helvetica) `Work Function Usage (`, then /F14 (BookMasterGothic-Bold) `WRKFCNUSG`, then /F2 again `)`; the page shows no space inside the parentheses, and xpdf pdftotext 4.06 prints `Work Function Usage (WRKFCNUSG)`",
         "tables_at_least": 4,
         "table_rows": [
           ["FUNCTION_ID", "VARCHAR(30)", "ID of the function."],

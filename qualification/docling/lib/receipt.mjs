@@ -41,6 +41,7 @@ import {
   notApplicable,
   notJudged,
   pass,
+  splitExpect,
   stopped,
   unjudged,
 } from './criteria.mjs';
@@ -448,9 +449,11 @@ export function fixtureEntry({ only, run, report, source, evidence, build, other
     const doc = describeDocument(blocked ? null : evidence.document);
     const facts = bodyFacts(doc);
     const images = (base.document?.page_images ?? []).map((image) => ({ ...image, file: evidence?.pageFiles?.[image.file] ?? null }));
-    criteria[contentAspect(source)] =
-      blocked ??
-      contentJudgement(source.expect, { markdown: evidence.markdown ?? '', ...facts, page_count: kind.page_renders ? null : doc.pages.length });
+    // One comparison, two criteria: the expectations that cross a font change are judged apart.
+    const expect = splitExpect(source);
+    const observed = { markdown: evidence?.markdown ?? '', ...facts, page_count: kind.page_renders ? null : doc.pages.length };
+    criteria[contentAspect(source)] = blocked ?? contentJudgement(expect.plain, observed);
+    if (expect.font_runs) criteria.content_across_font_runs = blocked ?? contentJudgement(expect.font_runs, observed);
     if (!kind.page_renders) {
       criteria.page_renders = notApplicable('the library keeps page images for the PDF/image pipeline only (docling converter.rs:756 generate_page_images)', {
         page_image_count: images.length,

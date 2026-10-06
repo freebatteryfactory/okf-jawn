@@ -1689,6 +1689,68 @@ test('a PDF must show glyph-name placeholders on exactly the pages and in the nu
   assert.match(detector, /`is_gid_name` accepts it \(lines 354-376\)/);
 });
 
+test('an expectation that crosses a font change is judged by its own criterion, with the same comparison, and content judges the others', async () => {
+  const phrase = 'Work Function Usage (WRKFCNUSG)';
+  const marked = structuredClone(DOCLING_SOURCES);
+  marked.files['table_heavy.pdf'].expect = {
+    confirmed_by: 'test stub',
+    crosses_font_runs_confirmed_by: 'three font selections in the content stream of the stub',
+    markdown_contains: ['Hello world', { text: phrase, crosses_font_runs: true }],
+    tables: 1,
+    pages: 1,
+  };
+  const converted = (markdown) => doclingReceipt({ 'table_heavy.pdf': { evidence: { markdown } } }, { sources: marked });
+  const of = (receipt, aspect) => doclingCriterion(receipt, `table_heavy.pdf/${aspect}`);
+
+  // The fixture emits both criteria, both required; a fixture that marks nothing emits only content.
+  assert.deepEqual(doclingCriteria.fontRunExpectations(marked.files['table_heavy.pdf']), [{ text: phrase, crosses_font_runs: true }]);
+  assert.deepEqual(doclingCriteria.fixtureAspects('table_heavy.pdf', marked.files['table_heavy.pdf']).map(({ aspect, required }) => [aspect, required]).slice(3, 5), [['content', true], ['content_across_font_runs', true]]);
+  assert.ok(!doclingCriteria.fixtureAspects('table_heavy.pdf', DOCLING_SOURCES.files['table_heavy.pdf']).some(({ aspect }) => aspect === 'content_across_font_runs'));
+
+  // What the library gives today: the phrase with a space after "(" and before ")". Content passes without it.
+  const today = converted('## Title\n\nHello   world\n\n- /SM590000 Work Function Usage ( WRKFCNUSG )\n');
+  assert.equal(of(today, 'content').result, 'pass');
+  assert.deepEqual(of(today, 'content_across_font_runs'), {
+    id: 'table_heavy.pdf/content_across_font_runs',
+    required: true,
+    result: 'fail',
+    detail: `1 of 1 expectations are not met; all: markdown_contains ${JSON.stringify(phrase)}`,
+  });
+  assert.equal(today.result, 'FAIL');
+  assert.deepEqual(doclingFailedIds(today), ['table_heavy.pdf/content_across_font_runs'], 'exactly the one criterion that names the limitation fails');
+  const entry = entryOf(today, 'table_heavy.pdf');
+  assert.deepEqual(entry.criteria.content.checks.map((check) => check.expected), ['Hello world', 1], 'content no longer holds the marked phrase');
+  assert.deepEqual(entry.criteria.content_across_font_runs.checks, [{ kind: 'markdown_contains', expected: phrase, case_insensitive: false, ok: false }]);
+  assert.equal(entry.criteria.content_across_font_runs.confirmed_by, 'three font selections in the content stream of the stub');
+
+  // The matcher is the one content uses and forgives nothing: only the phrase as the page shows it passes.
+  assert.equal(of(converted(`Hello world\n\n${phrase}\n`), 'content_across_font_runs').result, 'pass');
+  assert.equal(converted(`Hello world\n\n${phrase}\n`).result, 'PASS');
+  for (const spaced of ['Work Function Usage ( WRKFCNUSG )', 'Work Function Usage (WRKFCNUSG )', 'Work Function Usage ( WRKFCNUSG)', 'work function usage (wrkfcnusg)', 'Work Function Usage(WRKFCNUSG)']) {
+    assert.equal(of(converted(`Hello world\n\n${spaced}\n`), 'content_across_font_runs').result, 'fail', spaced);
+  }
+  // A failure of an ordinary expectation still fails content, and only content.
+  const lost = converted(`${phrase}\n`);
+  assert.deepEqual(doclingFailedIds(lost), ['table_heavy.pdf/content']);
+  assert.equal(of(lost, 'content').detail, '1 of 2 expectations are not met; all: markdown_contains "Hello world"');
+  // A conversion that failed leaves both unjudged.
+  const failed = doclingReceipt({ 'table_heavy.pdf': { fixture: { outcome: 'FAIL_converter_error', status: null } } }, { sources: marked });
+  assert.deepEqual([of(failed, 'content').result, of(failed, 'content_across_font_runs').result], ['not_judged', 'not_judged']);
+
+  // The real declarations: exactly one expectation is marked, in the corpus PDF, with how it was confirmed.
+  const sources = JSON.parse(await readFile(join(root, 'tests/fixtures/documents/SOURCES.json'), 'utf8'));
+  const withMarks = Object.entries(sources.files).filter(([, source]) => doclingCriteria.fontRunExpectations(source).length > 0);
+  assert.deepEqual(withMarks.map(([name, source]) => [name, doclingCriteria.fontRunExpectations(source)]), [['corpus/redp5110_sampled.pdf', [{ text: phrase, crosses_font_runs: true }]]]);
+  const corpus = sources.files['corpus/redp5110_sampled.pdf'];
+  assert.match(corpus.expect.crosses_font_runs_confirmed_by, /^reading the content stream of page 8 .*\/F2 \(Helvetica\).*\/F14 \(BookMasterGothic-Bold\).*\/F2 again/);
+  assert.equal(corpus.expect.markdown_contains.length, 7, 'no expectation was dropped: six are judged by content, one by the font-run criterion');
+  assert.equal(doclingCriteria.splitExpect(corpus).plain.markdown_contains.length, 6);
+  assert.deepEqual(doclingCriteria.splitExpect(corpus).font_runs, { confirmed_by: corpus.expect.crosses_font_runs_confirmed_by, markdown_contains: [{ text: phrase, crosses_font_runs: true }] });
+  assert.deepEqual(doclingCriteria.requiredIds(sources).filter((id) => id.endsWith('/content_across_font_runs')), ['corpus/redp5110_sampled.pdf/content_across_font_runs']);
+  assert.match(sources.font_runs_note, /the expectation stays what the page shows/);
+  assert.match(today.criterion_rules.content_across_font_runs, /by the same comparison as content and with nothing forgiven/);
+});
+
 test('each content, page-render and provenance failure fails its fixture and the receipt, and its detail gives the total and the examples', () => {
   {
     const receipt = doclingReceipt({ 'corpus/word_sample.docx': { evidence: { markdown: '## Title\n\nGoodbye\n' } } });

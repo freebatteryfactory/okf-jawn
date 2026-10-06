@@ -70,6 +70,8 @@ export const CRITERION_RULES = Object.freeze({
     'the format the library reports for the file is the format of the kind SOURCES.json declares for the fixture; what is judged for a fixture follows the declared kind, never the reported format',
   content:
     'every expectation the fixture declares in SOURCES.json holds for the converted document; match_rules says how each kind of expectation is compared',
+  content_across_font_runs:
+    'every expectation SOURCES.json marks as crossing a font change (crosses_font_runs) holds for the converted document, by the same comparison as content and with nothing forgiven; kept apart from content because the library ends a text cell at every font change and joins cells with a space (docling-pdf dp_lines.rs:227-229, assemble.rs:2084), so a phrase set in more than one font is extracted with spaces the page does not show',
   no_invented_text:
     'the converter invents no text for a page without glyphs: the fixture shows none, so the Markdown with HTML comments (the picture placeholders) removed holds no letter and no digit; every other expectation the fixture declares holds as well',
   page_renders: PAGE_RENDER_RULE,
@@ -101,6 +103,28 @@ export function contentAspect(source) {
 }
 
 /**
+ * The expectations of a fixture that cross a font change: the `markdown_contains` entries
+ * marked `crosses_font_runs`. They are judged by content_across_font_runs and not by content.
+ */
+export function fontRunExpectations(source) {
+  return (source?.expect?.markdown_contains ?? []).filter((entry) => entry !== null && typeof entry === 'object' && entry.crosses_font_runs === true);
+}
+
+/**
+ * The fixture's `expect` block in two parts: `plain` without the expectations that cross a
+ * font change, and `font_runs` with only those (null when the fixture marks none). Both are
+ * judged by the same function.
+ */
+export function splitExpect(source) {
+  const marked = fontRunExpectations(source);
+  if (marked.length === 0) return { plain: source?.expect, font_runs: null };
+  return {
+    plain: { ...source.expect, markdown_contains: source.expect.markdown_contains.filter((entry) => !marked.includes(entry)) },
+    font_runs: { confirmed_by: source.expect.crosses_font_runs_confirmed_by ?? null, markdown_contains: marked },
+  };
+}
+
+/**
  * The criteria one fixture run emits, in the order they are judged.
  * @param {string} name a key of SOURCES.json `files`, or TIMEOUT_PROBE
  * @param {object} [source] the fixture's entry in SOURCES.json
@@ -119,6 +143,7 @@ export function fixtureAspects(name, source) {
     'evidence',
     'format_recognised',
     contentAspect(source),
+    ...(fontRunExpectations(source).length > 0 ? ['content_across_font_runs'] : []),
     'page_renders',
     { aspect: 'provenance', required: kind.provenance !== 'recorded' },
     // Where locations are judged and the fixture has no text to locate, say so as a criterion.
