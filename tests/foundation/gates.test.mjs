@@ -132,11 +132,19 @@ test('every foundation test file is in exactly one of the fast and slow lists, a
  assert.deepEqual([...foundationTests.fast,...foundationTests.slow].sort(),onDisk,'a *.test.mjs file is in neither list, in both, or listed but missing');
  for(const name of foundationTests.fast){
   const source=await read(`tests/foundation/${name}`);
-  assert.doesNotMatch(source,/fixture-repo|process\.mjs|child_process|Bun\.spawn|Bun\.\$|\$\{?\s*git/,`${name} is listed fast but creates a repository or spawns a process`);
+  assert.doesNotMatch(source,/fixture-repo|process\.mjs|child_process|Bun\.spawn|Bun\.\$|\$\{?\s*\bgit\b/,`${name} is listed fast but creates a repository or spawns a process`);
  }
  const entry=await read('scripts/dev.mjs');
  assert.match(entry,/case 'check-offline': await offlineChecks\(\{ fast: args\.includes\('--fast'\) \}\); break;/);
  assert.match(entry,/!fast \|\| foundationTests\.fast\.includes\(name\)/);
+});
+test('no foundation test or script source contains a raw control byte where a regex escape was meant',async()=>{
+ const files=[];
+ for(const dir of ['tests/foundation','scripts'])for(const entry of await readdir(join(root,dir),{recursive:true}))if(entry.endsWith('.mjs'))files.push(`${dir}/${entry}`.replaceAll('\\','/'));
+ assert.ok(files.length>10,'the source scan found almost nothing');
+ // Tab, LF and CR are legitimate; every other C0 byte (a backspace from a mistyped `\b` for one) is not.
+ const control=/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/;
+ for(const file of files){const at=(await read(file)).search(control);assert.equal(at,-1,`${file} has a raw control byte at offset ${at}`);}
 });
 test('a failed git status counts as dirty, never as the clean commit',async t=>{
  const {root:repo}=await fixtureRepo(t,fixture);const sha=await git(repo,'rev-parse','HEAD');
