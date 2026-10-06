@@ -20,13 +20,20 @@ const [task = 'help', ...args] = process.argv.slice(2);
 // the offline tests create disposable repositories; an inherited GIT_DIR or GIT_INDEX_FILE
 // would aim their git commands at this repository.
 for (const name of gitLocalEnvironment) delete process.env[name];
+/** The options that take a value, with what the value is (`noun`) and how the usage shows it (`hint`): the one list `option()` and `positional` read. */
+const valueOptions = Object.freeze({
+  '--base': { noun: 'commit', hint: 'sha' },
+  '--head': { noun: 'commit', hint: 'sha' },
+  '--step': { noun: 'step id', hint: 'id' },
+});
 /**
  * The value of the option `--name`, written `--name value` or `--name=value`, or undefined when it is not
  * given. An option that is given with no value (nothing after it, an empty `=`, or another flag), or
  * given twice, is an error: it is never ignored and never quietly takes the next argument.
- * `noun` is what the value is and `hint` how the usage shows it.
+ * The option must be one of `valueOptions`.
  */
-function option(name, { noun = 'value', hint = 'value' } = {}) {
+function option(name) {
+  const { noun, hint } = valueOptions[name];
   const given = args.filter(value => value === name || value.startsWith(`${name}=`));
   if (given.length > 1) throw new Error(`${task} ${name} was given more than once; name one ${noun}`);
   if (given.length === 0) return undefined;
@@ -34,9 +41,8 @@ function option(name, { noun = 'value', hint = 'value' } = {}) {
   if (value === undefined || value === '' || value.startsWith('--')) throw new Error(`${task} ${name} needs a ${noun}: bun scripts/dev.mjs ${task} ${name} <${hint}>`);
   return value;
 }
-const commitOption = { noun: 'commit', hint: 'sha' };
-/** Arguments that are neither a `--flag` nor the value of one. */
-const positional = args.filter((value, index) => !value.startsWith('--') && !args[index - 1]?.startsWith('--'));
+/** Arguments that are neither a `--flag` nor the value of a value-taking option written in two tokens (`--head HEAD`); what follows `--head=HEAD` or a flag with no value (`--fast`) is positional. */
+const positional = args.filter((value, index) => !value.startsWith('--') && !Object.hasOwn(valueOptions, args[index - 1] ?? ''));
 
 async function doctor() {
   const selected = await pins(root);
@@ -185,7 +191,7 @@ async function main() {
     case 'lanes': process.stdout.write(`${(await createLanes(root, { names: args })).join('\n')}\n`); break;
     case 'lanes-table': process.stdout.write(await syncLaneTable(root) ? 'AGENTS.md lane table regenerated.\n' : 'AGENTS.md lane table is current.\n'); break;
     case 'scope': {
-      const result = await checkScope(root, { lane: positional[0], base: option('--base', commitOption), head: option('--head', commitOption) });
+      const result = await checkScope(root, { lane: positional[0], base: option('--base'), head: option('--head') });
       process.stdout.write(`scope: ${result.changed.length} changed path(s) since ${result.base}, all inside ${result.name}.\n`);
       break;
     }
@@ -195,7 +201,7 @@ async function main() {
       break;
     }
     case 'premerge': {
-      const result = await runPremerge(root, { only: option('--step', { noun: 'step id', hint: 'id' }) });
+      const result = await runPremerge(root, { only: option('--step') });
       if (!result.passed) process.exitCode = 1;
       break;
     }
@@ -208,7 +214,7 @@ async function main() {
     case 'lanes-reset': process.stdout.write(`${await resetLanes(root)}\n`); break;
     case 'qualify': await qualify(); break;
     case 'check-receipts': {
-      const head = option('--head', commitOption);
+      const head = option('--head');
       if (head === undefined) { process.stdout.write(`${await checkReceipts(root)}\n`); break; }
       const lines = await staleReceiptLines(root, head);
       if (lines.length) { process.stderr.write(`${lines.join('\n')}\n`); process.exitCode = 1; }

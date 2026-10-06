@@ -226,3 +226,19 @@ test('a value-taking option given no value, or twice, is an error that says so, 
   assert.equal(result.stdout,'',args.join(' '));
  }
 });
+
+test('the lane named on the command line is the same lane wherever the options stand and however they are written',async t=>{
+ // On main there is no lane row, so a lane that is dropped from the arguments is an error and one that is seen succeeds.
+ const repo=await repoWithTools(t,{'README.md':'fixture\n','.gitignore':'scripts/\n'});
+ const head=await git(repo,'rev-parse','HEAD');
+ for(const args of [['--head='+head,'storage'],['storage','--head='+head],['--head',head,'storage'],['storage','--head',head],
+  ['--base=main','storage'],['--base','main','storage'],['--unknown-flag','storage']]){
+  const result=await devIn(repo,'scope',...args);
+  assert.equal(result.code,0,args.join(" ")+": "+result.stderr);
+  assert.match(result.stdout,/^scope: 0 changed path\(s\) since [0-9a-f]{40}, all inside storage\.$/m,args.join(' '));
+ }
+ // The value of a two-token option is not a lane.
+ const lonely=await devIn(repo,'scope','--head',head);
+ assert.equal(lonely.code,1);
+ assert.match(lonely.stderr,/No scope row for branch main/);
+});
