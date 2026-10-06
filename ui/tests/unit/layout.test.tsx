@@ -1,6 +1,7 @@
 /** Layout normalize → validate pipeline and PresentView render path. */
 
 import { render, screen } from '@testing-library/react';
+import { compile, type TopLevelSpec } from 'vega-lite';
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 import type { zPresentResponse } from '../../src/api/generated/zod.gen';
@@ -562,5 +563,139 @@ describe('PresentView dataset integrity checks', () => {
     blocks.push({ bytes: new Uint8Array(1), offset: 4 * mebibyte, hasMore: false });
     const container = await renderServing(blocks, 'c'.repeat(64));
     await expectRefusal(container, 'Dataset exceeds the inline display budget');
+  });
+});
+
+describe('PresentView chart specification validation', () => {
+  const source = {
+    item_id: '11111111-2222-4333-8444-555555555555',
+    path: 'fixtures/metrics.json',
+    revision: '0123456789abcdef0123456789abcdef01234567',
+    selection: { kind: 'all' as const },
+    workspace_id: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
+  };
+  const rows = [{ category: 'a', value: 1 }];
+  const payload = new TextEncoder().encode(JSON.stringify(rows));
+  const validChart = {
+    $schema: 'https://vega.github.io/schema/vega-lite/v6.json',
+    data: { name: 'metrics' },
+    mark: 'bar',
+    encoding: {
+      x: { field: 'category', type: 'nominal' },
+      y: { field: 'value', type: 'quantitative' },
+    },
+  };
+  /** A JSON object with no mark, layer or composition: the wire schema takes it, `compile` throws. */
+  const rejectedChart = {
+    $schema: 'https://vega.github.io/schema/vega-lite/v6.json',
+    data: { name: 'metrics' },
+    encoding: {
+      x: { field: 'category', type: 'nominal' },
+      y: { field: 'value', type: 'quantitative' },
+    },
+  };
+
+  /** A json_render view that shows the chart named `metrics_chart` of `charts`. */
+  async function responseWith(charts: Record<string, unknown>) {
+    const digestBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
+    const digest = Array.from(digestBytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    const response = {
+      view: {
+        schema_version: 1,
+        title: 'Chart board',
+        description: 'One named Vega-Lite entry',
+        mode: 'pinned',
+        grammar: 'json_render',
+        bindings: [],
+        charts,
+        spec: {
+          root: 'root',
+          elements: {
+            root: {
+              type: 'Chart',
+              props: { binding: 'metrics', chart: 'metrics_chart', title: 'Metrics chart' },
+              children: [],
+            },
+          },
+        },
+      },
+      resolved_bindings: [
+        { name: 'metrics', source, units: {}, transforms: [], materialized: digest },
+      ],
+      warnings: [],
+      receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    } as z.infer<typeof zPresentResponse>;
+    return { response, digest };
+  }
+
+  /** A host that serves the source and the dataset, and remembers which tools were called. */
+  function host(digest: string) {
+    const called: string[] = [];
+    const callTool = async (name: string) => {
+      called.push(name);
+      if (name === 'show') {
+        return {
+          structuredContent: {
+            markdown: 'metrics',
+            media: [],
+            outline: [],
+            receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+            source,
+            truncated: false,
+            view: 'text',
+            warnings: [],
+          },
+        };
+      }
+      if (name === 'read_object') {
+        let binary = '';
+        for (const byte of payload) binary += String.fromCharCode(byte);
+        return {
+          structuredContent: {
+            data_base64: btoa(binary),
+            has_more: false,
+            media_type: 'application/json',
+            offset: '0',
+            sha256: digest,
+            total_size: String(payload.byteLength),
+          },
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    };
+    return { called, callTool };
+  }
+
+  it('uses a specification that compile itself rejects, beside one it accepts', () => {
+    expect(() => compile(rejectedChart as TopLevelSpec)).toThrow(/^Invalid specification /);
+    expect(() => compile(validChart as TopLevelSpec)).not.toThrow();
+  });
+
+  it('refuses a chart specification that compile rejects: an alert names the chart and no chart is drawn', async () => {
+    const { response, digest } = await responseWith({ metrics_chart: rejectedChart });
+    const { called, callTool } = host(digest);
+    const { container } = render(<PresentView response={response} callTool={callTool} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toMatch(
+      /^Chart "metrics_chart" failed validation: Invalid specification /,
+    );
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(container.querySelector('svg')).toBeNull();
+    expect(container.querySelector('table')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Metrics chart' })).toBeNull();
+    // The specification is judged before anything is asked of the host.
+    expect(called).toEqual([]);
+  });
+
+  it('draws the chart of the same view when its specification is one compile accepts', async () => {
+    const { response, digest } = await responseWith({ metrics_chart: validChart });
+    const { called, callTool } = host(digest);
+    const { container } = render(<PresentView response={response} callTool={callTool} />);
+    expect(await screen.findByRole('heading', { name: 'Metrics chart' })).toBeTruthy();
+    await expect
+      .poll(() => container.querySelector('svg') !== null, { timeout: 15_000 })
+      .toBe(true);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(called).toEqual(['show', 'read_object']);
   });
 });
