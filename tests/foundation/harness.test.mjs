@@ -2122,6 +2122,8 @@ test('a PDF must show glyph-name placeholders on exactly the pages and in the nu
   // The corpus PDF declares what was counted in the file; every other PDF declares nothing, which means none.
   assert.deepEqual(sources.files['corpus/redp5110_sampled.pdf'].expect.undecoded_glyphs.pages, { 3: 268, 5: 3, 6: 2, 8: 7, 11: 5 });
   assert.match(sources.files['corpus/redp5110_sampled.pdf'].expect.undecoded_glyphs.confirmed_by, /^reading the file without any converter/);
+  // How the numbers were obtained, and that two readers written independently of each other agree; the receipt carries the sentence as confirmed_by.
+  assert.match(sources.files['corpus/redp5110_sampled.pdf'].expect.undecoded_glyphs.confirmed_by, /The counts were obtained by that reader, written by whoever authored this expectation, and again by a second reader of the same PDF bytes that an independent reviewer of the harness wrote without sight of the first; the two agree on every page, and neither reader is a tool of this repository\.$/);
   for (const name of pdfs.filter((pdf) => pdf !== 'corpus/redp5110_sampled.pdf')) assert.equal(sources.files[name].expect.undecoded_glyphs, undefined, name);
   assert.match(sources.undecoded_glyphs_note, /never from converter output/);
   assert.match(good.criterion_rules.undecoded_glyphs_reported, /A pass says the text that cannot be decoded is detected and where; it does not say that text was recovered/);
