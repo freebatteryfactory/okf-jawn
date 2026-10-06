@@ -55,6 +55,20 @@ jobs:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('.bun-version', 'bun.lock') }}
       - run: bun scripts/dev.mjs bootstrap
+      # bootstrap has just replaced api/, generated/cli/ and ui/src/api/generated/ with what the
+      # pinned generators write, so the gen-check step below compares a new pass with bootstrap's
+      # output, not with the commit. This step is the comparison with the commit: a tracked file
+      # that changed, or a new file git does not ignore, means the committed generated output is
+      # stale. What bootstrap writes elsewhere (node_modules, target, ui/dist) is ignored by git.
+      - name: The checkout is unchanged by generation
+        run: |
+          status="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$status" ]; then
+            echo "::error::bootstrap changed the checkout: the committed generated output is not what the pinned generators write. Run 'bun scripts/dev.mjs gen' and commit the result."
+            printf '%s\n' "$status"
+            git diff
+            exit 1
+          fi
       # One step per premerge step, in premerge order (tests/foundation/ci.test.mjs holds them
       # equal). Each runs unless the run was cancelled, so one failure cannot hide the others.
       - if: ${{ !cancelled() }}

@@ -15,15 +15,31 @@
 //! page image. The receipt carries the hash of each, so content, structure, provenance and
 //! page renders are judged from the files, against expectations this binary never sees.
 //!
+//! How the process ends is part of the protocol. It exits 0 once its receipt is written,
+//! whatever the converter returned, and `EXIT_HARNESS` when it could not make the run itself.
+//! Nothing here panics or exits otherwise, so any other exit is the process dying under the
+//! library, and the orchestrator judges that as the library failing on the fixture.
+//!
 //! Every receipt records the stage the fixture reached: `source` (the file never
 //! reached the converter), `converter_error` (`convert` returned `Err`) or
 //! `converter_status` (`convert` returned `Ok`). A must-fail fixture passes only at
 //! the last two, and only when the converter refused it. The one judgement made here is
 //! that conversion-level rule, named in `conversion_rule`.
+//!
+//! For a PDF that converted, two more observations are recorded, each by a rule that is a
+//! pure function over the document export: `locations` (module `locate`: every item with the
+//! source that located it, the export or the library's own text-layer document) and
+//! `undecoded_glyphs` (module `glyphs`: the library's placeholders for glyphs a font gives no
+//! Unicode for, by page). The orchestrator judges both; these two modules are the reference
+//! behaviour for the ingest lane. The text-layer document the lookups were made from is
+//! written beside the export as `text_layer.json`, with its hash in the receipt, so the
+//! orchestrator makes each lookup again from the two files and takes none on trust.
 
 use docling::{
     ConversionResult, ConversionStatus, DocumentConverter, PictureImage, SourceDocument,
 };
+use glyphs::UndecodedGlyphs;
+use locate::Locations;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -31,6 +47,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 /// The builder calls this harness makes. One value drives the converter and the receipt,
@@ -63,6 +80,9 @@ struct DocumentEvidence {
     markdown_nonempty: bool,
     markdown_sha256: String,
     page_images: Vec<PageImageRecord>,
+    /// The text-layer document of a PDF, as written beside the export; null for another
+    /// format and when the library could not read the text layer.
+    text_layer: Option<TextLayerEvidence>,
 }
 
 /// Printed once on stdout when the receipt is on disk and the process is about to wait.
@@ -106,6 +126,9 @@ struct FixtureReceipt {
     input_format: Option<&'static str>,
     /// `docling::pdf_page_count` on the fixture bytes; null for a fixture that is not a PDF.
     library_page_count: Option<PageCount>,
+    /// Where each item of a converted PDF is and which source located it; null for another
+    /// format and when `convert` did not return `Ok`.
+    locations: Option<Locations>,
     original_unchanged: bool,
     outcome: String,
     path: PathBuf,
@@ -115,6 +138,9 @@ struct FixtureReceipt {
     stage: Stage,
     /// The `ConversionStatus` label; null unless `convert` returned `Ok`.
     status: Option<String>,
+    /// The library's placeholders for glyphs without Unicode in a converted PDF, by page;
+    /// null for another format and when `convert` did not return `Ok`.
+    undecoded_glyphs: Option<UndecodedGlyphs>,
 }
 
 /// One fixture about to be handed to the converter.
@@ -149,6 +175,7 @@ struct Observed<'a> {
     errors: Vec<ErrorReceipt>,
     input_format: Option<&'static str>,
     library_page_count: Option<PageCount>,
+    pdf: Option<PdfFacts>,
     reached: Reached<'a>,
 }
 
@@ -157,6 +184,12 @@ struct Observed<'a> {
 struct PageCount {
     error: Option<String>,
     value: Option<usize>,
+}
+
+/// What is observed of a converted PDF beyond its export.
+struct PdfFacts {
+    locations: Locations,
+    undecoded_glyphs: UndecodedGlyphs,
 }
 
 /// One page image as the library returned it; `file` holds its bytes.
@@ -223,6 +256,15 @@ struct Settings {
     environment: BTreeMap<String, String>,
 }
 
+/// The text-layer document the lookups of `locations` were made from
+/// (`docling::pdf_text_layer_pages`, exported as JSON), as a file the orchestrator re-reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct TextLayerEvidence {
+    bytes: usize,
+    file: &'static str,
+    sha256: String,
+}
+
 /// The stage name written to the receipt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -235,9 +277,16 @@ enum Stage {
 const DOCUMENT_JSON: &str = "document.json";
 const DOCUMENT_MD: &str = "document.md";
 const DONE: &str = "done";
+/// The exit code of a run this binary itself could not make: a variable that is not set, a
+/// fixture file that is missing, an output file that cannot be written. The orchestrator
+/// (`lib/receipt.mjs` `HARNESS_EXIT`) reads it as a harness error. Every other non-zero exit
+/// (a panic exits 101) is the process dying on the fixture, which the orchestrator records as
+/// a failure of the library on that fixture.
+const EXIT_HARNESS: u8 = 64;
 const MUST_FAIL_FINDING: &str = "converter accepts truncated PDF";
 const MUST_FAIL_NAME: &str = "must_fail_truncated.pdf";
 const OCR_LANG: &str = "en";
+const TEXT_LAYER_JSON: &str = "text_layer.json";
 const TIMEOUT_BUDGET_MS: u64 = 1;
 const TIMEOUT_PROBE: &str = "timeout_probe";
 const TIMEOUT_PROBE_FIXTURE: &str = "scanned_image_only.pdf";
@@ -370,6 +419,10 @@ fn build_receipt(run: &FixtureRun<'_>, observed: Observed<'_>) -> Result<Fixture
         Reached::ConverterStatus { status, .. } => Some(status_label(status).to_owned()),
         Reached::Source | Reached::ConverterError => None,
     };
+    let (locations, undecoded_glyphs) = match observed.pdf {
+        Some(pdf) => (Some(pdf.locations), Some(pdf.undecoded_glyphs)),
+        None => (None, None),
+    };
     Ok(FixtureReceipt {
         conversion_rule: rule_label(run.rule),
         converter: run.session.converter.clone(),
@@ -384,6 +437,7 @@ fn build_receipt(run: &FixtureRun<'_>, observed: Observed<'_>) -> Result<Fixture
             .unwrap_or_default(),
         input_format: observed.input_format,
         library_page_count: observed.library_page_count,
+        locations,
         original_unchanged,
         outcome: judgement.outcome.to_owned(),
         path: run.path.to_path_buf(),
@@ -392,6 +446,7 @@ fn build_receipt(run: &FixtureRun<'_>, observed: Observed<'_>) -> Result<Fixture
         sha256_before: run.sha_before.clone(),
         stage: stage_of(observed.reached),
         status,
+        undecoded_glyphs,
     })
 }
 
@@ -423,6 +478,7 @@ fn refused(
             }],
             input_format,
             library_page_count,
+            pdf: None,
             reached,
         },
     )
@@ -493,8 +549,25 @@ fn write_evidence(
         markdown_nonempty: !markdown.trim().is_empty(),
         markdown_sha256: sha256_hex(markdown.as_bytes()),
         page_images,
+        text_layer: None,
     };
     Ok((evidence, markdown))
+}
+
+/// Write the text-layer document of a PDF beside its export and record what was written.
+fn write_text_layer(
+    out_dir: &Path,
+    text_layer: &serde_json::Value,
+) -> Result<TextLayerEvidence, String> {
+    let json = serde_json::to_vec(text_layer)
+        .map_err(|error| format!("serialize text-layer document: {error}"))?;
+    let target = out_dir.join(TEXT_LAYER_JSON);
+    fs::write(&target, &json).map_err(|error| format!("write {}: {error}", target.display()))?;
+    Ok(TextLayerEvidence {
+        bytes: json.len(),
+        file: TEXT_LAYER_JSON,
+        sha256: sha256_hex(&json),
+    })
 }
 
 /// The library's page count for a PDF source; `None` for every other format.
@@ -511,6 +584,34 @@ fn library_page_count(source: &SourceDocument) -> Option<PageCount> {
             },
         }
     })
+}
+
+/// The observations a converted PDF gets beyond its export, and the text-layer document
+/// they were made from, written to `out_dir`.
+///
+/// The text layer is read with the library's own entry point, from the same bytes. When the
+/// library cannot read it, every item the export left unlocated stays unlocated, the error
+/// is recorded and no text-layer file is written.
+fn pdf_facts(
+    out_dir: &Path,
+    export: &serde_json::Value,
+    bytes: &[u8],
+    name: &str,
+) -> Result<(PdfFacts, Option<TextLayerEvidence>), String> {
+    let text_layer = docling::pdf_text_layer_pages(bytes, name, None)
+        .map(|document| document.export_to_json_value())
+        .map_err(|error| error.to_string());
+    let written = match &text_layer {
+        Ok(document) => Some(write_text_layer(out_dir, document)?),
+        Err(_) => None,
+    };
+    let locations = locate::locate_items(export, text_layer.as_ref().map_err(String::as_str));
+    let undecoded_glyphs = glyphs::undecoded_glyphs(export, &locations.items);
+    let facts = PdfFacts {
+        locations,
+        undecoded_glyphs,
+    };
+    Ok((facts, written))
 }
 
 fn convert_fixture(
@@ -531,6 +632,9 @@ fn convert_fixture(
     };
     let input_format = source.format.as_str();
     let pages = library_page_count(&source);
+    // The converter takes the source; a PDF's bytes are kept to read its text layer afterwards.
+    let pdf_source = (source.format == docling::InputFormat::Pdf)
+        .then(|| (source.bytes.clone(), source.name.clone()));
     let mut result = match converter.convert(source) {
         Ok(result) => result,
         Err(error) => {
@@ -553,7 +657,17 @@ fn convert_fixture(
             module_name: item.module_name.clone(),
         })
         .collect();
-    let (document, markdown) = write_evidence(run.out_dir, &mut result)?;
+    let (mut document, markdown) = write_evidence(run.out_dir, &mut result)?;
+    // The export read here is the one just written: the page images have left the document.
+    let pdf = match pdf_source {
+        Some((bytes, name)) => {
+            let export = result.document.export_to_json_value();
+            let (facts, text_layer) = pdf_facts(run.out_dir, &export, &bytes, &name)?;
+            document.text_layer = text_layer;
+            Some(facts)
+        }
+        None => None,
+    };
     build_receipt(
         run,
         Observed {
@@ -562,6 +676,7 @@ fn convert_fixture(
             errors,
             input_format: Some(result.format.as_str()),
             library_page_count: pages,
+            pdf,
             reached: Reached::ConverterStatus {
                 status: result.status,
                 markdown: &markdown,
@@ -782,19 +897,29 @@ fn run() -> Result<(), String> {
     run_one(&only, &environment)
 }
 
-fn main() -> Result<(), String> {
-    run().inspect_err(|error| {
-        let _ = writeln!(io::stderr(), "okf-qualify-docling: {error}");
-    })
+/// Ends with `EXIT_HARNESS` when this binary could not make the run, and never panics or
+/// exits anywhere else, so any other non-zero exit is the process dying under the library.
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let _ = writeln!(io::stderr(), "okf-qualify-docling: {error}");
+            ExitCode::from(EXIT_HARNESS)
+        }
+    }
 }
+
+mod glyphs;
+mod locate;
 
 #[cfg(test)]
 mod tests {
     use super::{
         Applied, ConversionResult, ConversionStatus, DOCUMENT_JSON, DOCUMENT_MD, DONE, DoneMarker,
         ErrorReceipt, MUST_FAIL_FINDING, MUST_FAIL_NAME, PictureImage, Reached, Rule, Stage,
-        TIMEOUT_PROBE, TIMEOUT_PROBE_FIXTURE, build_converter, fixture_catalog, judge, lookup_only,
-        rule_label, sha256_hex, timeout_honoured, write_evidence,
+        TEXT_LAYER_JSON, TIMEOUT_PROBE, TIMEOUT_PROBE_FIXTURE, build_converter, fixture_catalog,
+        judge, lookup_only, rule_label, sha256_hex, timeout_honoured, write_evidence,
+        write_text_layer,
     };
     use std::collections::BTreeSet;
     use std::fs;
@@ -1043,6 +1168,36 @@ mod tests {
         assert_eq!(image.sha256, sha256_hex(&pixels));
         assert_eq!(fs::read(out.path().join(&image.file))?, pixels);
         assert!(result.document.page_images.is_empty());
+        // A text-layer document belongs to a PDF; this conversion wrote none.
+        assert_eq!(evidence.text_layer, None);
+        assert!(!out.path().join(TEXT_LAYER_JSON).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn the_text_layer_document_is_written_as_a_file_with_the_hash_the_receipt_records() -> TestResult
+    {
+        let layer = serde_json::json!({ "texts": [
+            { "label": "text", "text": "Figure 1-2   Existing controls", "prov": [{ "page_no": 2, "bbox": { "l": 136.27, "t": 100.55, "r": 316.76, "b": 91.27, "coord_origin": "BOTTOMLEFT" } }] },
+        ] });
+        let out = tempfile::tempdir()?;
+        let written = write_text_layer(out.path(), &layer)?;
+        assert_eq!(written.file, "text_layer.json");
+        assert_eq!(written.file, TEXT_LAYER_JSON);
+        let on_disk = fs::read(out.path().join(written.file))?;
+        assert_eq!(written.bytes, on_disk.len());
+        assert_eq!(written.sha256, sha256_hex(&on_disk));
+        // The file is the document itself: read back, it is what the lookups were made from.
+        let read_back: serde_json::Value = serde_json::from_slice(&on_disk)?;
+        assert_eq!(read_back, layer);
+        assert_eq!(
+            serde_json::to_value(&written)?,
+            serde_json::json!({ "bytes": on_disk.len(), "file": "text_layer.json", "sha256": sha256_hex(&on_disk) })
+        );
+        // A directory that cannot be written is this binary's own failure, said as such.
+        let missing = out.path().join("no-such-directory");
+        let refused = write_text_layer(&missing, &layer);
+        assert!(refused.is_err_and(|error| error.starts_with("write ")));
         Ok(())
     }
 }

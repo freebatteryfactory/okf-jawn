@@ -8,7 +8,10 @@
  *   { "git_sha": "<40-hex>", "inputs": ["path/relative/to/repo", ...], "produced_at": "<ISO-8601 UTC>" }
  * produced_at is the moment the clean tree was observed, before the harness ran.
  * `bun scripts/dev.mjs check-receipts` validates git_sha and inputs of every file
- * under qualification/receipts/; recordReceipt is the only writer of that directory.
+ * under qualification/receipts/; recordReceipt is the only writer of that directory, and
+ * `bun qualification/record.mjs` is its only caller: a harness writes its receipt under
+ * .artifacts/ and records nothing. It copies a receipt of any result; the gate status that
+ * follows from it is derived by scripts/lib/receipts.mjs and written by record.mjs, never typed.
  */
 
 import { spawn } from 'node:child_process';
@@ -131,26 +134,35 @@ export function receiptHeaderProblems(receipt) {
 }
 
 /**
- * Copy a finished receipt to qualification/receipts/<name>.json.
- * The tree need not be clean here (an earlier recorded receipt is itself untracked),
- * but HEAD must still be the commit the receipt cites.
+ * Why recordReceipt would refuse this receipt under this name; empty when it would copy it.
+ * The tree need not be clean (an earlier recorded receipt is itself untracked), but HEAD must
+ * still be the commit the receipt cites.
+ * @param {string} root repository root
+ * @param {string} name receipt name, e.g. "docling"
+ * @param {unknown} receipt
+ * @returns {Promise<string[]>}
+ */
+export async function recordProblems(root, name, receipt) {
+  if (typeof name !== 'string' || !RECEIPT_NAME.test(name)) {
+    return [`name ${JSON.stringify(name)} must be lower-case words joined by hyphens`];
+  }
+  const problems = receiptHeaderProblems(receipt);
+  if (problems.length) return problems;
+  const head = (await git(['rev-parse', 'HEAD'], root)).stdout.trim();
+  return head === receipt.git_sha ? [] : [`receipt cites ${receipt.git_sha} but HEAD is ${head}; requalify on the current commit`];
+}
+
+/**
+ * Copy a finished receipt to qualification/receipts/<name>.json; throws with recordProblems
+ * when there are any.
  * @param {string} root repository root
  * @param {string} name receipt name, e.g. "docling"
  * @param {object} receipt finished receipt with the shared header
  * @returns {Promise<string>} the written path
  */
 export async function recordReceipt(root, name, receipt) {
-  if (typeof name !== 'string' || !RECEIPT_NAME.test(name)) {
-    throw new Error(`recordReceipt: name ${JSON.stringify(name)} must be lower-case words joined by hyphens`);
-  }
-  const problems = receiptHeaderProblems(receipt);
+  const problems = await recordProblems(root, name, receipt);
   if (problems.length) throw new Error(`recordReceipt(${name}): ${problems.join('; ')}`);
-  const head = (await git(['rev-parse', 'HEAD'], root)).stdout.trim();
-  if (head !== receipt.git_sha) {
-    throw new Error(
-      `recordReceipt(${name}): receipt cites ${receipt.git_sha} but HEAD is ${head}; requalify on the current commit`,
-    );
-  }
   const target = join(root, 'qualification', 'receipts', `${name}.json`);
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, `${JSON.stringify(receipt, null, 2)}\n`);

@@ -24,6 +24,35 @@ test('CI runs exactly the premerge sequence, one step each, and a failure does n
  assert.equal(steps.find(step=>step.uses?.startsWith('actions/upload-artifact@')).if,always);
  assert.equal(checkout('foundation').with['fetch-depth'],0,'check-receipts compares against history');
 });
+test('the job that runs the real generators fails when generation changed the checkout, before any gated step',async()=>{
+ const steps=workflow.jobs.foundation.steps;
+ // bootstrap is the step that generates: it replaces the committed generated directories.
+ const entry=await read('scripts/dev.mjs');
+ const bootstrapTask=entry.slice(entry.indexOf('async function bootstrap()'),entry.indexOf('async function vendor()'));
+ assert.match(bootstrapTask,/await generate\(root\);/,'bootstrap no longer generates, so the clean-tree step guards nothing');
+ const generation=steps.findIndex(step=>step.run==='bun scripts/dev.mjs bootstrap');
+ const clean=steps.findIndex(step=>step.name==='The checkout is unchanged by generation');
+ assert.ok(generation>=0,'no bootstrap step');
+ assert.equal(clean,generation+1,'the clean-tree step must directly follow generation');
+ const gated=steps.map((step,index)=>typeof step.run==='string'&&step.run.startsWith(prefix)?index:-1).filter(index=>index>=0);
+ assert.ok(gated.length>0&&gated.every(index=>index>clean),'the clean-tree step must precede every gated step, the tests among them');
+ const step=steps[clean];
+ // It runs only after a bootstrap that succeeded: a half-written tree proves nothing either way.
+ assert.equal(step.if,undefined);
+ assert.equal(step['continue-on-error'],undefined,'a changed checkout must fail the job');
+ const lines=step.run.trim().split('\n').map(line=>line.trim());
+ assert.equal(lines[0],'status="$(git status --porcelain --untracked-files=all)"','untracked files count: a generated file nobody committed is stale output too');
+ assert.equal(lines[1],'if [ -n "$status" ]; then');
+ assert.ok(lines.includes('git diff'),'the difference is printed');
+ assert.deepEqual(lines.slice(-2),['exit 1','fi']);
+ // Nothing between checkout and this step may hide a difference.
+ for(const earlier of steps.slice(0,clean))assert.doesNotMatch(earlier.run??'',/git (stash|checkout|restore|reset|clean|add)\b/,earlier.run);
+ // The directories it guards are the ones generation replaces, and all of them are tracked.
+ const replaced=[...(await read('scripts/lib/generation.mjs')).matchAll(/\['[a-z]+', '([a-z/]+)'\]/g)].map(match=>match[1]);
+ assert.deepEqual(replaced,['api','ui/src/api/generated','generated/cli']);
+ const ignore=(await read('.gitignore')).split(/\r?\n/);
+ for(const directory of replaced)assert.ok(!ignore.some(line=>line.replace(/^\//,'').replace(/\/$/,'')===directory),`${directory} is ignored, so git status could not see it change`);
+});
 test('Clippy and tests cover every feature, so no separate runtime job exists',()=>{
  for(const id of ['clippy','test']){
   const args=premergeSteps(root).find(step=>step.id===id).args;

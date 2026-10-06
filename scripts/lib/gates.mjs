@@ -164,6 +164,6 @@ export async function cleanCheckout(root, { parent = lanesParent(root), execute 
  * fails when a `*.test.mjs` file is in neither list or in both, or when a fast file spawns.
  */
 export const foundationTests = Object.freeze({
-  fast: Object.freeze(['ci', 'files', 'generation', 'lockfile', 'policy', 'ports', 'toolchain'].map(name => `${name}.test.mjs`)),
+  fast: Object.freeze(['ci', 'files', 'generation', 'lockfile', 'policy', 'ports', 'receipt-envelope', 'toolchain'].map(name => `${name}.test.mjs`)),
   slow: Object.freeze(['gates', 'harness', 'hooks', 'init', 'lanes', 'no-external-engine', 'process', 'receipts', 'records', 'vendor'].map(name => `${name}.test.mjs`)),
 });
