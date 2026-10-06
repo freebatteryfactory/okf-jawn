@@ -169,3 +169,19 @@ function findPosixShell() {
   }
   throw new Error(`no POSIX sh found; looked for: ${looked.join('; ')}`);
 }
+
+/**
+ * Run `body(entry)` for every entry at once and wait for ALL of them to settle before returning or
+ * failing, so no case is still creating files in a scratch directory when its test's cleanup runs.
+ * When any fail, one error names every failing case (an entry's label is its first element when it
+ * is an array, else the entry itself) and keeps the causes in `errors`.
+ */
+export async function eachCase(entries, body) {
+  const label = entry => String(Array.isArray(entry) ? entry[0] : entry);
+  const settled = await Promise.allSettled(entries.map(entry => Promise.resolve().then(() => body(entry))));
+  const failed = settled.flatMap((outcome, index) => (outcome.status === 'rejected' ? [{ name: label(entries[index]), error: outcome.reason }] : []));
+  if (failed.length === 0) return settled.map(outcome => outcome.value);
+  const error = new Error(`${failed.length} of ${entries.length} cases failed:\n${failed.map(({ name, error: cause }) => `- ${name}: ${String(cause?.message ?? cause).split('\n')[0]}`).join('\n')}`);
+  error.errors = failed.map(({ error: cause }) => cause);
+  throw error;
+}

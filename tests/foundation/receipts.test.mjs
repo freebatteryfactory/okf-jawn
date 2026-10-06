@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
 import { acceptedFailureFields, acceptingRole, checkReceipts, derivedLines, derivedRecord, gateKinds, qualifyingStatuses, receiptGateStatuses, rewriteCommand, staleLines, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
-import { commit, copyRepo, fixtureAcceptance, fixtureCriteria, fixtureGates, fixturePinned, fixtureReceipt, fixtureRecord, fixtureRecordFiles, fixtureTracker, git, sharedRepos } from './fixture-repo.mjs';
+import { commit, copyRepo, eachCase, fixtureAcceptance, fixtureCriteria, fixtureGates, fixturePinned, fixtureReceipt, fixtureRecord, fixtureRecordFiles, fixtureTracker, git, sharedRepos } from './fixture-repo.mjs';
 
 const source = fileURLToPath(new URL('../../', import.meta.url));
 // Every test starts from a copy of a repository prepared once for this file.
@@ -433,6 +433,7 @@ test('nothing but a trusted FAIL with every failing criterion accepted is upgrad
     lacksPinned: start(fixtureReceipt('docling', sha, { criteria: [failing[1]] }), [fixtureAcceptance()], 'a FAIL that lacks a pinned criterion'),
     optionalFailure: start(fixtureReceipt('docling', sha, { criteria: optionalFail }), [], 'an optional failure'),
   };
+  const judge = async () => {
 
   // One of two failing criteria is not accepted: the gate is failed.
   let derived = await started.oneOfTwo;
@@ -481,6 +482,9 @@ test('nothing but a trusted FAIL with every failing criterion accepted is upgrad
   // A failing criterion that is not required does not fail the receipt, so there is nothing to accept.
   derived = await started.optionalFailure;
   assert.deepEqual(statuses(derived), { [docling]: 'passed', [apps]: 'passed', qualified: true });
+  };
+  // A failing judgement must not leave a derivation still writing into a copy the cleanup is removing.
+  try { await judge(); } finally { await Promise.allSettled(Object.values(started).flat()); }
 });
 
 test('an acceptance that outlived its cause is a failure that says to remove it', async t => {
@@ -545,7 +549,7 @@ test('an accepted failure must be whole, decided by the owner and tracked by a g
     [[{ criterion: 'corpus/a.pdf/provenance', decided_by: 'agent', tracked_by: 'nothing' }], 'three things wrong',
       ['accepted_failures[0] lacks decision, decided_on', 'accepted_failures[0] is decided by "agent"; only the owner accepts a failing criterion', 'accepted_failures[0].tracked_by "nothing" is not the id of a gate in verification.json']],
   ];
-  await Promise.all(unsound.map(async ([entries, why, expectedProblems]) => assert.deepEqual(await problems(entries, why), expectedProblems)));
+  await eachCase(unsound, async ([entries, why, expectedProblems]) => assert.deepEqual(await problems(entries, why), expectedProblems));
   // The tracking gate may stand in any group of the record, and it must be there.
   await commit(root, { ...receipts, 'verification.json': fixtureRecord({ accepted: { docling: [fixtureAcceptance()] } }) }, 'the tracking gate is gone');
   assert.deepEqual((await derivedRecord(root)).failures.map(failure => failure.message), ['accepted_failures[0].tracked_by "converter-font-run-spacing" is not the id of a gate in verification.json']);
@@ -679,7 +683,7 @@ test('a receipt that fails any check leaves its gate incomplete on every path, w
   ];
   const expected = { [docling]: 'incomplete', [apps]: 'passed', qualified: false };
   // Each case judges its own copy of the repository, so the eight run at once; within a case every step is as it was.
-  await Promise.all(untrusted.map(async ([why, receipt, reason]) => {
+  await eachCase(untrusted, async ([why, receipt, reason]) => {
     const { root } = await copyRepo(t, prepared);
     const { record, check } = commandsFor(root);
     const head = await commit(root, { ...other, [at('docling')]: receipt, 'verification.json': passedRecord() }, why);
@@ -706,7 +710,7 @@ test('a receipt that fails any check leaves its gate incomplete on every path, w
     assert.ok(said(rewritten).some(line => line.startsWith(`docling.json: ${reason}`)), `${why}: ${rewritten.stderr}`);
     assert.equal(await readFile(join(root, 'verification.json'), 'utf8'), fixtureRecord({ statuses: { 'mcp-apps': 'passed' } }), why);
     assertNoStack(rewritten);
-  }));
+  });
 });
 
 test('when an input of a recorded receipt changes, check-receipts fails until the harness is recorded again or record.mjs writes the gate back to incomplete', async t => {

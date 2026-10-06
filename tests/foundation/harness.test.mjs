@@ -71,7 +71,7 @@ import { run as runCommand } from '../../scripts/lib/process.mjs';
 import { checkReceipts, derivedRecord, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
 import { afterAll } from 'bun:test';
 import concurrently from './concurrent-test.mjs';
-import { commit as fixtureCommit, copyRepo, git as fixtureGit, sharedRepos } from './fixture-repo.mjs';
+import { commit as fixtureCommit, copyRepo, eachCase, git as fixtureGit, sharedRepos } from './fixture-repo.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 import { BASIC_HOST, PATCHED_SERVE, SOURCE_RECORD, lsRemoteArgs, patchServe, rawUrl, sourceProblems, sourceRecord, tagCommit } from '../../qualification/mcp-apps/lib/basic-host.mjs';
 import {
@@ -4668,14 +4668,21 @@ concurrently('join: a Docling run that did not judge everything never qualifies,
   const firstRun = oneCase(firstCopy, firstCase, ['mcp-apps']);
   firstRun.catch(() => {}); // its failure is reported where it is awaited, below
   // The state that case leaves for the MCP Apps gate, made once by the same command and committed.
-  const { root: recordedApps } = await copyRepo(t, first);
-  assert.equal((await toolsIn(recordedApps).recordCommand('mcp-apps')).code, 0);
-  await fixtureCommit(recordedApps, {}, 'record the MCP Apps receipt');
+  let recordedApps;
+  try {
+    ({ root: recordedApps } = await copyRepo(t, first));
+    assert.equal((await toolsIn(recordedApps).recordCommand('mcp-apps')).code, 0);
+    await fixtureCommit(recordedApps, {}, 'record the MCP Apps receipt');
+  } catch (error) {
+    await firstRun.catch(() => {}); // the first case must stop writing before the cleanup removes its copy
+    throw error;
+  }
   const fromRecorded = async (judge) => judge((await copyRepo(t, recordedApps)).root);
-  await Promise.all([
-    firstRun,
-    ...laterCases.map((entry) => fromRecorded((repo) => oneCase(repo, entry, []))),
-    fromRecorded(crashedCase),
-    fromRecorded(wholeCase),
-  ]);
+  // Every case settles before the cleanup runs, and every failing case is named.
+  await eachCase([
+    [`${firstCase[0]} (both gates recorded by one command)`, firstRun],
+    ...laterCases.map((entry) => [entry[0], fromRecorded((repo) => oneCase(repo, entry, []))]),
+    ['a converter process that crashed', fromRecorded(crashedCase)],
+    ['the whole run', fromRecorded(wholeCase)],
+  ], ([, running]) => running);
 });

@@ -7,7 +7,7 @@ import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { delimiter, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
-import { commit, fixtureReceipt, fixtureRecord, fixtureRecordFiles, git, posixShell, runWithInput, sharedRepos } from './fixture-repo.mjs';
+import { commit, fixtureReceipt, fixtureRecord, fixtureRecordFiles, eachCase, git, posixShell, runWithInput, sharedRepos } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 // Every test starts from a copy of a repository prepared once for this file.
 const shared=sharedRepos();
@@ -98,7 +98,7 @@ const rerun='bun qualification/docling/run.mjs, then bun qualification/record.mj
 test('pre-push only warns about a stale receipt on a lane or cure ref',async t=>{
  const refs=['refs/heads/build/storage','refs/heads/cure/hook','refs/heads/feature/x'];
  // Each push has its own repository, so the three run at once and are judged in order.
- const pushes=await Promise.all(refs.map(ref=>pushWithReceipts(t,{stale:true,refs:[[ref,ref]]})));
+ const pushes=await eachCase(refs,ref=>pushWithReceipts(t,{stale:true,refs:[[ref,ref]]}));
  for(const [index,ref] of refs.entries()){
   const {result,output}=pushes[index];
   assert.equal(result.status,0,`${ref}: ${output}`);
@@ -107,7 +107,7 @@ test('pre-push only warns about a stale receipt on a lane or cure ref',async t=>
 });
 test('pre-push blocks a stale receipt on main and integration/*, naming the receipt and the harness',async t=>{
  const refs=['refs/heads/main','refs/heads/integration/x'];
- const pushes=await Promise.all(refs.map(ref=>pushWithReceipts(t,{stale:true,refs:[['refs/heads/cure/hook',ref]]})));
+ const pushes=await eachCase(refs,ref=>pushWithReceipts(t,{stale:true,refs:[['refs/heads/cure/hook',ref]]}));
  for(const [index,ref] of refs.entries()){
   const {result,output}=pushes[index];
   assert.notEqual(result.status,0,`${ref}: ${output}`);
@@ -124,9 +124,8 @@ test('pre-push blocks a hand-edited receipt or status on main and integration/*,
  const blocking=['refs/heads/main','refs/heads/integration/x'];
  const edits=['receipt','status'];
  // Six independent pushes, each in its own repository: run at once, judged in the order they were written.
- const pushes=await Promise.all(edits.map(edited=>Promise.all([
-  Promise.all(blocking.map(ref=>pushWithReceipts(t,{stale:false,edited,refs:[['refs/heads/cure/hook',ref]]}))),
-  pushWithReceipts(t,{stale:false,edited,refs:[['refs/heads/cure/hook','refs/heads/cure/hook']]})]).then(([blocked,elsewhere])=>({blocked,elsewhere}))));
+ const pushes=await eachCase(edits.flatMap(edited=>[...blocking,'refs/heads/cure/hook'].map(ref=>[`${edited} to ${ref}`,edited,ref])),
+  ([,edited,ref])=>pushWithReceipts(t,{stale:false,edited,refs:[['refs/heads/cure/hook',ref]]})).then(all=>edits.map((edited,index)=>({blocked:all.slice(index*3,index*3+2),elsewhere:all[index*3+2]})));
  for(const [editIndex,edited] of edits.entries()){
   const {blocked,elsewhere}=pushes[editIndex];
   for(const [refIndex,ref] of blocking.entries()){
@@ -144,10 +143,10 @@ test('pre-push blocks a hand-edited receipt or status on main and integration/*,
 test('pre-push says nothing about receipts that are valid or absent, and skips a deleted ref',async t=>{
  const zero='0'.repeat(40);
  const stales=[false,null];
- const [pushes,deleted]=await Promise.all([
-  Promise.all(stales.map(stale=>pushWithReceipts(t,{stale,refs:[['refs/heads/main','refs/heads/main'],['(delete)','refs/heads/old',zero]]}))),
-  // A deleted ref alone neither crashes nor checks anything, even though the remote ref is main.
-  pushWithReceipts(t,{stale:true,refs:[['(delete)','refs/heads/main',zero]]})]);
+ // A deleted ref alone neither crashes nor checks anything, even though the remote ref is main.
+ const [deleted,...pushes]=await eachCase(['a deleted ref alone',...stales.map(stale=>`stale ${stale}`)],(name,index)=>name==='a deleted ref alone'
+  ?pushWithReceipts(t,{stale:true,refs:[['(delete)','refs/heads/main',zero]]})
+  :pushWithReceipts(t,{stale:name==='stale false'?false:null,refs:[['refs/heads/main','refs/heads/main'],['(delete)','refs/heads/old',zero]]}));
  for(const {result,output} of pushes){
   assert.equal(result.status,0,output);
   assert.doesNotMatch(output,/receipt/i,output);

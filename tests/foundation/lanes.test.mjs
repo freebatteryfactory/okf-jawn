@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { LANE_TABLE_BEGIN, LANE_TABLE_END, checkScope, createLanes, laneNamed, lanes, lanesParent, outOfScope, renderLaneTable, resetLanes, scopeFor } from '../../scripts/lib/lanes.mjs';
 import * as lanesModule from '../../scripts/lib/lanes.mjs';
 import { run } from '../../scripts/lib/process.mjs';
-import { commit, git, sharedRepos } from './fixture-repo.mjs';
+import { commit, eachCase, git, sharedRepos } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 // Every test starts from a copy of a repository prepared once for this file.
 const shared=sharedRepos();
@@ -241,4 +241,29 @@ test('the lane named on the command line is the same lane wherever the options s
  const lonely=await devIn(repo,'scope','--head',head);
  assert.equal(lonely.code,1);
  assert.match(lonely.stderr,/No scope row for branch main/);
+});
+
+test('concurrent cases settle before cleanup, and every failing case is named',async()=>{
+ // A stand-in for the test: its cleanups run when this test says, after the cases.
+ const cleanups=[];
+ const scope={after:cleanup=>{cleanups.push(cleanup);}};
+ const bases=[];
+ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+ const cases=[['fails at once',0],['succeeds slowly',300],['fails while a sibling is still copying',50]];
+ const failure=await eachCase(cases,async ([name,delay])=>{
+  const {base}=await fixtureRepo(scope);
+  bases.push(base);
+  await sleep(delay);
+  if(name.startsWith('fails'))throw new Error(name+' on purpose');
+  return name;
+ }).then(()=>null,error=>error);
+ assert.ok(failure,'two of three cases failed, so the call fails');
+ assert.match(failure.message,/^2 of 3 cases failed:\n- fails at once: fails at once on purpose\n- fails while a sibling is still copying: fails while a sibling is still copying on purpose$/);
+ assert.equal(failure.errors.length,2);
+ // Every case, including the slow sibling that outlived both failures, had finished before the call returned.
+ assert.equal(bases.length,3);
+ assert.ok(bases.every(base=>existsSync(base)),'the copies are still there until the cleanup runs');
+ for(const cleanup of cleanups.reverse())await cleanup();
+ assert.deepEqual(bases.filter(base=>existsSync(base)),[],'no scratch directory of any case is left behind');
+ assert.deepEqual(await eachCase(['a','b'],async name=>name+name),['aa','bb'],'when every case passes the results come back in order');
 });
