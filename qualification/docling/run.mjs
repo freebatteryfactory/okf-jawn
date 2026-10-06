@@ -62,7 +62,7 @@ try {
 }
 process.stdout.write('Verifying Docling model assets against the manifest hashes...\n');
 const { manifest, verified } = await verifyAssets(manifestBytes);
-process.stdout.write(`Verified ${verified.count} assets (${verified.bytes_total} bytes); every hash matches.\n`);
+process.stdout.write(`Verified ${verified.matched} of ${verified.count} assets (${verified.bytes_total} bytes) against the manifest hashes.\n`);
 
 const sources = JSON.parse(await readFile(join(fixturesDir, 'SOURCES.json'), 'utf8'));
 const lockText = await readFile(join(root, 'Cargo.lock'), 'utf8');

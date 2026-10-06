@@ -36,7 +36,7 @@ import {
   TIMEOUT_PROBE,
   buildDoclingReceipt,
 } from '../../qualification/docling/lib/receipt.mjs';
-import { inventoryCheck, parseManifest, unverifiedEnvPaths, verifyAssets } from '../../qualification/docling/lib/assets.mjs';
+import { assetsMatched, inventoryCheck, parseManifest, unverifiedEnvPaths, verifyAssets } from '../../qualification/docling/lib/assets.mjs';
 import { buildFacts, classifyRefusal, declaredDoclingFeatures, resolvedFeatures } from '../../qualification/docling/lib/build.mjs';
 import {
   bboxProblem,
@@ -527,7 +527,7 @@ test('every supported fixture declares what it contains and how that was confirm
   assert.match(blank[0][1].expect.blank_pages_confirmed_by, /inflates to zero bytes.*pdftotext 4\.06 -f 17 -l 17 prints no character/);
 });
 
-const VERIFIED_MODEL = { file: 'layout.onnx', path: 'C:\\models\\layout.onnx', bytes: 10, sha256: 'd'.repeat(64) };
+const VERIFIED_MODEL = { file: 'layout.onnx', path: 'C:\\models\\layout.onnx', bytes: 10, sha256: 'd'.repeat(64), manifest_bytes: 10, manifest_sha256: 'd'.repeat(64) };
 
 const DOCLING_INVENTORY = [
   { stage: 'layout', path: 'C:/models/layout.onnx', found: true, bytes: 10 },
@@ -555,8 +555,22 @@ test('model assets are re-hashed at run time and any missing or changed file sto
   const { manifest, verified } = await verifyAssets(Buffer.from(text));
   assert.equal(manifest.DOCLING_RS_MODELS_DIR, fixture.dir);
   assert.equal(verified.count, 2);
-  assert.equal(verified.all_match, true);
-  assert.equal(verified.hashed_at_run_time, true);
+  // No literal says "all match": the counts come from each file's own hash beside its manifest entry.
+  assert.equal(verified.all_match, undefined);
+  assert.equal(verified.hashed_at_run_time, undefined);
+  assert.equal(verified.matched, 2);
+  assert.deepEqual(verified.unmatched, []);
+  for (const [index, file] of verified.files.entries()) {
+    assert.equal(file.manifest_sha256, fixture.assets[index].sha256);
+    assert.equal(file.manifest_bytes, fixture.assets[index].bytes);
+    assert.equal(file.sha256, createHash('sha256').update(await readFile(file.path)).digest('hex'), 'the recorded hash is the hash of the bytes on disk');
+  }
+  assert.deepEqual(assetsMatched(verified.files), { count: 2, matched: 2, unmatched: [] });
+  const [first, second] = verified.files;
+  assert.deepEqual(assetsMatched([first, { ...second, sha256: '0'.repeat(64) }]), { count: 2, matched: 1, unmatched: ['tableformer/encoder.onnx'] });
+  assert.deepEqual(assetsMatched([{ ...first, bytes: first.bytes + 1 }, second]).unmatched, ['layout.onnx']);
+  assert.deepEqual(assetsMatched([{ file: 'x.onnx', bytes: 1, sha256: 'a'.repeat(64) }]).unmatched, ['x.onnx'], 'a record with no manifest entry beside it matches nothing');
+  assert.deepEqual(assetsMatched(undefined), { count: 0, matched: 0, unmatched: [] });
   assert.equal(verified.manifest_sha256, createHash('sha256').update(Buffer.from(text)).digest('hex'), 'the manifest is hashed as read, BOM included');
   assert.deepEqual(verified.files.map((file) => file.file), ['layout.onnx', 'tableformer/encoder.onnx']);
   assert.equal(verified.files[0].sha256, fixture.assets[0].sha256);
@@ -970,7 +984,7 @@ const DOCLING_BUILD = buildFacts({
   command: 'cargo build --locked --release -p okf-qualify-docling',
 });
 
-const DOCLING_ASSETS = { count: 1, all_match: true, manifest_sha256: 'e'.repeat(64), hashed_at_run_time: true, files: [VERIFIED_MODEL] };
+const DOCLING_ASSETS = { ...assetsMatched([VERIFIED_MODEL]), manifest_sha256: 'e'.repeat(64), bytes_total: 10, files: [VERIFIED_MODEL] };
 
 const STUB_SOURCE = (paginated) => ({
   role: 'stub',
@@ -1239,7 +1253,7 @@ test('the receipt lists the converter settings the processes held and the assets
   assert.equal(probe.options.document_timeout, 'Some(1ms)');
   assert.deepEqual(probe.used_by, [TIMEOUT_PROBE]);
   assert.deepEqual(receipt.settings.environment, { DOCLING_RS_MODELS_DIR: 'C:\\models' });
-  assert.equal(receipt.assets_verified.all_match, true);
+  assert.deepEqual([receipt.assets_verified.count, receipt.assets_verified.matched], [1, 1]);
 });
 
 test('the receipt fails when a model the library resolves is not a verified file', () => {

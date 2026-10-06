@@ -6,6 +6,10 @@
  * bytes and sha256. A listed hash proves nothing about the file a later run loads, so
  * verifyAssets reads every file again and throws, naming the file, on the first one that is
  * missing, has another length or another hash. Nothing here downloads or repairs.
+ *
+ * Each recorded file keeps the manifest's length and hash beside the ones read now, and
+ * `assetsMatched` counts agreement from those pairs: the receipt holds no literal that says
+ * the assets match.
  */
 
 import { createHash } from 'node:crypto';
@@ -47,6 +51,20 @@ export function parseManifest(text) {
     }
   });
   return manifest;
+}
+
+/** True when a re-hashed file has the length and the hash its manifest entry gives. */
+const sameAsManifest = (file) =>
+  Number.isInteger(file?.bytes) && file.bytes === file.manifest_bytes && typeof file.sha256 === 'string' && file.sha256 === file.manifest_sha256;
+
+/**
+ * How many re-hashed files equal their manifest entry, counted from the file records.
+ * @param {object[]|null|undefined} files the `files` verifyAssets recorded
+ */
+export function assetsMatched(files) {
+  const list = Array.isArray(files) ? files : [];
+  const unmatched = list.filter((file) => !sameAsManifest(file)).map((file) => file?.file ?? file?.path ?? 'unnamed');
+  return { count: list.length, matched: list.length - unmatched.length, unmatched };
 }
 
 const samePath = (a, b) => String(a).replaceAll('\\', '/').toLowerCase() === String(b).replaceAll('\\', '/').toLowerCase();
@@ -97,16 +115,16 @@ export async function verifyAssets(manifestBytes) {
       path: asset.path,
       bytes: size,
       sha256,
+      manifest_bytes: asset.bytes,
+      manifest_sha256: asset.sha256.toLowerCase(),
     });
   }
   return {
     manifest,
     verified: {
-      count: files.length,
-      all_match: true,
+      ...assetsMatched(files),
       manifest_sha256: createHash('sha256').update(Buffer.from(manifestBytes)).digest('hex'),
       bytes_total: files.reduce((sum, file) => sum + file.bytes, 0),
-      hashed_at_run_time: true,
       files,
     },
   };
