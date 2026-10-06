@@ -199,7 +199,7 @@ async function main() {
       if (head === undefined) { process.stdout.write(`${await checkReceipts(root)}\n`); break; }
       const lines = await staleReceiptLines(root, head);
       if (lines.length) { process.stderr.write(`${lines.join('\n')}\n`); process.exitCode = 1; }
-      else process.stdout.write(`check-receipts: receipts at ${head} are current.\n`);
+      else process.stdout.write(`check-receipts: receipts at ${head} are current and its typed statuses are the derived ones.\n`);
       break;
     }
     case 'audit': await audit(); break;

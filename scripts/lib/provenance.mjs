@@ -9,6 +9,8 @@
  * produced_at is the moment the clean tree was observed, before the harness ran.
  * `bun scripts/dev.mjs check-receipts` validates git_sha and inputs of every file
  * under qualification/receipts/; recordReceipt is the only writer of that directory.
+ * It copies a receipt of any result; the gate status that follows from it is derived by
+ * scripts/lib/receipts.mjs and written by `bun qualification/record.mjs`, never typed.
  */
 
 import { spawn } from 'node:child_process';

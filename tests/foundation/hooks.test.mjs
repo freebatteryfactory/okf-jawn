@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { delimiter, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
-import { commit, fixtureRepo, git, posixShell } from './fixture-repo.mjs';
+import { commit, fixtureReceipt, fixtureRecord, fixtureRecordFiles, fixtureRepo, git, posixShell } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const read=file=>readFile(join(root,file),'utf8');
 
@@ -64,13 +64,13 @@ test('pre-push scope-checks each pushed build/* ref at its pushed commit and ign
 
 // The receipt rule runs the real `check-receipts --head` from a copy of scripts/ inside a temporary
 // repository; `bun` forwards that task to the real Bun and only records the other calls, and
-// `cargo` is a stub.
+// `cargo` is a stub. The repository has a record with receipt gates, their criteria files and a
+// receipt its record agrees with, so only the staleness under test can be reported.
 async function pushWithReceipts(t,{stale,refs}){
  const posix=path=>path.split(sep).join('/');
- const {base,root:repo}=await fixtureRepo(t,{'harness/run.mjs':'// v1\n'});
+ const {base,root:repo}=await fixtureRepo(t,fixtureRecordFiles());
  const first=await git(repo,'rev-parse','HEAD');
- const receipt=JSON.stringify({git_sha:first,inputs:['harness/run.mjs'],produced_at:'2026-10-05T18:00:00Z'});
- await commit(repo,stale===null?{'notes.txt':'no receipts'}:{'qualification/receipts/docling-library-qualification.json':receipt},'record');
+ await commit(repo,stale===null?{'notes.txt':'no receipts'}:{'qualification/receipts/docling.json':fixtureReceipt('docling',first),'verification.json':fixtureRecord({statuses:{docling:'passed'}})},'record');
  const head=stale===true?await commit(repo,{'harness/run.mjs':'// v2\n'},'change an input'):await git(repo,'rev-parse','HEAD');
  cpSync(join(root,'scripts'),join(repo,'scripts'),{recursive:true});
  const stubs=join(base,'stubs');
@@ -87,14 +87,14 @@ test('pre-push only warns about a stale receipt on a lane or cure ref',async t=>
  for(const ref of ['refs/heads/build/storage','refs/heads/cure/hook','refs/heads/feature/x']){
   const {result,output}=await pushWithReceipts(t,{stale:true,refs:[[ref,ref]]});
   assert.equal(result.status,0,`${ref}: ${output}`);
-  assert.match(output,/^warning: stale receipt docling-library-qualification\.json: inputs changed after [0-9a-f]{40}: harness\/run\.mjs -- re-run: bun qualification\/docling\/run\.mjs, then bun qualification\/record\.mjs docling$/m,ref);
+  assert.match(output,/^warning: stale receipt docling\.json: inputs changed after [0-9a-f]{40}: harness\/run\.mjs -- re-run: bun qualification\/docling\/run\.mjs, then bun qualification\/record\.mjs docling$/m,ref);
  }
 });
 test('pre-push blocks a stale receipt on main and integration/*, naming the receipt and the harness',async t=>{
  for(const ref of ['refs/heads/main','refs/heads/integration/x']){
   const {result,output}=await pushWithReceipts(t,{stale:true,refs:[['refs/heads/cure/hook',ref]]});
   assert.notEqual(result.status,0,`${ref}: ${output}`);
-  assert.match(output,/^stale receipt docling-library-qualification\.json: inputs changed after [0-9a-f]{40}: harness\/run\.mjs -- re-run: /m,ref);
+  assert.match(output,/^stale receipt docling\.json: inputs changed after [0-9a-f]{40}: harness\/run\.mjs -- re-run: /m,ref);
   assert.ok(output.includes(rerun),output);
   assert.doesNotMatch(output,/warning:/,'a blocking ref is not downgraded to a warning');
  }

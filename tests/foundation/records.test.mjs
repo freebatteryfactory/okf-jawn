@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
-import { libraryGates } from '../../scripts/lib/receipts.mjs';
+import { derivedRecord } from '../../scripts/lib/receipts.mjs';
 import { premergeSteps } from '../../scripts/lib/gates.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const read=file=>readFile(join(root,file),'utf8');
@@ -36,11 +36,14 @@ test('nothing tracked is also ignored, and no snapshot of the tree is kept',asyn
  const ignored=await run('git',['ls-files','-ci','--exclude-standard'],{cwd:root,capture:true});
  assert.equal(ignored.stdout.trim(),'','these tracked files are ignored by .gitignore');
 });
-test('verification.json records no pass while Phase 0 is reopened, and only terminal gates once qualified',async()=>{
+test('verification.json types what its receipts derive, and records no pass while Phase 0 is unqualified',async()=>{
  const record=JSON.parse(await read('verification.json'));
  const gates=record.current.gates.phase_0;
- assert.equal(new Set(gates.map(gate=>gate.id)).size,gates.length);
- for(const id of libraryGates)assert.ok(gates.some(gate=>gate.id===id),`Phase 0 gate ${id} is missing`);
+ // The comparison check-receipts makes, without git: a hand edit of a status or of phase_0_qualified fails here too.
+ const derived=await derivedRecord(root);
+ assert.deepEqual(derived.mismatches,[]);
+ assert.equal(record.phase_0_qualified,derived.phase_0_qualified);
+ for(const gate of derived.gates)assert.equal(gates.find(entry=>entry.id===gate.id).status,gate.status,gate.id);
  if(record.phase_0_qualified===true){
   assert.equal(record.current.deterministic_foundation_green,true);
   for(const gate of gates)assert.ok(['passed','rejected_with_fallback','bounded_upstream_exception'].includes(gate.status),`${gate.id} is ${gate.status} although phase_0_qualified is true`);
