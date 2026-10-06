@@ -2,10 +2,14 @@
  * Orchestrate Phase 0 MCP Apps protocol qualification.
  *
  * Steps: rebuild dist-apps, build the harness binary, harness --check, Streamable HTTP
- * protocol check over all four render tools and the app-only show tool, then (unless
- * OKF_MCP_APPS_PROTOCOL_ONLY=1) the official basic-host example rendering each of the
- * four views under Playwright with axe, and an optional ngrok URL (OKF_MCP_APPS_NGROK=1)
- * that is always closed before the receipt is written.
+ * protocol check over all four render tools and the app-only show and read_object tools,
+ * then (unless OKF_MCP_APPS_PROTOCOL_ONLY=1) the official basic-host example rendering each
+ * of the four views under Playwright with axe, and an optional ngrok URL
+ * (OKF_MCP_APPS_NGROK=1) that is always closed before the receipt is written.
+ *
+ * The present view must really render its retained dataset: the App fetches it through
+ * read_object in ranged blocks, and basic_host.present_dataset is computed from the chart
+ * svg, the table rows and the harness's tool-call reports seen while that view rendered.
  *
  * Usage (from PowerShell, cargo on PATH): bun qualification/mcp-apps/run.mjs [--record]
  * Exits non-zero when the protocol check or any view fails; the receipt is written first.
@@ -28,10 +32,13 @@ import {
   VIEWS,
   basicHostUrl,
   basicHostVerdict,
+  datasetExpectation,
+  judgePresentDataset,
   judgeView,
   ngrokRecord,
   partitionAxe,
   runProblems,
+  toolCallsFrom,
 } from './lib/views.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -232,6 +239,64 @@ async function protocolCheck(mcpUrl, manifest) {
     }
     if (showCalls.length === 0) throw new Error('render_present has no resolved_bindings to show');
 
+    // The present view fetches each retained dataset through the app-only read_object tool
+    // (arguments and loop as PresentView.tsx; the harness serves small blocks on purpose).
+    const objectReads = [];
+    for (const binding of present.resolved_bindings) {
+      if (!binding.materialized) continue;
+      const chunks = [];
+      let offset = 0;
+      let calls = 0;
+      let part = null;
+      do {
+        if (calls >= 1000) throw new Error(`read_object for binding ${binding.name} did not finish in 1000 calls`);
+        const read = await client.callTool({
+          name: 'read_object',
+          arguments: { source: binding.source, object: binding.materialized, offset: String(offset), length: 1048576 },
+        });
+        calls += 1;
+        part = read.structuredContent;
+        if (read.isError || !part) {
+          throw new Error(`read_object failed for binding ${binding.name}: ${JSON.stringify(read.content)}`);
+        }
+        const textBlock = (read.content ?? []).find((block) => block.type === 'text');
+        if (!textBlock?.text) throw new Error('read_object missing text fallback');
+        if (part.sha256 !== binding.materialized || part.offset !== String(offset)) {
+          throw new Error(`read_object changed identity or range for binding ${binding.name}: ${JSON.stringify(part)}`);
+        }
+        const bytes = Buffer.from(part.data_base64, 'base64');
+        if (bytes.length === 0 && part.has_more) throw new Error('read_object made no progress');
+        chunks.push(bytes);
+        offset += bytes.length;
+      } while (part.has_more === true);
+      const merged = Buffer.concat(chunks);
+      const sha256 = createHash('sha256').update(merged).digest('hex');
+      if (sha256 !== binding.materialized) {
+        throw new Error(`read_object bytes for binding ${binding.name} hash to ${sha256}, not ${binding.materialized}`);
+      }
+      if (part.total_size !== String(merged.length)) {
+        throw new Error(`read_object total_size ${part.total_size} !== ${merged.length} bytes read`);
+      }
+      if (calls < 2) throw new Error('read_object returned the dataset in one block; the ranged loop was not exercised');
+      objectReads.push({
+        binding: binding.name,
+        object: binding.materialized,
+        calls,
+        bytes: merged.length,
+        sha256,
+        media_type: part.media_type,
+      });
+    }
+    if (objectReads.length === 0) throw new Error('render_present has no materialized binding to read');
+    // A digest nobody retains must come back as a tool error, never as bytes.
+    const unknown = await client.callTool({
+      name: 'read_object',
+      arguments: { source: present.resolved_bindings[0].source, object: '0'.repeat(64) },
+    });
+    if (unknown.isError !== true || unknown.structuredContent) {
+      throw new Error(`read_object served an unknown digest: ${JSON.stringify(unknown)}`);
+    }
+
     return {
       status: 'passed',
       tools: renderTools.map((tool) => ({
@@ -242,6 +307,8 @@ async function protocolCheck(mcpUrl, manifest) {
       resources: reads,
       tool_calls: toolCalls,
       show_calls: showCalls,
+      object_reads: objectReads,
+      unknown_object_refused: unknown.isError === true,
     };
   } finally {
     await client.close().catch(() => {});
@@ -348,25 +415,55 @@ async function readFrame(frame) {
   try {
     const text = await frame.locator('body').innerText({ timeout: 1_000 });
     const alerts = await frame.locator('[role="alert"]').allInnerTexts();
-    return { text, alerts };
+    // Vega's SVG renderer draws the spec's own marks as children of g.role-mark;
+    // a table inside closed <details> has no client rects.
+    const dom = await frame.evaluate(() => ({
+      svgs: document.querySelectorAll('svg').length,
+      svg_marks: document.querySelectorAll('svg g[class~="role-mark"] > *').length,
+      tables: Array.from(document.querySelectorAll('table'), (table) => ({
+        caption: table.caption?.textContent ?? '',
+        visible: table.getClientRects().length > 0,
+        in_details: table.closest('details') !== null,
+        columns: Array.from(table.querySelectorAll('thead th'), (cell) => cell.textContent ?? ''),
+        rows: Array.from(table.tBodies[0]?.rows ?? [], (row) =>
+          Array.from(row.cells, (cell) => cell.textContent ?? ''),
+        ),
+      })),
+    }));
+    return { text, alerts, ...dom };
   } catch {
     return null;
   }
 }
 
-async function renderView(browser, AxeBuilder, view) {
+/** The dataset fixture as the App must show it: digest of its exact bytes and its rows. */
+async function loadDatasetExpectation(dataset) {
+  const bytes = await readFile(join(root, dataset.fixture));
+  return datasetExpectation({
+    binding: dataset.binding,
+    digest: createHash('sha256').update(bytes).digest('hex'),
+    rows: JSON.parse(bytes.toString('utf8')),
+  });
+}
+
+async function renderView(browser, AxeBuilder, view, toolLog) {
   const url = basicHostUrl(view.tool);
   const screenshot = join(outDir, `basic-host-${view.tool}.png`);
+  const expected = view.dataset ? await loadDatasetExpectation(view.dataset) : null;
   const context = await browser.newContext();
   try {
     const page = await context.newPage();
+    // Tool calls reported from here on belong to this view's render.
+    const logStart = toolLog().length;
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
 
     let located = null;
     let observed = null;
     let verdict = judgeView(view, null);
+    let dataset = expected ? judgePresentDataset(expected, null) : null;
+    let rendered = false;
     const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline && !verdict.ok) {
+    while (Date.now() < deadline && !rendered) {
       const hostText = await page.locator('body').innerText();
       if (/Failed to connect to any servers/i.test(hostText)) {
         throw new Error(`basic-host could not reach the harness: ${hostText.slice(0, 200)}`);
@@ -374,7 +471,14 @@ async function renderView(browser, AxeBuilder, view) {
       located = appFrameOf(page);
       observed = located ? await readFrame(located.frame) : null;
       verdict = judgeView(view, observed);
-      if (!verdict.ok) await page.waitForTimeout(500);
+      if (expected) {
+        dataset = judgePresentDataset(
+          expected,
+          observed && { ...observed, tool_calls: toolCallsFrom(toolLog().slice(logStart)) },
+        );
+      }
+      rendered = verdict.ok && (dataset === null || dataset.ok);
+      if (!rendered) await page.waitForTimeout(500);
     }
     await page.screenshot({ path: screenshot, fullPage: true });
 
@@ -387,12 +491,21 @@ async function renderView(browser, AxeBuilder, view) {
       feature_text: (observed?.text ?? '').slice(0, 400),
       alerts: verdict.alerts,
       expected_alerts: verdict.expected_alerts,
+      ...(dataset ? { present_dataset: dataset.record } : {}),
     };
     if (!verdict.ok) {
       return {
         ...base,
         status: 'failed',
         error: `App frame did not show the ${view.view} view: missing=${JSON.stringify(verdict.missing)} foreign=${JSON.stringify(verdict.foreign)} blocking=${JSON.stringify(verdict.blocking)} alerts=${JSON.stringify(verdict.alerts)}`,
+      };
+    }
+
+    if (dataset && !dataset.ok) {
+      return {
+        ...base,
+        status: 'failed',
+        error: `App frame did not render the retained dataset: ${dataset.problems.join('; ')}`,
       };
     }
 
@@ -417,7 +530,7 @@ async function renderView(browser, AxeBuilder, view) {
   }
 }
 
-async function runBasicHostCheck(mcpUrl) {
+async function runBasicHostCheck(mcpUrl, toolLog) {
   // Package does not ship basic-host HTML; use the tagged GitHub example.
   const ensured = await ensureBasicHost();
   await buildBasicHost();
@@ -457,7 +570,7 @@ async function runBasicHostCheck(mcpUrl) {
     try {
       for (const view of VIEWS) {
         try {
-          views.push(await renderView(browser, AxeBuilder, view));
+          views.push(await renderView(browser, AxeBuilder, view, toolLog));
         } catch (error) {
           views.push({
             tool: view.tool,
@@ -475,8 +588,10 @@ async function runBasicHostCheck(mcpUrl) {
       source: ensured.source,
       views,
       axe_tolerated_upstream_host_rules: UPSTREAM_HOST_RULES,
-      present_dataset:
-        'not_exercised: tests/fixtures/views/present-response.json has no materialized dataset, so the DataTable and Chart show their "unavailable" alerts; binding resolution through the app-only show tool is exercised',
+      present_dataset: views.find((item) => item.present_dataset)?.present_dataset ?? {
+        status: 'not_observed',
+        reason: 'no view reached the point where its dataset rendering is observed',
+      },
       note: 'Official ext-apps basic-host example (v2.0.3) against the Streamable HTTP harness; not a claude.ai/ChatGPT claim.',
     };
   } finally {
@@ -650,7 +765,7 @@ try {
       }
     }
     try {
-      basicHost = await runBasicHostCheck(MCP_URL);
+      basicHost = await runBasicHostCheck(MCP_URL, () => harness.stderr());
     } catch (error) {
       basicHost = {
         status: 'failed',
