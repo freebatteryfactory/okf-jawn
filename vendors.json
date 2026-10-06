@@ -712,37 +712,6 @@
       "qualification": "Not compiled or integrated in this environment"
     },
     {
-      "name": "iii",
-      "use_sites": [
-        "crates/core/src/jobs.rs",
-        ".agents/skills/qualify-iii/SKILL.md"
-      ],
-      "official_sources": [
-        "https://iii.dev/docs/creating-workers/functions",
-        "https://iii.dev/docs/creating-workers/channels",
-        "https://github.com/iii-hq/workers/tree/main/queue",
-        "https://github.com/iii-hq/iii/blob/main/engine/LICENSE"
-      ],
-      "symbols": [
-        "RegisterFunction",
-        "request_format",
-        "response_format",
-        "queue::define",
-        "durable:subscriber",
-        "channels"
-      ],
-      "context7_library_id": null,
-      "context7_query": null,
-      "knowledge_source": "Official documentation reference; qualify installed version before use",
-      "offline_notes": [
-        "REJECTED WITH FALLBACK (commit 32a10ba receipt): engine+queue+worker SIGKILL before Ok, effect ledger, blob paths, startup/RSS and ELv2 from tag iii/v0.24.4 observed; dlq_messages browse empty so inspected DLQ could not be claimed. Selected runtime is Tokio+RecordStore.",
-        "Pinned artifact sha256: engine tar b1dd2714e1411bb2c59f7aa0f76edc2f2655857e1cbe692d3dce9deec745628b; worker tar f7b95e6103f6fedd5d9cf730c418f0ceb8a482c7534fabcd55bb96a5b345f514; ELv2 text aa94db7315d297192247f2254026cacbdb433a7742d841f27506a4d974c42c85.",
-        "Registry schemas are metadata; typed deserialization and application validation still run."
-      ],
-      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "REJECTED_WITH_FALLBACK on commit 32a10ba: crash redelivery and effect-ledger passed; channel blob refs passed; DLQ browse empty (inspected=false). Fallback Tokio+RecordStore. Receipt .artifacts/qualification/iii/receipt.json."
-    },
-    {
       "name": "pdfjs",
       "use_sites": [],
       "planned_use_sites": [

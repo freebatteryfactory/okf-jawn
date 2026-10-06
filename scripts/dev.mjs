@@ -140,12 +140,10 @@ async function qualify() {
     await run(bun(), ['tests/integration/acceptance.mjs'], { cwd: root });
   } else if (name === 'docling') {
     await run(bun(), ['qualification/docling/run.mjs'], { cwd: root, timeout: 1_800_000 });
-  } else if (name === 'iii') {
-    await run(bun(), ['qualification/iii/run.mjs'], { cwd: root, timeout: 1_800_000 });
   } else if (name === 'mcp-apps') {
     await run(bun(), ['qualification/mcp-apps/run.mjs'], { cwd: root, timeout: 1_800_000 });
   } else {
-    throw new Error('Available: qualify mcp-wire | application | docling | iii | mcp-apps. None is recorded as passed by this command until its receipt is written.');
+    throw new Error('Available: qualify mcp-wire | application | docling | mcp-apps. None is recorded as passed by this command until its receipt is written.');
   }
 }
 

@@ -5,7 +5,7 @@ import { run } from './process.mjs';
 import { exists } from './files.mjs';
 
 /** Phase 0 gates that are closed by an executed library qualification and its receipt. */
-export const libraryGates = Object.freeze(['docling-library-qualification', 'iii-library-qualification', 'mcp-apps-protocol-qualification']);
+export const libraryGates = Object.freeze(['docling-library-qualification', 'mcp-apps-protocol-qualification']);
 
 const receiptsPath = 'qualification/receipts';
 
@@ -53,7 +53,7 @@ export async function checkReceipts(root) {
 
 /** The harness command that regenerates a receipt, by the harness name in its file name. */
 function rerunCommand(name) {
-  const harness = ['docling', 'mcp-apps', 'iii'].find(candidate => name.includes(candidate));
+  const harness = ['docling', 'mcp-apps'].find(candidate => name.includes(candidate));
   return harness ? `bun qualification/${harness}/run.mjs, then bun qualification/record.mjs ${harness}` : 'rerun the harness that produced it, then bun qualification/record.mjs <name>';
 }
 

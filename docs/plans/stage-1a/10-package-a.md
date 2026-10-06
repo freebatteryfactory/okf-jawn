@@ -1390,7 +1390,7 @@ Claude-Session: https://claude.ai/code/session_01LoZr4ME3crLYjcTNn5GcAC
 
 ```js
 // scripts/lib/receipts.mjs
-export const libraryGates;   // ['docling-library-qualification', 'iii-library-qualification', 'mcp-apps-protocol-qualification']
+export const libraryGates;   // ['docling-library-qualification', 'mcp-apps-protocol-qualification']
 export async function checkReceipts(root);   // resolves a one-line summary; rejects 'check-receipts failed:\n<one line per failure>'
 ```
 
@@ -1424,8 +1424,8 @@ test('a qualified Phase 0 passes with one current receipt per library gate',asyn
  const sha=await git(root,'rev-parse','HEAD');
  await commit(root,{'verification.json':verification(true,paths),...Object.fromEntries(Object.values(paths).map(path=>[path,receipt(sha)]))},'record R');
  assert.match(await checkReceipts(root),/3 receipt\(s\) valid against HEAD; all 3 Phase 0 library gates have one/);
- await commit(root,{'verification.json':verification(true,{...paths,'iii-library-qualification':'.artifacts/qualification/iii/receipt.json'})},'point a gate outside the committed receipts');
- await assert.rejects(checkReceipts(root),/iii-library-qualification: phase_0_qualified is true but its receipt \(\.artifacts\/qualification\/iii\/receipt\.json\)/);
+ await commit(root,{'verification.json':verification(true,{...paths,'docling-library-qualification':'.artifacts/qualification/docling/receipt.json'})},'point a gate outside the committed receipts');
+ await assert.rejects(checkReceipts(root),/docling-library-qualification: phase_0_qualified is true but its receipt \(\.artifacts\/qualification\/docling\/receipt\.json\)/);
 });
 test('a receipt is rejected when an input changed, its commit is foreign, or its header is incomplete',async t=>{
  const {root}=await fixtureRepo(t,{'verification.json':verification(false),'harness/run.mjs':'// v1\n'});
@@ -1459,7 +1459,7 @@ import { run } from './process.mjs';
 import { exists } from './files.mjs';
 
 /** Phase 0 gates that are closed by an executed library qualification and its receipt. */
-export const libraryGates = Object.freeze(['docling-library-qualification', 'iii-library-qualification', 'mcp-apps-protocol-qualification']);
+export const libraryGates = Object.freeze(['docling-library-qualification', 'mcp-apps-protocol-qualification']);
 
 const receiptsPath = 'qualification/receipts';
 
@@ -1525,7 +1525,7 @@ export async function checkReceipts(root) {
 fix(gates): require library receipts once Phase 0 is recorded as qualified.
 
 Why: check-receipts passed on an empty directory unconditionally, so verification.json could say phase_0_qualified true with no evidence. Design section 2 outcome 2: receipts "pass check-receipts".
-What changed: checkReceipts lives in scripts/lib/receipts.mjs. Empty is accepted only while phase_0_qualified is false; when true, the docling, iii and mcp-apps gates must each name an existing file under qualification/receipts/. Receipts need git_sha (40 lowercase hex), non-empty inputs and produced_at; the check no longer creates the directory.
+What changed: checkReceipts lives in scripts/lib/receipts.mjs. Empty is accepted only while phase_0_qualified is false; when true, the docling and mcp-apps gates must each name an existing file under qualification/receipts/. Receipts need git_sha (40 lowercase hex), non-empty inputs and produced_at; the check no longer creates the directory.
 Verified: bun test ./tests/foundation/receipts.test.mjs -> 3 pass, 0 fail; bun scripts/dev.mjs check-receipts -> accepted, tree unchanged.
 Next: Task A.10, the lane gate.
 
@@ -3258,10 +3258,7 @@ it with rows for later packages) once this branch is merged.
    `git diff b13fcd0 50113b9 -- vendors.json` shows the seventh lookup was the earlier schemars
    query, overwritten by the new one. Task A.2 sets the number to 6 and asserts equality. If the
    owner wants the superseded query kept, it needs a second recorded query on the schemars entry.
-3. **"Adopted iii worker" wording was not found.** `git grep -n -i adopt -- verification.json
-   vendors.json README.md AGENTS.md` matches only `vendors.json:317` ("Foundation-repair adopts
-   these settings", about cargo-deny). SPEC.md:55 says "iii was not adopted". Nothing was changed
-   for this item.
+3. **Withdrawn.** The wording this item concerned no longer exists (package J).
 4. **`vendors.json` Docling version text needs no edit.** It already says `docling-core 1.93.6`;
    only `Cargo.lock` was wrong. Task A.3 restores the lock and adds a test that holds the three
    places equal.
@@ -3305,7 +3302,7 @@ it with rows for later packages) once this branch is merged.
 14. **Receipt header is stricter than today's check.** `git_sha` must be 40 lowercase hex (the
     `commit_sha` alias is no longer accepted), `inputs` must be non-empty and `produced_at` must
     parse. This follows the design's shared header for package B; B's receipts must satisfy it.
-    "Library gate" is taken to mean the docling, iii and mcp-apps gates; `clean-checkout-rerun`
+    "Library gate" is taken to mean the docling and mcp-apps gates; `clean-checkout-rerun`
     keeps its receipt under `.artifacts/` and is not required by `check-receipts`.
 15. **Timeout tree kill is Windows only.** `taskkill /T /F` ends the tree there; on POSIX the
     direct child is still the only process signalled, because a group kill needs

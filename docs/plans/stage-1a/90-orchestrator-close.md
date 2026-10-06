@@ -53,7 +53,7 @@ Rust files and 4 Biome errors present at `678f919`.
   `view-server-validation` gains "a binding outside the View's workspace is rejected
   (`ViewDocument::bindings_outside`)".
 - Design doc: note the accepted deviations (no synthesized instances; `find_commit` kept;
-  router signature kept; receipts for docling, mcp-apps and iii only).
+  router signature kept; receipts for docling and mcp-apps only).
 
 - [ ] **Step 4: Full gate, push, CI**
 
@@ -95,8 +95,7 @@ green on it (a prose-only commit after S is acceptable; requalify on the later o
 
 ### Task O.4: Requalify on S
 
-**Files:** none tracked. Runs in a dedicated worktree so build output and receipts are on `D:`
-and the iii harness finds its binary under `<root>\target` (B Deviation 8).
+**Files:** none tracked. Runs in a dedicated worktree so build output and receipts are on `D:`.
 
 - [ ] **Step 1: Worktree and prerequisites**
 
@@ -122,9 +121,8 @@ report which prerequisite and which gate it blocks.
 bun scripts/dev.mjs bootstrap
 bun qualification/docling/run.mjs      # exit 0 PASS, or exit 1 with a recorded finding
 bun qualification/mcp-apps/run.mjs     # exit 0 PASS
-bun qualification/iii/run.mjs          # exit 1, decision REJECTED_WITH_FALLBACK
 bun scripts/dev.mjs clean-checkout     # all exit codes 0, git_status_empty true
-bun qualification/record.mjs docling mcp-apps iii
+bun qualification/record.mjs docling mcp-apps
 ```
 
 - [ ] **Step 3: Independent receipt audit**
@@ -139,14 +137,14 @@ could not have observed."
 
 - [ ] **Step 4: Decide terminal states**
 
-Each Phase 0 gate becomes `passed`, `rejected_with_fallback` (iii), or stays `incomplete` with
+Each Phase 0 gate becomes `passed`, or stays `incomplete` with
 its reason. If Docling accepted the truncated PDF, or the must-fail result is
 `FAIL_refusal_unproven`, the Docling gate stays `incomplete`, the finding is reported to the
 owner, and `phase_0_qualified` stays false until the owner decides.
 
 ### Task O.5: Record R and reach main
 
-**Files:** Create `qualification/receipts/{docling,mcp-apps,iii}.json`. Modify
+**Files:** Create `qualification/receipts/{docling,mcp-apps}.json`. Modify
 `verification.json`, `vendors.json`. Nothing else: R must not touch any receipt input.
 
 - [ ] **Step 1: Bring the receipts into the main checkout and update the records**
@@ -163,7 +161,7 @@ library's `qualification` text is rewritten from its receipt, not from memory.
 - [ ] **Step 2: Check, commit, push**
 
 ```bash
-bun scripts/dev.mjs check-receipts     # check-receipts: 3 receipt(s) valid against HEAD.
+bun scripts/dev.mjs check-receipts     # check-receipts: 2 receipt(s) valid against HEAD.
 bun scripts/dev.mjs check-offline      # 0 fail
 git add qualification/receipts verification.json vendors.json
 git commit -F <message file>

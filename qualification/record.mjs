@@ -1,10 +1,10 @@
 /**
  * Copy finished qualification receipts into qualification/receipts/.
  *
- * Usage: bun qualification/record.mjs <name>...   (docling | mcp-apps | iii)
+ * Usage: bun qualification/record.mjs <name>...   (docling | mcp-apps)
  *
- * Each harness needs a clean tree and a recorded receipt is an untracked file, so three
- * harnesses cannot each record on the same commit. Run all three first (their receipts
+ * Each harness needs a clean tree and a recorded receipt is an untracked file, so two
+ * harnesses cannot each record on the same commit. Run both first (their receipts
  * land in the ignored .artifacts/qualification/<name>/receipt.json), then record them
  * together. recordReceipt refuses a receipt without the shared header or one that cites
  * a commit other than HEAD.
@@ -15,7 +15,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { recordReceipt } from '../scripts/lib/provenance.mjs';
 
-const KNOWN = ['docling', 'mcp-apps', 'iii'];
+const KNOWN = ['docling', 'mcp-apps'];
 
 /**
  * Why this receipt must not be recorded, or null. A protocol-only MCP Apps run never rendered

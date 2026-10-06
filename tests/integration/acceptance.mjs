@@ -39,4 +39,4 @@ await call('proposals','accept_proposal',approval,true,403);
 const acceptedConfirmation=await call('reviews','create_confirmation',{workspace_id,action:'accept_proposal',target_id:proposal.id,revision:proposal.proposal_revision,content_digest:proposal.content_digest});
 await call('proposals','accept_proposal',{...approval,confirmation_id:acceptedConfirmation.id});
 const accepted=await call('proposals','get_proposal',{workspace_id,proposal_id:proposal.id});assert.equal(accepted.status,'accepted');
-process.stdout.write(JSON.stringify({status:'passed',scope:'real authorization/proposal/review/pinned-read journey',workspace_id,not_covered:['converter fidelity','export/backup restoration','iii crash recovery','host rendering','complete human UI']},null,2)+'\n');
+process.stdout.write(JSON.stringify({status:'passed',scope:'real authorization/proposal/review/pinned-read journey',workspace_id,not_covered:['converter fidelity','export/backup restoration','job crash/restart recovery','host rendering','complete human UI']},null,2)+'\n');
