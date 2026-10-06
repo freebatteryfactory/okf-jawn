@@ -70,6 +70,11 @@ function canonicalShape(spec: {
   return { root: spec.root, elements };
 }
 
+/** How long the chart may take to draw its marks before the poll says so. */
+const CHART_DRAWS_WITHIN_MS = 15_000;
+/** Longer than the poll plus the rest of the test, or vitest's default 5 s would end the test before the poll can fail. */
+const TEST_TIMEOUT_MS = CHART_DRAWS_WITHIN_MS + 15_000;
+
 describe('ViewDocument json-render round-trip', () => {
   it('parses the fixture with Zod, prepareSpec, and renders catalog roles', () => {
     const document = zViewDocument.parse(viewDocumentFixture);
@@ -114,7 +119,9 @@ describe('ViewDocument json-render round-trip', () => {
     expect(within(list).getByText('Unresolved: metrics')).toBeTruthy();
   });
 
-  it('renders each of the six catalog components with the data it needs', async () => {
+  it('renders each of the six catalog components with the data it needs', {
+    timeout: TEST_TIMEOUT_MS,
+  }, async () => {
     const document = zViewDocument.parse(viewDocumentFixture);
     const source = zReadItemResponse.parse(sourceReadItemFixture);
     const resolved = zPresentResponse.parse(presentResponseFixture).resolved_bindings;
@@ -173,7 +180,10 @@ describe('ViewDocument json-render round-trip', () => {
     const chart = only(':scope > section', stack);
     expect(only('h3', chart).textContent).toBe('Metrics chart');
     const marks = () => chart.querySelectorAll('svg g[class~="role-mark"] > *');
-    await expect.poll(() => marks().length, { timeout: 15_000 }).toBe(rows.length);
+    // Drawing takes about 0.2 s here (the whole test runs in 0.16 s); the poll waits 75 times that for a loaded
+    // machine, and the test's own timeout below is longer than the poll, so a chart that draws nothing fails
+    // with this assertion's message and not with "Test timed out".
+    await expect.poll(() => marks().length, { timeout: CHART_DRAWS_WITHIN_MS }).toBe(rows.length);
     for (const mark of marks()) expect(mark.tagName.toLowerCase()).toBe('path');
     const chartTable = only('details table', chart);
     expect(only('caption', chartTable).textContent).toBe('metrics');
