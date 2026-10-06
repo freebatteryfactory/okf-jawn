@@ -360,4 +360,31 @@ describe('PresentView refused dataset read', () => {
     expect(shown.endsWith('…')).toBe(true);
     expect(() => encodeURIComponent(shown)).not.toThrow();
   });
+  it("shows the tool's own message when `show` is refused", async () => {
+    const callTool = async () => ({
+      isError: true,
+      content: [{ type: 'text', text: 'revision is not retained by this source' }],
+    });
+    render(<PresentView response={response} callTool={callTool} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('revision is not retained by this source');
+    expect(alert.textContent).not.toMatch(/invalid_type|expected|"path"/i);
+  });
+
+  it('bounds a long `show` refusal to 512 characters ending with an ellipsis', async () => {
+    const callTool = async () => ({
+      isError: true,
+      content: [{ type: 'text', text: 'y'.repeat(10_000) }],
+    });
+    render(<PresentView response={response} callTool={callTool} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(`${'y'.repeat(511)}…`);
+  });
+
+  it('shows a fixed plain sentence when a `show` refusal carries no text', async () => {
+    const callTool = async () => ({ isError: true, content: [] });
+    render(<PresentView response={response} callTool={callTool} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('The host refused to read the source.');
+  });
 });
