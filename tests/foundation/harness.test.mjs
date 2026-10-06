@@ -37,6 +37,7 @@ import {
   buildDoclingReceipt,
 } from '../../qualification/docling/lib/receipt.mjs';
 import { inventoryCheck, parseManifest, unverifiedEnvPaths, verifyAssets } from '../../qualification/docling/lib/assets.mjs';
+import { buildFacts, classifyRefusal, declaredDoclingFeatures, resolvedFeatures } from '../../qualification/docling/lib/build.mjs';
 import {
   bboxProblem,
   bodyFacts,
@@ -876,6 +877,54 @@ test('converter options are lifted from the Debug text of the converter as raw R
     nope: null,
   });
   assert.equal(converterOptions(CONVERTER_DEBUG.replace('document_timeout: None', 'document_timeout: Some(1ms)'), ['document_timeout']).document_timeout, 'Some(1ms)');
+});
+
+const NO_FALLBACK_ERROR = 'parse error: pdf: pdf: pdfium support is not compiled in (docling-pdf feature `pdfium`)';
+
+const DOCLING_TREE = [
+  'okf-qualify-docling v0.1.0 (D:\\okf\\qualification\\docling)|',
+  'docling v1.93.5|pdf',
+  'docling-core v1.93.6|',
+  'docling-pdf v1.93.6|ml,ocr-prep',
+  'docling-core v1.93.6| (*)',
+  'lopdf v0.44.0|chrono,default,jiff,rayon,time',
+].join('\n');
+
+test('a refusal is classified from its error text alone', () => {
+  assert.equal(classifyRefusal(NO_FALLBACK_ERROR), 'primary_parser_failed_no_fallback_in_build');
+  assert.equal(classifyRefusal('parse error: pdf: unexpected end of stream at byte 330'), 'converter_rejected');
+  assert.equal(classifyRefusal(''), 'converter_rejected');
+});
+
+test('build features are read from the manifests and from cargo, never assumed', async () => {
+  const declared = declaredDoclingFeatures(
+    await readFile(join(root, 'qualification/docling/Cargo.toml'), 'utf8'),
+    await readFile(join(root, 'Cargo.toml'), 'utf8'),
+  );
+  assert.deepEqual(declared.features, ['pdf'], 'the pinned build enables pdf only; pdfium is not to be switched on here');
+  assert.equal(declared.default_features, false);
+  assert.match(declared.declared_in, /workspace\.dependencies/);
+  assert.deepEqual(declaredDoclingFeatures('docling = { version = "1", features = ["pdf", "pdfium"] }', '').features, ['pdf', 'pdfium']);
+  assert.deepEqual(
+    declaredDoclingFeatures('docling = { workspace = true, features = ["pdfium"] }', 'docling = { version = "1", features = ["pdf"] }').features,
+    ['pdf', 'pdfium'],
+  );
+  assert.throws(() => declaredDoclingFeatures('serde = "1"', ''), /no inline docling dependency/);
+
+  assert.deepEqual(resolvedFeatures(DOCLING_TREE)['docling-pdf'], ['ml', 'ocr-prep']);
+  assert.deepEqual(resolvedFeatures(DOCLING_TREE).docling, ['pdf']);
+  assert.deepEqual(resolvedFeatures(DOCLING_TREE)['docling-core'], []);
+  const withPdfium = buildFacts({
+    harnessToml: 'docling = { workspace = true }',
+    workspaceToml: 'docling = { version = "1", features = ["pdfium"] }',
+    treeText: 'docling v1.93.5|pdf,pdfium\ndocling-pdf v1.93.6|ml,ocr-prep,pdfium\npdfium-render v0.8.0|default',
+    command: 'c',
+  });
+  assert.equal(withPdfium.pdfium_compiled_in, true);
+  assert.throws(
+    () => buildFacts({ harnessToml: 'docling = { workspace = true }', workspaceToml: 'docling = { features = ["pdf"] }', treeText: 'serde v1.0.0|std', command: 'c' }),
+    /did not list docling/,
+  );
 });
 
 const pidAlive = (pid) => {
