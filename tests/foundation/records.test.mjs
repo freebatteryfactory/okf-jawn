@@ -1,6 +1,7 @@
 /** Records, prose and scripts agree with the generated surface and with what was actually run. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -26,6 +27,27 @@ const requiredChecks=['Dependency-free source tooling, not product acceptance','
 const unconverted={
  'authored-typescript-seams':'no test gives PresentView a Vega-Lite specification that compile rejects, and none holds that main.tsx applies omitUndefined once at the wire boundary',
 };
+/**
+ * Every field of verification.json outside the archive, in file order. Each has one verdict:
+ * derived by a tool and verified (phase_0_qualified, receipt gate statuses), checked against
+ * the tree by a test below, or a decision with a date and a role. A field in neither list fails.
+ */
+const recordFields={
+ top:['project','delivery','phase_0_qualified','reopened','application_implemented','current','historical_archive_record'],
+ current:['direct_versions','typescript_policy','typescript_boundary_fixes','advisories_remaining','gates'],
+};
+/** Fields that were typed claims CI enforces, a tool derives or history narrates; none may come back. */
+const removedFields=['recorded_at_utc','base_commit','environment','lockfiles_resolved','lockfile_provenance','rust_compiled','rust_generator_executed','frontend_generation_executed',
+ 'generation_deterministic','project_typescript_checked','project_typescript_passed','authored_typescript_error_count','deterministic_foundation_green','phase_0_note','checks','code_tested_commits'];
+/** SHA-256 of the file's text from the `historical_archive_record` key to its end, as first committed. */
+const archiveDigest='8a2e38568aa78c9292d722e09c89e31cbd2e72e953c742d1c457565d52a1a1f2';
+/** A decision names what was decided, the calendar day and the role that decided it. */
+function assertDecision(entry,where){
+ assert.ok(typeof entry.decision==='string'&&entry.decision.length>0,`${where}.decision`);
+ assert.match(entry.decided_on,/^\d{4}-\d{2}-\d{2}$/,`${where}.decided_on`);
+ assert.equal(new Date(`${entry.decided_on}T00:00:00Z`).toISOString().slice(0,10),entry.decided_on,`${where}: decided_on is not a calendar date`);
+ assert.ok(['owner','integration-owner'].includes(entry.decided_by),`${where}.decided_by is ${entry.decided_by}`);
+}
 
 test('nothing tracked is also ignored, and no snapshot of the tree is kept',async()=>{
  await assert.rejects(read('REPOSITORY-TREE.txt'),{code:'ENOENT'});
@@ -36,22 +58,74 @@ test('nothing tracked is also ignored, and no snapshot of the tree is kept',asyn
  const ignored=await run('git',['ls-files','-ci','--exclude-standard'],{cwd:root,capture:true});
  assert.equal(ignored.stdout.trim(),'','these tracked files are ignored by .gitignore');
 });
-test('verification.json types what its receipts derive, and records no pass while Phase 0 is unqualified',async()=>{
- const record=JSON.parse(await read('verification.json'));
- const gates=record.current.gates.phase_0;
+test('verification.json types what its receipts derive, in the form record.mjs rewrites',async()=>{
+ const typed=await record();
  // The comparison check-receipts makes, without git: a hand edit of a status or of phase_0_qualified fails here too.
  const derived=await derivedRecord(root);
+ assert.deepEqual(derived.failures,[]);
  assert.deepEqual(derived.mismatches,[]);
- assert.equal(record.phase_0_qualified,derived.phase_0_qualified);
- for(const gate of derived.gates)assert.equal(gates.find(entry=>entry.id===gate.id).status,gate.status,gate.id);
- if(record.phase_0_qualified===true){
-  assert.equal(record.current.deterministic_foundation_green,true);
-  for(const gate of gates)assert.ok(['passed','rejected_with_fallback','bounded_upstream_exception'].includes(gate.status),`${gate.id} is ${gate.status} although phase_0_qualified is true`);
-  return;
+ assert.equal(typed.phase_0_qualified,derived.phase_0_qualified);
+ for(const gate of derived.gates)assert.equal(typed.current.gates.phase_0.find(entry=>entry.id===gate.id).status,gate.status,gate.id);
+ assert.equal(await read('verification.json'),`${JSON.stringify(typed,null,2)}\n`,'verification.json is not in two-space JSON form, so record.mjs could not rewrite only the derived values');
+});
+test('the record holds no hand-typed result: no "passed" outside a receipt gate, no boolean claim, no field CI or a tool states',async()=>{
+ const typed=await record();
+ assert.deepEqual(Object.keys(typed),recordFields.top,'a new top-level field needs a verdict first: derived, checked against the tree, or a decision');
+ assert.deepEqual(Object.keys(typed.current),recordFields.current,'a new field of current needs a verdict first: derived, checked against the tree, or a decision');
+ for(const field of removedFields)assert.ok(!Object.hasOwn(typed.current,field)&&!Object.hasOwn(typed,field),`${field} was removed: CI enforces it, a tool derives it, or it narrated history`);
+ const walk=(value,path,visit)=>{visit(value,path);if(value!==null&&typeof value==='object')for(const [key,child] of Object.entries(value))walk(child,[...path,key],visit);};
+ const receiptStatus=path=>path.length===4&&path[0]==='gates'&&path[1]==='phase_0'&&path[3]==='status'&&typed.current.gates.phase_0[path[2]].kind==='receipt';
+ let seen=0;
+ walk(typed.current,[],(value,path)=>{
+  seen+=1;
+  assert.notEqual(typeof value,'boolean',`current.${path.join('.')} is a typed boolean claim`);
+  if(value==='passed')assert.ok(receiptStatus(path),`current.${path.join('.')} types "passed" outside a gate of kind receipt`);
+ });
+ assert.ok(seen>100,'the walk read almost nothing');
+ // Two booleans remain at the top. phase_0_qualified is derived (the test above). Nothing derives
+ // application_implemented yet, so it cannot be typed true: acceptance gates need receipts first.
+ assert.deepEqual(Object.entries(typed).filter(([,value])=>typeof value==='boolean').map(([key])=>key),['phase_0_qualified','application_implemented']);
+ assert.equal(typed.application_implemented,false);
+ // Why Phase 0 was reopened is a decision, not a status.
+ assert.deepEqual(Object.keys(typed.reopened),['decision','decided_on','decided_by']);
+ assertDecision(typed.reopened,'reopened');
+});
+test('the archive record is kept byte for byte',async()=>{
+ const text=await read('verification.json');
+ const start=text.indexOf('  "historical_archive_record": {');
+ assert.ok(start>0);
+ assert.equal(createHash('sha256').update(text.slice(start)).digest('hex'),archiveDigest,'historical_archive_record changed; it is history and stays as it was written');
+});
+test('every version the record names is the pin in the manifests',async()=>{
+ const versions=(await record()).current.direct_versions;
+ const cargo=await read('Cargo.toml');
+ const ui=JSON.parse(await read('ui/package.json'));
+ const packages={...ui.dependencies,...ui.devDependencies};
+ assert.ok(Object.keys(versions).length>0);
+ for(const [name,stated] of Object.entries(versions)){
+  const line=new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')} = \\{ version = "=([^"]+)"(.*)\\}$`,'m').exec(cargo);
+  if(!line){
+   assert.ok(Object.hasOwn(packages,name),`${name} is pinned in neither Cargo.toml nor ui/package.json`);
+   assert.equal(stated,packages[name],`${name}: the record and ui/package.json differ`);
+   continue;
+  }
+  // A crate: the version, then a note that restates the feature selection of the same line.
+  assert.equal(stated.split(' ')[0],line[1],`${name}: the record and Cargo.toml differ`);
+  assert.equal(stated.includes('default-features=false'),line[2].includes('default-features = false'),`${name}: default-features`);
+  const features=/features=\[([^\]]*)\]/.exec(stated.replace('default-features=',''))?.[1];
+  const declared=/(?<!default-)features = \[([^\]]*)\]/.exec(line[2])?.[1].replace(/["\s]/g,'');
+  assert.equal(features,declared,`${name}: features`);
  }
- assert.equal(record.current.deterministic_foundation_green,false,'deterministic_foundation_green cannot be true while Phase 0 is unqualified');
- for(const gate of gates)assert.notEqual(gate.status,'passed',`${gate.id} is recorded as passed while Phase 0 is reopened`);
- for(const check of record.current.checks)assert.notEqual(check.status,'passed',`${check.command.join(' ')} is recorded as passed while Phase 0 is reopened`);
+});
+test('the advisories the record calls remaining are exactly the ones the audit configuration ignores',async()=>{
+ const remaining=(await record()).current.advisories_remaining;
+ const ids=prefix=>remaining.filter(entry=>entry.id.startsWith(prefix)).map(entry=>entry.id).sort();
+ const rustsec=ids('RUSTSEC-');
+ assert.ok(rustsec.length>0);
+ assert.deepEqual([...(await read('deny.toml')).matchAll(/\{ id = "(RUSTSEC-\d{4}-\d{4})"/g)].map(match=>match[1]).sort(),rustsec,'deny.toml ignores a different set');
+ assert.deepEqual([.../^ignore = \[([^\]]*)\]/m.exec(await read('.cargo/audit.toml'))[1].matchAll(/"([^"]+)"/g)].map(match=>match[1]).sort(),rustsec,'.cargo/audit.toml ignores a different set');
+ assert.deepEqual(ids('GHSA-'),[/const bracesException = '([^']+)'/.exec(await read('scripts/dev.mjs'))?.[1]],'the audit task ignores a different Bun advisory');
+ assert.equal(rustsec.length+ids('GHSA-').length,remaining.length,'an advisory that no audit configuration ignores is not "remaining"');
 });
 test('every Phase 0 gate has exactly one kind and only the fields of that kind',async()=>{
  const gates=(await record()).current.gates.phase_0;
@@ -71,12 +145,7 @@ test('every Phase 0 gate has exactly one kind and only the fields of that kind',
   assert.ok(['passed','failed','incomplete'].includes(gate.status),`${gate.id} status ${gate.status}`);
  }
  assert.ok(gates.some(gate=>gate.kind==='receipt'),'no gate is backed by a receipt');
- for(const gate of gates.filter(entry=>entry.kind==='decision')){
-  assert.ok(typeof gate.decision==='string'&&gate.decision.length>0,gate.id);
-  assert.match(gate.decided_on,/^\d{4}-\d{2}-\d{2}$/,gate.id);
-  assert.equal(new Date(`${gate.decided_on}T00:00:00Z`).toISOString().slice(0,10),gate.decided_on,`${gate.id}: decided_on is not a calendar date`);
-  assert.ok(['owner','integration-owner'].includes(gate.decided_by),`${gate.id} decided_by ${gate.decided_by}`);
- }
+ for(const gate of gates.filter(entry=>entry.kind==='decision'))assertDecision(gate,gate.id);
  // A gate that was not converted keeps its typed status, which is never a pass.
  for(const gate of gates.filter(entry=>entry.kind===undefined))assert.equal(gate.status,'incomplete',gate.id);
 });
@@ -133,22 +202,20 @@ test('a ci gate names a job of the workflow by its check name, and that job runs
   assert.ok(gates.some(gate=>gate.enforced_by.check===check),`no ci gate names the required check ${check}`);
  }
 });
-test('no gate text carries a commit hash or a CI run number; history lives in git',async()=>{
- const groups=(await record()).current.gates;
- assert.deepEqual(Object.keys(groups),['phase_0','construction','acceptance']);
+test('no gate text, and nothing else outside the archive, carries a commit hash or a CI run number; history lives in git',async()=>{
+ const {historical_archive_record:_archive,...live}=await record();
+ assert.deepEqual(Object.keys(live.current.gates),['phase_0','construction','acceptance']);
+ // The gates left unconverted keep their old text until they gain a kind.
+ live.current.gates.phase_0=live.current.gates.phase_0.filter(gate=>!Object.hasOwn(unconverted,gate.id));
  // Seven or more hex digits in a row: a short or full commit, or a run number.
  const hashLike=/\b[0-9a-f]{7,40}\b/i;
  const strings=value=>typeof value==='string'?[value]:value!==null&&typeof value==='object'?Object.values(value).flatMap(strings):[];
- let scanned=0;
- for(const [group,gates] of Object.entries(groups))for(const gate of gates){
-  if(group==='phase_0'&&Object.hasOwn(unconverted,gate.id))continue;
-  for(const text of strings(gate)){
-   scanned+=1;
-   assert.doesNotMatch(text,hashLike,`${group} gate ${gate.id}`);
-   assert.doesNotMatch(text,/actions\/runs\/|\bCI \d+/,`${group} gate ${gate.id}`);
-  }
+ const texts=strings(live);
+ assert.ok(texts.length>100,'the scan read almost nothing');
+ for(const text of texts){
+  assert.doesNotMatch(text,hashLike,text.slice(0,80));
+  assert.doesNotMatch(text,/actions\/runs\/|\bCI \d+/,text.slice(0,80));
  }
- assert.ok(scanned>50,'the scan read almost nothing');
 });
 test('the acceptance script calls only declared operations, and edits through a draft and a Snapshot',async()=>{
  const paths=new Set(JSON.parse(await read('api/operations.json')).map(operation=>operation.path));
