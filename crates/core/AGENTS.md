@@ -6,7 +6,7 @@ Read root AGENTS.md and SPEC.md.
 
 **Gate:** `cargo test -p okf-jawn-core`
 
-**Receipt:** authorization and dispatch tests pass (grants, targets, mutation ledger, confirmation re-consume); ApplicationService modules implement declared operations without fabricating success.
+**Receipt:** authorization and dispatch tests pass (grants, targets, mutation ledger); ApplicationService modules implement declared operations without fabricating success. Confirmation single-use is the storage lane's `confirmation-single-use` gate, not part of this receipt.
 
 Implement `ports::Application` for `application::ApplicationService` in cohesive child modules of `crates/core/src/application/`, using only the injected `Ports`. Core never depends on the storage, ingest, server, mcp or cli crates. Capability checks and exact revision semantics remain shared. Dispatch authorizes every `RequestScope` target, builds `OperationContext`, and runs `MutationStore::begin` before handlers. Coordinate SearchIndex updates and rebuilds with content changes; rebuild never touches RecordStore. Connector operations are available to the local owner only. Add production behavior, not an in-memory stand-in. Coordinate CLI ergonomics with the complete operation contract.
 

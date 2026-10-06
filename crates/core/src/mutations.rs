@@ -1,9 +1,12 @@
 //! Durable mutation ledger: one write identity per (tenant, subject, client, operation, key).
 //!
 //! # Retention
-//! Completed mutations are retained for 7 days; a key reused after that starts a new mutation.
-//! A mutation that began and never completed stays until a later attempt completes it; the
-//! 7-day TTL never drops it, or crash protection has a hole.
+//! A completed row is kept for 7 days, and so is a released row: its attempt failed and said
+//! so, and nothing is left to reconcile. A key reused after its row is dropped starts a new
+//! mutation. Only a row whose lease expired without `complete` or `release` (its attempt
+//! crashed, or could not reach the ledger) stays until it is reconciled, that is until a later
+//! attempt resumes it and completes or releases it. The 7-day TTL never drops such a row, or
+//! crash protection has a hole.
 //!
 //! # Resumed attempts
 //! The ledger never looks into another store. Every store that creates a durable row takes the
