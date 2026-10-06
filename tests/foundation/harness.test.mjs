@@ -36,6 +36,7 @@ import {
   TIMEOUT_PROBE,
   buildDoclingReceipt,
 } from '../../qualification/docling/lib/receipt.mjs';
+import { OCR_FIXTURES, decodeFixture, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 import {
   UPSTREAM_HOST_RULES,
@@ -507,6 +508,24 @@ test('every fixture run is a recorded source whose bytes are unchanged, and must
     assert.equal(createHash('sha256').update(bytes).digest('hex'), entry.sha256, name);
   }
   assert.deepEqual(sources.files[MUST_FAIL].pass_when, ['converter_error', 'converter_status:Failure']);
+});
+
+test('the OCR fixtures show exactly the words their expectation names, pixel for pixel', async () => {
+  const dir = join(root, 'tests/fixtures/documents');
+  const sources = JSON.parse(await readFile(join(dir, 'SOURCES.json'), 'utf8'));
+  assert.deepEqual(Object.keys(OCR_FIXTURES).sort(), ['scanned_text.pdf', 'text_image.png']);
+  for (const [name, spec] of Object.entries(OCR_FIXTURES)) {
+    const drawn = Buffer.from(renderLines(spec));
+    assert.equal(Buffer.compare(Buffer.from(decodeFixture(spec, await readFile(join(dir, name)))), drawn), 0, `${name} is not what the generator draws`);
+    assert.deepEqual(sources.files[name].expect.ocr_tokens, fixtureWords(spec), name);
+    assert.ok(drawn.includes(0) && drawn.includes(255), `${name}: black strokes on white`);
+    // A different word draws different pixels, so the comparison above can fail.
+    const other = { ...spec, lines: spec.lines.map((line, index) => (index === 0 ? { ...line, text: 'TEAM' } : line)) };
+    assert.notEqual(Buffer.compare(Buffer.from(renderLines(other)), drawn), 0);
+  }
+  assert.throws(() => renderLines({ width: 10, height: 10, unit: 1, lines: [{ text: 'Q', left: 0, top: 0 }] }), /no glyph for "Q"/);
+  assert.match((await readFile(join(dir, 'scanned_text.pdf'))).toString('latin1'), /\/Subtype \/Image \/Width 612 \/Height 792 \/ColorSpace \/DeviceGray/);
+  assert.doesNotMatch((await readFile(join(dir, 'scanned_text.pdf'))).toString('latin1'), /\bBT\b|\bTj\b/, 'no text operators: the words exist only as pixels');
 });
 
 const pidAlive = (pid) => {

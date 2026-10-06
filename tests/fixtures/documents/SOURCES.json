@@ -1,6 +1,6 @@
 {
   "generated_at": "2026-10-05T12:00:00+00:00",
-  "generator": "okf-jawn qualification fixture builder + docling-project corpus fetch",
+  "generator": "okf-jawn qualification fixture builder + docling-project corpus fetch; scanned_text.pdf and text_image.png are drawn by qualification/docling/lib/ocr-fixture.mjs",
   "license_note": "Self-generated fixtures remain MIT for qualification. Corpus files are copied from docling-project/docling (MIT) at commit 4e650af5.",
   "corpus_source": {
     "repository": "https://github.com/docling-project/docling",
@@ -16,6 +16,19 @@
       "notes": "Minimal valid RGB PNG; usable as OCR/image backend input",
       "sha256": "c845833844c2085e427dec79455f1274e413569de93e30605ba8c43ad20bcfb5",
       "bytes": 211
+    },
+    "text_image.png": {
+      "role": "image_with_text",
+      "url": "generated://okf-jawn/fixtures/text_image.png",
+      "license": "MIT (generated for qualification; the letterforms are authored in the generator)",
+      "notes": "480x160 8-bit greyscale PNG showing two lines of black text on white, PLANT 74 and KEPT LATE, drawn by qualification/docling/lib/ocr-fixture.mjs (bun qualification/docling/make-ocr-fixtures.mjs). The text exists only as pixels.",
+      "sha256": "52b23b375be4a4b64841f67b4fe6de9926ce142d1a74b1a583dc86b5f13c8816",
+      "bytes": 2505,
+      "expect": {
+        "confirmed_by": "its generator: OCR_FIXTURES in qualification/docling/lib/ocr-fixture.mjs lists the words drawn, and the foundation test decodes this file and compares it pixel for pixel with the generator's raster",
+        "ocr_tokens": ["PLANT", "74", "KEPT", "LATE"],
+        "pages": 1
+      }
     },
     "sample_with_image.docx": {
       "role": "docx_with_images",
@@ -48,6 +61,19 @@
       "notes": "Image-only PDF with DeviceRGB XObject and no text operators (OCR path)",
       "sha256": "0deee37bf0d2206b4bba1964f9b43b02244f1e2108b18c34e129bbff925e7b4e",
       "bytes": 72666
+    },
+    "scanned_text.pdf": {
+      "role": "scanned_pdf_with_text",
+      "url": "generated://okf-jawn/fixtures/scanned_text.pdf",
+      "license": "MIT (generated for qualification; the letterforms are authored in the generator)",
+      "notes": "One-page PDF-1.4 whose only content is a 612x792 Flate-compressed DeviceGray image showing two lines of black text on white, WATER METER and TAX YEAR 47, drawn by qualification/docling/lib/ocr-fixture.mjs (bun qualification/docling/make-ocr-fixtures.mjs). No text operators: the text exists only as pixels.",
+      "sha256": "4487d56c9a6d4cbef3f8282e034111265018328ed355f153252c3f092e388c96",
+      "bytes": 3788,
+      "expect": {
+        "confirmed_by": "its generator: OCR_FIXTURES in qualification/docling/lib/ocr-fixture.mjs lists the words drawn, the foundation test decodes this file and compares it pixel for pixel with the generator's raster, and xpdf pdftotext 4.06 reads the file without error and prints no text",
+        "ocr_tokens": ["WATER", "METER", "TAX", "YEAR", "47"],
+        "pages": 1
+      }
     },
     "table_heavy.pdf": {
       "role": "table_heavy_pdf",

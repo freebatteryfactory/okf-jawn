@@ -396,7 +396,7 @@ fn convert_fixture(
     )
 }
 
-fn fixture_catalog() -> [(&'static str, &'static str, Expected); 10] {
+fn fixture_catalog() -> [(&'static str, &'static str, Expected); 12] {
     [
         (
             "sample_with_image.docx",
@@ -425,6 +425,11 @@ fn fixture_catalog() -> [(&'static str, &'static str, Expected); 10] {
             Expected::SuccessNonEmpty { must_contain: None },
         ),
         (
+            "scanned_text.pdf",
+            "scanned_pdf_with_text",
+            Expected::SuccessNonEmpty { must_contain: None },
+        ),
+        (
             "table_heavy.pdf",
             "table_heavy_pdf",
             Expected::SuccessNonEmpty {
@@ -434,6 +439,11 @@ fn fixture_catalog() -> [(&'static str, &'static str, Expected); 10] {
         (
             "sample_image.png",
             "image",
+            Expected::SuccessNonEmpty { must_contain: None },
+        ),
+        (
+            "text_image.png",
+            "image_with_text",
             Expected::SuccessNonEmpty { must_contain: None },
         ),
         (
