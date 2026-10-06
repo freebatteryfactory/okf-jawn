@@ -1,12 +1,20 @@
 //! Durable mutation ledger: one write identity per (tenant, subject, client, operation, key).
 //!
 //! # Retention
-//! A completed row is kept for 7 days, and so is a released row: its attempt failed and said
-//! so, and nothing is left to reconcile. A key reused after its row is dropped starts a new
+//! A completed row is kept for 7 days, and so is a released row; the clock starts when the row
+//! is completed or released. A released attempt may have left effects, and those are safe to
+//! leave because every creating store keys them by `MutationId`; the row itself is no longer
+//! needed once the retry window has passed. A key reused after its row is dropped starts a new
 //! mutation. Only a row whose lease expired without `complete` or `release` (its attempt
 //! crashed, or could not reach the ledger) stays until it is reconciled, that is until a later
 //! attempt resumes it and completes or releases it. The 7-day TTL never drops such a row, or
-//! crash protection has a hole.
+//! crash protection has a hole. SPEC §8's "abandoned mutations stay until reconciled" means a
+//! row whose lease expired without `complete` or `release`; `BeginOutcome::Abandoned` is also
+//! returned for a released row, which does expire.
+//!
+//! A lease must expire. Its length is set by the storage implementation, which records it in
+//! `crates/storage/AGENTS.md`; three exits other than a crash leave a live lease until then: a
+//! dropped request future, a failed `release`, and a store that wrongly returns `Conflict`.
 //!
 //! # Resumed attempts
 //! The ledger never looks into another store. Every store that creates a durable row takes the
@@ -126,12 +134,17 @@ pub trait MutationStore: Send + Sync {
     /// Compare-and-set on the lease: fails with `ErrorCode::Conflict` when `lease` is no longer
     /// the current grant (it expired and another attempt holds the mutation). Nothing is
     /// stored in that case; the response of the attempt that holds the grant is the one kept.
+    ///
+    /// `Conflict` is returned for a lost lease and for nothing else; any other failure uses
+    /// another code (`Unavailable` or `Internal`). Dispatch treats `Conflict` here as "another
+    /// attempt holds this mutation" and does not release.
     fn complete(&self, lease: MutationLease, response: Value) -> PortFuture<'_, ()>;
 
     /// End the lease after a failed attempt. The row keeps its id; the same key may begin again.
     ///
     /// Ends the lease only if `lease` is the current grant; a stale lease is a no-op, and so is
-    /// releasing a completed mutation. After a release that took effect, the next `begin` with
+    /// releasing a completed mutation. This is what keeps a row completed when `complete`
+    /// committed and then reported an error. After a release that took effect, the next `begin` with
     /// the same key and digest returns `Abandoned` without waiting for the lease to expire.
     fn release(&self, lease: MutationLease) -> PortFuture<'_, ()>;
 }

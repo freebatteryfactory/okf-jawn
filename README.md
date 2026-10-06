@@ -50,7 +50,7 @@ The authored source of operation meaning is `crates/contract/src/operations.rs`,
 
 | Output | Actual producer |
 | --- | --- |
-| `api/openapi.json` and `.yaml` | Schemars component schemas (the schema authority) and the typed operation declarations, assembled with Utoipa's OpenAPI builder |
+| `api/openapi.json` and `.yaml` | Schemars component schemas (the schema authority) and the typed operation declarations, assembled as plain JSON from them |
 | `api/operations.json`, `transports.json` | Serde serialization of the same declarations |
 | Per-operation input/output JSON Schemas | Schemars, explicit deserialize/serialize contracts |
 | `api/forms/*.schema.json` | Schemars Draft 7 for RJSF's default AJV adapter |
@@ -74,7 +74,7 @@ Two explicit entry paths, chosen by `OKF_AUTH_MODE`, produce the same internal p
 ## Vendor documentation without conversation recall
 
 ```sh
-bun scripts/dev.mjs vendor utoipa
+bun scripts/dev.mjs vendor schemars
 bun scripts/dev.mjs vendor mcp
 bun scripts/dev.mjs vendor bun
 ```
@@ -91,13 +91,13 @@ bun scripts/dev.mjs lane storage     # that lane's gate
 bun scripts/dev.mjs premerge         # the CI sequence, every step, every feature
 ```
 
-`lanes` creates one worktree and `build/<lane>` branch per lane from the same clean commit, under `OKF_LANES_DIR` when set, else `D:\okf\lanes` on Windows when `D:` exists, else `../okf-jawn-lanes`. `scripts/lib/lanes.mjs` is the only lane table: worktrees, gates, the scope check, the AGENTS.md table and the CODEOWNERS lane rows are generated from it or tested against it. `lane <name>` runs that lane's fmt, Clippy, tests, source policy and scope check (Biome, route generation through `bun scripts/dev.mjs routes`, `tsc` and filtered Vitest for the UI lanes), writes `.artifacts/lane/<name>/<sha>.log` and ends with `PASS <name> <sha>` or `FAIL <name> <sha> <step>`; the sha carries `-dirty` when the tree had uncommitted changes. `premerge` is what CI runs; it never stops at the first failure. `lanes-reset` removes only clean lanes that hold no commits of their own, and never forces. None of this starts paid agents, spends API credits, or grants repository privileges. Each lane's files contain short local instructions. The integration owner controls contracts, manifests, lockfiles, generated outputs, deployment and independent acceptance. `CODEOWNERS` routes review on GitHub; it is not a local lock, and no branch protection is configured yet. Builders may test their work but may not redefine it from whichever unrelated check is red.
+`lanes` creates one worktree and `build/<lane>` branch per lane from the same clean commit, under `OKF_LANES_DIR` when set, else `D:\okf\lanes` on Windows when `D:` exists, else `../okf-jawn-lanes`. `scripts/lib/lanes.mjs` is the only lane table: worktrees, gates, the scope check, the AGENTS.md table and the CODEOWNERS lane rows are generated from it or tested against it. `lane <name>` runs that lane's fmt, Clippy, tests, source policy and scope check (Biome, route generation through `bun scripts/dev.mjs routes`, `tsc` and filtered Vitest for the UI lanes), writes `.artifacts/lane/<name>/<sha>.log` and ends with `PASS <name> <sha>` or `FAIL <name> <sha> <step>`; the sha carries `-dirty` when the tree had uncommitted changes. `premerge` is what CI runs; it never stops at the first failure. `lanes-reset` removes only clean lanes that hold no commits of their own, and never forces. None of this starts paid agents, spends API credits, or grants repository privileges. Each lane's files contain short local instructions. The integration owner controls contracts, manifests, lockfiles, generated outputs, deployment and independent acceptance. `CODEOWNERS` routes review on GitHub; it is not a local lock. A ruleset on `main` requires the two always-running CI jobs and blocks force-push and deletion; squash and rebase merging are disabled, so history reaches `main` only through merge commits. No required review exists until real owners replace the placeholder handles. Builders may test their work but may not redefine it from whichever unrelated check is red.
 
 The intended release is the complete product in `SPEC.md`, not a succession of cut-down demos. Lanes work on full responsibilities in parallel rather than storage first and UI later; assemble them while context is fresh, then accept connected user journeys. Do not spend construction time on speculative optimization or adapters hiding a wrong shared assumption.
 
 ## Verification and limits
 
-`check-offline` runs the dependency-free tooling tests with `bun test` (`check-offline --fast` only those that create no repository and spawn no process, as pre-commit does): positive/negative HTTP harness controls and static contract/policy/toolchain consistency checks. It is not Rust compilation, TypeScript 7 type checking (`tsc -b` in `ui/`, which imports the route tree that `bun scripts/dev.mjs routes` writes; the Hey API client runtime is a separate project in `ui/tsconfig.generated.json` because of hey-api/openapi-ts#3157, and `typecheck:generated-strict` reports when that exception can go), Utoipa/Hey API execution, full semantic schema validation, WorkOS qualification, conversion, or product acceptance. `foundation` requests the broader checks and fails if their prerequisites are missing.
+`check-offline` runs the dependency-free tooling tests with `bun test` (`check-offline --fast` only those that create no repository and spawn no process, as pre-commit does): positive/negative HTTP harness controls and static contract/policy/toolchain consistency checks. It is not Rust compilation, TypeScript 7 type checking (`tsc -b` in `ui/`, which imports the route tree that `bun scripts/dev.mjs routes` writes; the Hey API client runtime is a separate project in `ui/tsconfig.generated.json` because of hey-api/openapi-ts#3157, and `typecheck:generated-strict` reports when that exception can go), Schemars/Hey API execution, full semantic schema validation, WorkOS qualification, conversion, or product acceptance. `foundation` requests the broader checks and fails if their prerequisites are missing.
 
 `bun scripts/dev.mjs qualify mcp-wire` checks a supplied running MCP endpoint. It does not certify that a host rendered the iframe. `qualify application` exercises a disposable test deployment; it refuses to run without explicit credentials and a test-environment opt-in. No secret or external endpoint is supplied by default.
 

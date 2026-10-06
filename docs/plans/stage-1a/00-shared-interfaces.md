@@ -148,9 +148,14 @@ pub enum BeginOutcome {
 pub trait MutationStore: Send + Sync {
     fn begin<'a>(&'a self, key: &'a MutationKey, digest: &'a Digest) -> PortFuture<'a, BeginOutcome>;
     /// Compare-and-set on the lease: fails with `ErrorCode::Conflict` when `lease` is no longer
-    /// the current grant (it expired and another attempt holds the mutation).
+    /// the current grant (it expired and another attempt holds the mutation). `Conflict` is
+    /// returned for a lost lease and for nothing else; any other failure uses another code
+    /// (`Unavailable` or `Internal`). Dispatch treats `Conflict` here as "another attempt holds
+    /// this mutation" and does not release.
     fn complete(&self, lease: MutationLease, response: Value) -> PortFuture<'_, ()>;
-    /// Ends the lease only if `lease` is the current grant; a stale lease is a no-op. After a
+    /// Ends the lease only if `lease` is the current grant; a stale lease is a no-op, and so is
+    /// releasing a completed mutation: this is what keeps a row completed when `complete`
+    /// committed and then reported an error. After a
     /// release that took effect, the next `begin` with the same key and digest returns
     /// `Abandoned { lease }`, so the retry runs as `Attempt::Resumed` under the same identity
     /// (the failed attempt may have left effects).

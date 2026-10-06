@@ -2,35 +2,8 @@
   "schema_version": 1,
   "project": "okf-jawn",
   "scope": "Offline navigation notes and exact lookup instructions, not a licensed mirror of vendor documentation or a compatibility certification. use_sites exist in the repository now; planned_use_sites are where a lane will integrate the library; generated_sites are written by gen. context7_queries_executed counts the lookups whose library and query are recorded here.",
-  "context7_queries_executed": 6,
+  "context7_queries_executed": 5,
   "vendors": [
-    {
-      "name": "utoipa",
-      "use_sites": [
-        "xtask/src/api.rs"
-      ],
-      "official_sources": [
-        "https://docs.rs/utoipa/6.0.0/utoipa/",
-        "https://github.com/juhaku/utoipa/blob/master/utoipa/README.md"
-      ],
-      "symbols": [
-        "ToSchema::schemas",
-        "PartialSchema::schema",
-        "OpenApiBuilder",
-        "ComponentsBuilder",
-        "PathItem"
-      ],
-      "context7_library_id": "/juhaku/utoipa",
-      "context7_query": "Construct a standalone OpenAPI document with OpenApiBuilder, PathsBuilder, OperationBuilder, RequestBodyBuilder, ContentBuilder and ComponentsBuilder; API generation independent of runtime handlers.",
-      "knowledge_source": "Context7 query and official API documentation",
-      "offline_notes": [
-        "API generation must compile independently of runtime storage and UI.",
-        "The canonical operation table is authored Rust. The generated OpenAPI is the public interchange artifact.",
-        "References collected from request and response types are checked for conflicting component names; do not silently replace them."
-      ],
-      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
-    },
     {
       "name": "schemars",
       "use_sites": [

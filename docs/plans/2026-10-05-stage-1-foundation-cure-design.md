@@ -326,3 +326,8 @@ Questions for the owner before Stage 2 (none block Stage 1):
   docling, mcp-apps and iii, and the clean-checkout receipt stays under `.artifacts/`.
 - The implementation plan is `docs/plans/stage-1a/` (one file per package). Phases 5–6 get their
   own plan at commit R.
+- Packages E2, T and P were added during execution: E2 hardened dispatch, T the test follow-ups,
+  P the UI lint fix and the prose pass.
+- The `main` ruleset (the two always-running CI jobs required, force-push and deletion blocked,
+  merge commits only) was applied before commit S.
+- The 27 guesses from the store-ports verification open the storage-lane plan.
