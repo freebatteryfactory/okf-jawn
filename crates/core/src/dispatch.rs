@@ -5,6 +5,7 @@
 //! "Error" is anything that fails after `begin` granted the lease, not only the handler: a
 //! failure to serialize the response, to build the ledger body, or in `complete` itself also
 //! releases the lease, and the caller receives the first error, never the release's.
+//! A request that declares no target is refused as `Internal` before anything else runs.
 //! A grant is used only when it is for the workspace and tenant that were asked for. The ledger
 //! never inspects other stores: a resumed attempt re-runs the handler under the same
 //! `MutationId`, and what the ledger retains is decided by the request's `ReplayPolicy`.
@@ -233,7 +234,17 @@ async fn authorize_targets(
     let principal = caller.principal;
     let mut grants: Vec<WorkspaceGrant> = Vec::new();
     let mut tenant: Option<TenantGrant> = None;
-    for target in request.targets() {
+    let targets = request.targets();
+    if targets.is_empty() {
+        // Every operation authorizes something, if only sign-in (`Target::Authenticated`). An
+        // empty list is a defect in the request's `RequestScope`; running the handler on it
+        // would run it with no authorization at all.
+        return Err(ApiError::new(
+            ErrorCode::Internal,
+            "Request declares no authorization target",
+        ));
+    }
+    for target in targets {
         match target {
             // Any signed-in principal; the handler filters its result by grants.
             Target::Authenticated => {}
@@ -359,16 +370,31 @@ okf_jawn_contract::for_each_operation!(dispatch_operations);
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
     use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-    use okf_jawn_contract::identity::Digest;
-    use okf_jawn_contract::scope::ReplayPolicy;
+    use okf_jawn_contract::identity::{Digest, IdempotencyKey, TenantId, WorkspaceId};
+    use okf_jawn_contract::metadata::OperationName;
+    use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
     use serde::{Serialize, Serializer};
     use serde_json::{Value, json};
 
-    use super::{finish, ledger_body, new_mutation_id, replay_response};
+    use super::{Caller, authorize_targets, finish, ledger_body, new_mutation_id, replay_response};
+    use crate::access::AccessControl;
+    use crate::context::{TenantGrant, WorkspaceGrant};
     use crate::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore};
     use crate::ports::PortFuture;
+
+    /// Access double that grants nothing and counts how often it was asked.
+    #[derive(Default)]
+    struct NoAccess {
+        lookups: AtomicUsize,
+    }
+
+    /// A request whose `RequestScope` declares nothing to authorize. No contract request does;
+    /// the dispatch table only reaches contract requests, so this one is checked directly.
+    struct Untargeted;
 
     /// Ledger double that records the bodies it was asked to keep and the leases it was asked
     /// to end. `begin` is never reached: these tests enter after the handler.
@@ -385,6 +411,54 @@ mod tests {
     const POLICY: ReplayPolicy = ReplayPolicy::AlreadyIssued {
         id_pointer: "/issued/id",
     };
+
+    impl NoAccess {
+        fn refuse<T>(&self) -> Result<T, ApiError> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            Err(ApiError::new(ErrorCode::Forbidden, "nothing is granted"))
+        }
+    }
+
+    impl AccessControl for NoAccess {
+        fn authorize<'a>(
+            &'a self,
+            _principal: &'a Principal,
+            _workspace: WorkspaceId,
+            _permission: Permission,
+        ) -> PortFuture<'a, WorkspaceGrant> {
+            Box::pin(async { self.refuse() })
+        }
+
+        fn authorize_tenant<'a>(
+            &'a self,
+            _principal: &'a Principal,
+            _permission: Permission,
+        ) -> PortFuture<'a, TenantGrant> {
+            Box::pin(async { self.refuse() })
+        }
+
+        fn grants<'a>(&'a self, _principal: &'a Principal) -> PortFuture<'a, Vec<WorkspaceGrant>> {
+            Box::pin(async { self.refuse() })
+        }
+
+        fn grant_creator<'a>(
+            &'a self,
+            _principal: &'a Principal,
+            _workspace: WorkspaceId,
+        ) -> PortFuture<'a, WorkspaceGrant> {
+            Box::pin(async { self.refuse() })
+        }
+    }
+
+    impl RequestScope for Untargeted {
+        fn targets(&self) -> Vec<Target> {
+            Vec::new()
+        }
+
+        fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+            None
+        }
+    }
 
     impl RecordingLedger {
         fn completed(&self) -> Result<Vec<Value>, ApiError> {
@@ -445,6 +519,28 @@ mod tests {
             mutation_id: new_mutation_id(),
             token: 7,
         }
+    }
+
+    #[tokio::test]
+    async fn a_request_that_declares_no_target_is_refused_as_internal() -> Result<(), ApiError> {
+        let access = NoAccess::default();
+        let principal = Principal {
+            subject: "alice".to_owned(),
+            tenant_id: TenantId::try_from("tenant-local".to_owned())
+                .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?,
+            route: AccessRoute::LocalOwner,
+            client_id: None,
+            delegation: None,
+        };
+        let caller = Caller {
+            principal: &principal,
+            session_id: None,
+        };
+        let refused =
+            authorize_targets(&access, &caller, OperationName::GetHealth, &Untargeted).await;
+        assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
+        assert_eq!(access.lookups.load(Ordering::SeqCst), 0);
+        Ok(())
     }
 
     #[tokio::test]
