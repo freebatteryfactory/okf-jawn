@@ -195,9 +195,13 @@ async function main() {
     case 'lanes-reset': process.stdout.write(`${await resetLanes(root)}\n`); break;
     case 'qualify': await qualify(); break;
     case 'check-receipts': {
-      const head = option('--head');
-      // `--head` asks about a commit; without one it must not quietly check the working tree instead.
-      if (args.includes('--head') && (head === undefined || head.startsWith('--'))) throw new Error('check-receipts --head needs a commit: bun scripts/dev.mjs check-receipts --head <sha>');
+      // `--head <sha>` and `--head=<sha>` are the same option. However it is written, `--head` asks about a
+      // commit; without one it must not quietly check the working tree instead, and a second one is no
+      // commit to choose between.
+      const spellings = args.filter(value => value === '--head' || value.startsWith('--head='));
+      if (spellings.length > 1) throw new Error('check-receipts --head was given more than once; name one commit');
+      const head = spellings[0]?.startsWith('--head=') ? spellings[0].slice('--head='.length) : option('--head');
+      if (spellings.length && (head === undefined || head === '' || head.startsWith('--'))) throw new Error('check-receipts --head needs a commit: bun scripts/dev.mjs check-receipts --head <sha>');
       if (head === undefined) { process.stdout.write(`${await checkReceipts(root)}\n`); break; }
       const lines = await staleReceiptLines(root, head);
       if (lines.length) { process.stderr.write(`${lines.join('\n')}\n`); process.exitCode = 1; }

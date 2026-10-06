@@ -811,6 +811,35 @@ test('check-receipts --head with no commit is an error, and a commit without ver
   assert.deepEqual(said(unknown), ['check-receipts: no-such-ref is not a commit in this repository.']);
 });
 
+test('check-receipts --head=<commit> is the option written another way, and no spelling of --head is ever ignored', async t => {
+  const { root } = await fixtureRepo(t, { 'harness/run.mjs': '// v1\n' });
+  const { check } = await commandsIn(root);
+  const needsCommit = 'check-receipts --head needs a commit: bun scripts/dev.mjs check-receipts --head <sha>';
+  const bare = await git(root, 'rev-parse', 'HEAD');
+  const recorded = await commit(root, { 'verification.json': fixtureRecord(), 'qualification/docling/criteria.json': fixtureCriteria('docling'), 'qualification/mcp-apps/criteria.json': fixtureCriteria('mcp-apps') }, 'a record');
+  // The working tree passes, so a --head that is dropped would pass too; the commit without a record must fail either way.
+  assert.equal((await check()).code, 0);
+  const spaced = await check('--head', bare);
+  const joined = await check(`--head=${bare}`);
+  assert.equal(spaced.code, 1);
+  assert.deepEqual([joined.code, joined.stdout, said(joined)], [spaced.code, spaced.stdout, said(spaced)], 'both spellings judge the same commit');
+  assert.deepEqual(said(joined), [`untrusted record verification.json is missing at ${bare}`]);
+  const good = await check(`--head=${recorded}`);
+  assert.equal(good.code, 0, good.stderr);
+  assert.equal(good.stdout.trim(), `check-receipts: nothing at ${recorded} is untrusted, and its typed statuses are the ones its receipts derive.`);
+  // No commit, or two, or a name that is none, is said so: never the working tree instead.
+  for (const [args, lines] of [[['--head='], [needsCommit]], [['--head=', '--verbose'], [needsCommit]], [['--head=--verbose'], [needsCommit]],
+    [['--head=no-such-ref'], ['check-receipts: no-such-ref is not a commit in this repository.']],
+    [['--head', recorded, `--head=${bare}`], ['check-receipts --head was given more than once; name one commit']],
+    [[`--head=${bare}`, `--head=${recorded}`], ['check-receipts --head was given more than once; name one commit']]]) {
+    const result = await check(...args);
+    assert.equal(result.code, 1, args.join(' '));
+    assert.deepEqual(said(result), lines, args.join(' '));
+    assert.equal(result.stdout, '', `${args.join(' ')}: the working tree was not checked instead`);
+    assertNoStack(result);
+  }
+});
+
 test('a receipt file whose JSON is no object is a failure, and a directory under receipts/ is reported, on both paths', async t => {
   const { root, sha } = await recorded(t);
   const rerun = 'bun qualification/docling/run.mjs, then bun qualification/record.mjs docling';
