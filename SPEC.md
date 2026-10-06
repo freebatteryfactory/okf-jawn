@@ -128,7 +128,7 @@ Hosted: WorkOS AuthKit provides browser sessions and WorkOS Connect provides MCP
 
 Principal identity is not authorization. The Principal carries subject, tenant, route, client and optional delegation ceiling; effective permissions come from AccessControl as WorkspaceGrant and TenantGrant. Workspace list/open responses include the caller's effective permissions so the UI can show the right actions. The hosted adapter may cache Read, Write and Propose grants for at most 60 seconds; Approve, Review and Admin are always checked fresh. The local adapter does not cache. Logging out ends the session immediately.
 
-No passwords, tokens, connector secrets or WorkOS keys appear in browser logs, vendor notes or source. A newly issued connector secret is returned exactly once and never stored in plain text; idempotent retries of create_connector return AlreadyIssued without the secret.
+No passwords, tokens, connector secrets or WorkOS keys appear in browser logs, vendor notes or source. A newly issued connector secret is returned exactly once and never stored in plain text; replaying a completed create_connector returns AlreadyIssued without the secret, while a resumed attempt rotates the secret of the connector it created (section 8).
 
 Uploaded HTML is hostile data until constrained by actual isolation. Use a sandboxed separate origin, no credentials or privileged APIs, restricted navigation/messages and explicit external-resource policy. Do not treat a normal browser iframe as automatically safe.
 

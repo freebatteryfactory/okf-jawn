@@ -12,7 +12,7 @@
 //! row whose lease expired without `complete` or `release`; `BeginOutcome::Abandoned` is also
 //! returned for a released row, which does expire.
 //!
-//! A lease must expire. Its length is set by the storage implementation and recorded in
+//! A lease must expire. Its length is set by the storage implementation, which records it in
 //! `crates/storage/AGENTS.md`; three exits other than a crash leave a live lease until then: a
 //! dropped request future, a failed `release`, and a store that wrongly returns `Conflict`.
 //!
