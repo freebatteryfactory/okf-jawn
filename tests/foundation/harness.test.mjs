@@ -59,6 +59,8 @@ import { OCR_FIXTURES, decodeFixture, encodePng, fixtureWords, renderLines } fro
 import { pngInk } from '../../qualification/docling/lib/png.mjs';
 import { deflateSync } from 'node:zlib';
 import { recordRefusal } from '../../qualification/record.mjs';
+import { checkReceipts, derivedRecord, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
+import { commit as fixtureCommit, fixtureRepo, git as fixtureGit } from './fixture-repo.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 import { BASIC_HOST, PATCHED_SERVE, SOURCE_RECORD, lsRemoteArgs, patchServe, rawUrl, sourceProblems, sourceRecord, tagCommit } from '../../qualification/mcp-apps/lib/basic-host.mjs';
 import {
@@ -3574,4 +3576,176 @@ test('record.mjs refuses a receipt by its envelope, never by its result or by wh
   assert.match(await reasons({ git_sha: full.git_sha, inputs: full.inputs, produced_at: full.produced_at }), /criteria must be an array/);
   const source = await readFile(join(root, 'qualification/record.mjs'), 'utf8');
   assert.doesNotMatch(source, /protocol_only|basic_host/, 'record.mjs must not look inside a receipt for a reason to refuse it');
+});
+
+/**
+ * The join: what each harness really emits, held to the checker's content rules.
+ *
+ * The harness packages and the checker were built apart. These doubles go through each
+ * harness's own receipt-building code with the real declarations (SOURCES.json, VIEWS), so the
+ * receipts carry the real criterion ids, and the real `checkReceipts` reads them against the
+ * real tracked criteria.json files and the real verification.json in a repository shaped like
+ * this one.
+ */
+
+/**
+ * A converter process double for a real fixture of SOURCES.json: a document that holds exactly
+ * what the fixture's `expect` block asks for. `over` replaces parts, as for doclingRun.
+ */
+function doclingRunFor(only, source, over = {}) {
+  if (only === MUST_FAIL || only === TIMEOUT_PROBE) return doclingRun(only, over);
+  const expect = source.expect ?? {};
+  const kind = doclingCriteria.KINDS[source.kind];
+  const located = kind.provenance !== 'none';
+  const pageCount = expect.pages ?? (kind.page_renders ? 1 : 0);
+  const pageNumbers = Array.from({ length: pageCount }, (_, index) => index + 1);
+  const where = (index) => (located && pageCount > 0 ? prov({ l: 72, t: 720 - 10 * (index % 60), r: 300, b: 712 - 10 * (index % 60) }) : []);
+  const strings = [...(expect.markdown_contains ?? []).map((entry) => (typeof entry === 'string' ? entry : entry.text)), ...(expect.ocr_tokens ?? [])];
+  const texts = expect.no_text === true
+    ? []
+    : [
+        ...Array.from({ length: expect.headings_at_least ?? 0 }, (_, index) => ({ label: 'section_header', text: `Heading ${index + 1}` })),
+        ...strings.map((text) => ({ label: 'text', text })),
+      ].map((item, index) => ({ self_ref: `#/texts/${index}`, ...item, prov: where(index) }));
+  const tableCount = expect.tables ?? expect.tables_at_least ?? ((expect.table_rows ?? []).length ? 1 : 0);
+  const tables = Array.from({ length: tableCount }, (_, index) => ({
+    self_ref: `#/tables/${index}`,
+    label: 'table',
+    prov: where(index),
+    data: { grid: (index === 0 ? (expect.table_rows ?? [['a']]) : [['a']]).map((row) => row.map((text) => ({ text }))), table_cells: [] },
+  }));
+  // A fixture without glyphs still shows something: its picture is what provenance judges.
+  const pictures = Array.from({ length: Math.max(expect.pictures_at_least ?? 0, expect.no_text === true ? 1 : 0) }, (_, index) => ({
+    self_ref: `#/pictures/${index}`,
+    label: 'picture',
+    prov: where(index),
+    captions: [],
+  }));
+  const pageBytes = (page_no) => ((expect.blank_pages ?? []).includes(page_no) ? BLANK_PNG : PAGE_PNG);
+  const images = kind.page_renders
+    ? pageNumbers.map((page_no) => ({ ...PAGE_IMAGE, page_no, bytes: pageBytes(page_no).length, sha256: createHash('sha256').update(pageBytes(page_no)).digest('hex'), file: `page-${page_no}.png` }))
+    : [];
+  return doclingRun(only, {
+    ...over,
+    fixture: {
+      library_page_count: source.kind === 'pdf' ? { value: pageCount, error: null } : null,
+      document: { markdown_file: 'document.md', json_file: 'document.json', page_images: images },
+      ...over.fixture,
+    },
+    evidence: {
+      markdown: expect.no_text === true ? '<!-- image -->\n' : `${strings.join('\n\n')}\n`,
+      document: {
+        pages: Object.fromEntries(pageNumbers.map((page_no) => [page_no, { size: { width: 612, height: 792 }, page_no }])),
+        texts,
+        tables,
+        pictures,
+        groups: (expect.sheet_names ?? []).map((name) => ({ label: 'sheet', name })),
+      },
+      pageFiles: Object.fromEntries(images.map((image) => [image.file, pageFile(pageBytes(image.page_no))])),
+      problems: [],
+      ...over.evidence,
+    },
+  });
+}
+
+/** A Docling receipt for the real SOURCES.json, built by the harness's own code. `overrides` as for doclingReceipt. */
+async function realDoclingReceipt(header, overrides = {}, parts = {}) {
+  const sources = JSON.parse(await readFile(join(root, 'tests/fixtures/documents/SOURCES.json'), 'utf8'));
+  return buildDoclingReceipt({
+    header,
+    converter: DOCLING_CONVERTER,
+    platform: 'win32',
+    build: DOCLING_BUILD,
+    assets: DOCLING_ASSETS,
+    environment: { DOCLING_RS_MODELS_DIR: 'C:\\models' },
+    sources,
+    runs: FIXTURE_RUNS.map((only) => doclingRunFor(only, sources.files[only], overrides[only])),
+    scope: { mode: 'all', fixtures: FIXTURE_RUNS, qualification: true },
+    paths: { fixtures_dir: 'tests/fixtures/documents' },
+    finishedAt: '2026-10-06T10:00:00.000Z',
+    ...parts,
+  });
+}
+
+/** A repository shaped like this one: the real record and the real criteria files, committed. */
+async function joinRepository(t) {
+  const tracked = ['verification.json', 'qualification/docling/criteria.json', 'qualification/mcp-apps/criteria.json'];
+  const files = Object.fromEntries(await Promise.all(tracked.map(async (path) => [path, await readFile(join(root, path), 'utf8')])));
+  const { root: repo } = await fixtureRepo(t, { ...files, 'qualification/receipts/.gitkeep': '' });
+  const sha = await fixtureGit(repo, 'rev-parse', 'HEAD');
+  /** Commit these receipts as recorded, with the statuses record.mjs would write. */
+  const record = async (receipts) => {
+    for (const [harness, receipt] of Object.entries(receipts)) await writeFile(join(repo, 'qualification/receipts', `${harness}.json`), `${JSON.stringify(receipt, null, 2)}\n`);
+    await writeDerivedRecord(repo);
+    await fixtureCommit(repo, {}, 'record');
+    return derivedRecord(repo);
+  };
+  return { repo, sha, record };
+}
+
+const derivedStatuses = (derived) => Object.fromEntries(derived.gates.map((gate) => [gate.harness, gate.status]));
+const derivedFailures = (derived) => derived.failures.map((failure) => `${failure.name}: ${failure.message}`);
+/** A receipt as a harness that dropped one check would write it: the criterion is gone and nothing else says so. */
+const withoutCriterion = (receipt, id) => ({ ...receipt, criteria: receipt.criteria.filter((criterion) => criterion.id !== id), not_judged: receipt.not_judged.filter((other) => other !== id) });
+
+test('join: a passing receipt from each harness has no content failure under the real checker, criteria files and record', async (t) => {
+  const { repo, sha, record } = await joinRepository(t);
+  const docling = await realDoclingReceipt({ git_sha: sha, inputs: DOCLING_INPUTS, produced_at: '2026-10-06T09:00:00.000Z' });
+  const apps = (await (await qualifyDouble({ change: { header: async () => ({ git_sha: sha, inputs: MCP_APPS_INPUTS, produced_at: '2026-10-06T09:00:00.000Z' }) } })).run()).receipt;
+  assert.deepEqual([docling.result, apps.result], ['PASS', 'PASS'], JSON.stringify(docling.failures));
+  // The ids each harness emitted as required are exactly the ones its tracked file pins.
+  const pinned = async (harness) => JSON.parse(await readFile(join(root, 'qualification', harness, 'criteria.json'), 'utf8')).required;
+  const requiredOf = (receipt) => receipt.criteria.filter((criterion) => criterion.required).map((criterion) => criterion.id).sort();
+  assert.deepEqual(requiredOf(docling), await pinned('docling'));
+  assert.deepEqual(requiredOf(apps), await pinned('mcp-apps'));
+  // The Docling receipt lists criteria that are not judged by design; the checker derives the same list.
+  assert.ok(docling.not_judged.length > 0 && apps.not_judged.length === 0);
+
+  const derived = await record({ docling, 'mcp-apps': apps });
+  assert.deepEqual(derivedFailures(derived), []);
+  assert.deepEqual(derivedStatuses(derived), { docling: 'passed', 'mcp-apps': 'passed' });
+  assert.match(await checkReceipts(repo), /^check-receipts: 2 receipt\(s\) valid against HEAD; docling-library-qualification: passed \(qualification\/receipts\/docling\.json result PASS\); mcp-apps-protocol-qualification: passed /);
+  assert.equal(await recordRefusal(repo, 'docling', docling), null);
+  assert.equal(await recordRefusal(repo, 'mcp-apps', apps), null);
+
+  // A harness that dropped a pinned check is named, for each harness, although its result still folds to PASS.
+  for (const [harness, receipt, id] of [['docling', docling, 'corpus/redp5110_sampled.pdf/provenance'], ['mcp-apps', apps, 'render_present/dataset_exercised']]) {
+    const dropped = withoutCriterion(receipt, id);
+    assert.equal(sharedEnvelope.foldCriteria(dropped.criteria, dropped.harness_error), 'PASS');
+    const after = await record({ [harness]: dropped });
+    assert.deepEqual(derivedFailures(after), [`${harness}.json: pinned criterion ${id} is missing`]);
+    await assert.rejects(checkReceipts(repo), (error) => error.message.includes(`\n${harness}.json: pinned criterion ${id} is missing`));
+    assert.match(await recordRefusal(repo, harness, dropped), new RegExp(`pinned criterion ${id.replaceAll('/', '\\/')} is missing`));
+    assert.deepEqual(derivedFailures(await record({ [harness]: receipt })), [], `${harness} restored`);
+  }
+});
+
+test('join: a failed and an unfinished receipt from each harness are clean evidence, and the gate says failed or incomplete', async (t) => {
+  const { repo, sha, record } = await joinRepository(t);
+  const header = (inputs) => ({ git_sha: sha, inputs, produced_at: '2026-10-06T09:00:00.000Z' });
+  const appsDouble = (options) => qualifyDouble({ ...options, change: { header: async () => header(MCP_APPS_INPUTS), ...options?.change } });
+
+  // FAIL: the library, or the App, did what a rule forbids.
+  const doclingFail = await realDoclingReceipt(header(DOCLING_INPUTS), { 'born_digital_text.pdf': { evidence: { markdown: 'something else\n' } } });
+  const appsFail = (await (await appsDouble({ observe: (view, good) => (view.dataset ? { ...good, frame: { ...good.frame, svg_marks: 1 } } : good) })).run()).receipt;
+  assert.deepEqual([doclingFail.result, appsFail.result], ['FAIL', 'FAIL']);
+  let derived = await record({ docling: doclingFail, 'mcp-apps': appsFail });
+  assert.deepEqual(derivedFailures(derived), []);
+  assert.deepEqual(derivedStatuses(derived), { docling: 'failed', 'mcp-apps': 'failed' });
+  assert.match(await checkReceipts(repo), /^check-receipts: 2 receipt\(s\) valid against HEAD; /);
+
+  // INCOMPLETE: the machine stopped the run. Every Docling criterion is then unjudged, 19 of the MCP Apps ones.
+  const doclingStopped = await realDoclingReceipt(header(DOCLING_INPUTS), {}, { runs: [], assets: null, build: null, harnessError: 'the Docling model assets could not be verified: missing' });
+  const appsStopped = (await (await appsDouble({ change: { launchBrowser: async () => { throw new Error("Executable doesn't exist"); } } })).run()).receipt;
+  assert.deepEqual([doclingStopped.result, appsStopped.result], ['INCOMPLETE', 'INCOMPLETE']);
+  assert.equal(doclingStopped.not_judged.length, doclingStopped.criteria.length);
+  assert.equal(appsStopped.not_judged.length, 19);
+  derived = await record({ docling: doclingStopped, 'mcp-apps': appsStopped });
+  assert.deepEqual(derivedFailures(derived), []);
+  assert.deepEqual(derivedStatuses(derived), { docling: 'incomplete', 'mcp-apps': 'incomplete' });
+  assert.match(await checkReceipts(repo), /^check-receipts: 2 receipt\(s\) valid against HEAD; /);
+
+  // The checker's own rule about not_judged holds a harness to its list: one id hidden is named.
+  const hidden = { ...doclingStopped, not_judged: doclingStopped.not_judged.slice(1) };
+  assert.match(derivedFailures(await record({ docling: hidden })).join('\n'), /^docling\.json: not_judged is \[.*\] but its criteria derive \["assets\/hashes_match",/);
 });
