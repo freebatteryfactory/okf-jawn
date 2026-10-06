@@ -230,6 +230,18 @@ test('the Docling gate carries the one failure the owner accepted, and the gates
  assert.match(construction['ingest-locates-unlocated-items'].meaning,/qualification\/docling\/src\/locate\.rs.*never given a guessed box/);
  assert.match(construction['ingest-flags-undecodable-text'].meaning,/qualification\/docling\/src\/glyphs\.rs.*never indexed as words.*reported as partly extracted/);
  assert.match(construction['converter-font-run-spacing'].meaning,/the acceptance entry is removed$/);
+ // What the two rules cannot do is said where the lane reads it: in its gates and in its own rules.
+ const detectorLimits="The detector has two known limits: it flags real text of the placeholder's shape that stands after a space (`/B747`, `/v100`, `/tmp123`), and it misses a placeholder glued to a preceding character (`x/g12`). A signal from the library that a glyph had no Unicode is preferred to this detector as soon as the library gives one";
+ assert.ok(construction['ingest-flags-undecodable-text'].meaning.endsWith(detectorLimits),'ingest-flags-undecodable-text does not state the detector\'s two known limits');
+ assert.match(construction['ingest-locates-unlocated-items'].meaning,/The rule does not guarantee that the box it finds is the item's own: that file states the two known wrong placements \(LOCATE_LIMITS\).*without applying a threshold\. Whether the product bounds that distance is the owner's decision, open until this gate is built$/);
+ assert.match(docling.covers,/It does not prove that a box found through the text layer is the item's own \(the receipt states the rule's two known wrong placements, and records each such item's distance to the item whose page was searched as a measurement with no threshold\)/);
+ const ingestRules=await read('crates/ingest/AGENTS.md');
+ assert.ok(ingestRules.includes(`${detectorLimits}.`),'crates/ingest/AGENTS.md does not state the detector\'s two known limits');
+ assert.match(ingestRules,/`LOCATE_LIMITS` in that file states the two known wrong placements/);
+ const detector=await read('qualification/docling/src/glyphs.rs');
+ assert.match(detector,/fn the_two_known_limits_of_the_detector_are_as_stated\(\)/,'the limits are stated without a test that holds them');
+ for(const example of ['`/B747`','`/v100`','`/tmp123`','`x/g12`'])assert.ok(detector.includes(example),`src/glyphs.rs does not name ${example}`);
+ assert.match(await read('qualification/docling/src/locate.rs'),/^pub\(crate\) const LOCATE_LIMITS: &str = "/m);
  // The status words of the two hand-typed groups are a closed list; none of them is a pass.
  const words=group=>[...new Set(gates[group].map(gate=>gate.status))].sort();
  assert.deepEqual(words('construction'),['blocked_on_lanes','blocked_upstream']);

@@ -13,8 +13,12 @@
 //! placeholders in a converted document, by page. It must be read again on every library
 //! version change.
 //!
-//! What the detector cannot do: tell a placeholder from real text of the same shape standing
-//! alone (`/A380`), or see a placeholder glued to a preceding decoded character (`x/g12`).
+//! The detector has two known limits, and a test holds them as they are. It flags real text of
+//! the placeholder's shape that stands after a space or starts the text: `/A380`, `/B747`,
+//! `/v100`, `/G20`, `/tmp123`, `/index9`. And it misses a placeholder glued to a preceding
+//! decoded character: `x/g12`, `(/SM590000)`. Both lose or pollute text in a product that
+//! indexes what it converts, so a signal from the library that a glyph had no Unicode is
+//! preferred to this detector as soon as the library gives one.
 
 use crate::locate::{ItemLocation, body_items};
 use serde::Serialize;
@@ -53,7 +57,7 @@ pub(crate) struct UndecodedGlyphs {
 const GID_PREFIXES: [&str; 6] = ["g", "G", "cid", "CID", "glyph", "index"];
 
 /// The rule, as the receipt states it.
-pub(crate) const GLYPH_RULE: &str = "a placeholder is `/` followed by a glyph name the library prints because the font has no Unicode for it (docling-pdf textparse.rs is_gid_name: g, G, cid, CID, glyph or index and digits, or 1 to 3 letters and at least 3 digits; never afii... or uni...), where the slash starts the text, follows whitespace or follows another placeholder; counted in the text of every text item and of every table cell, on the page the item is located on";
+pub(crate) const GLYPH_RULE: &str = "a placeholder is `/` followed by a glyph name the library prints because the font has no Unicode for it (docling-pdf textparse.rs is_gid_name: g, G, cid, CID, glyph or index and digits, or 1 to 3 letters and at least 3 digits; never afii... or uni...), where the slash starts the text, follows whitespace or follows another placeholder; counted in the text of every text item and of every table cell, on the page the item is located on. Two known limits: real text of that shape standing after a space (/B747) is counted too, and a placeholder glued to a preceding character (x/g12) is not";
 
 /// True for a glyph name the library prints verbatim because it carries no Unicode meaning:
 /// docling-pdf 1.93.6 `textparse.rs` `is_gid_name`, restated.
@@ -195,7 +199,9 @@ pub(crate) fn undecoded_glyphs(export: &Value, locations: &[ItemLocation]) -> Un
 
 #[cfg(test)]
 mod tests {
-    use super::{is_placeholder_glyph_name, placeholder_glyph_tokens, undecoded_glyphs};
+    use super::{
+        GLYPH_RULE, is_placeholder_glyph_name, placeholder_glyph_tokens, undecoded_glyphs,
+    };
     use crate::locate::locate_items;
     use serde_json::json;
 
@@ -258,6 +264,28 @@ mod tests {
             ["/cid42", "/glyph7"]
         );
         assert_eq!(placeholder_glyph_tokens(""), [""; 0]);
+    }
+
+    #[test]
+    fn the_two_known_limits_of_the_detector_are_as_stated() {
+        // Real text of the placeholder's shape, standing after a space or starting the text, is flagged.
+        for (text, flagged) in [
+            ("/A380", vec!["/A380"]),
+            ("Boeing 747/A380 and /B747", vec!["/B747"]),
+            ("see RFC /v100 and /G20 summit", vec!["/v100", "/G20"]),
+            ("path /tmp123/file", vec!["/tmp123"]),
+            (
+                "see section /index9 or /glyph12",
+                vec!["/index9", "/glyph12"],
+            ),
+        ] {
+            assert_eq!(placeholder_glyph_tokens(text), flagged, "{text}");
+        }
+        // A placeholder glued to a preceding decoded character is not seen.
+        for text in ["x/g12", "(/SM590000)", "Usage/SM590000 next"] {
+            assert_eq!(placeholder_glyph_tokens(text), [""; 0], "{text}");
+        }
+        assert!(GLYPH_RULE.contains("Two known limits: real text of that shape standing after a space (/B747) is counted too, and a placeholder glued to a preceding character (x/g12) is not"));
     }
 
     #[test]
