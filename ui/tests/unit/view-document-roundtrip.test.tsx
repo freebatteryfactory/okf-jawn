@@ -1,9 +1,24 @@
-/** Phase 0: ViewDocument Zod + prepareSpec + render equivalence for the six-component catalog. */
+/**
+ * Phase 0: ViewDocument Zod + prepareSpec + render equivalence for the six-component catalog.
+ *
+ * The fixture is rendered twice. With nothing resolved, each data component shows its
+ * unavailable state. With the data each component needs (the committed source, dataset and
+ * bindings fixtures, resolved as PresentView resolves them), each of the six draws what only a
+ * real render of that data produces: a row's cells, a chart mark per row, the source's words.
+ */
 
 import { render, screen, within } from '@testing-library/react';
+import type { TopLevelSpec } from 'vega-lite';
 import { describe, expect, it } from 'vitest';
+import metricsDatasetFixture from '../../../tests/fixtures/views/present-metrics-dataset.json';
+import presentResponseFixture from '../../../tests/fixtures/views/present-response.json';
+import sourceReadItemFixture from '../../../tests/fixtures/views/source-read-item.json';
 import viewDocumentFixture from '../../../tests/fixtures/views/view-document-six-component.json';
-import { zViewDocument } from '../../src/api/generated/zod.gen';
+import {
+  zPresentResponse,
+  zReadItemResponse,
+  zViewDocument,
+} from '../../src/api/generated/zod.gen';
 import { BindingsContext, type ResolvedPresentation } from '../../src/features/views/Bindings';
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
 
@@ -97,5 +112,82 @@ describe('ViewDocument json-render round-trip', () => {
     const list = screen.getByRole('list');
     expect(within(list).getByText('Unresolved: venue')).toBeTruthy();
     expect(within(list).getByText('Unresolved: metrics')).toBeTruthy();
+  });
+
+  it('renders each of the six catalog components with the data it needs', async () => {
+    const document = zViewDocument.parse(viewDocumentFixture);
+    const source = zReadItemResponse.parse(sourceReadItemFixture);
+    const resolved = zPresentResponse.parse(presentResponseFixture).resolved_bindings;
+    const rows = metricsDatasetFixture;
+    // The fixtures are the ones the view names: its two bindings, its chart, and the dataset behind both.
+    expect(resolved.map((binding) => binding.name)).toEqual(['venue', 'metrics']);
+    expect(Object.keys(document.charts ?? {})).toEqual(['metrics_chart']);
+    expect(rows).toHaveLength(5);
+    const presentation: ResolvedPresentation = {
+      charts: new Map([['metrics_chart', document.charts?.metrics_chart as TopLevelSpec]]),
+      sources: new Map([['venue', source]]),
+      bindings: new Map(resolved.map((binding) => [binding.name, binding])),
+      tables: new Map([['metrics', rows]]),
+    };
+
+    const { container } = render(
+      <BindingsContext.Provider value={presentation}>
+        <Layout spec={document.spec} />
+      </BindingsContext.Provider>,
+    );
+    const only = (selector: string, within_: ParentNode = container) => {
+      const found = within_.querySelectorAll(selector);
+      expect(found, selector).toHaveLength(1);
+      return found[0] as HTMLElement;
+    };
+    const texts = (nodes: Iterable<Element>) => Array.from(nodes, (node) => node.textContent);
+
+    // Stack: the titled section that holds everything else.
+    const stack = only('section.view-stack');
+    expect(only('h2', stack).textContent).toBe('Six-component catalog');
+
+    // Columns: one container, and the two components the spec puts in it are drawn inside it.
+    const columns = only('.view-columns', stack);
+    const excerpt = only('article.source-excerpt', columns);
+    const table = only(':scope > table', columns);
+
+    // SourceExcerpt: the path and revision of the source it was given, and its words as rendered Markdown.
+    expect(only('header strong', excerpt).textContent).toBe('fixtures/qualification-source.md');
+    expect(only('header code', excerpt).textContent).toBe(source.source.revision);
+    expect(only('h1', excerpt).textContent).toBe('Qualification source');
+    expect(only('p', excerpt).textContent).toBe(
+      'Contract-valid ReadItemResponse fixture for the MCP Apps harness.',
+    );
+    expect(excerpt.textContent).not.toContain('# Qualification source');
+
+    // DataTable: a column per field and a row per record of the dataset, cell for cell.
+    expect(only('caption', table).textContent).toBe('metrics');
+    expect(texts(table.querySelectorAll('thead th'))).toEqual(['category', 'value']);
+    const body = Array.from(table.querySelectorAll('tbody tr'), (row) =>
+      texts(row.querySelectorAll('td')),
+    );
+    expect(body).toEqual(rows.map((row) => [row.category, String(row.value)]));
+    expect(body[0]).toEqual(['Ingested', '412']);
+
+    // Chart: its title, one drawn mark per row of the dataset, and the same rows as its source table.
+    const chart = only(':scope > section', stack);
+    expect(only('h3', chart).textContent).toBe('Metrics chart');
+    const marks = () => chart.querySelectorAll('svg g[class~="role-mark"] > *');
+    await expect.poll(() => marks().length, { timeout: 15_000 }).toBe(rows.length);
+    for (const mark of marks()) expect(mark.tagName.toLowerCase()).toBe('path');
+    const chartTable = only('details table', chart);
+    expect(only('caption', chartTable).textContent).toBe('metrics');
+    expect(chartTable.querySelectorAll('tbody tr')).toHaveLength(rows.length);
+
+    // SourceList: each binding by the path and revision it resolved to.
+    const list = only(':scope > ul', stack);
+    expect(texts(list.querySelectorAll('li'))).toEqual([
+      `fixtures/qualification-source.md @ ${source.source.revision}`,
+      `fixtures/qualification-metrics.json @ ${source.source.revision}`,
+    ]);
+
+    // Nothing is unavailable and nothing is unresolved: every one of the six drew its data.
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(container.textContent).not.toMatch(/unavailable|Unresolved/);
   });
 });

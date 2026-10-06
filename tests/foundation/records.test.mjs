@@ -211,6 +211,13 @@ test('every Phase 0 gate has exactly one kind and only the fields of that kind',
  for(const gate of gates.filter(entry=>entry.kind==='decision'))assertDecision(gate,gate.id);
  // A gate that was not converted keeps its typed status, which is never a pass.
  for(const gate of gates.filter(entry=>entry.kind===undefined))assert.equal(gate.status,'incomplete',gate.id);
+ // The round-trip gate says the six components are rendered with data, and its test does that.
+ const roundTrip=gates.find(gate=>gate.id==='json-render-catalog-round-trip');
+ assert.match(roundTrip.covers,/renders all six catalog components twice: with nothing resolved, .* and with the committed source, dataset and binding fixtures, /);
+ const roundTripTest=await read('ui/tests/unit/view-document-roundtrip.test.tsx');
+ assert.ok(roundTrip.enforced_by.evidence.includes('ui/tests/unit/view-document-roundtrip.test.tsx'));
+ assert.match(roundTripTest,/^ {2}it\('renders each of the six catalog components with the data it needs', async \(\) => \{$/m);
+ for(const drawn of ["only('section.view-stack')","only('.view-columns', stack)","only('article.source-excerpt', columns)","only(':scope > table', columns)",'svg g[class~="role-mark"] > *',"only(':scope > ul', stack)"])assert.ok(roundTripTest.includes(drawn),`the round-trip test no longer looks for ${drawn}`);
  // The seams gate names a test file for each claim that only a test can hold.
  const seams=gates.find(gate=>gate.id==='authored-typescript-seams');
  assert.equal(seams.kind,'ci');

@@ -141,7 +141,7 @@
               "ui/tests/unit/view-document-roundtrip.test.tsx"
             ]
           },
-          "covers": "One ViewDocument fixture round-trips through the Rust contract types with unknown fields denied, and in the UI parses with the generated Zod schema, survives prepareSpec and a JSON round trip unchanged, and renders all six catalog components. It does not prove a View saved through storage or rendered in an MCP host."
+          "covers": "One ViewDocument fixture round-trips through the Rust contract types with unknown fields denied, and in the UI parses with the generated Zod schema, survives prepareSpec and a JSON round trip unchanged, and renders all six catalog components twice: with nothing resolved, where each data component shows its unavailable state, and with the committed source, dataset and binding fixtures, where the Stack and the Columns hold the others, the source excerpt shows the source's words, the data table a row per record, the chart one mark per row and the source list each resolved path. It does not prove the resolution of a binding through the host's tools, a View saved through storage or rendering in an MCP host."
         },
         {
           "id": "hey-api-generated-runtime-probe",
