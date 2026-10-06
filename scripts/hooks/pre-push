@@ -11,7 +11,8 @@ refs=$(cat)
 bun scripts/dev.mjs check-offline
 cargo fmt --all --check
 # Each pushed build/* ref is scope-checked, and every pushed ref has its qualification receipts
-# checked, at the commit being pushed, not at the current HEAD. Stale receipts block main and
+# checked, at the commit being pushed, not at the current HEAD. A status still typed over a stale
+# receipt, a hand-edited receipt and a typed status the receipts do not derive block main and
 # integration/*; on any other ref they are printed as warnings.
 printf '%s\n' "$refs" | while read -r local_ref local_sha remote_ref remote_sha; do
   case "$local_sha" in
