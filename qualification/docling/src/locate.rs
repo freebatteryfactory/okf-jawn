@@ -23,6 +23,18 @@
 //! before); an item with no located earlier sibling. A table or a picture has no text to look
 //! up and stays unlocated when the export does not locate it.
 //!
+//! What the rule does not guarantee is that the box it gives is the item's own. Two cases put
+//! an item in the wrong place and pass, and the receipt says so (`LOCATE_LIMITS`): an item
+//! under the body that starts a page is searched on its earlier sibling's page, so the same
+//! words standing once on that earlier page (a running footer) are taken for it; and when the
+//! page sets the item's text differently (a caption continued as 'Figure 1 (continued)') while
+//! another line of that page is exactly the item's text, that line is taken. The page is chosen
+//! by the order of the siblings, not by where the item is, and nothing holds the box found to
+//! the box of the parent. So each lookup records `distance`: how far the box found lies from
+//! the box of the item whose page was searched (`reference`). It is a measurement with no
+//! threshold; a rule that uses it (a box near the parent, or below the earlier sibling) is for
+//! whoever carries this module into the product to decide.
+//!
 //! Everything here is a pure function over the JSON exports, so it is tested without models.
 
 use serde::Serialize;
@@ -65,6 +77,8 @@ pub(crate) enum LocatedBy {
 pub(crate) struct Locations {
     /// One entry per text item, table and picture, in export order.
     pub(crate) items: Vec<ItemLocation>,
+    /// What the rule does not guarantee, in words.
+    pub(crate) limits: &'static str,
     /// The rule in words.
     pub(crate) rule: &'static str,
     /// What was read of the text layer.
@@ -72,16 +86,23 @@ pub(crate) struct Locations {
 }
 
 /// What the text-layer lookup did for one item the export left unlocated.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct Lookup {
     /// How the pages were chosen: `parent`, `earlier_sibling` or `none`.
     pub(crate) basis: &'static str,
+    /// The shortest distance, in page units, between the box found and the box `reference`
+    /// has on the same page; 0 when they touch or overlap. A measurement: no threshold is
+    /// applied. Null when the item is not located or `reference` has no box on that page.
+    pub(crate) distance: Option<f64>,
     /// How many text-layer items on those pages have exactly the item's text.
     pub(crate) occurrences: usize,
     /// The pages that were searched.
     pub(crate) pages: Vec<u64>,
     /// Why the item is not located; null when it is.
     pub(crate) reason: Option<String>,
+    /// The `self_ref` of the item whose pages were searched: the parent, or the earlier
+    /// sibling. Null when there was no page to search.
+    pub(crate) reference: Option<String>,
 }
 
 /// What `docling::pdf_text_layer_pages` returned for the fixture.
@@ -108,6 +129,10 @@ const ITEM_ARRAYS: [(&str, &str); 3] = [
     ("tables", "table"),
     ("pictures", "picture"),
 ];
+
+/// What the rule does not guarantee, as the receipt states it; `lib/document.mjs`
+/// `TEXT_LAYER_LIMITS` is the same sentence and a test holds the two equal.
+pub(crate) const LOCATE_LIMITS: &str = "The rule does not guarantee that the box is the item's own. An item under the body that starts a page is searched on the page of its earlier sibling, so the same words standing once on that earlier page (a running footer) are taken for it; and when the page sets the item's text differently (a caption continued as 'Figure 1 (continued)') while another line of that page is exactly the item's text, that line is taken. Nothing holds the box found to the box of the parent: for each item the lookup records the distance between the box found and the box of the item whose page was searched (lookup.distance, in page units, 0 when they touch or overlap) as a measurement, and no threshold is applied";
 
 /// The rule, as the receipt states it.
 pub(crate) const LOCATE_RULE: &str = "an item the export gives no provenance is looked up in the library's text-layer document (docling::pdf_text_layer_pages): on the pages of its parent when the parent is located, otherwise on the last page of the nearest earlier sibling the export located; it is located only when exactly one text-layer item on those pages has exactly its text and that item's box has area and lies inside the page; otherwise it stays unlocated";
@@ -159,19 +184,23 @@ fn pages_of(item: &Value) -> Vec<u64> {
         .collect()
 }
 
-/// The pages to search for an unlocated item, and how they were chosen.
-fn lookup_pages(export: &Value, item: &Value) -> (&'static str, Vec<u64>) {
+/// The pages to search for an unlocated item, how they were chosen, and the item they are
+/// the pages of: the parent, or the earlier sibling.
+fn lookup_pages<'a>(
+    export: &'a Value,
+    item: &Value,
+) -> (&'static str, Vec<u64>, Option<&'a Value>) {
     let parent = item
         .get("parent")
         .and_then(|parent| parent.get("$ref"))
         .and_then(Value::as_str)
         .and_then(|reference| resolve(export, reference));
     let Some(parent) = parent else {
-        return ("none", Vec::new());
+        return ("none", Vec::new(), None);
     };
     let own = pages_of(parent);
     if !own.is_empty() {
-        return ("parent", own);
+        return ("parent", own, Some(parent));
     }
     let reference = item.get("self_ref").and_then(Value::as_str);
     let children: Vec<&str> = parent
@@ -185,15 +214,57 @@ fn lookup_pages(export: &Value, item: &Value) -> (&'static str, Vec<u64>) {
         .iter()
         .position(|child| Some(*child) == reference)
         .map_or(&[][..], |at| children.get(..at).unwrap_or_default());
-    let page = earlier
+    let found = earlier
         .iter()
         .rev()
         .filter_map(|sibling| resolve(export, sibling))
-        .find_map(|sibling| pages_of(sibling).last().copied());
-    match page {
-        Some(page) => ("earlier_sibling", vec![page]),
-        None => ("none", Vec::new()),
+        .find_map(|sibling| pages_of(sibling).last().map(|page| (*page, sibling)));
+    match found {
+        Some((page, sibling)) => ("earlier_sibling", vec![page], Some(sibling)),
+        None => ("none", Vec::new(), None),
     }
+}
+
+/// The left, bottom, right and top of a box, measured from the bottom-left corner of a page
+/// of this height.
+fn edges(bbox: &Value, height: f64) -> Option<(f64, f64, f64, f64)> {
+    let side = |name: &str| {
+        bbox.get(name)
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+    };
+    let (left, top, right, bottom) = (side("l")?, side("t")?, side("r")?, side("b")?);
+    match bbox.get("coord_origin").and_then(Value::as_str) {
+        Some("BOTTOMLEFT") => Some((left, bottom, right, top)),
+        Some("TOPLEFT") => Some((left, height - bottom, right, height - top)),
+        _ => None,
+    }
+}
+
+/// The shortest distance between two boxes of one page of this height, in page units and
+/// rounded as the export rounds; 0 when they touch or overlap. `None` when either is not a
+/// box.
+pub(crate) fn box_distance(first: &Value, second: &Value, height: f64) -> Option<f64> {
+    let (left, bottom, right, top) = edges(first, height)?;
+    let (other_left, other_bottom, other_right, other_top) = edges(second, height)?;
+    let across = (other_left - right).max(left - other_right).max(0.0);
+    let along = (other_bottom - top).max(bottom - other_top).max(0.0);
+    Some((across.hypot(along) * 100.0).round() / 100.0)
+}
+
+/// How far the box found on `page_no` lies from the box `reference` has on that page.
+fn distance_to(
+    export: &Value,
+    reference: Option<&Value>,
+    page_no: u64,
+    found: &Value,
+) -> Option<f64> {
+    let own = provenance(reference?)
+        .iter()
+        .find(|entry| entry.get("page_no").and_then(Value::as_u64) == Some(page_no))?
+        .get("bbox")?;
+    let (_, height) = page_size(export, page_no)?;
+    box_distance(found, own, height)
 }
 
 /// The size of a page of the converted document.
@@ -257,12 +328,18 @@ fn look_up(
     item: &Value,
     lines: Result<&[Line<'_>], &str>,
 ) -> (Lookup, Option<(u64, Value)>) {
-    let (basis, pages) = lookup_pages(export, item);
+    let (basis, pages, searched) = lookup_pages(export, item);
+    let reference = searched
+        .and_then(|other| other.get("self_ref"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let unlocated = |occurrences: usize, reason: String| Lookup {
         basis,
+        distance: None,
         occurrences,
         pages: pages.clone(),
         reason: Some(reason),
+        reference: reference.clone(),
     };
     let lines = match lines {
         Ok(lines) => lines,
@@ -320,9 +397,11 @@ fn look_up(
     }
     let found = Lookup {
         basis,
+        distance: distance_to(export, searched, line.page_no, line.bbox),
         occurrences: 1,
         pages,
         reason: None,
+        reference,
     };
     (found, Some((line.page_no, line.bbox.clone())))
 }
@@ -382,6 +461,7 @@ pub(crate) fn locate_items(export: &Value, text_layer: Result<&Value, &str>) -> 
         .collect();
     Locations {
         items,
+        limits: LOCATE_LIMITS,
         rule: LOCATE_RULE,
         text_layer: read,
     }
@@ -389,7 +469,7 @@ pub(crate) fn locate_items(export: &Value, text_layer: Result<&Value, &str>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{LocatedBy, Locations, bbox_problem, locate_items};
+    use super::{LOCATE_LIMITS, LocatedBy, Locations, bbox_problem, box_distance, locate_items};
     use serde_json::{Value, json};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -741,6 +821,165 @@ mod tests {
             value.pointer("/text_layer/source"),
             Some(&json!("docling::pdf_text_layer_pages"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn each_lookup_records_how_far_the_box_found_lies_from_the_item_whose_page_was_searched()
+    -> TestResult {
+        let (export, layer) = (export(), text_layer());
+        let locations = locate_items(&export, Ok(&layer));
+        let measured = |item: &str| -> Result<(Value, Value, Value), Box<dyn std::error::Error>> {
+            let lookup =
+                serde_json::to_value(some(by(&locations, item)?.lookup.as_ref(), "the lookup")?)?;
+            let field = |name: &str| some(lookup.get(name).cloned(), name);
+            Ok((field("basis")?, field("reference")?, field("distance")?))
+        };
+        // The picture ends at 450 and its caption was found with its top at 100.55, below it.
+        assert_eq!(
+            measured("#/texts/1")?,
+            (json!("parent"), json!("#/pictures/0"), json!(349.45))
+        );
+        // The table starts at 400 and its caption was found with its bottom at 504.28, above it.
+        assert_eq!(
+            measured("#/texts/2")?,
+            (json!("parent"), json!("#/tables/0"), json!(104.28))
+        );
+        // An item under the body is measured against the earlier sibling whose page was searched.
+        assert_eq!(
+            measured("#/texts/4")?,
+            (json!("earlier_sibling"), json!("#/texts/3"), json!(34.83))
+        );
+
+        // An item that is not located has no distance, and still says whose page was searched.
+        let mut twice = text_layer();
+        some(
+            twice.get_mut("texts").and_then(Value::as_array_mut),
+            "the lines",
+        )?
+        .push(line(2, "Figure 1-2   Existing controls", &good_box()));
+        let unlocated = locate_items(&export, Ok(&twice));
+        let lookup = some(by(&unlocated, "#/texts/1")?.lookup.as_ref(), "the lookup")?;
+        assert_eq!(
+            (lookup.distance, lookup.reference.as_deref()),
+            (None, Some("#/pictures/0"))
+        );
+        // With no page to search there is nothing to measure against.
+        let mut alone = export.clone();
+        some(
+            alone
+                .pointer_mut("/body/children")
+                .and_then(Value::as_array_mut),
+            "children",
+        )?
+        .rotate_right(1);
+        let lookup = locate_items(&alone, Ok(&layer));
+        let lookup = some(by(&lookup, "#/texts/4")?.lookup.as_ref(), "the lookup")?;
+        assert_eq!((lookup.distance, lookup.reference.as_deref()), (None, None));
+
+        // The distance is a measurement: an item found far from its parent is located all the same.
+        assert_eq!(
+            by(&locations, "#/texts/1")?.located_by,
+            LocatedBy::TextLayer
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_distance_between_two_boxes_is_the_gap_between_their_nearest_edges() -> TestResult {
+        let bottom_left = |left: f64, top: f64, right: f64, bottom: f64| json!({ "l": left, "t": top, "r": right, "b": bottom, "coord_origin": "BOTTOMLEFT" });
+        let distance = |first: &Value, second: &Value| {
+            serde_json::to_value(box_distance(first, second, 792.0))
+        };
+        let anchor = bottom_left(100.0, 200.0, 300.0, 100.0);
+        // Overlapping and touching boxes are at distance 0.
+        assert_eq!(
+            distance(&anchor, &bottom_left(150.0, 250.0, 250.0, 150.0))?,
+            json!(0.0)
+        );
+        assert_eq!(
+            distance(&anchor, &bottom_left(300.0, 200.0, 400.0, 100.0))?,
+            json!(0.0)
+        );
+        // Straight below, straight to the right, and across a corner (3 and 4 make 5).
+        assert_eq!(
+            distance(&anchor, &bottom_left(100.0, 95.5, 300.0, 80.0))?,
+            json!(4.5)
+        );
+        assert_eq!(
+            distance(&anchor, &bottom_left(312.25, 200.0, 400.0, 100.0))?,
+            json!(12.25)
+        );
+        assert_eq!(
+            distance(&anchor, &bottom_left(303.0, 96.0, 400.0, 50.0))?,
+            json!(5.0)
+        );
+        // The order of the two boxes does not matter.
+        assert_eq!(
+            distance(&bottom_left(303.0, 96.0, 400.0, 50.0), &anchor)?,
+            json!(5.0)
+        );
+        // A top-left box is read from the top of the page: 592 to 692 down a 792 page is 100 to 200 up it.
+        let top_left =
+            json!({ "l": 100.0, "t": 592.0, "r": 300.0, "b": 692.0, "coord_origin": "TOPLEFT" });
+        assert_eq!(distance(&anchor, &top_left)?, json!(0.0));
+        assert_eq!(
+            distance(&top_left, &bottom_left(100.0, 95.5, 300.0, 80.0))?,
+            json!(4.5)
+        );
+        // What is not a box has no distance.
+        for broken in [
+            json!({ "l": 1.0, "t": 2.0, "r": 3.0, "coord_origin": "BOTTOMLEFT" }),
+            json!({ "l": 1.0, "t": 2.0, "r": 3.0, "b": 0.0 }),
+            json!(null),
+        ] {
+            assert_eq!(distance(&anchor, &broken)?, json!(null), "{broken}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_locations_state_what_the_rule_does_not_guarantee() -> TestResult {
+        let (export, layer) = (export(), text_layer());
+        let locations = locate_items(&export, Ok(&layer));
+        assert_eq!(locations.limits, LOCATE_LIMITS);
+        let value = serde_json::to_value(&locations)?;
+        assert_eq!(value.get("limits"), Some(&json!(LOCATE_LIMITS)));
+        for said in [
+            "does not guarantee that the box is the item's own",
+            "starts a page is searched on the page of its earlier sibling",
+            "a running footer",
+            "'Figure 1 (continued)'",
+            "no threshold is applied",
+        ] {
+            assert!(LOCATE_LIMITS.contains(said), "{said}");
+        }
+
+        // The first case, as a document: a body item at the top of page 3 whose earlier sibling is
+        // on page 2, where the same words stand once as a footer. It is located, on page 2.
+        let wrong = json!({
+            "pages": {
+                "2": { "page_no": 2, "size": { "width": 612.0, "height": 792.0 } },
+                "3": { "page_no": 3, "size": { "width": 612.0, "height": 792.0 } },
+            },
+            "body": { "self_ref": "#/body", "children": [{ "$ref": "#/texts/0" }, { "$ref": "#/texts/1" }] },
+            "texts": [
+                { "self_ref": "#/texts/0", "label": "text", "text": "A paragraph.", "parent": { "$ref": "#/body" }, "prov": prov(2, 72.0, 700.0, 300.0, 690.0) },
+                { "self_ref": "#/texts/1", "label": "text", "text": "Row and column access control", "parent": { "$ref": "#/body" }, "prov": [] },
+            ],
+        });
+        let footer =
+            json!({ "l": 345.0, "t": 37.0, "r": 560.0, "b": 27.0, "coord_origin": "BOTTOMLEFT" });
+        let layer = json!({ "texts": [line(2, "Row and column access control", &footer)] });
+        let placed = locate_items(&wrong, Ok(&layer));
+        let item = by(&placed, "#/texts/1")?;
+        assert_eq!(
+            (item.located_by, item.page_no),
+            (LocatedBy::TextLayer, Some(2))
+        );
+        // What the measurement shows of it: the footer lies 654.55 units from the sibling.
+        let lookup = serde_json::to_value(some(item.lookup.as_ref(), "the lookup")?)?;
+        assert_eq!(lookup.get("distance"), Some(&json!(654.55)));
         Ok(())
     }
 }

@@ -31,9 +31,21 @@ const ROUNDING = 0.011;
 const INVALID_SHOWN = 10;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
+/**
+ * What locating through the text layer does not guarantee; the receipt carries this sentence
+ * with the rule. It is the sentence src/locate.rs states as LOCATE_LIMITS (a test holds the
+ * two equal): the harness review placed an item wrongly on two documents written for it, and
+ * both passed.
+ */
+export const TEXT_LAYER_LIMITS =
+  "The rule does not guarantee that the box is the item's own. An item under the body that starts a page is searched on the page of its earlier sibling, so the same words standing once on that earlier page (a running footer) are taken for it; and when the page sets the item's text differently (a caption continued as 'Figure 1 (continued)') while another line of that page is exactly the item's text, that line is taken. Nothing holds the box found to the box of the parent: for each item the lookup records the distance between the box found and the box of the item whose page was searched (lookup.distance, in page units, 0 when they touch or overlap) as a measurement, and no threshold is applied";
+
 /** What a passing provenance criterion asserts; the receipt carries this sentence. */
-export const PROVENANCE_RULE =
-  'every text item, table and picture is located: by its own provenance in the export or, for a PDF item the export gives none, by the one text-layer item on the page of its parent (or of its nearest located earlier sibling) that has exactly its text; each page_no is a page of the document and each bbox has area and lies inside that page; the detail states how many items each source located and how many none did';
+export const PROVENANCE_RULE = `every text item, table and picture is located: by its own provenance in the export or, for a PDF item the export gives none, by the one text-layer item on the page of its parent (or of its nearest located earlier sibling) that has exactly its text; each page_no is a page of the document and each bbox has area and lies inside that page; the detail states how many items each source located and how many none did. ${TEXT_LAYER_LIMITS}`;
+
+/** What `text_layer_distances` holds; the receipt carries this sentence beside the numbers. */
+export const DISTANCE_STATEMENT =
+  'for each item the text layer located, the shortest distance in page units between the box found and the box of the item whose page was searched (its parent, or its nearest located earlier sibling), 0 when they touch or overlap, as src/locate.rs recorded it. A measurement: no threshold is applied and no item passes or fails on it';
 
 /** The sources an item can be located by, in the order the counts are stated. */
 export const LOCATION_SOURCES = Object.freeze(['export', 'text_layer', 'none']);
@@ -166,6 +178,30 @@ function coverage(kind, items, pages, lookups) {
   };
 }
 
+/**
+ * The distances the lookup recorded for the items the text layer located, with their range.
+ * `unmeasured` counts the items whose reference has no box on the page (the lookup recorded null).
+ */
+function textLayerDistances(items) {
+  const located = items.filter((item) => item.located_by === 'text_layer');
+  const measured = (item) => typeof item.lookup?.distance === 'number' && Number.isFinite(item.lookup.distance);
+  const values = located.filter(measured).map((item) => item.lookup.distance);
+  return {
+    statement: DISTANCE_STATEMENT,
+    threshold_applied: false,
+    measured: values.length,
+    unmeasured: located.length - values.length,
+    min: values.length ? Math.min(...values) : null,
+    max: values.length ? Math.max(...values) : null,
+    items: located.map((item) => ({
+      ref: item.ref,
+      basis: item.lookup?.basis ?? null,
+      reference: item.lookup?.reference ?? null,
+      distance: measured(item) ? item.lookup.distance : null,
+    })),
+  };
+}
+
 const sampleOf = (item) =>
   item
     ? {
@@ -234,6 +270,8 @@ export function judgeProvenance(doc, { paginated, lookups = null }) {
     page_provenance: pageProvenance,
     // Paginated fixtures only: each item with the source that located it, its page and its box.
     ...(paginated ? { located_items: itemList } : {}),
+    // A PDF only: how far each item the text layer located lies from the item whose page was searched.
+    ...(paginated && lookups ? { text_layer_distances: textLayerDistances(itemList) } : {}),
   };
   if (!paginated) {
     return {

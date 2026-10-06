@@ -44,7 +44,10 @@ import * as doclingCriteria from '../../qualification/docling/lib/criteria.mjs';
 import * as doclingEnvelope from '../../scripts/lib/receipt-envelope.mjs';
 import * as sharedEnvelope from '../../scripts/lib/receipt-envelope.mjs';
 import {
+  DISTANCE_STATEMENT,
   PAGE_RENDER_RULE,
+  PROVENANCE_RULE,
+  TEXT_LAYER_LIMITS,
   bboxProblem,
   bodyFacts,
   converterOptions,
@@ -1001,7 +1004,7 @@ test('provenance: every text item, table and picture of a paginated fixture need
 });
 
 /** What src/locate.rs records for an item the export left unlocated: found in the text layer, or not and why. */
-const lookupFound = (item, bbox, page_no = 1) => ({ item, kind: 'text', label: 'caption', located_by: 'text_layer', page_no, bbox: { coord_origin: 'BOTTOMLEFT', ...bbox }, lookup: { basis: 'parent', occurrences: 1, pages: [page_no], reason: null } });
+const lookupFound = (item, bbox, page_no = 1, measured = {}) => ({ item, kind: 'text', label: 'caption', located_by: 'text_layer', page_no, bbox: { coord_origin: 'BOTTOMLEFT', ...bbox }, lookup: { basis: 'parent', occurrences: 1, pages: [page_no], reason: null, ...measured } });
 const lookupMissed = (item, reason, occurrences = 0) => ({ item, kind: 'text', label: 'caption', located_by: 'none', page_no: null, bbox: null, lookup: { basis: 'parent', occurrences, pages: [1], reason } });
 
 test('provenance: an item the export leaves unlocated is located by the text-layer lookup, held to the same rule for its page and box', () => {
@@ -1050,6 +1053,78 @@ test('provenance: an item the export leaves unlocated is located by the text-lay
   const rescued = judgeProvenance(badExport, { paginated: true, lookups: new Map([['#/texts/0', lookupFound('#/texts/0', captionBox)]]) });
   assert.equal(rescued.status, 'FAIL');
   assert.deepEqual(rescued.text_items.invalid, [{ ref: '#/texts/0', label: 'text', problem: 'bbox has no area' }]);
+});
+
+test('the text-layer rule says what it does not guarantee, and each item it locates records its distance as a measurement with no threshold', async () => {
+  // One sentence in two places: the binary states it with its locations, the receipt with its rule.
+  const locate = await readFile(join(root, 'qualification/docling/src/locate.rs'), 'utf8');
+  assert.ok(locate.includes(`pub(crate) const LOCATE_LIMITS: &str = "${TEXT_LAYER_LIMITS}";`), 'src/locate.rs LOCATE_LIMITS is not the sentence of lib/document.mjs TEXT_LAYER_LIMITS');
+  assert.match(locate, /^ {8}limits: LOCATE_LIMITS,$/m, 'the locations the binary writes carry the limits');
+  // The two cases the harness review placed wrongly, and that nothing holds the box to the parent's.
+  for (const said of [
+    "does not guarantee that the box is the item's own",
+    'An item under the body that starts a page is searched on the page of its earlier sibling, so the same words standing once on that earlier page (a running footer) are taken for it',
+    "when the page sets the item's text differently (a caption continued as 'Figure 1 (continued)') while another line of that page is exactly the item's text, that line is taken",
+    'Nothing holds the box found to the box of the parent',
+    'as a measurement, and no threshold is applied',
+  ]) assert.ok(TEXT_LAYER_LIMITS.includes(said), said);
+  assert.ok(PROVENANCE_RULE.endsWith(`. ${TEXT_LAYER_LIMITS}`));
+  assert.equal(doclingReceipt().criterion_rules.provenance, PROVENANCE_RULE, 'the receipt carries the limits with the rule');
+  assert.match(locate, /^ {4}pub\(crate\) distance: Option<f64>,$/m);
+  assert.match(locate, /^ {4}pub\(crate\) reference: Option<String>,$/m);
+
+  // Four captions the export left unlocated. The lookup measured three of them; the reference of the fourth has no box on the page.
+  const captions = ['Figure 1', 'Table 2', 'Example 3', 'Figure 4'].map((text, index) => ({ self_ref: `#/texts/${index + 2}`, label: 'caption', text, prov: [] }));
+  const document = stubDocument({ texts: [...stubDocument().texts, ...captions] });
+  const box = (index) => ({ l: 136.27, t: 500 - 20 * index, r: 284.48, b: 492 - 20 * index });
+  const found = [
+    lookupFound('#/texts/2', box(0), 1, { distance: 4.6, reference: '#/pictures/0' }),
+    lookupFound('#/texts/3', box(1), 1, { distance: 1.5, reference: '#/tables/0' }),
+    lookupFound('#/texts/4', box(2), 1, { basis: 'earlier_sibling', distance: 9.28, reference: '#/texts/1' }),
+    lookupFound('#/texts/5', box(3), 1, { distance: null, reference: '#/pictures/1' }),
+  ];
+  const judged = judgeProvenance(describeDocument(document), { paginated: true, lookups: new Map(found.map((record) => [record.item, record])) });
+  assert.equal(judged.status, 'PASS');
+  assert.deepEqual(judged.text_layer_distances, {
+    statement: DISTANCE_STATEMENT,
+    threshold_applied: false,
+    measured: 3,
+    unmeasured: 1,
+    min: 1.5,
+    max: 9.28,
+    items: [
+      { ref: '#/texts/2', basis: 'parent', reference: '#/pictures/0', distance: 4.6 },
+      { ref: '#/texts/3', basis: 'parent', reference: '#/tables/0', distance: 1.5 },
+      { ref: '#/texts/4', basis: 'earlier_sibling', reference: '#/texts/1', distance: 9.28 },
+      { ref: '#/texts/5', basis: 'parent', reference: '#/pictures/1', distance: null },
+    ],
+  });
+  assert.match(DISTANCE_STATEMENT, /A measurement: no threshold is applied and no item passes or fails on it$/);
+  // Each located item keeps what the lookup recorded, the distance with it.
+  assert.deepEqual(judged.located_items.find((item) => item.ref === '#/texts/4').lookup, { basis: 'earlier_sibling', occurrences: 1, pages: [1], reason: null, distance: 9.28, reference: '#/texts/1' });
+
+  // The receipt states the range with the three counts, and says that it is not a rule.
+  const withLocations = (records) => doclingReceipt({ 'born_digital_text.pdf': { evidence: { document }, fixture: { locations: stubLocations(document, records) } } });
+  const zero = '(0 text items, 0 tables, 0 pictures)';
+  const receipt = withLocations(found);
+  assert.equal(receipt.result, 'PASS');
+  assert.equal(
+    doclingCriterion(receipt, 'born_digital_text.pdf/provenance').detail,
+    `7 items: 3 located by the export (2 text items, 1 tables, 0 pictures), 4 through the text layer (4 text items, 0 tables, 0 pictures), 0 not located ${zero}; the 3 found through the text layer lie 1.5 to 9.28 page units from the item whose page was searched (a measurement, no threshold, 1 more not measured)`,
+  );
+  assert.deepEqual(entryOf(receipt, 'born_digital_text.pdf').criteria.provenance.text_layer_distances, judged.text_layer_distances);
+
+  // No threshold: the item the review placed wrongly lies 654.55 units from the sibling whose page was searched, and is located all the same.
+  const far = withLocations([...found.slice(0, 3), lookupFound('#/texts/5', box(3), 1, { basis: 'earlier_sibling', distance: 654.55, reference: '#/texts/0' })]);
+  assert.equal(far.result, 'PASS');
+  assert.match(doclingCriterion(far, 'born_digital_text.pdf/provenance').detail, /; the 4 found through the text layer lie 1\.5 to 654\.55 page units from the item whose page was searched \(a measurement, no threshold\)$/);
+
+  // Nothing found through the text layer: nothing was measured, and the detail says only the counts.
+  const plain = entryOf(doclingReceipt(), 'born_digital_text.pdf').criteria.provenance;
+  assert.deepEqual(plain.text_layer_distances, { statement: DISTANCE_STATEMENT, threshold_applied: false, measured: 0, unmeasured: 0, min: null, max: null, items: [] });
+  assert.doesNotMatch(plain.detail, /page units/);
+  // An image has no text layer to look anything up in.
+  assert.equal(entryOf(doclingReceipt(), 'text_image.png').criteria.provenance.text_layer_distances, undefined);
 });
 
 test('the document facts come from the body layer of the export', () => {

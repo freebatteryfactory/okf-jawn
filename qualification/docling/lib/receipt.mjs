@@ -258,7 +258,17 @@ function locationCounts(judged) {
     (source) => `${judged.items.located_by[source]} ${words[source]} (${kinds.map(([name, coverage]) => `${coverage.located_by[source]} ${name}`).join(', ')})`,
   );
   const named = kinds.flatMap(([, coverage]) => coverage.invalid.map((item) => `${item.ref} ${item.label}: ${item.problem}`));
-  return `${judged.items.total} items: ${counts.join(', ')}${examples(named, judged.items.located_by.none)}`;
+  return `${judged.items.total} items: ${counts.join(', ')}${distanceRange(judged.text_layer_distances)}${examples(named, judged.items.located_by.none)}`;
+}
+
+/**
+ * "; the 13 found through the text layer lie 1.5 to 9.28 page units from the item whose page
+ * was searched (a measurement, no threshold)", or nothing when no distance was recorded.
+ */
+function distanceRange(distances) {
+  if (!distances || distances.measured === 0) return '';
+  const unmeasured = distances.unmeasured > 0 ? `, ${distances.unmeasured} more not measured` : '';
+  return `; the ${distances.measured} found through the text layer lie ${distances.min} to ${distances.max} page units from the item whose page was searched (a measurement, no threshold${unmeasured})`;
 }
 
 /**
