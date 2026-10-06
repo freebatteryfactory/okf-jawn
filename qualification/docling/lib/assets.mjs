@@ -32,7 +32,7 @@ export function sha256File(path) {
 
 /** Parse the manifest text (UTF-8, with or without a BOM) and check its shape. */
 export function parseManifest(text) {
-  const manifest = JSON.parse(String(text).replace(/^﻿/, ''));
+  const manifest = JSON.parse(String(text).replace(/^\uFEFF/, ''));
   if (typeof manifest?.DOCLING_RS_MODELS_DIR !== 'string' || manifest.DOCLING_RS_MODELS_DIR.length === 0) {
     throw new Error('Docling assets manifest: DOCLING_RS_MODELS_DIR must name the models directory');
   }
