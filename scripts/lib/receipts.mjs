@@ -11,7 +11,7 @@ import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { run } from './process.mjs';
 import { exists } from './files.mjs';
-import { receiptResults, statusOf } from './receipt-envelope.mjs';
+import { envelopeFailures, receiptResults, statusOf } from './receipt-envelope.mjs';
 
 /** The kinds a Phase 0 gate can have. A gate with none of them is still hand-typed. */
 export const gateKinds = Object.freeze(['receipt', 'ci', 'decision']);
@@ -65,12 +65,49 @@ function receiptFile(gate) {
 }
 
 /**
+ * The criterion ids a gate pins, from its criteria file in `tree`
+ * (`{ "gate": "<id>", "required": ["<criterion id>", ...] }`). When the file cannot supply them,
+ * `problems` says why and `pinned` is empty, so the rest of the envelope is still judged.
+ */
+async function pinnedCriteria(tree, gate) {
+  const unusable = message => ({ pinned: [], problems: [message] });
+  if (typeof gate.criteria !== 'string' || gate.criteria.length === 0) return unusable(`gate ${gate.id} names no criteria file`);
+  const text = await tree.read(gate.criteria);
+  if (text === null) return unusable(`its criteria file ${gate.criteria} is missing${tree.at}, so nothing pins what this receipt must have judged`);
+  const criteria = parsed(text);
+  if (criteria.error) return unusable(`its criteria file ${gate.criteria} is ${criteria.error}`);
+  const { value } = criteria;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return unusable(`its criteria file ${gate.criteria} must be an object with "gate" and "required"`);
+  if (value.gate !== gate.id) return unusable(`its criteria file ${gate.criteria} is for gate ${JSON.stringify(value.gate)}, not ${gate.id}`);
+  const required = value.required;
+  if (!Array.isArray(required) || required.length === 0 || !required.every(id => typeof id === 'string' && id.length > 0) || new Set(required).size !== required.length) {
+    return unusable(`its criteria file ${gate.criteria} must list each required criterion id once in a non-empty "required" array`);
+  }
+  return { pinned: required, problems: [] };
+}
+
+/** Why a receipt's `not_judged` is not the list its criteria derive; empty when it is, or when the criteria are themselves malformed. */
+function notJudgedFailures(receipt) {
+  if (receipt === null || typeof receipt !== 'object' || !Array.isArray(receipt.criteria) || receipt.criteria.some(entry => entry === null || typeof entry !== 'object')) return [];
+  const derived = receipt.criteria.filter(entry => entry.result === 'not_judged' || entry.result === 'not_applicable').map(entry => entry.id);
+  const typed = receipt.not_judged;
+  const same = Array.isArray(typed) && typed.length === derived.length && derived.every(id => typed.includes(id));
+  return same ? [] : [`not_judged is ${JSON.stringify(typed)} but its criteria derive ${JSON.stringify(derived)}`];
+}
+
+/**
  * What the receipts in a tree support, and where verification.json there types something else.
  *
  * `head` is a commit, read with git and independent of the checkout; without it the working tree
  * is read. A receipt gate is `incomplete` when its receipt file does not exist, otherwise the
  * status its receipt's result supports. `phase_0_qualified` is true only when every receipt gate
- * is `passed` and no Phase 0 gate is still hand-typed (has none of `gateKinds`).
+ * is `passed`, no receipt has a failure and no Phase 0 gate is still hand-typed (has none of
+ * `gateKinds`).
+ *
+ * A receipt that exists is read, not only its header: `envelopeFailures` must be empty against
+ * the `required` list of the gate's criteria file in the same tree (a missing criteria file is
+ * a failure), its `not_judged` must be the list its criteria derive, and every file under
+ * qualification/receipts/ must be the one receipt of one gate.
  *
  * Returns `{ missing, gates, receipts, unconverted, phase_0_qualified, pending, failures, mismatches }`:
  * `gates` is one `{ id, harness, file, status, typed, basis }` per receipt gate; `receipts` is
@@ -125,10 +162,23 @@ export async function derivedRecord(root, head) {
     const known = receiptResults.includes(found.receipt?.result);
     entry.status = known ? statusOf(found.receipt.result) : 'incomplete';
     entry.basis = known ? `${gate.receipt} result ${found.receipt.result}` : `${gate.receipt} has no result of ${receiptResults.join(', ')}`;
+    // The receipt is read, not only its header: its result must be the fold of its criteria,
+    // and every criterion its harness pins must be present and required.
+    const { pinned, problems } = await pinnedCriteria(tree, gate);
+    for (const message of [...problems, ...envelopeFailures(found.receipt, gate.id, pinned), ...notJudgedFailures(found.receipt)]) failures.push({ name: file, message });
+  }
+  // A receipt is recorded only for the gate it closes: one file, one gate.
+  const named = result.gates.map(gate => gate.file).filter(file => file !== null);
+  for (const gate of result.gates) {
+    if (gate.file !== null && named.indexOf(gate.file) !== named.lastIndexOf(gate.file)) failures.push({ name: gate.id, message: `its receipt ${receiptsPath}/${gate.file} is named by more than one gate` });
+  }
+  for (const { name } of receipts) {
+    if (!named.includes(name)) failures.push({ name, message: `no Phase 0 gate of kind receipt names this file under ${receiptsPath}/` });
   }
   for (const gate of result.gates) if (gate.status !== 'passed') result.pending.push(`${gate.id} is ${gate.status}`);
   for (const id of result.unconverted) result.pending.push(`${id} has no kind and is still hand-typed`);
   if (result.gates.length === 0) result.pending.push('no Phase 0 gate is backed by a receipt');
+  if (failures.length) result.pending.push(`${failures.length} receipt failure(s)`);
   result.phase_0_qualified = result.pending.length === 0;
   for (const gate of result.gates) {
     if (gate.typed !== gate.status) result.mismatches.push(`${gate.id}: ${recordPath}${tree.at} types status ${JSON.stringify(gate.typed)} but the derived status is "${gate.status}" (${gate.basis}); run \`${rewriteCommand}\` to rewrite it`);

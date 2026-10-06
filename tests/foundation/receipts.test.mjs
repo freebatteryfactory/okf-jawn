@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
 import { checkReceipts, derivedLines, derivedRecord, gateKinds, rewriteCommand, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
-import { commit, fixtureGates, fixtureReceipt, fixtureRecord, fixtureRecordFiles, fixtureRepo, git } from './fixture-repo.mjs';
+import { commit, fixtureCriteria, fixtureGates, fixturePinned, fixtureReceipt, fixtureRecord, fixtureRecordFiles, fixtureRepo, git } from './fixture-repo.mjs';
 
 const source = fileURLToPath(new URL('../../', import.meta.url));
 const docling = fixtureGates.docling;
@@ -132,7 +132,120 @@ test('a Phase 0 gate that is still hand-typed keeps Phase 0 unqualified; ci and 
   }
   const noReceiptGates = `${JSON.stringify({ phase_0_qualified: true, current: { gates: { phase_0: kinds } } }, null, 2)}\n`;
   await commit(root, { 'verification.json': noReceiptGates }, 'no receipt gate at all');
-  await assert.rejects(checkReceipts(root), /phase_0_qualified: verification\.json types true but the derived value is false \(no Phase 0 gate is backed by a receipt\)/);
+  await assert.rejects(checkReceipts(root), /phase_0_qualified: verification\.json types true but the derived value is false \(no Phase 0 gate is backed by a receipt; 2 receipt failure\(s\)\)/);
+});
+
+/** Everything check-receipts says about one tree, or '' when it passes. */
+const complaint = root => checkReceipts(root).then(() => '', error => error.message);
+const passedRecord = () => fixtureRecord({ statuses: { docling: 'passed', 'mcp-apps': 'passed' }, qualified: true });
+
+test('check-receipts reads the receipt: a typed PASS over a required fail, a harness error, or an unjudged criterion is rejected', async t => {
+  const { root, sha } = await recorded(t);
+  const both = overrides => ({ [at('docling')]: fixtureReceipt('docling', sha, overrides), [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha), 'verification.json': passedRecord() });
+  await commit(root, both({ criteria: failing, result: 'PASS' }), 'PASS typed over a required fail');
+  let said = await complaint(root);
+  assert.match(said, /^docling\.json: result is PASS but its criteria fold to FAIL$/m);
+  assert.match(said, /^phase_0_qualified: verification\.json types true but the derived value is false \(1 receipt failure\(s\)\)/m, 'an untrusted receipt qualifies nothing');
+  assert.equal((await derivedRecord(root)).phase_0_qualified, false);
+  await commit(root, both({ harness_error: 'the browser was missing', result: 'PASS' }), 'PASS typed over a harness error');
+  assert.match(await complaint(root), /^docling\.json: result is PASS but its criteria fold to INCOMPLETE$/m);
+  await commit(root, both({ criteria: unjudged, result: 'PASS' }), 'PASS typed over an unjudged criterion');
+  assert.match(await complaint(root), /^docling\.json: result is PASS but its criteria fold to INCOMPLETE$/m);
+  // The header alone, as receipts were before the envelope, is not a receipt of any result.
+  await commit(root, { [at('docling')]: `${JSON.stringify({ git_sha: sha, inputs: ['harness/run.mjs'], produced_at: '2026-10-05T18:00:00Z' })}\n`, 'verification.json': fixtureRecord({ statuses: { 'mcp-apps': 'passed' } }) }, 'a header-only receipt');
+  said = await complaint(root);
+  for (const reason of ['gate is undefined, expected "docling-library-qualification"', 'result must be one of PASS, FAIL, INCOMPLETE', 'harness_error must be null or a string', 'criteria must be an array']) assert.ok(said.includes(`docling.json: ${reason}`), reason);
+  await commit(root, both({}), 'the green case');
+  assert.equal(await complaint(root), '');
+});
+
+test('check-receipts rejects a receipt for another gate and a file under receipts/ that no gate names', async t => {
+  const { root, sha } = await recorded(t);
+  // The MCP Apps receipt, copied to the place the Docling gate reads.
+  await commit(root, { [at('docling')]: fixtureReceipt('mcp-apps', sha), [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha), 'verification.json': passedRecord() }, 'a receipt for the wrong gate');
+  let said = await complaint(root);
+  assert.match(said, /^docling\.json: gate is "mcp-apps-protocol-qualification", expected "docling-library-qualification"$/m);
+  assert.doesNotMatch(said, /^mcp-apps\.json: /m, 'the receipt in its own place is not blamed');
+  await commit(root, { [at('docling')]: fixtureReceipt('docling', sha), 'qualification/receipts/docling-library-qualification.json': fixtureReceipt('docling', sha) }, 'an orphan receipt');
+  said = await complaint(root);
+  assert.match(said, /^docling-library-qualification\.json: no Phase 0 gate of kind receipt names this file under qualification\/receipts\/$/m);
+  assert.match(said, /\(1 receipt failure\(s\)\)/);
+  // Only the placeholder that keeps the directory tracked is not a receipt.
+  const { root: other, sha: first } = await recorded(t);
+  await commit(other, { 'qualification/receipts/.gitkeep': '' }, 'the placeholder');
+  assert.equal(await complaint(other), '');
+  await commit(other, { 'qualification/receipts/notes.txt': 'not a receipt\n' }, 'a stray file');
+  said = await complaint(other);
+  assert.match(said, /^notes\.txt: not valid JSON/m);
+  assert.match(said, /^notes\.txt: no Phase 0 gate of kind receipt names this file/m);
+  // Two gates cannot share one receipt.
+  const shared = JSON.parse(fixtureRecord());
+  shared.current.gates.phase_0[1].receipt = at('docling');
+  await commit(other, { 'qualification/receipts/notes.txt': fixtureReceipt('docling', first), 'verification.json': `${JSON.stringify(shared, null, 2)}\n` }, 'two gates, one receipt');
+  assert.match(await complaint(other), /^mcp-apps-protocol-qualification: its receipt qualification\/receipts\/docling\.json is named by more than one gate$/m);
+});
+
+test('check-receipts holds a receipt to the pinned criteria of its gate, read from the same tree', async t => {
+  const { root, sha } = await recorded(t);
+  const content = { id: 'corpus/a.pdf/content', required: true, result: 'pass' };
+  const record = { 'verification.json': fixtureRecord({ statuses: { docling: 'passed' } }) };
+  // The harness dropped a check: its result still folds to PASS, and only the pinned list notices.
+  await commit(root, { ...record, [at('docling')]: fixtureReceipt('docling', sha, { criteria: [content] }) }, 'a pinned criterion is missing');
+  assert.match(await complaint(root), /^docling\.json: pinned criterion corpus\/a\.pdf\/provenance is missing$/m);
+  // The harness made a failing check optional: the fold ignores it, the pinned list does not.
+  await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { criteria: [content, { id: 'corpus/a.pdf/provenance', required: false, result: 'fail' }] }) }, 'a pinned criterion is not required');
+  assert.match(await complaint(root), /^docling\.json: pinned criterion corpus\/a\.pdf\/provenance is not marked required$/m);
+  // A criterion the file pins later is demanded of the receipt already recorded.
+  await commit(root, { [at('docling')]: fixtureReceipt('docling', sha), 'qualification/docling/criteria.json': fixtureCriteria('docling', [...fixturePinned, 'corpus/a.pdf/tables']) }, 'the criteria file pins one more');
+  assert.match(await complaint(root), /^docling\.json: pinned criterion corpus\/a\.pdf\/tables is missing$/m);
+  for (const [why, text, expected] of [
+    ['for another gate', fixtureCriteria('mcp-apps'), /^docling\.json: its criteria file qualification\/docling\/criteria\.json is for gate "mcp-apps-protocol-qualification", not docling-library-qualification$/m],
+    ['not JSON', '{', /^docling\.json: its criteria file qualification\/docling\/criteria\.json is not valid JSON/m],
+    ['an empty list', fixtureCriteria('docling', []), /^docling\.json: its criteria file qualification\/docling\/criteria\.json must list each required criterion id once in a non-empty "required" array$/m],
+    ['a repeated id', fixtureCriteria('docling', ['a', 'a']), /must list each required criterion id once/],
+    ['no list', `${JSON.stringify({ gate: docling })}\n`, /must list each required criterion id once/],
+    ['not an object', '[]\n', /^docling\.json: its criteria file qualification\/docling\/criteria\.json must be an object with "gate" and "required"$/m],
+  ]) {
+    await commit(root, { 'qualification/docling/criteria.json': text }, `criteria file: ${why}`);
+    assert.match(await complaint(root), expected, why);
+  }
+  await commit(root, { 'qualification/docling/criteria.json': fixtureCriteria('docling') }, 'the criteria file again');
+  assert.equal(await complaint(root), '');
+  // not_judged is derived from the criteria too; a list that hides an unjudged criterion is named.
+  const optional = [...fixturePinned.map(id => ({ id, required: true, result: 'pass' })), { id: 'memory/peak', required: false, result: 'not_judged' }];
+  await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { criteria: optional, not_judged: [] }) }, 'not_judged typed empty');
+  assert.match(await complaint(root), /^docling\.json: not_judged is \[\] but its criteria derive \["memory\/peak"\]$/m);
+  await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { criteria: optional }) }, 'not_judged as derived');
+  assert.equal(await complaint(root), '');
+});
+
+test('a receipt whose criteria file is missing is rejected, and one without a receipt needs none yet', async t => {
+  // The harness packages add the criteria files; until then a gate without a receipt is simply incomplete.
+  const { root } = await fixtureRepo(t, { 'verification.json': fixtureRecord(), 'harness/run.mjs': '// v1\n' });
+  const sha = await git(root, 'rev-parse', 'HEAD');
+  assert.equal(await complaint(root), '');
+  await commit(root, { [at('docling')]: fixtureReceipt('docling', sha), 'verification.json': fixtureRecord({ statuses: { docling: 'passed' } }) }, 'a receipt without its criteria file');
+  const said = await complaint(root);
+  assert.match(said, /^docling\.json: its criteria file qualification\/docling\/criteria\.json is missing, so nothing pins what this receipt must have judged$/m);
+  assert.match(said, /^check-receipts failed:\n/);
+  const head = await git(root, 'rev-parse', 'HEAD');
+  assert.deepEqual(await staleReceiptLines(root, head), [
+    `untrusted receipt docling.json: its criteria file qualification/docling/criteria.json is missing at ${head}, so nothing pins what this receipt must have judged -- re-run: bun qualification/docling/run.mjs, then bun qualification/record.mjs docling`]);
+});
+
+test('staleReceiptLines reports a hand-edited receipt at the pushed commit like a stale one', async t => {
+  const { root, sha } = await recorded(t);
+  const honest = await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { criteria: failing }), 'verification.json': fixtureRecord({ statuses: { docling: 'failed' } }) }, 'record a failure');
+  assert.deepEqual(await staleReceiptLines(root, honest), []);
+  // The result and the status are both edited to a pass; the criteria still say what was judged.
+  const edited = await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { criteria: failing, result: 'PASS' }), 'verification.json': fixtureRecord({ statuses: { docling: 'passed' } }) }, 'edit the receipt to PASS');
+  assert.deepEqual(await staleReceiptLines(root, edited), ['untrusted receipt docling.json: result is PASS but its criteria fold to FAIL -- re-run: bun qualification/docling/run.mjs, then bun qualification/record.mjs docling']);
+  const orphan = await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { criteria: failing }), 'verification.json': fixtureRecord({ statuses: { docling: 'failed' } }), 'qualification/receipts/extra.json': fixtureReceipt('docling', sha) }, 'an orphan receipt');
+  assert.deepEqual(await staleReceiptLines(root, orphan), ['untrusted receipt extra.json: no Phase 0 gate of kind receipt names this file under qualification/receipts/ -- re-run: rerun the harness that produced it, then bun qualification/record.mjs <name>']);
+  // Judged at the earlier commits whatever is checked out.
+  await git(root, 'checkout', '--quiet', '--detach', sha);
+  assert.deepEqual(await staleReceiptLines(root, honest), []);
+  assert.equal((await staleReceiptLines(root, edited)).length, 1);
 });
 
 test('writeDerivedRecord rewrites only the derived values and keeps the form of the file', async t => {
@@ -195,8 +308,15 @@ test('record.mjs copies a receipt of any result and writes the derived statuses,
   assert.notEqual(unknown.code, 0);
   assert.match(unknown.stderr, /Usage: bun qualification\/record\.mjs \[<name>\.\.\.\] where name is one of docling, mcp-apps/);
   // Committed as the record commit, the tree is what check-receipts accepts.
-  await commit(root, {}, 'record');
+  const head = await commit(root, {}, 'record');
   assert.match(await checkReceipts(root), /^check-receipts: 1 receipt\(s\) valid against HEAD; docling-library-qualification: failed /);
+  // A receipt whose envelope cannot be trusted is still copied, and the script says so and fails.
+  await mkdir(join(root, '.artifacts', 'qualification', 'mcp-apps'), { recursive: true });
+  await writeFile(join(root, '.artifacts', 'qualification', 'mcp-apps', 'receipt.json'), fixtureReceipt('mcp-apps', head, { criteria: failing, result: 'PASS', protocol_only: false, basic_host: { status: 'passed' } }));
+  const untrusted = await record('mcp-apps');
+  assert.equal(untrusted.code, 1, untrusted.stdout);
+  assert.match(untrusted.stderr, /^mcp-apps\.json: result is PASS but its criteria fold to FAIL$/m);
+  assert.match(untrusted.stdout, /^phase_0_qualified: false \(.*1 receipt failure\(s\)\)$/m);
 });
 
 test('a receipt is rejected when an input changed, its commit is foreign, or its header is incomplete', async t => {
