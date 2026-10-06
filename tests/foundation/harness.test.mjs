@@ -669,8 +669,8 @@ test('provenance: every text item of a paginated fixture needs a page of the doc
   const judge = (over, paginated = true) => judgeProvenance(describeDocument(stubDocument(over)), { paginated });
   const good = judge();
   assert.equal(good.status, 'PASS');
-  assert.deepEqual(good.text_items, { total: 2, with_provenance: 2, located: 2, invalid: [] });
-  assert.deepEqual(good.tables, { total: 1, with_provenance: 1, located: 1, invalid: [] });
+  assert.deepEqual(good.text_items, { total: 2, with_provenance: 2, located: 2, invalid_total: 0, invalid: [] });
+  assert.deepEqual(good.tables, { total: 1, with_provenance: 1, located: 1, invalid_total: 0, invalid: [] });
   assert.deepEqual(good.page_provenance, [{ page_no: 1, text_items: 2, tables: 1, pictures: 0 }]);
   assert.deepEqual(good.sample.first, { ref: '#/texts/0', label: 'section_header', text: 'Title', page_no: 1, bbox: { coord_origin: 'BOTTOMLEFT', ...BOX } });
   assert.equal(good.sample.last.text, 'Hello world');
@@ -709,6 +709,15 @@ test('provenance: every text item of a paginated fixture needs a page of the doc
   assert.equal(office.locator, 'none');
   assert.deepEqual(office.groups, ['sheet:Sheet1']);
   assert.equal(judge({}, false).locator, 'page_and_bbox_on_every_item');
+  // An item that carries a prov entry with a zero box (slide notes) is not located, and the locator word says so.
+  const notes = judge({ texts: [...stubDocument().texts, { self_ref: '#/texts/2', label: 'text', text: 'notes', prov: prov({ l: 0, t: 0, r: 0, b: 0 }) }] }, false);
+  assert.equal(notes.locator, 'page_and_bbox_on_some_items');
+  assert.equal(notes.text_items.with_provenance, 3);
+  assert.equal(notes.text_items.located, 2);
+  // The list of invalid items is capped; the count is not.
+  const many = judge({ texts: Array.from({ length: 12 }, (_, index) => ({ self_ref: `#/texts/${index}`, label: 'caption', text: 'c', prov: [] })) });
+  assert.equal(many.text_items.invalid.length, 10);
+  assert.equal(many.text_items.invalid_total, 12);
 });
 
 test('the document facts come from the body layer of the export', () => {

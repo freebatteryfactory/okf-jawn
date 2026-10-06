@@ -16,6 +16,7 @@
 const HEADING_LABELS = ['title', 'section_header'];
 /** The export rounds coordinates to two decimals (docling-core json.rs:667). */
 const ROUNDING = 0.011;
+/** `invalid` lists at most this many items; `invalid_total` is the full count. */
 const INVALID_SHOWN = 10;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -111,6 +112,7 @@ function coverage(items, pages) {
     total: items.length,
     with_provenance: items.filter((item) => item.prov.length > 0).length,
     located: items.length - invalid.length,
+    invalid_total: invalid.length,
     invalid: invalid.slice(0, INVALID_SHOWN).map(({ item, problem }) => ({ ref: item.ref, label: item.label, problem })),
   };
 }
@@ -151,8 +153,8 @@ export function judgeProvenance(doc, { paginated }) {
     tables: onPage(doc.tables, page.page_no),
     pictures: onPage(doc.pictures, page.page_no),
   }));
-  const all = [...doc.texts, ...doc.tables, ...doc.pictures];
-  const withProv = all.filter((item) => item.prov.length > 0).length;
+  const items = doc.texts.length + doc.tables.length + doc.pictures.length;
+  const located = texts.located + tables.located + pictures.located;
   const base = {
     page_count: doc.pages.length,
     text_items: texts,
@@ -170,7 +172,8 @@ export function judgeProvenance(doc, { paginated }) {
     return {
       status: 'recorded_not_judged',
       reason: 'not a PDF or image fixture: the locator the library gives is recorded as observed',
-      locator: all.length === 0 || withProv === 0 ? 'none' : withProv === all.length ? 'page_and_bbox_on_every_item' : 'page_and_bbox_on_some_items',
+      // Counted from items that are located by the same rule as above, not from items that merely carry a prov entry.
+      locator: located === 0 ? 'none' : located === items ? 'page_and_bbox_on_every_item' : 'page_and_bbox_on_some_items',
       groups: [...new Set(doc.groups.map((group) => `${group.label}:${group.name ?? ''}`))].slice(0, 50),
       ...base,
     };
