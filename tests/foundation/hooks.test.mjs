@@ -1,13 +1,13 @@
 /** Tracked hooks: POSIX sh, installed through core.hooksPath, never a tool that is not installed. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { cpSync, existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { delimiter, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
-import { fixtureRepo, posixShell } from './fixture-repo.mjs';
+import { commit, fixtureRepo, git, posixShell } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const read=file=>readFile(join(root,file),'utf8');
 
@@ -57,5 +57,57 @@ test('pre-push scope-checks each pushed build/* ref at its pushed commit and ign
  assert.equal(result.status,0,result.stderr);
  assert.deepEqual((await readFile(log,'utf8')).trim().split(/\r?\n/),[
   'bun scripts/dev.mjs check-offline','cargo fmt --all --check',
-  `bun scripts/dev.mjs scope storage --head ${sha}`,`bun scripts/dev.mjs scope views --head ${other}`]);
+  `bun scripts/dev.mjs scope storage --head ${sha}`,`bun scripts/dev.mjs check-receipts --head ${sha}`,
+  `bun scripts/dev.mjs check-receipts --head ${'b'.repeat(40)}`,
+  `bun scripts/dev.mjs scope views --head ${other}`,`bun scripts/dev.mjs check-receipts --head ${other}`]);
+});
+
+// The receipt rule runs the real `check-receipts --head` from a copy of scripts/ inside a temporary
+// repository; `bun` forwards that task to the real Bun and only records the other calls, and
+// `cargo` is a stub.
+async function pushWithReceipts(t,{stale,refs}){
+ const posix=path=>path.split(sep).join('/');
+ const {base,root:repo}=await fixtureRepo(t,{'harness/run.mjs':'// v1\n'});
+ const first=await git(repo,'rev-parse','HEAD');
+ const receipt=JSON.stringify({git_sha:first,inputs:['harness/run.mjs'],produced_at:'2026-10-05T18:00:00Z'});
+ await commit(repo,stale===null?{'notes.txt':'no receipts'}:{'qualification/receipts/docling-library-qualification.json':receipt},'record');
+ const head=stale===true?await commit(repo,{'harness/run.mjs':'// v2\n'},'change an input'):await git(repo,'rev-parse','HEAD');
+ cpSync(join(root,'scripts'),join(repo,'scripts'),{recursive:true});
+ const stubs=join(base,'stubs');
+ await mkdir(stubs);
+ await writeFile(join(stubs,'bun'),`#!/bin/sh\nif [ "$2" = check-receipts ]; then exec "${posix(process.execPath)}" "$@"; fi\necho "bun $*" >> "${posix(join(base,'calls.log'))}"\n`);
+ await writeFile(join(stubs,'cargo'),'#!/bin/sh\nexit 0\n');
+ for(const name of ['bun','cargo'])await chmod(join(stubs,name),0o755);
+ const stdin=refs.map(([local,remote,sha=head])=>`${local} ${sha} ${remote} ${'0'.repeat(40)}`).join('\n')+'\n';
+ const result=spawnSync(posixShell(),[posix(join(root,'scripts/hooks/pre-push'))],{cwd:repo,input:stdin,encoding:'utf8',env:{...process.env,PATH:`${stubs}${delimiter}${process.env.PATH}`}});
+ return {result,output:result.stdout+result.stderr};
+}
+const rerun='bun qualification/docling/run.mjs, then bun qualification/record.mjs docling';
+test('pre-push only warns about a stale receipt on a lane or cure ref',async t=>{
+ for(const ref of ['refs/heads/build/storage','refs/heads/cure/hook','refs/heads/feature/x']){
+  const {result,output}=await pushWithReceipts(t,{stale:true,refs:[[ref,ref]]});
+  assert.equal(result.status,0,`${ref}: ${output}`);
+  assert.match(output,/^warning: stale receipt docling-library-qualification\.json: inputs changed after [0-9a-f]{40}: harness\/run\.mjs -- re-run: bun qualification\/docling\/run\.mjs, then bun qualification\/record\.mjs docling$/m,ref);
+ }
+});
+test('pre-push blocks a stale receipt on main and integration/*, naming the receipt and the harness',async t=>{
+ for(const ref of ['refs/heads/main','refs/heads/integration/x']){
+  const {result,output}=await pushWithReceipts(t,{stale:true,refs:[['refs/heads/cure/hook',ref]]});
+  assert.notEqual(result.status,0,`${ref}: ${output}`);
+  assert.match(output,/^stale receipt docling-library-qualification\.json: inputs changed after [0-9a-f]{40}: harness\/run\.mjs -- re-run: /m,ref);
+  assert.ok(output.includes(rerun),output);
+  assert.doesNotMatch(output,/warning:/,'a blocking ref is not downgraded to a warning');
+ }
+});
+test('pre-push says nothing about receipts that are valid or absent, and skips a deleted ref',async t=>{
+ const zero='0'.repeat(40);
+ for(const stale of [false,null]){
+  const {result,output}=await pushWithReceipts(t,{stale,refs:[['refs/heads/main','refs/heads/main'],['(delete)','refs/heads/old',zero]]});
+  assert.equal(result.status,0,output);
+  assert.doesNotMatch(output,/receipt/i,output);
+ }
+ // A deleted ref alone neither crashes nor checks anything, even though the remote ref is main.
+ const {result,output}=await pushWithReceipts(t,{stale:true,refs:[['(delete)','refs/heads/main',zero]]});
+ assert.equal(result.status,0,output);
+ assert.doesNotMatch(output,/receipt/i,output);
 });

@@ -10,7 +10,7 @@ import { initialize, installHooks } from './lib/init.mjs';
 import { tree } from './lib/tree.mjs';
 import { bun, pins } from './lib/toolchain.mjs';
 import { checkScope, createLanes, resetLanes, syncLaneTable } from './lib/lanes.mjs';
-import { checkReceipts } from './lib/receipts.mjs';
+import { checkReceipts, staleReceiptLines } from './lib/receipts.mjs';
 import { cleanCheckout, foundationTests, premergeSteps, runLane, runPremerge } from './lib/gates.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -196,7 +196,14 @@ async function main() {
     }
     case 'lanes-reset': process.stdout.write(`${await resetLanes(root)}\n`); break;
     case 'qualify': await qualify(); break;
-    case 'check-receipts': process.stdout.write(`${await checkReceipts(root)}\n`); break;
+    case 'check-receipts': {
+      const head = option('--head');
+      if (head === undefined) { process.stdout.write(`${await checkReceipts(root)}\n`); break; }
+      const lines = await staleReceiptLines(root, head);
+      if (lines.length) { process.stderr.write(`${lines.join('\n')}\n`); process.exitCode = 1; }
+      else process.stdout.write(`check-receipts: receipts at ${head} are current.\n`);
+      break;
+    }
     case 'audit': await audit(); break;
     case 'check': await runNamed(['fmt', 'clippy', 'source-policy', 'ui-lint', 'ui-typecheck', 'gen-check']); break;
     case 'test': await runNamed(['test', 'ui-test']); break;
