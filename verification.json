@@ -61,9 +61,22 @@
       "phase_0": [
         {
           "id": "authored-typescript-seams",
-          "status": "incomplete",
-          "receipt": null,
-          "meaning": "Reopened: last passed on e3dd8bf (CI 37322344115); Vitest was skipped in CI 37352882339 on b205c4a. Re-run on S. Covers: Vitest under Bun+happy-dom; ui/tsconfig.tests.json type-checks tests; Layout strictObject rejects on/watch and passes visible; wire missing-key + generated request cases; RulesForm mounts with invalid data and asserts AJV errors; mcp-apps-mime reads real manifest; PresentView validates Vega via compile; omitUndefined once in main.tsx."
+          "kind": "ci",
+          "enforced_by": {
+            "workflow": ".github/workflows/ci.yml",
+            "job": "foundation",
+            "check": "Actual pinned generators and consumers, every feature",
+            "evidence": [
+              "bun scripts/dev.mjs premerge --step ui-typecheck",
+              "bun scripts/dev.mjs premerge --step ui-test",
+              "ui/tests/unit/layout.test.tsx",
+              "ui/tests/unit/wire.test.ts",
+              "ui/tests/unit/rules-form.test.tsx",
+              "ui/tests/unit/mcp-apps-mime.test.ts",
+              "ui/tests/unit/mcp-apps-dispatch.test.tsx"
+            ]
+          },
+          "covers": "On every push the authored UI source and its tests type-check under the authored policy (ui/tsconfig.tests.json covers ui/tests), and the unit tests run in Vitest under Bun with happy-dom. They hold these seams: the json-render Layout rejects on and watch and passes visible through; the wire helper omits an undefined optional and keeps null; RulesForm mounts with invalid data and shows the AJV errors; the SDK's resource MIME type is the one api/mcp-apps.json declares; PresentView refuses a chart specification that Vega-Lite's compile rejects, before any host call, with an alert that names the chart and no chart drawn; and the Apps bridge in ui/src/mcp-apps/main.tsx omits undefined optionals once, as a tool call leaves for the host, while PresentView passes its fields through. It does not prove that a valid chart beside a rejected one is still drawn (PresentView refuses the whole view, and no test holds either behaviour), rendering in a real host (the receipt gate mcp-apps-protocol-qualification) or any behaviour against a running server."
         },
         {
           "id": "deterministic-foundation",

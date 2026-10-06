@@ -22,11 +22,11 @@ const gateFields={
 const requiredChecks=['Dependency-free source tooling, not product acceptance','Actual pinned generators and consumers, every feature'];
 /**
  * Phase 0 gates left as they were, each with the claim no CI step enforces. A gate leaves this
- * list by gaining that enforcement and a kind, never by losing the claim.
+ * list by gaining that enforcement and a kind, never by losing the claim. None is left:
+ * authored-typescript-seams was the last, and became a ci gate when ui/tests/unit gained a test
+ * for each of its two unenforced claims.
  */
-const unconverted={
- 'authored-typescript-seams':'no test gives PresentView a Vega-Lite specification that compile rejects, and none holds that main.tsx applies omitUndefined once at the wire boundary',
-};
+const unconverted={};
 /**
  * Every field of verification.json outside the archive, in file order. Each has one verdict:
  * derived by a tool and verified (phase_0_qualified, receipt gate statuses), checked against
@@ -148,6 +148,13 @@ test('every Phase 0 gate has exactly one kind and only the fields of that kind',
  for(const gate of gates.filter(entry=>entry.kind==='decision'))assertDecision(gate,gate.id);
  // A gate that was not converted keeps its typed status, which is never a pass.
  for(const gate of gates.filter(entry=>entry.kind===undefined))assert.equal(gate.status,'incomplete',gate.id);
+ // The seams gate names a test file for each claim that only a test can hold.
+ const seams=gates.find(gate=>gate.id==='authored-typescript-seams');
+ assert.equal(seams.kind,'ci');
+ for(const file of ['layout','wire','rules-form','mcp-apps-mime','mcp-apps-dispatch'])assert.ok(seams.enforced_by.evidence.some(entry=>entry.startsWith(`ui/tests/unit/${file}.test.`)),`authored-typescript-seams does not name ${file}`);
+ assert.match(await read('ui/tests/unit/layout.test.tsx'),/refuses a chart specification that compile rejects/);
+ assert.match(await read('ui/tests/unit/mcp-apps-dispatch.test.tsx'),/describe\('MCP App wire boundary'/);
+ assert.match(await read('ui/package.json'),/"typecheck": "tsc -b && tsc -p tsconfig\.tests\.json --noEmit"/,'the typecheck step no longer covers ui/tests');
 });
 test('a ci gate names a job of the workflow by its check name, and that job runs the evidence',async()=>{
  const gates=(await record()).current.gates.phase_0.filter(gate=>gate.kind==='ci');
