@@ -69,8 +69,8 @@ fn dispatch_ports(ports: &FixturePorts) -> DispatchPorts<'_> {
 
 /// Dispatch as a caller without a browser session.
 ///
-/// The dispatch future is boxed: it holds one state per declared operation, and awaiting it
-/// inline would make every test future that large (`clippy::large_futures`).
+/// The call is awaited inline, as a binding does: `dispatch` boxes its own per-operation state,
+/// and `clippy::large_futures` on this test target is what holds it to that.
 async fn call(
     app: &CountingApplication,
     ports: &FixturePorts,
@@ -82,14 +82,7 @@ async fn call(
         principal,
         session_id: None,
     };
-    Box::pin(dispatch(
-        app,
-        &dispatch_ports(ports),
-        &caller,
-        operation,
-        input,
-    ))
-    .await
+    dispatch(app, &dispatch_ports(ports), &caller, operation, input).await
 }
 
 /// Start `operation` and wait until its handler is parked. The returned attempt holds its lease
@@ -884,13 +877,13 @@ async fn the_session_id_of_the_caller_reaches_the_handler() -> TestResult {
         principal: &alice,
         session_id: Some("session-1"),
     };
-    Box::pin(dispatch(
+    dispatch(
         &app,
         &dispatch_ports(&ports),
         &in_session,
         "list_items",
         list_items_body(WORKSPACE_A),
-    ))
+    )
     .await?;
     call(
         &app,

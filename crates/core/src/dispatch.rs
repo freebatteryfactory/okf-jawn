@@ -36,11 +36,9 @@ macro_rules! dispatch_operations {
     ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
         $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
         $destructive:literal, $description:literal)),* $(,)?) => {
-        /// Dispatch one declared JSON operation into its typed implementation.
-        ///
-        /// # Errors
-        /// Returns input, authorization, idempotency, implementation, or serialization errors.
-        pub async fn dispatch(
+        /// Run one declared operation. Its future holds one state per operation in the table
+        /// and is large; [`dispatch`] is the entry point and boxes it.
+        async fn run_declared(
             service: &dyn Application,
             ports: &DispatchPorts<'_>,
             caller: &Caller<'_>,
@@ -91,6 +89,23 @@ enum MutationGate {
     Run(Option<MutationLease>),
     /// Answer from the ledger without running the handler.
     ShortCircuit(Value),
+}
+
+/// Dispatch one declared JSON operation into its typed implementation.
+///
+/// The per-operation state is boxed inside, so this future is small and a binding awaits it
+/// inline, without `Box::pin`.
+///
+/// # Errors
+/// Returns input, authorization, idempotency, implementation, or serialization errors.
+pub async fn dispatch(
+    service: &dyn Application,
+    ports: &DispatchPorts<'_>,
+    caller: &Caller<'_>,
+    operation_id: &str,
+    input: Value,
+) -> Result<Value, ApiError> {
+    Box::pin(run_declared(service, ports, caller, operation_id, input)).await
 }
 
 async fn prepare_mutation<Req: RequestScope + Serialize>(
