@@ -36,6 +36,7 @@ import {
   TIMEOUT_PROBE,
   buildDoclingReceipt,
 } from '../../qualification/docling/lib/receipt.mjs';
+import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
 import { OCR_FIXTURES, decodeFixture, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 import {
@@ -526,6 +527,109 @@ test('the OCR fixtures show exactly the words their expectation names, pixel for
   assert.throws(() => renderLines({ width: 10, height: 10, unit: 1, lines: [{ text: 'Q', left: 0, top: 0 }] }), /no glyph for "Q"/);
   assert.match((await readFile(join(dir, 'scanned_text.pdf'))).toString('latin1'), /\/Subtype \/Image \/Width 612 \/Height 792 \/ColorSpace \/DeviceGray/);
   assert.doesNotMatch((await readFile(join(dir, 'scanned_text.pdf'))).toString('latin1'), /\bBT\b|\bTj\b/, 'no text operators: the words exist only as pixels');
+});
+
+test('content is matched against the declared expectation, and a missing string, row or count fails', () => {
+  const observed = {
+    markdown: '## Title\n\nHello   world\n\n| Name | Qty |\n| - | - |\n| Widget | 3 |\n',
+    tables: [[['Name', 'Qty'], [' Widget ', '3']]],
+    headings: 1,
+    pictures: 0,
+    sheet_names: ['Sheet1'],
+    page_count: 3,
+  };
+  const ok = judgeContent(
+    {
+      confirmed_by: 'test',
+      markdown_contains: ['Hello world', { text: 'TITLE', case_insensitive: true }],
+      table_rows: [['Widget', '3']],
+      tables: 1,
+      headings_at_least: 1,
+      sheet_names: ['Sheet1'],
+      pages: 3,
+    },
+    observed,
+  );
+  assert.equal(ok.status, 'PASS');
+  assert.equal(ok.found, 7);
+  assert.equal(ok.total, 7);
+  assert.equal(ok.confirmed_by, 'test');
+
+  const failing = (expect) => {
+    const judged = judgeContent(expect, observed);
+    assert.equal(judged.status, 'FAIL', JSON.stringify(expect));
+    return judged.checks.filter((check) => !check.ok);
+  };
+  assert.deepEqual(failing({ markdown_contains: ['hello world'] }).map((check) => check.expected), ['hello world'], 'case-sensitive by default');
+  assert.equal(failing({ markdown_contains: ['Hello world', 'Goodbye'] }).length, 1);
+  assert.equal(failing({ table_rows: [['Widget', '4']] }).length, 1);
+  assert.equal(failing({ table_rows: [['3', 'Widget']] }).length, 1, 'cells must come in row order');
+  assert.deepEqual(failing({ tables: 2 })[0], { kind: 'tables', comparison: 'exact', expected: 2, observed: 1, ok: false });
+  assert.equal(failing({ tables_at_least: 2 }).length, 1);
+  assert.equal(failing({ headings_at_least: 2 })[0].observed, 1);
+  assert.equal(failing({ pictures_at_least: 1 }).length, 1);
+  assert.equal(failing({ sheet_names: ['Sheet1', 'Sheet2'] }).length, 1);
+  assert.equal(failing({ pages: 2 })[0].observed, 3);
+  assert.match(judgeContent(undefined, observed).reason, /no expect block/);
+  assert.match(judgeContent({ confirmed_by: 'x' }, observed).reason, /checks nothing/);
+  assert.equal(judgeContent({ confirmed_by: 'x' }, observed).status, 'FAIL');
+  assert.ok(rowHasCells(['R1', 'True', '', 'False'], ['R1', 'False']));
+  assert.ok(!rowHasCells(['R1', 'True'], ['R1', 'True', 'True']));
+});
+
+test('OCR text must hold every expected token exactly; only case and whitespace are forgiven', () => {
+  const judge = (markdown, expect = { ocr_tokens: ['WATER', 'METER', '47'] }) =>
+    judgeContent(expect, { markdown, tables: [], headings: 0, pictures: 1 });
+  assert.match(MATCH_RULES.ocr_tokens, /No character confusion/);
+  assert.deepEqual(textTokens('<!-- image -->\n\nWater-Meter  47.'), ['water', 'meter', '47']);
+
+  const read = judge('<!-- image -->\n\nwater   METER\n\ntax year 47\n');
+  assert.equal(read.status, 'PASS');
+  assert.equal(read.ocr_exercised, true);
+  assert.equal(read.observed_text, 'water METER tax year 47');
+
+  for (const [markdown, missing] of [
+    ['W4TER METER 47', ['WATER']], // a digit for a letter is not forgiven
+    ['WATERMETER 47', ['WATER', 'METER']], // a lost space is a different token
+    ['WATER METER 4 7', ['47']],
+    ['WATER METEP 47', ['METER']],
+    ['<!-- image -->', ['WATER', 'METER', '47']], // a picture placeholder is not text
+    ['<!-- WATER METER 47 -->', ['WATER', 'METER', '47']],
+  ]) {
+    const judged = judge(markdown);
+    assert.equal(judged.status, 'FAIL', markdown);
+    assert.deepEqual(judged.checks.filter((check) => !check.ok).map((check) => check.expected), missing, markdown);
+    assert.equal(judged.observed_text, collapse(markdown.replace(/<!--[\s\S]*?-->/g, ' ')), 'the text read is recorded on a FAIL');
+  }
+
+  // A fixture that shows no glyphs: placeholders are fine, any letter or digit is invented text.
+  const blank = judge('<!-- image -->\n\n<!-- image -->\n', { no_text: true });
+  assert.equal(blank.status, 'PASS');
+  assert.equal(blank.ocr_exercised, false);
+  const invented = judge('<!-- image -->\n\nIll\n', { no_text: true });
+  assert.equal(invented.status, 'FAIL');
+  assert.deepEqual(invented.checks[0].observed, ['ill']);
+});
+
+test('every supported fixture declares what it contains and how that was confirmed', async () => {
+  const sources = JSON.parse(await readFile(join(root, 'tests/fixtures/documents/SOURCES.json'), 'utf8'));
+  const nothing = { markdown: '', tables: [], headings: 0, pictures: 0, sheet_names: [], page_count: null };
+  for (const [name, entry] of Object.entries(sources.files)) {
+    if (name === MUST_FAIL) {
+      assert.equal(entry.expect, undefined, 'the must-fail fixture has no content to expect');
+      continue;
+    }
+    assert.ok(typeof entry.expect?.confirmed_by === 'string' && entry.expect.confirmed_by.length > 40, `${name}: confirmed_by must say how the expectation was read from the fixture`);
+    const judged = judgeContent(entry.expect, nothing);
+    assert.ok(judged.total > 0, `${name}: expect must check something`);
+    if (/\.(pdf|png)$/.test(name)) assert.ok(Number.isInteger(entry.expect.pages), `${name}: a paginated fixture declares its page count`);
+    // An empty document satisfies only the two fixtures that show no glyphs.
+    assert.equal(judged.status, entry.expect.no_text === true ? 'PASS' : 'FAIL', name);
+  }
+  assert.deepEqual(
+    Object.entries(sources.files).filter(([, entry]) => entry.expect?.no_text === true).map(([name]) => name).sort(),
+    ['sample_image.png', 'scanned_image_only.pdf'],
+  );
 });
 
 const pidAlive = (pid) => {

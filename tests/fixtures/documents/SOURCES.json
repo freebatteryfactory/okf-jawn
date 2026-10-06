@@ -2,6 +2,7 @@
   "generated_at": "2026-10-05T12:00:00+00:00",
   "generator": "okf-jawn qualification fixture builder + docling-project corpus fetch; scanned_text.pdf and text_image.png are drawn by qualification/docling/lib/ocr-fixture.mjs",
   "license_note": "Self-generated fixtures remain MIT for qualification. Corpus files are copied from docling-project/docling (MIT) at commit 4e650af5.",
+  "expect_note": "Each supported fixture declares `expect`: what its content is, written from the fixture itself (its generator, its XML parts, or an independent text extraction named in confirmed_by) and never from converter output. qualification/docling/lib/expect.mjs holds the comparison rules; the receipt records every expectation with whether it was found. An expectation is not loosened to make a run pass.",
   "corpus_source": {
     "repository": "https://github.com/docling-project/docling",
     "commit": "4e650af5",
@@ -10,12 +11,17 @@
   },
   "files": {
     "sample_image.png": {
-      "role": "image",
+      "role": "image_without_text",
       "url": "generated://okf-jawn/fixtures/sample_image.png",
       "license": "MIT (generated for qualification; not third-party copyrighted content)",
-      "notes": "Minimal valid RGB PNG; usable as OCR/image backend input",
+      "notes": "Minimal valid 120x80 RGB PNG: a blue field with two plain light rectangles and no glyphs. It exercises the image pipeline, not OCR recognition; text_image.png does that.",
       "sha256": "c845833844c2085e427dec79455f1274e413569de93e30605ba8c43ad20bcfb5",
-      "bytes": 211
+      "bytes": 211,
+      "expect": {
+        "confirmed_by": "its generator (write_png in the fixture builder: every pixel is one of three flat colours in two axis-aligned rectangles on a field) and by viewing the file",
+        "no_text": true,
+        "pages": 1
+      }
     },
     "text_image.png": {
       "role": "image_with_text",
@@ -36,7 +42,13 @@
       "license": "MIT (generated for qualification)",
       "notes": "Valid OOXML DOCX zip with word/media/image1.png",
       "sha256": "585cc09d1c5990439bfcfe341a424aff99fcc40d14701e2ad65fe123d2e3c025",
-      "bytes": 1912
+      "bytes": 1912,
+      "expect": {
+        "confirmed_by": "its generator and unzipping the file: word/document.xml holds one w:t run with this sentence, one w:drawing bound to word/media/image1.png, no w:tbl and no heading style",
+        "markdown_contains": ["OKF qualification DOCX with embedded image"],
+        "tables": 0,
+        "pictures_at_least": 1
+      }
     },
     "sample_sheet.xlsx": {
       "role": "xlsx",
@@ -44,7 +56,19 @@
       "license": "MIT (generated for qualification)",
       "notes": "Valid OOXML XLSX with shared strings and numeric cells",
       "sha256": "fc03b4d75e6c90e47699cfe6ffbfa90ed856549d1ec9ff78f6b3571263aa50f9",
-      "bytes": 1993
+      "bytes": 1993,
+      "expect": {
+        "confirmed_by": "its generator and unzipping the file: xl/workbook.xml names one sheet, Sheet1; xl/worksheets/sheet1.xml holds A1:C4 with shared strings Item, Qty, Price, Widget, Gadget, Sprocket and numeric cells 3, 1.25, 2, 9.5, 7, 0.75",
+        "markdown_contains": ["Item", "Qty", "Price", "Widget", "Gadget", "Sprocket"],
+        "tables": 1,
+        "table_rows": [
+          ["Item", "Qty", "Price"],
+          ["Widget", "3", "1.25"],
+          ["Gadget", "2", "9.5"],
+          ["Sprocket", "7", "0.75"]
+        ],
+        "sheet_names": ["Sheet1"]
+      }
     },
     "born_digital_text.pdf": {
       "role": "born_digital_pdf",
@@ -52,15 +76,26 @@
       "license": "MIT (generated for qualification)",
       "notes": "Valid PDF-1.4 with Helvetica text operators (text layer)",
       "sha256": "475e19546a52bb05488e6a5267c110176e8fb851c6d712a771bf5b48e6183d6f",
-      "bytes": 661
+      "bytes": 661,
+      "expect": {
+        "confirmed_by": "its generator (two Tj operators, 24 pt Helvetica, one page, no path operators) and xpdf pdftotext 4.06, which prints both lines",
+        "markdown_contains": ["Born-digital qualification PDF", "Text layer present for extraction."],
+        "tables": 0,
+        "pages": 1
+      }
     },
     "scanned_image_only.pdf": {
-      "role": "scanned_or_image_pdf",
+      "role": "image_only_pdf_without_text",
       "url": "generated://okf-jawn/fixtures/scanned_image_only.pdf",
       "license": "MIT (generated for qualification)",
-      "notes": "Image-only PDF with DeviceRGB XObject and no text operators (OCR path)",
+      "notes": "Image-only PDF with one DeviceRGB XObject and no text operators. The image is a light field with two plain dark bars and no glyphs, so this fixture exercises the image-only page path and the timeout probe, not OCR recognition; scanned_text.pdf does that.",
       "sha256": "0deee37bf0d2206b4bba1964f9b43b02244f1e2108b18c34e129bbff925e7b4e",
-      "bytes": 72666
+      "bytes": 72666,
+      "expect": {
+        "confirmed_by": "its generator (a 200x120 raster of three flat greys in two axis-aligned bars, drawn once with `/Im0 Do`; no BT operator in the file) and xpdf pdftotext 4.06, which prints nothing",
+        "no_text": true,
+        "pages": 1
+      }
     },
     "scanned_text.pdf": {
       "role": "scanned_pdf_with_text",
@@ -81,13 +116,25 @@
       "license": "MIT (generated for qualification)",
       "notes": "Born-digital PDF with multi-column tabular text + stroked grid",
       "sha256": "01ac9dc21954a7842c1bcba748ad8c7b32dbf7e62acad9d691f69da316503906",
-      "bytes": 2621
+      "bytes": 2621,
+      "expect": {
+        "confirmed_by": "its generator (one 14 pt title line, then 8 rows of 6 cells placed on a stroked grid, one page) and xpdf pdftotext 4.06 -layout, which prints the title and the cell texts",
+        "markdown_contains": ["Table-heavy qualification PDF", "Region", "Epsilon", "Central"],
+        "tables": 1,
+        "table_rows": [
+          ["Name", "Region", "Q1", "Q2", "Q3", "Q4"],
+          ["Alpha", "North", "12", "15", "11", "18"],
+          ["Delta", "West", "21", "19", "22", "20"],
+          ["Eta", "South", "3", "4", "5", "6"]
+        ],
+        "pages": 1
+      }
     },
     "must_fail_truncated.pdf": {
       "role": "must_fail",
       "url": "generated://okf-jawn/fixtures/must_fail_truncated.pdf",
       "license": "MIT (generated for qualification)",
-      "notes": "Valid PDF-1.4 header truncated mid-stream. PASS only when the converter itself refuses it: DocumentConverter::convert returns Err (stage converter_error) or Ok with ConversionStatus::Failure (stage converter_status). A SourceDocument::from_file error (stage source) is FAIL: the fixture never reached the converter. Success or PartialSuccess is FAIL with the finding \"converter accepts truncated PDF\". The fixture is never altered to force a pass.",
+      "notes": "Valid PDF-1.4 header truncated mid-stream. PASS only when the converter itself refuses it: DocumentConverter::convert returns Err (stage converter_error) or Ok with ConversionStatus::Failure (stage converter_status). A SourceDocument::from_file error (stage source) is FAIL: the fixture never reached the converter. Success or PartialSuccess is FAIL with the finding \"converter accepts truncated PDF\". The fixture is never altered to force a pass. The receipt also states what kind of refusal it was (refusal_kind), computed from the error text.",
       "pass_when": ["converter_error", "converter_status:Failure"],
       "sha256": "6493e95ce39d3f7de423a9578c5f67a864cdc839d1048f38f04b1b1ec9a52b20",
       "bytes": 330,
@@ -98,36 +145,107 @@
       "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/docx/word_sample.docx",
       "license": "MIT (docling-project/docling)",
       "source_commit": "4e650af5",
-      "notes": "Upstream word_sample.docx; must_contain Summer",
+      "notes": "Upstream word_sample.docx",
       "sha256": "ae4f3f6edd7ccd636b893ec8355d5eade6b0413fa779606452c561e334f390f7",
-      "bytes": 103966
+      "bytes": 103966,
+      "expect": {
+        "confirmed_by": "unzipping the file and reading word/document.xml: paragraphs styled Subtitle, Title, Heading1 and Heading2, a Caption paragraph, bullet list items, one w:tbl of 4 rows by 3 cells and one w:drawing",
+        "markdown_contains": [
+          "Summer activities",
+          "Swimming in the lake",
+          "Figure 1: This is a cute duckling",
+          "To get started with swimming, first lay down in a water and try not to drown:",
+          "Wear sunglasses",
+          "I like to eat leaves"
+        ],
+        "tables": 1,
+        "table_rows": [
+          ["Food", "Calories per portion"],
+          ["Leaves", "Ash, Elm, Maple", "50"],
+          ["Berries", "Blueberry, Strawberry, Cranberry", "150"],
+          ["Grain", "Corn, Buckwheat, Barley", "200"]
+        ],
+        "headings_at_least": 3,
+        "pictures_at_least": 1
+      }
     },
     "corpus/xlsx_01.xlsx": {
       "role": "corpus_xlsx",
       "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/xlsx/xlsx_01.xlsx",
       "license": "MIT (docling-project/docling)",
       "source_commit": "4e650af5",
-      "notes": "Upstream xlsx_01.xlsx; must_contain col-1",
+      "notes": "Upstream xlsx_01.xlsx",
       "sha256": "fd4e67c4474e6d8308b1e9a9006500bd8e055c1aa2a337d54e641c3b1f506cf2",
-      "bytes": 170934
+      "bytes": 170934,
+      "expect": {
+        "confirmed_by": "unzipping the file and reading xl/workbook.xml, xl/sharedStrings.xml and the four worksheets: Sheet1 holds A1:C7; Sheet2 holds three separate cell blocks (A1:D9, G5:I9, C14:E18); Sheet3 holds two blocks with merged cells; Sheet4 is state=hidden. Six cell blocks sit on the three visible sheets",
+        "markdown_contains": ["col-1", "col-4", "first", "second", "third", "header"],
+        "tables_at_least": 6,
+        "table_rows": [
+          ["first", "second", "third"],
+          ["6", "0", "-6"],
+          ["col-1", "col-2", "col-3", "col-4"],
+          ["8", "16", "24", "32"],
+          ["4", "8", "12"]
+        ],
+        "sheet_names": ["Sheet1", "Sheet2", "Sheet3"]
+      }
     },
     "corpus/powerpoint_sample.pptx": {
       "role": "corpus_pptx",
       "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/pptx/powerpoint_sample.pptx",
       "license": "MIT (docling-project/docling)",
       "source_commit": "4e650af5",
-      "notes": "Upstream powerpoint_sample.pptx; must_contain Test Table",
+      "notes": "Upstream powerpoint_sample.pptx",
       "sha256": "24191d47fda511e11984e875f8676506da5ae1fbcaefcc63d81be377d3a3950c",
-      "bytes": 45849
+      "bytes": 45849,
+      "expect": {
+        "confirmed_by": "unzipping the file and reading ppt/presentation.xml (three p:sldId) and ppt/slides/slide1..3.xml: slide 1 has a ctrTitle, a subTitle and one a:tbl of 9 rows by 7 cells; slide 2 a title, a body list and a text box; slide 3 five text boxes",
+        "markdown_contains": [
+          "Test Table Slide",
+          "With footnote",
+          "Second slide title",
+          "A rectangle shape with this text inside.",
+          "List item4",
+          "Maybe a list?"
+        ],
+        "tables": 1,
+        "table_rows": [
+          ["Class1", "Class2"],
+          ["A merged with B", "C", "A", "B", "C"],
+          ["R1", "True", "False", "False", "True", "True"]
+        ],
+        "headings_at_least": 2,
+        "pages": 3
+      }
     },
     "corpus/redp5110_sampled.pdf": {
       "role": "corpus_pdf",
       "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/pdf/redp5110_sampled.pdf",
       "license": "MIT (docling-project/docling; sample content from IBM Redbooks materials used in upstream tests)",
       "source_commit": "4e650af5",
-      "notes": "Upstream redp5110_sampled.pdf; must_contain IBM",
+      "notes": "Upstream redp5110_sampled.pdf",
       "sha256": "2f6bc92861997d1434c069040dc63447c3e415e8e9eadbd1a8129ba2327ddba5",
-      "bytes": 1277938
+      "bytes": 1277938,
+      "expect": {
+        "confirmed_by": "xpdf pdftotext 4.06 -layout on the file (18 pages, matching /Count 18 in its page tree): each string below is in that text layer after whitespace is collapsed; the four table captions Table 2-1, 2-2, 3-1 and 3-2 are on pages 8, 9, 11 and 12; nine numbered section headings (1.1, 1.2, 1.3.1, 2.1.6, 2.1.7, 2.2, 3.2.2, 3.3, 3.6.6) start a line outside the contents page",
+        "markdown_contains": [
+          "Row and Column Access Control",
+          "Recent news headlines are filled with reports of data breaches",
+          "1.1 Security fundamentals",
+          "Work Function Usage (WRKFCNUSG)",
+          "Table 3-1 Special registers and their corresponding values",
+          "Figure 3-10 Column masks shown in System i Navigator",
+          "The authorization ID that initiated the connection."
+        ],
+        "tables_at_least": 4,
+        "table_rows": [
+          ["FUNCTION_ID", "VARCHAR(30)", "ID of the function."],
+          ["SYSTEM_USER", "The authorization ID that initiated the connection."]
+        ],
+        "headings_at_least": 9,
+        "pages": 18
+      }
     }
   }
 }
