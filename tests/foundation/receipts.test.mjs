@@ -840,6 +840,34 @@ test('check-receipts --head=<commit> is the option written another way, and no s
   }
 });
 
+test('record.mjs says verification.json could not be read, and why, rather than that no harness has the name', async t => {
+  const { root } = await fixtureRepo(t, { 'harness/run.mjs': '// v1\n' });
+  const { record } = await commandsIn(root);
+  const path = join(root, 'verification.json');
+  const cases = [
+    ['missing', async () => {}, `verification.json could not be read: it does not exist in ${root}`],
+    ['not JSON', () => writeFile(path, '{not json'), /^verification\.json could not be read: it is not valid JSON \(.+\)$/],
+    ['a directory', () => mkdir(path), /^verification\.json could not be read: .*(EISDIR|illegal operation on a directory|is a directory)/i],
+    ['valid JSON with no Phase 0 gates', () => writeFile(path, '{}\n'), 'verification.json has no Phase 0 gate of kind receipt, so there is no harness to record'],
+  ];
+  for (const [why, arrange, expected] of cases) {
+    await rm(path, { recursive: true, force: true });
+    await arrange();
+    // With a name, the harness is not blamed; with none, the record is not rewritten blindly either.
+    for (const names of [['docling'], []]) {
+      const result = await record(...names);
+      assert.equal(result.code, 1, `${why} ${names.join(' ')}`);
+      assert.equal(result.stdout, '', `${why}: nothing was recorded or rewritten`);
+      assert.equal(said(result).length, 1, `${why}: one sentence: ${result.stderr}`);
+      const [sentence] = said(result);
+      if (typeof expected === 'string') assert.ok(sentence.startsWith(expected), `${why}: ${sentence}`);
+      else assert.match(sentence, expected, why);
+      assert.doesNotMatch(sentence, /no harness of that name/, `${why}: the sentence must not name the wrong cause`);
+      assertNoStack(result);
+    }
+  }
+});
+
 test('a receipt file whose JSON is no object is a failure, and a directory under receipts/ is reported, on both paths', async t => {
   const { root, sha } = await recorded(t);
   const rerun = 'bun qualification/docling/run.mjs, then bun qualification/record.mjs docling';
