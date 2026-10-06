@@ -52,6 +52,7 @@ import {
   partitionAxe,
   runProblems,
   toolCallsFrom,
+  transportRecord,
 } from '../../qualification/mcp-apps/lib/views.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -833,6 +834,35 @@ test('the run fails when one view fails, when a view is missing, or when the pro
   );
   assert.deepEqual(runProblems({ protocol, basicHost: { status: 'not_run' }, protocolOnly: true }), []);
   assert.match(runProblems({ protocol: { status: 'failed', error: 'x' }, basicHost: verdict, protocolOnly: true })[0], /protocol_check failed: x/);
+});
+
+test('the MCP Apps receipt states what ran: stdio not_run, HTTP as the harness reported it, and no literal posing as an observation', async () => {
+  const url = 'http://127.0.0.1:18765/mcp';
+  assert.deepEqual(transportRecord({ requested: url, reported: url }), {
+    stdio: { status: 'not_run', reason: 'this orchestrator drives the harness over Streamable HTTP only' },
+    http: { status: 'listening', endpoint: url, requested: url },
+  });
+  for (const reported of [null, undefined, '']) {
+    const record = transportRecord({ requested: url, reported });
+    assert.deepEqual(record.http, { status: 'not_listening', endpoint: null, requested: url });
+    assert.equal(record.stdio.status, 'not_run');
+  }
+
+  const source = await readFile(join(root, 'qualification/mcp-apps/run.mjs'), 'utf8');
+  // Values the receipt once stated without having seen them, and instructions it carried.
+  assert.doesNotMatch(source, /stdio: 'default'|cspObject: true|has_structured_content: true|build_command|serve_command|how_to_http_ngrok/);
+  assert.match(source, /transport: transportRecord\(\{ requested: MCP_URL, reported: listeningOn \}\)/);
+  assert.match(source, /listeningOn = listening\[1\]/);
+  assert.match(source, /static_bundle_smoke: \{\s*status: 'not_run'/);
+  assert.match(source, /host_package: ensured\.package/);
+
+  // The harness's check report reads resource metadata and the tool list back from its handlers.
+  const harness = await readFile(join(root, 'qualification/mcp-apps/src/main.rs'), 'utf8');
+  const report = harness.slice(harness.indexOf('fn check_report'), harness.indexOf('impl ServerHandler'));
+  assert.match(report, /read_catalog\(&app\.uri\)/);
+  assert.match(report, /self\.tool_definitions\(\)/);
+  assert.match(report, /self\s*\.call_render_tool\(name\)/);
+  assert.doesNotMatch(report, /prefersBorder|connectDomains|SHOW_TOOL|READ_OBJECT_TOOL|tool\.fixture/);
 });
 
 test('a receipt never records an open tunnel', () => {

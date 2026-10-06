@@ -337,59 +337,74 @@ impl QualifyAppsServer {
         }
     }
 
-    fn check_report(&self) -> Value {
-        let resources: Vec<Value> = self
-            .resources
-            .iter()
-            .map(|app| {
-                let text = String::from_utf8(app.bytes.as_ref().to_vec()).ok();
-                let readable = text.as_ref().is_some_and(|body| {
+    /// What this server answers, taken from the answers themselves: each resource as
+    /// `resources/read` returns it, each tool as `tools/list` lists it and each render tool's
+    /// result as `tools/call` produces it. Nothing here restates a value the handlers hold.
+    fn check_report(&self) -> Result<Value, String> {
+        let mut resources = Vec::with_capacity(self.resources.len());
+        for app in &self.resources {
+            let read = self
+                .read_catalog(&app.uri)
+                .ok()
+                .and_then(|read| serde_json::to_value(read).ok());
+            let content = read.as_ref().and_then(|read| read.pointer("/contents/0"));
+            let readable = content
+                .and_then(|content| content.get("text"))
+                .and_then(Value::as_str)
+                .is_some_and(|body| {
                     let lower = body.to_ascii_lowercase();
                     lower.starts_with("<!doctype html") || lower.contains("id=\"root\"")
                 });
-                json!({
-                    "name": app.name,
-                    "uri": app.uri,
-                    "mimeType": app.mime_type,
-                    "byteLength": app.byte_length,
-                    "sha256": app.sha256,
-                    "readable": readable,
-                    "path": app.path,
-                    "metaUi": {
-                        "csp": {
-                            "connectDomains": [],
-                            "resourceDomains": []
-                        },
-                        "prefersBorder": true
-                    }
-                })
-            })
-            .collect();
-        let tools: Vec<Value> = self
-            .tools
-            .iter()
-            .map(|tool| {
-                json!({
-                    "name": tool.name,
-                    "resourceUri": tool.resource_uri,
-                    "hasStructuredContent": !tool.fixture.is_null(),
-                })
-            })
-            .collect();
-        json!({
+            resources.push(json!({
+                "name": app.name,
+                "uri": app.uri,
+                "mimeType": app.mime_type,
+                "byteLength": app.byte_length,
+                "sha256": app.sha256,
+                "readable": readable,
+                "path": app.path,
+                "metaUi": content.and_then(|content| content.pointer("/_meta/ui")),
+            }));
+        }
+
+        let listed = serde_json::to_value(self.tool_definitions())
+            .map_err(|error| format!("serialize the tool list: {error}"))?;
+        let mut tools = Vec::new();
+        let mut app_tools = Vec::new();
+        for tool in listed.as_array().into_iter().flatten() {
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("listed tool has no name: {tool}"))?;
+            if tool.pointer("/_meta/ui/visibility") == Some(&json!(["app"])) {
+                app_tools.push(json!(name));
+                continue;
+            }
+            let structured = self
+                .call_render_tool(name)
+                .ok()
+                .and_then(|result| result.structured_content)
+                .is_some_and(|content| !content.is_null());
+            tools.push(json!({
+                "name": name,
+                "resourceUri": tool.pointer("/_meta/ui/resourceUri"),
+                "hasStructuredContent": structured,
+            }));
+        }
+        Ok(json!({
             "mode": "check",
             "resource_count": resources.len(),
             "tool_count": tools.len(),
             "resources": resources,
             "tools": tools,
-            "app_tools": [SHOW_TOOL, READ_OBJECT_TOOL],
+            "app_tools": app_tools,
             "dataset": {
                 "fixture": DATASET_FIXTURE,
                 "sha256": self.dataset.sha256,
                 "byteLength": self.dataset.bytes.len(),
                 "maxBlockBytes": READ_OBJECT_MAX_BYTES,
             },
-        })
+        }))
     }
 }
 
@@ -823,7 +838,7 @@ async fn serve_http(server: QualifyAppsServer, addr: SocketAddr) -> Result<(), S
 }
 
 fn run_check(server: &QualifyAppsServer) -> Result<(), String> {
-    let report = server.check_report();
+    let report = server.check_report()?;
     let json = serde_json::to_string(&report).map_err(|error| error.to_string())?;
     writeln!(io::stdout(), "{json}").map_err(|error| error.to_string())?;
     let resources = report
@@ -877,15 +892,18 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        DATASET_FIXTURE, Dataset, QualifyAppsServer, READ_OBJECT_MAX_BYTES, READ_OBJECT_TOOL,
-        SHOW_TOOL, ShowFixtures, base64_encode, fixtures_dir, load_fixture, read_object_block,
-        resolved_bindings, show_fixture, tool_call_record, tunnel_hosts_allowed,
+        BundledApp, DATASET_FIXTURE, Dataset, QualifyAppsServer, READ_OBJECT_MAX_BYTES,
+        READ_OBJECT_TOOL, RenderTool, SHOW_TOOL, ShowFixtures, base64_encode, fixtures_dir,
+        load_fixture, read_object_block, resolved_bindings, resource_ui_meta, show_fixture,
+        tool_call_record, tunnel_hosts_allowed,
     };
     use rmcp::model::{CallToolResult, ContentBlock};
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -1151,6 +1169,80 @@ mod tests {
             server.call_read_object(read_request(&binding, &unknown, Some("0"), 64).as_object());
         assert_eq!(refused.is_error, Some(true));
         assert!(refused.structured_content.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn the_check_report_is_taken_from_what_the_server_answers() -> TestResult {
+        let show = fixtures()?;
+        let dataset = Dataset::load(&fixtures_dir(), &show.present)?;
+        let app = |name: &str, bytes: &[u8]| BundledApp {
+            byte_length: 0,
+            bytes: Arc::from(bytes),
+            mime_type: "text/html;profile=mcp-app".to_owned(),
+            name: name.to_owned(),
+            path: PathBuf::from(format!("{name}.html")),
+            sha256: String::new(),
+            uri: format!("ui://okf-jawn/{name}.html"),
+        };
+        let html = app("app", b"<!doctype html><div id=\"root\"></div>");
+        let binary = app("binary", &[0xff, 0xfe]);
+        let server = QualifyAppsServer {
+            by_uri: [html.clone(), binary.clone()]
+                .into_iter()
+                .map(|app| (app.uri.clone(), app))
+                .collect(),
+            dataset,
+            resources: vec![html.clone(), binary],
+            tools: vec![
+                RenderTool {
+                    description: "present",
+                    fixture: show.present.clone(),
+                    name: "render_present",
+                    resource_uri: html.uri.clone(),
+                    summary: "text".to_owned(),
+                },
+                RenderTool {
+                    description: "empty",
+                    fixture: Value::Null,
+                    name: "render_nothing",
+                    resource_uri: html.uri.clone(),
+                    summary: "text".to_owned(),
+                },
+            ],
+            show,
+        };
+        let report = server.check_report()?;
+
+        // The UI metadata is the one resources/read attaches, and only where a read succeeds.
+        let read = serde_json::to_value(
+            server
+                .read_catalog(&html.uri)
+                .map_err(|error| error.message)?,
+        )?;
+        let attached = read
+            .pointer("/contents/0/_meta/ui")
+            .ok_or("resources/read attached no _meta.ui")?;
+        assert_eq!(Some(attached), resource_ui_meta().get("ui"));
+        assert_eq!(report.pointer("/resources/0/metaUi"), Some(attached));
+        assert_eq!(report.pointer("/resources/0/readable"), Some(&json!(true)));
+        assert_eq!(report.pointer("/resources/1/metaUi"), Some(&Value::Null));
+        assert_eq!(report.pointer("/resources/1/readable"), Some(&json!(false)));
+
+        // Tools come from the listing; structured content from calling the tool.
+        assert_eq!(
+            field(&report, "app_tools")?,
+            &json!([SHOW_TOOL, READ_OBJECT_TOOL])
+        );
+        assert_eq!(
+            field(&report, "tools")?,
+            &json!([
+                { "name": "render_present", "resourceUri": html.uri, "hasStructuredContent": true },
+                { "name": "render_nothing", "resourceUri": html.uri, "hasStructuredContent": false },
+            ])
+        );
+        assert_eq!(field(&report, "tool_count")?, &json!(2));
+        assert_eq!(field(&report, "resource_count")?, &json!(2));
         Ok(())
     }
 

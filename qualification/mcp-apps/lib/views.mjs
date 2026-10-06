@@ -277,6 +277,20 @@ export function runProblems({ protocol, basicHost, protocolOnly }) {
   return problems;
 }
 
+/**
+ * Which transports the run exercised. This orchestrator never drives stdio, so the receipt
+ * says so instead of naming it; HTTP is the endpoint the harness itself reported, if any.
+ */
+export function transportRecord({ requested, reported }) {
+  const listening = typeof reported === 'string' && reported.length > 0;
+  return {
+    stdio: { status: 'not_run', reason: 'this orchestrator drives the harness over Streamable HTTP only' },
+    http: listening
+      ? { status: 'listening', endpoint: reported, requested }
+      : { status: 'not_listening', endpoint: null, requested },
+  };
+}
+
 /** The tunnel lifecycle as a receipt may state it. An opened tunnel must have been closed. */
 export function ngrokRecord({ enabled, opened_at, closed_at, public_url, local_port, note }) {
   if (!enabled) {

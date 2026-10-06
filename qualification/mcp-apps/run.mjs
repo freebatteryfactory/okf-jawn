@@ -14,6 +14,11 @@
  * Usage (from PowerShell, cargo on PATH): bun qualification/mcp-apps/run.mjs [--record]
  * Exits non-zero when the protocol check or any view fails; the receipt is written first.
  * host_render reports only evidence found under .artifacts/.../hosts/ and never a PASS.
+ *
+ * Every receipt field is computed from something this run observed, or says that it was
+ * not run; instructions belong here, not in the receipt. Manual host testing: start
+ * `okf-qualify-mcp-apps --http 127.0.0.1:18765` (or set OKF_MCP_APPS_HTTP) with
+ * OKF_MCP_APPS_NGROK=1, run `ngrok http 18765`, and give the host https://<ngrok-host>/mcp.
  */
 
 import { createHash } from 'node:crypto';
@@ -39,6 +44,7 @@ import {
   partitionAxe,
   runProblems,
   toolCallsFrom,
+  transportRecord,
 } from './lib/views.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -52,6 +58,9 @@ const outDir = join(root, '.artifacts/qualification/mcp-apps');
 const receiptPath = join(outDir, 'receipt.json');
 const hostsDir = join(outDir, 'hosts');
 const basicHostDir = join(outDir, 'basic-host');
+const HARNESS_PACKAGE = 'okf-qualify-mcp-apps';
+/** The ext-apps release whose examples/basic-host is the reference host. */
+const BASIC_HOST_TAG = 'v2.0.3';
 const HTTP_PORT = Number(process.env.OKF_MCP_APPS_PORT ?? '18765');
 const HTTP_BIND = `127.0.0.1:${HTTP_PORT}`;
 const MCP_URL = `http://127.0.0.1:${HTTP_PORT}/mcp`;
@@ -193,7 +202,7 @@ async function protocolCheck(mcpUrl, manifest) {
         uri: resource.uri,
         mimeType: content.mimeType,
         sha256: hash,
-        cspObject: true,
+        csp,
       });
     }
 
@@ -210,7 +219,7 @@ async function protocolCheck(mcpUrl, manifest) {
       if (view.tool === 'render_present') present = call.structuredContent;
       toolCalls.push({
         name: view.tool,
-        has_structured_content: true,
+        has_structured_content: call.structuredContent !== null && typeof call.structuredContent === 'object',
         text_fallback: textBlock.text,
       });
     }
@@ -299,6 +308,7 @@ async function protocolCheck(mcpUrl, manifest) {
 
     return {
       status: 'passed',
+      server: client.getServerVersion() ?? null,
       tools: renderTools.map((tool) => ({
         name: tool.name,
         resourceUri: tool._meta.ui.resourceUri,
@@ -316,13 +326,13 @@ async function protocolCheck(mcpUrl, manifest) {
 }
 
 async function ensureBasicHost() {
-  // Official basic-host is not shipped inside the npm package; fetch the v2.0.3 example.
+  // Official basic-host is not shipped inside the npm package; fetch the tagged example.
   const marker = join(basicHostDir, 'package.json');
   let source = 'cached';
   try {
     await readFile(marker, 'utf8');
   } catch {
-    source = 'fetched_v2.0.3';
+    source = 'fetched';
     await mkdir(basicHostDir, { recursive: true });
     const files = [
       'package.json',
@@ -340,8 +350,7 @@ async function ensureBasicHost() {
       'src/host-styles.ts',
       'src/vite-env.d.ts',
     ];
-    const base =
-      'https://raw.githubusercontent.com/modelcontextprotocol/ext-apps/v2.0.3/examples/basic-host';
+    const base = `https://raw.githubusercontent.com/modelcontextprotocol/ext-apps/${BASIC_HOST_TAG}/examples/basic-host`;
     for (const file of files) {
       const response = await fetch(`${base}/${file}`);
       if (!response.ok) {
@@ -373,7 +382,12 @@ async function ensureBasicHost() {
   if (extras.code !== 0) {
     throw new Error(`basic-host bun add extras exited ${extras.code}`);
   }
-  return { source, path: basicHostDir };
+  // What is on disk decides which host this was, whether it was fetched now or earlier.
+  const manifest = JSON.parse(await readFile(marker, 'utf8'));
+  if (`v${manifest.version}` !== BASIC_HOST_TAG) {
+    throw new Error(`basic-host in ${basicHostDir} is ${manifest.name}@${manifest.version}, not ${BASIC_HOST_TAG}`);
+  }
+  return { source, path: basicHostDir, package: { name: manifest.name, version: manifest.version } };
 }
 
 async function buildBasicHost() {
@@ -586,13 +600,14 @@ async function runBasicHostCheck(mcpUrl, toolLog) {
     return {
       ...basicHostVerdict(views),
       source: ensured.source,
+      host_package: ensured.package,
       views,
       axe_tolerated_upstream_host_rules: UPSTREAM_HOST_RULES,
       present_dataset: views.find((item) => item.present_dataset)?.present_dataset ?? {
         status: 'not_observed',
         reason: 'no view reached the point where its dataset rendering is observed',
       },
-      note: 'Official ext-apps basic-host example (v2.0.3) against the Streamable HTTP harness; not a claude.ai/ChatGPT claim.',
+      note: 'The ext-apps basic-host example is a reference host; this is not a claude.ai or ChatGPT claim.',
     };
   } finally {
     await killProcessTree(host);
@@ -701,7 +716,9 @@ if (!mimeCheck.equal) {
 
 // Build once, then run the binary itself: its stderr and exit code are ours to read,
 // and the process group holds the harness, not `cargo run`.
-const harnessBin = await buildRelease(root, 'okf-qualify-mcp-apps');
+const harnessBin = await buildRelease(root, HARNESS_PACKAGE);
+const harnessBytes = await readFile(harnessBin);
+const harnessArgs = ['--http', HTTP_BIND];
 
 const checkRun = await run(harnessBin, ['--check'], {
   env: { ...process.env, OKF_MCP_APPS_DIST: distApps },
@@ -729,7 +746,7 @@ if (!readable.app) {
   throw new Error('shared App resource was not reported readable by the harness');
 }
 
-const harness = spawnGroup(harnessBin, ['--http', HTTP_BIND], {
+const harness = spawnGroup(harnessBin, harnessArgs, {
   env: {
     ...process.env,
     OKF_MCP_APPS_DIST: distApps,
@@ -744,12 +761,14 @@ let tunnel = null;
 let fatal = null;
 let harnessExit = null;
 let harnessDiedEarly = false;
+let listeningOn = null;
 
 try {
-  await waitForListening(harness, {
+  const listening = await waitForListening(harness, {
     pattern: /okf-qualify-mcp-apps listening on (\S+)/,
-    label: 'okf-qualify-mcp-apps',
+    label: HARNESS_PACKAGE,
   });
+  listeningOn = listening[1];
   try {
     protocol = await protocolCheck(MCP_URL, manifest);
   } catch (error) {
@@ -770,7 +789,7 @@ try {
       basicHost = {
         status: 'failed',
         error: String(error.message || error),
-        note: '@modelcontextprotocol/ext-apps npm package does not ship basic-host; attempted official v2.0.3 GitHub example.',
+        note: `@modelcontextprotocol/ext-apps npm package does not ship basic-host; attempted the official ${BASIC_HOST_TAG} GitHub example.`,
       };
     }
   }
@@ -809,13 +828,14 @@ const receipt = {
   finished_at: new Date().toISOString(),
   result: problems.length === 0 ? 'PASS' : 'FAIL',
   problems,
-  harness: 'okf-qualify-mcp-apps',
+  harness: HARNESS_PACKAGE,
   protocol_only: PROTOCOL_ONLY,
-  transport: {
-    stdio: 'default',
-    http: MCP_URL,
-    build_command: 'cargo build --locked --release -p okf-qualify-mcp-apps',
-    serve_command: `okf-qualify-mcp-apps --http ${HTTP_BIND}`,
+  transport: transportRecord({ requested: MCP_URL, reported: listeningOn }),
+  harness_binary: {
+    path: harnessBin,
+    bytes: harnessBytes.length,
+    sha256: createHash('sha256').update(harnessBytes).digest('hex'),
+    args: harnessArgs,
   },
   harness_process: {
     exited_before_teardown: harnessDiedEarly,
@@ -832,15 +852,12 @@ const receipt = {
   basic_host: basicHost,
   ngrok,
   host_render,
-  static_bundle_smoke:
-    'ui/tests/e2e/mcp-apps-static-bundle-smoke.spec.ts is smoke only; not a host-render check.',
-  how_to_http_ngrok: {
-    harness: `cargo run --locked -p okf-qualify-mcp-apps --release -- --http ${HTTP_BIND}`,
-    or_env: `OKF_MCP_APPS_HTTP=${HTTP_BIND}`,
-    ngrok: `OKF_MCP_APPS_NGROK=1 ngrok http ${HTTP_PORT}`,
-    connector_url: `https://<ngrok-host>/mcp`,
+  static_bundle_smoke: {
+    status: 'not_run',
+    reason:
+      'ui/tests/e2e/mcp-apps-static-bundle-smoke.spec.ts is a separate smoke test; this orchestrator does not run it and it is not a host-render check',
   },
-  note: 'Phase 0 MCP Apps protocol qualification against the official basic-host example. host_render (claude.ai/ChatGPT) belongs to the acceptance gate mcp-apps-web-hosts and is never invented here.',
+  note: 'host_render (claude.ai / ChatGPT) belongs to the acceptance gate mcp-apps-web-hosts and is never invented here.',
 };
 
 await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
