@@ -1,6 +1,7 @@
 /**
  * What the MCP Apps qualification expects to see, and how it judges what it saw.
- * Pure: no I/O and no imports, so every rule is testable without a browser.
+ * Pure: no I/O and no imports, so every rule is testable without a browser. Nothing here
+ * decides the run: lib/criteria.mjs turns these judgements into criteria and the fold decides.
  *
  * Expected strings come from tests/fixtures/views/*.json as rendered by
  * ui/src/features/{documents/SourceExcerpt,history/Changes,history/Timeline,views/Layout}.tsx.
@@ -40,6 +41,7 @@ export const MCP_APPS_INPUTS = [
   'qualification/mcp-apps', // this orchestrator, its rules and the harness server
   'rust-toolchain.toml', // the compiler that builds the harness
   'scripts/lib/provenance.mjs', // the receipt header and the clean-tree rule
+  'scripts/lib/receipt-envelope.mjs', // the fold that decides the result and the envelope rules
   'tests/fixtures/views', // what the render tools, show and read_object serve
   // All of ui/, not only the App's import graph (src/mcp-apps/main.tsx, three feature
   // directories, src/lib/wire.ts, src/api/generated/zod.gen.ts, src/styles.css): Tailwind
@@ -403,35 +405,6 @@ export function partitionAxe(results, appDepth) {
     host_blocking,
     host_tolerated,
   };
-}
-
-/** Passed only when every view in VIEWS has a passed result. */
-export function basicHostVerdict(results) {
-  const failed = [];
-  for (const view of VIEWS) {
-    const result = results.find((item) => item.tool === view.tool);
-    if (!result) failed.push({ tool: view.tool, error: 'not rendered' });
-    else if (result.status !== 'passed') {
-      failed.push({ tool: view.tool, error: result.error ?? 'failed without an error message' });
-    }
-  }
-  return { status: failed.length === 0 ? 'passed' : 'failed', failed };
-}
-
-/** Reasons the run must exit non-zero; empty when it may exit 0. */
-export function runProblems({ protocol, basicHost, protocolOnly }) {
-  const problems = [];
-  if (protocol?.status !== 'passed') {
-    problems.push(`protocol_check ${protocol?.status ?? 'missing'}: ${protocol?.error ?? 'no detail'}`);
-  }
-  if (!protocolOnly && basicHost?.status !== 'passed') {
-    const detail =
-      basicHost?.error ??
-      (basicHost?.failed ?? []).map((item) => `${item.tool}: ${item.error}`).join('; ') ??
-      'no detail';
-    problems.push(`basic_host ${basicHost?.status ?? 'missing'}: ${detail}`);
-  }
-  return problems;
 }
 
 /** Text that only react-dom's development build carries. */
