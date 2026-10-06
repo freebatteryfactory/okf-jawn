@@ -4686,3 +4686,40 @@ concurrently('join: a Docling run that did not judge everything never qualifies,
     ['the whole run', fromRecorded(wholeCase)],
   ], ([, running]) => running);
 });
+
+concurrently('join: a receipt recorded over an earlier committed receipt of the same gate replaces it, and the gate follows the second one', async (t) => {
+  const { repo } = await joinRepository(t, { tools: true });
+  const produced_at = '2026-10-06T09:00:00.000Z';
+  const recordCommand = (...names) => runCommand(process.execPath, ['qualification/record.mjs', ...names], { cwd: repo, capture: true, allowFailure: true });
+  const artifact = async (receipt) => {
+    await mkdir(join(repo, '.artifacts', 'qualification', 'docling'), { recursive: true });
+    await writeFile(join(repo, '.artifacts', 'qualification', 'docling', 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
+  };
+  const recordedFile = join(repo, 'qualification', 'receipts', 'docling.json');
+  const typedStatus = async () => JSON.parse(await readFile(join(repo, 'verification.json'), 'utf8')).current.gates.phase_0.find((gate) => gate.harness === 'docling').status;
+
+  // First run: every fixture judged, the owner's one accepted failure: recorded and committed.
+  const firstHead = await fixtureGit(repo, 'rev-parse', 'HEAD');
+  const first = await realDoclingReceipt({ git_sha: firstHead, inputs: DOCLING_INPUTS, produced_at }, {}, {}, { today: true });
+  await artifact(first);
+  const recordedFirst = await recordCommand('docling');
+  assert.equal(recordedFirst.code, 0, recordedFirst.stderr);
+  assert.deepEqual(JSON.parse(await readFile(recordedFile, 'utf8')), first);
+  assert.equal(await typedStatus(), 'accepted_with_limitations');
+  const afterFirst = await fixtureCommit(repo, {}, 'record the first run');
+  assert.match(await checkReceipts(repo), /docling-library-qualification: accepted_with_limitations/);
+
+  // Second run, a later commit: a single-fixture run that did not judge everything derives another status.
+  const second = await realDoclingReceipt({ git_sha: afterFirst, inputs: DOCLING_INPUTS, produced_at: '2026-10-06T10:00:00.000Z' }, {}, {}, { today: true, only: ['corpus/redp5110_sampled.pdf'] });
+  assert.notDeepEqual(second, first);
+  await artifact(second);
+  const recordedSecond = await recordCommand('docling');
+  assert.equal(recordedSecond.code, 0, recordedSecond.stderr);
+  assert.match(recordedSecond.stdout, /^recorded .*receipt\.json -> .*docling\.json$/m);
+  assert.deepEqual(JSON.parse(await readFile(recordedFile, 'utf8')), second, 'the receipt file is the second receipt, not the first');
+  assert.equal(await typedStatus(), 'incomplete', 'the typed status follows the second receipt');
+  assert.deepEqual(derivedStatuses(await derivedRecord(repo)).docling, 'incomplete');
+  await fixtureCommit(repo, {}, 'record the second run over the first');
+  assert.match(await checkReceipts(repo), /docling-library-qualification: incomplete \(.*did not judge everything/);
+  assert.deepEqual(await staleReceiptLines(repo, await fixtureGit(repo, 'rev-parse', 'HEAD')), []);
+});
