@@ -119,7 +119,7 @@ const ROUNDING: f64 = 0.011;
 pub(crate) const TEXT_LAYER_SOURCE: &str = "docling::pdf_text_layer_pages";
 
 /// Every text item, table and picture of an export with its kind, in export order.
-fn body_items(export: &Value) -> impl Iterator<Item = (&'static str, &Value)> {
+pub(crate) fn body_items(export: &Value) -> impl Iterator<Item = (&'static str, &Value)> {
     ITEM_ARRAYS.into_iter().flat_map(move |(array, kind)| {
         export
             .get(array)

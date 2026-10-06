@@ -237,6 +237,51 @@ function provenanceJudgement(only, kind, base, doc, blocked) {
   return notJudged(`not a PDF or image fixture: the locator the library gives is recorded as observed and no rule is applied (${located})`, observed);
 }
 
+/** Page numbers as numbers, ascending. */
+const pageNumbers = (pages) => Object.keys(pages).map(Number).sort((a, b) => a - b);
+
+/** "page 3 (268), page 5 (3)" */
+const pageCounts = (pages) => pageNumbers(pages).map((page) => `page ${page} (${pages[page]})`).join(', ');
+
+/**
+ * Do the placeholders the converter process found (src/glyphs.rs) stand on the pages, and in
+ * the numbers, the fixture declares? `declared` is `expect.undecoded_glyphs` of SOURCES.json,
+ * absent for a fixture whose fonts all map to Unicode: such a fixture must show none.
+ */
+function glyphJudgement(only, base, declared, blocked) {
+  if (blocked) return blocked;
+  const recorded = base.undecoded_glyphs;
+  const counts = recorded?.pages;
+  const whole = (value) => Number.isInteger(value) && value >= 0;
+  if (counts === null || typeof counts !== 'object' || Array.isArray(counts) || !Object.values(counts).every(whole) || !whole(recorded.unlocated_tokens)) {
+    return stopped(`the converter process for ${only} recorded no count of glyph-name placeholders for a PDF`);
+  }
+  const positive = (pages) => Object.fromEntries(pageNumbers(pages).filter((page) => pages[page] > 0).map((page) => [page, pages[page]]));
+  const expected = positive(declared?.pages ?? {});
+  const reported = positive(counts);
+  const differing = [...new Set([...pageNumbers(expected), ...pageNumbers(reported)])]
+    .sort((a, b) => a - b)
+    .filter((page) => (expected[page] ?? 0) !== (reported[page] ?? 0))
+    .map((page) => `page ${page}: ${reported[page] ?? 0} reported, ${expected[page] ?? 0} declared`);
+  if (recorded.unlocated_tokens > 0) differing.push(`${recorded.unlocated_tokens} reported in items that are on no page`);
+  const total = (pages) => Object.values(pages).reduce((sum, count) => sum + count, 0);
+  const evidence = {
+    declared_pages: expected,
+    reported_pages: reported,
+    declared_total: total(expected),
+    reported_total: total(reported) + recorded.unlocated_tokens,
+    unlocated_tokens: recorded.unlocated_tokens,
+    confirmed_by: declared?.confirmed_by ?? null,
+  };
+  if (differing.length > 0) {
+    return fail(`the glyph-name placeholders reported differ from the ones SOURCES.json declares in ${differing.length} place(s)${examples(differing)}`, evidence);
+  }
+  const detail = evidence.declared_total === 0
+    ? 'no glyph-name placeholder is reported and SOURCES.json declares none: every glyph of the text layer has Unicode'
+    : `${evidence.reported_total} glyph-name placeholder(s) reported, as SOURCES.json declares: ${pageCounts(reported)}; the text of those glyphs is not in the file and is not recovered`;
+  return pass({ detail, ...evidence });
+}
+
 /** Whether the files a converter process wrote are the ones it recorded. */
 function evidenceJudgement(only, base, evidence) {
   if (base.document === null || typeof base.document !== 'object') {
@@ -429,6 +474,7 @@ export function fixtureEntry({ only, run, report, source, evidence, build, other
         'the fixture shows no glyphs, so the converter is to produce no text item and there is none whose location could be judged; its pictures and tables are located by provenance',
       );
     }
+    if (kind.text_layer) criteria.undecoded_glyphs_reported = glyphJudgement(only, base, source.expect?.undecoded_glyphs, blocked);
     if (!blocked) {
       entry.structure = {
         tables: facts.tables.length,

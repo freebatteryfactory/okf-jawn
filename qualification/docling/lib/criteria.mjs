@@ -41,7 +41,9 @@ export const TIMEOUT_PROBE = 'timeout_probe';
  * format no locator), recorded (the library's locator is recorded and no rule is applied).
  * `text_layer`: the file has a text layer the library reads on its own
  * (docling::pdf_text_layer_pages), so the converter process records, for each item, the
- * source that located it (src/locate.rs).
+ * source that located it (src/locate.rs), and the placeholders the library printed for
+ * glyphs its fonts give no Unicode for (src/glyphs.rs), which are judged against the
+ * fixture's declaration (undecoded_glyphs_reported).
  */
 export const KINDS = Object.freeze({
   pdf: Object.freeze({ format: 'pdf', page_renders: true, provenance: 'judged', text_layer: true }),
@@ -74,6 +76,8 @@ export const CRITERION_RULES = Object.freeze({
   provenance: PROVENANCE_RULE,
   text_provenance:
     'not applicable by design: the fixture shows no glyphs, so there is no text item whose location could be judged; its pictures and tables are located by provenance and any text the converter produces fails no_invented_text',
+  undecoded_glyphs_reported:
+    'the placeholders the library prints for glyphs a font gives no Unicode for (`/` and a glyph name; the detector and its rule are src/glyphs.rs, restated from docling-pdf textparse.rs is_gid_name) are found on exactly the pages, and in exactly the numbers, the fixture declares in SOURCES.json (expect.undecoded_glyphs.pages, counted from the file itself); a PDF fixture that declares none must show none. A pass says the text that cannot be decoded is detected and where; it does not say that text was recovered',
   memory_measured:
     'a peak resident set size was read for the converter process; the size is a measurement and no limit is applied',
   refused:
@@ -119,6 +123,7 @@ export function fixtureAspects(name, source) {
     { aspect: 'provenance', required: kind.provenance !== 'recorded' },
     // Where locations are judged and the fixture has no text to locate, say so as a criterion.
     ...(noText && kind.provenance === 'judged' ? ['text_provenance'] : []),
+    ...(kind.text_layer ? ['undecoded_glyphs_reported'] : []),
     'memory_measured',
   ]);
 }

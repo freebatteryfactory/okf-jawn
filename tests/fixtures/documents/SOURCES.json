@@ -4,6 +4,7 @@
   "license_note": "Self-generated fixtures remain MIT for qualification. Corpus files are copied from docling-project/docling (MIT) at commit 4e650af5.",
   "kind_note": "Each fixture declares `kind`: what the file is (pdf, image, docx, xlsx or pptx), read from its bytes and not from what a converter reports. qualification/docling/lib/criteria.mjs decides from the declared kind which criteria are judged for the fixture; the format the library reports is itself judged against it (format_recognised).",
   "expect_note": "Each supported fixture declares `expect`: what its content is, written from the fixture itself (its generator, its XML parts, or an independent text extraction named in confirmed_by) and never from converter output. qualification/docling/lib/expect.mjs holds the comparison rules; the receipt records every expectation with whether it was found. An expectation is not loosened to make a run pass.",
+  "undecoded_glyphs_note": "A PDF fixture declares under `expect.undecoded_glyphs.pages` how many glyphs each page draws that the file gives no Unicode for: character codes shown in a simple font that has no /ToUnicode map and whose /Encoding /Differences names the code with a placeholder glyph name (g115, SM590000) instead of an Adobe glyph name. The library prints `/` and the name for each (docling-pdf textparse.rs), and the harness must find exactly these numbers on exactly these pages (criterion undecoded_glyphs_reported). The numbers are counted from the file's own font dictionaries and page content streams, never from converter output. A PDF fixture that declares none must show none: born_digital_text.pdf and table_heavy.pdf name one font, the standard Helvetica, with no /Differences; scanned_image_only.pdf and scanned_text.pdf name no font and show no text.",
   "corpus_source": {
     "repository": "https://github.com/docling-project/docling",
     "commit": "4e650af5",
@@ -260,6 +261,10 @@
         "headings_at_least": 9,
         "pages": 18,
         "blank_pages": [17],
+        "undecoded_glyphs": {
+          "pages": { "3": 268, "5": 3, "6": 2, "8": 7, "11": 5 },
+          "confirmed_by": "reading the file without any converter (a standard-library reader of the PDF objects: font dictionaries, /Encoding /Differences, and the Tf, Tj and TJ operators of each page's content stream; the file has no object stream and no form XObject): exactly two fonts have placeholder glyph names and no /ToUnicode. /F12 (NKDKLM+HelveticaNeueLTCom-Roman, 35 names g3 to g115) is used on page 3 only, where 268 of its codes are shown: the four items of the Highlights list. /F15 (BookMaster, code 2 named SM590000, the list bullet) is shown 3 times on page 5, 2 on page 6, 7 on page 8 and 5 on page 11, 17 in all. No other page names either font."
+        },
         "blank_pages_confirmed_by": "reading the file: page 17 is object 410, whose /Contents is object 411, an 8-byte FlateDecode stream that inflates to zero bytes, and whose /Resources is << /ProcSet [/PDF] >> with no font and no XObject, so the page paints nothing; xpdf pdftotext 4.06 -f 17 -l 17 prints no character, while pages 16 and 18 print 1779 and 1245 non-space characters"
       }
     }

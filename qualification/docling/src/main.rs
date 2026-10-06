@@ -21,14 +21,17 @@
 //! the last two, and only when the converter refused it. The one judgement made here is
 //! that conversion-level rule, named in `conversion_rule`.
 //!
-//! For a PDF that converted, one more observation is recorded, by a rule that is a pure
-//! function over the document export: `locations` (module `locate`: every item with the
-//! source that located it, the export or the library's own text-layer document). The
-//! orchestrator judges it; the module is the reference behaviour for the ingest lane.
+//! For a PDF that converted, two more observations are recorded, each by a rule that is a
+//! pure function over the document export: `locations` (module `locate`: every item with the
+//! source that located it, the export or the library's own text-layer document) and
+//! `undecoded_glyphs` (module `glyphs`: the library's placeholders for glyphs a font gives no
+//! Unicode for, by page). The orchestrator judges both; these two modules are the reference
+//! behaviour for the ingest lane.
 
 use docling::{
     ConversionResult, ConversionStatus, DocumentConverter, PictureImage, SourceDocument,
 };
+use glyphs::UndecodedGlyphs;
 use locate::Locations;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -124,6 +127,9 @@ struct FixtureReceipt {
     stage: Stage,
     /// The `ConversionStatus` label; null unless `convert` returned `Ok`.
     status: Option<String>,
+    /// The library's placeholders for glyphs without Unicode in a converted PDF, by page;
+    /// null for another format and when `convert` did not return `Ok`.
+    undecoded_glyphs: Option<UndecodedGlyphs>,
 }
 
 /// One fixture about to be handed to the converter.
@@ -172,6 +178,7 @@ struct PageCount {
 /// What is observed of a converted PDF beyond its export.
 struct PdfFacts {
     locations: Locations,
+    undecoded_glyphs: UndecodedGlyphs,
 }
 
 /// One page image as the library returned it; `file` holds its bytes.
@@ -385,7 +392,10 @@ fn build_receipt(run: &FixtureRun<'_>, observed: Observed<'_>) -> Result<Fixture
         Reached::ConverterStatus { status, .. } => Some(status_label(status).to_owned()),
         Reached::Source | Reached::ConverterError => None,
     };
-    let locations = observed.pdf.map(|pdf| pdf.locations);
+    let (locations, undecoded_glyphs) = match observed.pdf {
+        Some(pdf) => (Some(pdf.locations), Some(pdf.undecoded_glyphs)),
+        None => (None, None),
+    };
     Ok(FixtureReceipt {
         conversion_rule: rule_label(run.rule),
         converter: run.session.converter.clone(),
@@ -409,6 +419,7 @@ fn build_receipt(run: &FixtureRun<'_>, observed: Observed<'_>) -> Result<Fixture
         sha256_before: run.sha_before.clone(),
         stage: stage_of(observed.reached),
         status,
+        undecoded_glyphs,
     })
 }
 
@@ -540,8 +551,11 @@ fn pdf_facts(export: &serde_json::Value, bytes: &[u8], name: &str) -> PdfFacts {
     let text_layer = docling::pdf_text_layer_pages(bytes, name, None)
         .map(|document| document.export_to_json_value())
         .map_err(|error| error.to_string());
+    let locations = locate::locate_items(export, text_layer.as_ref().map_err(String::as_str));
+    let undecoded_glyphs = glyphs::undecoded_glyphs(export, &locations.items);
     PdfFacts {
-        locations: locate::locate_items(export, text_layer.as_ref().map_err(String::as_str)),
+        locations,
+        undecoded_glyphs,
     }
 }
 
@@ -827,6 +841,7 @@ fn main() -> Result<(), String> {
     })
 }
 
+mod glyphs;
 mod locate;
 
 #[cfg(test)]

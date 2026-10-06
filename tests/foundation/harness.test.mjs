@@ -1179,6 +1179,12 @@ function stubLocations(document, found = []) {
   };
 }
 
+/** What src/glyphs.rs records for a converted PDF: placeholders per page (`pages`), none by default. */
+function stubGlyphs(pages = {}, unlocated_tokens = 0) {
+  const tokens = Object.values(pages).reduce((sum, count) => sum + count, 0) + unlocated_tokens;
+  return { items: [], pages, rule: 'stub', tokens, unlocated_tokens };
+}
+
 /** A fixture process that behaved: exit 0, measured, receipt and evidence on disk. `over` replaces parts. */
 function doclingRun(only, over = {}) {
   const supported = only !== MUST_FAIL && only !== TIMEOUT_PROBE;
@@ -1216,7 +1222,10 @@ function doclingRun(only, over = {}) {
           ...over.evidence,
         };
   // A converted PDF also carries where its items are, for the document the process wrote.
-  if (fixture.input_format === 'pdf' && only !== MUST_FAIL) fixture.locations = stubLocations(evidence.document);
+  if (fixture.input_format === 'pdf' && only !== MUST_FAIL) {
+    fixture.locations = stubLocations(evidence.document);
+    fixture.undecoded_glyphs = stubGlyphs();
+  }
   Object.assign(fixture, over.fixture);
   return {
     only,
@@ -1293,9 +1302,10 @@ test('a Docling receipt carries the shared header and envelope, and passes when 
   assert.equal(receipt.timeout_case.outcome, 'PASS');
   assert.deepEqual(Object.keys(receipt.summary), FIXTURE_RUNS);
   assert.deepEqual([...new Set(Object.values(receipt.summary))], ['PASS']);
-  assert.deepEqual(Object.keys(receipt.criteria_summary), ['conversion', 'evidence', 'format_recognised', 'content', 'page_renders', 'provenance', 'memory_measured', 'refused', 'refusal_attributed', 'timeout_reported', 'budget_had_effect']);
+  assert.deepEqual(Object.keys(receipt.criteria_summary), ['conversion', 'evidence', 'format_recognised', 'content', 'page_renders', 'provenance', 'memory_measured', 'undecoded_glyphs_reported', 'refused', 'refusal_attributed', 'timeout_reported', 'budget_had_effect']);
   const pdf = entryOf(receipt, 'born_digital_text.pdf');
-  assert.deepEqual(Object.keys(pdf.criteria), ['conversion', 'evidence', 'format_recognised', 'content', 'page_renders', 'provenance', 'memory_measured']);
+  assert.deepEqual(Object.keys(pdf.criteria), ['conversion', 'evidence', 'format_recognised', 'content', 'page_renders', 'provenance', 'undecoded_glyphs_reported', 'memory_measured']);
+  assert.deepEqual(Object.keys(entryOf(receipt, 'text_image.png').criteria), ['conversion', 'evidence', 'format_recognised', 'content', 'page_renders', 'provenance', 'memory_measured'], 'an image has no text layer and no glyph criterion');
   assert.deepEqual([...new Set(Object.values(pdf.criteria).map((item) => item.result))], ['pass']);
   assert.equal(pdf.criteria.page_renders.status, undefined, 'a criterion carries one verdict word: its result');
   assert.equal(pdf.outcome, 'PASS');
@@ -1607,6 +1617,78 @@ test('a PDF item the text layer locates passes provenance, and the detail always
   }
 });
 
+test('a PDF must show glyph-name placeholders on exactly the pages and in the numbers its fixture declares, and none when it declares none', async () => {
+  const declared = structuredClone(DOCLING_SOURCES);
+  declared.files['table_heavy.pdf'].expect.undecoded_glyphs = { pages: { 3: 268, 5: 3, 8: 7 }, confirmed_by: 'reading the fonts of the stub' };
+  const reporting = (glyphs, sources = declared) => doclingReceipt({ 'table_heavy.pdf': { fixture: { undecoded_glyphs: glyphs } } }, { sources });
+  const criterion = (receipt, only = 'table_heavy.pdf') => doclingCriterion(receipt, `${only}/undecoded_glyphs_reported`);
+
+  // Reported as declared: a pass that says how many, where, and that the text is not recovered.
+  const good = reporting(stubGlyphs({ 3: 268, 5: 3, 8: 7 }));
+  assert.equal(good.result, 'PASS');
+  assert.deepEqual(criterion(good), {
+    id: 'table_heavy.pdf/undecoded_glyphs_reported',
+    required: true,
+    result: 'pass',
+    detail: '278 glyph-name placeholder(s) reported, as SOURCES.json declares: page 3 (268), page 5 (3), page 8 (7); the text of those glyphs is not in the file and is not recovered',
+  });
+  // The receipt lists, for the fixture, the pages with undecodable text and the count.
+  const judged = entryOf(good, 'table_heavy.pdf').criteria.undecoded_glyphs_reported;
+  assert.deepEqual(judged.reported_pages, { 3: 268, 5: 3, 8: 7 });
+  assert.deepEqual(judged.declared_pages, { 3: 268, 5: 3, 8: 7 });
+  assert.deepEqual([judged.reported_total, judged.declared_total, judged.unlocated_tokens, judged.confirmed_by], [278, 278, 0, 'reading the fonts of the stub']);
+  assert.deepEqual(entryOf(good, 'table_heavy.pdf').undecoded_glyphs.pages, { 3: 268, 5: 3, 8: 7 }, 'what the converter process recorded stays in the receipt');
+  // A PDF that declares none and shows none passes, and says so.
+  assert.equal(criterion(good, 'born_digital_text.pdf').detail, 'no glyph-name placeholder is reported and SOURCES.json declares none: every glyph of the text layer has Unicode');
+
+  // A different number, a different page, a page too many or too few: each fails, naming the page.
+  const failing = (glyphs, sources) => {
+    const receipt = reporting(glyphs, sources);
+    assert.equal(receipt.result, 'FAIL');
+    assert.deepEqual(doclingFailedIds(receipt), ['table_heavy.pdf/undecoded_glyphs_reported']);
+    return criterion(receipt).detail;
+  };
+  assert.equal(failing(stubGlyphs({ 3: 267, 5: 3, 8: 7 })), 'the glyph-name placeholders reported differ from the ones SOURCES.json declares in 1 place(s); all: page 3: 267 reported, 268 declared');
+  assert.equal(failing(stubGlyphs({ 3: 268, 5: 3 })), 'the glyph-name placeholders reported differ from the ones SOURCES.json declares in 1 place(s); all: page 8: 0 reported, 7 declared');
+  assert.equal(failing(stubGlyphs({ 3: 268, 5: 3, 9: 7 })), 'the glyph-name placeholders reported differ from the ones SOURCES.json declares in 2 place(s); all: page 8: 0 reported, 7 declared; page 9: 7 reported, 0 declared');
+  assert.equal(failing(stubGlyphs()), 'the glyph-name placeholders reported differ from the ones SOURCES.json declares in 3 place(s); all: page 3: 0 reported, 268 declared; page 5: 0 reported, 3 declared; page 8: 0 reported, 7 declared');
+  // Placeholders nobody declared: text that cannot be decoded and that the fixture did not know of.
+  assert.equal(failing(stubGlyphs({ 2: 4 }), DOCLING_SOURCES), 'the glyph-name placeholders reported differ from the ones SOURCES.json declares in 1 place(s); all: page 2: 4 reported, 0 declared');
+  // A placeholder in an item that is on no page is on none of the declared pages.
+  assert.equal(failing(stubGlyphs({ 3: 268, 5: 3, 8: 6 }, 1)), 'the glyph-name placeholders reported differ from the ones SOURCES.json declares in 2 place(s); all: page 8: 6 reported, 7 declared; 1 reported in items that are on no page');
+  // A page declared or reported with zero is no page with undecodable text.
+  assert.equal(reporting(stubGlyphs({ 3: 268, 5: 3, 8: 7, 9: 0 })).result, 'PASS');
+
+  // A PDF process that recorded no count is a harness error, not a pass and not a library failure.
+  for (const glyphs of [undefined, { pages: null, unlocated_tokens: 0 }, { pages: { 3: 'many' }, unlocated_tokens: 0 }, { pages: {} }]) {
+    const unrecorded = reporting(glyphs);
+    assert.equal(unrecorded.result, 'INCOMPLETE');
+    assert.equal(unrecorded.harness_error, 'the converter process for table_heavy.pdf recorded no count of glyph-name placeholders for a PDF');
+    assert.equal(criterion(unrecorded).result, 'not_judged');
+  }
+  // A conversion that failed leaves nothing to count.
+  const failed = doclingReceipt({ 'table_heavy.pdf': { fixture: { outcome: 'FAIL_converter_error', status: null } } }, { sources: declared });
+  assert.equal(criterion(failed).result, 'not_judged');
+
+  // Every PDF fixture has the criterion, required and pinned; no other fixture has it.
+  const sources = JSON.parse(await readFile(join(root, 'tests/fixtures/documents/SOURCES.json'), 'utf8'));
+  const pdfs = Object.entries(sources.files).filter(([, entry]) => entry.kind === 'pdf' && entry.role !== 'must_fail').map(([name]) => name);
+  assert.deepEqual(pdfs.sort(), ['born_digital_text.pdf', 'corpus/redp5110_sampled.pdf', 'scanned_image_only.pdf', 'scanned_text.pdf', 'table_heavy.pdf']);
+  assert.deepEqual(doclingCriteria.requiredIds(sources).filter((id) => id.endsWith('/undecoded_glyphs_reported')), pdfs.map((name) => `${name}/undecoded_glyphs_reported`));
+  // The corpus PDF declares what was counted in the file; every other PDF declares nothing, which means none.
+  assert.deepEqual(sources.files['corpus/redp5110_sampled.pdf'].expect.undecoded_glyphs.pages, { 3: 268, 5: 3, 6: 2, 8: 7, 11: 5 });
+  assert.match(sources.files['corpus/redp5110_sampled.pdf'].expect.undecoded_glyphs.confirmed_by, /^reading the file without any converter/);
+  for (const name of pdfs.filter((pdf) => pdf !== 'corpus/redp5110_sampled.pdf')) assert.equal(sources.files[name].expect.undecoded_glyphs, undefined, name);
+  assert.match(sources.undecoded_glyphs_note, /never from converter output/);
+  assert.match(good.criterion_rules.undecoded_glyphs_reported, /A pass says the text that cannot be decoded is detected and where; it does not say that text was recovered/);
+  // The harness binary computes the count for a PDF with the detector module, and the module restates the library's rule.
+  const main = await readFile(join(root, 'qualification/docling/src/main.rs'), 'utf8');
+  assert.match(main, /let undecoded_glyphs = glyphs::undecoded_glyphs\(export, &locations\.items\);/);
+  const detector = await readFile(join(root, 'qualification/docling/src/glyphs.rs'), 'utf8');
+  assert.match(detector, /docling-pdf 1\.93\.6 `textparse\.rs`, `Font::decode_code`, lines 118-119/);
+  assert.match(detector, /`is_gid_name` accepts it \(lines 354-376\)/);
+});
+
 test('each content, page-render and provenance failure fails its fixture and the receipt, and its detail gives the total and the examples', () => {
   {
     const receipt = doclingReceipt({ 'corpus/word_sample.docx': { evidence: { markdown: '## Title\n\nGoodbye\n' } } });
@@ -1765,7 +1847,7 @@ test('a fixture that shows no glyphs is judged for invented text, by a criterion
   const silent = receipt('<!-- image -->\n\n<!-- image -->\n');
   assert.equal(silent.result, 'PASS');
   const entry = entryOf(silent, 'scanned_image_only.pdf');
-  assert.deepEqual(Object.keys(entry.criteria), ['conversion', 'evidence', 'format_recognised', 'no_invented_text', 'page_renders', 'provenance', 'text_provenance', 'memory_measured']);
+  assert.deepEqual(Object.keys(entry.criteria), ['conversion', 'evidence', 'format_recognised', 'no_invented_text', 'page_renders', 'provenance', 'text_provenance', 'undecoded_glyphs_reported', 'memory_measured']);
   assert.equal(entry.criteria.no_invented_text.result, 'pass');
   assert.equal(entry.criteria.provenance.result, 'pass', 'the picture is located');
   assert.deepEqual(doclingCriterion(silent, 'scanned_image_only.pdf/text_provenance'), {
@@ -3782,6 +3864,7 @@ function doclingRunFor(only, source, over = {}) {
     fixture: {
       library_page_count: source.kind === 'pdf' ? { value: pageCount, error: null } : null,
       document: { markdown_file: 'document.md', json_file: 'document.json', page_images: images },
+      ...(kind.text_layer ? { undecoded_glyphs: stubGlyphs(expect.undecoded_glyphs?.pages ?? {}) } : {}),
       ...over.fixture,
     },
     evidence: {
