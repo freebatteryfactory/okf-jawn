@@ -37,6 +37,15 @@ import {
   buildDoclingReceipt,
 } from '../../qualification/docling/lib/receipt.mjs';
 import { inventoryCheck, parseManifest, unverifiedEnvPaths, verifyAssets } from '../../qualification/docling/lib/assets.mjs';
+import {
+  bboxProblem,
+  bodyFacts,
+  converterOptions,
+  describeDocument,
+  judgePageRenders,
+  judgeProvenance,
+  pngSize,
+} from '../../qualification/docling/lib/document.mjs';
 import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
 import { OCR_FIXTURES, decodeFixture, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
@@ -702,6 +711,171 @@ test('the models the library resolves must be verified files', () => {
   assert.deepEqual(inventoryCheck([{ stage: 'layout', path: 'C:/models/layout.onnx', found: true, bytes: 11 }], [VERIFIED_MODEL]).unverified, ['layout'], 'same path, other length');
   assert.equal(inventoryCheck([{ stage: 'ocr.rec', path: 'C:/models/layout.onnx', found: false, bytes: 0 }], [VERIFIED_MODEL]).status, 'FAIL');
   assert.equal(inventoryCheck(null, [VERIFIED_MODEL]).status, 'FAIL');
+});
+
+const CONVERTER_DEBUG =
+  'DocumentConverter { allowed_formats: None, strict: false, compact_tables: false, no_table_former: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some("en"), artifacts_dir: "C:\\\\t", document_timeout: None }';
+
+/** The first 24 bytes of a PNG of this size: all pngSize reads. */
+function pngHead(width, height) {
+  const head = Buffer.alloc(24);
+  head.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  head.writeUInt32BE(width, 16);
+  head.writeUInt32BE(height, 20);
+  return head;
+}
+
+const PAGE_PNG = pngHead(1224, 1584);
+
+const PAGE_PNG_SHA = createHash('sha256').update(PAGE_PNG).digest('hex');
+
+const PAGE_IMAGE = { page_no: 1, mimetype: 'image/png', width: 1224, height: 1584, dpi: 144, bytes: PAGE_PNG.length, sha256: PAGE_PNG_SHA, file: 'page-1.png' };
+
+const prov = (bbox, page_no = 1) => [{ page_no, bbox: { coord_origin: 'BOTTOMLEFT', ...bbox }, charspan: [0, 5] }];
+
+const BOX = { l: 72, t: 720, r: 300, b: 700 };
+
+/** A docling JSON export: one page, a heading and a paragraph with boxes on it, one 2x2 table. */
+function stubDocument(over = {}) {
+  return {
+    pages: { 1: { size: { width: 612, height: 792 }, page_no: 1 } },
+    texts: [
+      { self_ref: '#/texts/0', label: 'section_header', text: 'Title', prov: prov(BOX) },
+      { self_ref: '#/texts/1', label: 'text', text: 'Hello world', prov: prov({ l: 72, t: 690, r: 300, b: 670 }) },
+    ],
+    tables: [
+      {
+        self_ref: '#/tables/0',
+        label: 'table',
+        prov: prov({ l: 72, t: 600, r: 400, b: 500 }),
+        data: {
+          grid: [[{ text: 'Name' }, { text: 'Qty' }], [{ text: 'Widget ' }, { text: '3' }]],
+          table_cells: [{ text: 'Name', bbox: { l: 72, t: 192, r: 200, b: 212, coord_origin: 'TOPLEFT' } }],
+        },
+      },
+    ],
+    pictures: [],
+    groups: [],
+    ...over,
+  };
+}
+
+test('page renders: one image per page with matching bytes and size, or the criterion fails', () => {
+  const pages = [{ page_no: 1, width: 612, height: 792 }];
+  const image = { ...PAGE_IMAGE, file: { sha256: PAGE_PNG_SHA, bytes: PAGE_PNG.length, png: pngSize(PAGE_PNG) } };
+  const judge = (over = {}) =>
+    judgePageRenders({ applicable: true, expectedPages: 1, libraryPageCount: { value: 1, error: null }, pages, images: [image], ...over });
+
+  const good = judge();
+  assert.equal(good.status, 'PASS');
+  assert.deepEqual(good.renders, [
+    { page_no: 1, width_px: 1224, height_px: 1584, mimetype: 'image/png', dpi: 144, bytes: 24, sha256: PAGE_PNG_SHA, px_per_page_unit: 2 },
+  ]);
+  assert.deepEqual(pngSize(PAGE_PNG), { width: 1224, height: 1584 });
+  assert.equal(pngSize(Buffer.from('not a png, but long enough to read')), null);
+
+  const none = judge({ images: [] });
+  assert.equal(none.status, 'unavailable');
+  assert.match(none.reason, /generate_page_images\(true\) was applied and the returned document\.page_images is empty for 1 page/);
+
+  const problems = (over) => {
+    const judged = judge(over);
+    assert.equal(judged.status, 'FAIL', JSON.stringify(over));
+    return judged.problems.join('; ');
+  };
+  assert.match(problems({ pages: [...pages, { page_no: 2, width: 612, height: 792 }], expectedPages: 2, libraryPageCount: null }), /1 page image\(s\) for 2 page\(s\).*page 2 has no image/);
+  assert.match(problems({ expectedPages: 3 }), /the fixture has 3/);
+  assert.match(problems({ libraryPageCount: { value: 4, error: null } }), /pdf_page_count says 4/);
+  assert.match(problems({ images: [{ ...image, file: { ...image.file, sha256: '0'.repeat(64) } }] }), /file hash differs/);
+  assert.match(problems({ images: [{ ...image, file: { ...image.file, png: { width: 10, height: 10 } } }] }), /PNG is 10x10, the library reports 1224x1584/);
+  assert.match(problems({ images: [{ ...image, file: { ...image.file, png: null } }] }), /not a PNG/);
+  assert.match(problems({ images: [{ ...image, file: null }] }), /could not be re-read/);
+  assert.match(problems({ images: [{ ...image, width: 0 }] }), /no pixels/);
+  assert.match(problems({ pages: [] }), /no pages map/);
+
+  assert.equal(judge({ applicable: false, images: [] }).status, 'not_applicable');
+});
+
+test('provenance: every text item of a paginated fixture needs a page of the document and a box inside it', () => {
+  const judge = (over, paginated = true) => judgeProvenance(describeDocument(stubDocument(over)), { paginated });
+  const good = judge();
+  assert.equal(good.status, 'PASS');
+  assert.deepEqual(good.text_items, { total: 2, with_provenance: 2, located: 2, invalid: [] });
+  assert.deepEqual(good.tables, { total: 1, with_provenance: 1, located: 1, invalid: [] });
+  assert.deepEqual(good.page_provenance, [{ page_no: 1, text_items: 2, tables: 1, pictures: 0 }]);
+  assert.deepEqual(good.sample.first, { ref: '#/texts/0', label: 'section_header', text: 'Title', page_no: 1, bbox: { coord_origin: 'BOTTOMLEFT', ...BOX } });
+  assert.equal(good.sample.last.text, 'Hello world');
+  assert.equal(good.sample.heading.ref, '#/texts/0');
+  assert.equal(good.sample.table_cell.text, 'Name');
+  assert.equal(good.sample.table_cell.bbox.coord_origin, 'TOPLEFT');
+
+  const text = (provValue) => ({ texts: [{ self_ref: '#/texts/0', label: 'text', text: 'x', prov: provValue }] });
+  const problem = (provValue) => {
+    const judged = judge(text(provValue));
+    assert.equal(judged.status, 'FAIL', JSON.stringify(provValue));
+    assert.equal(judged.text_items.located, 0);
+    return judged.text_items.invalid[0].problem;
+  };
+  assert.equal(problem([]), 'no provenance');
+  assert.match(problem(prov(BOX, 2)), /page_no 2 is not a page of the document \(1\.\.=1\)/);
+  assert.match(problem(prov(BOX, 0)), /page_no 0 is not a page/);
+  assert.match(problem(prov({ ...BOX, r: 700 })), /outside the 612 x 792 page/);
+  assert.match(problem(prov({ ...BOX, t: 800 })), /outside/);
+  assert.match(problem(prov({ ...BOX, l: -5 })), /outside/);
+  assert.equal(problem(prov({ l: 0, t: 0, r: 0, b: 0 })), 'bbox has no area', 'the library writes a zero box for an item without geometry');
+  assert.equal(problem(prov({ ...BOX, t: 700, b: 720 })), 'bbox has no area', 'a bottom-left box has t above b');
+  assert.equal(problem([{ page_no: 1, bbox: null }]), 'no bbox');
+  assert.match(problem([{ page_no: 1, bbox: { ...BOX, coord_origin: 'SIDEWAYS' } }]), /unknown coord_origin/);
+  assert.equal(bboxProblem({ l: 10, t: 20, r: 30, b: 40, coord_origin: 'TOPLEFT' }, { width: 612, height: 792 }), null);
+  assert.equal(bboxProblem({ l: 10, t: 40, r: 30, b: 20, coord_origin: 'TOPLEFT' }, { width: 612, height: 792 }), 'bbox has no area');
+
+  // One good item does not hide a bad one.
+  const mixed = judge({ texts: [...stubDocument().texts, { self_ref: '#/texts/2', label: 'text', text: 'lost', prov: [] }] });
+  assert.equal(mixed.status, 'FAIL');
+  assert.deepEqual(mixed.text_items.invalid, [{ ref: '#/texts/2', label: 'text', problem: 'no provenance' }]);
+
+  assert.equal(judge({ texts: [] }).status, 'not_exercised');
+  const office = judge({ pages: {}, texts: [{ self_ref: '#/texts/0', label: 'text', text: 'x', prov: [] }], tables: [], groups: [{ label: 'sheet', name: 'Sheet1' }] }, false);
+  assert.equal(office.status, 'recorded_not_judged');
+  assert.equal(office.locator, 'none');
+  assert.deepEqual(office.groups, ['sheet:Sheet1']);
+  assert.equal(judge({}, false).locator, 'page_and_bbox_on_every_item');
+});
+
+test('the document facts come from the body layer of the export', () => {
+  const doc = describeDocument(
+    stubDocument({
+      texts: [
+        { self_ref: '#/texts/0', label: 'title', text: 'T', prov: [] },
+        { self_ref: '#/texts/1', label: 'section_header', text: 'S', prov: [] },
+        { self_ref: '#/texts/2', label: 'page_header', text: 'H', content_layer: 'furniture', prov: [] },
+        { self_ref: '#/texts/3', label: 'section_header', text: 'hidden', content_layer: 'invisible', prov: [] },
+      ],
+      tables: [...stubDocument().tables, { self_ref: '#/tables/1', content_layer: 'invisible', prov: [], data: { grid: [[{ text: 'header' }]] } }],
+      pictures: [{ self_ref: '#/pictures/0', prov: [], captions: [{ $ref: '#/texts/9' }], image: { uri: 'data:image/png;base64,AA' } }],
+      groups: [{ label: 'sheet', name: 'Sheet1', content_layer: 'body' }, { label: 'sheet', name: 'Sheet4', content_layer: 'invisible' }],
+    }),
+  );
+  const facts = bodyFacts(doc);
+  assert.equal(facts.headings, 2);
+  assert.deepEqual(facts.tables, [[['Name', 'Qty'], ['Widget ', '3']]]);
+  assert.equal(facts.pictures, 1);
+  assert.equal(facts.pictures_with_image, 1);
+  assert.equal(facts.pictures_with_caption, 1);
+  assert.deepEqual(facts.sheet_names, ['Sheet1']);
+  assert.equal(facts.items_on_other_layers, 3);
+  assert.deepEqual(describeDocument(null), { pages: [], texts: [], tables: [], pictures: [], groups: [] });
+});
+
+test('converter options are lifted from the Debug text of the converter as raw Rust literals', () => {
+  assert.deepEqual(converterOptions(CONVERTER_DEBUG, ['generate_page_images', 'images_scale', 'ocr_lang', 'document_timeout', 'nope']), {
+    generate_page_images: 'true',
+    images_scale: 'None',
+    ocr_lang: 'Some("en")',
+    document_timeout: 'None',
+    nope: null,
+  });
+  assert.equal(converterOptions(CONVERTER_DEBUG.replace('document_timeout: None', 'document_timeout: Some(1ms)'), ['document_timeout']).document_timeout, 'Some(1ms)');
 });
 
 const pidAlive = (pid) => {
