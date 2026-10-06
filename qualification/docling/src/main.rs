@@ -9,12 +9,21 @@
 //! receipt is on disk and then blocks on stdin until EOF; the orchestrator reads this
 //! process's peak memory exactly once during that wait.
 //!
+//! This process observes and the orchestrator judges. Beside its receipt it writes what
+//! the converter returned: `document.md` (`export_to_markdown`), `document.json`
+//! (`export_to_json_value`, the docling wire schema with per-item `prov`) and one file per
+//! page image. The receipt carries the hash of each, so content, structure, provenance and
+//! page renders are judged from the files, against expectations this binary never sees.
+//!
 //! Every receipt records the stage the fixture reached: `source` (the file never
 //! reached the converter), `converter_error` (`convert` returned `Err`) or
 //! `converter_status` (`convert` returned `Ok`). A must-fail fixture passes only at
-//! the last two, and only when the converter refused it.
+//! the last two, and only when the converter refused it. The one judgement made here is
+//! that conversion-level rule, named in `conversion_rule`.
 
-use docling::{ConversionStatus, DocumentConverter, SourceDocument};
+use docling::{
+    ConversionResult, ConversionStatus, DocumentConverter, PictureImage, SourceDocument,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -23,6 +32,38 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// The builder calls this harness makes. One value drives the converter and the receipt,
+/// so a setting cannot be recorded without being applied.
+#[derive(Clone, Serialize)]
+struct Applied {
+    artifacts_dir: String,
+    document_timeout_ms: Option<u64>,
+    generate_page_images: bool,
+    ocr_lang: &'static str,
+}
+
+/// Converter identity, with where each fact was read.
+#[derive(Clone, Serialize)]
+struct ConverterIdentity {
+    /// `docling::PDF_ML_COMPILED`: a compile-time fact of the linked crate.
+    pdf_ml_compiled: bool,
+    version: String,
+    version_source: &'static str,
+}
+
+/// What a successful `convert` returned, written beside the receipt.
+#[derive(Clone, Serialize)]
+struct DocumentEvidence {
+    json_bytes: usize,
+    json_file: &'static str,
+    json_sha256: String,
+    markdown_chars: usize,
+    markdown_file: &'static str,
+    markdown_nonempty: bool,
+    markdown_sha256: String,
+    page_images: Vec<PageImageRecord>,
+}
 
 /// Printed once on stdout when the receipt is on disk and the process is about to wait.
 #[derive(Serialize)]
@@ -35,9 +76,10 @@ struct DoneMarker<'a> {
 /// Process inputs read once from the environment.
 struct Environment {
     converter_version: String,
+    /// Every `DOCLING_*` and `PDFIUM_*` variable this process sees: the library reads them.
+    docling_env: BTreeMap<String, String>,
     fixtures_dir: String,
     hold: bool,
-    models_dir: String,
     out_dir: String,
 }
 
@@ -48,37 +90,26 @@ struct ErrorReceipt {
     module_name: String,
 }
 
-/// What a fixture must produce for the gate to pass.
-#[derive(Clone, Copy)]
-enum Expected {
-    /// Supported extraction: `Success`, non-empty Markdown, optional substring.
-    SuccessNonEmpty { must_contain: Option<&'static str> },
-    /// The converter itself must refuse the input.
-    ExplicitFailure,
-}
-
 #[derive(Clone, Serialize)]
 struct FixtureReceipt {
-    converter_version: String,
+    /// The rule `outcome` was judged by; see [`rule_label`].
+    conversion_rule: &'static str,
+    converter: ConverterIdentity,
+    /// Null unless `convert` returned `Ok`.
+    document: Option<DocumentEvidence>,
     elapsed_ms: u128,
     errors: Vec<ErrorReceipt>,
-    expected: String,
     /// Set when a must-fail fixture was accepted; a decision for the owner.
     finding: Option<String>,
     fixture: String,
-    markdown_chars: usize,
-    markdown_nonempty: bool,
-    must_contain_ok: Option<bool>,
+    /// The format the library detected (`InputFormat::as_str`); null when detection failed.
+    input_format: Option<&'static str>,
+    /// `docling::pdf_page_count` on the fixture bytes; null for a fixture that is not a PDF.
+    library_page_count: Option<PageCount>,
     original_unchanged: bool,
     outcome: String,
-    page_image_count: usize,
-    page_provenance: Vec<PageProvenance>,
     path: PathBuf,
-    /// Always null in-process: authored Rust forbids the OS FFI needed to sample RSS.
-    /// The orchestrator attaches the peak it read for this process.
-    peak_rss_bytes: Option<u64>,
-    role: String,
-    settings: BTreeMap<String, serde_json::Value>,
+    settings: Settings,
     sha256_after: String,
     sha256_before: String,
     stage: Stage,
@@ -88,9 +119,9 @@ struct FixtureReceipt {
 
 /// One fixture about to be handed to the converter.
 struct FixtureRun<'a> {
-    expected: Expected,
+    out_dir: &'a Path,
     path: &'a Path,
-    role: &'a str,
+    rule: Rule,
     session: &'a Session,
     sha_before: String,
     started: Instant,
@@ -99,29 +130,53 @@ struct FixtureRun<'a> {
 /// The gate's verdict on one observation.
 struct Judgement {
     finding: Option<String>,
-    must_contain_ok: Option<bool>,
     outcome: &'static str,
+}
+
+/// One entry of `docling::model_inventory()`: the file a pipeline stage would load.
+#[derive(Serialize)]
+struct ModelRecord {
+    bytes: u64,
+    found: bool,
+    path: String,
+    stage: &'static str,
 }
 
 /// What came back from the converter call, with the evidence to record.
 struct Observed<'a> {
+    document: Option<DocumentEvidence>,
     elapsed_ms: u128,
     errors: Vec<ErrorReceipt>,
-    page_provenance: Vec<PageProvenance>,
+    input_format: Option<&'static str>,
+    library_page_count: Option<PageCount>,
     reached: Reached<'a>,
 }
 
+/// The library's own page count for a PDF, or the error it gave instead.
 #[derive(Clone, Serialize)]
-struct PageProvenance {
+struct PageCount {
+    error: Option<String>,
+    value: Option<usize>,
+}
+
+/// One page image as the library returned it; `file` holds its bytes.
+#[derive(Clone, Serialize)]
+struct PageImageRecord {
+    bytes: usize,
+    dpi: u32,
+    file: String,
+    height: u32,
+    mimetype: String,
     page_no: usize,
-    has_image: bool,
+    sha256: String,
+    width: u32,
 }
 
 #[derive(Serialize)]
 struct QualificationReport {
-    converter_crate: String,
     fixtures_dir: PathBuf,
-    models_dir: PathBuf,
+    /// `docling::model_inventory()` under this process's environment.
+    model_inventory: Vec<ModelRecord>,
     receipts: Vec<FixtureReceipt>,
     summary: BTreeMap<String, String>,
     timeout_case: Option<FixtureReceipt>,
@@ -141,10 +196,31 @@ enum Reached<'a> {
     },
 }
 
+/// The conversion-level rule a fixture is judged by.
+#[derive(Clone, Copy)]
+enum Rule {
+    /// A supported fixture: `Success` with Markdown that is not blank.
+    Converted,
+    /// The must-fail fixture: the converter itself must refuse the input.
+    ExplicitFailure,
+    /// The timeout probe: a spent document budget reported as the library documents it.
+    TimeoutHonoured,
+}
+
 /// Converter identity and settings recorded on every receipt of this process.
 struct Session {
-    converter_version: String,
-    settings: BTreeMap<String, serde_json::Value>,
+    converter: ConverterIdentity,
+    settings: Settings,
+}
+
+/// The converter settings of this process, from three independent readings.
+#[derive(Clone, Serialize)]
+struct Settings {
+    applied: Applied,
+    /// `Debug` of the built `DocumentConverter`: every option as the library holds it,
+    /// including the ones this harness leaves at the library default.
+    converter_debug: String,
+    environment: BTreeMap<String, String>,
 }
 
 /// The stage name written to the receipt.
@@ -156,15 +232,24 @@ enum Stage {
     ConverterStatus,
 }
 
+const DOCUMENT_JSON: &str = "document.json";
+const DOCUMENT_MD: &str = "document.md";
 const DONE: &str = "done";
 const MUST_FAIL_FINDING: &str = "converter accepts truncated PDF";
 const MUST_FAIL_NAME: &str = "must_fail_truncated.pdf";
+const OCR_LANG: &str = "en";
 const TIMEOUT_BUDGET_MS: u64 = 1;
 const TIMEOUT_PROBE: &str = "timeout_probe";
+const TIMEOUT_PROBE_FIXTURE: &str = "scanned_image_only.pdf";
+const VERSION_SOURCE: &str = "environment variable OKF_DOCLING_CRATE_VERSION, which run.mjs sets from the docling entry of Cargo.lock";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 fn sha256_file(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(sha256_hex(&bytes))
 }
 
 fn status_label(status: ConversionStatus) -> &'static str {
@@ -175,10 +260,12 @@ fn status_label(status: ConversionStatus) -> &'static str {
     }
 }
 
-fn expected_label(expected: Expected) -> &'static str {
-    match expected {
-        Expected::SuccessNonEmpty { .. } => "SuccessNonEmpty",
-        Expected::ExplicitFailure => "ExplicitFailure",
+/// The name of the rule, as the receipt states it.
+fn rule_label(rule: Rule) -> &'static str {
+    match rule {
+        Rule::Converted => "success_status_and_nonblank_markdown",
+        Rule::ExplicitFailure => "converter_refuses_the_input",
+        Rule::TimeoutHonoured => "partial_success_with_pipeline_timeout_error",
     }
 }
 
@@ -190,36 +277,37 @@ fn stage_of(reached: Reached<'_>) -> Stage {
     }
 }
 
-fn page_provenance(result: &docling::ConversionResult) -> Vec<PageProvenance> {
-    let mut pages: Vec<PageProvenance> = result
-        .document
-        .page_images
-        .iter()
-        .map(|(page_no, image)| PageProvenance {
-            page_no: *page_no,
-            has_image: !image.mimetype.is_empty(),
-        })
-        .collect();
-    pages.sort_by_key(|page| page.page_no);
-    pages
-}
-
 fn verdict(outcome: &'static str) -> Judgement {
     Judgement {
         finding: None,
-        must_contain_ok: None,
         outcome,
     }
 }
 
 /// Judge one observation. A mutated original fails whatever else happened.
-fn judge(expected: Expected, reached: Reached<'_>, original_unchanged: bool) -> Judgement {
+fn judge(
+    rule: Rule,
+    reached: Reached<'_>,
+    errors: &[ErrorReceipt],
+    original_unchanged: bool,
+) -> Judgement {
     if !original_unchanged {
         return verdict("FAIL_original_mutated");
     }
-    match expected {
-        Expected::ExplicitFailure => judge_must_fail(reached),
-        Expected::SuccessNonEmpty { must_contain } => judge_success(must_contain, reached),
+    match rule {
+        Rule::ExplicitFailure => judge_must_fail(reached),
+        Rule::Converted => judge_converted(reached),
+        Rule::TimeoutHonoured => {
+            let status = match reached {
+                Reached::ConverterStatus { status, .. } => Some(status_label(status)),
+                Reached::Source | Reached::ConverterError => None,
+            };
+            if timeout_honoured(stage_of(reached), status, errors) {
+                verdict("PASS")
+            } else {
+                verdict("FAIL_timeout_not_honoured")
+            }
+        }
     }
 }
 
@@ -238,36 +326,25 @@ fn judge_must_fail(reached: Reached<'_>) -> Judgement {
             ..
         } => Judgement {
             finding: Some(MUST_FAIL_FINDING.to_owned()),
-            must_contain_ok: None,
             outcome: "FAIL_expected_failure",
         },
     }
 }
 
-fn judge_success(must_contain: Option<&str>, reached: Reached<'_>) -> Judgement {
+/// `Success` with Markdown that is not blank. What the Markdown says is not judged here.
+fn judge_converted(reached: Reached<'_>) -> Judgement {
     let (status, markdown) = match reached {
         Reached::Source => return verdict("FAIL_source_error"),
         Reached::ConverterError => return verdict("FAIL_converter_error"),
         Reached::ConverterStatus { status, markdown } => (status, markdown),
     };
-    let must_contain_ok = must_contain.map(|needle| markdown.contains(needle));
-    let outcome = if matches!(status, ConversionStatus::Failure) {
-        "FAIL_unexpected_failure"
-    } else if markdown.trim().is_empty() {
-        "FAIL_empty_markdown"
-    } else if must_contain_ok == Some(false) {
-        "FAIL_missing_expected_text"
-    } else if matches!(status, ConversionStatus::Success) {
-        "PASS"
-    } else {
+    verdict(match status {
+        ConversionStatus::Failure => "FAIL_unexpected_failure",
+        _ if markdown.trim().is_empty() => "FAIL_empty_markdown",
+        ConversionStatus::Success => "PASS",
         // `PartialSuccess` with content is recorded but is not a pass for a supported fixture.
-        "FAIL_partial_not_success"
-    };
-    Judgement {
-        finding: None,
-        must_contain_ok,
-        outcome,
-    }
+        ConversionStatus::PartialSuccess => "FAIL_partial_not_success",
+    })
 }
 
 /// A buffered `convert` reports a spent document budget as `PartialSuccess` with one
@@ -283,34 +360,33 @@ fn timeout_honoured(stage: Stage, status: Option<&str>, errors: &[ErrorReceipt])
 fn build_receipt(run: &FixtureRun<'_>, observed: Observed<'_>) -> Result<FixtureReceipt, String> {
     let sha_after = sha256_file(run.path)?;
     let original_unchanged = run.sha_before == sha_after;
-    let judgement = judge(run.expected, observed.reached, original_unchanged);
-    let (status, markdown) = match observed.reached {
-        Reached::ConverterStatus { status, markdown } => {
-            (Some(status_label(status).to_owned()), markdown)
-        }
-        Reached::Source | Reached::ConverterError => (None, ""),
+    let judgement = judge(
+        run.rule,
+        observed.reached,
+        &observed.errors,
+        original_unchanged,
+    );
+    let status = match observed.reached {
+        Reached::ConverterStatus { status, .. } => Some(status_label(status).to_owned()),
+        Reached::Source | Reached::ConverterError => None,
     };
     Ok(FixtureReceipt {
-        converter_version: run.session.converter_version.clone(),
+        conversion_rule: rule_label(run.rule),
+        converter: run.session.converter.clone(),
+        document: observed.document,
         elapsed_ms: observed.elapsed_ms,
         errors: observed.errors,
-        expected: expected_label(run.expected).to_owned(),
         finding: judgement.finding,
         fixture: run
             .path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        markdown_chars: markdown.chars().count(),
-        markdown_nonempty: !markdown.trim().is_empty(),
-        must_contain_ok: judgement.must_contain_ok,
+        input_format: observed.input_format,
+        library_page_count: observed.library_page_count,
         original_unchanged,
         outcome: judgement.outcome.to_owned(),
-        page_image_count: observed.page_provenance.len(),
-        page_provenance: observed.page_provenance,
         path: run.path.to_path_buf(),
-        peak_rss_bytes: None,
-        role: run.role.to_owned(),
         settings: run.session.settings.clone(),
         sha256_after: sha_after,
         sha256_before: run.sha_before.clone(),
@@ -325,24 +401,116 @@ fn refused(
     reached: Reached<'_>,
     module_name: &str,
     message: String,
+    source: Option<(&'static str, Option<PageCount>)>,
 ) -> Result<FixtureReceipt, String> {
     let component_type = match reached {
         Reached::Source => "source",
         Reached::ConverterError | Reached::ConverterStatus { .. } => "converter",
     };
+    let (input_format, library_page_count) = match source {
+        Some((format, pages)) => (Some(format), pages),
+        None => (None, None),
+    };
     build_receipt(
         run,
         Observed {
+            document: None,
             elapsed_ms: run.started.elapsed().as_millis(),
             errors: vec![ErrorReceipt {
                 component_type: component_type.to_owned(),
                 error_message: message,
                 module_name: module_name.to_owned(),
             }],
-            page_provenance: Vec::new(),
+            input_format,
+            library_page_count,
             reached,
         },
     )
+}
+
+/// File extension for a page image of this mimetype; bytes are written as returned.
+fn image_extension(mimetype: &str) -> &'static str {
+    match mimetype {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        _ => "bin",
+    }
+}
+
+/// Write each page image the library returned and record what it is.
+fn write_page_images(
+    out_dir: &Path,
+    images: &BTreeMap<usize, PictureImage>,
+) -> Result<Vec<PageImageRecord>, String> {
+    let mut records = Vec::with_capacity(images.len());
+    for (page_no, image) in images {
+        let file = format!("page-{page_no}.{}", image_extension(&image.mimetype));
+        let target = out_dir.join(&file);
+        fs::write(&target, &image.data)
+            .map_err(|error| format!("write {}: {error}", target.display()))?;
+        records.push(PageImageRecord {
+            bytes: image.data.len(),
+            dpi: image.dpi,
+            file,
+            height: image.height,
+            mimetype: image.mimetype.clone(),
+            page_no: *page_no,
+            sha256: sha256_hex(&image.data),
+            width: image.width,
+        });
+    }
+    Ok(records)
+}
+
+/// Write the Markdown, the document export and the page images of one conversion.
+///
+/// The page images leave the document first: the JSON export would otherwise inline each
+/// one as a base64 `pages[n].image` (docling-core json.rs:329), and they are recorded here
+/// from the bytes the library returned.
+fn write_evidence(
+    out_dir: &Path,
+    result: &mut ConversionResult,
+) -> Result<(DocumentEvidence, String), String> {
+    let images = std::mem::take(&mut result.document.page_images);
+    let page_images = write_page_images(out_dir, &images)?;
+    let markdown = result.document.export_to_markdown();
+    let json = serde_json::to_vec(&result.document.export_to_json_value())
+        .map_err(|error| format!("serialize document export: {error}"))?;
+    for (file, bytes) in [
+        (DOCUMENT_MD, markdown.as_bytes()),
+        (DOCUMENT_JSON, json.as_slice()),
+    ] {
+        let target = out_dir.join(file);
+        fs::write(&target, bytes)
+            .map_err(|error| format!("write {}: {error}", target.display()))?;
+    }
+    let evidence = DocumentEvidence {
+        json_bytes: json.len(),
+        json_file: DOCUMENT_JSON,
+        json_sha256: sha256_hex(&json),
+        markdown_chars: markdown.chars().count(),
+        markdown_file: DOCUMENT_MD,
+        markdown_nonempty: !markdown.trim().is_empty(),
+        markdown_sha256: sha256_hex(markdown.as_bytes()),
+        page_images,
+    };
+    Ok((evidence, markdown))
+}
+
+/// The library's page count for a PDF source; `None` for every other format.
+fn library_page_count(source: &SourceDocument) -> Option<PageCount> {
+    (source.format == docling::InputFormat::Pdf).then(|| {
+        match docling::pdf_page_count(&source.bytes, None) {
+            Ok(value) => PageCount {
+                error: None,
+                value: Some(value),
+            },
+            Err(error) => PageCount {
+                error: Some(error.to_string()),
+                value: None,
+            },
+        }
+    })
 }
 
 fn convert_fixture(
@@ -357,10 +525,13 @@ fn convert_fixture(
                 Reached::Source,
                 "SourceDocument::from_file",
                 error.to_string(),
+                None,
             );
         }
     };
-    let result = match converter.convert(source) {
+    let input_format = source.format.as_str();
+    let pages = library_page_count(&source);
+    let mut result = match converter.convert(source) {
         Ok(result) => result,
         Err(error) => {
             return refused(
@@ -368,11 +539,11 @@ fn convert_fixture(
                 Reached::ConverterError,
                 "DocumentConverter::convert",
                 error.to_string(),
+                Some((input_format, pages)),
             );
         }
     };
     let elapsed_ms = run.started.elapsed().as_millis();
-    let markdown = result.document.export_to_markdown();
     let errors = result
         .errors
         .iter()
@@ -382,12 +553,15 @@ fn convert_fixture(
             module_name: item.module_name.clone(),
         })
         .collect();
+    let (document, markdown) = write_evidence(run.out_dir, &mut result)?;
     build_receipt(
         run,
         Observed {
+            document: Some(document),
             elapsed_ms,
             errors,
-            page_provenance: page_provenance(&result),
+            input_format: Some(result.format.as_str()),
+            library_page_count: pages,
             reached: Reached::ConverterStatus {
                 status: result.status,
                 markdown: &markdown,
@@ -396,101 +570,44 @@ fn convert_fixture(
     )
 }
 
-fn fixture_catalog() -> [(&'static str, &'static str, Expected); 10] {
+/// The supported fixtures. What each must contain is declared in `SOURCES.json` and judged
+/// by the orchestrator; this list only says which files this binary will open.
+fn fixture_catalog() -> [&'static str; 12] {
     [
-        (
-            "sample_with_image.docx",
-            "docx_with_images",
-            Expected::SuccessNonEmpty {
-                must_contain: Some("OKF"),
-            },
-        ),
-        (
-            "sample_sheet.xlsx",
-            "xlsx",
-            Expected::SuccessNonEmpty {
-                must_contain: Some("Widget"),
-            },
-        ),
-        (
-            "born_digital_text.pdf",
-            "born_digital_pdf",
-            Expected::SuccessNonEmpty {
-                must_contain: Some("Born-digital"),
-            },
-        ),
-        (
-            "scanned_image_only.pdf",
-            "scanned_or_image_pdf",
-            Expected::SuccessNonEmpty { must_contain: None },
-        ),
-        (
-            "table_heavy.pdf",
-            "table_heavy_pdf",
-            Expected::SuccessNonEmpty {
-                must_contain: Some("Name"),
-            },
-        ),
-        (
-            "sample_image.png",
-            "image",
-            Expected::SuccessNonEmpty { must_contain: None },
-        ),
-        (
-            "corpus/word_sample.docx",
-            "corpus_docx",
-            Expected::SuccessNonEmpty {
-                must_contain: Some("Summer"),
-            },
-        ),
-        (
-            "corpus/xlsx_01.xlsx",
-            "corpus_xlsx",
-            Expected::SuccessNonEmpty {
-                must_contain: Some("col-1"),
-            },
-        ),
-        (
-            "corpus/powerpoint_sample.pptx",
-            "corpus_pptx",
-            Expected::SuccessNonEmpty {
-                must_contain: Some("Test Table"),
-            },
-        ),
-        (
-            "corpus/redp5110_sampled.pdf",
-            "corpus_pdf",
-            Expected::SuccessNonEmpty {
-                must_contain: Some("IBM"),
-            },
-        ),
+        "sample_with_image.docx",
+        "sample_sheet.xlsx",
+        "born_digital_text.pdf",
+        "scanned_image_only.pdf",
+        "scanned_text.pdf",
+        "table_heavy.pdf",
+        "sample_image.png",
+        "text_image.png",
+        "corpus/word_sample.docx",
+        "corpus/xlsx_01.xlsx",
+        "corpus/powerpoint_sample.pptx",
+        "corpus/redp5110_sampled.pdf",
     ]
 }
 
-fn lookup_only(only: &str) -> Result<(&'static str, &'static str, Expected), String> {
+/// The fixture file and the rule for one `OKF_DOCLING_ONLY` value.
+fn lookup_only(only: &str) -> Result<(&'static str, Rule), String> {
     if only == MUST_FAIL_NAME || only == "must_fail" {
-        return Ok((MUST_FAIL_NAME, "must_fail", Expected::ExplicitFailure));
+        return Ok((MUST_FAIL_NAME, Rule::ExplicitFailure));
     }
     if only == TIMEOUT_PROBE {
-        return Ok((
-            "scanned_image_only.pdf",
-            TIMEOUT_PROBE,
-            Expected::SuccessNonEmpty { must_contain: None },
-        ));
+        return Ok((TIMEOUT_PROBE_FIXTURE, Rule::TimeoutHonoured));
     }
-    for (name, role, expected) in fixture_catalog() {
-        if name == only {
-            return Ok((name, role, expected));
-        }
-    }
-    Err(format!(
-        "OKF_DOCLING_ONLY={only} is not a known fixture, must_fail, or timeout_probe"
-    ))
+    fixture_catalog()
+        .into_iter()
+        .find(|name| *name == only)
+        .map(|name| (name, Rule::Converted))
+        .ok_or_else(|| {
+            format!("OKF_DOCLING_ONLY={only} is not a known fixture, must_fail, or timeout_probe")
+        })
 }
 
-fn write_report(out_dir: &str, report: &QualificationReport) -> Result<PathBuf, String> {
-    fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
-    let report_path = PathBuf::from(out_dir).join("receipt.json");
+fn write_report(out_dir: &Path, report: &QualificationReport) -> Result<PathBuf, String> {
+    let report_path = out_dir.join("receipt.json");
     let json = serde_json::to_string_pretty(report).map_err(|error| error.to_string())?;
     fs::write(&report_path, format!("{json}\n")).map_err(|error| error.to_string())?;
     writeln!(io::stdout(), "Wrote {}", report_path.display()).map_err(|error| error.to_string())?;
@@ -515,67 +632,78 @@ fn hold_for_sample(only: &str, receipt: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn build_session(environment: &Environment, artifacts: &Path, budget_ms: Option<u64>) -> Session {
-    let mut settings = BTreeMap::new();
-    settings.insert(
-        "artifacts_dir".to_owned(),
-        serde_json::Value::String(artifacts.display().to_string()),
-    );
-    settings.insert(
-        "models_dir".to_owned(),
-        serde_json::Value::String(environment.models_dir.clone()),
-    );
-    settings.insert(
-        "ocr_lang".to_owned(),
-        serde_json::Value::String("en".to_owned()),
-    );
-    if let Some(ms) = budget_ms {
-        settings.insert(
-            "document_timeout_ms".to_owned(),
-            serde_json::Value::from(ms),
-        );
-    }
-    Session {
-        converter_version: environment.converter_version.clone(),
-        settings,
-    }
+/// The converter for one process. Page images are requested (`generate_page_images`,
+/// docling converter.rs:756); `images_scale` is left unset, so each page image is the
+/// pipeline's own page render, not a resample (docling-pdf assemble.rs:2419).
+fn build_converter(applied: &Applied) -> DocumentConverter {
+    DocumentConverter::new()
+        .ocr_lang(applied.ocr_lang)
+        .artifacts_dir(applied.artifacts_dir.clone())
+        .generate_page_images(applied.generate_page_images)
+        .document_timeout(applied.document_timeout_ms.map(Duration::from_millis))
 }
 
-fn build_converter(artifacts: &Path, budget_ms: Option<u64>) -> DocumentConverter {
-    DocumentConverter::new()
-        .ocr_lang("en")
-        .artifacts_dir(artifacts.display().to_string())
-        .document_timeout(budget_ms.map(Duration::from_millis))
+fn build_session(
+    environment: &Environment,
+    artifacts: &Path,
+    budget_ms: Option<u64>,
+) -> (DocumentConverter, Session) {
+    let applied = Applied {
+        artifacts_dir: artifacts.display().to_string(),
+        document_timeout_ms: budget_ms,
+        generate_page_images: true,
+        ocr_lang: OCR_LANG,
+    };
+    let converter = build_converter(&applied);
+    let session = Session {
+        converter: ConverterIdentity {
+            pdf_ml_compiled: docling::PDF_ML_COMPILED,
+            version: environment.converter_version.clone(),
+            version_source: VERSION_SOURCE,
+        },
+        settings: Settings {
+            applied,
+            converter_debug: format!("{converter:?}"),
+            environment: environment.docling_env.clone(),
+        },
+    };
+    (converter, session)
+}
+
+fn model_inventory() -> Vec<ModelRecord> {
+    docling::model_inventory()
+        .into_iter()
+        .map(|entry| ModelRecord {
+            bytes: entry.bytes,
+            found: entry.found,
+            path: entry.path,
+            stage: entry.stage,
+        })
+        .collect()
 }
 
 fn run_one(only: &str, environment: &Environment) -> Result<(), String> {
-    let (name, role, expected) = lookup_only(only)?;
-    let is_timeout = role == TIMEOUT_PROBE;
+    let (name, rule) = lookup_only(only)?;
+    let is_timeout = matches!(rule, Rule::TimeoutHonoured);
     let budget_ms = is_timeout.then_some(TIMEOUT_BUDGET_MS);
     let artifacts = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let session = build_session(environment, artifacts.path(), budget_ms);
+    let (converter, session) = build_session(environment, artifacts.path(), budget_ms);
     let path = PathBuf::from(&environment.fixtures_dir).join(name);
     if !path.is_file() {
         return Err(format!("missing fixture {}", path.display()));
     }
-    let converter = build_converter(artifacts.path(), budget_ms);
+    let out_dir = PathBuf::from(&environment.out_dir);
+    fs::create_dir_all(&out_dir).map_err(|error| error.to_string())?;
+    let inventory = model_inventory();
     let run = FixtureRun {
-        expected,
+        out_dir: &out_dir,
         path: &path,
-        role,
+        rule,
         session: &session,
         sha_before: sha256_file(&path)?,
         started: Instant::now(),
     };
-    let mut receipt = convert_fixture(&converter, &run)?;
-    if is_timeout {
-        let honoured = timeout_honoured(receipt.stage, receipt.status.as_deref(), &receipt.errors);
-        receipt.outcome = if honoured {
-            "PASS".to_owned()
-        } else {
-            "FAIL_timeout_not_honoured".to_owned()
-        };
-    }
+    let receipt = convert_fixture(&converter, &run)?;
 
     let key = if is_timeout { TIMEOUT_PROBE } else { name };
     let mut summary = BTreeMap::new();
@@ -586,14 +714,13 @@ fn run_one(only: &str, environment: &Environment) -> Result<(), String> {
         (vec![receipt], None)
     };
     let report = QualificationReport {
-        converter_crate: environment.converter_version.clone(),
         fixtures_dir: PathBuf::from(&environment.fixtures_dir),
-        models_dir: PathBuf::from(&environment.models_dir),
+        model_inventory: inventory,
         receipts,
         summary,
         timeout_case,
     };
-    let report_path = write_report(&environment.out_dir, &report)?;
+    let report_path = write_report(&out_dir, &report)?;
     // The process exits 0 once its receipt is written; the orchestrator judges outcomes.
     if environment.hold {
         hold_for_sample(only, &report_path)?;
@@ -602,8 +729,9 @@ fn run_one(only: &str, environment: &Environment) -> Result<(), String> {
 }
 
 fn read_environment() -> Result<Environment, String> {
-    let models_dir = env::var("DOCLING_RS_MODELS_DIR")
-        .map_err(|_| "DOCLING_RS_MODELS_DIR must be set to the verified models cache".to_owned())?;
+    if env::var("DOCLING_RS_MODELS_DIR").is_err() {
+        return Err("DOCLING_RS_MODELS_DIR must be set to the verified models cache".to_owned());
+    }
     let converter_version = env::var("OKF_DOCLING_CRATE_VERSION")
         .ok()
         .map(|version| version.trim().to_owned())
@@ -628,11 +756,14 @@ fn read_environment() -> Result<Environment, String> {
             .into_owned()
     });
     let hold = env::var("OKF_DOCLING_HOLD").is_ok_and(|value| value == "1");
+    let docling_env = env::vars()
+        .filter(|(name, _)| name.starts_with("DOCLING_") || name.starts_with("PDFIUM_"))
+        .collect();
     Ok(Environment {
         converter_version,
+        docling_env,
         fixtures_dir,
         hold,
-        models_dir,
         out_dir,
     })
 }
@@ -660,9 +791,10 @@ fn main() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConversionStatus, DONE, DoneMarker, ErrorReceipt, Expected, MUST_FAIL_FINDING,
-        MUST_FAIL_NAME, Reached, Stage, TIMEOUT_PROBE, fixture_catalog, judge, lookup_only,
-        timeout_honoured,
+        Applied, ConversionResult, ConversionStatus, DOCUMENT_JSON, DOCUMENT_MD, DONE, DoneMarker,
+        ErrorReceipt, MUST_FAIL_FINDING, MUST_FAIL_NAME, PictureImage, Reached, Rule, Stage,
+        TIMEOUT_PROBE, TIMEOUT_PROBE_FIXTURE, build_converter, fixture_catalog, judge, lookup_only,
+        rule_label, sha256_hex, timeout_honoured, write_evidence,
     };
     use std::collections::BTreeSet;
     use std::fs;
@@ -675,13 +807,21 @@ mod tests {
         value.ok_or_else(|| format!("missing {what}"))
     }
 
+    fn timeout_error() -> [ErrorReceipt; 1] {
+        [ErrorReceipt {
+            component_type: "document_backend".to_owned(),
+            error_message: "document timeout of 0.001s exceeded after 0 of 1 pages".to_owned(),
+            module_name: "pipeline".to_owned(),
+        }]
+    }
+
     #[test]
     fn must_fail_is_judged_by_the_stage_it_reached() -> TestResult {
-        let never_reached = judge(Expected::ExplicitFailure, Reached::Source, true);
+        let never_reached = judge(Rule::ExplicitFailure, Reached::Source, &[], true);
         assert_eq!(never_reached.outcome, "FAIL_before_converter");
         assert_eq!(never_reached.finding, None);
 
-        let refused = judge(Expected::ExplicitFailure, Reached::ConverterError, true);
+        let refused = judge(Rule::ExplicitFailure, Reached::ConverterError, &[], true);
         assert_eq!(refused.outcome, "PASS_explicit_failure");
         assert_eq!(refused.finding, None);
 
@@ -690,7 +830,7 @@ mod tests {
             markdown: "",
         };
         assert_eq!(
-            judge(Expected::ExplicitFailure, failure, true).outcome,
+            judge(Rule::ExplicitFailure, failure, &[], true).outcome,
             "PASS_explicit_failure"
         );
 
@@ -699,44 +839,77 @@ mod tests {
                 status,
                 markdown: "text",
             };
-            let accepted = judge(Expected::ExplicitFailure, reached, true);
+            let accepted = judge(Rule::ExplicitFailure, reached, &[], true);
             assert_eq!(accepted.outcome, "FAIL_expected_failure");
             assert_eq!(some(accepted.finding, "finding")?, MUST_FAIL_FINDING);
         }
 
-        let mutated = judge(Expected::ExplicitFailure, Reached::ConverterError, false);
+        let mutated = judge(Rule::ExplicitFailure, Reached::ConverterError, &[], false);
         assert_eq!(mutated.outcome, "FAIL_original_mutated");
         Ok(())
     }
 
     #[test]
-    fn a_converter_error_never_passes_a_supported_fixture_or_the_timeout_probe() -> TestResult {
-        let (_, role, expected) = lookup_only(TIMEOUT_PROBE)?;
-        assert_eq!(role, TIMEOUT_PROBE);
+    fn a_supported_fixture_passes_only_on_success_with_nonblank_markdown() -> TestResult {
+        let (_, rule) = lookup_only("born_digital_text.pdf")?;
+        assert_eq!(rule_label(rule), "success_status_and_nonblank_markdown");
+        let reached = |status, markdown| Reached::ConverterStatus { status, markdown };
+        let outcome = |reached| judge(rule, reached, &[], true).outcome;
+        assert_eq!(outcome(reached(ConversionStatus::Success, "text")), "PASS");
         assert_eq!(
-            judge(expected, Reached::ConverterError, true).outcome,
-            "FAIL_converter_error"
+            outcome(reached(ConversionStatus::Success, " \n")),
+            "FAIL_empty_markdown"
         );
         assert_eq!(
-            judge(expected, Reached::Source, true).outcome,
-            "FAIL_source_error"
+            outcome(reached(ConversionStatus::PartialSuccess, "text")),
+            "FAIL_partial_not_success"
+        );
+        assert_eq!(
+            outcome(reached(ConversionStatus::Failure, "text")),
+            "FAIL_unexpected_failure"
+        );
+        assert_eq!(outcome(Reached::ConverterError), "FAIL_converter_error");
+        assert_eq!(outcome(Reached::Source), "FAIL_source_error");
+        Ok(())
+    }
+
+    #[test]
+    fn the_timeout_probe_is_judged_by_its_own_rule_and_says_so() -> TestResult {
+        let (name, rule) = lookup_only(TIMEOUT_PROBE)?;
+        assert_eq!(name, TIMEOUT_PROBE_FIXTURE);
+        assert_eq!(
+            rule_label(rule),
+            "partial_success_with_pipeline_timeout_error"
+        );
+        let errors = timeout_error();
+        let partial = Reached::ConverterStatus {
+            status: ConversionStatus::PartialSuccess,
+            markdown: "",
+        };
+        assert_eq!(judge(rule, partial, &errors, true).outcome, "PASS");
+        assert_eq!(
+            judge(rule, partial, &[], true).outcome,
+            "FAIL_timeout_not_honoured"
+        );
+        // A conversion that simply succeeded did not honour the budget.
+        let success = Reached::ConverterStatus {
+            status: ConversionStatus::Success,
+            markdown: "text",
+        };
+        assert_eq!(
+            judge(rule, success, &errors, true).outcome,
+            "FAIL_timeout_not_honoured"
+        );
+        assert_eq!(
+            judge(rule, Reached::ConverterError, &errors, true).outcome,
+            "FAIL_timeout_not_honoured"
         );
 
-        let errors = [ErrorReceipt {
-            component_type: "document_backend".to_owned(),
-            error_message: "document timeout of 0.001s exceeded after 0 of 1 pages".to_owned(),
-            module_name: "pipeline".to_owned(),
-        }];
         assert!(!timeout_honoured(Stage::ConverterError, None, &errors));
         assert!(!timeout_honoured(
             Stage::ConverterStatus,
             Some("Success"),
             &errors
-        ));
-        assert!(!timeout_honoured(
-            Stage::ConverterStatus,
-            Some("PartialSuccess"),
-            &[]
         ));
         assert!(timeout_honoured(
             Stage::ConverterStatus,
@@ -778,10 +951,98 @@ mod tests {
         let recorded: BTreeSet<String> = some(files, "files object")?.keys().cloned().collect();
         let harness: BTreeSet<String> = fixture_catalog()
             .into_iter()
-            .map(|(name, _, _)| name.to_owned())
+            .map(str::to_owned)
             .chain(std::iter::once(MUST_FAIL_NAME.to_owned()))
             .collect();
         assert_eq!(harness, recorded);
+        Ok(())
+    }
+
+    #[test]
+    fn the_recorded_settings_are_the_ones_the_converter_holds() -> TestResult {
+        let applied = Applied {
+            artifacts_dir: "out/artifacts".to_owned(),
+            document_timeout_ms: Some(1),
+            generate_page_images: true,
+            ocr_lang: "en",
+        };
+        let debug = format!("{:?}", build_converter(&applied));
+        for held in [
+            "generate_page_images: true",
+            "images_scale: None",
+            "ocr_lang: Some(\"en\")",
+            "document_timeout: Some(1ms)",
+            "artifacts_dir: \"out/artifacts\"",
+        ] {
+            let _at = some(debug.find(held), held)?;
+        }
+        let without = Applied {
+            document_timeout_ms: None,
+            generate_page_images: false,
+            ..applied
+        };
+        let debug = format!("{:?}", build_converter(&without));
+        assert!(debug.contains("generate_page_images: false"), "{debug}");
+        assert!(debug.contains("document_timeout: None"), "{debug}");
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_files_hold_what_the_receipt_hashes_and_page_images_leave_the_export() -> TestResult
+    {
+        let mut document = docling::DoclingDocument::new("probe");
+        document.add_heading(1, "Probe heading");
+        document.add_paragraph("Probe body.");
+        let pixels = vec![7_u8, 8, 9];
+        document.page_images.insert(
+            2,
+            PictureImage {
+                mimetype: "image/png".to_owned(),
+                width: 40,
+                height: 30,
+                data: pixels.clone(),
+                dpi: 144,
+            },
+        );
+        let mut result = ConversionResult {
+            document,
+            status: ConversionStatus::Success,
+            input_name: "probe".to_owned(),
+            format: docling::InputFormat::Md,
+            errors: Vec::new(),
+        };
+        let out = tempfile::tempdir()?;
+        let (evidence, markdown) = write_evidence(out.path(), &mut result)?;
+
+        assert!(markdown.contains("Probe heading"), "{markdown}");
+        assert!(evidence.markdown_nonempty);
+        assert_eq!(evidence.markdown_chars, markdown.chars().count());
+        let written_md = fs::read(out.path().join(DOCUMENT_MD))?;
+        assert_eq!(written_md, markdown.as_bytes());
+        assert_eq!(evidence.markdown_sha256, sha256_hex(&written_md));
+
+        let written_json = fs::read(out.path().join(DOCUMENT_JSON))?;
+        assert_eq!(evidence.json_sha256, sha256_hex(&written_json));
+        assert_eq!(evidence.json_bytes, written_json.len());
+        let export: serde_json::Value = serde_json::from_slice(&written_json)?;
+        let texts = some(
+            export.get("texts").and_then(serde_json::Value::as_array),
+            "texts",
+        )?;
+        assert_eq!(texts.len(), 2);
+        assert!(!String::from_utf8_lossy(&written_json).contains("base64"));
+
+        let image = some(evidence.page_images.first(), "page image record")?;
+        assert_eq!(evidence.page_images.len(), 1);
+        assert_eq!(
+            (image.page_no, image.width, image.height, image.dpi),
+            (2, 40, 30, 144)
+        );
+        assert_eq!(image.file, "page-2.png");
+        assert_eq!(image.bytes, pixels.len());
+        assert_eq!(image.sha256, sha256_hex(&pixels));
+        assert_eq!(fs::read(out.path().join(&image.file))?, pixels);
+        assert!(result.document.page_images.is_empty());
         Ok(())
     }
 }
