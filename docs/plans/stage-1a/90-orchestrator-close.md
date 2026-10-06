@@ -161,7 +161,7 @@ library's `qualification` text is rewritten from its receipt, not from memory.
 - [ ] **Step 2: Check, commit, push**
 
 ```bash
-bun scripts/dev.mjs check-receipts     # check-receipts: 3 receipt(s) valid against HEAD.
+bun scripts/dev.mjs check-receipts     # check-receipts: 2 receipt(s) valid against HEAD.
 bun scripts/dev.mjs check-offline      # 0 fail
 git add qualification/receipts verification.json vendors.json
 git commit -F <message file>

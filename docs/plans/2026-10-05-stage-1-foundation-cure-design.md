@@ -135,7 +135,7 @@ do not commit `api/`, `generated/cli/` or `ui/src/api/generated/` except where s
 - An `Err` from `converter.convert` is a converter-stage failure and is recorded as such.
   Whatever Docling returns for `must_fail_truncated.pdf` is recorded as observed; a Success or
   PartialSuccess is a FAIL with a finding for the owner.
-- All three receipts share one top-level header: `git_sha`, `inputs`, `produced_at`.
+- Both receipts share one top-level header: `git_sha`, `inputs`, `produced_at`.
 - MCP Apps harness: basic-host renders all four tools and asserts each view's text; any failure
   fails the run; process-group kill on POSIX; ngrok lifecycle recorded as closed.
 - Lint errors in `qualification/docling/src/main.rs` fixed.
@@ -331,4 +331,4 @@ Questions for the owner before Stage 2 (none block Stage 1):
 - The `main` ruleset (the two always-running CI jobs required, force-push and deletion blocked,
   merge commits only) was applied before commit S.
 - The 27 guesses from the store-ports verification open the storage-lane plan.
-- The rejected external job engine, its harness, workspace member and receipt gate were removed at the owner's instruction (package J); SPEC ง5 and ง12 now state the Tokio-over-RecordStore design directly.
+- The rejected external job engine, its harness, workspace member and receipt gate were removed at the owner's instruction (package J); SPEC ยง5 and ยง12 now state the Tokio-over-RecordStore design directly.
