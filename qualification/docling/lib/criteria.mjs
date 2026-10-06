@@ -67,7 +67,7 @@ export const CRITERION_RULES = Object.freeze({
   conversion:
     'DocumentConverter::convert returned Success with Markdown that is not blank, and the fixture bytes are unchanged afterwards; a converter process that dies on the fixture (a panic, an abort, a fault: any exit the harness binary did not make itself) fails this criterion, with its exit code and the last lines of its stderr',
   evidence:
-    'the Markdown, the document export and every page image the converter process wrote are on disk with the hashes it recorded',
+    'the Markdown, the document export, every page image and, for a PDF, the text-layer document the converter process wrote are on disk with the hashes it recorded',
   format_recognised:
     'the format the library reports for the file is the format of the kind SOURCES.json declares for the fixture; what is judged for a fixture follows the declared kind, never the reported format',
   content:

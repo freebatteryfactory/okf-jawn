@@ -19,6 +19,12 @@
  * rule as an exported one. An item neither source locates is not located, and nothing here
  * guesses a box.
  *
+ * What the process recorded of a lookup is not taken on trust. The process also writes the
+ * text-layer document as a file; `deriveLookups` makes every lookup again from that file and
+ * the export, by the same rule, and `lookupDifferences` says where the record differs. A
+ * record that differs is a harness error (the binary recorded something its own evidence does
+ * not give), never a location.
+ *
  * A render must also depict its page: the orchestrator decodes each image (lib/png.mjs) and
  * this module fails one that is a single flat colour, unless the fixture's entry in
  * SOURCES.json declares that page blank, in which case the render must be flat.
@@ -200,6 +206,115 @@ function textLayerDistances(items) {
       distance: measured(item) ? item.lookup.distance : null,
     })),
   };
+}
+
+/** The value a `#/...` reference of the export points at, as src/locate.rs `resolve` reads it. */
+function resolveRef(json, reference) {
+  if (typeof reference !== 'string' || !reference.startsWith('#/')) return undefined;
+  const [array, index, ...rest] = reference.slice(2).split('/');
+  if (index === undefined) return json?.[array];
+  if (rest.length > 0 || !/^\d+$/.test(index) || !Array.isArray(json?.[array])) return undefined;
+  return json[array][Number(index)];
+}
+
+/** The pages an exported item's provenance names, ascending and each once. */
+function pagesOf(item) {
+  const pages = list(item?.prov).map((entry) => entry?.page_no).filter((page) => Number.isInteger(page) && page >= 0);
+  return [...new Set(pages)].sort((a, b) => a - b);
+}
+
+/** The pages to search for an unlocated item and how they were chosen: src/locate.rs `lookup_pages`. */
+function lookupPages(json, item) {
+  const parent = resolveRef(json, item?.parent?.$ref);
+  if (parent === undefined || parent === null) return { basis: 'none', pages: [] };
+  const own = pagesOf(parent);
+  if (own.length > 0) return { basis: 'parent', pages: own };
+  const children = list(parent.children).map((child) => child?.$ref).filter((reference) => typeof reference === 'string');
+  const at = children.indexOf(item.self_ref);
+  for (const sibling of (at < 0 ? [] : children.slice(0, at)).reverse()) {
+    const pages = pagesOf(resolveRef(json, sibling));
+    if (pages.length > 0) return { basis: 'earlier_sibling', pages: [pages.at(-1)] };
+  }
+  return { basis: 'none', pages: [] };
+}
+
+/** The located lines of a text-layer document: src/locate.rs `text_layer_lines`. */
+export function textLayerLines(textLayer) {
+  return list(textLayer?.texts).flatMap((item) => {
+    const entry = list(item?.prov)[0];
+    const located = entry?.bbox !== null && typeof entry?.bbox === 'object' && Number.isInteger(entry.page_no) && entry.page_no >= 0 && typeof item.text === 'string';
+    return located ? [{ page_no: entry.page_no, text: item.text, bbox: entry.bbox }] : [];
+  });
+}
+
+/**
+ * The text-layer rule of src/locate.rs, made again from the two files the converter process
+ * wrote: for every text item the export gives no provenance, `{ basis, pages, occurrences,
+ * page_no, bbox }` by its ref, with `page_no` and `bbox` null when the item is not located.
+ * An item is located only when exactly one text-layer line on the pages searched has exactly
+ * its text and that line's box has area and lies inside the page.
+ * @param {object} json the document export (document.json)
+ * @param {object} textLayer the text-layer document (text_layer.json)
+ * @returns {Map<string, { basis: string, pages: number[], occurrences: number, page_no: number|null, bbox: object|null }>}
+ */
+export function deriveLookups(json, textLayer) {
+  const lines = textLayerLines(textLayer);
+  const pages = describeDocument(json).pages;
+  const derived = new Map();
+  for (const item of list(json?.texts)) {
+    if (list(item?.prov).length > 0) continue;
+    const { basis, pages: searched } = lookupPages(json, item);
+    const text = typeof item.text === 'string' ? item.text : '';
+    const nowhere = (occurrences) => ({ basis, pages: searched, occurrences, page_no: null, bbox: null });
+    if (text.trim().length === 0 || searched.length === 0) {
+      derived.set(item.self_ref, nowhere(0));
+      continue;
+    }
+    const matches = lines.filter((line) => searched.includes(line.page_no) && line.text === text);
+    const [line] = matches;
+    const page = matches.length === 1 ? pages.find((candidate) => candidate.page_no === line.page_no) : undefined;
+    if (matches.length !== 1 || !page || bboxProblem(line.bbox, page) !== null) derived.set(item.self_ref, nowhere(matches.length));
+    else derived.set(item.self_ref, { basis, pages: searched, occurrences: 1, page_no: line.page_no, bbox: line.bbox });
+  }
+  return derived;
+}
+
+const sameBox = (first, second) =>
+  first !== null && second !== null && typeof first === 'object' && typeof second === 'object' && ['l', 't', 'r', 'b', 'coord_origin'].every((side) => first[side] === second[side]);
+
+/**
+ * Where what the converter process recorded of its text-layer lookups differs from what the
+ * two files give by the same rule: one sentence per item, empty when every record is the
+ * lookup made again. Compared: whether the item is located, its page and box, how the pages
+ * were chosen, which pages, and how many lines had its text.
+ * @param {Map<string, object>} recorded the entries of `locations.items` by item ref
+ * @param {ReturnType<typeof deriveLookups>} derived
+ */
+export function lookupDifferences(recorded, derived) {
+  const differences = [];
+  const said = (value) => JSON.stringify(value);
+  for (const [ref, again] of derived) {
+    const record = recorded.get(ref);
+    const lookup = record?.lookup;
+    const located = record?.located_by === 'text_layer';
+    const wrong = [];
+    if (lookup === null || typeof lookup !== 'object') wrong.push('no lookup is recorded for an item the export left unlocated');
+    else {
+      if (lookup.basis !== again.basis) wrong.push(`basis ${said(lookup.basis)}, the files give ${said(again.basis)}`);
+      if (said(lookup.pages) !== said(again.pages)) wrong.push(`pages ${said(lookup.pages)}, the files give ${said(again.pages)}`);
+      if (lookup.occurrences !== again.occurrences) wrong.push(`${said(lookup.occurrences)} line(s) with its text, the files give ${again.occurrences}`);
+    }
+    if (located !== (again.page_no !== null)) wrong.push(located ? 'recorded as located, and the files do not locate it' : 'recorded as not located, and the files locate it');
+    else if (located && (record.page_no !== again.page_no || !sameBox(record.bbox, again.bbox))) {
+      wrong.push(`page ${said(record.page_no)} and box ${said(record.bbox)}, the files give page ${again.page_no} and box ${said(again.bbox)}`);
+    }
+    if (wrong.length > 0) differences.push(`${ref}: ${wrong.join('; ')}`);
+  }
+  // An item the export located has no lookup to make, whatever the record says of it.
+  for (const [ref, record] of recorded) {
+    if (!derived.has(ref) && record?.located_by === 'text_layer') differences.push(`${ref}: recorded as located through the text layer, and the export locates it itself or it is no text item`);
+  }
+  return differences;
 }
 
 const sampleOf = (item) =>

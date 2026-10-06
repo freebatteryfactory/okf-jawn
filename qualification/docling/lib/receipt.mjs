@@ -51,7 +51,17 @@ import {
   stopped,
   unjudged,
 } from './criteria.mjs';
-import { LOCATION_SOURCES, bodyFacts, converterOptions, describeDocument, judgePageRenders, judgeProvenance } from './document.mjs';
+import {
+  LOCATION_SOURCES,
+  bodyFacts,
+  converterOptions,
+  deriveLookups,
+  describeDocument,
+  judgePageRenders,
+  judgeProvenance,
+  lookupDifferences,
+  textLayerLines,
+} from './document.mjs';
 import { MATCH_RULES, judgeContent } from './expect.mjs';
 
 export { MUST_FAIL, TIMEOUT_PROBE };
@@ -273,10 +283,17 @@ function distanceRange(distances) {
 
 /**
  * What the converter process recorded about the items of a PDF (src/locate.rs), by ref, or
- * the sentence that says why it cannot be used: the record is missing, or it is not the
- * record of the document the process wrote.
+ * the sentence that says why it cannot be used: the record is missing, it is not the record
+ * of the document the process wrote, or a text-layer lookup in it is not the one the files
+ * the process wrote give.
+ *
+ * The lookups are not taken on trust: wherever the export leaves a text item unlocated, the
+ * text-layer document the process wrote (text_layer.json, re-hashed by lib/evidence.mjs) is
+ * read and every lookup is made again from it and the export (lib/document.mjs
+ * deriveLookups). The record must be that result; the page, the box and the count of lines
+ * the judge then uses are therefore ones this orchestrator derived itself.
  */
-function recordedLookups(only, base, doc) {
+function recordedLookups(only, base, doc, evidence) {
   const recorded = base.locations?.items;
   if (!Array.isArray(recorded)) return { problem: `the converter process for ${only} recorded no item locations for a PDF` };
   const refs = [...doc.texts, ...doc.tables, ...doc.pictures].map((item) => item.ref);
@@ -284,16 +301,36 @@ function recordedLookups(only, base, doc) {
   if (lookups.size !== recorded.length || recorded.length !== refs.length || !refs.every((ref) => lookups.has(ref))) {
     return { problem: `the item locations the converter process for ${only} recorded (${recorded.length}) are not those of the ${refs.length} items of the document it wrote` };
   }
-  return { lookups };
+  const throughTextLayer = recorded.filter((entry) => entry.located_by === 'text_layer').length;
+  const unlocatedByExport = doc.texts.filter((item) => item.prov.length === 0).length;
+  if (unlocatedByExport === 0 && throughTextLayer === 0) return { lookups };
+  const unread = base.locations.text_layer?.error;
+  if (typeof unread === 'string' && unread.length > 0) {
+    // The library could not read the text layer, so there is no file and nothing can be located through it.
+    if (throughTextLayer > 0) return { problem: `the converter process for ${only} recorded ${throughTextLayer} item(s) as located through a text layer it says it could not read (${tail(unread)})` };
+    return { lookups };
+  }
+  if (evidence?.textLayer === null || typeof evidence?.textLayer !== 'object') {
+    return { problem: `the converter process for ${only} wrote no text-layer document (text_layer.json) for the ${unlocatedByExport} item(s) it looked up, so its lookups cannot be made again` };
+  }
+  const lines = textLayerLines(evidence.textLayer).length;
+  if (base.locations.text_layer?.items !== lines) {
+    return { problem: `the converter process for ${only} recorded ${JSON.stringify(base.locations.text_layer?.items ?? null)} located text-layer item(s) and its text_layer.json holds ${lines}` };
+  }
+  const differences = lookupDifferences(lookups, deriveLookups(evidence.document, evidence.textLayer));
+  if (differences.length > 0) {
+    return { problem: `${differences.length} text-layer lookup(s) the converter process for ${only} recorded are not what its document.json and text_layer.json give${examples(differences)}` };
+  }
+  return { lookups, verified: { lookups_made_again: unlocatedByExport, text_layer_items: lines, text_layer_file: base.document?.text_layer?.file ?? null } };
 }
 
-function provenanceJudgement(only, kind, base, doc, blocked) {
+function provenanceJudgement(only, kind, base, doc, blocked, evidence) {
   if (kind.provenance === 'judged') {
     if (blocked) return blocked;
     // Only a PDF has a text layer to look an unlocated item up in; an image is judged by its export alone.
-    const { lookups = null, problem = null } = kind.text_layer ? recordedLookups(only, base, doc) : {};
+    const { lookups = null, problem = null, verified = null } = kind.text_layer ? recordedLookups(only, base, doc, evidence) : {};
     if (problem) return stopped(problem);
-    const judged = judgeProvenance(doc, { paginated: true, lookups });
+    const judged = { ...judgeProvenance(doc, { paginated: true, lookups }), ...(verified ? { text_layer_lookups: verified } : {}) };
     if (judged.status === 'PASS') return pass({ detail: locationCounts(judged), ...evidenceOf(judged) });
     if (judged.status === 'FAIL') return fail(locationCounts(judged), evidenceOf(judged));
     return notJudged(judged.reason, evidenceOf(judged));
@@ -550,7 +587,7 @@ export function fixtureEntry({ only, run, report, source, evidence, build, other
           blankPages: source.expect?.blank_pages ?? [],
         });
     }
-    criteria.provenance = provenanceJudgement(only, kind, base, doc, blocked);
+    criteria.provenance = provenanceJudgement(only, kind, base, doc, blocked, evidence);
     // The items are listed once, judged, under criteria.provenance.located_items.
     if (base.locations) entry.locations = { ...base.locations, items: `${base.locations.items?.length ?? 0} recorded; judged under criteria.provenance.located_items` };
     if (list.some(({ aspect }) => aspect === 'text_provenance')) {

@@ -51,10 +51,13 @@ import {
   bboxProblem,
   bodyFacts,
   converterOptions,
+  deriveLookups,
   describeDocument,
   judgePageRenders,
   judgeProvenance,
+  lookupDifferences,
   pngSize,
+  textLayerLines,
 } from '../../qualification/docling/lib/document.mjs';
 import { loadEvidence } from '../../qualification/docling/lib/evidence.mjs';
 import { qualify as qualifyDocling } from '../../qualification/docling/lib/orchestrate.mjs';
@@ -800,15 +803,18 @@ test('evidence is what is on disk: every file a converter process wrote is re-re
   const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
   const markdown = Buffer.from('## Title\n\nHello world\n');
   const json = Buffer.from(JSON.stringify(stubDocument()));
+  const layerDocument = { texts: [{ label: 'text', text: 'Hello world', prov: [{ page_no: 1, bbox: { l: 72, t: 690, r: 300, b: 670, coord_origin: 'BOTTOMLEFT' } }] }] };
+  const layer = Buffer.from(JSON.stringify(layerDocument));
   const written = {
     markdown_file: 'document.md',
     markdown_sha256: sha(markdown),
     json_file: 'document.json',
     json_sha256: sha(json),
     page_images: [{ ...PAGE_IMAGE, file: 'page-1.png' }],
+    text_layer: { file: 'text_layer.json', sha256: sha(layer), bytes: layer.length },
   };
   const write = async (over = {}) => {
-    const files = { 'document.md': markdown, 'document.json': json, 'page-1.png': PAGE_PNG, ...over };
+    const files = { 'document.md': markdown, 'document.json': json, 'page-1.png': PAGE_PNG, 'text_layer.json': layer, ...over };
     for (const [name, bytes] of Object.entries(files)) {
       if (bytes === null) await rm(join(dir, name), { force: true });
       else await writeFile(join(dir, name), bytes);
@@ -820,6 +826,7 @@ test('evidence is what is on disk: every file a converter process wrote is re-re
   assert.deepEqual(good.problems, []);
   assert.equal(good.markdown, markdown.toString('utf8'));
   assert.deepEqual(good.document, stubDocument());
+  assert.deepEqual(good.textLayer, layerDocument, 'the text-layer document the lookups were made from is read from its file');
   assert.deepEqual(good.pageFiles, { 'page-1.png': pageFile(PAGE_PNG) });
   assert.equal(good.pageFiles['page-1.png'].ink.uniform, false, 'the pixels of the file on disk are read');
 
@@ -832,6 +839,28 @@ test('evidence is what is on disk: every file a converter process wrote is re-re
   const swapped = await loadEvidence(dir, written);
   assert.deepEqual(swapped.problems, ['page-1.png: hash on disk differs from the receipt']);
   assert.equal(swapped.pageFiles['page-1.png'].sha256, sha(BLANK_PNG), 'what is recorded is the file as found');
+
+  // The text-layer document is held to its recorded hash like the others: changed, missing, or not JSON.
+  await write({ 'text_layer.json': Buffer.from(JSON.stringify({ texts: [...layerDocument.texts, ...layerDocument.texts] })) });
+  const relayered = await loadEvidence(dir, written);
+  assert.deepEqual(relayered.problems, ['text_layer.json: hash on disk differs from the receipt']);
+  await write({ 'text_layer.json': null });
+  const unlayered = await loadEvidence(dir, written);
+  assert.equal(unlayered.textLayer, null);
+  assert.equal(unlayered.problems.length, 1);
+  assert.match(unlayered.problems[0], /^text_layer\.json: .*ENOENT/);
+  const notLayer = Buffer.from('[ not json');
+  await write({ 'text_layer.json': notLayer });
+  const brokenLayer = await loadEvidence(dir, { ...written, text_layer: { file: 'text_layer.json', sha256: sha(notLayer), bytes: notLayer.length } });
+  assert.equal(brokenLayer.textLayer, null);
+  assert.match(brokenLayer.problems.join(' | '), /^text_layer\.json: not JSON/);
+  // A process that recorded no text-layer file (not a PDF, or a text layer the library could not read) has none to read.
+  await write();
+  const { text_layer: _none, ...withoutLayer } = written;
+  for (const recorded of [withoutLayer, { ...written, text_layer: null }]) {
+    const none = await loadEvidence(dir, recorded);
+    assert.deepEqual([none.textLayer, none.problems], [null, []]);
+  }
 
   // A file that is not there, or not what its name says.
   await write({ 'document.md': null, 'page-1.png': null });
@@ -848,7 +877,7 @@ test('evidence is what is on disk: every file a converter process wrote is re-re
   assert.match(broken.problems.join(' | '), /document\.json: not JSON/);
 
   // A process that returned no document wrote nothing to read.
-  assert.deepEqual(await loadEvidence(dir, null), { markdown: null, document: null, pageFiles: {}, problems: [] });
+  assert.deepEqual(await loadEvidence(dir, null), { markdown: null, document: null, textLayer: null, pageFiles: {}, problems: [] });
 });
 
 /** One PNG row filtered the way an encoder would write it (PNG specification, filter types 0 to 4). */
@@ -1104,7 +1133,7 @@ test('the text-layer rule says what it does not guarantee, and each item it loca
   assert.deepEqual(judged.located_items.find((item) => item.ref === '#/texts/4').lookup, { basis: 'earlier_sibling', occurrences: 1, pages: [1], reason: null, distance: 9.28, reference: '#/texts/1' });
 
   // The receipt states the range with the three counts, and says that it is not a rule.
-  const withLocations = (records) => doclingReceipt({ 'born_digital_text.pdf': { evidence: { document }, fixture: { locations: stubLocations(document, records) } } });
+  const withLocations = (records) => doclingReceipt({ 'born_digital_text.pdf': lookedUp(document, records) });
   const zero = '(0 text items, 0 tables, 0 pictures)';
   const receipt = withLocations(found);
   assert.equal(receipt.result, 'PASS');
@@ -1125,6 +1154,192 @@ test('the text-layer rule says what it does not guarantee, and each item it loca
   assert.doesNotMatch(plain.detail, /page units/);
   // An image has no text layer to look anything up in.
   assert.equal(entryOf(doclingReceipt(), 'text_image.png').criteria.provenance.text_layer_distances, undefined);
+});
+
+/**
+ * The converted document of the Rust tests of src/locate.rs: on page 2 a picture and a table,
+ * each with a caption the export left unlocated; on page 3 a code block followed by a caption
+ * that hangs under the body.
+ */
+function locateExport() {
+  return {
+    pages: { 2: { page_no: 2, size: { width: 612, height: 792 } }, 3: { page_no: 3, size: { width: 612, height: 792 } } },
+    body: { self_ref: '#/body', children: ['#/texts/0', '#/pictures/0', '#/tables/0', '#/texts/3', '#/texts/4'].map(($ref) => ({ $ref })) },
+    texts: [
+      { self_ref: '#/texts/0', label: 'text', text: 'A paragraph.', parent: { $ref: '#/body' }, prov: prov({ l: 72, t: 700, r: 300, b: 690 }, 2) },
+      { self_ref: '#/texts/1', label: 'caption', text: 'Figure 1-2   Existing controls', parent: { $ref: '#/pictures/0' }, prov: [] },
+      { self_ref: '#/texts/2', label: 'caption', text: 'Table 2-1   FUNCTION_USAGE view', parent: { $ref: '#/tables/0' }, prov: [] },
+      { self_ref: '#/texts/3', label: 'code', text: 'CREATE MASK', parent: { $ref: '#/body' }, prov: prov({ l: 72, t: 500, r: 400, b: 420 }, 3) },
+      { self_ref: '#/texts/4', label: 'text', text: 'Example 3-9   Creating a mask', parent: { $ref: '#/body' }, prov: [] },
+    ],
+    tables: [{ self_ref: '#/tables/0', label: 'table', parent: { $ref: '#/body' }, prov: prov({ l: 72, t: 400, r: 500, b: 300 }, 2), data: { table_cells: [] } }],
+    pictures: [{ self_ref: '#/pictures/0', label: 'picture', parent: { $ref: '#/body' }, prov: prov({ l: 72, t: 650, r: 500, b: 450 }, 2) }],
+  };
+}
+const layerLine = (page_no, text, bbox) => ({ label: 'text', text, prov: [{ page_no, bbox: { coord_origin: 'BOTTOMLEFT', ...bbox } }] });
+const FIGURE_BOX = { l: 136.27, t: 100.55, r: 316.76, b: 91.27 };
+const TABLE_BOX = { l: 136.27, t: 512.02, r: 284.48, b: 504.28 };
+const EXAMPLE_BOX = { l: 136.27, t: 385.17, r: 351.42, b: 377.44 };
+/** The text layer of that document: each caption once, on its own page. */
+function locateTextLayer() {
+  return {
+    texts: [
+      layerLine(2, 'A paragraph.', FIGURE_BOX),
+      layerLine(2, 'Figure 1-2   Existing controls', FIGURE_BOX),
+      layerLine(2, 'Table 2-1   FUNCTION_USAGE view', TABLE_BOX),
+      layerLine(3, 'Example 3-9   Creating a mask', EXAMPLE_BOX),
+    ],
+  };
+}
+
+test('the judge makes every text-layer lookup again from the two files the process wrote, by the rule of src/locate.rs', () => {
+  const origin = (box) => ({ coord_origin: 'BOTTOMLEFT', ...box });
+  const derived = deriveLookups(locateExport(), locateTextLayer());
+  // Only the text items the export left unlocated are looked up; the result is what the Rust tests hold.
+  assert.deepEqual([...derived.keys()], ['#/texts/1', '#/texts/2', '#/texts/4']);
+  assert.deepEqual(derived.get('#/texts/1'), { basis: 'parent', pages: [2], occurrences: 1, page_no: 2, bbox: origin(FIGURE_BOX) });
+  assert.deepEqual(derived.get('#/texts/2'), { basis: 'parent', pages: [2], occurrences: 1, page_no: 2, bbox: origin(TABLE_BOX) });
+  assert.deepEqual(derived.get('#/texts/4'), { basis: 'earlier_sibling', pages: [3], occurrences: 1, page_no: 3, bbox: origin(EXAMPLE_BOX) });
+  assert.equal(textLayerLines(locateTextLayer()).length, 4);
+
+  const figure = (layer, document = locateExport()) => deriveLookups(document, layer).get('#/texts/1');
+  const withLines = (...lines) => ({ texts: [...locateTextLayer().texts, ...lines] });
+  const unlocated = (occurrences) => ({ basis: 'parent', pages: [2], occurrences, page_no: null, bbox: null });
+  // Twice on the page: not located. The same text on another page is not a second occurrence.
+  assert.deepEqual(figure(withLines(layerLine(2, 'Figure 1-2   Existing controls', { l: 72, t: 60, r: 200, b: 50 }))), unlocated(2));
+  assert.equal(figure(withLines(layerLine(3, 'Figure 1-2   Existing controls', FIGURE_BOX))).page_no, 2);
+  // Absent, only on another page, only as part of a longer line, or spaced differently: not located.
+  for (const layer of [
+    { texts: [] },
+    { texts: [layerLine(3, 'Figure 1-2   Existing controls', FIGURE_BOX)] },
+    { texts: [layerLine(2, 'Figure 1-2   Existing controls and more', FIGURE_BOX), layerLine(2, 'Figure 1-2', FIGURE_BOX)] },
+    { texts: [layerLine(2, 'Figure 1-2 Existing controls', FIGURE_BOX)] },
+    {},
+    null,
+  ]) assert.deepEqual(figure(layer), unlocated(0), JSON.stringify(layer));
+  // The one match must be a region of the page: inside it, with area, with a known origin.
+  for (const bbox of [{ l: 136, t: 900, r: 316, b: 880 }, { l: 136, t: 100, r: 136, b: 90 }, { l: 136, t: 90, r: 316, b: 100 }, { l: 136, t: 100, r: 316 }, { l: 136, t: 100, r: 316, b: 90, coord_origin: 'CENTRE' }]) {
+    assert.deepEqual(figure({ texts: [layerLine(2, 'Figure 1-2   Existing controls', bbox)] }), unlocated(1), JSON.stringify(bbox));
+  }
+  // A line without a location, or without text, is no line of the text layer.
+  assert.deepEqual(figure({ texts: [{ label: 'text', text: 'Figure 1-2   Existing controls', prov: [] }, { label: 'text', prov: [{ page_no: 2, bbox: origin(FIGURE_BOX) }] }] }), unlocated(0));
+  // An item whose parent is not located and that has no located earlier sibling has no page to search.
+  const first = locateExport();
+  first.body.children.unshift(first.body.children.pop());
+  assert.deepEqual(deriveLookups(first, locateTextLayer()).get('#/texts/4'), { basis: 'none', pages: [], occurrences: 0, page_no: null, bbox: null });
+  const orphan = locateExport();
+  orphan.pictures[0].prov = [];
+  assert.deepEqual(figure(locateTextLayer(), orphan), { basis: 'none', pages: [], occurrences: 0, page_no: null, bbox: null });
+  // An item without text has nothing to look up; the earlier sibling's LAST page is the one searched.
+  const blank = locateExport();
+  blank.texts[1].text = '  ';
+  assert.deepEqual(figure(locateTextLayer(), blank), unlocated(0));
+  const spanning = locateExport();
+  spanning.texts[3].prov = [...prov({ l: 72, t: 100, r: 400, b: 50 }, 2), ...prov({ l: 72, t: 500, r: 400, b: 420 }, 3)];
+  assert.deepEqual(deriveLookups(spanning, locateTextLayer()).get('#/texts/4').pages, [3]);
+
+  // What the process recorded is held to that result, field by field.
+  const record = (ref, lookup = derived.get(ref)) => ({
+    item: ref,
+    kind: 'text',
+    label: 'caption',
+    located_by: lookup.page_no === null ? 'none' : 'text_layer',
+    page_no: lookup.page_no,
+    bbox: lookup.bbox,
+    lookup: { basis: lookup.basis, occurrences: lookup.occurrences, pages: lookup.pages, reason: null, distance: 1.5, reference: '#/pictures/0' },
+  });
+  const recorded = (change = {}) => new Map(['#/texts/1', '#/texts/2', '#/texts/4'].map((ref) => [ref, { ...record(ref), ...(ref === '#/texts/1' ? change : {}) }]));
+  assert.deepEqual(lookupDifferences(recorded(), derived), [], 'the record that is the lookup made again differs nowhere; the distance and the reason are not compared');
+  const differs = (change) => lookupDifferences(recorded(change), derived);
+  const figureBox = JSON.stringify(origin(FIGURE_BOX));
+  assert.deepEqual(differs({ page_no: 3 }), [`#/texts/1: page 3 and box ${figureBox}, the files give page 2 and box ${figureBox}`]);
+  assert.deepEqual(differs({ bbox: origin({ ...FIGURE_BOX, t: 101 }) }), [`#/texts/1: page 2 and box ${JSON.stringify(origin({ ...FIGURE_BOX, t: 101 }))}, the files give page 2 and box ${figureBox}`]);
+  assert.deepEqual(differs({ located_by: 'none', page_no: null, bbox: null }), ['#/texts/1: recorded as not located, and the files locate it']);
+  assert.deepEqual(differs({ lookup: { ...record('#/texts/1').lookup, basis: 'earlier_sibling' } }), ['#/texts/1: basis "earlier_sibling", the files give "parent"']);
+  assert.deepEqual(differs({ lookup: { ...record('#/texts/1').lookup, pages: [2, 3] } }), ['#/texts/1: pages [2,3], the files give [2]']);
+  assert.deepEqual(differs({ lookup: { ...record('#/texts/1').lookup, occurrences: 2 } }), ['#/texts/1: 2 line(s) with its text, the files give 1']);
+  assert.deepEqual(differs({ lookup: null }), ['#/texts/1: no lookup is recorded for an item the export left unlocated']);
+  // Recorded as located where the files find the text twice.
+  const twice = deriveLookups(locateExport(), withLines(layerLine(2, 'Figure 1-2   Existing controls', { l: 72, t: 60, r: 200, b: 50 })));
+  assert.deepEqual(lookupDifferences(recorded(), twice), ['#/texts/1: 1 line(s) with its text, the files give 2; recorded as located, and the files do not locate it']);
+  // An item the export located has no lookup, whatever a record claims for it.
+  const claimed = recorded();
+  claimed.set('#/texts/0', { ...record('#/texts/1'), item: '#/texts/0' });
+  assert.deepEqual(lookupDifferences(claimed, derived), ['#/texts/0: recorded as located through the text layer, and the export locates it itself or it is no text item']);
+});
+
+test('a lookup record that is not what the files give is a harness error, never a location; the text-layer document is evidence like the rest', async () => {
+  const captions = [
+    { self_ref: '#/texts/2', label: 'caption', text: 'Table 2-1   FUNCTION_USAGE view', prov: [] },
+    { self_ref: '#/texts/3', label: 'caption', text: 'Figure 1-2   Existing row and column controls', prov: [] },
+  ];
+  const document = stubDocument({ texts: [...stubDocument().texts, ...captions] });
+  const found = [lookupFound('#/texts/2', TABLE_BOX), lookupFound('#/texts/3', FIGURE_BOX)];
+  const only = 'born_digital_text.pdf';
+  const run = (change = (parts) => parts) => doclingReceipt({ [only]: change(lookedUp(document, found)) });
+
+  // Made again from document.json and text_layer.json, the two lookups are the records: located, and the receipt says what was checked.
+  const good = run();
+  assert.equal(good.result, 'PASS');
+  const provenance = entryOf(good, only).criteria.provenance;
+  assert.deepEqual(provenance.text_layer_lookups, { lookups_made_again: 2, text_layer_items: 2, text_layer_file: 'text_layer.json' });
+  assert.deepEqual(provenance.items.located_by, { export: 3, text_layer: 2, none: 0 });
+  assert.deepEqual(entryOf(good, only).document.text_layer, { file: 'text_layer.json', sha256: 'a'.repeat(64), bytes: 12 }, 'the entry keeps the file and the hash the process recorded');
+  // A PDF with nothing to look up needs no lookup made again; an image has no text layer at all.
+  assert.equal(entryOf(doclingReceipt(), only).criteria.provenance.text_layer_lookups, undefined);
+  assert.equal(entryOf(good, 'text_image.png').criteria.provenance.text_layer_lookups, undefined);
+
+  // Each way the record can differ from the files stops the judgement: a harness error, nothing located, nothing failed.
+  const stoppedBy = (change, sentence) => {
+    const receipt = run(change);
+    assert.equal(receipt.harness_error, sentence);
+    assert.equal(receipt.result, 'INCOMPLETE', sentence);
+    assert.deepEqual(doclingCriterion(receipt, `${only}/provenance`), { id: `${only}/provenance`, required: true, result: 'not_judged', detail: sentence });
+    assert.deepEqual(doclingFailedIds(receipt), [], 'the binary contradicting its own evidence says nothing about the library');
+    assertDoclingEnvelope(receipt);
+  };
+  const differ = (count, list) => `${count} text-layer lookup(s) the converter process for ${only} recorded are not what its document.json and text_layer.json give; all: ${list}`;
+  const withLayer = (texts) => (parts) => ({ evidence: { ...parts.evidence, textLayer: { texts: texts(parts.evidence.textLayer.texts) } }, fixture: { locations: { ...parts.fixture.locations, text_layer: { ...parts.fixture.locations.text_layer, items: texts(parts.evidence.textLayer.texts).length } } } });
+  const withRecord = (ref, change) => (parts) => ({ ...parts, fixture: { locations: { ...parts.fixture.locations, items: parts.fixture.locations.items.map((entry) => (entry.item === ref ? { ...entry, ...change(entry) } : entry)) } } });
+  // The text stands twice in the text layer the process wrote, and the record says it was found once.
+  stoppedBy(withLayer((lines) => [...lines, layerLine(1, captions[0].text, { l: 72, t: 60, r: 200, b: 50 })]), differ(1, '#/texts/2: 1 line(s) with its text, the files give 2; recorded as located, and the files do not locate it'));
+  // The text is not in the text layer at all.
+  stoppedBy(withLayer((lines) => lines.slice(1)), differ(1, '#/texts/2: 1 line(s) with its text, the files give 0; recorded as located, and the files do not locate it'));
+  // The record gives another box, or another page, than the line of the file.
+  const box = (value) => JSON.stringify({ coord_origin: 'BOTTOMLEFT', ...value });
+  stoppedBy(withRecord('#/texts/3', (entry) => ({ bbox: { ...entry.bbox, l: 72 } })), differ(1, `#/texts/3: page 1 and box ${box({ ...FIGURE_BOX, l: 72 })}, the files give page 1 and box ${box(FIGURE_BOX)}`));
+  stoppedBy(withRecord('#/texts/3', () => ({ page_no: 2 })), differ(1, `#/texts/3: page 2 and box ${box(FIGURE_BOX)}, the files give page 1 and box ${box(FIGURE_BOX)}`));
+  // The record says the item was not found, and the files find it.
+  stoppedBy(withRecord('#/texts/3', (entry) => ({ located_by: 'none', page_no: null, bbox: null, lookup: { ...entry.lookup, occurrences: 0, reason: 'no text-layer item on page [1] has exactly this text' } })), differ(1, '#/texts/3: 0 line(s) with its text, the files give 1; recorded as not located, and the files locate it'));
+  // Both records wrong: both are named.
+  stoppedBy(withLayer(() => []), differ(2, '#/texts/2: 1 line(s) with its text, the files give 0; recorded as located, and the files do not locate it; #/texts/3: 1 line(s) with its text, the files give 0; recorded as located, and the files do not locate it'));
+  // The count of text-layer items the process recorded is not the count in its file.
+  stoppedBy((parts) => ({ ...parts, fixture: { locations: { ...parts.fixture.locations, text_layer: { ...parts.fixture.locations.text_layer, items: 549 } } } }), `the converter process for ${only} recorded 549 located text-layer item(s) and its text_layer.json holds 2`);
+  // No text-layer document was written for lookups that were recorded.
+  stoppedBy((parts) => ({ ...parts, evidence: { ...parts.evidence, textLayer: null } }), `the converter process for ${only} wrote no text-layer document (text_layer.json) for the 2 item(s) it looked up, so its lookups cannot be made again`);
+  // The process says the library could not read the text layer, and records items as found in it.
+  const unread = (parts) => ({ evidence: { ...parts.evidence, textLayer: null }, fixture: { locations: { ...parts.fixture.locations, text_layer: { error: 'pdf: unreadable', items: 0, source: 'docling::pdf_text_layer_pages' } } } });
+  stoppedBy(unread, `the converter process for ${only} recorded 2 item(s) as located through a text layer it says it could not read (pdf: unreadable)`);
+
+  // A text layer the library could not read, honestly recorded: nothing is found through it, and that is the library's result.
+  const honest = doclingReceipt({ [only]: { evidence: { document, textLayer: null }, fixture: { locations: { ...stubLocations(document), text_layer: { error: 'pdf: unreadable', items: 0, source: 'docling::pdf_text_layer_pages' } } } } });
+  assert.deepEqual([honest.result, honest.harness_error], ['FAIL', null]);
+  assert.deepEqual(doclingFailedIds(honest), [`${only}/provenance`]);
+  // A text-layer file whose bytes are not the recorded ones stops everything judged from the files, as any evidence file does.
+  const changed = doclingReceipt({ [only]: { ...lookedUp(document, found), evidence: { ...lookedUp(document, found).evidence, problems: ['text_layer.json: hash on disk differs from the receipt'] } } });
+  assert.equal(changed.result, 'INCOMPLETE');
+  assert.match(changed.harness_error, /^1 file\(s\) the converter process for born_digital_text\.pdf wrote are not the ones it recorded; all: text_layer\.json: hash on disk differs from the receipt$/);
+  assert.equal(doclingCriterion(changed, `${only}/provenance`).result, 'not_judged');
+
+  // The binary writes the file it read the lookups from and records its hash; the orchestrator re-reads it with the rest.
+  const main = await readFile(join(root, 'qualification/docling/src/main.rs'), 'utf8');
+  assert.match(main, /^const TEXT_LAYER_JSON: &str = "text_layer\.json";$/m);
+  assert.match(main, /Ok\(document\) => Some\(write_text_layer\(out_dir, document\)\?\),/);
+  assert.match(main, /let locations = locate::locate_items\(export, text_layer\.as_ref\(\)\.map_err\(String::as_str\)\);/, 'the lookups are made from the document that was written');
+  assert.match(main, /document\.text_layer = text_layer;/);
+  const orchestrate = await readFile(join(root, 'qualification/docling/lib/orchestrate.mjs'), 'utf8');
+  assert.match(orchestrate, /evidence: await io\.loadEvidence\(fixtureOut, written\),/);
+  assert.match(good.criterion_rules.evidence, /for a PDF, the text-layer document the converter process wrote are on disk with the hashes it recorded$/);
 });
 
 test('the document facts come from the body layer of the export', () => {
@@ -1280,6 +1495,29 @@ function stubLocations(document, found = []) {
   };
 }
 
+/**
+ * What a converter process would have written and recorded for these lookup records, as the
+ * parts of a doclingRun: the export in which each looked-up item hangs under the table (or,
+ * for an earlier-sibling record, under the body after the located texts), the text-layer
+ * document that holds its text on the searched page once per recorded occurrence, and the
+ * locations. Made again from the two files by lib/document.mjs, the lookups are the records.
+ */
+function lookedUp(document, records) {
+  const recordOf = (item) => records.find((entry) => entry.item === item.self_ref);
+  const texts = document.texts.map((item) => (recordOf(item) ? { ...item, parent: { $ref: recordOf(item).lookup.basis === 'earlier_sibling' ? '#/body' : '#/tables/0' } } : item));
+  const written = { ...document, texts, body: { self_ref: '#/body', children: texts.map((item) => ({ $ref: item.self_ref })) } };
+  const elsewhere = { coord_origin: 'BOTTOMLEFT', l: 72, t: 60, r: 200, b: 50 };
+  const lines = records.flatMap((entry) =>
+    Array.from({ length: entry.lookup.occurrences }, (_, index) => ({
+      label: 'text',
+      text: texts.find((item) => item.self_ref === entry.item).text,
+      prov: [{ page_no: entry.lookup.pages[0], bbox: index === 0 && entry.bbox ? entry.bbox : elsewhere }],
+    })),
+  );
+  const locations = stubLocations(written, records);
+  return { evidence: { document: written, textLayer: { texts: lines } }, fixture: { locations: { ...locations, text_layer: { ...locations.text_layer, items: lines.length } } } };
+}
+
 /** What src/glyphs.rs records for a converted PDF: placeholders per page (`pages`), none by default. */
 function stubGlyphs(pages = {}, unlocated_tokens = 0) {
   const tokens = Object.values(pages).reduce((sum, count) => sum + count, 0) + unlocated_tokens;
@@ -1322,10 +1560,13 @@ function doclingRun(only, over = {}) {
           problems: [],
           ...over.evidence,
         };
-  // A converted PDF also carries where its items are, for the document the process wrote.
+  // A converted PDF also carries where its items are, for the document the process wrote, and
+  // the text-layer document it read: here one that holds no line, so nothing is found through it.
   if (fixture.input_format === 'pdf' && only !== MUST_FAIL) {
     fixture.locations = stubLocations(evidence.document);
     fixture.undecoded_glyphs = stubGlyphs();
+    if (fixture.document) fixture.document = { ...fixture.document, text_layer: { file: 'text_layer.json', sha256: 'a'.repeat(64), bytes: 12 } };
+    if (evidence.textLayer === undefined) evidence.textLayer = { texts: [] };
   }
   Object.assign(fixture, over.fixture);
   return {
@@ -1768,7 +2009,7 @@ test('a PDF item the text layer locates passes provenance, and the detail always
   ];
   const document = stubDocument({ texts: [...stubDocument().texts, ...captions] });
   const boxes = [{ l: 136.27, t: 512.02, r: 284.48, b: 504.28 }, { l: 136.27, t: 100.55, r: 316.76, b: 91.27 }];
-  const withLocations = (found) => doclingReceipt({ 'born_digital_text.pdf': { evidence: { document }, fixture: { locations: stubLocations(document, found) } } });
+  const withLocations = (found) => doclingReceipt({ 'born_digital_text.pdf': lookedUp(document, found) });
   const zero = '(0 text items, 0 tables, 0 pictures)';
 
   const receipt = withLocations(captions.map((caption, index) => lookupFound(caption.self_ref, boxes[index])));
