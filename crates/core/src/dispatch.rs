@@ -91,6 +91,9 @@ enum MutationGate {
     ShortCircuit(Value),
 }
 
+/// Most bytes of validator or decoder text an `InvalidInput` message carries.
+const INVALID_INPUT_ECHO_LIMIT: usize = 512;
+
 /// Dispatch one declared JSON operation into its typed implementation.
 ///
 /// The per-operation state is boxed inside, so this future is small and a binding awaits it
@@ -331,7 +334,21 @@ fn parse_operation(operation_id: &str) -> Result<OperationName, ApiError> {
 
 fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
     serde_json::from_value(value)
-        .map_err(|error| ApiError::new(ErrorCode::InvalidInput, error.to_string()))
+        .map_err(|error| ApiError::new(ErrorCode::InvalidInput, bounded(error.to_string())))
+}
+
+/// Keep at most [`INVALID_INPUT_ECHO_LIMIT`] bytes of `text`, cut on a character boundary and
+/// marked with `…`.
+///
+/// Validator and decoder texts quote the caller's value. Unbounded, a request of megabytes
+/// comes back whole in its own refusal, and from there into logs.
+fn bounded(mut text: String) -> String {
+    if text.len() <= INVALID_INPUT_ECHO_LIMIT {
+        return text;
+    }
+    text.truncate(text.floor_char_boundary(INVALID_INPUT_ECHO_LIMIT));
+    text.push('…');
+    text
 }
 
 fn decode_validated<T: DeserializeOwned + JsonSchema>(
@@ -357,6 +374,7 @@ fn decode_validated<T: DeserializeOwned + JsonSchema>(
 /// Report a schema failure and name the offending field as a JSON Pointer into the request.
 ///
 /// A missing required property is reported at the parent object, so its name is appended.
+/// The validator's text quotes the offending value, so it is [`bounded`].
 fn invalid_input(error: &jsonschema::ValidationError<'_>) -> ApiError {
     let location = if let ValidationErrorKind::Required {
         property: Value::String(name),
@@ -366,7 +384,7 @@ fn invalid_input(error: &jsonschema::ValidationError<'_>) -> ApiError {
     } else {
         error.instance_path().clone()
     };
-    let refused = ApiError::new(ErrorCode::InvalidInput, error.to_string());
+    let refused = ApiError::new(ErrorCode::InvalidInput, bounded(error.to_string()));
     if location.is_empty() {
         refused
     } else {

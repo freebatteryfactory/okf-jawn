@@ -28,6 +28,8 @@ const KEY_TWO: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CONNECTOR: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const JOB: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+/// Longest `InvalidInput` message: 512 bytes of validator text and the three bytes of `…`.
+const BOUNDED_MESSAGE: usize = 515;
 
 fn principal(subject: &str, route: AccessRoute) -> Result<Principal, IdentityError> {
     Ok(Principal {
@@ -1161,6 +1163,46 @@ async fn a_schema_failure_names_the_offending_field() -> TestResult {
     assert_eq!(refused.code, ErrorCode::InvalidInput);
     assert_eq!(refused.field.as_deref(), Some("/idempotency_key"));
     assert_eq!(app.call_count("list_items")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_invalid_input_message_echoes_a_bounded_part_of_the_value() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    // 100 KB of two-byte characters. The validator quotes the value, so byte 512 of its text
+    // falls inside a character and the cut has to move back to a boundary.
+    let huge = "é".repeat(50_000);
+    assert_eq!(huge.len(), 100_000);
+    let mistyped = json!({
+        "workspace_id": WORKSPACE_A,
+        "at": { "kind": "latest" },
+        "folder": "",
+        "page": { "limit": huge }
+    });
+    let refused = err_of(call(&app, &ports, &alice, "list_items", mistyped).await)?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("/page/limit"));
+    assert!(
+        refused.message.len() <= BOUNDED_MESSAGE,
+        "the message is {} bytes long",
+        refused.message.len()
+    );
+    assert!(refused.message.ends_with('…'));
+    assert!(refused.message.contains("ééé"));
+    assert_eq!(app.call_count("list_items")?, 0);
+
+    // A short validator text is returned whole, with no mark.
+    let short = json!({
+        "workspace_id": WORKSPACE_A,
+        "at": { "kind": "latest" },
+        "folder": "",
+        "page": { "limit": "ten" }
+    });
+    let refused = err_of(call(&app, &ports, &alice, "list_items", short).await)?;
+    assert!(refused.message.contains("ten"));
+    assert!(!refused.message.ends_with('…'));
     Ok(())
 }
 
