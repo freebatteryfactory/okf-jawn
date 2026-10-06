@@ -23,6 +23,23 @@ export function statusOf(result) {
   return gateStatuses[result] ?? 'incomplete';
 }
 
+/**
+ * The exit code of a harness run that wrote a receipt, by the receipt's result. Every harness
+ * ends with these and no other numbers, so a caller reads one convention.
+ */
+export const EXIT_CODES = Object.freeze({ PASS: 0, FAIL: 2, INCOMPLETE: 3 });
+
+/**
+ * The exit code of a run that was refused before it started and wrote no receipt (a dirty
+ * tree, an unknown option). It is what an uncaught error exits with, and no result has it.
+ */
+export const EXIT_REFUSED = 1;
+
+/** The exit code for a receipt result; anything that is not a known result is INCOMPLETE. */
+export function exitCodeFor(result) {
+  return Object.hasOwn(EXIT_CODES, result) ? EXIT_CODES[result] : EXIT_CODES.INCOMPLETE;
+}
+
 /** Reasons `criteria` is not a well-formed list; empty when it is. */
 export function criteriaFailures(criteria) {
   if (!Array.isArray(criteria)) return ['criteria must be an array'];

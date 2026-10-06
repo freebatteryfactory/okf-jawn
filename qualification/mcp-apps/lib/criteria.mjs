@@ -19,11 +19,11 @@ import { APP_RESOURCE_URI, UPSTREAM_HOST_RULES, VIEWS, judgePresentDataset, judg
 /** The verification.json gate this receipt is evidence for. */
 export const GATE = 'mcp-apps-protocol-qualification';
 
-/** Process exit codes: 0 only for PASS; FAIL and INCOMPLETE differ so a caller can tell them apart. */
-export const EXIT_CODES = Object.freeze({ PASS: 0, FAIL: 1, INCOMPLETE: 2 });
-
-/** The exit code for a receipt result; anything that is not a known result is INCOMPLETE. */
-export const exitCodeFor = (result) => EXIT_CODES[result] ?? EXIT_CODES.INCOMPLETE;
+/**
+ * Process exit codes, shared by every harness: 0 PASS, 2 FAIL, 3 INCOMPLETE; 1 (EXIT_REFUSED)
+ * is a run that was refused before it started and wrote no receipt.
+ */
+export { EXIT_CODES, EXIT_REFUSED, exitCodeFor } from '../../../scripts/lib/receipt-envelope.mjs';
 
 /**
  * What a reader of the receipt alone must know before reading "exercised" or a passing result:

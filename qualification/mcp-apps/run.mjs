@@ -12,10 +12,12 @@
  * lib/protocol.mjs and lib/views.mjs; how a view is watched is in lib/observe.mjs.
  *
  * Usage (from PowerShell, cargo on PATH): bun qualification/mcp-apps/run.mjs [--record]
- * Exit code: 0 PASS, 1 FAIL (a criterion about the App or the protocol failed), 2 INCOMPLETE
- * (something was not judged: a protocol-only run, a missing browser, a build that broke, or
- * this script itself failing). The receipt's result is the fold of its criteria; the receipt
- * of the previous run is removed first, so the file never describes another run.
+ * Exit code (scripts/lib/receipt-envelope.mjs, the same numbers as every harness): 0 PASS,
+ * 2 FAIL (a criterion about the App or the protocol failed), 3 INCOMPLETE (something was not
+ * judged: a protocol-only run, a missing browser, a build that broke). 1 is a run refused
+ * before it started, with no receipt written: a dirty tree, or a defect in this script. The
+ * receipt's result is the fold of its criteria; the receipt of the previous run is removed
+ * first, so the file never describes another run.
  * host_render reports only evidence found under .artifacts/.../hosts/ and never a PASS.
  *
  * Every receipt field is computed from something this run observed, or says that it was
@@ -33,7 +35,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { receiptHeader, recordReceipt } from '../../scripts/lib/provenance.mjs';
 import { buildRelease } from '../lib/cargo.mjs';
 import { BASIC_HOST, PATCHED_SERVE, SOURCE_RECORD, lsRemoteArgs, patchServe, rawUrl, sourceProblems, sourceRecord, tagCommit } from './lib/basic-host.mjs';
-import { EXIT_CODES } from './lib/criteria.mjs';
+import { EXIT_REFUSED } from './lib/criteria.mjs';
 import { DOM_SELECTORS, observeView, readAppDom } from './lib/observe.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from './lib/process.mjs';
 import { observeProtocol } from './lib/protocol.mjs';
@@ -447,7 +449,7 @@ try {
   process.stdout.write(`MCP Apps qualification ${receipt.result} (${receipt.criteria.length} criteria, ${receipt.not_judged.length} not judged)\n`);
   process.exitCode = exitCode;
 } catch (error) {
-  // No receipt could be written (for example a dirty tree): nothing was judged.
-  process.stderr.write(`MCP Apps qualification did not complete: ${error?.stack ?? error}\n`);
-  process.exitCode = EXIT_CODES.INCOMPLETE;
+  // No receipt was written (for example a dirty tree): the run was refused, not judged.
+  process.stderr.write(`MCP Apps qualification wrote no receipt: ${error?.stack ?? error}\n`);
+  process.exitCode = EXIT_REFUSED;
 }

@@ -20,6 +20,12 @@
  */
 
 import { foldCriteria } from '../../../scripts/lib/receipt-envelope.mjs';
+
+/**
+ * Process exit code of run.mjs per receipt result, shared by every harness: 0 PASS, 2 FAIL,
+ * 3 INCOMPLETE. 1 is left to a run that wrote no receipt.
+ */
+export { EXIT_CODES, exitCodeFor } from '../../../scripts/lib/receipt-envelope.mjs';
 import { PAGE_RENDER_RULE, PROVENANCE_RULE } from './document.mjs';
 
 /** The verification.json gate this receipt is evidence for. */
@@ -27,9 +33,6 @@ export const GATE = 'docling-library-qualification';
 
 export const MUST_FAIL = 'must_fail_truncated.pdf';
 export const TIMEOUT_PROBE = 'timeout_probe';
-
-/** Process exit code of run.mjs per receipt result. 1 is left to a run that wrote no receipt. */
-export const EXIT_CODES = Object.freeze({ PASS: 0, FAIL: 2, INCOMPLETE: 3 });
 
 /**
  * What a fixture's declared kind (SOURCES.json `kind`) means for judging. `format` is the
@@ -197,9 +200,4 @@ export function envelope({ expected, judgements, harnessError = null }) {
     not_judged_reasons: Object.fromEntries(open.map((criterion) => [criterion.id, `${criterion.result}: ${criterion.detail ?? 'no reason recorded'}`])),
     criteria,
   };
-}
-
-/** The exit code run.mjs ends with for a receipt result; anything unknown is INCOMPLETE. */
-export function exitCodeFor(result) {
-  return EXIT_CODES[result] ?? EXIT_CODES.INCOMPLETE;
 }

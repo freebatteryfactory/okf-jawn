@@ -40,6 +40,7 @@ import { assetsMatched, inventoryCheck, parseManifest, unverifiedEnvPaths, verif
 import { buildFacts, classifyRefusal, declaredDoclingFeatures, resolvedFeatures } from '../../qualification/docling/lib/build.mjs';
 import * as doclingCriteria from '../../qualification/docling/lib/criteria.mjs';
 import * as doclingEnvelope from '../../scripts/lib/receipt-envelope.mjs';
+import * as sharedEnvelope from '../../scripts/lib/receipt-envelope.mjs';
 import {
   PAGE_RENDER_RULE,
   bboxProblem,
@@ -2741,7 +2742,7 @@ test('criteria.json pins every criterion the MCP Apps harness can emit as requir
   assert.match(receipt.harness_error, /pinned criterion render_present\/dataset_exercised is missing/);
   assert.ok(mcpAppsEnvelopeFailures(receipt, MCP_APPS_GATE, double.pinned).includes('pinned criterion render_present/dataset_exercised is missing'));
   assert.equal(receipt.basic_host.present_dataset.status, 'not_observed');
-  assert.equal(exitCode, 2);
+  assert.equal(exitCode, 3);
   assert.match(recorded.refused, /not recorded: the envelope cannot be trusted/);
   assert.deepEqual(double.recorded, []);
 });
@@ -2773,8 +2774,8 @@ test('the MCP Apps receipt carries the shared envelope, and its result is the fo
   assert.deepEqual(receipt.rules, criterionRules());
   assert.equal(receipt.ngrok.status, 'not_run');
   // Exit codes: 0 only for PASS, and the other two differ.
-  assert.deepEqual(EXIT_CODES, { PASS: 0, FAIL: 1, INCOMPLETE: 2 });
-  assert.deepEqual(['PASS', 'FAIL', 'INCOMPLETE', 'anything else'].map(exitCodeFor), [0, 1, 2, 2]);
+  assert.deepEqual(EXIT_CODES, { PASS: 0, FAIL: 2, INCOMPLETE: 3 });
+  assert.deepEqual(['PASS', 'FAIL', 'INCOMPLETE', 'anything else'].map(exitCodeFor), [0, 2, 3, 3]);
 });
 
 test('the receipt says in words what was the product and what was this harness', async () => {
@@ -2815,7 +2816,7 @@ test('a criterion about the App or the protocol that fails makes the run FAIL, w
     assert.deepEqual(failedIds(receipt), failing, label);
     assert.equal(receipt.result, 'FAIL', label);
     assert.equal(receipt.harness_error, null, label);
-    assert.equal(exitCode, 1, label);
+    assert.equal(exitCode, 2, label);
     assert.equal(receipt.basic_host.status, 'failed', label);
     assert.deepEqual(mcpAppsEnvelopeFailures(receipt, MCP_APPS_GATE, double.pinned), [], label);
     assert.deepEqual(receipt.criteria.map((criterion) => criterion.id), criterionIds(), `${label}: every criterion is still listed`);
@@ -2874,7 +2875,7 @@ test('what the machine could not do is a harness error: INCOMPLETE, a receipt fo
     assert.equal(receipt.result, 'INCOMPLETE', label);
     assert.match(receipt.harness_error, sentence, label);
     assert.deepEqual(failedIds(receipt), [], `${label}: an environment failure is never a product failure`);
-    assert.equal(exitCode, 2, label);
+    assert.equal(exitCode, 3, label);
     assert.equal(receipt.criteria.filter((criterion) => criterion.result === 'pass').length, judgedCount, label);
     assert.deepEqual(receipt.not_judged, receipt.criteria.filter((criterion) => criterion.result === 'not_judged').map((criterion) => criterion.id), label);
     assert.equal(receipt.not_judged.length, criterionIds().length - judgedCount, label);
@@ -2940,7 +2941,7 @@ test('a protocol-only run leaves every render criterion not judged and so folds 
   assert.equal(receipt.not_judged.length, 19);
   assert.ok(receipt.criteria.filter((criterion) => criterion.result === 'not_judged').every((criterion) => criterion.detail === 'skipped: protocol-only run'));
   assert.ok(receipt.criteria.filter((criterion) => !criterion.id.startsWith('render_')).every((criterion) => criterion.result === 'pass'));
-  assert.equal(exitCode, 2);
+  assert.equal(exitCode, 3);
   assert.equal(receipt.protocol_only, true);
   assert.equal(receipt.protocol_check.status, 'passed');
   assert.deepEqual([receipt.basic_host.status, receipt.basic_host.reason], ['not_run', 'skipped: protocol-only run']);
@@ -2964,7 +2965,7 @@ test('--record writes nothing before the result is known, records any result, an
   // A failed run is recorded as a failed run: honest evidence, with the result its criteria fold to.
   const failed = await qualifyDouble({ observe: (view, good) => (view.dataset ? { ...good, frame: { ...good.frame, svg_marks: 1 } } : good) });
   const fail = await failed.run({ record: true });
-  assert.equal(fail.exitCode, 1);
+  assert.equal(fail.exitCode, 2);
   assert.equal(failed.recorded.length, 1);
   assert.equal(failed.recorded[0].result, 'FAIL');
   assert.deepEqual(failed.calls.slice(-2), ['writeReceipt', 'recordReceipt']);
@@ -3511,6 +3512,36 @@ test('both orchestrators take their header from receiptHeader and record only th
     assert.match(source, /process\.argv\.includes\('--record'\)/, name);
     assert.doesNotMatch(source, /requireCleanTree|commit_sha|writeFile\([^)]*qualification\/receipts/, name);
   }
+});
+
+test('both harnesses end with the same exit code for the same outcome, taken from one place', async () => {
+  // The numbers live in the shared envelope module; a harness that kept its own could drift.
+  assert.deepEqual(sharedEnvelope.EXIT_CODES, { PASS: 0, FAIL: 2, INCOMPLETE: 3 });
+  assert.equal(sharedEnvelope.EXIT_REFUSED, 1);
+  assert.ok(Object.isFrozen(sharedEnvelope.EXIT_CODES));
+  assert.ok(!Object.values(sharedEnvelope.EXIT_CODES).includes(sharedEnvelope.EXIT_REFUSED), 'a run that wrote no receipt must not look like one that did');
+  assert.deepEqual(['PASS', 'FAIL', 'INCOMPLETE', 'anything else', 'constructor', undefined].map(sharedEnvelope.exitCodeFor), [0, 2, 3, 3, 3, 3]);
+  for (const [name, harness] of [['docling', doclingCriteria], ['mcp-apps', { EXIT_CODES, exitCodeFor }]]) {
+    assert.equal(harness.EXIT_CODES, sharedEnvelope.EXIT_CODES, `${name} has exit codes of its own`);
+    assert.equal(harness.exitCodeFor, sharedEnvelope.exitCodeFor, `${name} maps a result to an exit code itself`);
+  }
+  // No harness file types an exit number: every one comes from the shared names.
+  const files = [
+    ...['run.mjs', 'lib/criteria.mjs', 'lib/orchestrate.mjs', 'lib/receipt.mjs'].map((file) => `qualification/docling/${file}`),
+    ...['run.mjs', 'lib/criteria.mjs', 'lib/qualify.mjs'].map((file) => `qualification/mcp-apps/${file}`),
+  ];
+  const sources = Object.fromEntries(await Promise.all(files.map(async (file) => [file, await readFile(join(root, file), 'utf8')])));
+  for (const [file, source] of Object.entries(sources)) {
+    assert.doesNotMatch(source, /process\.exitCode\s*=\s*\d|process\.exit\(|EXIT_CODES\s*=\s*Object|\b(PASS|FAIL|INCOMPLETE):\s*\d/, file);
+  }
+  // A run that wrote a receipt ends with the code of its result ...
+  assert.match(sources['qualification/docling/run.mjs'], /process\.exitCode = exitCodeFor\(receipt\.result\);/);
+  assert.match(sources['qualification/mcp-apps/lib/qualify.mjs'], /exitCode: exitCodeFor\(receipt\.result\)/);
+  assert.match(sources['qualification/mcp-apps/run.mjs'], /process\.exitCode = exitCode;/);
+  // ... and one that was refused before it started, with no receipt, ends with EXIT_REFUSED:
+  // Docling by an uncaught error (what Bun exits with), MCP Apps by naming it.
+  assert.match(sources['qualification/mcp-apps/run.mjs'], /\n\} catch \(error\) \{\r?\n[^\n]*\n[^\n]*\n  process\.exitCode = EXIT_REFUSED;\r?\n\}\r?\n$/);
+  assert.doesNotMatch(sources['qualification/docling/run.mjs'], /\bcatch\b/, 'a refused Docling run must stay an uncaught error');
 });
 
 test('no time-budgeted test uses a budget a loaded machine can miss', async () => {

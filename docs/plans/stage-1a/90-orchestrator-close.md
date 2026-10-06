@@ -119,8 +119,8 @@ report which prerequisite and which gate it blocks.
 
 ```powershell
 bun scripts/dev.mjs bootstrap
-bun qualification/docling/run.mjs      # exit 0 PASS, or exit 1 with a recorded finding
-bun qualification/mcp-apps/run.mjs     # exit 0 PASS
+bun qualification/docling/run.mjs      # both harnesses: exit 0 PASS, 2 FAIL, 3 INCOMPLETE;
+bun qualification/mcp-apps/run.mjs     # 1 = refused before it started, no receipt (dirty tree)
 bun scripts/dev.mjs clean-checkout     # all exit codes 0, git_status_empty true
 bun qualification/record.mjs docling mcp-apps   # copies both receipts, whatever their result, and
                                                 # writes each gate's status and phase_0_qualified
