@@ -4,7 +4,8 @@
   "reopened": {
     "decision": "Phase 0 was reopened because the terminal record made before it claimed more than its harnesses had tested and the shared contract and ports had gaps. The web-host check moved to acceptance, and both library qualifications are run again on a clean commit.",
     "decided_on": "2026-10-05",
-    "decided_by": "integration-owner"
+    "decided_by": "integration-owner",
+    "findings_at": "6ca72dd:verification.json"
   },
   "application_implemented": false,
   "current": {
@@ -21,7 +22,7 @@
       "shadcn": "4.21.1"
     },
     "typescript_policy": {
-      "authored": "ui/tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes on authored source and generated files except the Hey API client runtime. skipLibCheck for third-party .d.ts only. Tooling configs are a separate composite project (ui/tsconfig.tooling.json) with types:[bun]. ui/tests is type-checked via ui/tsconfig.tests.json referenced from ui/tsconfig.json.",
+      "authored": "ui/tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes on authored source and generated files except the Hey API client runtime. skipLibCheck for third-party .d.ts only. Tooling configs are a separate composite project (ui/tsconfig.tooling.json) with types:[bun]. ui/tests is type-checked by ui/tsconfig.tests.json, which ui/tsconfig.json does not reference: the `typecheck` script of ui/package.json runs it after the build mode check (`tsc -b && tsc -p tsconfig.tests.json --noEmit`).",
       "generated_client_runtime": "ui/tsconfig.generated.json: client/ and core/ only; exactOptionalPropertyTypes false (hey-api/openapi-ts#3157). Removal probe: typecheck:generated-strict.",
       "wire_validation_boundary": "Host/tool payloads validated with generated Zod schemas keep z.infer/z.output (equivalent in Zod 4) in authored UI. types.gen remains the HTTP-client shape. At a real SDK/wire boundary, construct the generated request object explicitly and omit undefined optionals once in main.tsx. No cast through unknown in ui/src; RulesForm tests mount the form and assert displayed AJV errors.",
       "node_ambient": "No MCP Apps Node-types island. Buffer appears only in @modelcontextprotocol/client .d.ts; skipLibCheck covers it. @types/node is not a direct dependency."
@@ -161,7 +162,7 @@
               "bun scripts/dev.mjs bootstrap"
             ]
           },
-          "covers": "Every CI run starts from a fresh clone of the pushed commit: bootstrap installs from the committed lockfiles only, builds the generator, generates, and builds and type-checks the UI before the gated steps run, so nothing can depend on an uncommitted file. Cargo's registry and target directory and Bun's cache are restored from caches keyed on the lockfiles. CI asserts that the checkout is unchanged directly after bootstrap (the deterministic-foundation gate) and not again after the gated steps, and it does not run the audit; `bun scripts/dev.mjs clean-checkout` asserts a clean tree after the whole sequence and runs the audit locally, and is a tool, not a gate."
+          "covers": "Every CI run starts from a fresh clone of the pushed commit: bootstrap installs from the committed lockfiles only, builds the generator, generates, and builds and type-checks the UI before the gated steps run, so nothing can depend on an uncommitted file. Cargo's registry and target directory are restored from a cache keyed on rust-toolchain.toml and Cargo.lock, with a fallback to the newest cargo cache of the same runner OS when none has that key, so `target` can come from another lockfile state and cargo's own fingerprints under `--locked` decide what is rebuilt; Bun's install cache is keyed on .bun-version and bun.lock and has no fallback. CI asserts that the checkout is unchanged directly after bootstrap (the deterministic-foundation gate) and not again after the gated steps, and it does not run the audit; `bun scripts/dev.mjs clean-checkout` asserts a clean tree after the whole sequence and runs the audit locally, and is a tool, not a gate."
         },
         {
           "id": "github-actions-ci-receipt",

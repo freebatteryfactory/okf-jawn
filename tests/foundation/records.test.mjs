@@ -43,6 +43,8 @@ const recordFields={
 /** Fields that were typed claims CI enforces, a tool derives or history narrates; none may come back. `delivery` restated a status in prose ("not a ... qualified application") that phase_0_qualified derives. */
 const removedFields=['delivery','recorded_at_utc','base_commit','environment','lockfiles_resolved','lockfile_provenance','rust_compiled','rust_generator_executed','frontend_generation_executed',
  'generation_deterministic','project_typescript_checked','project_typescript_passed','authored_typescript_error_count','deterministic_foundation_green','phase_0_note','checks','code_tested_commits'];
+/** Where the findings that reopened Phase 0 are readable in full: `git show` of this, key `reopened.findings`. The one commit the live record names. */
+const findingsAt='6ca72dd:verification.json';
 /** SHA-256 of the file's text from the `historical_archive_record` key to its end, as first committed. */
 const archiveDigest='8a2e38568aa78c9292d722e09c89e31cbd2e72e953c742d1c457565d52a1a1f2';
 /** A decision names what was decided, the calendar day and the role that decided it. */
@@ -133,9 +135,19 @@ test('the record holds no hand-typed result: no "passed" outside a receipt gate,
  // application_implemented yet, so it cannot be typed true: acceptance gates need receipts first.
  assert.deepEqual(Object.entries(typed).filter(([,value])=>typeof value==='boolean').map(([key])=>key),['phase_0_qualified','application_implemented']);
  assert.equal(typed.application_implemented,false);
- // Why Phase 0 was reopened is a decision, not a status.
- assert.deepEqual(Object.keys(typed.reopened),['decision','decided_on','decided_by']);
+ // Why Phase 0 was reopened is a decision, not a status. The twelve findings behind it are
+ // history: the entry names the commit at which this file still listed them in full.
+ assert.deepEqual(Object.keys(typed.reopened),['decision','decided_on','decided_by','findings_at']);
  assertDecision(typed.reopened,'reopened');
+ assert.equal(typed.reopened.findings_at,findingsAt);
+ if(await hasHistory()){
+  const [commit,path]=findingsAt.split(':');
+  const shown=await run('git',['show',`${commit}:${path}`],{cwd:root,capture:true,allowFailure:true});
+  assert.equal(shown.code,0,`${findingsAt} cannot be read from this repository's history`);
+  const then=JSON.parse(shown.stdout).reopened;
+  assert.equal(then.findings.length,12,'the commit the entry names does not hold the twelve findings');
+  for(const finding of then.findings)assert.ok(typeof finding==='string'&&finding.length>40,'a finding there is not a sentence');
+ }
 });
 test('the archive record is kept byte for byte',async()=>{
  const text=await read('verification.json');
@@ -206,6 +218,11 @@ test('every Phase 0 gate has exactly one kind and only the fields of that kind',
  assert.match(await read('ui/tests/unit/layout.test.tsx'),/refuses a chart specification that compile rejects/);
  assert.match(await read('ui/tests/unit/mcp-apps-dispatch.test.tsx'),/describe\('MCP App wire boundary'/);
  assert.match(await read('ui/package.json'),/"typecheck": "tsc -b && tsc -p tsconfig\.tests\.json --noEmit"/,'the typecheck step no longer covers ui/tests');
+ // The record says how ui/tests is type-checked as it is: by the script, not by a project reference.
+ const policy=(await record()).current.typescript_policy.authored;
+ assert.ok(policy.endsWith('ui/tests is type-checked by ui/tsconfig.tests.json, which ui/tsconfig.json does not reference: the `typecheck` script of ui/package.json runs it after the build mode check (`tsc -b && tsc -p tsconfig.tests.json --noEmit`).'),'typescript_policy.authored does not say how ui/tests is type-checked');
+ const references=JSON.parse(await read('ui/tsconfig.json')).references.map(reference=>reference.path);
+ assert.deepEqual(references,['./tsconfig.generated.json','./tsconfig.tooling.json'],'ui/tsconfig.json references changed: the sentence in typescript_policy.authored must follow');
 });
 test('the Docling gate carries the one failure the owner accepted, and the gates that carry the cures exist',async()=>{
  const gates=(await record()).current.gates;
@@ -299,6 +316,18 @@ test('a ci gate names a job of the workflow by its check name, and that job runs
    }else assert.fail(`${where}: no rule says which CI step runs a file of this sort`);
   }
  }
+ // What clean-checkout-rerun says of the caches is what the workflow configures: the cargo cache
+ // falls back to any cargo cache of the runner OS, the Bun cache has no fallback.
+ const cleanCheckout=gates.find(gate=>gate.id==='clean-checkout-rerun');
+ const caches=Bun.YAML.parse(await read('.github/workflows/ci.yml')).jobs.foundation.steps.filter(step=>step.uses?.startsWith('actions/cache@')).map(step=>step.with);
+ const cargoCache=caches.find(cache=>/^target$/m.test(cache.path)),bunCache=caches.find(cache=>cache.path.includes('~/.bun/install/cache'));
+ assert.equal(cargoCache.key,"cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}");
+ assert.equal(cargoCache['restore-keys'].trim(),'cargo-${{ runner.os }}-');
+ assert.equal(bunCache.key,"bun-${{ runner.os }}-${{ hashFiles('.bun-version', 'bun.lock') }}");
+ assert.equal(bunCache['restore-keys'],undefined);
+ assert.match(cleanCheckout.covers,/restored from a cache keyed on rust-toolchain\.toml and Cargo\.lock, with a fallback to the newest cargo cache of the same runner OS when none has that key, so `target` can come from another lockfile state/);
+ assert.match(cleanCheckout.covers,/Bun's install cache is keyed on \.bun-version and bun\.lock and has no fallback\./);
+ assert.doesNotMatch(cleanCheckout.covers,/caches keyed on the lockfiles/);
  // "and the checkout" in deterministic-foundation is held by a workflow step that is no dev.mjs
  // task (bootstrap regenerates before gen-check runs), so the test that pins that step is its evidence.
  const foundation=gates.find(gate=>gate.id==='deterministic-foundation');
@@ -316,6 +345,9 @@ test('a ci gate names a job of the workflow by its check name, and that job runs
 test('no gate text, and nothing else outside the archive, carries a commit hash or a CI run number; history lives in git',async()=>{
  const {historical_archive_record:_archive,...live}=await record();
  assert.deepEqual(Object.keys(live.current.gates),['phase_0','construction','acceptance']);
+ // One pointer into history is kept on purpose and is exactly this one: where the reopening findings can be read.
+ assert.equal(live.reopened.findings_at,findingsAt);
+ live.reopened={...live.reopened,findings_at:''};
  // The gates left unconverted keep their old text until they gain a kind.
  live.current.gates.phase_0=live.current.gates.phase_0.filter(gate=>!Object.hasOwn(unconverted,gate.id));
  // Seven or more hex digits in a row: a short or full commit, or a run number.
@@ -370,6 +402,9 @@ test('README, AGENTS and the close-out plan state that receipt-backed statuses a
  // What a changed input costs, and both ways out of it.
  assert.ok(readme.includes('when an input of a recorded receipt changes, `check-receipts` fails until the harness is re-run and recorded, or `bun qualification/record.mjs` is run to write the gate back to `incomplete`'),'README does not say what happens when an input of a recorded receipt changes');
  assert.match(readme,/is trusted for nothing, whatever result it types: its gate derives `incomplete`/);
+ // The limit is said plainly where the records are described.
+ assert.ok(readme.includes('receipts are produced on a developer machine and are not signed, so a consistent hand edit of a receipt is not detected by `check-receipts`'),'README does not state that receipts are unsigned');
+ assert.ok(readme.includes('Producing the receipts in CI, where a contributor cannot edit them, is the planned cure.'),'README does not name the planned cure');
  const plan=await read('docs/plans/stage-1a/90-orchestrator-close.md');
  assert.match(plan,/The orchestrator types no status in `verification\.json`/);
  assert.doesNotMatch(plan,/Decide terminal states|gets the state decided in O\.4/,'the plan still has the orchestrator typing gate states');
