@@ -50,8 +50,10 @@ import {
 import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
 import { OCR_FIXTURES, decodeFixture, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
+import { PROTOCOL_CRITERIA, PROTOCOL_RULES, canonicalJson, judgeProtocol, observeProtocol } from '../../qualification/mcp-apps/lib/protocol.mjs';
 import {
   APP_ONLY_TOOLS,
+  APP_RESOURCE_URI,
   MCP_APPS_INPUTS,
   PRESENT_DATASET,
   REACT_DEVELOPMENT_MARKER,
@@ -1731,6 +1733,166 @@ test('the MCP Apps harness serves the committed fixtures and bundle whatever env
   assert.equal(source.match(/OKF_MCP_APPS_(DIST|FIXTURES):/g).length, 2, 'no second place builds the harness environment');
   // And what the harness says it serves is compared with the committed dataset before anything renders.
   assert.match(source, /check\.dataset\?\.sha256 !== committedDataset\.digest/);
+});
+
+const APP_MIME = 'text/html;profile=mcp-app';
+const DOUBLE_HTML = '<!doctype html><html><body><div id="root"></div></body></html>';
+
+/**
+ * An MCP client double that answers as the harness must for the committed fixtures, and what
+ * the protocol rules then expect. `change` replaces single answers; an answer may throw.
+ */
+async function harnessDouble(change = {}) {
+  const { bytes, digest, present } = await committedDataset();
+  const product = JSON.parse(await readFile(join(root, 'api/mcp-tools.json'), 'utf8')).tools.find((tool) => tool.name === 'read_object');
+  const tool = (name, ui, extra = {}) => ({ name, _meta: { ui }, inputSchema: { type: 'object' }, ...extra });
+  const text = (value) => [{ type: 'text', text: value }];
+  const answers = {
+    blockBytes: 64,
+    tools: () => [
+      ...VIEWS.map((view) => tool(view.tool, { resourceUri: APP_RESOURCE_URI })),
+      tool('show', { visibility: ['app'] }),
+      tool('read_object', { visibility: ['app'] }, { inputSchema: product.inputSchema, outputSchema: product.outputSchema }),
+    ],
+    resources: () => [{ uri: APP_RESOURCE_URI, name: 'app', mimeType: APP_MIME }],
+    resource: (uri) => ({ contents: [{ uri, mimeType: APP_MIME, text: DOUBLE_HTML, _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] } } } }] }),
+    render: (name) => ({ structuredContent: name === 'render_present' ? present : { fixture: name }, content: text(`${name} (text fallback).`) }),
+    show: (args) => ({ structuredContent: { source: { item_id: args.item_id, revision: args.at.revision } }, content: text('show') }),
+    block: (block) => block,
+    readObject(args) {
+      const known = ['source', 'object', 'offset', 'length'];
+      if (Object.keys(args).some((key) => !known.includes(key)) || args.object !== digest) return { isError: true, content: text('read_object: refused') };
+      const offset = Number(args.offset ?? '0');
+      const part = bytes.subarray(offset, offset + answers.blockBytes);
+      return {
+        structuredContent: answers.block({
+          sha256: digest,
+          offset: String(offset),
+          total_size: String(bytes.length),
+          media_type: 'application/json',
+          data_base64: part.toString('base64'),
+          has_more: offset + part.length < bytes.length,
+        }),
+        content: text('block'),
+      };
+    },
+    ...change,
+  };
+  const client = {
+    getServerVersion: () => ({ name: 'okf-qualify-mcp-apps', version: '0.1.0' }),
+    listTools: async () => ({ tools: answers.tools() }),
+    listResources: async () => ({ resources: answers.resources() }),
+    readResource: async ({ uri }) => answers.resource(uri),
+    callTool: async ({ name, arguments: args }) => (name === 'show' ? answers.show(args) : name === 'read_object' ? answers.readObject(args) : answers.render(name)),
+  };
+  const expected = {
+    render_tools: VIEWS.map((view) => view.tool),
+    app_only_tools: APP_ONLY_TOOLS,
+    resource_uri: APP_RESOURCE_URI,
+    mime_type: APP_MIME,
+    bundle_sha256: createHash('sha256').update(DOUBLE_HTML).digest('hex'),
+    product_read_object: product,
+  };
+  return { client, expected, digest, bytes, product, present };
+}
+
+test('the protocol check judges every rule as a criterion and passes a server that answers as the harness must', async () => {
+  const { client, expected, digest } = await harnessDouble();
+  const observed = await observeProtocol(client, { views: VIEWS });
+  const judged = judgeProtocol(expected, observed);
+  assert.deepEqual(judged.criteria.map((criterion) => criterion.id), PROTOCOL_CRITERIA);
+  assert.deepEqual(judged.criteria.filter((criterion) => criterion.result !== 'pass'), []);
+  assert.ok(judged.criteria.every((criterion) => criterion.required === true));
+  assert.equal(PROTOCOL_CRITERIA.length, 13);
+  for (const id of PROTOCOL_CRITERIA) {
+    assert.match(id, /^protocol\/[a-z_]+$/);
+    assert.ok(PROTOCOL_RULES[id].length > 40, `${id} has no rule text`);
+  }
+  // What the receipt keeps is what was answered.
+  assert.deepEqual(judged.record.server, { name: 'okf-qualify-mcp-apps', version: '0.1.0' });
+  assert.deepEqual(judged.record.object_reads, [{
+    binding: 'metrics', object: digest, blocks: 4, block_offsets: ['0', '64', '128', '192'], stopped: 'finished', assembled_bytes: 223, assembled_sha256: digest,
+  }]);
+  assert.deepEqual(judged.record.show_calls.map((call) => call.binding), ['venue', 'metrics']);
+  assert.deepEqual(judged.record.unknown_digest, { is_error: true, structured: false, text: 'read_object: refused' });
+  assert.deepEqual(judged.record.unknown_argument, { is_error: true, structured: false, text: 'read_object: refused' });
+  const listed = judged.record.tools.find((tool) => tool.name === 'read_object');
+  assert.equal(listed.input_schema_sha256, judged.record.product_read_object.input_schema_sha256);
+  assert.equal(listed.output_schema_sha256, judged.record.product_read_object.output_schema_sha256);
+  assert.match(listed.output_schema_sha256, /^[0-9a-f]{64}$/);
+
+  // Key order is not a difference; a value is.
+  assert.equal(canonicalJson({ b: [1, { d: 1, c: 2 }], a: null }), canonicalJson({ a: null, b: [1, { c: 2, d: 1 }] }));
+  assert.notEqual(canonicalJson({ a: [1, 2] }), canonicalJson({ a: [2, 1] }));
+});
+
+test('each protocol rule fails on its own wrong answer, and every other rule is still judged', async () => {
+  const base = await harnessDouble();
+  const tools = () => base.client.listTools().then((listed) => listed.tools);
+  const baseTools = await tools();
+  const good = (await base.client.readResource({ uri: APP_RESOURCE_URI })).contents[0];
+  const refuse = () => {
+    throw new Error("Structured content does not match the tool's output schema");
+  };
+  const dependent = ['show_bound_sources', 'read_object_ranged_loop', 'read_object_digest', 'read_object_unknown_digest_refused', 'read_object_unknown_argument_refused'];
+  const cases = [
+    ['read_object is not listed', { tools: () => baseTools.filter((tool) => tool.name !== 'read_object') }, ['app_only_tools', 'read_object_declaration'], /lists no read_object/],
+    ['a render tool names another resource', { tools: () => baseTools.map((tool) => (tool.name === 'render_source' ? { ...tool, _meta: { ui: { resourceUri: 'ui://other/app.html' } } } : tool)) }, ['render_tools'], /render_source resourceUri is ui:\/\/other\/app\.html/],
+    ['a render tool is missing', { tools: () => baseTools.filter((tool) => tool.name !== 'render_timeline') }, ['render_tools'], /render tools are \["render_changes","render_present","render_source"\]/],
+    ['a tool is neither a render tool nor app-only', { tools: () => [...baseTools, { name: 'extra', inputSchema: {} }] }, ['app_only_tools'], /not exactly one of render tool or app-only/],
+    ['show is visible to the model', { tools: () => baseTools.map((tool) => (tool.name === 'show' ? { ...tool, _meta: { ui: { visibility: ['model', 'app'] } } } : tool)) }, ['app_only_tools'], /app-only tools are \["read_object"\]/],
+    ['read_object has a hand-written input schema', { tools: () => baseTools.map((tool) => (tool.name === 'read_object' ? { ...tool, inputSchema: { type: 'object', additionalProperties: false } } : tool)) }, ['read_object_declaration'], /input_schema is not the product's/],
+    ['read_object declares no output schema', { tools: () => baseTools.map((tool) => (tool.name === 'read_object' ? { ...tool, outputSchema: undefined } : tool)) }, ['read_object_declaration'], /output_schema is not the product's/],
+    ['tools/list fails', { tools: () => { throw new Error('boom'); } }, ['render_tools', 'app_only_tools', 'read_object_declaration'], /tools\/list failed: boom/],
+    ['two resources are listed', { resources: () => [{ uri: APP_RESOURCE_URI, name: 'app' }, { uri: APP_RESOURCE_URI, name: 'again' }] }, ['resource_listed'], /lists 2 resources/],
+    ['another resource is listed', { resources: () => [{ uri: 'ui://other/app.html', name: 'app' }] }, ['resource_listed'], /uri is ui:\/\/other\/app\.html/],
+    ['no resource is listed', { resources: () => [] }, ['resource_listed', 'resource_mime_type', 'resource_meta_ui', 'resource_is_built_bundle'], /lists 0 resources/],
+    ['the resource has another mime type', { resource: () => ({ contents: [{ ...good, mimeType: 'text/html' }] }) }, ['resource_mime_type'], /mimeType is text\/html, not text\/html;profile=mcp-app/],
+    ['the resource has no csp', { resource: () => ({ contents: [{ ...good, _meta: { ui: {} } }] }) }, ['resource_meta_ui'], /_meta\.ui\.csp is not an object/],
+    ['the csp lacks a domain list', { resource: () => ({ contents: [{ ...good, _meta: { ui: { csp: { connectDomains: [] } } } }] }) }, ['resource_meta_ui'], /lacks a connectDomains or resourceDomains array/],
+    ['the resource is not the built bundle', { resource: () => ({ contents: [{ ...good, text: `${DOUBLE_HTML} ` }] }) }, ['resource_is_built_bundle'], /the bundle manifest says/],
+    ['a render tool has no text fallback', { render: (name) => ({ structuredContent: name === 'render_present' ? base.present : { fixture: name }, content: [] }) }, ['render_tool_results'], /render_source returned no text fallback/],
+    ['a render tool is rejected by the client', { render: refuse }, ['render_tool_results', ...dependent], /render_source failed: Structured content does not match/],
+    ['read_object returns everything in one block', { blockBytes: 1000 }, ['read_object_ranged_loop'], /in one block; the ranged loop was not exercised/],
+    ['read_object labels a block with another offset', { block: (block) => ({ ...block, offset: '0' }) }, ['read_object_ranged_loop'], /changed identity or range at 64/],
+    ['read_object labels a block with another object', { block: (block) => ({ ...block, sha256: 'f'.repeat(64) }) }, ['read_object_ranged_loop'], /changed identity or range at 0/],
+    ['read_object makes no progress', { block: (block) => ({ ...block, data_base64: '', has_more: true }) }, ['read_object_ranged_loop', 'read_object_digest'], /made no progress/],
+    ['read_object serves other bytes', { block: (block) => ({ ...block, data_base64: Buffer.from(Buffer.from(block.data_base64, 'base64').map((byte) => (byte === 0x34 ? 0x35 : byte))).toString('base64') }) }, ['read_object_digest'], /bytes read hash to [0-9a-f]{64}, not/],
+    ['read_object states another total size', { block: (block) => ({ ...block, total_size: '999' }) }, ['read_object_digest'], /total_size is "999", 223 bytes were read/],
+    ['read_object is rejected by the client', { readObject: refuse }, ['read_object_ranged_loop', 'read_object_digest', 'read_object_unknown_digest_refused', 'read_object_unknown_argument_refused'], /read_object for binding metrics failed: Structured content does not match/],
+  ];
+  for (const [label, change, failing, detail] of cases) {
+    const { client, expected } = await harnessDouble(change);
+    const judged = judgeProtocol(expected, await observeProtocol(client, { views: VIEWS }));
+    assert.deepEqual(judged.criteria.map((criterion) => criterion.id), PROTOCOL_CRITERIA, label);
+    const failed = judged.criteria.filter((criterion) => criterion.result === 'fail');
+    assert.deepEqual(failed.map((criterion) => criterion.id).sort(), failing.map((id) => `protocol/${id}`).sort(), `${label}: ${JSON.stringify(failed)}`);
+    assert.ok(judged.criteria.every((criterion) => ['pass', 'fail'].includes(criterion.result)), label);
+    assert.ok(failed.some((criterion) => detail.test(criterion.detail)), `${label}: ${JSON.stringify(failed)}`);
+  }
+
+  // The two refusals are judged from what came back, not assumed.
+  const { digest, bytes } = base;
+  const served = (args) => ({
+    structuredContent: { sha256: args.object, offset: '0', total_size: String(bytes.length), media_type: 'application/json', data_base64: bytes.subarray(0, 64).toString('base64'), has_more: true },
+    content: [{ type: 'text', text: 'block' }],
+  });
+  for (const [label, accepts, failing] of [
+    ['an unknown digest is served', (args) => args.object !== digest, 'read_object_unknown_digest_refused'],
+    ['an unknown argument is served', (args) => 'not_a_product_argument' in args, 'read_object_unknown_argument_refused'],
+  ]) {
+    const honest = await harnessDouble();
+    const { client, expected } = await harnessDouble({ readObject: (args) => (accepts(args) ? served(args) : honest.client.callTool({ name: 'read_object', arguments: args })) });
+    const judged = judgeProtocol(expected, await observeProtocol(client, { views: VIEWS }));
+    const failed = judged.criteria.filter((criterion) => criterion.result === 'fail');
+    assert.deepEqual(failed.map((criterion) => criterion.id), [`protocol/${failing}`], label);
+    assert.match(failed[0].detail, /was not answered with isError; .* was answered with structuredContent/, label);
+  }
+
+  // A loop that never ends is stopped and reported, not waited for.
+  const endless = await harnessDouble({ block: (block) => ({ ...block, has_more: true, data_base64: 'QQ==' }) });
+  const stopped = judgeProtocol(endless.expected, await observeProtocol(endless.client, { views: VIEWS, maxBlocks: 5 }));
+  assert.match(stopped.criteria.find((criterion) => criterion.id === 'protocol/read_object_ranged_loop').detail, /did not finish in 5 calls/);
 });
 
 test('both orchestrators take their header from receiptHeader and record only through recordReceipt', async () => {
