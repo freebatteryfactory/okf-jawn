@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cleanCheckout, cleanCheckoutTasks, foundationTests, laneSteps, premergeSteps, revisionLabel, runLane, runPremerge } from '../../scripts/lib/gates.mjs';
 import { laneNamed, lanes } from '../../scripts/lib/lanes.mjs';
+import { run } from '../../scripts/lib/process.mjs';
 import { fixtureRepo, git } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const read=file=>readFile(join(root,file),'utf8');
@@ -138,13 +139,93 @@ test('every foundation test file is in exactly one of the fast and slow lists, a
  assert.match(entry,/case 'check-offline': await offlineChecks\(\{ fast: args\.includes\('--fast'\) \}\); break;/);
  assert.match(entry,/!fast \|\| foundationTests\.fast\.includes\(name\)/);
 });
-test('no foundation test or script source contains a raw control byte where a regex escape was meant',async()=>{
+/** Files that may start with a UTF-8 byte-order mark. None: no tracked file needs one, and every tool here reads UTF-8 without it. */
+const bomAllowed=[];
+/** The offset of the first byte that makes `bytes` invalid UTF-8. */
+function firstInvalidUtf8(bytes){
+ // With `stream` an unfinished final sequence is not an error, so a prefix fails only once it holds the bad byte.
+ const valid=length=>{try{new TextDecoder('utf-8',{fatal:true}).decode(bytes.subarray(0,length),{stream:true});return true;}catch{return false;}};
+ if(valid(bytes.length))return bytes.length-1;
+ let low=0,high=bytes.length;
+ while(high-low>1){const middle=(low+high)>>1;if(valid(middle))low=middle;else high=middle;}
+ return high-1;
+}
+/**
+ * Every tracked text file of `repo` with its bytes. Git decides what is text. A file whose `text`
+ * attribute is unset (the `binary` macro in .gitattributes) is binary. For every other file
+ * (`text=auto`) git's own content detection decides, as `git ls-files --eol` reports it, with
+ * one correction: that detection calls a file with a single NUL byte binary, which is one of the
+ * defects looked for here, so a detected-binary file is left out only when it is not UTF-8 either.
+ * No list of extensions is kept.
+ */
+async function trackedText(repo){
+ const listed=(await run('git',['ls-files','--eol','-z'],{cwd:repo,capture:true})).stdout.split('\0').filter(Boolean);
  const files=[];
- for(const dir of ['tests/foundation','scripts'])for(const entry of await readdir(join(root,dir),{recursive:true}))if(entry.endsWith('.mjs'))files.push(`${dir}/${entry}`.replaceAll('\\','/'));
- assert.ok(files.length>10,'the source scan found almost nothing');
- // Tab, LF and CR are legitimate; every other C0 byte (a backspace from a mistyped `\b` for one) is not.
- const control=/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/;
- for(const file of files){const at=(await read(file)).search(control);assert.equal(at,-1,`${file} has a raw control byte at offset ${at}`);}
+ for(const line of listed){
+  const match=/^i\/(\S*)\s+w\/(\S*)\s+attr\/(.*?)\s*\t(.*)$/s.exec(line);
+  assert.ok(match,`git ls-files --eol printed a line this guard cannot read: ${JSON.stringify(line)}`);
+  const [,index,work,attributes,path]=match;
+  if(/^-text\b/.test(attributes))continue;
+  // Deleted in the working tree and not yet staged: there are no bytes to read.
+  if(!existsSync(join(repo,path)))continue;
+  const bytes=await readFile(join(repo,path));
+  let utf8=true;
+  try{new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{utf8=false;}
+  if(!utf8&&(work||index)==='-text')continue;
+  files.push({path,bytes,utf8});
+ }
+ return files;
+}
+/** What is wrong with the tracked text files of `repo`, as `{ path, kind, message }`: a raw control byte, bytes that are not UTF-8, or a byte-order mark. */
+async function textProblems(repo){
+ const files=await trackedText(repo);
+ const problems=[];
+ for(const {path,bytes,utf8} of files){
+  // Tab, LF and CR are legitimate; every other byte below 0x20 (a NUL, a backspace from a mistyped `\b`) is not.
+  const at=bytes.findIndex(byte=>byte<0x20&&byte!==0x09&&byte!==0x0a&&byte!==0x0d);
+  if(at>=0)problems.push({path,kind:'control',message:`${path} has the raw control byte 0x${bytes[at].toString(16).padStart(2,'0')} at offset ${at}`});
+  if(!utf8)problems.push({path,kind:'utf8',message:`${path} is not valid UTF-8: byte 0x${bytes[firstInvalidUtf8(bytes)].toString(16)} at offset ${firstInvalidUtf8(bytes)}`});
+  else if(bytes[0]===0xef&&bytes[1]===0xbb&&bytes[2]===0xbf&&!bomAllowed.includes(path))problems.push({path,kind:'bom',message:`${path} starts with a UTF-8 byte-order mark`});
+ }
+ return {scanned:files.length,problems};
+}
+test('no tracked text file, in any directory, contains a raw control byte',async()=>{
+ const {scanned,problems}=await textProblems(root);
+ assert.ok(scanned>300,`the scan read only ${scanned} files`);
+ assert.deepEqual(problems.filter(problem=>problem.kind==='control').map(problem=>problem.message),[]);
+});
+test('every tracked text file is valid UTF-8 and has no byte-order mark',async()=>{
+ const {problems}=await textProblems(root);
+ assert.deepEqual(problems.filter(problem=>problem.kind!=='control').map(problem=>problem.message),[]);
+ assert.deepEqual(bomAllowed,[],'a file allowed a byte-order mark needs its reason written beside it');
+});
+test('the text guards read every directory and leave out only what git treats as binary',async t=>{
+ const bytes=(...parts)=>Buffer.concat(parts.map(part=>typeof part==='string'?Buffer.from(part,'utf8'):Buffer.from(part)));
+ const zip=bytes([0x50,0x4b,0x03,0x04,0x00,0x00,0xff,0xfe,0x08,0x00,0x9c,0xa7]);
+ const {root:repo}=await fixtureRepo(t,{
+  '.gitattributes':'* text=auto eol=lf\n*.png binary\n',
+  'README.md':'plain text with a tab\tand a section sign \u00a7 in UTF-8\n',
+  'crates/storage/src/backspace.rs':bytes('//! a word boundary typed raw: ',[0x08],'\n'),
+  'crates/storage/src/zeroes.rs':bytes('//! two NUL bytes ',[0x00,0x00],'\n'),
+  'docs/plans/latin1.md':bytes('Section ',[0xa7],' 5, saved as Latin-1\n'),
+  'ui/src/bom.ts':bytes([0xef,0xbb,0xbf],'export const marked = true;\n'),
+  'scripts/escape.mjs':bytes('const bell = "',[0x1b],'[0m";\n'),
+  // Declared binary by attribute, although git's content detection would call these bytes text.
+  'tests/fixtures/declared.png':bytes('reads like text ',[0x08,0xa7],'\n'),
+  'tests/fixtures/undeclared.docx':zip,
+ });
+ const {scanned,problems}=await textProblems(repo);
+ assert.equal(scanned,7,'the declared and the detected binary file are the only ones left out');
+ assert.deepEqual(problems.map(problem=>problem.message).sort(),[
+  'crates/storage/src/backspace.rs has the raw control byte 0x08 at offset 31',
+  'crates/storage/src/zeroes.rs has the raw control byte 0x00 at offset 18',
+  'docs/plans/latin1.md is not valid UTF-8: byte 0xa7 at offset 8',
+  'scripts/escape.mjs has the raw control byte 0x1b at offset 14',
+  'ui/src/bom.ts starts with a UTF-8 byte-order mark',
+ ]);
+ // An unfinished sequence at the very end is named at the last byte.
+ assert.equal(firstInvalidUtf8(Buffer.from([0x61,0xc3])),1);
+ assert.equal(firstInvalidUtf8(Buffer.from([0x61,0x62,0xff,0x63])),2);
 });
 test('a failed git status counts as dirty, never as the clean commit',async t=>{
  const {root:repo}=await fixtureRepo(t,fixture);const sha=await git(repo,'rev-parse','HEAD');

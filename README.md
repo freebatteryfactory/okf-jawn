@@ -6,7 +6,7 @@ A document workspace for people and their AI tools.
 
 This repository contains the **full-scope Phase 0 foundation source**: typed contracts for the intended application, real generator integrations, repository/task setup, shared application, storage and search ports, HTTP/CLI adapters, MCP result adapters, reusable presentation source, tests, and an offline vendor-reference index.
 
-**It is not the finished application, and Phase 0 is qualified only when `verification.json` records passing real generation and consumer checks.** The archive was first assembled in an environment without Rust, network access or the selected JavaScript tooling; that record is kept in `verification.json` as history, not as current readiness. No lockfile, generated OpenAPI, generated client or bundled MCP App is ever handwritten.
+**It is not the finished application, and Phase 0 is qualified only when the committed qualification receipts say so.** Nobody types a result into `verification.json`: `bun qualification/record.mjs` writes the status of each receipt-backed gate and `phase_0_qualified` from the receipts under `qualification/receipts/`, `bun scripts/dev.mjs check-receipts` verifies them, and the gates that CI enforces on every push (real generation and the consumer checks among them) carry no status. The archive was first assembled in an environment without Rust, network access or the selected JavaScript tooling; that record is kept in `verification.json` as history, not as current readiness. No lockfile, generated OpenAPI, generated client or bundled MCP App is ever handwritten.
 
 The application is Rust: the server, application core, storage, ingestion, MCP and CLI. The browser workspace is TypeScript/React built with Vite. **Bun** is the JavaScript package manager and tooling runtime for the workspace, scripts, frontend builds and offline tests; it is not an application server. Node and pnpm are not project prerequisites.
 
@@ -18,7 +18,7 @@ This is self-contained **source and handoff context**, not a vendored offline di
 
 ## Start here
 
-Read `SPEC.md` for product meaning, `AGENTS.md` for construction rules, and `verification.json` for what was actually checked. An agent does not need this conversation.
+Read `SPEC.md` for product meaning, `AGENTS.md` for construction rules, and `verification.json` for what each gate covers and what closes it: a committed receipt, a CI job, or a recorded decision. An agent does not need this conversation.
 
 ```sh
 bun scripts/dev.mjs init
@@ -42,7 +42,7 @@ Equivalent `just` recipes are provided. `lock` is the only task that resolves de
 
 `gen` generates into two temporary directories, compares the entire output file sets and bytes, then publishes only generated directories. `gen-check` compares those results to the checkout without editing it. The generator does not require a database, converter, identity provider, or running application. Generator output is not an implementation-status claim.
 
-`bootstrap` and `init` install the tracked hooks through `core.hooksPath`; nothing else needs installing. pre-commit runs `check-offline --fast` (the tests that create no repository and spawn no process, under a second). pre-push runs the full `check-offline`, `cargo fmt --all --check` and, for each pushed `build/*` ref (read from the refs git passes on stdin, at the commit being pushed), the scope check, and for every pushed ref the receipt check (`check-receipts --head <pushed sha>`): a stale qualification receipt blocks a push to `main` or `integration/*` and is a `warning:` on any other ref, naming the harness to re-run. Hooks never regenerate files or touch another worktree.
+`bootstrap` and `init` install the tracked hooks through `core.hooksPath`; nothing else needs installing. pre-commit runs `check-offline --fast` (the tests that create no repository and spawn no process, under a second). pre-push runs the full `check-offline`, `cargo fmt --all --check` and, for each pushed `build/*` ref (read from the refs git passes on stdin, at the commit being pushed), the scope check, and for every pushed ref the receipt check (`check-receipts --head <pushed sha>`): a stale or hand-edited qualification receipt, or a typed gate status the receipts at that commit do not derive, blocks a push to `main` or `integration/*` and is a `warning:` on any other ref, naming the harness to re-run or the command that rewrites the status. Hooks never regenerate files or touch another worktree.
 
 ## What gets generated
 
@@ -98,6 +98,8 @@ The intended release is the complete product in `SPEC.md`, not a succession of c
 ## Verification and limits
 
 `check-offline` runs the dependency-free tooling tests with `bun test` (`check-offline --fast` only those that create no repository and spawn no process, as pre-commit does): positive/negative HTTP harness controls and static contract/policy/toolchain consistency checks. It is not Rust compilation, TypeScript 7 type checking (`tsc -b` in `ui/`, which imports the route tree that `bun scripts/dev.mjs routes` writes; the Hey API client runtime is a separate project in `ui/tsconfig.generated.json` because of hey-api/openapi-ts#3157, and `typecheck:generated-strict` reports when that exception can go), Schemars/Hey API execution, full semantic schema validation, WorkOS qualification, conversion, or product acceptance. `foundation` requests the broader checks and fails if their prerequisites are missing.
+
+Each Phase 0 gate in `verification.json` has one kind. A `receipt` gate names the committed receipt that closes it and its harness's tracked `criteria.json`; its status is derived, never typed: `bun qualification/record.mjs <name>...` copies finished receipts of any result into `qualification/receipts/` (a failed qualification is evidence, and its gate then says `failed`) and writes each such status and `phase_0_qualified` from them, and with no name only rewrites those values. A `ci` gate names the workflow job and step that enforce it on every push and carries no status. A `decision` gate records a choice, its date and the role that made it. `bun scripts/dev.mjs check-receipts` fails when a typed value differs from the derived one, when a receipt's result is not the fold of its criteria, when a criterion its harness pins is missing or not required, when a receipt is for another gate or no gate names it, and when a receipt's inputs changed after the commit it cites. `bun scripts/dev.mjs clean-checkout` reruns the whole foundation in a detached worktree of HEAD and requires that tree to stay clean; it is a local tool, not a gate, because CI starts from a fresh clone on every run.
 
 `bun scripts/dev.mjs qualify mcp-wire` checks a supplied running MCP endpoint. It does not certify that a host rendered the iframe. `qualify application` exercises a disposable test deployment; it refuses to run without explicit credentials and a test-environment opt-in. No secret or external endpoint is supplied by default.
 

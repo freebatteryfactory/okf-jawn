@@ -1,6 +1,6 @@
 # Work in okf-jawn
 
-Read README.md, SPEC.md and verification.json first. The delivered foundation is not a completed application. Do not inherit a claim of green from file presence; only the recorded results of the selected tools count.
+Read README.md, SPEC.md and verification.json first. The delivered foundation is not a completed application. Do not inherit a claim of green from file presence; only the recorded results of the selected tools count. Nobody types a result into `verification.json`: `bun qualification/record.mjs` writes each receipt-backed gate status and `phase_0_qualified` from the receipts under `qualification/receipts/`, `bun scripts/dev.mjs check-receipts` verifies them, and a gate that CI enforces carries no status.
 
 ## Shared map
 
@@ -45,7 +45,7 @@ Classify a failure before repair: your defect, unfinished neighboring work, or a
 
 Do not suppress lints, fake success, discard unsupported data, alter expected output to match implementation, or declare a partial test to be the full suite. Honest limitation comments are encouraged. Refactors for elegance and speculative optimizations wait until connected behavior exists.
 
-The integration owner holds Cargo.toml/Cargo.lock, package.json/bun.lock and other package manifests, contract, xtask, scripts, api, generated outputs, deployment and independent acceptance. Ownership is enforced locally by isolated worktrees; CODEOWNERS is review routing, not a local editing lock, and a ruleset on `main` requires the CI jobs and blocks force-push; merges are merge commits only. Never independently rewrite another lane's worktree. `bun scripts/dev.mjs scope`, part of every lane gate and of pre-push, fails when a lane branch changes a path outside its directories, a manifest, or a lockfile. pre-push also runs `check-receipts --head <pushed sha>`: a stale qualification receipt blocks `main` and `integration/*` pushes and warns on other refs.
+The integration owner holds Cargo.toml/Cargo.lock, package.json/bun.lock and other package manifests, contract, xtask, scripts, api, generated outputs, deployment and independent acceptance. Ownership is enforced locally by isolated worktrees; CODEOWNERS is review routing, not a local editing lock, and a ruleset on `main` requires the CI jobs and blocks force-push; merges are merge commits only. Never independently rewrite another lane's worktree. `bun scripts/dev.mjs scope`, part of every lane gate and of pre-push, fails when a lane branch changes a path outside its directories, a manifest, or a lockfile. pre-push also runs `check-receipts --head <pushed sha>`: a stale or hand-edited qualification receipt, or a typed gate status the receipts at that commit do not derive, blocks `main` and `integration/*` pushes and warns on other refs.
 
 ## Conventions
 
