@@ -25,7 +25,7 @@ export function laneSteps(root, lane) {
   const packages = lane.crates.flatMap(name => ['-p', name]);
   const features = lane.features.length ? ['--features', lane.features.join(',')] : [];
   return [
-    cargo(root, 'fmt', 'fmt', '--all', '--check'),
+    cargo(root, 'fmt', 'fmt', '--check', ...packages),
     cargo(root, 'clippy', 'clippy', '--locked', ...packages, ...features, '--all-targets', '--', '-D', 'warnings'),
     cargo(root, 'test', 'test', '--locked', ...packages, ...features),
     cargo(root, 'source-policy', 'xtask', 'source-policy', '--root', root),
@@ -63,11 +63,12 @@ export async function runSteps(steps, { logPath, failFast, execute = executeStep
   return { results, failed: results.filter(result => result.code !== 0).map(result => result.id), write };
 }
 
-/** HEAD, suffixed `-dirty` when the tree has uncommitted changes, so a log never claims a commit it did not test. */
+/** HEAD, suffixed `-dirty` when the tree has uncommitted changes or its status cannot be read, so a log never claims a commit it did not test. */
 export async function revisionLabel(root) {
   const head = (await run('git', ['rev-parse', 'HEAD'], { cwd: root, capture: true })).stdout.trim();
-  const status = (await run('git', ['status', '--porcelain'], { cwd: root, capture: true })).stdout.trim();
-  return status ? `${head}-dirty` : head;
+  // A status that cannot be read is not evidence of a clean tree.
+  const status = await run('git', ['status', '--porcelain'], { cwd: root, capture: true, allowFailure: true });
+  return status.code !== 0 || status.stdout.trim() ? `${head}-dirty` : head;
 }
 
 export async function runLane(root, name, { execute, echo } = {}) {
@@ -155,3 +156,14 @@ export async function cleanCheckout(root, { parent = lanesParent(root), execute 
   }
   return { passed: git_status_empty && Object.values(exit_codes).every(value => value === 0), receipt, receiptPath, worktree, removed };
 }
+
+/**
+ * The foundation tests by cost. `fast` files create no temporary repository and spawn no child
+ * process, so `check-offline --fast` (the pre-commit hook) stays under a few seconds; every
+ * other file is `slow` and runs in the full `check-offline`. tests/foundation/gates.test.mjs
+ * fails when a `*.test.mjs` file is in neither list or in both, or when a fast file spawns.
+ */
+export const foundationTests = Object.freeze({
+  fast: Object.freeze(['ci', 'files', 'generation', 'lockfile', 'policy', 'ports', 'toolchain'].map(name => `${name}.test.mjs`)),
+  slow: Object.freeze(['gates', 'harness', 'hooks', 'init', 'lanes', 'process', 'receipts', 'records', 'vendor'].map(name => `${name}.test.mjs`)),
+});

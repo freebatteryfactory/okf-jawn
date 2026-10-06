@@ -1,8 +1,8 @@
 #!/bin/sh
 # Tracked hook; `bun scripts/dev.mjs bootstrap` or `init` installs it through core.hooksPath.
-# It runs only the dependency-free checks, never regenerates files, never touches another worktree.
+# It runs only the fast dependency-free tests (pre-push runs the full suite), never regenerates files, never touches another worktree.
 set -eu
 # Git exports GIT_DIR and GIT_INDEX_FILE to hooks. The offline tests create disposable
 # repositories; with those variables set, their git commands would act on this repository.
 unset $(git rev-parse --local-env-vars)
-bun scripts/dev.mjs check-offline
+bun scripts/dev.mjs check-offline --fast

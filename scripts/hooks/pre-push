@@ -5,8 +5,17 @@ set -eu
 # Git exports GIT_DIR and GIT_INDEX_FILE to hooks. The offline tests create disposable
 # repositories; with those variables set, their git commands would act on this repository.
 unset $(git rev-parse --local-env-vars)
+# Git passes one `<local ref> <local sha> <remote ref> <remote sha>` line per pushed ref on
+# stdin. Read it first so that no check below can consume it.
+refs=$(cat)
 bun scripts/dev.mjs check-offline
 cargo fmt --all --check
-case "$(git rev-parse --abbrev-ref HEAD)" in
-  build/*|cure/*) bun scripts/dev.mjs scope ;;
-esac
+# Each pushed build/* ref is scope-checked at the commit being pushed, not at the current HEAD.
+printf '%s\n' "$refs" | while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_ref" in
+    refs/heads/build/*)
+      case "$local_sha" in
+        *[!0]*) bun scripts/dev.mjs scope "${local_ref#refs/heads/build/}" --head "$local_sha" ;;
+      esac ;;
+  esac
+done

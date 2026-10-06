@@ -6,6 +6,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LANE_TABLE_BEGIN, LANE_TABLE_END, checkScope, createLanes, laneNamed, lanes, lanesParent, outOfScope, renderLaneTable, resetLanes, scopeFor } from '../../scripts/lib/lanes.mjs';
+import * as lanesModule from '../../scripts/lib/lanes.mjs';
 import { run } from '../../scripts/lib/process.mjs';
 import { commit, fixtureRepo, git } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
@@ -95,13 +96,23 @@ test('uncommitted and untracked files count, and a branch without a row has no s
  await git(root,'checkout','--quiet','-b','build/ingest');
  await writeFile(join(root,'stray.txt'),'x');
  await assert.rejects(checkScope(root),/scope check failed for ingest[\s\S]*stray\.txt/);
- await git(root,'checkout','--quiet','-b','cure/unknown');
- await assert.rejects(checkScope(root),/No scope row for branch cure\/unknown/);
+ await git(root,'checkout','--quiet','-b','feature/unknown');
+ await assert.rejects(checkScope(root),/No scope row for branch feature\/unknown/);
 });
-test('this package has a scope row against the integration branch',()=>{
- const scope=scopeFor('cure/gates');
- assert.equal(scope.base,'integration/foundation-cure');
- assert.deepEqual(outOfScope(['scripts/dev.mjs','scripts/hooks/pre-push','Cargo.lock','crates/core/Cargo.toml','crates/core/src/dispatch.rs','qualification/docling/run.mjs','scripts/lib/provenance.mjs','tests/foundation/harness.test.mjs'],scope),['crates/core/src/dispatch.rs','qualification/docling/run.mjs','scripts/lib/provenance.mjs','tests/foundation/harness.test.mjs']);
+test('only lane branches have a scope; cure branches are finished and have none',()=>{
+ assert.equal(scopeFor('cure/gates'),null);
+ assert.equal(scopeFor('cure/tooling'),null);
+ assert.ok(!('cures' in lanesModule),'the temporary cure rows are gone');
+});
+test('a detached HEAD gets one clear line that asks for a lane',async t=>{
+ const {root}=await fixtureRepo(t);
+ await git(root,'checkout','--quiet','--detach');
+ await assert.rejects(checkScope(root),error=>{
+  assert.doesNotMatch(error.message,/[\r\n]/,'one line');
+  assert.match(error.message,/detached HEAD.*pass a lane: scope <lane>/);
+  return true;
+ });
+ assert.equal((await checkScope(root,{lane:'storage'})).changed.length,0,'a named lane still works on a detached HEAD');
 });
 test('lanes-reset removes clean, empty lanes without forcing anything',async t=>{
  const {base,root}=await fixtureRepo(t);const parent=join(base,'lanes');const calls=[];
@@ -143,4 +154,15 @@ test('the entrypoint lists no lane and no lane directory of its own, and nothing
  for(const lane of lanes)assert.doesNotMatch(entry,new RegExp(`'${lane.name}'`),lane.name);
  assert.doesNotMatch(entry,/okf-jawn-lanes|--force/);
  assert.doesNotMatch(await read('scripts/lib/lanes.mjs'),/'--force'|'-f'|'-D'/);
+});
+test('the scope check can address a pushed commit instead of HEAD, and then ignores the working tree',async t=>{
+ const {root}=await fixtureRepo(t,{'crates/storage/src/lib.rs':'//! storage\n','crates/core/src/lib.rs':'//! core\n'});
+ await git(root,'checkout','--quiet','-b','build/storage');
+ const good=await commit(root,{'crates/storage/src/lib.rs':'//! storage, changed\n'},'in lane');
+ const bad=await commit(root,{'crates/core/src/lib.rs':'//! core, changed from the storage lane\n'},'out of lane');
+ await git(root,'checkout','--quiet','main');
+ await writeFile(join(root,'stray.txt'),'not part of any pushed commit');
+ assert.deepEqual((await checkScope(root,{lane:'storage',head:good})).changed,['crates/storage/src/lib.rs']);
+ await assert.rejects(checkScope(root,{lane:'storage',head:bad}),/scope check failed for storage: 1 path\(s\) outside its scope:\n  crates\/core\/src\/lib\.rs/);
+ await assert.rejects(checkScope(root,{lane:'storage'}),/stray\.txt/,'without a head the working tree still counts');
 });

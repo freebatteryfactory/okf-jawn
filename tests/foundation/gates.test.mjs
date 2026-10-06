@@ -2,10 +2,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cleanCheckout, cleanCheckoutTasks, laneSteps, premergeSteps, runLane, runPremerge } from '../../scripts/lib/gates.mjs';
+import { cleanCheckout, cleanCheckoutTasks, foundationTests, laneSteps, premergeSteps, revisionLabel, runLane, runPremerge } from '../../scripts/lib/gates.mjs';
 import { laneNamed, lanes } from '../../scripts/lib/lanes.mjs';
 import { fixtureRepo, git } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
@@ -19,7 +19,7 @@ test('a Rust lane gate is fmt, Clippy and tests for its crates and features, sou
  const steps=laneSteps('/repo',laneNamed('storage'));
  assert.deepEqual(steps.map(step=>step.id),['fmt','clippy','test','source-policy','scope']);
  assert.deepEqual(steps.slice(0,4).map(step=>step.command),['cargo','cargo','cargo','cargo']);
- assert.deepEqual(steps[0].args,['fmt','--all','--check']);
+ assert.deepEqual(steps[0].args,['fmt','--check','-p','okf-jawn-storage']);
  assert.deepEqual(steps[1].args,['clippy','--locked','-p','okf-jawn-storage','--features','okf-jawn-storage/runtime','--all-targets','--','-D','warnings']);
  assert.deepEqual(steps[2].args,['test','--locked','-p','okf-jawn-storage','--features','okf-jawn-storage/runtime']);
  assert.deepEqual(steps[3].args,['xtask','source-policy','--root','/repo']);
@@ -27,6 +27,13 @@ test('a Rust lane gate is fmt, Clippy and tests for its crates and features, sou
  const core=laneSteps('/repo',laneNamed('core-cli'));
  assert.deepEqual(core[1].args,['clippy','--locked','-p','okf-jawn-core','-p','okf-jawn-cli','--all-targets','--','-D','warnings']);
  assert.deepEqual(core[2].args,['test','--locked','-p','okf-jawn-core','-p','okf-jawn-cli']);
+});
+test('every Rust lane checks the formatting of its own crates only, never the workspace',()=>{
+ for(const lane of lanes.filter(entry=>entry.kind==='rust')){
+  const args=laneSteps('/repo',lane)[0].args;
+  assert.deepEqual(args,['fmt','--check',...lane.crates.flatMap(name=>['-p',name])],lane.name);
+  assert.ok(!args.includes('--all'),lane.name);
+ }
 });
 test('a UI lane gate is Biome, route generation, tsc, Vitest filtered to the lane, then scope',async()=>{
  const views=laneSteps('/repo',laneNamed('views'));
@@ -119,4 +126,23 @@ test('clean-checkout records a failing step and a drifted tree, keeps the eviden
  await assert.rejects(cleanCheckout(repo,{parent,execute,...quiet}),/clean-checkout refused: .* already exists/);
  // `-D` is Clippy's deny flag here, so only the force spellings are forbidden in this file.
  assert.doesNotMatch(await read('scripts/lib/gates.mjs'),/'--force'|'-f'/,'gates.mjs must never force git');
+});
+test('every foundation test file is in exactly one of the fast and slow lists, and a fast file spawns nothing',async()=>{
+ const onDisk=(await readdir(join(root,'tests/foundation'))).filter(name=>name.endsWith('.test.mjs')).sort();
+ assert.deepEqual([...foundationTests.fast,...foundationTests.slow].sort(),onDisk,'a *.test.mjs file is in neither list, in both, or listed but missing');
+ for(const name of foundationTests.fast){
+  const source=await read(`tests/foundation/${name}`);
+  assert.doesNotMatch(source,/fixture-repo|process\.mjs|child_process|Bun\.spawn|Bun\.\$|\$\{?\s*git/,`${name} is listed fast but creates a repository or spawns a process`);
+ }
+ const entry=await read('scripts/dev.mjs');
+ assert.match(entry,/case 'check-offline': await offlineChecks\(\{ fast: args\.includes\('--fast'\) \}\); break;/);
+ assert.match(entry,/!fast \|\| foundationTests\.fast\.includes\(name\)/);
+});
+test('a failed git status counts as dirty, never as the clean commit',async t=>{
+ const {root:repo}=await fixtureRepo(t,fixture);const sha=await git(repo,'rev-parse','HEAD');
+ assert.equal(await revisionLabel(repo),sha);
+ // A corrupt index makes `git status` fail while `git rev-parse HEAD` still works.
+ await writeFile(join(repo,'.git','index'),'not an index');
+ await assert.rejects(git(repo,'status','--porcelain'));
+ assert.equal(await revisionLabel(repo),`${sha}-dirty`);
 });

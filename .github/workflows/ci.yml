@@ -1,7 +1,6 @@
 name: Source and foundation diagnostics
 on:
   push:
-  pull_request:
   workflow_dispatch:
   schedule:
     - cron: "23 5 * * *"

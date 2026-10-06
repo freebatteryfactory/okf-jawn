@@ -50,6 +50,9 @@ import {
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 
+/** Budget for a promise that settles at once; generous because a parallel cargo build has starved these. */
+const SLOW_MACHINE_BUDGET_MS = 20_000;
+
 /** Reject when `promise` has not settled after `ms`; a hang must read as a named failure. */
 function within(promise, ms, label) {
   let timer;
@@ -96,7 +99,9 @@ async function fixture(t, body) {
 }
 test('positive HTTP control reaches and validates a correct reviewed revision',async t=>{
  const revision='a'.repeat(40);const url=await fixture(t,{source:{revision},coverage:'current'});
- reviewCoversRevision(await (await fetch(url)).json(),revision);
+ const body=await (await fetch(url)).json();
+ assert.deepEqual(body,{source:{revision},coverage:'current'},'the control must have received the value the server sent');
+ reviewCoversRevision(body,revision);
 });
 test('negative HTTP control detects a response that advanced the reviewed revision',async t=>{
  const url=await fixture(t,{source:{revision:'b'.repeat(40)},coverage:'current'});
@@ -248,7 +253,7 @@ const MARKER_LINE = "JSON.stringify({okf_docling:'done',only:'x.pdf',receipt:'r.
 const HOLD_CHILD = `process.stdout.write(${MARKER_LINE});process.stdin.on('data',()=>{});process.stdin.on('end',()=>process.exit(0));`;
 
 test('an instant-exit converter process resolves promptly and is recorded as unmeasured', async () => {
-  const result = await within(runFixtureProcess({ command: process.execPath, args: ['-e', ''] }), 4000, 'instant exit');
+  const result = await within(runFixtureProcess({ command: process.execPath, args: ['-e', ''] }), SLOW_MACHINE_BUDGET_MS, 'instant exit');
   assert.equal(result.exitCode, 0);
   assert.equal(result.done, null);
   assert.equal(result.peakRssBytes, null);
@@ -270,7 +275,7 @@ test('the peak is sampled exactly once, while the process still waits on stdin',
   };
   const result = await within(
     runFixtureProcess({ command: process.execPath, args: ['-e', HOLD_CHILD], sample }),
-    4000,
+    SLOW_MACHINE_BUDGET_MS,
     'held child',
   );
   assert.equal(result.exitCode, 0);
@@ -296,7 +301,7 @@ test('a null sample never overwrites a number', async () => {
   const twice = `const l=${MARKER_LINE};process.stdout.write(l+l);process.stdin.on('data',()=>{});process.stdin.on('end',()=>process.exit(0));`;
   const result = await within(
     runFixtureProcess({ command: process.execPath, args: ['-e', twice], sample }),
-    4000,
+    SLOW_MACHINE_BUDGET_MS,
     'double marker',
   );
   assert.equal(calls, 1);
@@ -308,7 +313,7 @@ test('a process that exits while the sample is in flight still resolves, with th
   const sample = () => new Promise((done) => setTimeout(() => done({ bytes: null, note: 'process gone' }), 300));
   const result = await within(
     runFixtureProcess({ command: process.execPath, args: ['-e', `process.stdout.write(${MARKER_LINE});`], sample }),
-    4000,
+    SLOW_MACHINE_BUDGET_MS,
     'exit during sample',
   );
   assert.equal(result.exitCode, 0);
@@ -319,7 +324,7 @@ test('a process that exits while the sample is in flight still resolves, with th
 test('a converter that never finishes is killed at the fixture timeout', async () => {
   const result = await within(
     runFixtureProcess({ command: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], timeoutMs: 300 }),
-    4000,
+    SLOW_MACHINE_BUDGET_MS,
     'timeout',
   );
   assert.equal(result.timedOut, true);
@@ -331,7 +336,7 @@ test('a converter that never finishes is killed at the fixture timeout', async (
 test('a missing converter binary is a result, not a hang or a throw', async () => {
   const result = await within(
     runFixtureProcess({ command: join(tmpdir(), 'okf-no-such-binary') }),
-    4000,
+    SLOW_MACHINE_BUDGET_MS,
     'missing binary',
   );
   assert.notEqual(result.exitCode, 0);
@@ -522,7 +527,7 @@ test('waitForListening resolves on the listening line and the process can then b
   try {
     const match = await within(
       waitForListening(proc, { pattern: /okf-qualify-mcp-apps listening on (\S+)/, label: 'harness' }),
-      4000,
+      SLOW_MACHINE_BUDGET_MS,
       'listening',
     );
     assert.equal(match[1], 'http://127.0.0.1:1/mcp');
@@ -539,14 +544,14 @@ test('a harness that fails to bind is reported at once with its exit code and st
   ]);
   const started = Date.now();
   await assert.rejects(
-    within(waitForListening(proc, { pattern: /listening on (\S+)/, timeoutMs: 60_000, label: 'harness' }), 4000, 'bind failure'),
+    within(waitForListening(proc, { pattern: /listening on (\S+)/, timeoutMs: 60_000, label: 'harness' }), SLOW_MACHINE_BUDGET_MS, 'bind failure'),
     (error) => {
       assert.match(error.message, /harness exited before listening \(exit 1\)/);
       assert.match(error.message, /bind 127\.0\.0\.1:1: access denied/);
       return true;
     },
   );
-  assert.ok(Date.now() - started < 4000);
+  assert.ok(Date.now() - started < SLOW_MACHINE_BUDGET_MS);
 });
 
 test('killProcessTree stops grandchildren, not only the process it was given', async () => {
@@ -690,4 +695,22 @@ test('all three orchestrators take their header from receiptHeader and record on
     assert.match(source, /process\.argv\.includes\('--record'\)/, name);
     assert.doesNotMatch(source, /requireCleanTree|commit_sha|writeFile\([^)]*qualification\/receipts/, name);
   }
+});
+
+test('no time-budgeted test uses a budget a loaded machine can miss', async () => {
+  const source = await readFile(fileURLToPath(import.meta.url), 'utf8');
+  assert.equal(SLOW_MACHINE_BUDGET_MS, 20_000);
+  assert.doesNotMatch(source, new RegExp(String.raw`\b${2 * 2000}\b`), 'a 4 s budget failed once under a parallel cargo build');
+});
+
+test('record.mjs refuses a protocol-only MCP Apps receipt and any whose basic-host section did not run', async () => {
+  const { recordRefusal } = await import('../../qualification/record.mjs');
+  const ran = { protocol_only: false, basic_host: { status: 'passed', failed: [] } };
+  assert.equal(recordRefusal('mcp-apps', ran), null);
+  assert.match(recordRefusal('mcp-apps', { ...ran, protocol_only: true }), /protocol-only.*not the gate receipt/);
+  assert.match(recordRefusal('mcp-apps', { ...ran, basic_host: { status: 'not_run', reason: 'skipped: protocol-only' } }), /basic-host section was skipped/);
+  assert.match(recordRefusal('mcp-apps', { protocol_only: false }), /basic-host section was skipped/);
+  assert.equal(recordRefusal('docling', { protocol_only: true }), null, 'only the MCP Apps receipt has a basic-host section');
+  const source = await readFile(join(root, 'qualification/record.mjs'), 'utf8');
+  assert.ok(source.indexOf('recordRefusal(name, receipt)') < source.indexOf('await recordReceipt('), 'the refusal must come before the receipt is recorded');
 });
