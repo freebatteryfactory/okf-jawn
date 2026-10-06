@@ -273,3 +273,91 @@ describe('PresentView', () => {
     expect(screen.queryByText(/Resolved chart data or specification unavailable/i)).toBeNull();
   });
 });
+
+describe('PresentView refused dataset read', () => {
+  const digest = 'a'.repeat(64);
+  const source = {
+    item_id: '11111111-2222-4333-8444-555555555555',
+    path: 'fixtures/metrics.json',
+    revision: '0123456789abcdef0123456789abcdef01234567',
+    selection: { kind: 'all' as const },
+    workspace_id: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
+  };
+  const response = {
+    view: {
+      schema_version: 1,
+      title: 'Chart board',
+      description: 'A binding whose dataset the source refuses to read',
+      mode: 'pinned',
+      grammar: 'json_render',
+      bindings: [],
+      spec: { root: 'root', elements: { root: { type: 'Stack', props: {}, children: [] } } },
+    },
+    resolved_bindings: [
+      { name: 'metrics', source, units: {}, transforms: [], materialized: digest },
+    ],
+    warnings: [],
+    receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+  } as z.infer<typeof zPresentResponse>;
+
+  /** `show` succeeds; `read_object` resolves to the given refusal. */
+  function refusing(refusal: unknown) {
+    return async (name: string) => {
+      if (name === 'show') {
+        return {
+          structuredContent: {
+            markdown: 'metrics',
+            media: [],
+            outline: [],
+            receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+            source,
+            truncated: false,
+            view: 'text',
+            warnings: [],
+          },
+        };
+      }
+      if (name === 'read_object') return refusal;
+      throw new Error(`unexpected tool ${name}`);
+    };
+  }
+
+  it("shows the tool's own message, not a schema issue dump", async () => {
+    const callTool = refusing({
+      isError: true,
+      content: [{ type: 'text', text: 'object is not retained by this source' }],
+    });
+    render(<PresentView response={response} callTool={callTool} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('object is not retained by this source');
+    expect(alert.textContent).not.toMatch(/invalid_type|expected|"path"/i);
+  });
+
+  it('shows a fixed plain sentence when the refusal carries no text', async () => {
+    render(<PresentView response={response} callTool={refusing({ isError: true, content: [] })} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('The host refused to read the dataset.');
+  });
+
+  it('bounds a long refusal text to 512 characters ending with an ellipsis', async () => {
+    const callTool = refusing({
+      isError: true,
+      content: [{ type: 'text', text: 'x'.repeat(10_000) }],
+    });
+    render(<PresentView response={response} callTool={callTool} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(`${'x'.repeat(511)}…`);
+  });
+
+  it('cuts a long refusal on a character boundary, never inside a surrogate pair', async () => {
+    const callTool = refusing({
+      isError: true,
+      content: [{ type: 'text', text: '\u{1F4A5}'.repeat(10_000) }],
+    });
+    render(<PresentView response={response} callTool={callTool} />);
+    const shown = (await screen.findByRole('alert')).textContent ?? '';
+    expect(shown.length).toBeLessThanOrEqual(512);
+    expect(shown.endsWith('…')).toBe(true);
+    expect(() => encodeURIComponent(shown)).not.toThrow();
+  });
+});

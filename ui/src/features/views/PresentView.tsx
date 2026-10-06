@@ -20,7 +20,27 @@ export interface PresentViewProps {
 const rowsSchema = z
   .array(z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])))
   .max(100000);
-const toolResult = z.object({ structuredContent: z.unknown() });
+const toolResult = z.object({
+  isError: z.boolean().optional(),
+  content: z.array(z.looseObject({ type: z.string(), text: z.string().optional() })).optional(),
+  structuredContent: z.unknown().optional(),
+});
+const refusalLimit = 512;
+const refusalFallback = 'The host refused to read the dataset.';
+
+/** The tool's own refusal text, bounded; cut on a code point boundary, ending with an ellipsis. */
+function refusalMessage(output: z.infer<typeof toolResult>): string {
+  const text = (output.content ?? [])
+    .flatMap((part) => (part.type === 'text' && part.text ? [part.text] : []))
+    .join('\n')
+    .trim();
+  if (text.length === 0) return refusalFallback;
+  if (text.length <= refusalLimit) return text;
+  let end = refusalLimit - 1;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1; // do not leave half a surrogate pair
+  return `${text.slice(0, end)}…`;
+}
 
 /** Runtime-validate a Vega-Lite grammar value (SPEC §10); never cast untrusted specs. */
 export function parseVegaLiteSpec(value: unknown): TopLevelSpec {
@@ -49,6 +69,7 @@ async function dataset(
         length: 1048576,
       }),
     );
+    if (output.isError === true) throw new Error(refusalMessage(output));
     const part = zGetObjectResponse.parse(output.structuredContent);
     if (part.sha256 !== binding.materialized || BigInt(part.offset) !== offset)
       throw new Error('Dataset identity or range changed');
