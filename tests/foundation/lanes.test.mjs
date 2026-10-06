@@ -1,5 +1,6 @@
 /** One lane table drives worktrees, gates, scope, the AGENTS.md table and CODEOWNERS. */
-import test from 'node:test';
+import { afterAll } from 'bun:test';
+import test from './concurrent-test.mjs';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
@@ -8,8 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { LANE_TABLE_BEGIN, LANE_TABLE_END, checkScope, createLanes, laneNamed, lanes, lanesParent, outOfScope, renderLaneTable, resetLanes, scopeFor } from '../../scripts/lib/lanes.mjs';
 import * as lanesModule from '../../scripts/lib/lanes.mjs';
 import { run } from '../../scripts/lib/process.mjs';
-import { commit, fixtureRepo, git } from './fixture-repo.mjs';
+import { commit, git, sharedRepos } from './fixture-repo.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
+// Every test starts from a copy of a repository prepared once for this file.
+const shared=sharedRepos();
+afterAll(shared.dispose);
+const fixtureRepo=shared.fixtureRepo;
 const read=file=>readFile(join(root,file),'utf8');
 
 /** Case-sensitive existence, so `/Justfile` cannot stand in for `justfile` on Windows or macOS. */
