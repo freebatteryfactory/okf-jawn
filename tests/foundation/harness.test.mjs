@@ -375,138 +375,6 @@ test('the platform sampler reads a real high-water mark and reports why when it 
   });
 });
 
-const DOCLING_HEADER = {
-  git_sha: 'a'.repeat(40),
-  inputs: DOCLING_INPUTS,
-  produced_at: '2026-10-05T18:00:00.000Z',
-};
-const DOCLING_CONVERTER = {
-  crate: 'docling',
-  version: '1.93.5',
-  checksum: 'abc',
-  docling_core_versions: ['1.93.6'],
-  source: 'Cargo.lock',
-};
-
-/** A fixture process that behaved: exit 0, measured, receipt on disk. `over` replaces parts. */
-function doclingRun(only, over = {}) {
-  const fixture = {
-    fixture: only,
-    outcome: only === MUST_FAIL ? 'PASS_explicit_failure' : 'PASS',
-    stage: only === MUST_FAIL ? 'converter_error' : 'converter_status',
-    status: only === MUST_FAIL ? null : only === TIMEOUT_PROBE ? 'PartialSuccess' : 'Success',
-    finding: null,
-    peak_rss_bytes: null,
-    ...over.fixture,
-  };
-  return {
-    only,
-    run: {
-      exitCode: 0,
-      signal: null,
-      spawnError: null,
-      timedOut: false,
-      done: { okf_docling: 'done', only },
-      peakRssBytes: 1_048_576,
-      peakRssNote: 'stub source',
-      stderr: '',
-      stdoutSha256: 'f'.repeat(64),
-      ...over.run,
-    },
-    report:
-      'report' in over
-        ? over.report
-        : only === TIMEOUT_PROBE
-          ? { receipts: [], timeout_case: fixture }
-          : { receipts: [fixture], timeout_case: null },
-  };
-}
-
-function doclingReceipt(overrides = {}) {
-  const runs = FIXTURE_RUNS.map((only) => doclingRun(only, overrides[only]));
-  return buildDoclingReceipt({
-    header: DOCLING_HEADER,
-    converter: DOCLING_CONVERTER,
-    platform: 'win32',
-    modelsDir: 'models',
-    runs,
-    finishedAt: '2026-10-05T18:10:00.000Z',
-  });
-}
-
-test('a Docling receipt carries the shared header at its top level and passes when every rule holds', () => {
-  const receipt = doclingReceipt();
-  assert.deepEqual(receiptHeaderProblems(receipt), []);
-  assert.deepEqual(Object.keys(receipt).slice(0, 3), ['git_sha', 'inputs', 'produced_at']);
-  assert.equal(receipt.orchestrator, undefined);
-  assert.equal(receipt.result, 'PASS');
-  assert.equal(receipt.receipts.length, FIXTURE_RUNS.length - 1);
-  assert.equal(receipt.timeout_case.outcome, 'PASS');
-  assert.deepEqual(Object.keys(receipt.summary), FIXTURE_RUNS);
-});
-
-test('a fixture whose peak was not measured fails the memory criterion without throwing', () => {
-  const receipt = doclingReceipt({
-    'sample_sheet.xlsx': { run: { peakRssBytes: null, peakRssNote: 'Get-Process reported no PeakWorkingSet64' } },
-  });
-  const entry = receipt.receipts.find((item) => item.fixture === 'sample_sheet.xlsx');
-  assert.equal(entry.peak_rss_bytes, null);
-  assert.equal(entry.peak_rss_note, 'Get-Process reported no PeakWorkingSet64');
-  assert.equal(entry.memory, 'FAIL_not_measured');
-  assert.equal(entry.outcome, 'PASS');
-  assert.equal(receipt.memory_summary['sample_sheet.xlsx'], 'FAIL_not_measured');
-  assert.equal(receipt.result, 'FAIL');
-});
-
-test('a truncated PDF the converter accepts is a finding and a FAIL, recorded as observed', () => {
-  const receipt = doclingReceipt({
-    [MUST_FAIL]: {
-      fixture: {
-        outcome: 'FAIL_expected_failure',
-        stage: 'converter_status',
-        status: 'Success',
-        finding: 'converter accepts truncated PDF',
-      },
-    },
-  });
-  assert.equal(receipt.finding, 'converter accepts truncated PDF');
-  assert.equal(receipt.summary[MUST_FAIL], 'FAIL_expected_failure');
-  assert.equal(receipt.result, 'FAIL');
-});
-
-test('a refusal counts only when another PDF converted in the same run', () => {
-  const pdfs = FIXTURE_RUNS.filter((only) => only.endsWith('.pdf') && only !== MUST_FAIL);
-  const overrides = Object.fromEntries(
-    pdfs.map((only) => [only, { fixture: { outcome: 'FAIL_converter_error', stage: 'converter_error', status: null } }]),
-  );
-  const receipt = doclingReceipt(overrides);
-  assert.equal(receipt.summary[MUST_FAIL], 'FAIL_refusal_unproven');
-  assert.match(receipt.receipts.find((item) => item.fixture === MUST_FAIL).refusal_note, /no other PDF fixture converted/);
-  assert.equal(receipt.result, 'FAIL');
-});
-
-test('a fixture process that wrote no receipt, or never ran, is a harness FAIL', () => {
-  const crashed = doclingReceipt({
-    'table_heavy.pdf': { report: null, run: { exitCode: 1, stderr: 'okf-qualify-docling: missing fixture' } },
-  });
-  const entry = crashed.receipts.find((item) => item.fixture === 'table_heavy.pdf');
-  assert.equal(entry.outcome, 'FAIL_harness');
-  assert.equal(entry.harness_exit_code, 1);
-  assert.match(entry.harness_error, /missing fixture/);
-  assert.equal(crashed.result, 'FAIL');
-
-  const partial = buildDoclingReceipt({
-    header: DOCLING_HEADER,
-    converter: DOCLING_CONVERTER,
-    platform: 'win32',
-    modelsDir: 'models',
-    runs: [doclingRun('sample_sheet.xlsx')],
-    finishedAt: '2026-10-05T18:10:00.000Z',
-  });
-  assert.equal(partial.summary[TIMEOUT_PROBE], 'FAIL_not_run');
-  assert.equal(partial.result, 'FAIL');
-});
-
 test('every fixture run is a recorded source whose bytes are unchanged, and must_fail states its stage rule', async () => {
   const dir = join(root, 'tests/fixtures/documents');
   const sources = JSON.parse(await readFile(join(dir, 'SOURCES.json'), 'utf8'));
@@ -925,6 +793,322 @@ test('build features are read from the manifests and from cargo, never assumed',
     () => buildFacts({ harnessToml: 'docling = { workspace = true }', workspaceToml: 'docling = { features = ["pdf"] }', treeText: 'serde v1.0.0|std', command: 'c' }),
     /did not list docling/,
   );
+});
+
+const DOCLING_HEADER = {
+  git_sha: 'a'.repeat(40),
+  inputs: DOCLING_INPUTS,
+  produced_at: '2026-10-05T18:00:00.000Z',
+};
+
+const DOCLING_CONVERTER = {
+  crate: 'docling',
+  version: '1.93.5',
+  checksum: 'abc',
+  docling_core_versions: ['1.93.6'],
+  source: 'Cargo.lock',
+};
+
+const DOCLING_BUILD = buildFacts({
+  harnessToml: 'docling = { workspace = true }\n',
+  workspaceToml: 'docling = { version = "=1.93.5", default-features = false, features = ["pdf"] }\n',
+  treeText: DOCLING_TREE,
+  command: 'cargo build --locked --release -p okf-qualify-docling',
+});
+
+const DOCLING_ASSETS = { count: 1, all_match: true, manifest_sha256: 'e'.repeat(64), hashed_at_run_time: true, files: [VERIFIED_MODEL] };
+
+const STUB_SOURCE = (paginated) => ({
+  role: 'stub',
+  expect: { confirmed_by: 'test stub', markdown_contains: ['Hello world'], tables: 1, ...(paginated ? { pages: 1 } : {}) },
+});
+
+const isPaginated = (only) => /\.(pdf|png)$/.test(only);
+
+const DOCLING_SOURCES = {
+  files: Object.fromEntries(
+    FIXTURE_RUNS.filter((only) => only !== TIMEOUT_PROBE && only !== MUST_FAIL).map((only) => [only, STUB_SOURCE(isPaginated(only))]),
+  ),
+};
+
+/** A fixture process that behaved: exit 0, measured, receipt and evidence on disk. `over` replaces parts. */
+function doclingRun(only, over = {}) {
+  const supported = only !== MUST_FAIL && only !== TIMEOUT_PROBE;
+  const paginated = isPaginated(only);
+  const fixture = {
+    fixture: only,
+    outcome: only === MUST_FAIL ? 'PASS_explicit_failure' : 'PASS',
+    conversion_rule: only === MUST_FAIL ? 'converter_refuses_the_input' : 'success_status_and_nonblank_markdown',
+    stage: only === MUST_FAIL ? 'converter_error' : 'converter_status',
+    status: only === MUST_FAIL ? null : only === TIMEOUT_PROBE ? 'PartialSuccess' : 'Success',
+    finding: null,
+    input_format: only === TIMEOUT_PROBE || only.endsWith('.pdf') ? 'pdf' : only.endsWith('.png') ? 'image' : only.split('.').pop(),
+    library_page_count: only.endsWith('.pdf') && supported ? { value: 1, error: null } : null,
+    errors:
+      only === MUST_FAIL
+        ? [{ component_type: 'converter', module_name: 'DocumentConverter::convert', error_message: NO_FALLBACK_ERROR }]
+        : [],
+    settings: { converter_debug: CONVERTER_DEBUG },
+    document: supported
+      ? { markdown_file: 'document.md', json_file: 'document.json', page_images: paginated ? [PAGE_IMAGE] : [] }
+      : null,
+    ...over.fixture,
+  };
+  const evidence = {
+    markdown: '## Title\n\nHello   world\n',
+    document: stubDocument(paginated ? {} : { pages: {}, texts: stubDocument().texts.map((item) => ({ ...item, prov: [] })), tables: stubDocument().tables.map((item) => ({ ...item, prov: [] })) }),
+    pageFiles: { 'page-1.png': { sha256: PAGE_PNG_SHA, bytes: PAGE_PNG.length, png: pngSize(PAGE_PNG) } },
+    problems: [],
+    ...over.evidence,
+  };
+  return {
+    only,
+    run: {
+      exitCode: 0,
+      signal: null,
+      spawnError: null,
+      timedOut: false,
+      done: { okf_docling: 'done', only },
+      peakRssBytes: 1_048_576,
+      peakRssNote: 'stub source',
+      stderr: '',
+      stdoutSha256: 'f'.repeat(64),
+      ...over.run,
+    },
+    report:
+      'report' in over
+        ? over.report
+        : only === TIMEOUT_PROBE
+          ? { model_inventory: DOCLING_INVENTORY, receipts: [], timeout_case: fixture }
+          : { model_inventory: DOCLING_INVENTORY, receipts: [fixture], timeout_case: null },
+    evidence: supported ? evidence : undefined,
+  };
+}
+
+function doclingReceipt(overrides = {}, parts = {}) {
+  const runs = FIXTURE_RUNS.map((only) => doclingRun(only, overrides[only]));
+  return buildDoclingReceipt({
+    header: DOCLING_HEADER,
+    converter: DOCLING_CONVERTER,
+    platform: 'win32',
+    build: DOCLING_BUILD,
+    assets: DOCLING_ASSETS,
+    environment: { DOCLING_RS_MODELS_DIR: 'C:\\models' },
+    sources: DOCLING_SOURCES,
+    runs,
+    scope: { mode: 'all', fixtures: FIXTURE_RUNS, qualification: true },
+    paths: { fixtures_dir: 'tests/fixtures/documents' },
+    finishedAt: '2026-10-05T18:10:00.000Z',
+    ...parts,
+  });
+}
+
+const entryOf = (receipt, only) => receipt.receipts.find((item) => item.only === only);
+
+test('a Docling receipt carries the shared header at its top level and passes when every rule holds', () => {
+  const receipt = doclingReceipt();
+  assert.deepEqual(receiptHeaderProblems(receipt), []);
+  assert.deepEqual(Object.keys(receipt).slice(0, 3), ['git_sha', 'inputs', 'produced_at']);
+  assert.equal(receipt.orchestrator, undefined);
+  assert.deepEqual(receipt.failures, []);
+  assert.equal(receipt.result, 'PASS');
+  assert.equal(receipt.receipts.length, FIXTURE_RUNS.length - 1);
+  assert.equal(receipt.timeout_case.outcome, 'PASS');
+  assert.deepEqual(Object.keys(receipt.summary), FIXTURE_RUNS);
+  assert.deepEqual(Object.keys(receipt.criteria_summary), ['conversion', 'content', 'page_renders', 'provenance', 'memory_measured', 'refusal']);
+  const pdf = entryOf(receipt, 'born_digital_text.pdf');
+  assert.deepEqual(Object.keys(pdf.criteria), ['conversion', 'content', 'page_renders', 'provenance', 'memory_measured']);
+  assert.equal(pdf.page_image_count, 1);
+  assert.deepEqual(pdf.page_provenance, [{ page_no: 1, text_items: 2, tables: 1, pictures: 0, has_image: true }]);
+  assert.equal(pdf.role, 'stub');
+});
+
+test('memory is a measurement with no limit applied, and an unmeasured fixture fails memory_measured', () => {
+  const measured = doclingReceipt();
+  assert.deepEqual(measured.memory.limit_bytes, null);
+  assert.equal(measured.memory.limit_applied, false);
+  assert.match(measured.memory.statement, /applies no memory limit/);
+  assert.equal(measured.memory.peak_rss_bytes['sample_sheet.xlsx'], 1_048_576);
+  assert.deepEqual(entryOf(measured, 'sample_sheet.xlsx').memory, {
+    peak_rss_bytes: 1_048_576,
+    peak_rss_note: 'stub source',
+    limit_bytes: null,
+    limit_applied: false,
+  });
+  assert.equal(measured.memory_summary, undefined, 'a bare measurement is never worded as a pass');
+  assert.doesNotMatch(JSON.stringify(measured), /"memory":\s*"PASS"/);
+
+  const receipt = doclingReceipt({
+    'sample_sheet.xlsx': { run: { peakRssBytes: null, peakRssNote: 'Get-Process reported no PeakWorkingSet64' } },
+  });
+  const entry = entryOf(receipt, 'sample_sheet.xlsx');
+  assert.equal(entry.memory.peak_rss_bytes, null);
+  assert.equal(entry.memory.peak_rss_note, 'Get-Process reported no PeakWorkingSet64');
+  assert.equal(entry.criteria.memory_measured.status, 'FAIL');
+  assert.equal(entry.conversion_outcome, 'PASS');
+  assert.equal(entry.outcome, 'FAIL_memory_measured');
+  assert.equal(receipt.criteria_summary.memory_measured['sample_sheet.xlsx'], 'FAIL');
+  assert.equal(receipt.result, 'FAIL');
+});
+
+test('a truncated PDF the converter accepts is a finding and a FAIL, recorded as observed', () => {
+  const receipt = doclingReceipt({
+    [MUST_FAIL]: {
+      fixture: {
+        outcome: 'FAIL_expected_failure',
+        stage: 'converter_status',
+        status: 'Success',
+        finding: 'converter accepts truncated PDF',
+        errors: [],
+      },
+    },
+  });
+  assert.equal(receipt.finding, 'converter accepts truncated PDF');
+  assert.equal(receipt.summary[MUST_FAIL], 'FAIL_expected_failure');
+  assert.equal(entryOf(receipt, MUST_FAIL).refusal, undefined, 'an accepted input has no refusal to classify');
+  assert.equal(receipt.result, 'FAIL');
+});
+
+test('a refusal counts only when another PDF converted in the same run', () => {
+  const pdfs = FIXTURE_RUNS.filter((only) => only.endsWith('.pdf') && only !== MUST_FAIL);
+  const overrides = Object.fromEntries(
+    pdfs.map((only) => [only, { fixture: { outcome: 'FAIL_converter_error', stage: 'converter_error', status: null } }]),
+  );
+  const receipt = doclingReceipt(overrides);
+  assert.equal(receipt.summary[MUST_FAIL], 'FAIL_refusal_unproven');
+  assert.match(entryOf(receipt, MUST_FAIL).refusal_note, /no other PDF fixture converted/);
+  assert.equal(receipt.criteria_summary.refusal[MUST_FAIL], 'FAIL');
+  assert.equal(receipt.result, 'FAIL');
+
+  const counted = entryOf(doclingReceipt(), MUST_FAIL);
+  assert.equal(counted.criteria.refusal.status, 'PASS');
+  assert.deepEqual(counted.refusal.other_pdfs_converted, pdfs);
+});
+
+test('the must-fail receipt says what kind of refusal it was, from the error text and the build', () => {
+  assert.equal(DOCLING_BUILD.pdfium_compiled_in, false);
+  assert.deepEqual(DOCLING_BUILD.build_features, ['pdf']);
+  const refusal = entryOf(doclingReceipt(), MUST_FAIL).refusal;
+  assert.equal(refusal.stage, 'converter_error');
+  assert.equal(refusal.error_text, NO_FALLBACK_ERROR);
+  assert.equal(refusal.refusal_kind, 'primary_parser_failed_no_fallback_in_build');
+  assert.deepEqual(refusal.build_features, ['pdf']);
+  assert.equal(refusal.pdfium_compiled_in, false);
+  assert.match(refusal.meaning, /no pdfium fallback/);
+
+  const rejected = doclingReceipt({
+    [MUST_FAIL]: { fixture: { errors: [{ component_type: 'converter', module_name: 'm', error_message: 'parse error: pdf: bad xref' }] } },
+  });
+  assert.equal(entryOf(rejected, MUST_FAIL).refusal.refusal_kind, 'converter_rejected');
+  assert.equal(entryOf(rejected, MUST_FAIL).refusal.meaning, undefined);
+  assert.equal(rejected.result, 'PASS');
+
+  // The text says "no pdfium" while cargo resolved pdfium: the classification cannot stand.
+  const contradicted = doclingReceipt({}, { build: { ...DOCLING_BUILD, pdfium_compiled_in: true } });
+  assert.equal(contradicted.summary[MUST_FAIL], 'FAIL_refusal');
+  assert.equal(contradicted.result, 'FAIL');
+});
+
+test('a fixture process that wrote no receipt, or never ran, is a harness FAIL', () => {
+  const crashed = doclingReceipt({
+    'table_heavy.pdf': { report: null, run: { exitCode: 1, stderr: 'okf-qualify-docling: missing fixture' } },
+  });
+  const entry = entryOf(crashed, 'table_heavy.pdf');
+  assert.equal(entry.outcome, 'FAIL_harness');
+  assert.equal(entry.harness_exit_code, 1);
+  assert.match(entry.harness_error, /missing fixture/);
+  assert.equal(crashed.result, 'FAIL');
+
+  const partial = doclingReceipt({}, { runs: [doclingRun('sample_sheet.xlsx')], scope: { mode: 'only', fixtures: ['sample_sheet.xlsx'], qualification: false } });
+  assert.equal(partial.summary['sample_sheet.xlsx'], 'PASS');
+  assert.equal(partial.summary[TIMEOUT_PROBE], 'FAIL_not_run');
+  assert.equal(partial.result, 'FAIL', 'a single-fixture run is never the qualification');
+});
+
+test('each content, page-render and provenance failure fails its fixture and the receipt, with the evidence named', () => {
+  {
+    const receipt = doclingReceipt({ 'corpus/word_sample.docx': { evidence: { markdown: '## Title\n\nGoodbye\n' } } });
+    const entry = entryOf(receipt, 'corpus/word_sample.docx');
+    assert.equal(entry.fixture, 'corpus/word_sample.docx');
+    assert.equal(entry.outcome, 'FAIL_content');
+    assert.equal(entry.conversion_outcome, 'PASS');
+    assert.deepEqual(entry.failed_criteria, ['content']);
+    assert.equal(receipt.result, 'FAIL');
+    const failure = receipt.failures.find((item) => item.criterion === 'content');
+    assert.equal(failure.fixture, 'corpus/word_sample.docx');
+    assert.deepEqual(failure.detail.map((check) => check.expected), ['Hello world']);
+  }
+  {
+    const receipt = doclingReceipt({ 'scanned_text.pdf': { fixture: { document: { markdown_file: 'document.md', json_file: 'document.json', page_images: [] } } } });
+    const entry = entryOf(receipt, 'scanned_text.pdf');
+    assert.equal(entry.criteria.page_renders.status, 'unavailable');
+    assert.equal(entry.outcome, 'FAIL_page_renders');
+    assert.equal(entry.page_image_count, 0);
+    assert.equal(entry.page_provenance[0].has_image, false);
+    assert.equal(receipt.result, 'FAIL');
+    assert.equal(entryOf(receipt, 'sample_sheet.xlsx').criteria.page_renders.status, 'not_applicable');
+  }
+  {
+    const receipt = doclingReceipt({
+      'born_digital_text.pdf': { evidence: { document: stubDocument({ texts: [{ self_ref: '#/texts/0', label: 'text', text: 'x', prov: [] }] }) } },
+    });
+    const entry = entryOf(receipt, 'born_digital_text.pdf');
+    assert.equal(entry.criteria.provenance.status, 'FAIL');
+    assert.deepEqual(entry.failed_criteria, ['provenance']);
+    assert.equal(entry.outcome, 'FAIL_provenance');
+    assert.deepEqual(receipt.failures, [
+      { fixture: 'born_digital_text.pdf', criterion: 'provenance', status: 'FAIL', detail: [{ ref: '#/texts/0', label: 'text', problem: 'no provenance' }] },
+    ]);
+    assert.equal(receipt.criteria_summary.provenance['born_digital_text.pdf'], 'FAIL');
+    assert.equal(receipt.criteria_summary.provenance['sample_sheet.xlsx'], 'recorded_not_judged');
+    assert.equal(receipt.result, 'FAIL');
+  }
+});
+
+test('the receipt lists the converter settings the processes held and the assets it verified', () => {
+  const probeDebug = CONVERTER_DEBUG.replace('document_timeout: None', 'document_timeout: Some(1ms)');
+  // Each process has its own temporary artifacts_dir; that alone must not make a second converter.
+  const otherDir = CONVERTER_DEBUG.replace('artifacts_dir: "C:', 'artifacts_dir: "D:');
+  assert.notEqual(otherDir, CONVERTER_DEBUG);
+  const receipt = doclingReceipt({
+    [TIMEOUT_PROBE]: { fixture: { settings: { converter_debug: probeDebug } } },
+    'sample_sheet.xlsx': { fixture: { settings: { converter_debug: otherDir } } },
+  });
+  assert.equal(receipt.settings.converters.length, 2);
+  const [main, probe] = receipt.settings.converters;
+  assert.equal(main.options.generate_page_images, 'true');
+  assert.equal(main.options.images_scale, 'None');
+  assert.equal(main.options.ocr_mode, 'None');
+  assert.equal(main.options.no_table_former, 'false');
+  assert.equal(main.options.document_timeout, 'None');
+  assert.equal(main.used_by.length, FIXTURE_RUNS.length - 1);
+  assert.equal(probe.options.document_timeout, 'Some(1ms)');
+  assert.deepEqual(probe.used_by, [TIMEOUT_PROBE]);
+  assert.deepEqual(receipt.settings.environment, { DOCLING_RS_MODELS_DIR: 'C:\\models' });
+  assert.equal(receipt.assets_verified.all_match, true);
+});
+
+test('the receipt fails when a model the library resolves is not a verified file', () => {
+  const receipt = doclingReceipt({}, { assets: { ...DOCLING_ASSETS, files: [] } });
+  assert.equal(receipt.model_inventory.status, 'FAIL');
+  assert.deepEqual(Object.values(receipt.summary).filter((outcome) => !outcome.startsWith('PASS')), []);
+  assert.equal(receipt.result, 'FAIL');
+  assert.equal(receipt.failures[0].criterion, 'model_inventory');
+});
+
+test('the Docling orchestrator verifies assets before it builds, and the harness labels what it writes', async () => {
+  const run = await readFile(join(root, 'qualification/docling/run.mjs'), 'utf8');
+  assert.ok(run.indexOf('await verifyAssets(manifestBytes)') > 0, 'run.mjs must re-hash the assets');
+  assert.ok(run.indexOf('await verifyAssets(manifestBytes)') < run.indexOf('await buildRelease('), 'assets are verified before anything is built or converted');
+  assert.ok(run.indexOf('await receiptHeader(') < run.indexOf('await verifyAssets('), 'the clean-tree guard still comes first');
+  assert.match(run, /if \(only\.length && record\) throw new Error/);
+  assert.match(run, /exec\('cargo', TREE_ARGS/);
+
+  const harness = await readFile(join(root, 'qualification/docling/src/main.rs'), 'utf8');
+  assert.doesNotMatch(harness, /SuccessNonEmpty|must_contain|peak_rss_bytes/, 'no label for a rule that is not applied, no expectation outside SOURCES.json, no field that is always null');
+  assert.match(harness, /\.generate_page_images\(applied\.generate_page_images\)/);
+  assert.match(harness, /version_source: VERSION_SOURCE/);
+  assert.match(harness, /Rule::TimeoutHonoured => "partial_success_with_pipeline_timeout_error"/);
 });
 
 const pidAlive = (pid) => {

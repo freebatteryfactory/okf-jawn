@@ -1,13 +1,22 @@
 /**
  * Orchestrate Docling direct-library qualification. Thin entry point:
- *   lib/runner.mjs  runs one process per fixture and samples its peak memory once;
- *   lib/receipt.mjs composes and judges the receipt;
+ *   lib/assets.mjs    re-hashes every model asset before anything converts;
+ *   lib/build.mjs     reads the docling features of this build from cargo;
+ *   lib/runner.mjs    runs one process per fixture and samples its peak memory once;
+ *   lib/evidence.mjs  re-reads the Markdown, document export and page images each process wrote;
+ *   lib/receipt.mjs   judges every criterion and composes the receipt;
  *   scripts/lib/provenance.mjs supplies the receipt header behind its clean-tree guard.
  *
  * Usage (from PowerShell, cargo on PATH): bun qualification/docling/run.mjs [--record]
- * Needs .artifacts/qualification/docling/assets.json naming the verified model assets.
+ * Needs .artifacts/qualification/docling/assets.json naming the verified model assets; a
+ * missing or changed asset stops the run before the build.
  * Writes .artifacts/qualification/docling/receipt.json; --record also copies it to
  * qualification/receipts/docling.json. Exits non-zero unless the receipt result is PASS.
+ *
+ * Single-fixture mode, for iterating without the large fixtures: set OKF_DOCLING_ONLY to one
+ * or more names from FIXTURE_RUNS, comma-separated. Only those run; the receipt goes to
+ * .artifacts/qualification/docling/only/receipt.json, says so in `scope`, reports every
+ * other fixture as FAIL_not_run (so it is never PASS) and cannot be recorded.
  */
 
 import { createHash } from 'node:crypto';
@@ -15,28 +24,47 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { receiptHeader, recordReceipt } from '../../scripts/lib/provenance.mjs';
-import { buildRelease, lockedPackage, lockedPackages } from '../lib/cargo.mjs';
-import { DOCLING_INPUTS, FIXTURE_RUNS, buildDoclingReceipt } from './lib/receipt.mjs';
+import { buildRelease, exec, lockedPackage, lockedPackages } from '../lib/cargo.mjs';
+import { verifyAssets } from './lib/assets.mjs';
+import { TREE_ARGS, buildFacts } from './lib/build.mjs';
+import { loadEvidence } from './lib/evidence.mjs';
+import { DOCLING_INPUTS, FIXTURE_RUNS, TIMEOUT_PROBE, buildDoclingReceipt } from './lib/receipt.mjs';
 import { runFixtureProcess } from './lib/runner.mjs';
 
+const PACKAGE = 'okf-qualify-docling';
+const FIXTURES = 'tests/fixtures/documents';
+const MANIFEST = '.artifacts/qualification/docling/assets.json';
+
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const outDir = join(root, '.artifacts/qualification/docling');
-const assetsPath = join(outDir, 'assets.json');
-const partialDir = join(outDir, 'partial');
-const fixturesDir = join(root, 'tests/fixtures/documents');
 const record = process.argv.includes('--record');
+const only = (process.env.OKF_DOCLING_ONLY ?? '')
+  .split(',')
+  .map((name) => name.trim())
+  .filter(Boolean);
+const unknown = only.filter((name) => !FIXTURE_RUNS.includes(name));
+if (unknown.length) throw new Error(`OKF_DOCLING_ONLY names no fixture run: ${unknown.join(', ')}. Known: ${FIXTURE_RUNS.join(', ')}`);
+if (only.length && record) throw new Error('A single-fixture run (OKF_DOCLING_ONLY) is not the qualification and cannot be recorded');
+const selected = only.length ? FIXTURE_RUNS.filter((name) => only.includes(name)) : FIXTURE_RUNS;
+
+const outDir = join(root, '.artifacts/qualification/docling', ...(only.length ? ['only'] : []));
+const partialDir = join(outDir, 'partial');
+const fixturesDir = join(root, FIXTURES);
 
 const header = await receiptHeader(root, DOCLING_INPUTS);
 
-let assets;
+let manifestBytes;
 try {
-  assets = JSON.parse((await readFile(assetsPath, 'utf8')).replace(/^\uFEFF/, ''));
+  manifestBytes = await readFile(join(root, MANIFEST));
 } catch (error) {
   throw new Error(
-    `Docling model assets manifest not readable at ${assetsPath}: ${error.message}. Qualification needs the verified model assets; a missing asset is never qualified.`,
+    `Docling model assets manifest not readable at ${join(root, MANIFEST)}: ${error.message}. Qualification needs the verified model assets; a missing asset is never qualified.`,
   );
 }
+process.stdout.write('Verifying Docling model assets against the manifest hashes...\n');
+const { manifest, verified } = await verifyAssets(manifestBytes);
+process.stdout.write(`Verified ${verified.count} assets (${verified.bytes_total} bytes); every hash matches.\n`);
 
+const sources = JSON.parse(await readFile(join(fixturesDir, 'SOURCES.json'), 'utf8'));
 const lockText = await readFile(join(root, 'Cargo.lock'), 'utf8');
 const docling = lockedPackage(lockText, 'docling');
 const converter = {
@@ -47,30 +75,40 @@ const converter = {
   source: 'Cargo.lock',
 };
 
-const env = {
-  ...process.env,
-  DOCLING_RS_MODELS_DIR: assets.DOCLING_RS_MODELS_DIR,
+// What the converter processes see beyond the caller's environment. Recorded as settings.
+const environment = {
+  DOCLING_RS_MODELS_DIR: manifest.DOCLING_RS_MODELS_DIR,
+  ...manifest.recommended_env,
   OKF_DOCLING_FIXTURES: fixturesDir,
-  ...assets.recommended_env,
   OKF_DOCLING_CRATE_VERSION: docling.version,
   OKF_DOCLING_HOLD: '1',
 };
+const env = { ...process.env, ...environment };
 
 await mkdir(outDir, { recursive: true });
 await rm(partialDir, { recursive: true, force: true });
 await mkdir(partialDir, { recursive: true });
 
-const binPath = await buildRelease(root, 'okf-qualify-docling');
+const binPath = await buildRelease(root, PACKAGE);
+const tree = await exec('cargo', TREE_ARGS, { cwd: root });
+if (tree.code !== 0) throw new Error(`cargo ${TREE_ARGS.join(' ')} exited ${tree.code}\n${tree.stderr}`);
+const build = buildFacts({
+  harnessToml: await readFile(join(root, 'qualification/docling/Cargo.toml'), 'utf8'),
+  workspaceToml: await readFile(join(root, 'Cargo.toml'), 'utf8'),
+  treeText: tree.stdout,
+  // buildRelease (qualification/lib/cargo.mjs) runs exactly this and does not return its argv.
+  command: `cargo build --locked --release -p ${PACKAGE}`,
+});
 
 const runs = [];
-for (const only of FIXTURE_RUNS) {
-  process.stdout.write(`\n=== Docling fixture: ${only} ===\n`);
-  const fixtureOut = join(partialDir, only.replaceAll(/[\\/]/g, '__'));
+for (const name of selected) {
+  process.stdout.write(`\n=== Docling fixture: ${name} ===\n`);
+  const fixtureOut = join(partialDir, name.replaceAll(/[\\/]/g, '__'));
   await mkdir(fixtureOut, { recursive: true });
   const run = await runFixtureProcess({
     command: binPath,
     cwd: root,
-    env: { ...env, OKF_DOCLING_ONLY: only, OKF_DOCLING_OUT: fixtureOut },
+    env: { ...env, OKF_DOCLING_ONLY: name, OKF_DOCLING_OUT: fixtureOut },
     onStdout: (text) => process.stdout.write(text),
     onStderr: (text) => process.stderr.write(text),
   });
@@ -80,10 +118,12 @@ for (const only of FIXTURE_RUNS) {
   } catch {
     report = null; // judged as FAIL_harness by lib/receipt.mjs
   }
+  const written = name === TIMEOUT_PROBE ? report?.timeout_case?.document : report?.receipts?.[0]?.document;
   runs.push({
-    only,
+    only: name,
     run: { ...run, stdoutSha256: createHash('sha256').update(run.stdout).digest('hex') },
     report,
+    evidence: await loadEvidence(fixtureOut, written),
   });
 }
 
@@ -91,8 +131,13 @@ const receipt = buildDoclingReceipt({
   header,
   converter,
   platform: process.platform,
-  modelsDir: assets.DOCLING_RS_MODELS_DIR,
+  build,
+  assets: { ...verified, manifest: MANIFEST, models_dir: manifest.DOCLING_RS_MODELS_DIR, models_source: manifest.models_source ?? null },
+  environment,
+  sources,
   runs,
+  scope: only.length ? { mode: 'only', fixtures: selected, qualification: false } : { mode: 'all', fixtures: selected, qualification: true },
+  paths: { fixtures_dir: FIXTURES, sources: `${FIXTURES}/SOURCES.json`, per_fixture_evidence: join(outDir, 'partial') },
   finishedAt: new Date().toISOString(),
 });
 
@@ -108,6 +153,6 @@ if (receipt.result !== 'PASS') {
     ? ` Finding for the owner: ${receipt.finding}. Fixture must_fail_truncated.pdf was not altered.`
     : '';
   throw new Error(
-    `Docling qualification FAIL.${finding} ${JSON.stringify({ summary: receipt.summary, memory: receipt.memory_summary })}`,
+    `Docling qualification FAIL.${finding} ${JSON.stringify({ summary: receipt.summary, failures: receipt.failures.map((item) => `${item.fixture ?? 'run'}: ${item.criterion} ${item.status}`) })}`,
   );
 }
