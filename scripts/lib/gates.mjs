@@ -165,5 +165,5 @@ export async function cleanCheckout(root, { parent = lanesParent(root), execute 
  */
 export const foundationTests = Object.freeze({
   fast: Object.freeze(['ci', 'files', 'generation', 'lockfile', 'policy', 'ports', 'toolchain'].map(name => `${name}.test.mjs`)),
-  slow: Object.freeze(['gates', 'harness', 'hooks', 'init', 'lanes', 'process', 'receipts', 'records', 'vendor'].map(name => `${name}.test.mjs`)),
+  slow: Object.freeze(['gates', 'harness', 'hooks', 'init', 'lanes', 'no-external-engine', 'process', 'receipts', 'records', 'vendor'].map(name => `${name}.test.mjs`)),
 });
