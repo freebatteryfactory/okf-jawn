@@ -1,6 +1,6 @@
 /** Disposable Git repositories for tooling tests; never the real checkout. */
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { cp, mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -27,14 +27,55 @@ export async function commit(root, files, message) {
 }
 
 export async function fixtureRepo(t, files = { 'README.md': 'fixture\n' }) {
-  const base = await realpath(await mkdtemp(join(tmpdir(), 'okf-repo-')));
-  // Cleanup of a scratch directory is best effort; a locked file there is not a test failure.
-  t.after(() => rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => {}));
+  const base = await scratch(t);
   const root = join(base, 'repo');
   await mkdir(root);
   await git(root, 'init', '--quiet', '--initial-branch=main');
   await commit(root, files, 'initial');
   return { base, root };
+}
+
+/** A scratch directory removed when `t` ends. Cleanup is best effort; a locked file there is not a test failure. */
+async function scratch(t) {
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'okf-repo-')));
+  t.after(() => rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => {}));
+  return base;
+}
+
+/** A copy of the repository at `source` in a scratch directory private to `t`, as `{ base, root }`; what the copy does never reaches `source`. */
+export async function copyRepo(t, source) {
+  const base = await scratch(t);
+  const root = join(base, 'repo');
+  await cp(source, root, { recursive: true });
+  return { base, root };
+}
+
+/**
+ * Prepared repositories for one test file: each distinct set of files is initialised and committed
+ * once, then the returned `fixtureRepo` copies the result for every test, so a test may commit,
+ * check out and write in its repository and no test sees another's. Call `dispose` once, after the
+ * file's last test (an `afterAll`); the prepared originals are only ever read, never handed to a test.
+ */
+export function sharedRepos() {
+  const bases = new Set();
+  const prepared = new Map();
+  const prepare = async files => {
+    const base = await realpath(await mkdtemp(join(tmpdir(), 'okf-prepared-')));
+    bases.add(base);
+    const root = join(base, 'repo');
+    await mkdir(root);
+    await git(root, 'init', '--quiet', '--initial-branch=main');
+    await commit(root, files, 'initial');
+    return root;
+  };
+  return {
+    fixtureRepo: async (t, files = { 'README.md': 'fixture\n' }) => {
+      const key = JSON.stringify(files);
+      if (!prepared.has(key)) prepared.set(key, prepare(files));
+      return copyRepo(t, await prepared.get(key));
+    },
+    dispose: () => Promise.all([...bases].map(base => rm(base, { recursive: true, force: true, maxRetries: 3 }).catch(() => {}))),
+  };
 }
 
 /** The receipt-backed Phase 0 gates of a fixture record: gate id by harness name. */
@@ -90,8 +131,29 @@ export function fixtureRecordFiles(options) {
     ...Object.fromEntries(Object.keys(fixtureGates).map(harness => [`qualification/${harness}/criteria.json`, fixtureCriteria(harness)])) };
 }
 
-/** The path of a POSIX sh: `sh` from PATH when runnable, else (win32) the sh.exe that ships with the git on PATH. Throws, naming what was looked for; never skips. */
+/** Run a command with `input` on its stdin without blocking the event loop (spawnSync would stop every test running beside it); resolves like spawnSync with `status`, `signal`, `stdout` and `stderr`. */
+export function runWithInput(command, args, { cwd, input, env }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = ''; let stderr = '';
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', (status, signal) => resolve({ status: status ?? 1, signal, stdout, stderr }));
+    child.stdin.on('error', () => {});
+    child.stdin.end(input);
+  });
+}
+
+let shell;
+/** The path of a POSIX sh: `sh` from PATH when runnable, else (win32) the sh.exe that ships with the git on PATH. Throws, naming what was looked for; never skips. The answer is found once per process. */
 export function posixShell() {
+  shell ??= findPosixShell();
+  return shell;
+}
+
+function findPosixShell() {
   if (spawnSync('sh', ['-c', 'exit 0'], { stdio: 'ignore' }).status === 0) return 'sh';
   const looked = ['sh (on PATH, not runnable)'];
   if (process.platform === 'win32') {
