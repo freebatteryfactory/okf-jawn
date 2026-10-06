@@ -6,6 +6,14 @@
  * receipts alone; `writeDerivedRecord` (run by `bun qualification/record.mjs`) is the only writer
  * of the two values, and `checkReceipts` fails when a typed value differs from the derived one.
  * A committed receipt must also describe HEAD: its commit an ancestor, its inputs unchanged.
+ *
+ * A receipt gate may carry `accepted_failures`: criteria the owner has decided to accept as
+ * failing, each tied to the gate that tracks its cure. A FAIL receipt whose every failing
+ * required criterion is accepted derives `accepted_with_limitations`, which qualifies Phase 0
+ * as `passed` does. Nothing else is upgraded: not an INCOMPLETE receipt, not a FAIL with one
+ * failing criterion nobody accepted, not a receipt whose envelope cannot be trusted. An
+ * acceptance that names a criterion its receipt no longer fails is stale and is itself a
+ * failure, so the limitation cannot outlive its cause.
  */
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -17,6 +25,14 @@ import { envelopeFailures, receiptResults, statusOf } from './receipt-envelope.m
 export const gateKinds = Object.freeze(['receipt', 'ci', 'decision']);
 /** The command that rewrites the derived values; every message about a typed value names it. */
 export const rewriteCommand = 'bun qualification/record.mjs';
+/** The statuses a receipt gate can derive. The last is a FAIL whose every failing required criterion the owner accepted. */
+export const receiptGateStatuses = Object.freeze(['passed', 'failed', 'incomplete', 'accepted_with_limitations']);
+/** The statuses with which a receipt gate no longer holds Phase 0 back. */
+export const qualifyingStatuses = Object.freeze(['passed', 'accepted_with_limitations']);
+/** The fields of one entry of a receipt gate's `accepted_failures`, in file order; every one is required. */
+export const acceptedFailureFields = Object.freeze(['criterion', 'decision', 'decided_on', 'decided_by', 'tracked_by']);
+/** The only role that may accept a failing criterion. */
+export const acceptingRole = 'owner';
 
 const receiptsPath = 'qualification/receipts';
 const recordPath = 'verification.json';
@@ -95,6 +111,57 @@ function notJudgedFailures(receipt) {
   return same ? [] : [`not_judged is ${JSON.stringify(typed)} but its criteria derive ${JSON.stringify(derived)}`];
 }
 
+/** Every gate id of a record, in whichever group it stands. */
+function gateIds(record) {
+  const groups = record?.current?.gates;
+  if (groups === null || typeof groups !== 'object') return [];
+  return Object.values(groups).filter(Array.isArray).flat().map(gate => gate?.id).filter(id => typeof id === 'string');
+}
+
+/**
+ * The accepted failures of a receipt gate: `{ accepted, problems }`. `accepted` holds the
+ * criterion ids of the entries that are sound; `problems` says what is wrong with the others.
+ * An entry is sound when it has exactly the fields of `acceptedFailureFields` as non-empty
+ * strings, `decided_on` is a calendar day, `decided_by` is the owner, `tracked_by` is the id of
+ * a gate of the same record, and no other entry names its criterion. When `pinned` is known
+ * (the gate's criteria file was readable), the criterion must also be one that file pins.
+ */
+function acceptedFailures(gate, record, pinned) {
+  const entries = gate.accepted_failures;
+  if (entries === undefined) return { accepted: [], problems: [] };
+  if (!Array.isArray(entries)) return { accepted: [], problems: ['accepted_failures must be an array of entries'] };
+  const ids = gateIds(record);
+  const accepted = [];
+  const problems = [];
+  for (const [index, entry] of entries.entries()) {
+    const where = `accepted_failures[${index}]`;
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) { problems.push(`${where} must be an object with ${acceptedFailureFields.join(', ')}`); continue; }
+    const lacking = acceptedFailureFields.filter(field => typeof entry[field] !== 'string' || entry[field].length === 0);
+    const extra = Object.keys(entry).filter(field => !acceptedFailureFields.includes(field));
+    const wrong = [];
+    if (lacking.length) wrong.push(`${where} lacks ${lacking.join(', ')}`);
+    if (extra.length) wrong.push(`${where} has the unknown field(s) ${extra.join(', ')}`);
+    if (!lacking.includes('decided_on') && !(/^\d{4}-\d{2}-\d{2}$/.test(entry.decided_on) && new Date(`${entry.decided_on}T00:00:00Z`).toISOString().slice(0, 10) === entry.decided_on)) {
+      wrong.push(`${where}.decided_on ${JSON.stringify(entry.decided_on)} is not a calendar day (YYYY-MM-DD)`);
+    }
+    if (!lacking.includes('decided_by') && entry.decided_by !== acceptingRole) wrong.push(`${where} is decided by ${JSON.stringify(entry.decided_by)}; only the ${acceptingRole} accepts a failing criterion`);
+    if (!lacking.includes('tracked_by') && !ids.includes(entry.tracked_by)) wrong.push(`${where}.tracked_by ${JSON.stringify(entry.tracked_by)} is not the id of a gate in ${recordPath}`);
+    if (!lacking.includes('criterion')) {
+      if (entries.findIndex(other => other?.criterion === entry.criterion) !== index) wrong.push(`${where} repeats the criterion ${entry.criterion}`);
+      else if (pinned !== null && !pinned.includes(entry.criterion)) wrong.push(`${where} accepts ${entry.criterion}, which ${gate.criteria} does not pin`);
+    }
+    if (wrong.length) problems.push(...wrong);
+    else accepted.push(entry.criterion);
+  }
+  return { accepted, problems };
+}
+
+/** The ids of the required criteria a receipt fails; empty when its criteria are not a list. */
+function failingRequired(receipt) {
+  if (!Array.isArray(receipt?.criteria)) return [];
+  return receipt.criteria.filter(entry => entry !== null && typeof entry === 'object' && entry.required === true && entry.result === 'fail').map(entry => entry.id);
+}
+
 /**
  * Why the content of `receipt` cannot be trusted as the receipt of `gate` in `tree`; empty when
  * it can. This is the whole content rule, for a receipt about to be recorded and for one already
@@ -129,16 +196,23 @@ export async function recordFailures(root, name, receipt) {
  *
  * `head` is a commit, read with git and independent of the checkout; without it the working tree
  * is read. A receipt gate is `incomplete` when its receipt file does not exist, otherwise the
- * status its receipt's result supports. `phase_0_qualified` is true only when every receipt gate
- * is `passed`, no receipt has a failure and no Phase 0 gate is still hand-typed (has none of
- * `gateKinds`).
+ * status its receipt's result supports, with one upgrade: a FAIL receipt with a clean envelope
+ * whose every failing required criterion is a sound entry of the gate's `accepted_failures`
+ * is `accepted_with_limitations`. `phase_0_qualified` is true only when every receipt gate is
+ * `passed` or `accepted_with_limitations`, nothing has a failure and no Phase 0 gate is still
+ * hand-typed (has none of `gateKinds`).
+ *
+ * An accepted failure is checked whether or not a receipt exists (its fields, the owner, the
+ * tracking gate, a pinned criterion); once a receipt exists, an accepted criterion that the
+ * receipt does not fail is stale and is a failure that says to remove the entry.
  *
  * A receipt that exists is read, not only its header: `envelopeFailures` must be empty against
  * the `required` list of the gate's criteria file in the same tree (a missing criteria file is
  * a failure), its `not_judged` must be the list its criteria derive, and every file under
  * qualification/receipts/ must be the one receipt of one gate.
  *
- * Returns `{ missing, gates, receipts, unconverted, phase_0_qualified, pending, failures, mismatches }`:
+ * Returns `{ missing, gates, receipts, unconverted, phase_0_qualified, pending, limitations, failures, mismatches }`
+ * (`limitations` names the gates that are `accepted_with_limitations`):
  * `gates` is one `{ id, harness, file, status, typed, basis }` per receipt gate; `receipts` is
  * every file under qualification/receipts/ as `{ name, receipt }` (`receipt` null when it is not
  * JSON); `pending` says why `phase_0_qualified` is false; `failures` are `{ name, message }`
@@ -156,7 +230,7 @@ export async function derivedRecord(root, head) {
     if (outcome.error) failures.push({ name, message: outcome.error });
     receipts.push({ name, receipt: outcome.error ? null : outcome.value });
   }
-  const result = { missing: false, gates: [], receipts, unconverted: [], phase_0_qualified: false, pending: [], failures, mismatches: [] };
+  const result = { missing: false, gates: [], receipts, unconverted: [], phase_0_qualified: false, pending: [], limitations: [], failures, mismatches: [] };
   const recordText = await tree.read(recordPath);
   if (recordText === null) {
     for (const { name } of receipts) failures.push({ name, message: `${recordPath} is missing${tree.at}, so no gate names this receipt` });
@@ -178,6 +252,11 @@ export async function derivedRecord(root, head) {
     const file = receiptFile(gate);
     const entry = { id: gate.id, harness: gate.harness, file, status: 'incomplete', typed: gate.status, basis: `${gate.receipt} is absent` };
     result.gates.push(entry);
+    // What the owner accepted is checked with or without a receipt; a criterion can only be
+    // held to the pinned list when the criteria file is one that can be read.
+    const criteriaFile = Object.hasOwn(gate, 'accepted_failures') ? await pinnedCriteria(tree, gate) : null;
+    const acceptance = acceptedFailures(gate, record.value, criteriaFile && criteriaFile.problems.length === 0 ? criteriaFile.pinned : null);
+    for (const message of acceptance.problems) failures.push({ name: gate.id, message });
     if (file === null) {
       entry.basis = `its receipt (${JSON.stringify(gate.receipt)}) is not a file under ${receiptsPath}/`;
       failures.push({ name: gate.id, message: entry.basis });
@@ -191,7 +270,24 @@ export async function derivedRecord(root, head) {
     entry.basis = known ? `${gate.receipt} result ${found.receipt.result}` : `${gate.receipt} has no result of ${receiptResults.join(', ')}`;
     // The receipt is read, not only its header: its result must be the fold of its criteria,
     // and every criterion its harness pins must be present and required.
-    for (const message of await contentFailures(tree, gate, found.receipt)) failures.push({ name: file, message });
+    const untrusted = await contentFailures(tree, gate, found.receipt);
+    for (const message of untrusted) failures.push({ name: file, message });
+    // An acceptance outlives its cause when the receipt judged the criterion it names and did
+    // not fail it (or no longer has it). A criterion a run did not judge says nothing either way,
+    // so an unfinished run can still be recorded beside the acceptance.
+    const failing = failingRequired(found.receipt);
+    const resultOf = criterion => (Array.isArray(found.receipt?.criteria) ? found.receipt.criteria.find(candidate => candidate?.id === criterion)?.result : undefined);
+    const stale = acceptance.accepted.filter(criterion => !failing.includes(criterion) && resultOf(criterion) !== 'not_judged');
+    for (const criterion of stale) {
+      const now = resultOf(criterion);
+      failures.push({ name: gate.id, message: `accepted failure ${criterion} is not failing in ${gate.receipt} (${now === undefined ? 'the receipt has no such criterion' : `its result there is ${now}`}); the acceptance is stale: remove the entry from accepted_failures` });
+    }
+    // The one upgrade: a trusted FAIL whose every failing required criterion the owner accepted.
+    const everyFailureAccepted = failing.length > 0 && failing.every(criterion => acceptance.accepted.includes(criterion));
+    if (found.receipt.result === 'FAIL' && untrusted.length === 0 && acceptance.problems.length === 0 && stale.length === 0 && everyFailureAccepted) {
+      entry.status = 'accepted_with_limitations';
+      entry.basis = `${gate.receipt} result FAIL; the owner accepted every failing criterion: ${failing.join(', ')}`;
+    }
   }
   // A receipt is recorded only for the gate it closes: one file, one gate.
   const named = result.gates.map(gate => gate.file).filter(file => file !== null);
@@ -201,17 +297,18 @@ export async function derivedRecord(root, head) {
   for (const { name } of receipts) {
     if (!named.includes(name)) failures.push({ name, message: `no Phase 0 gate of kind receipt names this file under ${receiptsPath}/` });
   }
-  for (const gate of result.gates) if (gate.status !== 'passed') result.pending.push(`${gate.id} is ${gate.status}`);
+  for (const gate of result.gates) if (!qualifyingStatuses.includes(gate.status)) result.pending.push(`${gate.id} is ${gate.status}`);
   for (const id of result.unconverted) result.pending.push(`${id} has no kind and is still hand-typed`);
   if (result.gates.length === 0) result.pending.push('no Phase 0 gate is backed by a receipt');
   if (failures.length) result.pending.push(`${failures.length} receipt failure(s)`);
   result.phase_0_qualified = result.pending.length === 0;
+  result.limitations = result.gates.filter(gate => gate.status === 'accepted_with_limitations').map(gate => gate.id);
   for (const gate of result.gates) {
     if (gate.typed !== gate.status) result.mismatches.push(`${gate.id}: ${recordPath}${tree.at} types status ${JSON.stringify(gate.typed)} but the derived status is "${gate.status}" (${gate.basis}); run \`${rewriteCommand}\` to rewrite it`);
   }
   const typed = record.value.phase_0_qualified;
   if (typed !== result.phase_0_qualified) {
-    const why = result.pending.length ? ` (${result.pending.join('; ')})` : ' (every receipt gate passed)';
+    const why = result.pending.length ? ` (${result.pending.join('; ')})` : result.limitations.length ? ` (every receipt gate passed or was accepted with limitations: ${result.limitations.join(', ')})` : ' (every receipt gate passed)';
     result.mismatches.push(`phase_0_qualified: ${recordPath}${tree.at} types ${JSON.stringify(typed)} but the derived value is ${result.phase_0_qualified}${why}; run \`${rewriteCommand}\` to rewrite it`);
   }
   return result;
@@ -219,8 +316,9 @@ export async function derivedRecord(root, head) {
 
 /** One line per receipt gate and one for `phase_0_qualified`, as derived. */
 export function derivedLines(derived) {
+  const withLimitations = derived.phase_0_qualified && derived.limitations.length ? ` (with accepted limitations: ${derived.limitations.join(', ')})` : '';
   return [...derived.gates.map(gate => `${gate.id}: ${gate.status} (${gate.basis})`),
-    `phase_0_qualified: ${derived.phase_0_qualified}${derived.pending.length ? ` (${derived.pending.join('; ')})` : ''}`];
+    `phase_0_qualified: ${derived.phase_0_qualified}${derived.pending.length ? ` (${derived.pending.join('; ')})` : withLimitations}`];
 }
 
 /**

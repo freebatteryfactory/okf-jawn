@@ -139,12 +139,16 @@ could not have observed."
 - [ ] **Step 4: Read the derived states**
 
 Nobody decides or types a gate's state. `record.mjs` printed one line per receipt gate:
-`passed`, `failed` or `incomplete`, as the criteria of its receipt fold, and one line for
-`phase_0_qualified`. A FAIL or INCOMPLETE receipt is recorded like a PASS, because a failed
-qualification is evidence. If Docling accepted the truncated PDF, or the must-fail result is
-`FAIL_refusal_unproven`, the Docling gate says `failed`, the finding is reported to the owner,
-and `phase_0_qualified` stays false. The owner decides what is done about the finding, not what
-the record says.
+`passed`, `failed`, `incomplete` or `accepted_with_limitations`, as the criteria of its receipt
+fold, and one line for `phase_0_qualified`. A FAIL or INCOMPLETE receipt is recorded like a
+PASS, because a failed qualification is evidence. A gate says `accepted_with_limitations` only
+when its receipt is a FAIL and every failing required criterion is listed in the gate's
+`accepted_failures` by the owner, each tied to the gate that tracks its cure; that qualifies
+Phase 0 as `passed` does, and an acceptance whose criterion no longer fails must be removed
+before `check-receipts` passes again. If Docling accepted the truncated PDF, or any criterion
+the owner did not accept fails, the Docling gate says `failed`, the finding is reported to the
+owner, and `phase_0_qualified` stays false. The owner decides what is done about the finding,
+not what the record says.
 
 ### Task O.5: Record R and reach main
 

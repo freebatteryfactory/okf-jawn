@@ -46,13 +46,24 @@ export const fixturePinned = Object.freeze(['corpus/a.pdf/content', 'corpus/a.pd
 /**
  * A verification.json in the two-space form record.mjs keeps, with one Phase 0 gate of kind
  * receipt per harness. `statuses` types a status by harness (`incomplete` otherwise),
- * `qualified` types `phase_0_qualified`, and `extra` appends other Phase 0 gates.
+ * `qualified` types `phase_0_qualified`, and `extra` appends other Phase 0 gates. `accepted`
+ * gives a harness's gate its `accepted_failures`, and `construction` adds construction gates
+ * (the gates an accepted failure can be tracked by).
  */
-export function fixtureRecord({ statuses = {}, qualified = false, extra = [] } = {}) {
+export function fixtureRecord({ statuses = {}, qualified = false, extra = [], accepted = {}, construction } = {}) {
   const phase_0 = Object.entries(fixtureGates).map(([harness, id]) => ({ id, kind: 'receipt', harness,
     receipt: `qualification/receipts/${harness}.json`, criteria: `qualification/${harness}/criteria.json`,
-    status: statuses[harness] ?? 'incomplete', covers: 'fixture' }));
-  return `${JSON.stringify({ phase_0_qualified: qualified, current: { gates: { phase_0: [...phase_0, ...extra] } } }, null, 2)}\n`;
+    status: statuses[harness] ?? 'incomplete', ...(Object.hasOwn(accepted, harness) ? { accepted_failures: accepted[harness] } : {}), covers: 'fixture' }));
+  const gates = { phase_0: [...phase_0, ...extra], ...(construction ? { construction } : {}) };
+  return `${JSON.stringify({ phase_0_qualified: qualified, current: { gates } }, null, 2)}\n`;
+}
+
+/** The construction gate the fixture acceptances are tracked by. */
+export const fixtureTracker = Object.freeze({ id: 'converter-font-run-spacing', status: 'blocked_upstream', owner: 'integration-owner' });
+
+/** A sound accepted failure of the fixture Docling gate: the owner accepts that `criterion` fails. */
+export function fixtureAcceptance(criterion = 'corpus/a.pdf/provenance', overrides = {}) {
+  return { criterion, decision: 'Accepted for now and reported upstream.', decided_on: '2026-10-06', decided_by: 'owner', tracked_by: fixtureTracker.id, ...overrides };
 }
 
 /** The tracked criteria.json of a fixture harness. */

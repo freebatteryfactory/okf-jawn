@@ -7,12 +7,16 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
-import { derivedRecord } from '../../scripts/lib/receipts.mjs';
+import { acceptedFailureFields, derivedRecord, receiptGateStatuses } from '../../scripts/lib/receipts.mjs';
 import { premergeSteps } from '../../scripts/lib/gates.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const read=file=>readFile(join(root,file),'utf8');
 const record=async()=>JSON.parse(await read('verification.json'));
-/** The fields of each kind of Phase 0 gate, in file order. A gate of kind ci carries no status: CI states it on every push. */
+/**
+ * The fields of each kind of Phase 0 gate, in file order. A gate of kind ci carries no status: CI
+ * states it on every push. A receipt gate may also carry `accepted_failures` (after `status`):
+ * the failing criteria the owner accepted, which check-receipts holds to its own rules.
+ */
 const gateFields={
  receipt:['id','kind','harness','receipt','criteria','status','covers'],
  ci:['id','kind','enforced_by','covers'],
@@ -133,7 +137,8 @@ test('every Phase 0 gate has exactly one kind and only the fields of that kind',
  assert.deepEqual(gates.filter(gate=>gate.kind===undefined).map(gate=>gate.id),Object.keys(unconverted),'a gate without a kind must be listed in unconverted with what is missing');
  for(const gate of gates.filter(entry=>entry.kind!==undefined)){
   assert.ok(Object.hasOwn(gateFields,gate.kind),`${gate.id} has the unknown kind ${gate.kind}`);
-  assert.deepEqual(Object.keys(gate),gateFields[gate.kind],`${gate.id} (${gate.kind})`);
+  const fields=gate.kind==='receipt'&&Object.hasOwn(gate,'accepted_failures')?gateFields.receipt.flatMap(field=>field==='status'?[field,'accepted_failures']:[field]):gateFields[gate.kind];
+  assert.deepEqual(Object.keys(gate),fields,`${gate.id} (${gate.kind})`);
   for(const field of ['id','covers'])assert.ok(typeof gate[field]==='string'&&gate[field].length>0,`${gate.id}.${field}`);
  }
  for(const gate of gates.filter(entry=>entry.kind==='receipt')){
@@ -142,8 +147,11 @@ test('every Phase 0 gate has exactly one kind and only the fields of that kind',
   assert.equal(gate.receipt,`qualification/receipts/${gate.harness}.json`,gate.id);
   assert.equal(gate.criteria,`qualification/${gate.harness}/criteria.json`,gate.id);
   assert.ok(existsSync(join(root,'qualification',gate.harness,'run.mjs')),`${gate.id}: no harness at qualification/${gate.harness}/run.mjs`);
-  assert.ok(['passed','failed','incomplete'].includes(gate.status),`${gate.id} status ${gate.status}`);
+  assert.ok(receiptGateStatuses.includes(gate.status),`${gate.id} status ${gate.status}`);
+  // What an acceptance must be is check-receipts' rule (receipts.test.mjs); here only its shape in the file.
+  for(const entry of gate.accepted_failures??[])assert.deepEqual(Object.keys(entry),[...acceptedFailureFields],`${gate.id}: an accepted failure has exactly these fields, in this order`);
  }
+ for(const gate of gates.filter(entry=>entry.kind!=='receipt'))assert.ok(!Object.hasOwn(gate,'accepted_failures'),`${gate.id}: only a receipt gate can accept a failing criterion`);
  assert.ok(gates.some(gate=>gate.kind==='receipt'),'no gate is backed by a receipt');
  for(const gate of gates.filter(entry=>entry.kind==='decision'))assertDecision(gate,gate.id);
  // A gate that was not converted keeps its typed status, which is never a pass.

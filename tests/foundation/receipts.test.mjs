@@ -6,8 +6,8 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
-import { checkReceipts, derivedLines, derivedRecord, gateKinds, rewriteCommand, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
-import { commit, fixtureCriteria, fixtureGates, fixturePinned, fixtureReceipt, fixtureRecord, fixtureRecordFiles, fixtureRepo, git } from './fixture-repo.mjs';
+import { acceptedFailureFields, acceptingRole, checkReceipts, derivedLines, derivedRecord, gateKinds, qualifyingStatuses, receiptGateStatuses, rewriteCommand, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
+import { commit, fixtureAcceptance, fixtureCriteria, fixtureGates, fixturePinned, fixtureReceipt, fixtureRecord, fixtureRecordFiles, fixtureRepo, fixtureTracker, git } from './fixture-repo.mjs';
 
 const source = fileURLToPath(new URL('../../', import.meta.url));
 const docling = fixtureGates.docling;
@@ -137,6 +137,8 @@ test('a Phase 0 gate that is still hand-typed keeps Phase 0 unqualified; ci and 
 
 /** Everything check-receipts says about one tree, or '' when it passes. */
 const complaint = root => checkReceipts(root).then(() => '', error => error.message);
+/** Every failure of a derived record, one per line, as check-receipts prints them. */
+const derivedFailureText = derived => derived.failures.map(failure => `${failure.name}: ${failure.message}`).join('\n');
 const passedRecord = () => fixtureRecord({ statuses: { docling: 'passed', 'mcp-apps': 'passed' }, qualified: true });
 
 test('check-receipts reads the receipt: a typed PASS over a required fail, a harness error, or an unjudged criterion is rejected', async t => {
@@ -344,6 +346,164 @@ test('record.mjs copies a receipt of any result and writes the derived statuses,
   assert.equal(edited.code, 1, edited.stdout);
   assert.match(edited.stderr, /^mcp-apps\.json: result is PASS but its criteria fold to FAIL$/m);
   assert.match(edited.stdout, /^phase_0_qualified: false \(.*1 receipt failure\(s\)\)$/m);
+});
+
+/** A record whose Docling gate accepts `entries`, tracked by the fixture construction gate. */
+const accepting = (entries, options = {}) => fixtureRecord({ accepted: { docling: entries }, construction: [fixtureTracker], ...options });
+const failingBoth = [{ id: 'corpus/a.pdf/content', required: true, result: 'fail' }, { id: 'corpus/a.pdf/provenance', required: true, result: 'fail' }];
+const accepted = 'accepted_with_limitations';
+
+test('a FAIL receipt whose every failing criterion the owner accepted derives accepted_with_limitations, and that qualifies Phase 0', async t => {
+  const { root, sha } = await recorded(t);
+  assert.deepEqual([...receiptGateStatuses], ['passed', 'failed', 'incomplete', accepted]);
+  assert.deepEqual([...qualifyingStatuses], ['passed', accepted]);
+  assert.deepEqual([...acceptedFailureFields], ['criterion', 'decision', 'decided_on', 'decided_by', 'tracked_by']);
+  assert.equal(acceptingRole, 'owner');
+
+  // Without an acceptance a failing receipt is failed, as before.
+  await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { criteria: failing }), [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha), 'verification.json': fixtureRecord({ construction: [fixtureTracker] }) }, 'a failing receipt');
+  assert.deepEqual(statuses(await derivedRecord(root)), { [docling]: 'failed', [apps]: 'passed', qualified: false });
+
+  // The owner accepts the one failing criterion.
+  await commit(root, { 'verification.json': accepting([fixtureAcceptance()]) }, 'accept the failing criterion');
+  let derived = await derivedRecord(root);
+  assert.deepEqual(derived.failures, []);
+  assert.deepEqual(statuses(derived), { [docling]: accepted, [apps]: 'passed', qualified: true });
+  assert.deepEqual(derived.pending, []);
+  assert.deepEqual(derived.limitations, [docling]);
+  assert.equal(derived.gates[0].basis, `${at('docling')} result FAIL; the owner accepted every failing criterion: corpus/a.pdf/provenance`);
+  assert.deepEqual(derivedLines(derived), [`${docling}: ${accepted} (${at('docling')} result FAIL; the owner accepted every failing criterion: corpus/a.pdf/provenance)`,
+    `${apps}: passed (${at('mcp-apps')} result PASS)`, `phase_0_qualified: true (with accepted limitations: ${docling})`]);
+  // The record still types the old values, and is told the derived ones.
+  const said = await complaint(root);
+  assert.match(said, new RegExp(`^${docling}: verification\\.json types status "incomplete" but the derived status is "${accepted}" `, 'm'));
+  assert.match(said, new RegExp(`^phase_0_qualified: verification\\.json types false but the derived value is true \\(every receipt gate passed or was accepted with limitations: ${docling}\\)`, 'm'));
+  // record.mjs writes them, and the tree is then one check-receipts accepts.
+  assert.equal((await writeDerivedRecord(root)).changed, true);
+  assert.equal(await readFile(join(root, 'verification.json'), 'utf8'), accepting([fixtureAcceptance()], { statuses: { docling: accepted, 'mcp-apps': 'passed' }, qualified: true }));
+  const head = await commit(root, {}, 'record');
+  assert.match(await checkReceipts(root), new RegExp(`^check-receipts: 2 receipt\\(s\\) valid against HEAD; ${docling}: ${accepted} \\(.*phase_0_qualified: true \\(with accepted limitations: ${docling}\\); verification\\.json agrees\\.$`));
+  assert.deepEqual(await staleReceiptLines(root, head), []);
+
+  // The other gate still has to qualify on its own.
+  await commit(root, { [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha, { criteria: unjudged }) }, 'the other gate is incomplete');
+  assert.deepEqual(statuses(await derivedRecord(root)), { [docling]: accepted, [apps]: 'incomplete', qualified: false });
+});
+
+test('nothing but a trusted FAIL with every failing criterion accepted is upgraded', async t => {
+  const { root, sha } = await recorded(t);
+  const other = { [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha) };
+  const derive = async (receipt, entries, why) => {
+    await commit(root, { ...other, [at('docling')]: receipt, 'verification.json': accepting(entries) }, why);
+    return derivedRecord(root);
+  };
+
+  // One of two failing criteria is not accepted: the gate is failed.
+  let derived = await derive(fixtureReceipt('docling', sha, { criteria: failingBoth }), [fixtureAcceptance()], 'one failure nobody accepted');
+  assert.deepEqual(statuses(derived), { [docling]: 'failed', [apps]: 'passed', qualified: false });
+  assert.deepEqual(derived.failures, [], 'the acceptance itself is sound; the receipt simply fails more');
+  assert.deepEqual(derived.pending, [`${docling} is failed`]);
+  // Both accepted: upgraded.
+  derived = await derive(fixtureReceipt('docling', sha, { criteria: failingBoth }), [fixtureAcceptance(), fixtureAcceptance('corpus/a.pdf/content')], 'both accepted');
+  assert.deepEqual(statuses(derived), { [docling]: accepted, [apps]: 'passed', qualified: true });
+  assert.match(derived.gates[0].basis, /the owner accepted every failing criterion: corpus\/a\.pdf\/content, corpus\/a\.pdf\/provenance$/);
+
+  // An INCOMPLETE receipt is never upgraded. A criterion it did not judge says nothing about the acceptance.
+  derived = await derive(fixtureReceipt('docling', sha, { criteria: unjudged }), [fixtureAcceptance()], 'an unfinished run');
+  assert.deepEqual(statuses(derived), { [docling]: 'incomplete', [apps]: 'passed', qualified: false });
+  assert.deepEqual(derived.failures, []);
+  derived = await derive(fixtureReceipt('docling', sha, { criteria: failing, harness_error: 'the model file was missing', result: 'INCOMPLETE' }), [fixtureAcceptance()], 'INCOMPLETE typed over a failing criterion');
+  assert.equal(derived.gates[0].status, 'incomplete');
+  assert.match(derivedFailureText(derived), /^docling\.json: result is INCOMPLETE but its criteria fold to FAIL$/m);
+
+  // A receipt whose envelope cannot be trusted is not upgraded, whatever is accepted.
+  derived = await derive(fixtureReceipt('docling', sha, { criteria: failing, not_judged: ['corpus/a.pdf/content'] }), [fixtureAcceptance()], 'a FAIL with a wrong not_judged list');
+  assert.deepEqual(statuses(derived), { [docling]: 'failed', [apps]: 'passed', qualified: false });
+  assert.match(derivedFailureText(derived), /^docling\.json: not_judged is \["corpus\/a\.pdf\/content"\] but its criteria derive \[\]$/m);
+  derived = await derive(fixtureReceipt('docling', sha, { criteria: [failing[1]] }), [fixtureAcceptance()], 'a FAIL that lacks a pinned criterion');
+  assert.equal(derived.gates[0].status, 'failed');
+  assert.match(derivedFailureText(derived), /^docling\.json: pinned criterion corpus\/a\.pdf\/content is missing$/m);
+
+  // A failing criterion that is not required does not fail the receipt, so there is nothing to accept.
+  const optionalFail = [{ id: 'corpus/a.pdf/content', required: true, result: 'pass' }, { id: 'corpus/a.pdf/provenance', required: true, result: 'pass' }, { id: 'memory/peak', required: false, result: 'fail' }];
+  derived = await derive(fixtureReceipt('docling', sha, { criteria: optionalFail }), [], 'an optional failure');
+  assert.deepEqual(statuses(derived), { [docling]: 'passed', [apps]: 'passed', qualified: true });
+});
+
+test('an acceptance that outlived its cause is a failure that says to remove it', async t => {
+  const { root, sha } = await recorded(t);
+  const record = { 'verification.json': accepting([fixtureAcceptance()], { statuses: { docling: 'passed', 'mcp-apps': 'passed' }, qualified: true }), [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha) };
+  // The library was fixed: the receipt passes the criterion the record still accepts as failing.
+  const head = await commit(root, { ...record, [at('docling')]: fixtureReceipt('docling', sha) }, 'the criterion passes now');
+  const stale = `${docling}: accepted failure corpus/a.pdf/provenance is not failing in ${at('docling')} (its result there is pass); the acceptance is stale: remove the entry from accepted_failures`;
+  let derived = await derivedRecord(root);
+  assert.deepEqual(derived.failures, [{ name: docling, message: stale.slice(docling.length + 2) }]);
+  assert.deepEqual(statuses(derived), { [docling]: 'passed', [apps]: 'passed', qualified: false }, 'a stale acceptance keeps Phase 0 unqualified until it is removed');
+  await assert.rejects(checkReceipts(root), error => error.message.split('\n').includes(stale));
+  assert.deepEqual(await staleReceiptLines(root, head), [`untrusted record ${stale}`, `typed record phase_0_qualified: verification.json at ${head} types true but the derived value is false (1 receipt failure(s)); run \`bun qualification/record.mjs\` to rewrite it`]);
+  // Removing the entry is the cure.
+  await commit(root, { 'verification.json': fixtureRecord({ statuses: { docling: 'passed', 'mcp-apps': 'passed' }, qualified: true, construction: [fixtureTracker] }) }, 'remove the acceptance');
+  assert.equal(await complaint(root), '');
+
+  // Still failing, but one accepted criterion among two no longer fails: stale, and no upgrade.
+  await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { criteria: failing }), 'verification.json': accepting([fixtureAcceptance(), fixtureAcceptance('corpus/a.pdf/content')]) }, 'one of two acceptances is stale');
+  derived = await derivedRecord(root);
+  assert.equal(derived.gates[0].status, 'failed');
+  assert.deepEqual(derived.failures.map(failure => failure.message), [`accepted failure corpus/a.pdf/content is not failing in ${at('docling')} (its result there is pass); the acceptance is stale: remove the entry from accepted_failures`]);
+  // Not applicable by design is not failing either.
+  const notApplicable = [{ id: 'corpus/a.pdf/content', required: true, result: 'fail' }, { id: 'corpus/a.pdf/provenance', required: true, result: 'not_applicable', detail: 'the library gives no locator' }];
+  await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { criteria: notApplicable }), 'verification.json': accepting([fixtureAcceptance(), fixtureAcceptance('corpus/a.pdf/content')]) }, 'accepted and not applicable');
+  assert.match(derivedFailureText(await derivedRecord(root)), /accepted failure corpus\/a\.pdf\/provenance is not failing in .* \(its result there is not_applicable\); the acceptance is stale/);
+});
+
+test('an accepted failure must be whole, decided by the owner and tracked by a gate that exists', async t => {
+  const { root, sha } = await recorded(t);
+  const receipts = { [at('docling')]: fixtureReceipt('docling', sha, { criteria: failing }), [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha) };
+  const problems = async (entries, why, files = receipts) => {
+    await commit(root, { ...files, 'verification.json': accepting(entries) }, why);
+    const derived = await derivedRecord(root);
+    // An acceptance that is not sound upgrades nothing.
+    assert.equal(derived.gates[0].status, Object.hasOwn(files, at('docling')) ? 'failed' : derived.gates[0].status, why);
+    assert.equal(derived.phase_0_qualified, false, why);
+    await assert.rejects(checkReceipts(root), /check-receipts failed:/, why);
+    return derived.failures.filter(failure => failure.name === docling).map(failure => failure.message);
+  };
+  const without = field => { const { [field]: _dropped, ...rest } = fixtureAcceptance(); return rest; };
+
+  for (const field of acceptedFailureFields) {
+    assert.deepEqual(await problems([without(field)], `no ${field}`), [`accepted_failures[0] lacks ${field}`]);
+    assert.deepEqual(await problems([fixtureAcceptance(undefined, { [field]: '' })], `empty ${field}`), [`accepted_failures[0] lacks ${field}`]);
+  }
+  assert.deepEqual(await problems([fixtureAcceptance(undefined, { decided_by: 'integration-owner' })], 'decided by a lane'), ['accepted_failures[0] is decided by "integration-owner"; only the owner accepts a failing criterion']);
+  assert.deepEqual(await problems([fixtureAcceptance(undefined, { decided_by: 'Owner' })], 'decided by a name'), ['accepted_failures[0] is decided by "Owner"; only the owner accepts a failing criterion']);
+  assert.deepEqual(await problems([fixtureAcceptance(undefined, { tracked_by: 'no-such-gate' })], 'tracked by nothing'), ['accepted_failures[0].tracked_by "no-such-gate" is not the id of a gate in verification.json']);
+  assert.deepEqual(await problems([fixtureAcceptance(undefined, { decided_on: 'yesterday' })], 'no date'), ['accepted_failures[0].decided_on "yesterday" is not a calendar day (YYYY-MM-DD)']);
+  assert.deepEqual(await problems([fixtureAcceptance(undefined, { decided_on: '2026-02-30' })], 'no such day'), ['accepted_failures[0].decided_on "2026-02-30" is not a calendar day (YYYY-MM-DD)']);
+  assert.deepEqual(await problems([fixtureAcceptance(undefined, { waived: 'yes' })], 'an unknown field'), ['accepted_failures[0] has the unknown field(s) waived']);
+  assert.deepEqual(await problems(['corpus/a.pdf/provenance'], 'a bare id'), ['accepted_failures[0] must be an object with criterion, decision, decided_on, decided_by, tracked_by']);
+  assert.deepEqual(await problems({ criterion: 'corpus/a.pdf/provenance' }, 'not a list'), ['accepted_failures must be an array of entries']);
+  assert.deepEqual(await problems([fixtureAcceptance(), fixtureAcceptance()], 'the same criterion twice'), ['accepted_failures[1] repeats the criterion corpus/a.pdf/provenance']);
+  assert.deepEqual(await problems([fixtureAcceptance('corpus/a.pdf/tables')], 'a criterion nothing pins'), ['accepted_failures[0] accepts corpus/a.pdf/tables, which qualification/docling/criteria.json does not pin']);
+  // Several things wrong with one entry are all said.
+  assert.deepEqual(await problems([{ criterion: 'corpus/a.pdf/provenance', decided_by: 'agent', tracked_by: 'nothing' }], 'three things wrong'),
+    ['accepted_failures[0] lacks decision, decided_on', 'accepted_failures[0] is decided by "agent"; only the owner accepts a failing criterion', 'accepted_failures[0].tracked_by "nothing" is not the id of a gate in verification.json']);
+  // The tracking gate may stand in any group of the record, and it must be there.
+  await commit(root, { ...receipts, 'verification.json': fixtureRecord({ accepted: { docling: [fixtureAcceptance()] } }) }, 'the tracking gate is gone');
+  assert.deepEqual((await derivedRecord(root)).failures.map(failure => failure.message), ['accepted_failures[0].tracked_by "converter-font-run-spacing" is not the id of a gate in verification.json']);
+  await commit(root, { 'verification.json': fixtureRecord({ accepted: { docling: [fixtureAcceptance(undefined, { tracked_by: apps })] } }) }, 'tracked by a Phase 0 gate');
+  assert.equal((await derivedRecord(root)).gates[0].status, accepted);
+
+  // Before any receipt exists an acceptance is checked all the same, and a sound one is no failure.
+  const { root: bare } = await recorded(t);
+  await commit(bare, { 'verification.json': accepting([fixtureAcceptance()]) }, 'accepted before any run');
+  assert.match(await checkReceipts(bare), new RegExp(`^check-receipts: no receipts under qualification/receipts/; ${docling}: incomplete `));
+  await commit(bare, { 'verification.json': accepting([fixtureAcceptance(undefined, { decided_by: 'agent' })]) }, 'accepted by an agent before any run');
+  await assert.rejects(checkReceipts(bare), /docling-library-qualification: accepted_failures\[0\] is decided by "agent"; only the owner accepts a failing criterion/);
+  // An acceptance on a gate that is not the one whose receipt fails changes nothing for that gate.
+  await commit(root, { ...receipts, 'verification.json': fixtureRecord({ accepted: { 'mcp-apps': [fixtureAcceptance()] }, construction: [fixtureTracker] }) }, 'accepted on the other gate');
+  const elsewhere = await derivedRecord(root);
+  assert.equal(elsewhere.gates[0].status, 'failed');
+  assert.deepEqual(elsewhere.failures.map(failure => `${failure.name}: ${failure.message}`), [`${apps}: accepted failure corpus/a.pdf/provenance is not failing in ${at('mcp-apps')} (its result there is pass); the acceptance is stale: remove the entry from accepted_failures`]);
 });
 
 test('a receipt is rejected when an input changed, its commit is foreign, or its header is incomplete', async t => {
