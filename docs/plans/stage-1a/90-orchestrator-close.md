@@ -122,7 +122,8 @@ bun scripts/dev.mjs bootstrap
 bun qualification/docling/run.mjs      # exit 0 PASS, or exit 1 with a recorded finding
 bun qualification/mcp-apps/run.mjs     # exit 0 PASS
 bun scripts/dev.mjs clean-checkout     # all exit codes 0, git_status_empty true
-bun qualification/record.mjs docling mcp-apps
+bun qualification/record.mjs docling mcp-apps   # copies both receipts, whatever their result, and
+                                                # writes each gate's status and phase_0_qualified
 ```
 
 - [ ] **Step 3: Independent receipt audit**
@@ -135,12 +136,15 @@ every claim the matching Phase 0 gate in `verification.json` makes, quote the re
 that supports it or write 'unsupported'. Report anything a receipt asserts that its harness
 could not have observed."
 
-- [ ] **Step 4: Decide terminal states**
+- [ ] **Step 4: Read the derived states**
 
-Each Phase 0 gate becomes `passed`, or stays `incomplete` with
-its reason. If Docling accepted the truncated PDF, or the must-fail result is
-`FAIL_refusal_unproven`, the Docling gate stays `incomplete`, the finding is reported to the
-owner, and `phase_0_qualified` stays false until the owner decides.
+Nobody decides or types a gate's state. `record.mjs` printed one line per receipt gate:
+`passed`, `failed` or `incomplete`, as the criteria of its receipt fold, and one line for
+`phase_0_qualified`. A FAIL or INCOMPLETE receipt is recorded like a PASS, because a failed
+qualification is evidence. If Docling accepted the truncated PDF, or the must-fail result is
+`FAIL_refusal_unproven`, the Docling gate says `failed`, the finding is reported to the owner,
+and `phase_0_qualified` stays false. The owner decides what is done about the finding, not what
+the record says.
 
 ### Task O.5: Record R and reach main
 
@@ -151,17 +155,20 @@ owner, and `phase_0_qualified` stays false until the owner decides.
 
 ```powershell
 Copy-Item D:\okf\requalify\qualification\receipts\*.json C:\Users\eayou\code_dir\okf-jawn\qualification\receipts\
+bun qualification/record.mjs    # no name: copies nothing, rewrites the derived values
 ```
 
-In `verification.json`: each Phase 0 gate gets the state decided in O.4 with S, the CI run of S
-and the receipt path; the clean-checkout gate cites its receipt's exit codes; set
-`phase_0_qualified` to `true` only if every Phase 0 gate is terminal. In `vendors.json`: each
-library's `qualification` text is rewritten from its receipt, not from memory.
+The orchestrator types no status in `verification.json`. `record.mjs` writes each receipt
+gate's status and `phase_0_qualified` from the receipts just copied, and the orchestrator
+commits what it wrote; `check-receipts` fails on any other value. The gates of kind `ci` carry
+no status and need no edit, and `clean-checkout` is a tool whose receipt stays under
+`.artifacts/`. In `vendors.json`: each library's `qualification` text is rewritten from its
+receipt, not from memory.
 
 - [ ] **Step 2: Check, commit, push**
 
 ```bash
-bun scripts/dev.mjs check-receipts     # check-receipts: 2 receipt(s) valid against HEAD.
+bun scripts/dev.mjs check-receipts     # check-receipts: 2 receipt(s) valid against HEAD; <one status per gate>; verification.json agrees.
 bun scripts/dev.mjs check-offline      # 0 fail
 git add qualification/receipts verification.json vendors.json
 git commit -F <message file>

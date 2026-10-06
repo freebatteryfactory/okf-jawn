@@ -246,6 +246,20 @@ test('README states the generated counts and tool names, and neither prose file 
  for(const [name,text] of [['README.md',readme],['AGENTS.md',agents]])assert.doesNotMatch(text,/\b(?:three|3)\b[^.\n]*Context7/i,name);
  for(const term of ['TestResult','err_of','git merge --no-ff','Why:','PowerShell'])assert.ok(agents.includes(term),`AGENTS.md does not state ${term}`);
 });
+test('README, AGENTS and the close-out plan state that receipt-backed statuses are written by record.mjs, never typed',async()=>{
+ for(const file of ['README.md','AGENTS.md']){
+  const text=await read(file);
+  assert.ok(text.includes('`bun qualification/record.mjs` writes'),`${file} does not say what writes the derived values`);
+  assert.ok(text.includes('`bun scripts/dev.mjs check-receipts` verifies them'),`${file} does not say what verifies them`);
+  assert.match(text,/carr(?:y|ies) no status/,`${file} does not say that a CI-enforced gate carries no status`);
+  assert.match(text,/Nobody types a result into `verification\.json`/,file);
+ }
+ const readme=await read('README.md');
+ assert.match(readme,/`bun scripts\/dev\.mjs clean-checkout` [^.]*; it is a local tool, not a gate/,'README must document clean-checkout as a tool');
+ const plan=await read('docs/plans/stage-1a/90-orchestrator-close.md');
+ assert.match(plan,/The orchestrator types no status in `verification\.json`/);
+ assert.doesNotMatch(plan,/Decide terminal states|gets the state decided in O\.4/,'the plan still has the orchestrator typing gate states');
+});
 test('help names every task the entrypoint accepts, and just mirrors the gates',async()=>{
  const entry=await read('scripts/dev.mjs');
  const cases=[...entry.matchAll(/^\s+case '([a-z-]+)':/gm)].map(match=>match[1]).filter(name=>name!=='help');
