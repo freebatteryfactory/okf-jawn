@@ -2,6 +2,7 @@
  * Orchestrate Docling direct-library qualification. Thin entry point:
  *   lib/assets.mjs    re-hashes every model asset before anything converts;
  *   lib/build.mjs     reads the docling features of this build from cargo;
+ *   lib/native.mjs    records the ONNX Runtime library the build downloaded and links;
  *   lib/runner.mjs    runs one process per fixture and samples its peak memory once;
  *   lib/evidence.mjs  re-reads the Markdown, document export and page images each process wrote;
  *   lib/receipt.mjs   judges every criterion and composes the receipt;
@@ -21,15 +22,16 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { receiptHeader, recordReceipt } from '../../scripts/lib/provenance.mjs';
 import { buildRelease, exec, lockedPackage, lockedPackages } from '../lib/cargo.mjs';
-import { verifyAssets } from './lib/assets.mjs';
+import { sha256File, verifyAssets } from './lib/assets.mjs';
 import { TREE_ARGS, buildFacts } from './lib/build.mjs';
 import { exitCodeFor } from './lib/criteria.mjs';
 import { loadEvidence } from './lib/evidence.mjs';
+import { readOnnxRuntime } from './lib/native.mjs';
 import { DOCLING_INPUTS, FIXTURE_RUNS, TIMEOUT_PROBE, buildDoclingReceipt } from './lib/receipt.mjs';
 import { runFixtureProcess } from './lib/runner.mjs';
 
@@ -102,6 +104,16 @@ const build = buildFacts({
   command: `cargo build --locked --release -p ${PACKAGE}`,
 });
 
+// The ONNX Runtime library this build links is not in the asset manifest: record it from the build.
+const onnxRuntime = await readOnnxRuntime({
+  root,
+  pkg: PACKAGE,
+  exec,
+  readFile,
+  readdir,
+  hashFile: async (path) => ({ bytes: (await stat(path)).size, sha256: await sha256File(path) }),
+});
+
 const runs = [];
 for (const name of selected) {
   process.stdout.write(`\n=== Docling fixture: ${name} ===\n`);
@@ -134,7 +146,7 @@ const receipt = buildDoclingReceipt({
   converter,
   platform: process.platform,
   build,
-  assets: { ...verified, manifest: MANIFEST, models_dir: manifest.DOCLING_RS_MODELS_DIR, models_source: manifest.models_source ?? null },
+  assets: { ...verified, manifest: MANIFEST, models_dir: manifest.DOCLING_RS_MODELS_DIR, models_source: manifest.models_source ?? null, native_libraries: [onnxRuntime] },
   environment,
   sources,
   runs,

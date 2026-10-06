@@ -51,6 +51,7 @@ import {
   pngSize,
 } from '../../qualification/docling/lib/document.mjs';
 import { loadEvidence } from '../../qualification/docling/lib/evidence.mjs';
+import { distRows, onnxRuntimeRecord, ortBuildMessage, readOnnxRuntime } from '../../qualification/docling/lib/native.mjs';
 import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
 import { OCR_FIXTURES, decodeFixture, encodePng, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
 import { pngInk } from '../../qualification/docling/lib/png.mjs';
@@ -1673,6 +1674,141 @@ test('the timeout probe passes only when the budget changed the result, compared
   assert.equal(doclingCriterion(silent, `${TIMEOUT_PROBE}/timeout_reported`).detail, 'the converter did not report the spent budget as documented: FAIL_timeout_not_honoured, status Success, no error item');
   assert.deepEqual(doclingFailedIds(silent), [`${TIMEOUT_PROBE}/timeout_reported`]);
   assert.deepEqual(good.timeout_case.criteria.budget_had_effect.probe, { pages: 0, items: 0 });
+});
+
+const ORT_HASH = 'f7c654b3729cb9e5ad2a36a0c38e5b48e63bf4eed22968931aed33a0ad0b527d';
+
+const ORT_DIRECTORY = `C:\\Users\\x\\AppData\\Local\\ort.pyke.io\\dfbin\\x86_64-pc-windows-msvc\\${ORT_HASH}`;
+
+/** cargo's JSON message stream for a build: an artifact line, the ort-sys build script, another build script. */
+const cargoMessages = (linkedPaths = [`native=${ORT_DIRECTORY}`]) =>
+  [
+    JSON.stringify({ reason: 'compiler-artifact', package_id: 'registry+https://github.com/rust-lang/crates.io-index#ort-sys@2.0.0-rc.13', fresh: true }),
+    JSON.stringify({ reason: 'build-script-executed', package_id: 'registry+https://github.com/rust-lang/crates.io-index#zstd-sys@2.0.16', linked_libs: [], linked_paths: ['native=D:\\t\\out'] }),
+    JSON.stringify({
+      reason: 'build-script-executed',
+      package_id: 'registry+https://github.com/rust-lang/crates.io-index#ort-sys@2.0.0-rc.13',
+      linked_libs: ['dxguid', 'DirectML', 'static=onnxruntime'],
+      linked_paths: linkedPaths,
+      out_dir: 'D:\\t\\target\\release\\build\\ort-sys-bf63\\out',
+    }),
+    '{"reason":"build-finished","success":true}',
+    'not json at all',
+  ].join('\n');
+
+const ORT_DIST = [
+  'target\tfeature_set\turl\tsha256_hash',
+  '# a comment line',
+  `x86_64-pc-windows-msvc\tdirectml\thttps://cdn.pyke.io/0/pyke:ort-rs/ms@1.28.0/x86_64-pc-windows-msvc+directml.tar.lzma2\t${ORT_HASH}`,
+  `x86_64-pc-windows-msvc\twebgpu\thttps://cdn.pyke.io/0/pyke:ort-rs/ms@1.28.0/x86_64-pc-windows-msvc+webgpu.tar.lzma2\t${'7'.repeat(64)}`,
+  '',
+].join('\n');
+
+test('the ONNX Runtime library is recorded from what the build left, or as not_recorded with the reason', async () => {
+  assert.equal(ortBuildMessage(cargoMessages()).linked_libs.at(-1), 'static=onnxruntime');
+  assert.equal(ortBuildMessage('{"reason":"build-finished","success":true}'), null);
+  assert.deepEqual(distRows(ORT_DIST).map((row) => row.feature_set), ['directml', 'webgpu']);
+
+  const record = onnxRuntimeRecord({ messagesText: cargoMessages(), distTsv: ORT_DIST, distPath: 'C:\\registry\\ort-sys-2.0.0-rc.13\\build\\download\\dist.tsv' });
+  assert.deepEqual(
+    { name: record.name, status: record.status, version: record.version, sha256: record.sha256, url: record.url, target: record.target, feature_set: record.feature_set, crate: record.crate, crate_version: record.crate_version, directory: record.directory },
+    {
+      name: 'onnxruntime',
+      status: 'recorded',
+      version: '1.28.0',
+      sha256: ORT_HASH,
+      url: 'https://cdn.pyke.io/0/pyke:ort-rs/ms@1.28.0/x86_64-pc-windows-msvc+directml.tar.lzma2',
+      target: 'x86_64-pc-windows-msvc',
+      feature_set: 'directml',
+      crate: 'ort-sys',
+      crate_version: '2.0.0-rc.13',
+      directory: ORT_DIRECTORY,
+    },
+  );
+  assert.deepEqual(record.linked_libs, ['dxguid', 'DirectML', 'static=onnxruntime']);
+  assert.match(record.sha256_is, /ort-sys compares the downloaded archive with/);
+  assert.equal(record.read_from.length, 2);
+
+  // Nothing is assumed: each thing that cannot be read is the stated reason.
+  const reason = (input) => {
+    const judged = onnxRuntimeRecord({ messagesText: cargoMessages(), distTsv: ORT_DIST, distPath: 'dist.tsv', ...input });
+    assert.deepEqual(Object.keys(judged), ['name', 'status', 'reason']);
+    assert.equal(judged.status, 'not_recorded');
+    return judged.reason;
+  };
+  assert.equal(reason({ messagesText: '{"reason":"build-finished","success":true}' }), 'cargo printed no build-script-executed message for ort-sys in this build');
+  assert.match(reason({ messagesText: cargoMessages(['native=D:\\onnxruntime\\lib']) }), /none of which is a download directory named by a SHA-256/);
+  assert.equal(reason({ distTsv: ORT_DIST.replaceAll(ORT_HASH, '0'.repeat(64)) }), `dist.tsv has no row with the hash ${ORT_HASH} of the directory this build links from`);
+  assert.match(reason({ distTsv: null }), /has no row with the hash/);
+  assert.equal(onnxRuntimeRecord({ messagesText: cargoMessages(), distTsv: ORT_DIST.replace('ms@1.28.0', 'ms'), distPath: 'dist.tsv' }).version, null, 'a URL that names no version gives none');
+
+  // With I/O: cargo is asked, the crate's table is read from where cargo metadata says the crate is, the files are hashed now.
+  const asked = [];
+  const io = (over = {}) => ({
+    root: 'D:\\repo',
+    pkg: 'okf-qualify-docling',
+    exec: async (command, args) => {
+      asked.push([command, ...args].join(' '));
+      return args[0] === 'build'
+        ? { code: 0, stdout: cargoMessages(), stderr: '' }
+        : { code: 0, stdout: JSON.stringify({ packages: [{ name: 'ort-sys', manifest_path: join('C:', 'registry', 'ort-sys-2.0.0-rc.13', 'Cargo.toml') }] }), stderr: '' };
+    },
+    readFile: async (path) => {
+      asked.push(`read ${path}`);
+      return ORT_DIST;
+    },
+    readdir: async () => ['onnxruntime.lib', 'DirectML.dll'],
+    hashFile: async (path) => ({ bytes: path.length, sha256: createHash('sha256').update(path).digest('hex') }),
+    ...over,
+  });
+  const read = await readOnnxRuntime(io());
+  assert.equal(read.status, 'recorded');
+  assert.deepEqual(asked, [
+    'cargo build --locked --release -p okf-qualify-docling --message-format=json',
+    'cargo metadata --format-version 1 --locked',
+    `read ${join('C:', 'registry', 'ort-sys-2.0.0-rc.13', 'build', 'download', 'dist.tsv')}`,
+  ]);
+  assert.deepEqual(read.files.map((file) => file.file), ['DirectML.dll', 'onnxruntime.lib']);
+  assert.equal(read.files[1].sha256, createHash('sha256').update(join(ORT_DIRECTORY, 'onnxruntime.lib')).digest('hex'));
+  assert.equal((await readOnnxRuntime(io({ exec: async () => ({ code: 101, stdout: '', stderr: 'error' }) }))).reason, 'cargo build --locked --release -p okf-qualify-docling --message-format=json exited 101');
+  assert.equal((await readOnnxRuntime(io({ readdir: async () => { throw new Error('ENOENT: no such directory'); } }))).reason, 'reading the ONNX Runtime record failed: ENOENT: no such directory');
+  assert.equal(
+    (await readOnnxRuntime(io({ exec: async (command, args) => (args[0] === 'build' ? { code: 0, stdout: cargoMessages(), stderr: '' } : { code: 0, stdout: '{"packages":[]}', stderr: '' }) }))).reason,
+    'cargo metadata lists no ort-sys package',
+  );
+
+  // The record sits in the receipt's asset section, beside the model assets.
+  const receipt = doclingReceipt({}, { assets: { ...DOCLING_ASSETS, native_libraries: [read] } });
+  assert.equal(receipt.assets_verified.native_libraries[0].version, '1.28.0');
+  assert.equal(receipt.result, 'PASS');
+});
+
+/** Every repository file `entry` imports, directly or through its imports. */
+async function doclingImportGraph(entry) {
+  const seen = new Set();
+  const visit = async (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = await readFile(join(root, file), 'utf8');
+    for (const match of source.matchAll(/^import\s[^'"]*['"](\.{1,2}\/[^'"]+)['"];?\s*$/gm)) {
+      await visit(join(file, '..', match[1]).replaceAll('\\', '/'));
+    }
+  };
+  await visit(entry);
+  return [...seen].sort();
+}
+
+test('the Docling receipt inputs cover what the run executes and what decides its result', async () => {
+  for (const input of ['rust-toolchain.toml', '.cargo/config.toml', 'scripts/lib/provenance.mjs', 'scripts/lib/receipt-envelope.mjs', 'qualification/docling/criteria.json', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/documents']) {
+    assert.ok(DOCLING_INPUTS.includes(input), `${input} is not an input of the Docling receipt`);
+  }
+  assert.equal(new Set(DOCLING_INPUTS).size, DOCLING_INPUTS.length);
+  const tracked = execFileSync('git', ['ls-files', '--', ...DOCLING_INPUTS], { cwd: root }).toString().split('\n').filter(Boolean);
+  for (const input of DOCLING_INPUTS) assert.ok(tracked.some((file) => file === input || file.startsWith(`${input}/`)), `${input} is not tracked, so check-receipts could never see it change`);
+  // Every repository file the orchestrator loads lies under an input.
+  const loaded = await doclingImportGraph('qualification/docling/run.mjs');
+  assert.ok(loaded.includes('scripts/lib/receipt-envelope.mjs') && loaded.includes('qualification/docling/lib/png.mjs'), loaded.join(', '));
+  for (const file of loaded) assert.ok(DOCLING_INPUTS.some((input) => file === input || file.startsWith(`${input}/`)), `${file} is loaded by run.mjs and is not covered by an input`);
 });
 
 test('evidence that is not what the process recorded stops the judgements made from it', () => {

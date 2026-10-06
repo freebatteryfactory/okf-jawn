@@ -67,12 +67,22 @@ export const FIXTURE_RUNS = [
   TIMEOUT_PROBE,
 ];
 
+/**
+ * Paths whose later change makes a recorded receipt stale: the harness and its tracked
+ * criteria.json, the code that makes the header and decides the result, the fixtures, and
+ * what the build reads (manifests, lockfile, toolchain, cargo configuration).
+ */
 export const DOCLING_INPUTS = [
   'qualification/docling',
+  'qualification/docling/criteria.json',
   'qualification/lib',
+  'scripts/lib/provenance.mjs',
+  'scripts/lib/receipt-envelope.mjs',
   'tests/fixtures/documents',
   'Cargo.toml',
   'Cargo.lock',
+  'rust-toolchain.toml',
+  '.cargo/config.toml',
 ];
 
 /** A failure detail names at most this many examples after the total. */
