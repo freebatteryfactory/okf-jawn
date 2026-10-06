@@ -459,9 +459,10 @@ function assetsJudgement(assets) {
 
 function inventoryJudgement(checked) {
   if (checked.status === 'PASS') return pass();
+  // No inventory at all means no process got far enough to report one; those processes carry the harness error.
+  if (checked.reason) return notJudged(checked.reason);
   return stopped(
-    checked.reason ??
-      `${checked.unverified.length} of ${checked.entries.filter((entry) => entry.stage !== 'pdfium').length} models the library resolves are not verified files${examples(checked.unverified)}`,
+    `${checked.unverified.length} of ${checked.entries.filter((entry) => entry.stage !== 'pdfium').length} models the library resolves are not verified files${examples(checked.unverified)}`,
   );
 }
 
@@ -508,8 +509,10 @@ export function buildDoclingReceipt({
     'assets/model_inventory',
     runs.length === 0 ? notJudged(harnessError ? `not reached: ${harnessError}` : 'no converter process ran') : inventoryJudgement(inventory),
   );
+  // Every fixture run SOURCES.json declares, in execution order. Without readable declarations only the probe is known.
+  const names = FIXTURE_RUNS.filter((only) => only === TIMEOUT_PROBE || sources?.files?.[only]);
   const labels = {};
-  for (const only of FIXTURE_RUNS) {
+  for (const only of names) {
     const list = fixtureAspects(only, sources?.files?.[only]);
     const judged = entryOf(only)?.criteria ?? Object.fromEntries(list.map(({ aspect }) => [aspect, notJudged(notRun)]));
     for (const { aspect } of list) judgements.set(`${only}/${aspect}`, judged[aspect]);
@@ -523,7 +526,7 @@ export function buildDoclingReceipt({
     const criterion = top.criteria.find((item) => item.id === id);
     if (criterion.result !== 'pass') failures.push({ fixture: null, criterion: id, result: criterion.result, detail: criterion.detail ?? null });
   }
-  for (const only of FIXTURE_RUNS) {
+  for (const only of names) {
     const found = entryOf(only);
     for (const { aspect, required } of fixtureAspects(only, sources?.files?.[only])) {
       const judged = judgements.get(`${only}/${aspect}`);

@@ -126,7 +126,7 @@ export function fixtureAspects(name, source) {
 export function expectedCriteria(sources) {
   const list = RUN_CRITERIA.map((id) => ({ id, required: true }));
   for (const name of [...Object.keys(sources?.files ?? {}), TIMEOUT_PROBE]) {
-    for (const { aspect, required } of fixtureAspects(name, sources.files[name])) list.push({ id: `${name}/${aspect}`, required });
+    for (const { aspect, required } of fixtureAspects(name, sources?.files?.[name])) list.push({ id: `${name}/${aspect}`, required });
   }
   return list;
 }

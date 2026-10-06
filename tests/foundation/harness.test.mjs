@@ -51,6 +51,7 @@ import {
   pngSize,
 } from '../../qualification/docling/lib/document.mjs';
 import { loadEvidence } from '../../qualification/docling/lib/evidence.mjs';
+import { qualify } from '../../qualification/docling/lib/orchestrate.mjs';
 import { distRows, onnxRuntimeRecord, ortBuildMessage, readOnnxRuntime } from '../../qualification/docling/lib/native.mjs';
 import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
 import { OCR_FIXTURES, decodeFixture, encodePng, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
@@ -1889,19 +1890,215 @@ test('assets or models that are not the verified ones make the run INCOMPLETE, n
   assert.equal(doclingReceipt().model_inventory.result, 'pass');
 });
 
-test('the Docling orchestrator verifies assets before it builds, and the harness labels what it writes', async () => {
-  const run = await readFile(join(root, 'qualification/docling/run.mjs'), 'utf8');
-  assert.ok(run.indexOf('await verifyAssets(manifestBytes)') > 0, 'run.mjs must re-hash the assets');
-  assert.ok(run.indexOf('await verifyAssets(manifestBytes)') < run.indexOf('await buildRelease('), 'assets are verified before anything is built or converted');
-  assert.ok(run.indexOf('await receiptHeader(') < run.indexOf('await verifyAssets('), 'the clean-tree guard still comes first');
-  assert.match(run, /if \(only\.length && record\) throw new Error/);
-  assert.match(run, /exec\('cargo', TREE_ARGS/);
+/**
+ * Run lib/orchestrate.mjs `qualify` with every external step stubbed: no cargo, no converter,
+ * no model file. Files are really written, under a temporary output directory. `over` replaces
+ * steps; `calls` records the order in which they ran.
+ */
+async function doclingQualify(t, over = {}) {
+  const outDir = await mkdtemp(join(tmpdir(), 'okf-docling-run-'));
+  t.after(() => rm(outDir, { recursive: true, force: true }));
+  const manifestPath = join(outDir, 'assets.json');
+  const calls = [];
+  const sourcesPath = join(root, 'tests/fixtures/documents/SOURCES.json');
+  const distPath = join('C:', 'registry', 'ort-sys-2.0.0-rc.13', 'build', 'download', 'dist.tsv');
+  const nameOf = (dir) => dir.split(/[\\/]/).pop().replaceAll('__', '/');
+  const io = {
+    readFile: async (path, encoding) => {
+      if (path === sourcesPath) return JSON.stringify(DOCLING_SOURCES);
+      if (path === distPath) return ORT_DIST;
+      if (path === manifestPath) {
+        calls.push('read manifest');
+        if (over.manifestMissing) throw Object.assign(new Error(`ENOENT: no such file or directory, open '${path}'`), { code: 'ENOENT' });
+        return Buffer.from('{}');
+      }
+      return readFile(path, encoding);
+    },
+    writeFile,
+    mkdir,
+    rm,
+    readdir: async () => ['onnxruntime.lib'],
+    stat: async () => ({ size: 7 }),
+    sha256File: async () => 'c'.repeat(64),
+    verifyAssets: async () => {
+      calls.push('verifyAssets');
+      return { manifest: { DOCLING_RS_MODELS_DIR: 'C:\\models', recommended_env: { DOCLING_LAYOUT_ONNX: 'C:\\models\\layout.onnx' } }, verified: DOCLING_ASSETS };
+    },
+    buildRelease: async () => {
+      calls.push('buildRelease');
+      return 'D:\\target\\release\\okf-qualify-docling.exe';
+    },
+    exec: async (command, args) => {
+      calls.push(`${command} ${args[0]}${args.includes('--message-format=json') ? ' --message-format=json' : ''}`);
+      if (args[0] === 'tree') return { code: 0, stdout: DOCLING_TREE, stderr: '' };
+      if (args[0] === 'metadata') return { code: 0, stdout: JSON.stringify({ packages: [{ name: 'ort-sys', manifest_path: join('C:', 'registry', 'ort-sys-2.0.0-rc.13', 'Cargo.toml') }] }), stderr: '' };
+      return { code: 0, stdout: cargoMessages(), stderr: '' };
+    },
+    runFixtureProcess: async ({ command, env }) => {
+      const only = env.OKF_DOCLING_ONLY;
+      calls.push(`convert ${only}`);
+      assert.equal(command, 'D:\\target\\release\\okf-qualify-docling.exe');
+      assert.equal(env.DOCLING_LAYOUT_ONNX, 'C:\\models\\layout.onnx', 'the converter is given the manifest environment');
+      const stub = doclingRun(only);
+      await writeFile(join(env.OKF_DOCLING_OUT, 'receipt.json'), JSON.stringify(stub.report));
+      return { ...stub.run, stdout: 'Wrote receipt\n' };
+    },
+    loadEvidence: async (dir) => doclingRun(nameOf(dir)).evidence,
+    log: () => {},
+    logError: () => {},
+    now: () => '2026-10-05T18:10:00.000Z',
+    ...over.io,
+  };
+  const outcome = await qualify({
+    root,
+    header: DOCLING_HEADER,
+    outDir,
+    manifestPath,
+    selected: over.selected ?? FIXTURE_RUNS,
+    scope: { mode: 'all', fixtures: FIXTURE_RUNS, qualification: true },
+    env: { PATH: 'x' },
+    platform: 'win32',
+    io,
+  });
+  const written = JSON.parse(await readFile(join(outDir, 'receipt.json'), 'utf8'));
+  return { ...outcome, outDir, calls, written };
+}
+
+test('the Docling run verifies assets before it builds, builds before it converts, and writes the receipt it returns', async (t) => {
+  const { receipt, receiptPath, converted, calls, written, outDir } = await doclingQualify(t);
+  assert.equal(receipt.result, 'PASS');
+  assert.equal(converted, true);
+  assert.equal(receiptPath, join(outDir, 'receipt.json'));
+  assert.deepEqual(written, JSON.parse(JSON.stringify(receipt)), 'the file on disk is the receipt that was judged');
+  assert.deepEqual(calls.slice(0, 7), ['read manifest', 'verifyAssets', 'buildRelease', 'cargo tree', 'cargo build --message-format=json', 'cargo metadata', `convert ${FIXTURE_RUNS[0]}`]);
+  assert.deepEqual(calls.slice(6), FIXTURE_RUNS.map((only) => `convert ${only}`), 'one process per fixture, in order');
+  assert.equal(receipt.git_sha, DOCLING_HEADER.git_sha);
+  assert.equal(receipt.converter.version, lockedPackage(await readFile(join(root, 'Cargo.lock'), 'utf8'), 'docling').version, 'the converter version is read from Cargo.lock');
+  assert.equal(receipt.build.command, 'cargo build --locked --release -p okf-qualify-docling');
+  assert.match(receipt.assets_verified.manifest, /^[^\\]*assets\.json$/, 'the manifest is named relative to the repository, with forward slashes');
+  assert.equal(receipt.assets_verified.native_libraries[0].version, '1.28.0');
+  assert.equal(receipt.settings.environment.OKF_DOCLING_CRATE_VERSION, receipt.converter.version);
+  assert.equal(receipt.per_fixture.length, FIXTURE_RUNS.length);
+  assert.match(receipt.per_fixture[0].stdout_sha256, /^[0-9a-f]{64}$/);
+  assertDoclingEnvelope(receipt);
+  assert.equal(doclingCriteria.exitCodeFor(receipt.result), 0);
 
   const harness = await readFile(join(root, 'qualification/docling/src/main.rs'), 'utf8');
   assert.doesNotMatch(harness, /SuccessNonEmpty|must_contain|peak_rss_bytes/, 'no label for a rule that is not applied, no expectation outside SOURCES.json, no field that is always null');
   assert.match(harness, /\.generate_page_images\(applied\.generate_page_images\)/);
   assert.match(harness, /version_source: VERSION_SOURCE/);
   assert.match(harness, /Rule::TimeoutHonoured => "partial_success_with_pipeline_timeout_error"/);
+  const run = await readFile(join(root, 'qualification/docling/run.mjs'), 'utf8');
+  assert.match(run, /if \(only\.length && record\) throw new Error/);
+  assert.ok(run.indexOf('await receiptHeader(') < run.indexOf('await qualify('), 'the clean-tree guard comes before the run');
+  assert.match(run, /process\.exitCode = exitCodeFor\(receipt\.result\);/);
+  assert.doesNotMatch(run, /process\.exit\(|throw new Error\(`Docling qualification/, 'run.mjs reports the folded result; it does not decide one');
+});
+
+test('a failure before conversion replaces the previous receipt with an INCOMPLETE one for this run', async (t) => {
+  // What an earlier run left behind: a receipt that says PASS for another commit, and its evidence.
+  const stale = async (outDir) => {
+    await mkdir(join(outDir, 'partial', 'born_digital_text.pdf'), { recursive: true });
+    await writeFile(join(outDir, 'partial', 'born_digital_text.pdf', 'document.md'), 'old run');
+    await writeFile(join(outDir, 'receipt.json'), JSON.stringify({ git_sha: 'b'.repeat(40), result: 'PASS' }));
+  };
+  const stoppedAt = async (over, sentence, ranBefore) => {
+    let outDir = null;
+    const io = {
+      ...over.io,
+      mkdir: async (path, options) => {
+        // The first thing the run touches is its output directory: plant the stale files just before.
+        if (outDir === null) {
+          outDir = path;
+          await mkdir(path, options);
+          await stale(path);
+          return undefined;
+        }
+        return mkdir(path, options);
+      },
+    };
+    const { receipt, converted, calls, written } = await doclingQualify(t, { ...over, io });
+    assert.equal(receipt.result, 'INCOMPLETE', String(sentence));
+    if (typeof sentence === 'string') assert.equal(receipt.harness_error, sentence);
+    else assert.match(receipt.harness_error, sentence);
+    assert.equal(converted, false);
+    assert.deepEqual(calls, ranBefore, 'nothing runs after the step that failed');
+    assert.deepEqual(doclingFailedIds(receipt), [], 'the environment is never a library verdict');
+    assert.deepEqual([...new Set(receipt.criteria.filter((item) => !item.id.startsWith('assets/')).map((item) => item.result))], ['not_judged'], 'no fixture criterion is judged');
+    // The receipt on disk is this run's, not the earlier PASS; the earlier evidence is gone.
+    assert.equal(written.result, 'INCOMPLETE');
+    assert.equal(written.git_sha, DOCLING_HEADER.git_sha);
+    assert.equal(written.harness_error, receipt.harness_error);
+    await assert.rejects(stat(join(outDir, 'partial', 'born_digital_text.pdf', 'document.md')), /ENOENT/);
+    assertDoclingEnvelope(receipt);
+    assert.equal(doclingCriteria.exitCodeFor(receipt.result), 3);
+    return receipt;
+  };
+
+  const noManifest = await stoppedAt(
+    { manifestMissing: true },
+    /^the Docling model assets manifest is not readable at .*assets\.json \(qualification needs the verified model assets\): ENOENT: no such file or directory/,
+    ['read manifest'],
+  );
+  assert.equal(noManifest.assets_verified, null);
+  assert.equal(doclingCriterion(noManifest, 'assets/hashes_match').result, 'not_judged');
+  await stoppedAt(
+    { io: { verifyAssets: async () => { throw new Error('Docling model asset missing: C:\\models\\layout.onnx (ENOENT). A missing asset is never qualified.'); } } },
+    'the Docling model assets could not be verified: Docling model asset missing: C:\\models\\layout.onnx (ENOENT). A missing asset is never qualified.',
+    ['read manifest'],
+  );
+  const noBuild = await stoppedAt(
+    { io: { buildRelease: async () => { throw new Error('cargo build --locked --release -p okf-qualify-docling exited 101'); } } },
+    'the harness build failed: cargo build --locked --release -p okf-qualify-docling exited 101',
+    ['read manifest', 'verifyAssets'],
+  );
+  assert.equal(doclingCriterion(noBuild, 'assets/hashes_match').result, 'pass', 'what was verified before the failure stays recorded');
+  assert.equal(noBuild.build, null);
+  const noTree = await stoppedAt(
+    { io: { exec: async () => ({ code: 101, stdout: '', stderr: 'error: no such package' }) } },
+    'the docling features of this build could not be read from cargo: cargo tree --locked -p okf-qualify-docling -e normal --prefix none -f {p}|{f} exited 101 error: no such package',
+    ['read manifest', 'verifyAssets', 'buildRelease'],
+  );
+  assert.equal(noTree.converter.crate, 'docling');
+});
+
+test('a converter binary that is missing, or declarations that cannot be read, end INCOMPLETE and never as a library failure', async (t) => {
+  const missing = { exitCode: null, signal: null, spawnError: 'ENOENT: no such file or directory, uv_spawn', timedOut: false, done: null, peakRssBytes: null, peakRssNote: 'not sampled', stdout: '', stderr: '' };
+  const { receipt, converted, written } = await doclingQualify(t, { io: { runFixtureProcess: async () => missing, loadEvidence: async () => ({ markdown: null, document: null, pageFiles: {}, problems: [] }) } });
+  assert.equal(converted, true, 'the run reached conversion; each process failed to start');
+  assert.equal(receipt.result, 'INCOMPLETE');
+  assert.equal(
+    receipt.harness_error,
+    `the converter process for ${FIXTURE_RUNS[0]} could not be started: ENOENT: no such file or directory, uv_spawn (and ${FIXTURE_RUNS.length - 1} more harness error(s); each is the detail of the criteria it stopped)`,
+  );
+  assert.deepEqual(doclingFailedIds(receipt), []);
+  assert.equal(doclingCriterion(receipt, 'assets/model_inventory').detail, 'no converter process reported docling::model_inventory()');
+  assert.deepEqual(receipt.failures.filter((item) => item.fixture !== null).map((item) => item.fixture), FIXTURE_RUNS, 'each fixture has an entry of its own');
+  assert.equal(written.result, 'INCOMPLETE');
+  assertDoclingEnvelope(receipt);
+
+  // Without the declarations there is no list of fixtures: the receipt still says what stopped the run.
+  const unread = await doclingQualify(t, { io: { readFile: async (path, encoding) => (path.endsWith('SOURCES.json') ? '{ not json' : readFile(path, encoding)) } });
+  assert.equal(unread.receipt.result, 'INCOMPLETE');
+  assert.match(unread.receipt.harness_error, /^the fixture declarations in SOURCES\.json could not be read: /);
+  assert.deepEqual(unread.calls, []);
+  assert.deepEqual(doclingFailedIds(unread.receipt), []);
+
+  // A step that fails between two fixtures keeps what was judged and leaves the rest not judged.
+  let seen = 0;
+  const midway = await doclingQualify(t, {
+    io: {
+      loadEvidence: async (dir) => {
+        seen += 1;
+        if (seen === 3) throw new Error('EIO: read failed');
+        return doclingRun(dir.split(/[\\/]/).pop().replaceAll('__', '/')).evidence;
+      },
+    },
+  });
+  assert.equal(midway.receipt.result, 'INCOMPLETE');
+  assert.equal(midway.receipt.harness_error, 'EIO: read failed');
+  assert.deepEqual(Object.values(midway.receipt.summary).slice(0, 3), ['PASS', 'PASS', 'INCOMPLETE']);
+  assert.equal(doclingCriterion(midway.receipt, `${FIXTURE_RUNS[2]}/conversion`).detail, 'the fixture did not run: EIO: read failed');
 });
 
 const pidAlive = (pid) => {
