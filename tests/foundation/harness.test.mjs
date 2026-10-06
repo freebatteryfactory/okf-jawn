@@ -789,7 +789,7 @@ test('the PNG reader undoes every row filter before it calls an image flat or in
   assert.equal(pngInk(BLANK_PNG).uniform, true);
 });
 
-test('provenance: every text item of a paginated fixture needs a page of the document and a box inside it', () => {
+test('provenance: every text item, table and picture of a paginated fixture needs a page of the document and a box inside it', () => {
   const judge = (over, paginated = true) => judgeProvenance(describeDocument(stubDocument(over)), { paginated });
   const good = judge();
   assert.equal(good.status, 'PASS');
@@ -827,7 +827,28 @@ test('provenance: every text item of a paginated fixture needs a page of the doc
   assert.equal(mixed.status, 'FAIL');
   assert.deepEqual(mixed.text_items.invalid, [{ ref: '#/texts/2', label: 'text', problem: 'no provenance' }]);
 
-  assert.equal(judge({ texts: [] }).status, 'not_exercised');
+  // Tables and pictures decide the status exactly as text items do (review note N3).
+  const lostTable = judge({ tables: stubDocument().tables.map((table) => ({ ...table, prov: [] })) });
+  assert.equal(lostTable.status, 'FAIL', 'a table with empty prov fails although every text item is located');
+  assert.deepEqual(lostTable.text_items.invalid, []);
+  assert.deepEqual(lostTable.tables.invalid, [{ ref: '#/tables/0', label: 'table', problem: 'no provenance' }]);
+  assert.deepEqual(lostTable.items, { total: 3, located: 2 });
+  const picture = (provValue) => ({ pictures: [{ self_ref: '#/pictures/0', label: 'picture', prov: provValue }] });
+  assert.equal(judge(picture(prov(BOX))).status, 'PASS');
+  assert.deepEqual(judge(picture(prov(BOX))).items, { total: 4, located: 4 });
+  const lostPicture = judge(picture(prov({ l: 0, t: 0, r: 0, b: 0 })));
+  assert.equal(lostPicture.status, 'FAIL');
+  assert.deepEqual(lostPicture.pictures.invalid, [{ ref: '#/pictures/0', label: 'picture', problem: 'bbox has no area' }]);
+  assert.match(good.rule, /every text item, table and picture has provenance/);
+  assert.doesNotMatch(good.rule, /do not decide/);
+
+  // A document without text is still judged by what it does hold; only an empty one is not.
+  assert.equal(judge({ texts: [] }).status, 'PASS');
+  assert.equal(judge({ texts: [], tables: [], ...picture(prov(BOX)) }).status, 'PASS');
+  assert.equal(judge({ texts: [], tables: [], ...picture([]) }).status, 'FAIL');
+  const empty = judge({ texts: [], tables: [] });
+  assert.equal(empty.status, 'not_exercised');
+  assert.equal(empty.reason, 'the converted document holds no text item, table or picture');
   const office = judge({ pages: {}, texts: [{ self_ref: '#/texts/0', label: 'text', text: 'x', prov: [] }], tables: [], groups: [{ label: 'sheet', name: 'Sheet1' }] }, false);
   assert.equal(office.status, 'recorded_not_judged');
   assert.equal(office.locator, 'none');

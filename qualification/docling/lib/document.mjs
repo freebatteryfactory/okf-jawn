@@ -9,8 +9,8 @@
  *
  * SPEC section 7 promises "inclusive pages/lines" selections and "exact resolved citations";
  * section 5 "relevant page renders, source locators". So a paginated fixture (PDF, image)
- * must give every text item a page inside the document and a box inside that page, and one
- * render per page. Other formats are recorded as the library reports them, not judged.
+ * must give every text item, table and picture a page inside the document and a box inside
+ * that page, and one render per page. Other formats are recorded as the library reports them, not judged.
  *
  * A render must also depict its page: the orchestrator decodes each image (lib/png.mjs) and
  * this module fails one that is a single flat colour, unless the fixture's entry in
@@ -23,6 +23,10 @@ const ROUNDING = 0.011;
 /** `invalid` lists at most this many items; `invalid_total` is the full count. */
 const INVALID_SHOWN = 10;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/** What a passing provenance criterion asserts; the receipt carries this sentence. */
+export const PROVENANCE_RULE =
+  'every text item, table and picture has provenance, each page_no is a page of the document and each bbox has area and lies inside that page';
 
 /** What a passing page_renders criterion asserts; the receipt carries this sentence. */
 export const PAGE_RENDER_RULE =
@@ -165,6 +169,7 @@ export function judgeProvenance(doc, { paginated }) {
   const located = texts.located + tables.located + pictures.located;
   const base = {
     page_count: doc.pages.length,
+    items: { total: items, located },
     text_items: texts,
     tables,
     pictures,
@@ -186,14 +191,10 @@ export function judgeProvenance(doc, { paginated }) {
       ...base,
     };
   }
-  if (texts.total === 0) {
-    return { status: 'not_exercised', reason: 'the converted document holds no text item', ...base };
+  if (items === 0) {
+    return { status: 'not_exercised', reason: 'the converted document holds no text item, table or picture', ...base };
   }
-  return {
-    status: texts.located === texts.total ? 'PASS' : 'FAIL',
-    rule: 'every text item has provenance, each page_no is a page of the document and each bbox has area and lies inside that page; tables and pictures are counted the same way but do not decide the status',
-    ...base,
-  };
+  return { status: located === items ? 'PASS' : 'FAIL', rule: PROVENANCE_RULE, ...base };
 }
 
 /** Width and height from a PNG's IHDR, or null when the bytes do not start as a PNG. */
