@@ -170,7 +170,7 @@ test('the Docling gate carries the one failure the owner accepted, and the gates
  // The owner's decision of 2026-10-06, word for word; nobody but the owner changes or adds to it.
  assert.deepEqual(docling.accepted_failures,[{
   criterion:'corpus/redp5110_sampled.pdf/content_across_font_runs',
-  decision:'Docling stays the converter. Where a phrase changes font the library ends a text cell and joins cells with a space, so "(WRKFCNUSG)" is extracted as "( WRKFCNUSG )". Accepted for now and reported upstream; no newer version, option or pdfium changes it.',
+  decision:'Docling stays the converter. Where a phrase changes font the library ends a text cell and joins cells with a space, so "(WRKFCNUSG)" is extracted as "( WRKFCNUSG )". Accepted for now; no newer version, option or pdfium changes it. An upstream report is drafted and is not filed yet.',
   decided_on:'2026-10-06',
   decided_by:'owner',
   tracked_by:'converter-font-run-spacing',
