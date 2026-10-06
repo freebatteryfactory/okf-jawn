@@ -45,7 +45,7 @@
     "project_typescript_passed": true,
     "authored_typescript_error_count": 0,
     "deterministic_foundation_green": false,
-    "phase_0_note": "Phase 0 reopened. Prior terminal record at b13fcd0 overclaimed harness evidence and left shared contract/port gaps. Foundation repair in progress; requalify on one clean SHA after contract and port repairs. iii REJECTED_WITH_FALLBACK (Tokio+RecordStore) stands. web-host gate moved to acceptance as not_run. Docling and MCP Apps protocol gates return to incomplete pending clean-tree requalification.",
+    "phase_0_note": "Phase 0 reopened. Prior terminal record at b13fcd0 overclaimed harness evidence and left shared contract/port gaps. Foundation repair in progress; requalify on one clean SHA after contract and port repairs. web-host gate moved to acceptance as not_run. Docling and MCP Apps protocol gates return to incomplete pending clean-tree requalification.",
     "direct_versions": {
       "okf-core": "0.2.7",
       "okf-validator": "0.2.7 (default-features=false)",
@@ -56,9 +56,7 @@
       "@modelcontextprotocol/ext-apps": "2.0.3",
       "@types/bun": "1.4.2",
       "@hey-api/openapi-ts": "0.99.0",
-      "shadcn": "4.21.1",
-      "iii-sdk": "0.24.4",
-      "iii_engine": "iii/v0.24.4"
+      "shadcn": "4.21.1"
     },
     "typescript_policy": {
       "authored": "ui/tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes on authored source and generated files except the Hey API client runtime. skipLibCheck for third-party .d.ts only. Tooling configs are a separate composite project (ui/tsconfig.tooling.json) with types:[bun]. ui/tests is type-checked via ui/tsconfig.tests.json referenced from ui/tsconfig.json.",
@@ -184,12 +182,6 @@
           "meaning": "Reopened: prior PASS cited a dirty-tree SHA, sampled cargo.pid peak memory, and used must_fail_corrupt.bin which failed before the converter. Requalify on a clean SHA with per-fixture peak memory and must_fail_truncated.pdf."
         },
         {
-          "id": "iii-library-qualification",
-          "status": "rejected_with_fallback",
-          "receipt": ".artifacts/qualification/iii/receipt.json",
-          "meaning": "REJECTED_WITH_FALLBACK on 32a10ba4125719d4132e29d8679980113b6fc0a6: engine+queue kill/restart, crash redelivery, effect ledger, blob refs, startup/RSS, ELv2 from tag iii/v0.24.4 observed; DLQ browse empty (inspected=false). Fallback Tokio+RecordStore selected in SPEC/README. Decision stands; provenance guard will be added before any re-run."
-        },
-        {
           "id": "mcp-apps-protocol-qualification",
           "status": "incomplete",
           "receipt": null,
@@ -267,7 +259,7 @@
           "status": "blocked_on_lanes",
           "owner": "ingest",
           "receipt": ".artifacts/qualification/ or construction receipt for import restart",
-          "meaning": "Kill and restart against the real RecordStore with JobHandler(&ClaimedJob); no duplicate effect. Tokio+RecordStore path (iii rejected)."
+          "meaning": "Kill and restart against the real RecordStore with JobHandler(&ClaimedJob); no duplicate effect; after restart leases are expired and pending jobs re-enqueued (`expire_leases`, `pending_jobs`); an attempt that dies without a restart is retried after its lease expires."
         },
         {
           "id": "application-operations",
@@ -514,7 +506,6 @@
       "MCP App and Scalar bundling",
       "actual converter/native/model asset qualification",
       "WorkOS integration and hosted authentication",
-      "iii restart/channel qualification",
       "Claude/ChatGPT host rendering and WebMCP",
       "complete app, raw transport routes, backup/export and UI journeys"
     ],
