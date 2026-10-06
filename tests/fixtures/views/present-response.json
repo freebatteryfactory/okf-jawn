@@ -23,7 +23,8 @@
         "workspace_id": "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
       },
       "transforms": [],
-      "units": {}
+      "units": {},
+      "materialized": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff"
     }
   ],
   "view": {
@@ -55,7 +56,8 @@
           "workspace_id": "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
         },
         "transforms": [],
-        "units": {}
+        "units": {},
+        "materialized": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff"
       }
     ],
     "spec": {
