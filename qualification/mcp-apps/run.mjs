@@ -32,6 +32,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { receiptHeader, recordReceipt } from '../../scripts/lib/provenance.mjs';
 import { buildRelease } from '../lib/cargo.mjs';
+import { BASIC_HOST, PATCHED_SERVE, SOURCE_RECORD, lsRemoteArgs, patchServe, rawUrl, sourceProblems, sourceRecord, tagCommit } from './lib/basic-host.mjs';
 import { EXIT_CODES } from './lib/criteria.mjs';
 import { DOM_SELECTORS, observeView, readAppDom } from './lib/observe.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from './lib/process.mjs';
@@ -52,8 +53,6 @@ const hostsDir = join(outDir, 'hosts');
 const basicHostDir = join(outDir, 'basic-host');
 const criteriaPath = fileURLToPath(new URL('./criteria.json', import.meta.url));
 const HARNESS_PACKAGE = 'okf-qualify-mcp-apps';
-/** The ext-apps release whose examples/basic-host is the reference host. */
-const BASIC_HOST_TAG = 'v2.0.3';
 const HTTP_PORT = Number(process.env.OKF_MCP_APPS_PORT ?? '18765');
 const HTTP_BIND = `127.0.0.1:${HTTP_PORT}`;
 const MCP_URL = `http://127.0.0.1:${HTTP_PORT}/mcp`;
@@ -198,69 +197,62 @@ async function protocolObservation() {
   }
 }
 
+const sha256File = async (path) => createHash('sha256').update(await readFile(path)).digest('hex');
+
+/**
+ * The reference host's sources on disk, as lib/basic-host.mjs requires them: fetched at the
+ * commit the tag named, recorded with their hashes, and still those bytes now.
+ */
 async function ensureBasicHost() {
-  // Official basic-host is not shipped inside the npm package; fetch the tagged example.
-  const marker = join(basicHostDir, 'package.json');
-  let source = 'cached';
-  try {
-    await readFile(marker, 'utf8');
-  } catch {
-    source = 'fetched';
+  const recordPath = join(basicHostDir, SOURCE_RECORD);
+  const hashesOnDisk = async () =>
+    Object.fromEntries(
+      await Promise.all(BASIC_HOST.files.map(async (file) => [file, await sha256File(join(basicHostDir, file)).catch(() => null)])),
+    );
+  let record = await readFile(recordPath, 'utf8').then(JSON.parse, () => null);
+  let status = 'cached';
+  if (record === null) {
+    // Nothing recorded (first run, or a cache from before the record existed): fetch afresh.
+    status = 'fetched';
+    await rm(basicHostDir, { recursive: true, force: true });
     await mkdir(basicHostDir, { recursive: true });
-    const files = [
-      'package.json',
-      'index.html',
-      'sandbox.html',
-      'serve.ts',
-      'tsconfig.json',
-      'vite.config.ts',
-      'src/index.tsx',
-      'src/implementation.ts',
-      'src/sandbox.ts',
-      'src/theme.ts',
-      'src/index.module.css',
-      'src/global.css',
-      'src/host-styles.ts',
-      'src/vite-env.d.ts',
-    ];
-    const base = `https://raw.githubusercontent.com/modelcontextprotocol/ext-apps/${BASIC_HOST_TAG}/examples/basic-host`;
-    for (const file of files) {
-      const response = await fetch(`${base}/${file}`);
-      if (!response.ok) {
-        throw new Error(`fetch basic-host ${file}: HTTP ${response.status}`);
-      }
+    const listed = await run('git', lsRemoteArgs(), { stdio: ['ignore', 'pipe', 'pipe'] });
+    if (listed.code !== 0) throw new Error(`git ls-remote ${BASIC_HOST.repository} exited ${listed.code}: ${listed.stderr.trim()}`);
+    const commit = tagCommit(listed.stdout, BASIC_HOST.tag);
+    const files = {};
+    for (const file of BASIC_HOST.files) {
+      const response = await fetch(rawUrl(commit, file));
+      if (!response.ok) throw new Error(`fetch basic-host ${file} at ${commit}: HTTP ${response.status}`);
       const body = Buffer.from(await response.arrayBuffer());
       const target = join(basicHostDir, file);
       await mkdir(join(target, '..'), { recursive: true });
       await writeFile(target, body);
+      files[file] = createHash('sha256').update(body).digest('hex');
     }
+    record = { repository: BASIC_HOST.repository, tag: BASIC_HOST.tag, commit, fetched_at: new Date().toISOString(), files };
+    await writeFile(recordPath, `${JSON.stringify(record, null, 2)}\n`);
   }
-  // Express sendFile on this Windows/bun combo 404s with an absolute join path;
-  // use { root } so sandbox.html is served from dist/.
-  const servePath = join(basicHostDir, 'serve.ts');
-  let serveSource = await readFile(servePath, 'utf8');
-  if (serveSource.includes('res.sendFile(join(DIRECTORY, "sandbox.html"))')) {
-    serveSource = serveSource.replace(
-      'res.sendFile(join(DIRECTORY, "sandbox.html"));',
-      'res.sendFile("sandbox.html", { root: DIRECTORY });',
-    );
-    await writeFile(servePath, serveSource);
+  const hashes = await hashesOnDisk();
+  const problems = sourceProblems(record, hashes);
+  if (problems.length) {
+    throw new Error(`the basic-host sources in ${basicHostDir} are not the ones recorded as fetched (${problems.join('; ')}); delete that directory to fetch them again`);
   }
+  const packageJson = JSON.parse(await readFile(join(basicHostDir, 'package.json'), 'utf8'));
+  if (`v${packageJson.version}` !== BASIC_HOST.tag) {
+    throw new Error(`basic-host at ${record.commit} is ${packageJson.name}@${packageJson.version}, not ${BASIC_HOST.tag}`);
+  }
+  // The fetched serve.ts stays as fetched; the patched copy is what runs.
+  await writeFile(join(basicHostDir, PATCHED_SERVE), patchServe(await readFile(join(basicHostDir, 'serve.ts'), 'utf8')));
   const install = await run('bun', ['install'], { cwd: basicHostDir });
-  if (install.code !== 0) {
-    throw new Error(`basic-host bun install exited ${install.code}`);
-  }
-  // Upstream example relies on monorepo-hoisted cross-env / @types/cors.
-  const extras = await run('bun', ['add', '-d', '@types/cors', 'cross-env'], { cwd: basicHostDir });
-  if (extras.code !== 0) {
-    throw new Error(`basic-host bun add extras exited ${extras.code}`);
-  }
-  // What is on disk decides which host this was, whether it was fetched now or earlier.
-  const manifest = JSON.parse(await readFile(marker, 'utf8'));
-  if (`v${manifest.version}` !== BASIC_HOST_TAG) {
-    throw new Error(`basic-host in ${basicHostDir} is ${manifest.name}@${manifest.version}, not ${BASIC_HOST_TAG}`);
-  }
-  return { status: source, path: basicHostDir, package: { name: manifest.name, version: manifest.version } };
+  if (install.code !== 0) throw new Error(`basic-host bun install exited ${install.code}`);
+  return sourceRecord({
+    status,
+    record,
+    hashes,
+    packageJson,
+    // The example has no lockfile upstream; this is the one bun install resolved here.
+    lockfileSha256: await sha256File(join(basicHostDir, 'bun.lock')).catch(() => null),
+  });
 }
 
 async function buildBasicHost() {
@@ -278,7 +270,7 @@ async function buildBasicHost() {
 async function startHost() {
   const source = await ensureBasicHost();
   await buildBasicHost();
-  const host = spawnGroup('bun', ['serve.ts'], {
+  const host = spawnGroup('bun', [PATCHED_SERVE], {
     cwd: basicHostDir,
     env: {
       ...process.env,

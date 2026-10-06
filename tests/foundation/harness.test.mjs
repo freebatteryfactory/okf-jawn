@@ -50,6 +50,7 @@ import {
 import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
 import { OCR_FIXTURES, decodeFixture, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
+import { BASIC_HOST, PATCHED_SERVE, SOURCE_RECORD, lsRemoteArgs, patchServe, rawUrl, sourceProblems, sourceRecord, tagCommit } from '../../qualification/mcp-apps/lib/basic-host.mjs';
 import {
   EXIT_CODES,
   GATE as MCP_APPS_GATE,
@@ -1546,7 +1547,7 @@ test('axe exclusions cover host chrome only; the App frame is judged by every ru
 
 /** The orchestrator and its rule modules, as text. */
 async function mcpAppsSources() {
-  const names = ['run.mjs', 'lib/qualify.mjs', 'lib/criteria.mjs', 'lib/protocol.mjs', 'lib/observe.mjs', 'lib/views.mjs'];
+  const names = ['run.mjs', 'lib/qualify.mjs', 'lib/criteria.mjs', 'lib/protocol.mjs', 'lib/observe.mjs', 'lib/views.mjs', 'lib/basic-host.mjs'];
   const texts = await Promise.all(names.map((name) => readFile(join(root, 'qualification/mcp-apps', name), 'utf8')));
   return Object.fromEntries(names.map((name, index) => [name, texts[index]]));
 }
@@ -1571,7 +1572,7 @@ test('the MCP Apps receipt states what ran: stdio not_run, HTTP as the harness r
   assert.match(sources['lib/qualify.mjs'], /transport: transportRecord\(\{ requested: config\.mcp_url, reported: server\?\.endpoint \?\? null \}\)/);
   assert.match(sources['run.mjs'], /endpoint: listening\[1\]/);
   assert.match(sources['lib/qualify.mjs'], /static_bundle_smoke: \{\s*status: 'not_run'/);
-  assert.match(sources['run.mjs'], /package: \{ name: manifest\.name, version: manifest\.version \}/);
+  assert.match(sources['run.mjs'], /version: browser\.version\(\),/);
 
   // The harness's check report reads resource metadata and the tool list back from its handlers.
   const harness = await readFile(join(root, 'qualification/mcp-apps/src/main.rs'), 'utf8');
@@ -2237,28 +2238,55 @@ test('the MCP Apps receipt inputs cover everything the run renders and executes'
   const uncovered = [...app, ...bundler, ...orchestrator].filter((file) => !covered(file));
   assert.deepEqual(uncovered, [], 'files the run executes or renders that are not receipt inputs');
 
-  // What no import statement names: fixtures, lockfiles, manifests, toolchains, and the rest
-  // of ui/ (Tailwind turns words in any tracked ui file into rules of the App's stylesheet).
+  // What no import statement names: fixtures, lockfiles, manifests, toolchains, tool
+  // configuration, and what `bun --bun run build` reads in ui/.
   for (const path of [
     'tests/fixtures/views/present-response.json',
     'tests/fixtures/views/present-metrics-dataset.json',
     'qualification/mcp-apps/src/main.rs',
     'qualification/mcp-apps/Cargo.toml',
+    'qualification/mcp-apps/criteria.json',
+    'api/mcp-tools.json',
+    'scripts/lib/receipt-envelope.mjs',
     'Cargo.toml',
     'Cargo.lock',
     'rust-toolchain.toml',
+    '.cargo/config.toml',
     'bun.lock',
+    'bunfig.toml',
     'package.json',
     '.bun-version',
     'ui/package.json',
     'ui/vite.config.ts',
+    'ui/index.html',
     'ui/tsconfig.json',
     'ui/scripts/bundle-docs.mjs',
-    'ui/tests/e2e/mcp-apps-static-bundle-smoke.spec.ts',
+    'ui/src/styles.css',
+    'ui/src/lib/wire.ts',
   ]) {
     await stat(join(root, path));
     assert.ok(covered(path), `${path} is not covered by the receipt inputs`);
   }
+  // Narrowed: a change to a test, to lint or test configuration or to prose under ui/ does
+  // not make the receipt stale, because nothing the run executes reads it.
+  assert.ok(!MCP_APPS_INPUTS.includes('ui'), 'ui/ as a whole is no longer an input');
+  for (const path of [
+    'ui/tests/e2e/mcp-apps-static-bundle-smoke.spec.ts',
+    'ui/tests/unit/layout.test.tsx',
+    'ui/AGENTS.md',
+    'ui/biome.json',
+    'ui/playwright.config.ts',
+    'ui/vitest.config.ts',
+    'ui/tsconfig.tests.json',
+  ]) {
+    await stat(join(root, path));
+    assert.ok(!covered(path), `${path} is an input again`);
+  }
+  // The narrowing holds only while these stay true: the stylesheet scans ui/src alone, the App
+  // build takes no configuration file, and the build script runs these three steps.
+  assert.match(await readFile(join(root, 'ui/src/styles.css'), 'utf8'), /^@import "tailwindcss" source\("\.\/"\);/);
+  assert.match(await readFile(join(root, 'ui/scripts/bundle-app.mjs'), 'utf8'), /configFile: false,/);
+  assert.equal(JSON.parse(await readFile(join(root, 'ui/package.json'), 'utf8')).scripts.build, 'vite build && bun scripts/bundle-app.mjs && bun scripts/bundle-docs.mjs');
 
   const source = await readFile(join(root, 'qualification/mcp-apps/run.mjs'), 'utf8');
   assert.doesNotMatch(source, /const MCP_APPS_INPUTS/, 'the orchestrator must use the tested list');
@@ -2437,6 +2465,64 @@ test('each protocol rule fails on its own wrong answer, and every other rule is 
   const endless = await harnessDouble({ block: (block) => ({ ...block, has_more: true, data_base64: 'QQ==' }) });
   const stopped = judgeProtocol(endless.expected, await observeProtocol(endless.client, { views: VIEWS, maxBlocks: 5 }));
   assert.match(stopped.criteria.find((criterion) => criterion.id === 'protocol/read_object_ranged_loop').detail, /did not finish in 5 calls/);
+});
+
+test('the reference host is named by the commit its tag resolved to, and a cache that is not what was fetched is refused', async () => {
+  const tagObject = '1'.repeat(40);
+  const commit = '2'.repeat(40);
+  // An annotated tag lists the tag object and what it points at; the commit is the second.
+  assert.equal(tagCommit(`${tagObject}\trefs/tags/v2.0.3\n${commit}\trefs/tags/v2.0.3^{}\n`, 'v2.0.3'), commit);
+  assert.equal(tagCommit(`${commit}\trefs/tags/v2.0.3\r\n`, 'v2.0.3'), commit, 'a lightweight tag is the commit');
+  assert.throws(() => tagCommit(`${commit}\trefs/tags/v2.0.4\n`, 'v2.0.3'), /did not list the tag v2\.0\.3/);
+  assert.throws(() => tagCommit('', 'v2.0.3'), /did not list the tag/);
+  assert.deepEqual(lsRemoteArgs(), ['ls-remote', 'https://github.com/modelcontextprotocol/ext-apps', 'refs/tags/v2.0.3', 'refs/tags/v2.0.3^{}']);
+  assert.equal(rawUrl(commit, 'src/index.tsx'), `https://raw.githubusercontent.com/modelcontextprotocol/ext-apps/${commit}/examples/basic-host/src/index.tsx`);
+  assert.ok(BASIC_HOST.files.includes('serve.ts') && BASIC_HOST.files.includes('package.json'));
+
+  const files = Object.fromEntries(BASIC_HOST.files.map((file, index) => [file, index.toString(16).padStart(64, '0')]));
+  const record = { repository: BASIC_HOST.repository, tag: BASIC_HOST.tag, commit, fetched_at: '2026-10-06T00:00:00.000Z', files };
+  assert.deepEqual(sourceProblems(record, files), []);
+  assert.deepEqual(sourceProblems(record, { ...files, 'serve.ts': 'f'.repeat(64) }), [`serve.ts is ${'f'.repeat(64)}, fetched as ${files['serve.ts']}`]);
+  const { 'src/sandbox.ts': removed, ...withoutOne } = files;
+  assert.deepEqual(sourceProblems(record, withoutOne), [`src/sandbox.ts is missing, fetched as ${removed}`]);
+  assert.deepEqual(sourceProblems({ ...record, files: withoutOne }, files), ['src/sandbox.ts has no recorded sha256']);
+  assert.deepEqual(sourceProblems({ ...record, tag: 'v2.0.2' }, files), ['fetched at tag v2.0.2, not v2.0.3']);
+  assert.deepEqual(sourceProblems({ ...record, repository: 'https://example.invalid/fork' }, files), ['fetched from https://example.invalid/fork, not https://github.com/modelcontextprotocol/ext-apps']);
+  assert.deepEqual(sourceProblems({ ...record, commit: 'v2.0.3' }, files), ['no commit recorded']);
+  assert.deepEqual(sourceProblems(null, files), ['no record of what was fetched']);
+
+  const serve = 'const DIRECTORY = join(__dirname, "dist");\n  res.sendFile(join(DIRECTORY, "sandbox.html"));\n';
+  assert.equal(patchServe(serve), 'const DIRECTORY = join(__dirname, "dist");\n  res.sendFile("sandbox.html", { root: DIRECTORY });\n');
+  assert.throws(() => patchServe('res.sendFile("sandbox.html", { root: DIRECTORY });'), /serve\.ts no longer contains/);
+  assert.notEqual(PATCHED_SERVE, 'serve.ts', 'the fetched serve.ts is never overwritten, so its hash stays checkable');
+  assert.ok(!BASIC_HOST.files.includes(PATCHED_SERVE) && !BASIC_HOST.files.includes(SOURCE_RECORD));
+
+  assert.deepEqual(
+    sourceRecord({ status: 'cached', record, hashes: files, packageJson: { name: '@modelcontextprotocol/ext-apps-basic-host', version: '2.0.3', private: true }, lockfileSha256: 'a'.repeat(64) }),
+    {
+      status: 'cached',
+      repository: 'https://github.com/modelcontextprotocol/ext-apps',
+      requested_tag: 'v2.0.3',
+      commit,
+      commit_resolved_at: '2026-10-06T00:00:00.000Z',
+      files_verified: 14,
+      files_expected: 14,
+      package: { name: '@modelcontextprotocol/ext-apps-basic-host', version: '2.0.3' },
+      lockfile_sha256: 'a'.repeat(64),
+    },
+  );
+
+  // The orchestrator fetches by commit, checks the cache on every run and serves the patched copy.
+  const run = (await mcpAppsSources())['run.mjs'];
+  assert.match(run, /run\('git', lsRemoteArgs\(\),/);
+  assert.match(run, /const commit = tagCommit\(listed\.stdout, BASIC_HOST\.tag\);/);
+  assert.match(run, /fetch\(rawUrl\(commit, file\)\)/);
+  assert.match(run, /const problems = sourceProblems\(record, hashes\);\s*if \(problems\.length\) \{\s*throw new Error\(/);
+  assert.match(run, /spawnGroup\('bun', \[PATCHED_SERVE\], \{/);
+  assert.doesNotMatch(run, /BASIC_HOST_TAG|raw\.githubusercontent\.com|'serve\.ts'\], \{/);
+  // And the browser's own version is asked of the browser.
+  assert.match(run, /version: browser\.version\(\),/);
+  assert.match((await mcpAppsSources())['lib/qualify.mjs'], /browser: browser \? \{ name: 'chromium', version: browser\.version \} : null,/);
 });
 
 test('both orchestrators take their header from receiptHeader and record only through recordReceipt', async () => {
