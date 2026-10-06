@@ -69,7 +69,9 @@ import { deflateSync } from 'node:zlib';
 import { recordRefusal } from '../../qualification/record.mjs';
 import { run as runCommand } from '../../scripts/lib/process.mjs';
 import { checkReceipts, derivedRecord, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
-import { commit as fixtureCommit, fixtureRepo, git as fixtureGit } from './fixture-repo.mjs';
+import { afterAll } from 'bun:test';
+import concurrently from './concurrent-test.mjs';
+import { commit as fixtureCommit, copyRepo, git as fixtureGit, sharedRepos } from './fixture-repo.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 import { BASIC_HOST, PATCHED_SERVE, SOURCE_RECORD, lsRemoteArgs, patchServe, rawUrl, sourceProblems, sourceRecord, tagCommit } from '../../qualification/mcp-apps/lib/basic-host.mjs';
 import {
@@ -112,6 +114,11 @@ import {
 } from '../../qualification/mcp-apps/lib/views.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
+
+// The join tests start from copies of repositories prepared once for this file.
+const shared = sharedRepos();
+afterAll(shared.dispose);
+const fixtureRepo = shared.fixtureRepo;
 
 /** Budget for a promise that settles at once; generous because a parallel cargo build has starved these. */
 const SLOW_MACHINE_BUDGET_MS = 20_000;
@@ -4458,7 +4465,7 @@ const withoutCriterion = (receipt, id) => ({ ...receipt, criteria: receipt.crite
 
 const FONT_RUN_CRITERION = 'corpus/redp5110_sampled.pdf/content_across_font_runs';
 
-test('join: the receipt each harness builds has no content failure under the real checker, criteria files and record, and the Docling result of today is accepted with limitations', async (t) => {
+concurrently('join: the receipt each harness builds has no content failure under the real checker, criteria files and record, and the Docling result of today is accepted with limitations', async (t) => {
   const { repo, sha, record } = await joinRepository(t);
   const doclingHeader = { git_sha: sha, inputs: DOCLING_INPUTS, produced_at: '2026-10-06T09:00:00.000Z' };
   const today = await realDoclingReceipt(doclingHeader, {}, {}, { today: true });
@@ -4511,7 +4518,7 @@ test('join: the receipt each harness builds has no content failure under the rea
   await assert.rejects(checkReceipts(repo), (error) => error.message.split('\n').includes(stale));
 });
 
-test('join: a failed and an unfinished receipt from each harness are clean evidence, and the gate says failed or incomplete', async (t) => {
+concurrently('join: a failed and an unfinished receipt from each harness are clean evidence, and the gate says failed or incomplete', async (t) => {
   const { repo, sha, record } = await joinRepository(t);
   const header = (inputs) => ({ git_sha: sha, inputs, produced_at: '2026-10-06T09:00:00.000Z' });
   const appsDouble = (options) => qualifyDouble({ ...options, change: { header: async () => header(MCP_APPS_INPUTS), ...options?.change } });
@@ -4543,20 +4550,24 @@ test('join: a failed and an unfinished receipt from each harness are clean evide
   assert.match(derivedFailures(await record({ docling: hidden })).join('\n'), /^docling\.json: not_judged is \[.*\] but its criteria derive \["assets\/hashes_match",/);
 });
 
-test('join: a Docling run that did not judge everything never qualifies, although its one failure is the accepted one', async (t) => {
-  const { repo } = await joinRepository(t, { tools: true });
+concurrently('join: a Docling run that did not judge everything never qualifies, although its one failure is the accepted one', async (t) => {
+  const { repo: first } = await joinRepository(t, { tools: true });
   const produced_at = '2026-10-06T09:00:00.000Z';
-  const recordCommand = (...names) => runCommand(process.execPath, ['qualification/record.mjs', ...names], { cwd: repo, capture: true, allowFailure: true });
-  const artifact = async (harness, receipt) => {
-    await mkdir(join(repo, '.artifacts', 'qualification', harness), { recursive: true });
-    await writeFile(join(repo, '.artifacts', 'qualification', harness, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
-  };
-  const typedRecord = async () => JSON.parse(await readFile(join(repo, 'verification.json'), 'utf8'));
+  /** The recording command, the artifacts it reads and the record it writes, in the repository `repo`. */
+  const toolsIn = (repo) => ({
+    recordCommand: (...names) => runCommand(process.execPath, ['qualification/record.mjs', ...names], { cwd: repo, capture: true, allowFailure: true }),
+    artifact: async (harness, receipt) => {
+      await mkdir(join(repo, '.artifacts', 'qualification', harness), { recursive: true });
+      await writeFile(join(repo, '.artifacts', 'qualification', harness, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
+    },
+    typedRecord: async () => JSON.parse(await readFile(join(repo, 'verification.json'), 'utf8')),
+  });
   const doclingGate = (record) => record.current.gates.phase_0.find((gate) => gate.harness === 'docling');
   const unjudgedRequired = (receipt) => receipt.criteria.filter((criterion) => criterion.required && criterion.result === 'not_judged').length;
   // The MCP Apps gate passes throughout, so the Docling gate alone decides.
-  const first = await fixtureGit(repo, 'rev-parse', 'HEAD');
-  await artifact('mcp-apps', (await (await qualifyDouble({ change: { header: async () => ({ git_sha: first, inputs: MCP_APPS_INPUTS, produced_at }) } })).run()).receipt);
+  const firstHead = await fixtureGit(first, 'rev-parse', 'HEAD');
+  const appsReceipt = (await (await qualifyDouble({ change: { header: async () => ({ git_sha: firstHead, inputs: MCP_APPS_INPUTS, produced_at }) } })).run()).receipt;
+  await toolsIn(first).artifact('mcp-apps', appsReceipt);
 
   // Each is the Docling run of today (the accepted criterion fails) in which something else was not judged.
   const cutShort = [
@@ -4565,7 +4576,12 @@ test('join: a Docling run that did not judge everything never qualifies, althoug
     ['a memory peak that could not be read', { overrides: { 'sample_sheet.xlsx': { run: { peakRssBytes: null, peakRssNote: 'Get-Process reported no PeakWorkingSet64' } } } }, /^the peak memory of the converter process for sample_sheet\.xlsx was not measured: /, 1],
     ['a single-fixture run', { only: ['corpus/redp5110_sampled.pdf'] }, null, 87],
   ];
-  for (const [what, { overrides = {}, only = null }, harnessError, unjudged] of cutShort) {
+
+  // The first case records both gates with one command. The others, and the two runs after them, start from the
+  // repository that command leaves (the MCP Apps gate recorded and committed), each in its own copy: they are
+  // independent of each other, so they run at once.
+  const oneCase = async (repo, [what, { overrides = {}, only = null }, harnessError, unjudged], names) => {
+    const { recordCommand, artifact, typedRecord } = toolsIn(repo);
     const head = await fixtureGit(repo, 'rev-parse', 'HEAD');
     const receipt = await realDoclingReceipt({ git_sha: head, inputs: DOCLING_INPUTS, produced_at }, overrides, {}, { today: true, only });
     // The shape both reviews showed: FAIL, only the accepted criterion failing, required criteria nobody judged.
@@ -4578,7 +4594,7 @@ test('join: a Docling run that did not judge everything never qualifies, althoug
 
     // Recorded by the real command: the gate is incomplete and Phase 0 is not qualified.
     await artifact('docling', receipt);
-    const said = await recordCommand('docling', ...(head === first ? ['mcp-apps'] : []));
+    const said = await recordCommand('docling', ...names);
     assert.equal(said.code, 0, `${what}: ${said.stderr}`);
     assert.match(said.stdout, /^docling-library-qualification: incomplete \(qualification\/receipts\/docling\.json result FAIL with every failing criterion accepted, but the run did not judge everything: /m, what);
     assert.match(said.stdout, /^phase_0_qualified: false \(docling-library-qualification is incomplete\)$/m, what);
@@ -4611,32 +4627,55 @@ test('join: a Docling run that did not judge everything never qualifies, althoug
     assert.match(rewritten.stdout, /^verification\.json rewritten from the receipts\.$/m, what);
     assert.equal(await readFile(join(repo, 'verification.json'), 'utf8'), agreeing, what);
     await fixtureCommit(repo, {}, `the derived record again: ${what}`);
-  }
+  };
 
   // A converter process that dies on a valid fixture is the library failing, and nobody accepted that:
   // the gate is failed. It is not incomplete (nothing in the environment stopped it) and not accepted.
-  const crashedAt = await fixtureGit(repo, 'rev-parse', 'HEAD');
-  const crashed = await realDoclingReceipt({ git_sha: crashedAt, inputs: DOCLING_INPUTS, produced_at }, { 'table_heavy.pdf': { run: { exitCode: 101, stderr: 'thread main panicked at docling-pdf' } } }, {}, { today: true });
-  assert.deepEqual([crashed.result, crashed.harness_error], ['FAIL', null]);
-  assert.deepEqual(doclingFailedIds(crashed), ['table_heavy.pdf/conversion', FONT_RUN_CRITERION]);
-  await artifact('docling', crashed);
-  const afterCrash = await recordCommand('docling');
-  assert.equal(afterCrash.code, 0, afterCrash.stderr);
-  assert.match(afterCrash.stdout, /^docling-library-qualification: failed \(qualification\/receipts\/docling\.json result FAIL\)$/m);
-  assert.match(afterCrash.stdout, /^phase_0_qualified: false \(docling-library-qualification is failed\)$/m);
-  await fixtureCommit(repo, {}, 'record: a converter process that crashed');
-  assert.match(await checkReceipts(repo), /; docling-library-qualification: failed \(.*\); .*phase_0_qualified: false \(docling-library-qualification is failed\); verification\.json agrees\.$/);
+  const crashedCase = async (repo) => {
+    const { recordCommand, artifact } = toolsIn(repo);
+    const crashedAt = await fixtureGit(repo, 'rev-parse', 'HEAD');
+    const crashed = await realDoclingReceipt({ git_sha: crashedAt, inputs: DOCLING_INPUTS, produced_at }, { 'table_heavy.pdf': { run: { exitCode: 101, stderr: 'thread main panicked at docling-pdf' } } }, {}, { today: true });
+    assert.deepEqual([crashed.result, crashed.harness_error], ['FAIL', null]);
+    assert.deepEqual(doclingFailedIds(crashed), ['table_heavy.pdf/conversion', FONT_RUN_CRITERION]);
+    await artifact('docling', crashed);
+    const afterCrash = await recordCommand('docling');
+    assert.equal(afterCrash.code, 0, afterCrash.stderr);
+    assert.match(afterCrash.stdout, /^docling-library-qualification: failed \(qualification\/receipts\/docling\.json result FAIL\)$/m);
+    assert.match(afterCrash.stdout, /^phase_0_qualified: false \(docling-library-qualification is failed\)$/m);
+    await fixtureCommit(repo, {}, 'record: a converter process that crashed');
+    assert.match(await checkReceipts(repo), /; docling-library-qualification: failed \(.*\); .*phase_0_qualified: false \(docling-library-qualification is failed\); verification\.json agrees\.$/);
+  };
 
   // The same run with every fixture judged is still what the owner accepted.
-  const head = await fixtureGit(repo, 'rev-parse', 'HEAD');
-  const whole = await realDoclingReceipt({ git_sha: head, inputs: DOCLING_INPUTS, produced_at }, {}, {}, { today: true });
-  assert.deepEqual([whole.result, whole.harness_error, unjudgedRequired(whole)], ['FAIL', null, 0]);
-  await artifact('docling', whole);
-  const said = await recordCommand('docling');
-  assert.equal(said.code, 0, said.stderr);
-  assert.ok(said.stdout.split(/\r?\n/).includes(`docling-library-qualification: accepted_with_limitations (qualification/receipts/docling.json result FAIL; the owner accepted every failing criterion: ${FONT_RUN_CRITERION})`), said.stdout);
-  assert.match(said.stdout, /^phase_0_qualified: true \(with accepted limitations: docling-library-qualification\)$/m);
-  const recorded = await fixtureCommit(repo, {}, 'record the whole run');
-  assert.match(await checkReceipts(repo), /phase_0_qualified: true \(with accepted limitations: docling-library-qualification\); verification\.json agrees\.$/);
-  assert.deepEqual(await staleReceiptLines(repo, recorded), []);
+  const wholeCase = async (repo) => {
+    const { recordCommand, artifact } = toolsIn(repo);
+    const head = await fixtureGit(repo, 'rev-parse', 'HEAD');
+    const whole = await realDoclingReceipt({ git_sha: head, inputs: DOCLING_INPUTS, produced_at }, {}, {}, { today: true });
+    assert.deepEqual([whole.result, whole.harness_error, unjudgedRequired(whole)], ['FAIL', null, 0]);
+    await artifact('docling', whole);
+    const said = await recordCommand('docling');
+    assert.equal(said.code, 0, said.stderr);
+    assert.ok(said.stdout.split(/\r?\n/).includes(`docling-library-qualification: accepted_with_limitations (qualification/receipts/docling.json result FAIL; the owner accepted every failing criterion: ${FONT_RUN_CRITERION})`), said.stdout);
+    assert.match(said.stdout, /^phase_0_qualified: true \(with accepted limitations: docling-library-qualification\)$/m);
+    const recorded = await fixtureCommit(repo, {}, 'record the whole run');
+    assert.match(await checkReceipts(repo), /phase_0_qualified: true \(with accepted limitations: docling-library-qualification\); verification\.json agrees\.$/);
+    assert.deepEqual(await staleReceiptLines(repo, recorded), []);
+  };
+
+  // The first case leaves the MCP Apps gate recorded and committed: that repository is where the others start.
+  const [firstCase, ...laterCases] = cutShort;
+  const { root: firstCopy } = await copyRepo(t, first);
+  const firstRun = oneCase(firstCopy, firstCase, ['mcp-apps']);
+  firstRun.catch(() => {}); // its failure is reported where it is awaited, below
+  // The state that case leaves for the MCP Apps gate, made once by the same command and committed.
+  const { root: recordedApps } = await copyRepo(t, first);
+  assert.equal((await toolsIn(recordedApps).recordCommand('mcp-apps')).code, 0);
+  await fixtureCommit(recordedApps, {}, 'record the MCP Apps receipt');
+  const fromRecorded = async (judge) => judge((await copyRepo(t, recordedApps)).root);
+  await Promise.all([
+    firstRun,
+    ...laterCases.map((entry) => fromRecorded((repo) => oneCase(repo, entry, []))),
+    fromRecorded(crashedCase),
+    fromRecorded(wholeCase),
+  ]);
 });
