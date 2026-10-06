@@ -12,16 +12,22 @@
  * `criteria_summary` are derived from the same criteria, so the receipt holds one verdict.
  *
  * What kind of failure is what:
- *   fail          the library did something the rule forbids (see criteria.mjs CRITERION_RULES)
+ *   fail          the library did something the rule forbids (see criteria.mjs CRITERION_RULES).
+ *                 A converter process that dies on a fixture is one of them: a panic, an abort
+ *                 or a fault inside the conversion is the library failing on that fixture, so
+ *                 it fails the fixture's conversion criterion (`refused` for the must-fail
+ *                 fixture, `timeout_reported` for the probe), with the exit code and the last
+ *                 lines of stderr in the detail (see `processEnd`).
  *   harness_error the environment stopped a judgement: a converter process that did not start,
- *                 exited non-zero, was killed or wrote no receipt; evidence files that are not
- *                 the ones the process recorded; a peak that could not be read; assets or
- *                 models that are not the verified ones. The criteria it touches are
- *                 not_judged and the run is INCOMPLETE unless a required criterion failed.
+ *                 was killed at the harness timeout or from outside, refused the run itself
+ *                 (HARNESS_EXIT) or wrote no receipt; evidence files that are not the ones the
+ *                 process recorded; a peak that could not be read; assets or models that are
+ *                 not the verified ones. The criteria it touches are not_judged and the run is
+ *                 INCOMPLETE unless a required criterion failed.
  *
  * `failures` lists everything that keeps the run from PASS: each required criterion that
- * failed or was not judged, and one entry for a fixture that did not run or whose process
- * failed. Each detail states the total as well as the examples.
+ * failed or was not judged, and one entry for a fixture that did not run or whose process the
+ * environment stopped. Each detail states the total as well as the examples.
  */
 
 import { assetsMatched, inventoryCheck } from './assets.mjs';
@@ -88,6 +94,25 @@ export const DOCLING_INPUTS = [
 
 /** A failure detail names at most this many examples after the total. */
 const EXAMPLES_SHOWN = 10;
+/**
+ * The exit code src/main.rs ends with when the harness binary itself could not make the run
+ * (EXIT_HARNESS there; a test holds the two equal): a variable that is not set, a fixture file
+ * that is missing, an output directory that cannot be written.
+ */
+export const HARNESS_EXIT = 64;
+/** The signals a process raises against itself when it dies; any other signal was sent to it from outside. */
+const CRASH_SIGNALS = Object.freeze(['SIGABRT', 'SIGSEGV', 'SIGBUS', 'SIGILL', 'SIGFPE', 'SIGTRAP']);
+/** How many of the last lines of stderr the detail of a crash carries. */
+const STDERR_LINES = 5;
+/**
+ * The criterion of each kind of fixture run that a dying converter process fails, with what the
+ * process did instead of what the criterion asks. Every run has exactly one of them.
+ */
+const CRASH_FAILS = Object.freeze({
+  conversion: 'while converting the fixture',
+  refused: 'instead of refusing the truncated input',
+  timeout_reported: 'instead of reporting the spent budget',
+});
 /** Converter options the receipt lifts out of the DocumentConverter Debug text (SPEC section 5: settings). */
 const SETTING_NAMES = [
   'generate_page_images',
@@ -141,17 +166,44 @@ function judgeMemory(only, run) {
   };
 }
 
-/** Why the converter process gave nothing to judge, or null when it exited 0 with a receipt. */
-function processProblem(run, base) {
-  if (run.spawnError) return `could not be started: ${tail(run.spawnError)}`;
-  if (run.timedOut) return 'was killed at the harness timeout';
-  if (run.exitCode !== 0) {
-    const how = run.exitCode === null ? `ended on signal ${run.signal}` : `exited ${run.exitCode}`;
-    return `${how}${tail(run.stderr) ? `: ${tail(run.stderr)}` : ''}`;
+/** The last lines a process wrote to stderr, each trimmed, joined for one sentence. */
+function lastLines(text) {
+  const lines = String(text ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-STDERR_LINES);
+  return lines.length ? lines.join(' | ').slice(-800) : '(it wrote nothing to stderr)';
+}
+
+/**
+ * How a converter process that gave nothing to judge ended: `{ kind, how }`, or null when it
+ * exited 0 with a receipt.
+ *
+ * kind `crash`: the process died on the fixture. It exited non-zero with a code the harness
+ * binary does not use for its own refusals (a Rust panic exits 101; an abort or a fault exits
+ * with the platform's code), or it died on a signal a process raises against itself. The
+ * binary's own code neither panics nor exits, so this is the library failing on the fixture,
+ * and it is judged as a `fail`. A process that ran out of memory dies the same way and is
+ * recorded the same way; the detail carries the exit code.
+ *
+ * kind `harness`: the environment. The process could not be started (the binary is missing),
+ * was killed at the harness timeout, was ended by a signal sent from outside, refused the run
+ * itself (HARNESS_EXIT), or exited 0 without a readable receipt.
+ */
+function processEnd(run, base) {
+  const harness = (how) => ({ kind: 'harness', how });
+  const said = tail(run.stderr) ? `: ${tail(run.stderr)}` : '';
+  if (run.spawnError) return harness(`could not be started: ${tail(run.spawnError)}`);
+  if (run.timedOut) return harness('was killed at the harness timeout');
+  if (run.exitCode === HARNESS_EXIT) return harness(`could not make the run (exit ${HARNESS_EXIT}, the harness binary's own refusal)${said}`);
+  if (run.exitCode === null) {
+    if (CRASH_SIGNALS.includes(run.signal)) return { kind: 'crash', how: `died on signal ${run.signal}` };
+    return harness(`ended on signal ${run.signal}, sent from outside the process${said}`);
   }
-  if (base === null || typeof base !== 'object') return 'exited 0 without a readable receipt';
+  if (run.exitCode !== 0) return { kind: 'crash', how: `exited ${run.exitCode}` };
+  if (base === null || typeof base !== 'object') return harness('exited 0 without a readable receipt');
   return null;
 }
+
+/** True when the converter process exited 0 with a receipt, so there is something to judge. */
+const processFinished = (run, base) => processEnd(run, base) === null;
 
 /** Why a criterion that reads the converted files cannot be judged, or null when it can. */
 function unreadable(base, criteria) {
@@ -384,10 +436,11 @@ export function fixtureEntry({ only, run, report, source, evidence, build, other
     return entry;
   };
 
-  const stop = processProblem(run, base);
-  if (stop) {
-    const sentence = `the converter process for ${only} ${stop}`;
-    return finish({
+  const end = processEnd(run, base);
+  if (end) {
+    const sentence = `the converter process for ${only} ${end.how}`;
+    const crashed = end.kind === 'crash';
+    const observed = {
       only,
       fixture: only,
       role,
@@ -395,15 +448,23 @@ export function fixtureEntry({ only, run, report, source, evidence, build, other
       stage: null,
       status: null,
       finding: null,
-      process_failed: true,
-      harness_error: sentence,
+      process_failed: !crashed,
+      process_crashed: crashed,
+      harness_error: crashed ? null : sentence,
       harness_exit_code: run.exitCode,
       harness_signal: run.signal,
       harness_timed_out: run.timedOut,
       harness_stderr: String(run.spawnError ?? run.stderr ?? '').slice(-2000),
       memory,
-      criteria: Object.fromEntries(list.map(({ aspect }) => [aspect, stopped(sentence)])),
-    });
+    };
+    if (!crashed) return finish({ ...observed, criteria: Object.fromEntries(list.map(({ aspect }) => [aspect, stopped(sentence)])) });
+    // The library died on the fixture: the criterion that says the converter handled it fails,
+    // and nothing else of the fixture can be judged. No harness error: the environment did its part.
+    const handled = list.map(({ aspect }) => aspect).find((aspect) => Object.hasOwn(CRASH_FAILS, aspect));
+    const judged = Object.fromEntries(list.map(({ aspect }) => [aspect, notJudged(`${sentence}, so there is nothing of the fixture to judge`)]));
+    judged[handled] = fail(`${sentence} ${CRASH_FAILS[handled]}; the last lines of its stderr: ${lastLines(run.stderr)}`, { exit_code: run.exitCode, signal: run.signal });
+    if (memoryJudgement.result === 'pass') judged.memory_measured = memoryJudgement;
+    return finish({ ...observed, criteria: judged });
   }
 
   const entry = { ...base, only, role, conversion_outcome: base.outcome, memory, criteria: {} };
@@ -504,7 +565,7 @@ export function fixtureEntry({ only, run, report, source, evidence, build, other
 function convertedPdfs(runs, sources) {
   return runs
     .filter((item) => item.only !== TIMEOUT_PROBE && sources?.files?.[item.only]?.kind === 'pdf' && sources.files[item.only].role !== 'must_fail')
-    .filter((item) => processProblem(item.run, item.report?.receipts?.[0]) === null && item.report.receipts[0].outcome === 'PASS')
+    .filter((item) => processFinished(item.run, item.report?.receipts?.[0]) && item.report.receipts[0].outcome === 'PASS')
     .map((item) => item.only);
 }
 
@@ -517,7 +578,7 @@ function fullConversionOf(probe, runs) {
   const match = typeof hash === 'string' ? runs.find((item) => item.only !== TIMEOUT_PROBE && item.report?.receipts?.[0]?.sha256_before === hash) : null;
   if (!match) return null;
   const base = match.report.receipts[0];
-  const converted = processProblem(match.run, base) === null && base.outcome === 'PASS' && Array.isArray(match.evidence?.problems) && match.evidence.problems.length === 0;
+  const converted = processFinished(match.run, base) && base.outcome === 'PASS' && Array.isArray(match.evidence?.problems) && match.evidence.problems.length === 0;
   return { fixture: match.only, converted, document: converted ? match.evidence.document : null };
 }
 

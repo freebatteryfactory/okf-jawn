@@ -12,8 +12,10 @@
  *   pass            the rule in CRITERION_RULES holds
  *   fail            a statement about the library under test
  *   not_judged      no verdict was reached; `detail` says why. With `harness_error` the cause
- *                   is the environment (a process that did not run, a file that changed on
- *                   disk, a peak that could not be read), which makes the run INCOMPLETE
+ *                   is the environment (a process that did not start or was killed from
+ *                   outside, a file that changed on disk, a peak that could not be read),
+ *                   which makes the run INCOMPLETE. A converter process that dies on a
+ *                   fixture is not the environment: it is a `fail` of that fixture
  *   not_applicable  the library cannot do this for that input by design; `detail` says so
  * `required: false` marks a measurement recorded without a verdict: the locator the library
  * gives a spreadsheet or a presentation, which this harness has no rule for.
@@ -63,7 +65,7 @@ export const CRITERION_RULES = Object.freeze({
   'assets/model_inventory':
     'every model file docling::model_inventory() reports in a converter process of this run is one of the re-hashed assets, by path and length',
   conversion:
-    'DocumentConverter::convert returned Success with Markdown that is not blank, and the fixture bytes are unchanged afterwards',
+    'DocumentConverter::convert returned Success with Markdown that is not blank, and the fixture bytes are unchanged afterwards; a converter process that dies on the fixture (a panic, an abort, a fault: any exit the harness binary did not make itself) fails this criterion, with its exit code and the last lines of its stderr',
   evidence:
     'the Markdown, the document export and every page image the converter process wrote are on disk with the hashes it recorded',
   format_recognised:
@@ -83,11 +85,11 @@ export const CRITERION_RULES = Object.freeze({
   memory_measured:
     'a peak resident set size was read for the converter process; the size is a measurement and no limit is applied',
   refused:
-    'the converter itself refuses the truncated input (convert returns Err, or Ok with status Failure) and the fixture bytes are unchanged',
+    'the converter itself refuses the truncated input (convert returns Err, or Ok with status Failure) and the fixture bytes are unchanged; a converter process that dies on the input has not refused it and fails this criterion',
   refusal_attributed:
     'another PDF fixture converted in the same run, so the refusal is not a broken PDF pipeline, and what the refusal text says about the build agrees with what cargo resolved',
   timeout_reported:
-    'with a 1 ms document budget the converter returns PartialSuccess with a pipeline error that names the timeout',
+    'with a 1 ms document budget the converter returns PartialSuccess with a pipeline error that names the timeout; a converter process that dies under the budget has not reported it and fails this criterion',
   budget_had_effect:
     'the budget changed the result in a way a timeout that did nothing could not: the probe reported the spent budget and its document holds fewer pages or fewer items than the conversion of the same bytes without a budget in the same run; elapsed time is recorded and not judged',
 });

@@ -15,6 +15,11 @@
 //! page image. The receipt carries the hash of each, so content, structure, provenance and
 //! page renders are judged from the files, against expectations this binary never sees.
 //!
+//! How the process ends is part of the protocol. It exits 0 once its receipt is written,
+//! whatever the converter returned, and `EXIT_HARNESS` when it could not make the run itself.
+//! Nothing here panics or exits otherwise, so any other exit is the process dying under the
+//! library, and the orchestrator judges that as the library failing on the fixture.
+//!
 //! Every receipt records the stage the fixture reached: `source` (the file never
 //! reached the converter), `converter_error` (`convert` returned `Err`) or
 //! `converter_status` (`convert` returned `Ok`). A must-fail fixture passes only at
@@ -40,6 +45,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 /// The builder calls this harness makes. One value drives the converter and the receipt,
@@ -257,6 +263,12 @@ enum Stage {
 const DOCUMENT_JSON: &str = "document.json";
 const DOCUMENT_MD: &str = "document.md";
 const DONE: &str = "done";
+/// The exit code of a run this binary itself could not make: a variable that is not set, a
+/// fixture file that is missing, an output file that cannot be written. The orchestrator
+/// (`lib/receipt.mjs` `HARNESS_EXIT`) reads it as a harness error. Every other non-zero exit
+/// (a panic exits 101) is the process dying on the fixture, which the orchestrator records as
+/// a failure of the library on that fixture.
+const EXIT_HARNESS: u8 = 64;
 const MUST_FAIL_FINDING: &str = "converter accepts truncated PDF";
 const MUST_FAIL_NAME: &str = "must_fail_truncated.pdf";
 const OCR_LANG: &str = "en";
@@ -835,10 +847,16 @@ fn run() -> Result<(), String> {
     run_one(&only, &environment)
 }
 
-fn main() -> Result<(), String> {
-    run().inspect_err(|error| {
-        let _ = writeln!(io::stderr(), "okf-qualify-docling: {error}");
-    })
+/// Ends with `EXIT_HARNESS` when this binary could not make the run, and never panics or
+/// exits anywhere else, so any other non-zero exit is the process dying under the library.
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let _ = writeln!(io::stderr(), "okf-qualify-docling: {error}");
+            ExitCode::from(EXIT_HARNESS)
+        }
+    }
 }
 
 mod glyphs;

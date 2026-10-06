@@ -33,6 +33,7 @@ import {
 import {
   DOCLING_INPUTS,
   FIXTURE_RUNS,
+  HARNESS_EXIT,
   MUST_FAIL,
   TIMEOUT_PROBE,
   buildDoclingReceipt,
@@ -1326,7 +1327,7 @@ test('the result of a Docling receipt is the shared fold of its criteria, and no
   const scenarios = {
     PASS: doclingReceipt(),
     FAIL: doclingReceipt({ 'corpus/word_sample.docx': { evidence: { markdown: '## Title\n\nGoodbye\n' } } }),
-    INCOMPLETE: doclingReceipt({ 'table_heavy.pdf': { report: null, run: { exitCode: 1 } } }),
+    INCOMPLETE: doclingReceipt({ 'table_heavy.pdf': { report: null, run: { exitCode: HARNESS_EXIT } } }),
   };
   for (const [expected, receipt] of Object.entries(scenarios)) {
     assert.equal(receipt.result, expected);
@@ -1488,7 +1489,7 @@ test('the must-fail receipt says what kind of refusal it was, from the error tex
   assert.equal(contradicted.result, 'FAIL');
 });
 
-test('a converter process that failed, or a fixture that never ran, is INCOMPLETE with a harness error and no library verdict', () => {
+test('a converter process the environment stopped, or a fixture that never ran, is INCOMPLETE with a harness error and no library verdict', () => {
   const stoppedBy = (over, sentence) => {
     const receipt = doclingReceipt({ 'table_heavy.pdf': over });
     const entry = entryOf(receipt, 'table_heavy.pdf');
@@ -1502,27 +1503,35 @@ test('a converter process that failed, or a fixture that never ran, is INCOMPLET
     assertDoclingEnvelope(receipt);
     return entry;
   };
-  const crashed = stoppedBy(
-    { report: null, run: { exitCode: 1, stderr: 'okf-qualify-docling: missing fixture\n' } },
-    'the converter process for table_heavy.pdf exited 1: okf-qualify-docling: missing fixture',
+  // The harness binary refused the run itself: its own exit code, and what it said.
+  const refusal = `the converter process for table_heavy.pdf could not make the run (exit ${HARNESS_EXIT}, the harness binary's own refusal)`;
+  const refused = stoppedBy(
+    { report: null, run: { exitCode: HARNESS_EXIT, stderr: 'okf-qualify-docling: missing fixture C:\\fixtures\\table_heavy.pdf\n' } },
+    `${refusal}: okf-qualify-docling: missing fixture C:\\fixtures\\table_heavy.pdf`,
   );
-  assert.equal(crashed.harness_exit_code, 1);
-  assert.match(crashed.harness_stderr, /missing fixture/);
-  // A non-zero exit is not trusted although a receipt is on disk (the review's surviving mutant).
-  stoppedBy({ run: { exitCode: 101, stderr: 'thread main panicked' } }, 'the converter process for table_heavy.pdf exited 101: thread main panicked');
+  assert.equal(refused.harness_exit_code, HARNESS_EXIT);
+  assert.match(refused.harness_stderr, /missing fixture/);
+  assert.deepEqual([refused.process_failed, refused.process_crashed], [true, false]);
+  // That exit is not trusted although a receipt is on disk (the review's surviving mutant).
+  stoppedBy({ run: { exitCode: HARNESS_EXIT, stderr: 'okf-qualify-docling: wait for stdin EOF: broken pipe' } }, `${refusal}: okf-qualify-docling: wait for stdin EOF: broken pipe`);
   stoppedBy({ report: null }, 'the converter process for table_heavy.pdf exited 0 without a readable receipt');
+  // The binary is missing.
   stoppedBy({ report: null, run: { exitCode: null, spawnError: 'ENOENT: no such file or directory, uv_spawn' } }, 'the converter process for table_heavy.pdf could not be started: ENOENT: no such file or directory, uv_spawn');
+  // The harness's own timeout expired, whatever the kill then looked like to the process.
   stoppedBy({ report: null, run: { exitCode: null, signal: 'SIGTERM', timedOut: true } }, 'the converter process for table_heavy.pdf was killed at the harness timeout');
-  stoppedBy({ report: null, run: { exitCode: null, signal: 'SIGKILL' } }, 'the converter process for table_heavy.pdf ended on signal SIGKILL');
+  stoppedBy({ report: null, run: { exitCode: 1, signal: null, timedOut: true } }, 'the converter process for table_heavy.pdf was killed at the harness timeout');
+  // A signal sent from outside the process (the operating system, an operator).
+  stoppedBy({ report: null, run: { exitCode: null, signal: 'SIGKILL' } }, 'the converter process for table_heavy.pdf ended on signal SIGKILL, sent from outside the process');
+  stoppedBy({ report: null, run: { exitCode: null, signal: 'SIGTERM' } }, 'the converter process for table_heavy.pdf ended on signal SIGTERM, sent from outside the process');
 
   // A harness error does not hide a failure the library did produce, and several are counted.
   const both = doclingReceipt({
-    'table_heavy.pdf': { report: null, run: { exitCode: 1 } },
-    'scanned_text.pdf': { report: null, run: { exitCode: 1 } },
+    'table_heavy.pdf': { report: null, run: { exitCode: HARNESS_EXIT } },
+    'scanned_text.pdf': { report: null, run: { exitCode: HARNESS_EXIT } },
     'corpus/word_sample.docx': { evidence: { markdown: 'Goodbye' } },
   });
   assert.equal(both.result, 'FAIL');
-  assert.equal(both.harness_error, 'the converter process for scanned_text.pdf exited 1 (and 1 more harness error(s); each is the detail of the criteria it stopped)');
+  assert.equal(both.harness_error, `the converter process for scanned_text.pdf could not make the run (exit ${HARNESS_EXIT}, the harness binary's own refusal) (and 1 more harness error(s); each is the detail of the criteria it stopped)`);
   assert.deepEqual(doclingFailedIds(both), ['corpus/word_sample.docx/content']);
 
   const partial = doclingReceipt({}, { runs: [doclingRun('sample_sheet.xlsx')], scope: { mode: 'only', fixtures: ['sample_sheet.xlsx'], qualification: false } });
@@ -1534,6 +1543,100 @@ test('a converter process that failed, or a fixture that never ran, is INCOMPLET
   assert.deepEqual(partial.failures.filter((item) => item.criterion === null), notRun.map((fixture) => ({ fixture, criterion: null, result: 'not_judged', detail: 'the fixture did not run' })));
   assert.equal(doclingCriterion(partial, 'born_digital_text.pdf/content').detail, 'the fixture did not run');
   assertDoclingEnvelope(partial);
+});
+
+test('a converter process that dies on a fixture fails that fixture, with the exit code and the last lines of its stderr, and is no harness error', async () => {
+  const panic = [
+    'warning: 3 fonts without a ToUnicode map',
+    'loading layout model',
+    "thread 'main' panicked at docling-pdf-1.93.6/src/assemble.rs:2084:17:",
+    'index out of bounds: the len is 3 but the index is 7',
+    'note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace',
+    '',
+  ].join('\n');
+  const shown = "warning: 3 fonts without a ToUnicode map | loading layout model | thread 'main' panicked at docling-pdf-1.93.6/src/assemble.rs:2084:17: | index out of bounds: the len is 3 but the index is 7 | note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace";
+  const others = (aspects) => aspects.filter((aspect) => !['conversion', 'refused', 'timeout_reported'].includes(aspect));
+
+  // A Rust panic exits 101, whether or not the process had written a receipt before it died.
+  for (const report of [undefined, null]) {
+    const receipt = doclingReceipt({ 'table_heavy.pdf': { ...(report === null ? { report } : {}), run: { exitCode: 101, peakRssBytes: null, peakRssNote: 'converter exited before printing the done marker; peak RSS was not sampled', stderr: panic } } });
+    const how = 'the converter process for table_heavy.pdf exited 101';
+    assert.equal(receipt.result, 'FAIL');
+    assert.equal(receipt.harness_error, null, 'the library dying on a fixture is not the environment');
+    assert.deepEqual(doclingFailedIds(receipt), ['table_heavy.pdf/conversion']);
+    assert.deepEqual(doclingCriterion(receipt, 'table_heavy.pdf/conversion'), {
+      id: 'table_heavy.pdf/conversion',
+      required: true,
+      result: 'fail',
+      detail: `${how} while converting the fixture; the last lines of its stderr: ${shown}`,
+    });
+    const entry = entryOf(receipt, 'table_heavy.pdf');
+    assert.deepEqual([entry.outcome, receipt.summary['table_heavy.pdf'], entry.process_crashed, entry.process_failed, entry.harness_error, entry.harness_exit_code], ['FAIL', 'FAIL', true, false, null, 101]);
+    assert.deepEqual(entry.failed_criteria, ['conversion']);
+    assert.deepEqual([entry.criteria.conversion.exit_code, entry.criteria.conversion.signal], [101, null]);
+    // Nothing else of the fixture is judged, and none of it is blamed on the environment.
+    for (const aspect of others(Object.keys(entry.criteria))) {
+      assert.deepEqual(entry.criteria[aspect], { result: 'not_judged', detail: `${how}, so there is nothing of the fixture to judge` }, aspect);
+    }
+    assert.deepEqual(Object.keys(entry.criteria), ['conversion', 'evidence', 'format_recognised', 'content', 'page_renders', 'provenance', 'undecoded_glyphs_reported', 'memory_measured']);
+    assert.deepEqual(receipt.failures.filter((item) => item.fixture === 'table_heavy.pdf').map((item) => [item.criterion, item.result]), Object.keys(entry.criteria).map((aspect) => [aspect, aspect === 'conversion' ? 'fail' : 'not_judged']));
+    assertDoclingEnvelope(receipt);
+  }
+  // The detail carries the last five lines, no more.
+  assert.equal(doclingCriterion(doclingReceipt({ 'table_heavy.pdf': { run: { exitCode: 101, stderr: `an earlier line\n${panic}` } } }), 'table_heavy.pdf/conversion').detail, `the converter process for table_heavy.pdf exited 101 while converting the fixture; the last lines of its stderr: ${shown}`);
+  assert.match(doclingCriterion(doclingReceipt({ 'table_heavy.pdf': { run: { exitCode: 101, stderr: '' } } }), 'table_heavy.pdf/conversion').detail, /the last lines of its stderr: \(it wrote nothing to stderr\)$/);
+  // A peak that was read before the process died stays a measurement.
+  assert.equal(entryOf(doclingReceipt({ 'table_heavy.pdf': { run: { exitCode: 101, stderr: panic } } }), 'table_heavy.pdf').criteria.memory_measured.result, 'pass');
+
+  // Every way a process dies of itself: any other non-zero exit, and the signals a process raises against itself.
+  for (const [run, how] of [
+    [{ exitCode: 1 }, 'exited 1'],
+    [{ exitCode: 3221225477 }, 'exited 3221225477'],
+    [{ exitCode: 134 }, 'exited 134'],
+    [{ exitCode: null, signal: 'SIGSEGV' }, 'died on signal SIGSEGV'],
+    [{ exitCode: null, signal: 'SIGABRT' }, 'died on signal SIGABRT'],
+    [{ exitCode: null, signal: 'SIGBUS' }, 'died on signal SIGBUS'],
+    [{ exitCode: null, signal: 'SIGILL' }, 'died on signal SIGILL'],
+  ]) {
+    const receipt = doclingReceipt({ 'scanned_text.pdf': { report: null, run: { ...run, stderr: 'fatal runtime error' } } });
+    assert.deepEqual([receipt.result, receipt.harness_error], ['FAIL', null], how);
+    assert.deepEqual(doclingFailedIds(receipt), ['scanned_text.pdf/conversion'], how);
+    assert.equal(doclingCriterion(receipt, 'scanned_text.pdf/conversion').detail, `the converter process for scanned_text.pdf ${how} while converting the fixture; the last lines of its stderr: fatal runtime error`);
+  }
+
+  // The must-fail fixture and the timeout probe: a process that dies has neither refused the input nor reported the budget.
+  const truncated = doclingReceipt({ [MUST_FAIL]: { report: null, run: { exitCode: 101, stderr: panic } } });
+  assert.deepEqual(doclingFailedIds(truncated), [`${MUST_FAIL}/refused`]);
+  assert.match(doclingCriterion(truncated, `${MUST_FAIL}/refused`).detail, /^the converter process for must_fail_truncated\.pdf exited 101 instead of refusing the truncated input; the last lines of its stderr: /);
+  assert.equal(doclingCriterion(truncated, `${MUST_FAIL}/refusal_attributed`).result, 'not_judged');
+  const probe = doclingReceipt({ [TIMEOUT_PROBE]: { report: null, run: { exitCode: 101, stderr: panic } } });
+  assert.deepEqual(doclingFailedIds(probe), [`${TIMEOUT_PROBE}/timeout_reported`]);
+  assert.match(doclingCriterion(probe, `${TIMEOUT_PROBE}/timeout_reported`).detail, /^the converter process for timeout_probe exited 101 instead of reporting the spent budget; /);
+  assert.deepEqual([truncated.harness_error, probe.harness_error, truncated.result, probe.result], [null, null, 'FAIL', 'FAIL']);
+  // A PDF whose process died did not convert: it cannot vouch for the pipeline, nor serve as the probe's full conversion.
+  const all = doclingReceipt(Object.fromEntries(FIXTURE_RUNS.filter((only) => only.endsWith('.pdf') && only !== MUST_FAIL).map((only) => [only, { run: { exitCode: 101 } }])));
+  assert.equal(doclingCriterion(all, `${MUST_FAIL}/refusal_attributed`).result, 'not_judged');
+  assert.match(doclingCriterion(all, `${TIMEOUT_PROBE}/budget_had_effect`).detail, /^the full conversion of scanned_image_only\.pdf did not succeed in this run/);
+
+  // The library failing beside the environment failing: the failure stands, and the harness error is still said.
+  const mixed = doclingReceipt({ 'table_heavy.pdf': { run: { exitCode: 101, stderr: panic } }, 'scanned_text.pdf': { report: null, run: { exitCode: null, signal: 'SIGKILL' } } });
+  assert.deepEqual([mixed.result, mixed.harness_error], ['FAIL', 'the converter process for scanned_text.pdf ended on signal SIGKILL, sent from outside the process']);
+  assert.deepEqual(doclingFailedIds(mixed), ['table_heavy.pdf/conversion']);
+
+  // The one exit code that is the environment is the one the binary keeps for its own refusals, on both sides.
+  const main = await readFile(join(root, 'qualification/docling/src/main.rs'), 'utf8');
+  assert.equal(HARNESS_EXIT, 64);
+  assert.match(main, new RegExp(`^const EXIT_HARNESS: u8 = ${HARNESS_EXIT};$`, 'm'));
+  assert.match(main, /^fn main\(\) -> ExitCode \{$/m);
+  assert.match(main, /Err\(error\) => \{\s+let _ = writeln!\(io::stderr\(\), "okf-qualify-docling: \{error\}"\);\s+ExitCode::from\(EXIT_HARNESS\)\s+\}/);
+  assert.doesNotMatch(main, /process::exit|fn main\(\) -> Result/, 'the binary must end through main, with the code that says who refused');
+  // The rules say so in the receipt.
+  assert.match(truncated.criterion_rules.conversion, /a converter process that dies on the fixture \(a panic, an abort, a fault: any exit the harness binary did not make itself\) fails this criterion, with its exit code and the last lines of its stderr$/);
+  assert.match(truncated.criterion_rules.refused, /a converter process that dies on the input has not refused it and fails this criterion$/);
+  assert.match(truncated.criterion_rules.timeout_reported, /a converter process that dies under the budget has not reported it and fails this criterion$/);
+  // No id was added: the criteria a dying process fails are ones criteria.json already pins.
+  const pinned = JSON.parse(await readFile(join(root, 'qualification/docling/criteria.json'), 'utf8')).required;
+  for (const id of ['table_heavy.pdf/conversion', `${MUST_FAIL}/refused`, `${TIMEOUT_PROBE}/timeout_reported`]) assert.ok(pinned.includes(id), id);
 });
 
 test('a run that stopped before any conversion writes an INCOMPLETE envelope with every criterion not judged', () => {
@@ -1981,9 +2084,11 @@ test('the timeout probe passes only when the budget changed the result, compared
     'the full conversion of scanned_image_only.pdf did not succeed in this run, so there is nothing to compare the probe with',
     'FAIL',
   );
-  unjudged({ 'scanned_image_only.pdf': { run: { exitCode: 1 } } }, 'the full conversion of scanned_image_only.pdf did not succeed in this run, so there is nothing to compare the probe with');
+  unjudged({ 'scanned_image_only.pdf': { run: { exitCode: HARNESS_EXIT } } }, 'the full conversion of scanned_image_only.pdf did not succeed in this run, so there is nothing to compare the probe with');
   // A process that left no receipt recorded no input hash: which fixture held the same bytes is not known.
-  unjudged({ 'scanned_image_only.pdf': { report: null, run: { exitCode: 1 } } }, 'no fixture of this run converted the same bytes without a budget, so there is nothing to compare the probe with');
+  unjudged({ 'scanned_image_only.pdf': { report: null, run: { exitCode: HARNESS_EXIT } } }, 'no fixture of this run converted the same bytes without a budget, so there is nothing to compare the probe with');
+  // The same when the process died on the fixture, which is then a failure of that fixture as well.
+  unjudged({ 'scanned_image_only.pdf': { run: { exitCode: 101 } } }, 'the full conversion of scanned_image_only.pdf did not succeed in this run, so there is nothing to compare the probe with', 'FAIL');
   unjudged({ 'scanned_image_only.pdf': { fixture: { sha256_before: '0'.repeat(64) } } }, 'no fixture of this run converted the same bytes without a budget, so there is nothing to compare the probe with');
   unjudged({ [TIMEOUT_PROBE]: { fixture: { document: null } } }, 'the library returned no document for the probe, so nothing distinguishes it from the full conversion');
   unjudged({ [TIMEOUT_PROBE]: { evidence: { problems: ['document.json: hash on disk differs from the receipt'] } } }, 'the files the probe process wrote are not the ones it recorded (see evidence), so nothing is judged from them');
@@ -4112,7 +4217,7 @@ test('join: a Docling run that did not judge everything never qualifies, althoug
 
   // Each is the Docling run of today (the accepted criterion fails) in which something else was not judged.
   const cutShort = [
-    ['a converter process that crashed', { overrides: { 'table_heavy.pdf': { run: { exitCode: 101, stderr: 'thread main panicked at docling-pdf' } } } }, /^the converter process for table_heavy\.pdf exited 101: /, 8],
+    ['a converter process that could not be started', { overrides: { 'table_heavy.pdf': { report: null, run: { exitCode: null, spawnError: 'ENOENT: no such file or directory, uv_spawn' } } } }, /^the converter process for table_heavy\.pdf could not be started: /, 8],
     ['a process killed at the harness timeout', { overrides: { 'scanned_text.pdf': { report: null, run: { exitCode: null, signal: 'SIGTERM', timedOut: true } } } }, /^the converter process for scanned_text\.pdf was killed at the harness timeout$/, 8],
     ['a memory peak that could not be read', { overrides: { 'sample_sheet.xlsx': { run: { peakRssBytes: null, peakRssNote: 'Get-Process reported no PeakWorkingSet64' } } } }, /^the peak memory of the converter process for sample_sheet\.xlsx was not measured: /, 1],
     ['a single-fixture run', { only: ['corpus/redp5110_sampled.pdf'] }, null, 87],
@@ -4164,6 +4269,20 @@ test('join: a Docling run that did not judge everything never qualifies, althoug
     assert.equal(await readFile(join(repo, 'verification.json'), 'utf8'), agreeing, what);
     await fixtureCommit(repo, {}, `the derived record again: ${what}`);
   }
+
+  // A converter process that dies on a valid fixture is the library failing, and nobody accepted that:
+  // the gate is failed. It is not incomplete (nothing in the environment stopped it) and not accepted.
+  const crashedAt = await fixtureGit(repo, 'rev-parse', 'HEAD');
+  const crashed = await realDoclingReceipt({ git_sha: crashedAt, inputs: DOCLING_INPUTS, produced_at }, { 'table_heavy.pdf': { run: { exitCode: 101, stderr: 'thread main panicked at docling-pdf' } } }, {}, { today: true });
+  assert.deepEqual([crashed.result, crashed.harness_error], ['FAIL', null]);
+  assert.deepEqual(doclingFailedIds(crashed), ['table_heavy.pdf/conversion', FONT_RUN_CRITERION]);
+  await artifact('docling', crashed);
+  const afterCrash = await recordCommand('docling');
+  assert.equal(afterCrash.code, 0, afterCrash.stderr);
+  assert.match(afterCrash.stdout, /^docling-library-qualification: failed \(qualification\/receipts\/docling\.json result FAIL\)$/m);
+  assert.match(afterCrash.stdout, /^phase_0_qualified: false \(docling-library-qualification is failed\)$/m);
+  await fixtureCommit(repo, {}, 'record: a converter process that crashed');
+  assert.match(await checkReceipts(repo), /; docling-library-qualification: failed \(.*\); .*phase_0_qualified: false \(docling-library-qualification is failed\); verification\.json agrees\.$/);
 
   // The same run with every fixture judged is still what the owner accepted.
   const head = await fixtureGit(repo, 'rev-parse', 'HEAD');
