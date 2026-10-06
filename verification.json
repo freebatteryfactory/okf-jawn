@@ -225,14 +225,21 @@
           "status": "blocked_on_lanes",
           "owner": "storage",
           "receipt": "cargo test -p okf-jawn-storage --features runtime",
-          "meaning": "VersionStore (trailer, find_mutation, candidates), BlobStore, WorkspaceCatalog, SQLite stores (Record/Mutation/Draft/Confirmation/SandboxCapability/Proposal/Upload/Event/Credential), SearchIndex (no drafts), local AccessControl"
+          "meaning": "VersionStore (trailer, find_commit: commit is idempotent on MutationId, candidates), BlobStore, WorkspaceCatalog, SQLite stores (Record/Mutation/Draft/Confirmation/SandboxCapability/Proposal/Upload/Event/Credential), SearchIndex (no drafts), local AccessControl"
         },
         {
           "id": "mutation-crash-reconcile",
           "status": "blocked_on_lanes",
           "owner": "storage",
           "receipt": "cargo test -p okf-jawn-storage --features runtime -- mutation_crash_reconcile",
-          "meaning": "Commit succeeds, mutation complete is never written, retry finds the revision through find_mutation and creates no second commit"
+          "meaning": "Commit succeeds, mutation complete is never written, retry finds the revision through find_commit and creates no second commit (commit is idempotent on MutationId)"
+        },
+        {
+          "id": "mutation-lease-compare-and-set",
+          "status": "blocked_on_lanes",
+          "owner": "storage",
+          "receipt": "cargo test -p okf-jawn-storage --features runtime -- mutation_lease_compare_and_set",
+          "meaning": "A superseded attempt can neither complete nor release the mutation; both takeover orders are exercised"
         },
         {
           "id": "confirmation-single-use",
@@ -274,7 +281,7 @@
           "status": "blocked_on_lanes",
           "owner": "core-cli",
           "receipt": "cargo test -p okf-jawn-core -- views::",
-          "meaning": "views::validate against catalog.schema.json and vega-lite.schema.json plus referential checks; present and saved-view writes call it first"
+          "meaning": "views::validate against catalog.schema.json and vega-lite.schema.json plus referential checks, and a binding outside the View's workspace is rejected (`ViewDocument::bindings_outside`); present and saved-view writes call it first"
         },
         {
           "id": "draft-visibility",
@@ -289,6 +296,13 @@
           "owner": "server",
           "receipt": "cargo test -p okf-jawn-server --features runtime",
           "meaning": "WorkOS AccessControl, session/CSRF, TransportAuth, sandbox capability origin route, ReadinessProbe and startup composition"
+        },
+        {
+          "id": "http-fallback-errors",
+          "status": "blocked_on_lanes",
+          "owner": "server",
+          "receipt": "cargo test -p okf-jawn-server --features runtime -- http_fallback_errors",
+          "meaning": "An unknown path and a wrong method return ApiError JSON, not an empty axum default body"
         },
         {
           "id": "grant-cache-ttl",
