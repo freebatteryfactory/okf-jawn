@@ -5,7 +5,12 @@
  * closes it. `derivedRecord` computes each such gate's status and `phase_0_qualified` from those
  * receipts alone; `writeDerivedRecord` (run by `bun qualification/record.mjs`) is the only writer
  * of the two values, and `checkReceipts` fails when a typed value differs from the derived one.
- * A committed receipt must also describe HEAD: its commit an ancestor, its inputs unchanged.
+ *
+ * A receipt is trusted for the result it types only when it passes every check: it is a JSON
+ * object with the shared header, the commit it cites is an ancestor, none of its inputs changed
+ * after that commit, and its envelope is clean against the criteria its gate pins. One that
+ * fails any of them leaves its gate `incomplete` in `derivedRecord`, and so in every reader of
+ * it: `checkReceipts`, the `--head` path and `record.mjs`.
  *
  * A receipt gate may carry `accepted_failures`: criteria the owner has decided to accept as
  * failing, each tied to the gate that tracks its cure. A FAIL receipt whose every failing
@@ -21,7 +26,7 @@ import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { run } from './process.mjs';
 import { exists } from './files.mjs';
-import { envelopeFailures, receiptResults, statusOf } from './receipt-envelope.mjs';
+import { envelopeFailures, statusOf } from './receipt-envelope.mjs';
 
 /** The kinds a Phase 0 gate can have. A gate with none of them is still hand-typed. */
 export const gateKinds = Object.freeze(['receipt', 'ci', 'decision']);
@@ -41,7 +46,13 @@ const recordPath = 'verification.json';
 /** Keeps the otherwise empty directory tracked; it is not a receipt. */
 const placeholder = '.gitkeep';
 
-/** Reads of one tree: the working tree when `head` is undefined, otherwise that commit, whatever is checked out. */
+const byName = (left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+
+/**
+ * Reads of one tree: the working tree when `head` is undefined, otherwise that commit, whatever
+ * is checked out. `list` gives every entry of a directory as `{ name, directory }`, so that a
+ * directory where a file belongs is something to report and not something to read.
+ */
 function treeAt(root, head) {
   if (head === undefined) {
     const local = path => join(root, ...path.split('/'));
@@ -51,7 +62,10 @@ function treeAt(root, head) {
         try { return await readFile(local(path), 'utf8'); }
         catch (error) { if (error.code === 'ENOENT') return null; throw error; }
       },
-      async list(directory) { return await exists(local(directory)) ? (await readdir(local(directory))).sort() : []; },
+      async list(directory) {
+        if (!await exists(local(directory))) return [];
+        return (await readdir(local(directory), { withFileTypes: true })).map(entry => ({ name: entry.name, directory: entry.isDirectory() })).sort(byName);
+      },
     };
   }
   const git = args => run('git', args, { cwd: root, capture: true, allowFailure: true });
@@ -62,9 +76,13 @@ function treeAt(root, head) {
       return shown.code === 0 ? shown.stdout : null;
     },
     async list(directory) {
-      const listed = await git(['ls-tree', '-z', '--name-only', head, `${directory}/`]);
+      // One "<mode> <type> <object>\t<path>" per entry; the type of a directory is `tree`.
+      const listed = await git(['ls-tree', '-z', head, `${directory}/`]);
       if (listed.code !== 0) throw new Error(`check-receipts: could not list ${directory}/ at ${head} (git exit ${listed.code})`);
-      return listed.stdout.split('\0').filter(Boolean).map(path => path.slice(directory.length + 1)).sort();
+      return listed.stdout.split('\0').filter(Boolean).map(line => {
+        const tab = line.indexOf('\t');
+        return { name: line.slice(tab + 1 + directory.length + 1), directory: line.slice(0, tab).split(' ')[1] === 'tree' };
+      }).sort(byName);
     },
   };
 }
@@ -73,6 +91,15 @@ function treeAt(root, head) {
 function parsed(text) {
   try { return { value: JSON.parse(text.replace(/^\uFEFF/, '')) }; }
   catch (error) { return { error: `not valid JSON (${error.message})` }; }
+}
+
+/** The text of a receipt file as the JSON object a receipt is, or the reason it is not one: `null`, an array and a bare value parse as JSON and are no receipt. */
+function parsedReceipt(text) {
+  const outcome = parsed(text);
+  if (outcome.error) return outcome;
+  const { value } = outcome;
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) return outcome;
+  return { error: `not a receipt: its JSON is ${value === null ? 'null' : Array.isArray(value) ? 'an array' : `a ${typeof value}`}, not an object` };
 }
 
 /** The file name under qualification/receipts/ a receipt gate names, or null when it names anything else. */
@@ -165,32 +192,40 @@ function failingRequired(receipt) {
 }
 
 /**
- * The status a receipt gate derives from its receipt, and why: `{ status, basis }`. This
- * function is the whole rule, and nothing else names a status for a receipt that exists.
+ * The status a receipt gate derives once its receipt file exists, and why: `{ status, basis }`.
+ * This function is the whole rule; nothing else names a status for such a gate.
  *
- * - A result of PASS is `passed`, INCOMPLETE is `incomplete`, and anything that is not one of
- *   `receiptResults` is `incomplete`.
- * - A FAIL is `failed` when a failing required criterion is not one the owner soundly accepted:
- *   `accepted` (the criteria of the sound entries of the gate's `accepted_failures`) lacks one
- *   of them, an entry is unsound or stale (`acceptanceSound` false), or the receipt cannot be
- *   trusted (`trusted` false), so that what it says is accepted proves nothing.
- * - A FAIL whose every failing required criterion is accepted is `accepted_with_limitations`
- *   only when the run judged everything else: `harness_error` is null and NO required criterion
- *   is `not_judged`. Otherwise it is `incomplete`. A required failure outranks a harness error
- *   in `foldCriteria`, so while an accepted criterion fails on every run the result word cannot
- *   tell a run that was cut short (a converter process killed, a peak that could not be read, a
- *   single-fixture run) from a whole one; this rule can, and such a run never qualifies.
+ * 1. A receipt that fails any check is never trusted, whatever result it types: the gate is
+ *    `incomplete`. `untrusted` lists what it failed: it is not a JSON object, its header is
+ *    malformed, it cites a commit that is not an ancestor, its envelope is not clean against
+ *    the gate's pinned criteria, it is the receipt of another gate, or two gates name it.
+ *    `stale` (the commit it cites and the inputs that changed after it) is the same for a
+ *    receipt that was sound when recorded and is no longer about this tree.
+ * 2. Otherwise a result of PASS is `passed` and INCOMPLETE is `incomplete`.
+ * 3. A FAIL is `failed` when a failing required criterion is not one the owner soundly accepted:
+ *    `accepted` (the criteria of the sound entries of the gate's `accepted_failures`) lacks one
+ *    of them, or an entry is unsound or stale (`acceptanceSound` false).
+ * 4. A FAIL whose every failing required criterion is accepted is `accepted_with_limitations`
+ *    only when the run judged everything else: `harness_error` is null and NO required criterion
+ *    is `not_judged`. Otherwise it is `incomplete`. A required failure outranks a harness error
+ *    in `foldCriteria`, so while an accepted criterion fails on every run the result word cannot
+ *    tell a run that was cut short (a converter process killed, a peak that could not be read, a
+ *    single-fixture run) from a whole one; this rule can, and such a run never qualifies.
  *
  * `path` is the receipt's path, for the sentence.
  */
-export function receiptGateStatus(receipt, { path, trusted, accepted, acceptanceSound }) {
-  const result = receipt?.result;
-  if (!receiptResults.includes(result)) return { status: 'incomplete', basis: `${path} has no result of ${receiptResults.join(', ')}` };
+export function receiptGateStatus(receipt, { path, untrusted, stale, accepted, acceptanceSound }) {
+  if (untrusted.length > 0) {
+    const more = untrusted.length > 1 ? ` (and ${untrusted.length - 1} more)` : '';
+    return { status: 'incomplete', basis: `${path} cannot be trusted: ${untrusted[0].replace(/\s*\n\s*/g, ' ')}${more}` };
+  }
+  if (stale) return { status: 'incomplete', basis: `${path} is stale: ${stale.paths.length} of its inputs changed after the commit it cites` };
+  const result = receipt.result;
   const plain = { status: statusOf(result), basis: `${path} result ${result}` };
   if (result !== 'FAIL') return plain;
   const failing = failingRequired(receipt);
   const everyFailureAccepted = failing.length > 0 && failing.every(criterion => accepted.includes(criterion));
-  if (!trusted || !acceptanceSound || !everyFailureAccepted) return plain;
+  if (!acceptanceSound || !everyFailureAccepted) return plain;
   const unjudged = receipt.criteria.filter(entry => entry.required === true && entry.result === 'not_judged').length;
   const stopped = receipt.harness_error !== null;
   if (stopped || unjudged > 0) {
@@ -230,61 +265,129 @@ export async function recordFailures(root, name, receipt) {
 }
 
 /**
+ * What the header of a parsed receipt says against the commit `head`: `{ failures, stale }`.
+ * `failures` are reasons the header cannot be trusted at all: it is malformed, or the commit it
+ * cites is not an ancestor of `head`. `stale` is `{ sha, paths }` when the header is sound and
+ * one of its inputs changed between the commit it cites and `head`, otherwise null: such a
+ * receipt was true of its commit and is no longer evidence about this one.
+ */
+async function headerProblems(root, receipt, head) {
+  const untrusted = message => ({ failures: [message], stale: null });
+  const sha = receipt.git_sha;
+  if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) return untrusted('git_sha must be a full 40-hex commit');
+  if (!Array.isArray(receipt.inputs) || !receipt.inputs.length || !receipt.inputs.every(item => typeof item === 'string' && item.length > 0)) {
+    return untrusted('inputs must be a non-empty string[] of repo-relative paths');
+  }
+  if (typeof receipt.produced_at !== 'string' || Number.isNaN(Date.parse(receipt.produced_at))) return untrusted('produced_at must be an RFC 3339 time');
+  const git = args => run('git', args, { cwd: root, capture: true, allowFailure: true });
+  if ((await git(['merge-base', '--is-ancestor', sha, head])).code !== 0) return untrusted(`git_sha ${sha} is not an ancestor of ${head}`);
+  const changed = await git(['diff', '--name-only', sha, head, '--', ...receipt.inputs]);
+  if (changed.code !== 0) return untrusted(`could not compare its inputs with ${head} (git exit ${changed.code})`);
+  const paths = changed.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  return { failures: [], stale: paths.length ? { sha, paths } : null };
+}
+
+/**
  * What the receipts in a tree support, and where verification.json there types something else.
+ * This is the one derivation: `checkReceipts`, `staleReceiptLines` (the `--head` path) and
+ * `writeDerivedRecord` (`bun qualification/record.mjs`) all read it and derive nothing themselves.
  *
  * `head` is a commit, read with git and independent of the checkout; without it the working tree
- * is read. A receipt gate is `incomplete` when its receipt file does not exist, otherwise the
- * status `receiptGateStatus` gives: the one its receipt's result supports, except that a FAIL
- * with a clean envelope whose every failing required criterion is a sound entry of the gate's
- * `accepted_failures` is `accepted_with_limitations` when the run judged everything else and
- * `incomplete` when it did not. `phase_0_qualified` is true only when every receipt gate is
- * `passed` or `accepted_with_limitations`, nothing has a failure and no Phase 0 gate is still
- * hand-typed (has none of `gateKinds`).
+ * is read and its receipts are held to HEAD. A receipt gate is `incomplete` when its receipt file
+ * does not exist; otherwise its status is what `receiptGateStatus` gives. A receipt that fails
+ * any check is never trusted for the result it types and leaves its gate `incomplete`:
+ *
+ * - it is not a JSON object (`null`, an array and a bare value are no receipt), or it is a
+ *   directory;
+ * - its header is malformed, or cites a commit that is not an ancestor of the commit judged;
+ * - an input it lists changed after the commit it cites (it is stale);
+ * - its content: `envelopeFailures` must be empty against the `required` list of the gate's
+ *   criteria file in the same tree (a missing criteria file is a failure), so its result is the
+ *   fold of its criteria, every pinned criterion is present and required and it is the receipt
+ *   of this gate; and its `not_judged` must be the list its criteria derive;
+ * - more than one gate names it.
+ *
+ * Every one of these but staleness is also a failure (`failures`): something is wrong with what
+ * was committed, and `checkReceipts` fails until it is corrected. A stale receipt is no failure
+ * of the tree: it is listed in `stale`, its gate is `incomplete`, and the record is right as
+ * soon as it says so.
+ *
+ * `phase_0_qualified` is true only when every receipt gate is `passed` or
+ * `accepted_with_limitations`, nothing has a failure and no Phase 0 gate is still hand-typed
+ * (has none of `gateKinds`).
  *
  * An accepted failure is checked whether or not a receipt exists (its fields, the owner, the
  * tracking gate, a pinned criterion); once a receipt exists, an accepted criterion that the
- * receipt does not fail is stale and is a failure that says to remove the entry.
+ * receipt does not fail is stale and is a failure that says to remove the entry. Every entry
+ * under qualification/receipts/ must be the one receipt of one gate.
  *
- * A receipt that exists is read, not only its header: `envelopeFailures` must be empty against
- * the `required` list of the gate's criteria file in the same tree (a missing criteria file is
- * a failure), its `not_judged` must be the list its criteria derive, and every file under
- * qualification/receipts/ must be the one receipt of one gate.
+ * `history: false` is for a tree that has no history to hold a receipt to (a source copy without
+ * `.git`, a shallow clone): ancestry and staleness are then not judged, so what comes back is an
+ * upper bound of the real derivation and says so in `history`. No command uses it; a test that
+ * must also run in such a tree does.
  *
- * Returns `{ missing, gates, receipts, unconverted, phase_0_qualified, pending, limitations, failures, mismatches }`
+ * Returns `{ missing, history, gates, receipts, stale, unconverted, phase_0_qualified, pending, limitations, failures, mismatches }`
  * (`limitations` names the gates that are `accepted_with_limitations`):
  * `gates` is one `{ id, harness, file, status, typed, basis }` per receipt gate; `receipts` is
- * every file under qualification/receipts/ as `{ name, receipt }` (`receipt` null when it is not
- * JSON); `pending` says why `phase_0_qualified` is false; `failures` are `{ name, message }`
- * reasons a receipt or the record cannot be trusted; `mismatches` are the typed values that
- * differ from the derived ones, each naming `rewriteCommand`.
+ * every entry under qualification/receipts/ as `{ name, receipt }` (`receipt` null when it is no
+ * JSON object); `stale` is one `{ name, message }` per stale receipt; `pending` says why
+ * `phase_0_qualified` is false; `failures` are `{ name, message }` reasons a receipt or the
+ * record cannot be trusted (a reason from the header also carries `header: true`); `mismatches`
+ * are the typed values that differ from the derived ones, each naming `rewriteCommand`.
  */
-export async function derivedRecord(root, head) {
+export async function derivedRecord(root, head, { history = true } = {}) {
   const tree = treeAt(root, head);
-  const names = (await tree.list(receiptsPath)).filter(name => name !== placeholder);
+  const entries = (await tree.list(receiptsPath)).filter(entry => entry.name !== placeholder);
   const receipts = [];
   const failures = [];
-  for (const name of names) {
+  const stale = [];
+  // Per receipt file: every reason it cannot be trusted, and the inputs that went stale.
+  const untrusted = new Map(entries.map(entry => [entry.name, []]));
+  const staleBy = new Map();
+  // A header failure is reported after what is wrong with the record and with the content.
+  const headerFailures = [];
+  for (const { name, directory } of entries) {
+    const distrust = (message, list = failures, extra = {}) => {
+      untrusted.get(name).push(message);
+      list.push({ name, message, ...extra });
+    };
+    if (directory) {
+      distrust(`is a directory; only receipt files belong under ${receiptsPath}/`);
+      receipts.push({ name, receipt: null });
+      continue;
+    }
     const text = await tree.read(`${receiptsPath}/${name}`);
-    const outcome = text === null ? { error: `could not be read${tree.at}` } : parsed(text);
-    if (outcome.error) failures.push({ name, message: outcome.error });
+    const outcome = text === null ? { error: `could not be read${tree.at}` } : parsedReceipt(text);
     receipts.push({ name, receipt: outcome.error ? null : outcome.value });
+    if (outcome.error) { distrust(outcome.error); continue; }
+    if (!history) continue;
+    const header = await headerProblems(root, outcome.value, head ?? 'HEAD');
+    for (const message of header.failures) distrust(message, headerFailures, { header: true });
+    if (header.stale) {
+      staleBy.set(name, header.stale);
+      stale.push({ name, message: `inputs changed after ${header.stale.sha}:\n  ${header.stale.paths.join('\n  ')}` });
+    }
   }
-  const result = { missing: false, gates: [], receipts, unconverted: [], phase_0_qualified: false, pending: [], limitations: [], failures, mismatches: [] };
+  const result = { missing: false, history, gates: [], receipts, stale, unconverted: [], phase_0_qualified: false, pending: [], limitations: [], failures, mismatches: [] };
+  const unfinished = (pending, extra = {}) => { failures.push(...headerFailures); return { ...result, ...extra, pending }; };
   const recordText = await tree.read(recordPath);
   if (recordText === null) {
     for (const { name } of receipts) failures.push({ name, message: `${recordPath} is missing${tree.at}, so no gate names this receipt` });
-    return { ...result, missing: true, pending: [`${recordPath} is missing${tree.at}`] };
+    return unfinished([`${recordPath} is missing${tree.at}`], { missing: true });
   }
   const record = parsed(recordText);
   if (record.error) {
     failures.push({ name: recordPath, message: record.error });
-    return { ...result, pending: [`${recordPath} is ${record.error}`] };
+    return unfinished([`${recordPath} is ${record.error}`]);
   }
   const phase0 = record.value?.current?.gates?.phase_0;
   if (!Array.isArray(phase0)) {
     failures.push({ name: recordPath, message: 'current.gates.phase_0 must be an array of gates' });
-    return { ...result, pending: [`${recordPath} has no Phase 0 gates`] };
+    return unfinished([`${recordPath} has no Phase 0 gates`]);
   }
+  // A receipt is recorded only for the gate it closes: one file, one gate.
+  const named = phase0.filter(gate => gate?.kind === 'receipt').map(receiptFile).filter(file => file !== null);
+  const shared = file => named.indexOf(file) !== named.lastIndexOf(file);
   for (const gate of phase0) {
     if (!gateKinds.includes(gate?.kind)) { result.unconverted.push(String(gate?.id)); continue; }
     if (gate.kind !== 'receipt') continue;
@@ -303,33 +406,40 @@ export async function derivedRecord(root, head) {
     }
     const found = receipts.find(candidate => candidate.name === file);
     if (!found) continue;
-    if (found.receipt === null) { entry.basis = `${gate.receipt} is not valid JSON`; continue; }
-    // The receipt is read, not only its header: its result must be the fold of its criteria,
-    // and every criterion its harness pins must be present and required.
-    const untrusted = await contentFailures(tree, gate, found.receipt);
-    for (const message of untrusted) failures.push({ name: file, message });
-    // An acceptance outlives its cause when the receipt judged the criterion it names and did
-    // not fail it (or no longer has it). A criterion a run did not judge says nothing either way,
-    // so an unfinished run can still be recorded beside the acceptance.
-    const failing = failingRequired(found.receipt);
-    const resultOf = criterion => (Array.isArray(found.receipt?.criteria) ? found.receipt.criteria.find(candidate => candidate?.id === criterion)?.result : undefined);
-    const stale = acceptance.accepted.filter(criterion => !failing.includes(criterion) && resultOf(criterion) !== 'not_judged');
-    for (const criterion of stale) {
-      const now = resultOf(criterion);
-      failures.push({ name: gate.id, message: `accepted failure ${criterion} is not failing in ${gate.receipt} (${now === undefined ? 'the receipt has no such criterion' : `its result there is ${now}`}); the acceptance is stale: remove the entry from accepted_failures` });
+    const distrusted = [...untrusted.get(file)];
+    if (shared(file)) distrusted.push('more than one gate names it');
+    let outlived = [];
+    if (found.receipt !== null) {
+      // The receipt is read, not only its header: its result must be the fold of its criteria,
+      // and every criterion its harness pins must be present and required.
+      for (const message of await contentFailures(tree, gate, found.receipt)) {
+        failures.push({ name: file, message });
+        distrusted.push(message);
+      }
+      // An acceptance outlives its cause when the receipt judged the criterion it names and did
+      // not fail it (or no longer has it). A criterion a run did not judge says nothing either way,
+      // so an unfinished run can still be recorded beside the acceptance.
+      const failing = failingRequired(found.receipt);
+      const resultOf = criterion => (Array.isArray(found.receipt.criteria) ? found.receipt.criteria.find(candidate => candidate?.id === criterion)?.result : undefined);
+      outlived = acceptance.accepted.filter(criterion => !failing.includes(criterion) && resultOf(criterion) !== 'not_judged');
+      for (const criterion of outlived) {
+        const now = resultOf(criterion);
+        failures.push({ name: gate.id, message: `accepted failure ${criterion} is not failing in ${gate.receipt} (${now === undefined ? 'the receipt has no such criterion' : `its result there is ${now}`}); the acceptance is stale: remove the entry from accepted_failures` });
+      }
     }
-    const derived = receiptGateStatus(found.receipt, { path: gate.receipt, trusted: untrusted.length === 0, accepted: acceptance.accepted, acceptanceSound: acceptance.problems.length === 0 && stale.length === 0 });
+    const derived = receiptGateStatus(found.receipt, { path: gate.receipt, untrusted: distrusted, stale: staleBy.get(file) ?? null, accepted: acceptance.accepted, acceptanceSound: acceptance.problems.length === 0 && outlived.length === 0 });
     entry.status = derived.status;
     entry.basis = derived.basis;
   }
-  // A receipt is recorded only for the gate it closes: one file, one gate.
-  const named = result.gates.map(gate => gate.file).filter(file => file !== null);
   for (const gate of result.gates) {
-    if (gate.file !== null && named.indexOf(gate.file) !== named.lastIndexOf(gate.file)) failures.push({ name: gate.id, message: `its receipt ${receiptsPath}/${gate.file} is named by more than one gate` });
+    if (gate.file !== null && shared(gate.file)) failures.push({ name: gate.id, message: `its receipt ${receiptsPath}/${gate.file} is named by more than one gate` });
   }
+  // A directory has already been reported as what it is.
+  const directories = entries.filter(entry => entry.directory).map(entry => entry.name);
   for (const { name } of receipts) {
-    if (!named.includes(name)) failures.push({ name, message: `no Phase 0 gate of kind receipt names this file under ${receiptsPath}/` });
+    if (!named.includes(name) && !directories.includes(name)) failures.push({ name, message: `no Phase 0 gate of kind receipt names this file under ${receiptsPath}/` });
   }
+  failures.push(...headerFailures);
   for (const gate of result.gates) if (!qualifyingStatuses.includes(gate.status)) result.pending.push(`${gate.id} is ${gate.status}`);
   for (const id of result.unconverted) result.pending.push(`${id} has no kind and is still hand-typed`);
   if (result.gates.length === 0) result.pending.push('no Phase 0 gate is backed by a receipt');
@@ -352,6 +462,22 @@ export function derivedLines(derived) {
   const withLimitations = derived.phase_0_qualified && derived.limitations.length ? ` (with accepted limitations: ${derived.limitations.join(', ')})` : '';
   return [...derived.gates.map(gate => `${gate.id}: ${gate.status} (${gate.basis})`),
     `phase_0_qualified: ${derived.phase_0_qualified}${derived.pending.length ? ` (${derived.pending.join('; ')})` : withLimitations}`];
+}
+
+/** The harness command that regenerates a receipt file, from the gate that names it. */
+function rerunCommand(derived, name) {
+  const harness = derived.gates.find(gate => gate.file === name)?.harness;
+  return typeof harness === 'string' ? `bun qualification/${harness}/run.mjs, then bun qualification/record.mjs ${harness}` : 'rerun the harness that produced it, then bun qualification/record.mjs <name>';
+}
+
+/**
+ * One line per stale receipt: the commit it cites, the inputs that changed after it and the
+ * commands that replace it. With `onlyWhereTyped`, only the receipts whose gate the record still
+ * types a status that the stale receipt no longer supports.
+ */
+export function staleLines(derived, { onlyWhereTyped = false } = {}) {
+  const matters = name => !onlyWhereTyped || derived.gates.some(gate => gate.file === name && gate.typed !== gate.status);
+  return derived.stale.filter(entry => matters(entry.name)).map(entry => `${entry.name}: ${entry.message} -- re-run: ${rerunCommand(derived, entry.name)}`);
 }
 
 /**
@@ -378,65 +504,49 @@ export async function writeDerivedRecord(root) {
   return { changed: next !== text, derived: await derivedRecord(root) };
 }
 
-/** Reasons a parsed receipt's header cannot be trusted against `head`; empty when it can. */
-async function headerFailures(root, name, receipt, head) {
-  const sha = receipt?.git_sha;
-  if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) return [`${name}: git_sha must be a full 40-hex commit`];
-  if (!Array.isArray(receipt.inputs) || !receipt.inputs.length || !receipt.inputs.every(item => typeof item === 'string' && item.length > 0)) {
-    return [`${name}: inputs must be a non-empty string[] of repo-relative paths`];
-  }
-  if (typeof receipt.produced_at !== 'string' || Number.isNaN(Date.parse(receipt.produced_at))) return [`${name}: produced_at must be an RFC 3339 time`];
-  const git = args => run('git', args, { cwd: root, capture: true, allowFailure: true });
-  if ((await git(['merge-base', '--is-ancestor', sha, head])).code !== 0) return [`${name}: git_sha ${sha} is not an ancestor of ${head}`];
-  const changed = await git(['diff', '--name-only', sha, head, '--', ...receipt.inputs]);
-  if (changed.code !== 0) return [`${name}: could not compare its inputs with ${head} (git exit ${changed.code})`];
-  const names = changed.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  return names.length ? [`${name}: inputs changed after ${sha}:\n  ${names.join('\n  ')}`] : [];
-}
-
 /**
- * The working tree against HEAD: every receipt describes HEAD, and the typed statuses and
- * `phase_0_qualified` are the derived ones. Throws with every reason; returns one summary line.
+ * The working tree against HEAD: nothing under qualification/receipts/ or in the record has a
+ * failure, and the typed statuses and `phase_0_qualified` are the derived ones. Throws with
+ * every reason; returns one summary line.
+ *
+ * A stale receipt alone does not fail: its gate derives `incomplete`, and the check fails for
+ * as long as the record types anything else. The cure is to re-run and record the harness, or
+ * to run `rewriteCommand`, which writes the gate back to `incomplete`.
  */
 export async function checkReceipts(root) {
   const derived = await derivedRecord(root);
   const failures = derived.failures.map(failure => `${failure.name}: ${failure.message}`);
   if (derived.missing) failures.unshift(`${recordPath} is missing`);
-  for (const { name, receipt } of derived.receipts) if (receipt !== null) failures.push(...await headerFailures(root, name, receipt, 'HEAD'));
+  // A stale receipt is named beside the typed value it no longer supports.
+  failures.push(...staleLines(derived, { onlyWhereTyped: true }));
   failures.push(...derived.mismatches);
   if (failures.length) throw new Error(`check-receipts failed:\n${failures.join('\n')}`);
   const summary = derivedLines(derived).join('; ');
-  if (!derived.receipts.length) return `check-receipts: no receipts under ${receiptsPath}/; ${summary}; ${recordPath} agrees.`;
-  return `check-receipts: ${derived.receipts.length} receipt(s) valid against HEAD; ${summary}; ${recordPath} agrees.`;
-}
-
-/** The harness command that regenerates a receipt file, from the gate that names it. */
-function rerunCommand(derived, name) {
-  const harness = derived.gates.find(gate => gate.file === name)?.harness;
-  return typeof harness === 'string' ? `bun qualification/${harness}/run.mjs, then bun qualification/record.mjs ${harness}` : 'rerun the harness that produced it, then bun qualification/record.mjs <name>';
+  const count = derived.receipts.length;
+  if (!count) return `check-receipts: no receipts under ${receiptsPath}/; ${summary}; ${recordPath} agrees.`;
+  const state = derived.stale.length ? `${count} receipt(s), ${derived.stale.length} stale against HEAD` : `${count} receipt(s) valid against HEAD`;
+  return `check-receipts: ${state}; ${summary}; ${recordPath} agrees.`;
 }
 
 /**
  * One line per thing `head` (a commit, evaluated independent of the checkout) cannot be trusted
- * on: a receipt that is stale, cites a non-ancestor commit or has a malformed header, and a
- * typed status or `phase_0_qualified` that differs from what the receipts at that commit derive.
- * Receipts and verification.json are read from that commit's tree. This is what the pre-push
- * hook shows; it blocks `main` and `integration/*` and warns elsewhere.
+ * on: a receipt that is stale while the record still relies on it, one that cites a non-ancestor
+ * commit or has a malformed header, any other failure of a receipt or of the record, a missing
+ * verification.json, and a typed status or `phase_0_qualified` that differs from what the
+ * receipts at that commit derive. Receipts and verification.json are read from that commit's
+ * tree. This is what the pre-push hook shows; it blocks `main` and `integration/*` and warns
+ * elsewhere.
  */
 export async function staleReceiptLines(root, head) {
   const git = args => run('git', args, { cwd: root, capture: true, allowFailure: true });
   if ((await git(['rev-parse', '--verify', '--quiet', `${head}^{commit}`])).code !== 0) throw new Error(`check-receipts: ${head} is not a commit in this repository.`);
   const derived = await derivedRecord(root, head);
-  // A commit that has neither a record nor a receipt has nothing to check.
-  if (derived.missing && derived.receipts.length === 0) return [];
   const flat = text => text.replace(/\s*\n\s*/g, ' ');
-  const lines = [];
-  for (const { name, receipt } of derived.receipts) {
-    if (receipt === null) continue;
-    const failures = await headerFailures(root, name, receipt, head);
-    if (failures.length) lines.push(`stale receipt ${flat(failures.join(' '))} -- re-run: ${rerunCommand(derived, name)}`);
-  }
-  for (const failure of derived.failures) {
+  const lines = staleLines(derived, { onlyWhereTyped: true }).map(line => `stale receipt ${flat(line)}`);
+  for (const failure of derived.failures.filter(entry => entry.header === true)) lines.push(`stale receipt ${flat(`${failure.name}: ${failure.message}`)} -- re-run: ${rerunCommand(derived, failure.name)}`);
+  // A commit without a record fails here as the working tree does.
+  if (derived.missing) lines.push(`untrusted record ${recordPath} is missing at ${head}`);
+  for (const failure of derived.failures.filter(entry => entry.header !== true)) {
     const text = flat(`${failure.name}: ${failure.message}`);
     const isReceipt = derived.receipts.some(entry => entry.name === failure.name);
     lines.push(isReceipt ? `untrusted receipt ${text} -- re-run: ${rerunCommand(derived, failure.name)}` : `untrusted record ${text}`);

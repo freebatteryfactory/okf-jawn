@@ -196,10 +196,12 @@ async function main() {
     case 'qualify': await qualify(); break;
     case 'check-receipts': {
       const head = option('--head');
+      // `--head` asks about a commit; without one it must not quietly check the working tree instead.
+      if (args.includes('--head') && (head === undefined || head.startsWith('--'))) throw new Error('check-receipts --head needs a commit: bun scripts/dev.mjs check-receipts --head <sha>');
       if (head === undefined) { process.stdout.write(`${await checkReceipts(root)}\n`); break; }
       const lines = await staleReceiptLines(root, head);
       if (lines.length) { process.stderr.write(`${lines.join('\n')}\n`); process.exitCode = 1; }
-      else process.stdout.write(`check-receipts: receipts at ${head} are current and its typed statuses are the derived ones.\n`);
+      else process.stdout.write(`check-receipts: nothing at ${head} is untrusted, and its typed statuses are the ones its receipts derive.\n`);
       break;
     }
     case 'audit': await audit(); break;

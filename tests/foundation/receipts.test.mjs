@@ -2,11 +2,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
-import { acceptedFailureFields, acceptingRole, checkReceipts, derivedLines, derivedRecord, gateKinds, qualifyingStatuses, receiptGateStatuses, rewriteCommand, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
+import { acceptedFailureFields, acceptingRole, checkReceipts, derivedLines, derivedRecord, gateKinds, qualifyingStatuses, receiptGateStatuses, rewriteCommand, staleLines, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
 import { commit, fixtureAcceptance, fixtureCriteria, fixtureGates, fixturePinned, fixtureReceipt, fixtureRecord, fixtureRecordFiles, fixtureRepo, fixtureTracker, git } from './fixture-repo.mjs';
 
 const source = fileURLToPath(new URL('../../', import.meta.url));
@@ -50,13 +50,14 @@ test('a gate without a receipt is incomplete; otherwise the receipt result decid
     await commit(root, { [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha, { result }) }, `result ${result}`);
     derived = await derivedRecord(root);
     assert.deepEqual(statuses(derived), { [docling]: 'passed', [apps]: 'incomplete', qualified: false }, String(result));
-    assert.equal(derived.gates[1].basis, `${at('mcp-apps')} has no result of PASS, FAIL, INCOMPLETE`);
+    assert.equal(derived.gates[1].basis, `${at('mcp-apps')} cannot be trusted: result must be one of PASS, FAIL, INCOMPLETE`);
   }
 
   await commit(root, { [at('mcp-apps')]: '{not json' }, 'not JSON');
   derived = await derivedRecord(root);
   assert.deepEqual(statuses(derived), { [docling]: 'passed', [apps]: 'incomplete', qualified: false });
   assert.match(derived.failures.map(failure => `${failure.name}: ${failure.message}`).join('\n'), /^mcp-apps\.json: not valid JSON/);
+  assert.match(derived.gates[1].basis, /^qualification\/receipts\/mcp-apps\.json cannot be trusted: not valid JSON \(/);
 
   await commit(root, { [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha) }, 'both PASS');
   derived = await derivedRecord(root);
@@ -147,8 +148,9 @@ test('check-receipts reads the receipt: a typed PASS over a required fail, a har
   await commit(root, both({ criteria: failing, result: 'PASS' }), 'PASS typed over a required fail');
   let said = await complaint(root);
   assert.match(said, /^docling\.json: result is PASS but its criteria fold to FAIL$/m);
-  assert.match(said, /^phase_0_qualified: verification\.json types true but the derived value is false \(1 receipt failure\(s\)\)/m, 'an untrusted receipt qualifies nothing');
-  assert.equal((await derivedRecord(root)).phase_0_qualified, false);
+  assert.match(said, /^docling-library-qualification: verification\.json types status "passed" but the derived status is "incomplete" \(qualification\/receipts\/docling\.json cannot be trusted: result is PASS but its criteria fold to FAIL\); /m, 'the result it types decides nothing');
+  assert.match(said, /^phase_0_qualified: verification\.json types true but the derived value is false \(docling-library-qualification is incomplete; 1 receipt failure\(s\)\)/m, 'an untrusted receipt qualifies nothing');
+  assert.deepEqual(statuses(await derivedRecord(root)), { [docling]: 'incomplete', [apps]: 'passed', qualified: false });
   await commit(root, both({ harness_error: 'the browser was missing', result: 'PASS' }), 'PASS typed over a harness error');
   assert.match(await complaint(root), /^docling\.json: result is PASS but its criteria fold to INCOMPLETE$/m);
   await commit(root, both({ criteria: unjudged, result: 'PASS' }), 'PASS typed over an unjudged criterion');
@@ -231,8 +233,10 @@ test('a receipt whose criteria file is missing is rejected, and one without a re
   assert.match(said, /^docling\.json: its criteria file qualification\/docling\/criteria\.json is missing, so nothing pins what this receipt must have judged$/m);
   assert.match(said, /^check-receipts failed:\n/);
   const head = await git(root, 'rev-parse', 'HEAD');
+  const unpinned = `its criteria file qualification/docling/criteria.json is missing at ${head}, so nothing pins what this receipt must have judged`;
   assert.deepEqual(await staleReceiptLines(root, head), [
-    `untrusted receipt docling.json: its criteria file qualification/docling/criteria.json is missing at ${head}, so nothing pins what this receipt must have judged -- re-run: bun qualification/docling/run.mjs, then bun qualification/record.mjs docling`]);
+    `untrusted receipt docling.json: ${unpinned} -- re-run: bun qualification/docling/run.mjs, then bun qualification/record.mjs docling`,
+    `typed record ${docling}: verification.json at ${head} types status "passed" but the derived status is "incomplete" (${at('docling')} cannot be trusted: ${unpinned}); run \`bun qualification/record.mjs\` to rewrite it`]);
 });
 
 test('staleReceiptLines reports a hand-edited receipt at the pushed commit like a stale one', async t => {
@@ -241,13 +245,14 @@ test('staleReceiptLines reports a hand-edited receipt at the pushed commit like 
   assert.deepEqual(await staleReceiptLines(root, honest), []);
   // The result and the status are both edited to a pass; the criteria still say what was judged.
   const edited = await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { criteria: failing, result: 'PASS' }), 'verification.json': fixtureRecord({ statuses: { docling: 'passed' } }) }, 'edit the receipt to PASS');
-  assert.deepEqual(await staleReceiptLines(root, edited), ['untrusted receipt docling.json: result is PASS but its criteria fold to FAIL -- re-run: bun qualification/docling/run.mjs, then bun qualification/record.mjs docling']);
+  assert.deepEqual(await staleReceiptLines(root, edited), ['untrusted receipt docling.json: result is PASS but its criteria fold to FAIL -- re-run: bun qualification/docling/run.mjs, then bun qualification/record.mjs docling',
+    `typed record ${docling}: verification.json at ${edited} types status "passed" but the derived status is "incomplete" (${at('docling')} cannot be trusted: result is PASS but its criteria fold to FAIL); run \`bun qualification/record.mjs\` to rewrite it`]);
   const orphan = await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { criteria: failing }), 'verification.json': fixtureRecord({ statuses: { docling: 'failed' } }), 'qualification/receipts/extra.json': fixtureReceipt('docling', sha) }, 'an orphan receipt');
   assert.deepEqual(await staleReceiptLines(root, orphan), ['untrusted receipt extra.json: no Phase 0 gate of kind receipt names this file under qualification/receipts/ -- re-run: rerun the harness that produced it, then bun qualification/record.mjs <name>']);
   // Judged at the earlier commits whatever is checked out.
   await git(root, 'checkout', '--quiet', '--detach', sha);
   assert.deepEqual(await staleReceiptLines(root, honest), []);
-  assert.equal((await staleReceiptLines(root, edited)).length, 1);
+  assert.equal((await staleReceiptLines(root, edited)).length, 2);
 });
 
 test('writeDerivedRecord rewrites only the derived values and keeps the form of the file', async t => {
@@ -441,10 +446,10 @@ test('nothing but a trusted FAIL with every failing criterion accepted is upgrad
 
   // A receipt whose envelope cannot be trusted is not upgraded, whatever is accepted.
   derived = await derive(fixtureReceipt('docling', sha, { criteria: failing, not_judged: ['corpus/a.pdf/content'] }), [fixtureAcceptance()], 'a FAIL with a wrong not_judged list');
-  assert.deepEqual(statuses(derived), { [docling]: 'failed', [apps]: 'passed', qualified: false });
+  assert.deepEqual(statuses(derived), { [docling]: 'incomplete', [apps]: 'passed', qualified: false });
   assert.match(derivedFailureText(derived), /^docling\.json: not_judged is \["corpus\/a\.pdf\/content"\] but its criteria derive \[\]$/m);
   derived = await derive(fixtureReceipt('docling', sha, { criteria: [failing[1]] }), [fixtureAcceptance()], 'a FAIL that lacks a pinned criterion');
-  assert.equal(derived.gates[0].status, 'failed');
+  assert.equal(derived.gates[0].status, 'incomplete');
   assert.match(derivedFailureText(derived), /^docling\.json: pinned criterion corpus\/a\.pdf\/content is missing$/m);
 
   // A failing criterion that is not required does not fail the receipt, so there is nothing to accept.
@@ -534,7 +539,9 @@ test('a receipt is rejected when an input changed, its commit is foreign, or its
   await commit(root, { [at('docling')]: fixtureReceipt('docling', sha) }, 'receipt');
   assert.match(await checkReceipts(root), /1 receipt\(s\) valid against HEAD; /);
   await commit(root, { 'harness/run.mjs': '// v2\n' }, 'change an input');
-  await assert.rejects(checkReceipts(root), /docling\.json: inputs changed after [0-9a-f]{40}:\n  harness\/run\.mjs/);
+  await assert.rejects(checkReceipts(root), /docling\.json: inputs changed after [0-9a-f]{40}:\n  harness\/run\.mjs -- re-run: bun qualification\/docling\/run\.mjs, then bun qualification\/record\.mjs docling\n/);
+  await commit(root, { 'verification.json': fixtureRecord({ statuses: { docling: 'passed' } }), [at('docling')]: fixtureReceipt('docling', await git(root, 'rev-parse', 'HEAD')) }, 'requalified on the changed input');
+  assert.match(await checkReceipts(root), /1 receipt\(s\) valid against HEAD; /);
   await commit(root, { [at('docling')]: fixtureReceipt('docling', '0'.repeat(40)) }, 'foreign commit');
   await assert.rejects(checkReceipts(root), /docling\.json: git_sha 0{40} is not an ancestor of HEAD/);
   await commit(root, { [at('docling')]: fixtureReceipt('docling', sha, { inputs: [] }) }, 'no inputs');
@@ -553,15 +560,17 @@ test('staleReceiptLines judges the given commit and its receipts, whatever is ch
   assert.deepEqual(await staleReceiptLines(root, early), []);
   const late = await commit(root, { 'harness/run.mjs': '// v2\n' }, 'change an input');
   const lines = await staleReceiptLines(root, late);
-  assert.equal(lines.length, 1);
+  // The receipt is stale, and the record at that commit still types the status it no longer supports.
+  assert.equal(lines.length, 2);
   assert.match(lines[0], /^stale receipt docling\.json: inputs changed after [0-9a-f]{40}: harness\/run\.mjs -- re-run: bun qualification\/docling\/run\.mjs, then bun qualification\/record\.mjs docling$/);
+  assert.equal(lines[1], `typed record ${docling}: verification.json at ${late} types status "passed" but the derived status is "incomplete" (${at('docling')} is stale: 1 of its inputs changed after the commit it cites); run \`bun qualification/record.mjs\` to rewrite it`);
   // Checked out at the earlier commit, the later one is still stale and the earlier one still valid.
   await git(root, 'checkout', '--quiet', '--detach', early);
   assert.deepEqual(await staleReceiptLines(root, early), []);
-  assert.equal((await staleReceiptLines(root, late)).length, 1);
+  assert.deepEqual(await staleReceiptLines(root, late), lines);
   // Checked out before any receipt existed, receipts are still read from the given commit.
   await git(root, 'checkout', '--quiet', '--detach', sha);
-  assert.equal((await staleReceiptLines(root, late)).length, 1);
+  assert.deepEqual(await staleReceiptLines(root, late), lines);
   assert.deepEqual(await staleReceiptLines(root, sha), [], 'no receipts at that commit');
   await assert.rejects(staleReceiptLines(root, 'f'.repeat(40)), /not a commit/);
 });
@@ -570,9 +579,13 @@ test('staleReceiptLines names a non-ancestor commit and the harness to re-run', 
   const { root } = await recorded(t, { statuses: { docling: 'passed', 'mcp-apps': 'passed' }, qualified: true });
   const head = await commit(root, { [at('mcp-apps')]: fixtureReceipt('mcp-apps', '0'.repeat(40)), [at('docling')]: fixtureReceipt('docling', '1'.repeat(40)) }, 'foreign');
   const lines = await staleReceiptLines(root, head);
-  assert.equal(lines.length, 2);
-  assert.match(lines.join('\n'), /^stale receipt docling\.json: git_sha 1{40} is not an ancestor of [0-9a-f]{40} -- re-run: bun qualification\/docling\/run\.mjs, then bun qualification\/record\.mjs docling$/m);
-  assert.match(lines.join('\n'), /^stale receipt mcp-apps\.json: .* re-run: bun qualification\/mcp-apps\/run\.mjs, then bun qualification\/record\.mjs mcp-apps$/m);
+  // Each receipt is named with its harness, and neither supports the status or the qualification typed over it.
+  assert.equal(lines.length, 5, lines.join('\n'));
+  assert.match(lines[0], /^stale receipt docling\.json: git_sha 1{40} is not an ancestor of [0-9a-f]{40} -- re-run: bun qualification\/docling\/run\.mjs, then bun qualification\/record\.mjs docling$/);
+  assert.match(lines[1], /^stale receipt mcp-apps\.json: git_sha 0{40} is not an ancestor of [0-9a-f]{40} -- re-run: bun qualification\/mcp-apps\/run\.mjs, then bun qualification\/record\.mjs mcp-apps$/);
+  assert.match(lines[2], /^typed record docling-library-qualification: .* types status "passed" but the derived status is "incomplete" \(qualification\/receipts\/docling\.json cannot be trusted: git_sha 1{40} is not an ancestor of [0-9a-f]{40}\); /);
+  assert.match(lines[3], /^typed record mcp-apps-protocol-qualification: .* types status "passed" but the derived status is "incomplete" /);
+  assert.match(lines[4], /^typed record phase_0_qualified: .* types true but the derived value is false \(docling-library-qualification is incomplete; mcp-apps-protocol-qualification is incomplete; 2 receipt failure\(s\)\); /);
 });
 
 test('staleReceiptLines reports a typed status or phase_0_qualified the receipts at that commit do not derive', async t => {
@@ -584,11 +597,250 @@ test('staleReceiptLines reports a typed status or phase_0_qualified the receipts
   // The earlier commit is judged by its own record, not by the one checked out.
   assert.equal((await staleReceiptLines(root, typedPass)).length, 1);
   assert.deepEqual(await staleReceiptLines(root, sha), []);
-  // A commit with neither a record nor a receipt has nothing to check; one with a receipt but no record does.
+  // A commit without a record fails as the working tree does, with or without a receipt.
   const { root: bare } = await fixtureRepo(t, { 'harness/run.mjs': '// v1\n' });
   const first = await git(bare, 'rev-parse', 'HEAD');
-  assert.deepEqual(await staleReceiptLines(bare, first), []);
+  assert.deepEqual(await staleReceiptLines(bare, first), [`untrusted record verification.json is missing at ${first}`]);
+  await assert.rejects(checkReceipts(bare), error => error.message === 'check-receipts failed:\nverification.json is missing');
   const orphaned = await commit(bare, { [at('docling')]: fixtureReceipt('docling', first) }, 'a receipt without a record');
-  assert.deepEqual(await staleReceiptLines(bare, orphaned), [`untrusted receipt docling.json: verification.json is missing at ${orphaned}, so no gate names this receipt -- re-run: rerun the harness that produced it, then bun qualification/record.mjs <name>`]);
+  assert.deepEqual(await staleReceiptLines(bare, orphaned), [`untrusted record verification.json is missing at ${orphaned}`,
+    `untrusted receipt docling.json: verification.json is missing at ${orphaned}, so no gate names this receipt -- re-run: rerun the harness that produced it, then bun qualification/record.mjs <name>`]);
   await assert.rejects(checkReceipts(bare), error => error.message === 'check-receipts failed:\nverification.json is missing\ndocling.json: verification.json is missing, so no gate names this receipt');
+});
+
+/**
+ * The real scripts/ and qualification/record.mjs copied into a fixture repository, and the two
+ * commands run there as a user runs them: `record(...names)` and `check(...arguments)`.
+ */
+async function commandsIn(root) {
+  cpSync(join(source, 'scripts'), join(root, 'scripts'), { recursive: true });
+  await mkdir(join(root, 'qualification'), { recursive: true });
+  cpSync(join(source, 'qualification', 'record.mjs'), join(root, 'qualification', 'record.mjs'));
+  const command = script => (...args) => run(process.execPath, [...script, ...args], { cwd: root, capture: true, allowFailure: true });
+  return { record: command(['qualification/record.mjs']), check: command(['scripts/dev.mjs', 'check-receipts']) };
+}
+/** What a command wrote to stderr, one entry per line. */
+const said = result => result.stderr.trim().split(/\r?\n/);
+/** Nothing a command printed is a stack, a source excerpt or a caret under one. */
+const assertNoStack = result => assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /^\s+at .+:\d+:\d+\)?$|^\s*\d+ \| |^\s*\^+$/m, result.stderr);
+
+test('a receipt that fails any check leaves its gate incomplete on every path, whatever result it types', async t => {
+  const { root, sha } = await recorded(t);
+  const { record, check } = await commandsIn(root);
+  await commit(root, {}, 'the commands');
+  const other = { [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha) };
+  const passing = fixturePinned.map(id => ({ id, required: true, result: 'pass' }));
+  // Every one of these types or folds to PASS; none of them is evidence of a pass.
+  const untrusted = [
+    ['a header without its time', fixtureReceipt('docling', sha, { produced_at: undefined }), 'produced_at must be an RFC 3339 time'],
+    ['a commit that is not an ancestor', fixtureReceipt('docling', '0'.repeat(40)), `git_sha ${'0'.repeat(40)} is not an ancestor of `],
+    ['a result that is not the fold of its criteria', fixtureReceipt('docling', sha, { criteria: failing, result: 'PASS' }), 'result is PASS but its criteria fold to FAIL'],
+    ['a pinned criterion that is missing', fixtureReceipt('docling', sha, { criteria: [passing[0]] }), 'pinned criterion corpus/a.pdf/provenance is missing'],
+    ['a pinned criterion that is not required', fixtureReceipt('docling', sha, { criteria: [passing[0], { id: 'corpus/a.pdf/provenance', required: false, result: 'fail' }] }), 'pinned criterion corpus/a.pdf/provenance is not marked required'],
+    ['the receipt of another gate', fixtureReceipt('mcp-apps', sha), 'gate is "mcp-apps-protocol-qualification", expected "docling-library-qualification"'],
+    ['a not_judged list that hides a criterion', fixtureReceipt('docling', sha, { criteria: [...passing, { id: 'memory/peak', required: false, result: 'not_judged' }], not_judged: [] }), 'not_judged is [] but its criteria derive ["memory/peak"]'],
+    ['JSON that is no object', 'null\n', 'not a receipt: its JSON is null, not an object'],
+  ];
+  const expected = { [docling]: 'incomplete', [apps]: 'passed', qualified: false };
+  for (const [why, receipt, reason] of untrusted) {
+    const head = await commit(root, { ...other, [at('docling')]: receipt, 'verification.json': passedRecord() }, why);
+    // derivedRecord, for the working tree and for the commit.
+    const derived = await derivedRecord(root);
+    assert.deepEqual(statuses(derived), expected, why);
+    assert.ok(derived.gates[0].basis.startsWith(`${at('docling')} cannot be trusted: ${reason}`), `${why}: ${derived.gates[0].basis}`);
+    assert.ok(derived.failures.some(failure => failure.name === 'docling.json' && failure.message.startsWith(reason)), `${why}: it is also a failure of the tree`);
+    assert.deepEqual(statuses(await derivedRecord(root, head)), expected, `${why}, at the commit`);
+    // check-receipts and its --head path refuse the pass typed over it.
+    const working = await check();
+    assert.equal(working.code, 1, why);
+    assert.ok(said(working).some(line => line.startsWith(`${docling}: verification.json types status "passed" but the derived status is "incomplete" (${at('docling')} cannot be trusted: ${reason}`)), `${why}: ${working.stderr}`);
+    assert.ok(said(working).some(line => line.startsWith('phase_0_qualified: verification.json types true but the derived value is false (')), why);
+    const pushed = await check('--head', head);
+    assert.equal(pushed.code, 1, why);
+    assert.ok(said(pushed).some(line => line.startsWith(`typed record ${docling}: verification.json at ${head} types status "passed" but the derived status is "incomplete" (`)), `${why}: ${pushed.stderr}`);
+    assert.ok(said(pushed).some(line => line.startsWith(`typed record phase_0_qualified: verification.json at ${head} types true but the derived value is false (`)), why);
+    // record.mjs writes the gate back to incomplete and still says what is wrong with the receipt.
+    const rewritten = await record();
+    assert.equal(rewritten.code, 1, `${why}: ${rewritten.stdout}`);
+    assert.ok(rewritten.stdout.split(/\r?\n/).some(line => line.startsWith(`${docling}: incomplete (${at('docling')} cannot be trusted: ${reason}`)), `${why}: ${rewritten.stdout}`);
+    assert.match(rewritten.stdout, /^phase_0_qualified: false \(docling-library-qualification is incomplete; \d receipt failure\(s\)\)$/m, why);
+    assert.ok(said(rewritten).some(line => line.startsWith(`docling.json: ${reason}`)), `${why}: ${rewritten.stderr}`);
+    assert.equal(await readFile(join(root, 'verification.json'), 'utf8'), fixtureRecord({ statuses: { 'mcp-apps': 'passed' } }), why);
+    assertNoStack(rewritten);
+  }
+});
+
+test('when an input of a recorded receipt changes, check-receipts fails until the harness is recorded again or record.mjs writes the gate back to incomplete', async t => {
+  const { root, sha } = await recorded(t);
+  const { record, check } = await commandsIn(root);
+  const rerun = 'bun qualification/docling/run.mjs, then bun qualification/record.mjs docling';
+  // The two receipts depend on different inputs; only one of them changes.
+  await commit(root, { [at('docling')]: fixtureReceipt('docling', sha), [at('mcp-apps')]: fixtureReceipt('mcp-apps', sha, { inputs: ['qualification/mcp-apps/criteria.json'] }), 'verification.json': passedRecord() }, 'both recorded');
+  assert.match((await check()).stdout, /^check-receipts: 2 receipt\(s\) valid against HEAD; .* phase_0_qualified: true; verification\.json agrees\.\s*$/);
+  const late = await commit(root, { 'harness/run.mjs': '// v2\n' }, 'change an input of the Docling receipt');
+
+  // The one derivation: the gate is incomplete and Phase 0 is not qualified. Nothing in the tree is wrong.
+  const stale = `${at('docling')} is stale: 1 of its inputs changed after the commit it cites`;
+  let derived = await derivedRecord(root);
+  assert.deepEqual(statuses(derived), { [docling]: 'incomplete', [apps]: 'passed', qualified: false });
+  assert.deepEqual(derived.failures, [], 'a receipt that was true of its commit is no failure of this one');
+  assert.deepEqual(derived.stale, [{ name: 'docling.json', message: `inputs changed after ${sha}:\n  harness/run.mjs` }]);
+  assert.equal(derived.gates[0].basis, stale);
+  assert.deepEqual(staleLines(derived), [`docling.json: inputs changed after ${sha}:\n  harness/run.mjs -- re-run: ${rerun}`]);
+  assert.deepEqual(statuses(await derivedRecord(root, late)), { [docling]: 'incomplete', [apps]: 'passed', qualified: false });
+  // A tree without history (a shallow clone, a source copy) cannot hold a receipt to its commit:
+  // asked for, the derivation skips ancestry and staleness, says so, and is only an upper bound.
+  const bound = await derivedRecord(root, undefined, { history: false });
+  assert.deepEqual([bound.history, derived.history], [false, true]);
+  assert.deepEqual(statuses(bound), { [docling]: 'passed', [apps]: 'passed', qualified: true });
+  assert.deepEqual(bound.stale, []);
+  // No command asks for it: the check, the --head path and record.mjs all derive with history.
+  for (const file of ['scripts/lib/receipts.mjs', 'scripts/dev.mjs', 'qualification/record.mjs']) {
+    assert.doesNotMatch(await readFile(join(source, file), 'utf8'), /(?<!function )derivedRecord\([^)]*\{/, `${file} derives without history`);
+  }
+
+  // The record still types passed and qualified, so both paths fail: the stale receipt, the typed values, both cures.
+  const typedStatus = at => `${docling}: verification.json${at} types status "passed" but the derived status is "incomplete" (${stale}); run \`bun qualification/record.mjs\` to rewrite it`;
+  const typedQualified = at => `phase_0_qualified: verification.json${at} types true but the derived value is false (${docling} is incomplete); run \`bun qualification/record.mjs\` to rewrite it`;
+  let working = await check();
+  assert.equal(working.code, 1);
+  assert.deepEqual(said(working), ['check-receipts failed:', `docling.json: inputs changed after ${sha}:`, `  harness/run.mjs -- re-run: ${rerun}`, typedStatus(''), typedQualified('')]);
+  let pushed = await check('--head', late);
+  assert.equal(pushed.code, 1);
+  assert.deepEqual(said(pushed), [`stale receipt docling.json: inputs changed after ${sha}: harness/run.mjs -- re-run: ${rerun}`, `typed record ${typedStatus(` at ${late}`)}`, `typed record ${typedQualified(` at ${late}`)}`]);
+
+  // Cure one: record.mjs with no name writes the gate back to incomplete, exits 0 and says what would requalify it.
+  const rewritten = await record();
+  assert.equal(rewritten.code, 0, rewritten.stderr);
+  assert.equal(rewritten.stderr, '');
+  assert.deepEqual(rewritten.stdout.trim().split(/\r?\n/), [`${docling}: incomplete (${stale})`, `${apps}: passed (${at('mcp-apps')} result PASS)`, `phase_0_qualified: false (${docling} is incomplete)`,
+    `stale: docling.json: inputs changed after ${sha}: harness/run.mjs -- re-run: ${rerun}`, 'verification.json rewritten from the receipts.']);
+  assert.equal(await readFile(join(root, 'verification.json'), 'utf8'), fixtureRecord({ statuses: { 'mcp-apps': 'passed' } }));
+  const written = await commit(root, {}, 'the gate written back to incomplete');
+  working = await check();
+  assert.equal(working.code, 0, working.stderr);
+  assert.equal(working.stdout.trim(), `check-receipts: 2 receipt(s), 1 stale against HEAD; ${docling}: incomplete (${stale}); ${apps}: passed (${at('mcp-apps')} result PASS); phase_0_qualified: false (${docling} is incomplete); verification.json agrees.`);
+  pushed = await check('--head', written);
+  assert.equal(pushed.code, 0, pushed.stderr);
+  assert.equal(pushed.stdout.trim(), `check-receipts: nothing at ${written} is untrusted, and its typed statuses are the ones its receipts derive.`, 'it does not call a stale receipt current');
+  assert.deepEqual(await staleReceiptLines(root, written), []);
+  // Running it again changes nothing and still exits 0: no status survives over the stale receipt.
+  const again = await record();
+  assert.equal(again.code, 0);
+  assert.match(again.stdout, /^verification\.json already agrees with the receipts\.$/m);
+
+  // Cure two: the harness is run on the changed input and recorded.
+  await mkdir(join(root, '.artifacts', 'qualification', 'docling'), { recursive: true });
+  await writeFile(join(root, '.artifacts', 'qualification', 'docling', 'receipt.json'), fixtureReceipt('docling', written));
+  const requalified = await record('docling');
+  assert.equal(requalified.code, 0, requalified.stderr);
+  assert.match(requalified.stdout, /^docling-library-qualification: passed \(qualification\/receipts\/docling\.json result PASS\)$/m);
+  assert.match(requalified.stdout, /^phase_0_qualified: true$/m);
+  assert.doesNotMatch(requalified.stdout, /^stale: /m);
+  await commit(root, {}, 'requalified');
+  assert.match((await check()).stdout, /^check-receipts: 2 receipt\(s\) valid against HEAD; .* phase_0_qualified: true; verification\.json agrees\.\s*$/);
+  for (const result of [working, pushed, rewritten, again, requalified]) assertNoStack(result);
+});
+
+test('check-receipts --head with no commit is an error, and a commit without verification.json fails as the working tree does', async t => {
+  const { root } = await fixtureRepo(t, { 'harness/run.mjs': '// v1\n' });
+  const { check } = await commandsIn(root);
+  const needsCommit = 'check-receipts --head needs a commit: bun scripts/dev.mjs check-receipts --head <sha>';
+  const bare = await git(root, 'rev-parse', 'HEAD');
+  // No record: the working tree fails, and so does the same commit named with --head.
+  const working = await check();
+  assert.equal(working.code, 1);
+  assert.deepEqual(said(working), ['check-receipts failed:', 'verification.json is missing']);
+  const pushed = await check('--head', bare);
+  assert.equal(pushed.code, 1);
+  assert.deepEqual(said(pushed), [`untrusted record verification.json is missing at ${bare}`]);
+  assert.equal(pushed.stdout, '', 'it must not say that the typed statuses are the derived ones');
+  // With a record both pass; --head with no commit still does not fall back to the tree that would pass.
+  const recorded = await commit(root, { 'verification.json': fixtureRecord(), 'qualification/docling/criteria.json': fixtureCriteria('docling'), 'qualification/mcp-apps/criteria.json': fixtureCriteria('mcp-apps') }, 'a record');
+  assert.equal((await check()).code, 0);
+  assert.equal((await check('--head', recorded)).code, 0);
+  for (const args of [['--head'], ['--head', '--verbose']]) {
+    const missing = await check(...args);
+    assert.equal(missing.code, 1, args.join(' '));
+    assert.deepEqual(said(missing), [needsCommit], args.join(' '));
+    assert.equal(missing.stdout, '', 'the working tree was not checked instead');
+    assertNoStack(missing);
+  }
+  // A name that is no commit is said so.
+  const unknown = await check('--head', 'no-such-ref');
+  assert.equal(unknown.code, 1);
+  assert.deepEqual(said(unknown), ['check-receipts: no-such-ref is not a commit in this repository.']);
+});
+
+test('a receipt file whose JSON is no object is a failure, and a directory under receipts/ is reported, on both paths', async t => {
+  const { root, sha } = await recorded(t);
+  const rerun = 'bun qualification/docling/run.mjs, then bun qualification/record.mjs docling';
+  for (const [text, what] of [['null\n', 'null'], ['[]\n', 'an array'], ['"PASS"\n', 'a string'], ['7\n', 'a number'], ['true\n', 'a boolean']]) {
+    const reason = `not a receipt: its JSON is ${what}, not an object`;
+    const head = await commit(root, { [at('docling')]: text }, `a receipt that is ${what}`);
+    const derived = await derivedRecord(root);
+    assert.deepEqual(derived.failures, [{ name: 'docling.json', message: reason }], what);
+    assert.deepEqual(derived.receipts, [{ name: 'docling.json', receipt: null }], what);
+    assert.deepEqual(statuses(derived), { [docling]: 'incomplete', [apps]: 'incomplete', qualified: false }, what);
+    assert.equal(derived.gates[0].basis, `${at('docling')} cannot be trusted: ${reason}`, what);
+    // The record types incomplete and unqualified, as derived: only the file itself is wrong, and that fails.
+    await assert.rejects(checkReceipts(root), error => error.message === `check-receipts failed:\ndocling.json: ${reason}`, what);
+    assert.deepEqual(await staleReceiptLines(root, head), [`untrusted receipt docling.json: ${reason} -- re-run: ${rerun}`], what);
+  }
+  // A directory where a receipt belongs: named, not read, and not a crash, committed or not.
+  await rm(join(root, at('docling')));
+  const directory = 'is a directory; only receipt files belong under qualification/receipts/';
+  await mkdir(join(root, 'qualification', 'receipts', 'old'), { recursive: true });
+  await assert.rejects(checkReceipts(root), error => error.message === `check-receipts failed:\nold: ${directory}`, 'an empty directory in the working tree');
+  const head = await commit(root, { 'qualification/receipts/old/docling.json': fixtureReceipt('docling', sha) }, 'a directory under receipts/');
+  await assert.rejects(checkReceipts(root), error => error.message === `check-receipts failed:\nold: ${directory}`);
+  assert.deepEqual(await staleReceiptLines(root, head), [`untrusted receipt old: ${directory} -- re-run: rerun the harness that produced it, then bun qualification/record.mjs <name>`]);
+  assert.equal((await derivedRecord(root)).phase_0_qualified, false);
+  // A directory with the name a gate reads leaves that gate incomplete.
+  const named = await commit(root, { 'qualification/receipts/docling.json/receipt.json': fixtureReceipt('docling', sha), 'verification.json': fixtureRecord({ statuses: { docling: 'passed' } }) }, 'a directory named like the receipt');
+  for (const derived of [await derivedRecord(root), await derivedRecord(root, named)]) {
+    assert.equal(derived.gates[0].status, 'incomplete');
+    assert.equal(derived.gates[0].basis, `${at('docling')} cannot be trusted: ${directory}`);
+  }
+});
+
+test('record.mjs says what it refuses in one sentence each, with the command that produces what is missing and no stack', async t => {
+  const { root, sha } = await recorded(t);
+  const { record } = await commandsIn(root);
+  const artifact = async (harness, text) => {
+    await mkdir(join(root, '.artifacts', 'qualification', harness), { recursive: true });
+    await writeFile(join(root, '.artifacts', 'qualification', harness, 'receipt.json'), text);
+  };
+  const missing = harness => `record refused for ${harness}: .artifacts/qualification/${harness}/receipt.json is missing; \`bun qualification/${harness}/run.mjs\` writes it, on a clean tree at this commit`;
+  const refused = async (names, lines, why) => {
+    const result = await record(...names);
+    assert.equal(result.code, 1, why);
+    assert.deepEqual(said(result), lines, why);
+    assert.equal(result.stdout, '', `${why}: nothing was recorded or rewritten`);
+    assertNoStack(result);
+  };
+  const before = await readFile(join(root, 'verification.json'), 'utf8');
+  // No harness was run: each named receipt is missing, and the sentence names the command that writes it.
+  await refused(['docling', 'mcp-apps'], [missing('docling'), missing('mcp-apps'), 'Nothing was copied.'], 'no artifact at all');
+  // One sound receipt beside a missing one is not copied either.
+  await artifact('docling', fixtureReceipt('docling', sha));
+  await refused(['docling', 'mcp-apps'], [missing('mcp-apps'), 'Nothing was copied.'], 'one of two missing');
+  await assert.rejects(readFile(join(root, at('docling'))), { code: 'ENOENT' });
+  // An artifact that is not JSON.
+  await artifact('mcp-apps', '{"git_sha": ');
+  const unreadable = await record('mcp-apps');
+  assert.equal(unreadable.code, 1);
+  assert.equal(said(unreadable).length, 2);
+  assert.match(said(unreadable)[0], /^record refused for mcp-apps: \.artifacts\/qualification\/mcp-apps\/receipt\.json is not valid JSON \(.+\); `bun qualification\/mcp-apps\/run\.mjs` writes it, on a clean tree at this commit$/);
+  assertNoStack(unreadable);
+  // A receipt that cannot be trusted, and one that cites another commit.
+  await artifact('mcp-apps', fixtureReceipt('mcp-apps', sha, { criteria: failing, result: 'PASS' }));
+  await refused(['mcp-apps'], ['record refused for mcp-apps: its envelope cannot be trusted (result is PASS but its criteria fold to FAIL); rerun the harness on a clean tree', 'Nothing was copied.'], 'an untrusted envelope');
+  await artifact('mcp-apps', fixtureReceipt('mcp-apps', 'a'.repeat(40)));
+  await refused(['mcp-apps'], [`record refused for mcp-apps: receipt cites ${'a'.repeat(40)} but HEAD is ${sha}; requalify on the current commit`, 'Nothing was copied.'], 'another commit');
+  // A name that is no harness.
+  await refused(['no-such-harness'], ['no-such-harness: no harness of that name. Usage: bun qualification/record.mjs [<name>...] where name is one of docling, mcp-apps; with no name only the derived statuses are rewritten'], 'an unknown name');
+  // A record this command cannot rewrite.
+  await writeFile(join(root, 'verification.json'), `${JSON.stringify(JSON.parse(before), null, 4)}\n`);
+  await refused([], ['verification.json was not rewritten: verification.json is not in its two-space JSON form, so only the derived values cannot be rewritten; restore its formatting first.'], 'a reformatted record');
 });

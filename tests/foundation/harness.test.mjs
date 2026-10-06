@@ -4040,13 +4040,14 @@ test('join: the receipt each harness builds has no content failure under the rea
   assert.equal(await recordRefusal(repo, 'docling', today), null);
   assert.equal(await recordRefusal(repo, 'mcp-apps', apps), null);
 
-  // A harness that dropped a pinned check is named, for each harness, although its result folds as before; the gate is not upgraded.
-  for (const [harness, receipt, id, status] of [['docling', today, 'corpus/redp5110_sampled.pdf/provenance', 'failed'], ['mcp-apps', apps, 'render_present/dataset_exercised', 'passed']]) {
+  // A harness that dropped a pinned check is named, for each harness, although its result folds as before; a receipt that fails a check is trusted for nothing, so its gate is incomplete.
+  for (const [harness, receipt, id] of [['docling', today, 'corpus/redp5110_sampled.pdf/provenance'], ['mcp-apps', apps, 'render_present/dataset_exercised']]) {
     const dropped = withoutCriterion(receipt, id);
     assert.equal(sharedEnvelope.foldCriteria(dropped.criteria, dropped.harness_error), receipt.result);
     const after = await record({ [harness]: dropped });
     assert.deepEqual(derivedFailures(after), [`${harness}.json: pinned criterion ${id} is missing`]);
-    assert.equal(derivedStatuses(after)[harness], status);
+    assert.equal(derivedStatuses(after)[harness], 'incomplete');
+    assert.equal(after.gates.find((gate) => gate.harness === harness).basis, `qualification/receipts/${harness}.json cannot be trusted: pinned criterion ${id} is missing`);
     assert.equal(after.phase_0_qualified, false);
     await assert.rejects(checkReceipts(repo), (error) => error.message.includes(`\n${harness}.json: pinned criterion ${id} is missing`));
     assert.match(await recordRefusal(repo, harness, dropped), new RegExp(`pinned criterion ${id.replaceAll('/', '\\/')} is missing`));

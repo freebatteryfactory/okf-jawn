@@ -62,15 +62,58 @@ test('nothing tracked is also ignored, and no snapshot of the tree is kept',asyn
  const ignored=await run('git',['ls-files','-ci','--exclude-standard'],{cwd:root,capture:true});
  assert.equal(ignored.stdout.trim(),'','these tracked files are ignored by .gitignore');
 });
+/**
+ * Whether this checkout has the history a receipt is held to. A source copy without `.git` (the
+ * build container) and a shallow clone (the source-tooling job) do not: there the commit a
+ * receipt cites cannot be compared with HEAD.
+ */
+async function hasHistory(){
+ if(!existsSync(join(root,'.git')))return false;
+ const shallow=await run('git',['rev-parse','--is-shallow-repository'],{cwd:root,capture:true,allowFailure:true});
+ return shallow.code===0&&shallow.stdout.trim()==='false';
+}
 test('verification.json types what its receipts derive, in the form record.mjs rewrites',async()=>{
  const typed=await record();
- // The comparison check-receipts makes, without git: a hand edit of a status or of phase_0_qualified fails here too.
- const derived=await derivedRecord(root);
- assert.deepEqual(derived.failures,[]);
- assert.deepEqual(derived.mismatches,[]);
- assert.equal(typed.phase_0_qualified,derived.phase_0_qualified);
- for(const gate of derived.gates)assert.equal(typed.current.gates.phase_0.find(entry=>entry.id===gate.id).status,gate.status,gate.id);
+ const typedStatus=gate=>typed.current.gates.phase_0.find(entry=>entry.id===gate.id).status;
  assert.equal(await read('verification.json'),`${JSON.stringify(typed,null,2)}\n`,'verification.json is not in two-space JSON form, so record.mjs could not rewrite only the derived values');
+ if(await hasHistory()){
+  // The comparison check-receipts makes: a hand edit of a status or of phase_0_qualified fails here too.
+  const derived=await derivedRecord(root);
+  assert.equal(derived.history,true);
+  assert.deepEqual(derived.failures,[]);
+  assert.deepEqual(derived.mismatches,[]);
+  assert.equal(typed.phase_0_qualified,derived.phase_0_qualified);
+  for(const gate of derived.gates)assert.equal(typedStatus(gate),gate.status,gate.id);
+  return;
+ }
+ // Without history a receipt cannot be held to the commit it cites, so staleness is not judged and
+ // what is derived is an upper bound: the record may say incomplete where a receipt went stale,
+ // and never more than the receipts' content supports. check-receipts, in the job that has the
+ // history, makes the exact comparison.
+ const bound=await derivedRecord(root,undefined,{history:false});
+ assert.equal(bound.history,false);
+ assert.deepEqual(bound.failures,[]);
+ for(const gate of bound.gates)assert.ok([gate.status,'incomplete'].includes(typedStatus(gate)),`${gate.id}: verification.json types ${typedStatus(gate)}, more than its receipt supports (${gate.status})`);
+ assert.ok(typed.phase_0_qualified===false||bound.phase_0_qualified===true,'verification.json types phase_0_qualified true, which the receipts do not support');
+});
+/** The Phase 0 gates, in file order, each with its kind. Removing a gate or changing its kind changes what qualifies Phase 0, so it is a change to this list. */
+const phase0Gates=[
+ ['authored-typescript-seams','ci'],
+ ['deterministic-foundation','ci'],
+ ['docling-library-qualification','receipt'],
+ ['mcp-apps-protocol-qualification','receipt'],
+ ['json-render-catalog-round-trip','ci'],
+ ['hey-api-generated-runtime-probe','decision'],
+ ['clean-checkout-rerun','ci'],
+ ['github-actions-ci-receipt','ci'],
+];
+test('the Phase 0 gates are exactly these, each of this kind, and the two library qualifications are the receipt gates',async()=>{
+ const gates=(await record()).current.gates.phase_0;
+ assert.deepEqual(gates.map(gate=>[gate.id,gate.kind]),phase0Gates,'a Phase 0 gate was added, removed or given another kind: phase_0_qualified is derived from the receipt gates, so this list changes with it');
+ // What derivedRecord reads is the same two gates, each with its harness.
+ const derived=await derivedRecord(root,undefined,{history:await hasHistory()});
+ assert.deepEqual(derived.gates.map(gate=>[gate.id,gate.harness]),[['docling-library-qualification','docling'],['mcp-apps-protocol-qualification','mcp-apps']]);
+ assert.deepEqual(derived.unconverted,[]);
 });
 test('the record holds no hand-typed result: no "passed" outside a receipt gate, no boolean claim, no field CI or a tool states',async()=>{
  const typed=await record();
@@ -312,6 +355,9 @@ test('README, AGENTS and the close-out plan state that receipt-backed statuses a
  }
  const readme=await read('README.md');
  assert.match(readme,/`bun scripts\/dev\.mjs clean-checkout` [^.]*; it is a local tool, not a gate/,'README must document clean-checkout as a tool');
+ // What a changed input costs, and both ways out of it.
+ assert.ok(readme.includes('when an input of a recorded receipt changes, `check-receipts` fails until the harness is re-run and recorded, or `bun qualification/record.mjs` is run to write the gate back to `incomplete`'),'README does not say what happens when an input of a recorded receipt changes');
+ assert.match(readme,/is trusted for nothing, whatever result it types: its gate derives `incomplete`/);
  const plan=await read('docs/plans/stage-1a/90-orchestrator-close.md');
  assert.match(plan,/The orchestrator types no status in `verification\.json`/);
  assert.doesNotMatch(plan,/Decide terminal states|gets the state decided in O\.4/,'the plan still has the orchestrator typing gate states');
