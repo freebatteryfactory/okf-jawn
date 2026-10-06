@@ -7,6 +7,8 @@
       "!src/routeTree.gen.ts",
       "!dist",
       "!dist-apps",
+      "!test-results",
+      "!playwright-report",
       "!.tsbuild"
     ]
   },
@@ -23,6 +25,11 @@
       "suspicious": {
         "noExplicitAny": "error"
       }
+    }
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
     }
   },
   "javascript": {
