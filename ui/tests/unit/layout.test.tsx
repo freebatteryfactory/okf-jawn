@@ -270,8 +270,6 @@ describe('PresentView', () => {
     await expect
       .poll(() => container.querySelector('svg') !== null, { timeout: 15_000 })
       .toBe(true);
-    expect(
-      screen.queryByText(/Resolved chart data or specification unavailable/i),
-    ).toBeNull();
+    expect(screen.queryByText(/Resolved chart data or specification unavailable/i)).toBeNull();
   });
 });

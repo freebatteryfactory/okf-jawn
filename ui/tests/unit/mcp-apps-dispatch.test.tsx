@@ -31,10 +31,7 @@ describe('MCP App AppResult dispatch', () => {
       resolved_bindings: [],
     };
     render(
-      <AppResult
-        result={present}
-        callTool={vi.fn(async () => ({ structuredContent: {} }))}
-      />,
+      <AppResult result={present} callTool={vi.fn(async () => ({ structuredContent: {} }))} />,
     );
     expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
   });
