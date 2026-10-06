@@ -107,7 +107,16 @@
           "receipt": "qualification/receipts/docling.json",
           "criteria": "qualification/docling/criteria.json",
           "status": "incomplete",
-          "covers": "A pass proves that every criterion pinned in qualification/docling/criteria.json passed, or is not applicable by design with the reason stated in the receipt, for the Docling crate Cargo.lock pins, called directly as a library on the clean commit the receipt cites: the model assets have the manifest's hashes and are the files the library loads; every fixture converts, is recognised as its declared format and holds the content SOURCES.json declares, and a fixture without glyphs yields no invented text; each PDF and image fixture has one render per page that is not a flat colour unless the page is declared blank, and a page and a box for every text item, table and picture; a truncated PDF is refused; a 1 ms budget is reported and changes the result; and a peak memory was read for every converter process. It does not prove a locator for DOCX items (the library gives none) or for XLSX and PPTX items (recorded without a rule and not pinned), the production ingest worker, a memory limit (peak memory is measured, never limited) or a conversion through the application."
+          "accepted_failures": [
+            {
+              "criterion": "corpus/redp5110_sampled.pdf/content_across_font_runs",
+              "decision": "Docling stays the converter. Where a phrase changes font the library ends a text cell and joins cells with a space, so \"(WRKFCNUSG)\" is extracted as \"( WRKFCNUSG )\". Accepted for now and reported upstream; no newer version, option or pdfium changes it.",
+              "decided_on": "2026-10-06",
+              "decided_by": "owner",
+              "tracked_by": "converter-font-run-spacing"
+            }
+          ],
+          "covers": "A pass proves that every criterion pinned in qualification/docling/criteria.json passed, or is not applicable by design with the reason stated in the receipt, for the Docling crate Cargo.lock pins, called directly as a library on the clean commit the receipt cites: the model assets have the manifest's hashes and are the files the library loads; every fixture converts, is recognised as its declared format and holds the content SOURCES.json declares, a phrase set across a font change included, and a fixture without glyphs yields no invented text; each PDF and image fixture has one render per page that is not a flat colour unless the page is declared blank, and every text item, table and picture is located on a page with a box, by its own provenance or, for a PDF item the export leaves without one, by the one text-layer item with exactly its text; each PDF shows the library's placeholders for glyphs its fonts give no Unicode for on exactly the pages and in the numbers its fixture declares, which detects text that cannot be decoded and does not recover it; a truncated PDF is refused; a 1 ms budget is reported and changes the result; and a peak memory was read for every converter process. With accepted_with_limitations the same holds except for the criteria listed in accepted_failures, which fail. It does not prove a locator for DOCX items (the library gives none) or for XLSX and PPTX items (recorded without a rule and not pinned), the production ingest worker (locating through the text layer and detecting undecodable text are harness rules here; the construction gates ingest-locates-unlocated-items and ingest-flags-undecodable-text carry them into the product), a memory limit (peak memory is measured, never limited) or a conversion through the application."
         },
         {
           "id": "mcp-apps-protocol-qualification",
@@ -218,6 +227,20 @@
           "meaning": "Kill and restart against the real RecordStore with JobHandler(&ClaimedJob); no duplicate effect; after restart leases are expired and pending jobs re-enqueued (`expire_leases`, `pending_jobs`); an attempt that dies without a restart is retried after its lease expires."
         },
         {
+          "id": "ingest-locates-unlocated-items",
+          "status": "blocked_on_lanes",
+          "owner": "ingest",
+          "receipt": "cargo test -p okf-jawn-ingest --features runtime -- locates_unlocated_items",
+          "meaning": "An item the converter leaves without a location (a PDF caption: the library drops its box) is located through the page text layer by the rule of qualification/docling/src/locate.rs: docling::pdf_text_layer_pages, the one text-layer item with exactly its text on the page of its parent or of its nearest located earlier sibling, with a box that has area and lies inside the page. An item the rule does not find is recorded as unlocated; it is never given a guessed box, and every location records which source gave it"
+        },
+        {
+          "id": "ingest-flags-undecodable-text",
+          "status": "blocked_on_lanes",
+          "owner": "ingest",
+          "receipt": "cargo test -p okf-jawn-ingest --features runtime -- flags_undecodable_text",
+          "meaning": "Text the PDF's fonts cannot map to Unicode is detected by the rule of qualification/docling/src/glyphs.rs (the library prints `/` and the glyph's name for each such glyph), is never indexed as words, and its page is reported as partly extracted"
+        },
+        {
           "id": "application-operations",
           "status": "blocked_on_lanes",
           "owner": "core-cli",
@@ -279,6 +302,13 @@
           "owner": "views",
           "receipt": "bun --bun run --cwd ui test",
           "meaning": "Saved-view persist and reopen using server diagnostics as the source of truth"
+        },
+        {
+          "id": "converter-font-run-spacing",
+          "status": "blocked_upstream",
+          "owner": "integration-owner",
+          "receipt": "bun qualification/docling/run.mjs with corpus/redp5110_sampled.pdf/content_across_font_runs passing",
+          "meaning": "The Docling library ends a text cell at every font change and joins cells with a space, so a phrase set in more than one font is extracted with spaces the page does not show. Tracked upstream; no rule on our side cures it. Closes when a library release fixes it: the criterion then passes, check-receipts reports the acceptance on docling-library-qualification as stale, and the acceptance entry is removed"
         }
       ],
       "acceptance": [

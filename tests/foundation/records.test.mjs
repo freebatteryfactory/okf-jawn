@@ -164,6 +164,41 @@ test('every Phase 0 gate has exactly one kind and only the fields of that kind',
  assert.match(await read('ui/tests/unit/mcp-apps-dispatch.test.tsx'),/describe\('MCP App wire boundary'/);
  assert.match(await read('ui/package.json'),/"typecheck": "tsc -b && tsc -p tsconfig\.tests\.json --noEmit"/,'the typecheck step no longer covers ui/tests');
 });
+test('the Docling gate carries the one failure the owner accepted, and the gates that carry the cures exist',async()=>{
+ const gates=(await record()).current.gates;
+ const docling=gates.phase_0.find(gate=>gate.id==='docling-library-qualification');
+ // The owner's decision of 2026-10-06, word for word; nobody but the owner changes or adds to it.
+ assert.deepEqual(docling.accepted_failures,[{
+  criterion:'corpus/redp5110_sampled.pdf/content_across_font_runs',
+  decision:'Docling stays the converter. Where a phrase changes font the library ends a text cell and joins cells with a space, so "(WRKFCNUSG)" is extracted as "( WRKFCNUSG )". Accepted for now and reported upstream; no newer version, option or pdfium changes it.',
+  decided_on:'2026-10-06',
+  decided_by:'owner',
+  tracked_by:'converter-font-run-spacing',
+ }]);
+ for(const gate of gates.phase_0.filter(entry=>entry.id!==docling.id))assert.ok(!Object.hasOwn(gate,'accepted_failures'),`${gate.id} accepts a failure`);
+ const pinned=JSON.parse(await read('qualification/docling/criteria.json')).required;
+ assert.ok(pinned.includes(docling.accepted_failures[0].criterion),'the accepted criterion is not one the harness pins');
+ // The cures and the limitation are construction work, each with an owner lane.
+ const construction=Object.fromEntries(gates.construction.map(gate=>[gate.id,gate]));
+ for(const gate of gates.construction)assert.deepEqual(Object.keys(gate),['id','status','owner','receipt','meaning'],gate.id);
+ assert.deepEqual([construction['ingest-locates-unlocated-items'].owner,construction['ingest-locates-unlocated-items'].status],['ingest','blocked_on_lanes']);
+ assert.deepEqual([construction['ingest-flags-undecodable-text'].owner,construction['ingest-flags-undecodable-text'].status],['ingest','blocked_on_lanes']);
+ assert.deepEqual([construction['converter-font-run-spacing'].owner,construction['converter-font-run-spacing'].status],['integration-owner','blocked_upstream']);
+ assert.match(construction['ingest-locates-unlocated-items'].meaning,/qualification\/docling\/src\/locate\.rs.*never given a guessed box/);
+ assert.match(construction['ingest-flags-undecodable-text'].meaning,/qualification\/docling\/src\/glyphs\.rs.*never indexed as words.*reported as partly extracted/);
+ assert.match(construction['converter-font-run-spacing'].meaning,/the acceptance entry is removed$/);
+ // The status words of the two hand-typed groups are a closed list; none of them is a pass.
+ const words=group=>[...new Set(gates[group].map(gate=>gate.status))].sort();
+ assert.deepEqual(words('construction'),['blocked_on_lanes','blocked_upstream']);
+ assert.deepEqual(gates.construction.filter(gate=>gate.status==='blocked_upstream').map(gate=>gate.id),['converter-font-run-spacing'],'blocked_upstream is for a limitation only an upstream release cures');
+ assert.deepEqual(words('acceptance'),['blocked_on_product','not_run']);
+ // The ingest lane is told: its gate table lists both gates, and its rules name the harness functions as the reference.
+ const lane=await read('crates/ingest/AGENTS.md');
+ for(const id of ['ingest-locates-unlocated-items','ingest-flags-undecodable-text'])assert.ok(lane.includes(`| \`${id}\` | \`${construction[id].receipt}\` |`),`crates/ingest/AGENTS.md does not list ${id} with its command`);
+ assert.match(lane,/`locate::locate_items`/);
+ assert.match(lane,/`glyphs::undecoded_glyphs`/);
+ for(const name of ['locate_items','undecoded_glyphs','placeholder_glyph_tokens'])assert.match(await read(`qualification/docling/src/${name==='locate_items'?'locate':'glyphs'}.rs`),new RegExp(`pub\\(crate\\) fn ${name}\\(`),`${name} is not a function of the harness`);
+});
 test('a ci gate names a job of the workflow by its check name, and that job runs the evidence',async()=>{
  const gates=(await record()).current.gates.phase_0.filter(gate=>gate.kind==='ci');
  assert.ok(gates.length>0);
