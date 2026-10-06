@@ -27,6 +27,7 @@ const KEY_ONE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const KEY_TWO: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CONNECTOR: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const JOB: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 
 fn principal(subject: &str, route: AccessRoute) -> Result<Principal, IdentityError> {
     Ok(Principal {
@@ -207,6 +208,28 @@ fn proposal() -> Value {
         "status": "open",
         "created_by": "alice",
         "created_at": "2026-01-01T00:00:00Z"
+    })
+}
+
+/// The request body `retry_job` and `cancel_job` share.
+fn job_request_body(key: &str) -> Value {
+    json!({
+        "workspace_id": WORKSPACE_A,
+        "job_id": JOB,
+        "idempotency_key": key
+    })
+}
+
+fn job(state: &str) -> Value {
+    json!({
+        "id": JOB,
+        "workspace_id": WORKSPACE_A,
+        "kind": "import",
+        "state": state,
+        "progress": 0,
+        "attempt": 1,
+        "warnings": [],
+        "item_ids": []
     })
 }
 
@@ -684,6 +707,65 @@ async fn the_same_key_from_two_subjects_is_two_mutations() -> TestResult {
     assert_eq!(xavier_item.get("body"), Some(&json!("for xavier")));
     assert_eq!(yolanda_item.get("body"), Some(&json!("for yolanda")));
     assert_eq!(app.call_count("create_item")?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_same_subject_and_key_in_two_tenants_are_two_mutations() -> TestResult {
+    let mut table = GrantTable::default();
+    table
+        .workspaces
+        .entry("alice".to_owned())
+        .or_default()
+        .insert(workspace(WORKSPACE_A)?, all_permissions());
+    let ports = FixturePorts::new(table);
+    let app = CountingApplication::new();
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+
+    app.set_response("create_item", item_document("in the local tenant"))?;
+    let here = principal("alice", AccessRoute::LocalOwner)?;
+    let here_item = call(&app, &ports, &here, "create_item", body.clone()).await?;
+    app.set_response("create_item", item_document("in the other tenant"))?;
+    let mut there = principal("alice", AccessRoute::LocalOwner)?;
+    there.tenant_id = tenant("tenant-other")?;
+    let there_item = call(&app, &ports, &there, "create_item", body).await?;
+
+    assert_eq!(here_item.get("body"), Some(&json!("in the local tenant")));
+    assert_eq!(there_item.get("body"), Some(&json!("in the other tenant")));
+    let seen = app.contexts("create_item")?;
+    assert_eq!(seen.len(), 2);
+    let local = some(seen.first(), "the call in the local tenant")?;
+    let other = some(seen.get(1), "the call in the other tenant")?;
+    assert!(local.mutation.is_some());
+    assert!(other.mutation.is_some());
+    assert_ne!(local.mutation, other.mutation);
+    assert_eq!(other.attempt, Attempt::First);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_same_subject_and_key_on_two_operations_are_two_mutations() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("retry_job", job("queued"))?;
+    app.set_response("cancel_job", job("cancelled"))?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    // The two operations take the same request, so the body, its digest and the key are equal:
+    // only the operation tells the two mutations apart.
+    let body = job_request_body(KEY_ONE);
+
+    let retried = call(&app, &ports, &alice, "retry_job", body.clone()).await?;
+    let cancelled = call(&app, &ports, &alice, "cancel_job", body).await?;
+    assert_eq!(retried.get("state"), Some(&json!("queued")));
+    assert_eq!(cancelled.get("state"), Some(&json!("cancelled")));
+    assert_eq!(app.call_count("retry_job")?, 1);
+    assert_eq!(app.call_count("cancel_job")?, 1);
+    let retry_seen = app.contexts("retry_job")?;
+    let cancel_seen = app.contexts("cancel_job")?;
+    let retry_context = some(retry_seen.first(), "the retry_job call")?;
+    let cancel_context = some(cancel_seen.first(), "the cancel_job call")?;
+    assert!(retry_context.mutation.is_some());
+    assert_ne!(retry_context.mutation, cancel_context.mutation);
     Ok(())
 }
 
