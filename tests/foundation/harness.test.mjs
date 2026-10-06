@@ -8,6 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { cpSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -59,7 +60,8 @@ import { OCR_FIXTURES, decodeFixture, encodePng, fixtureWords, renderLines } fro
 import { pngInk } from '../../qualification/docling/lib/png.mjs';
 import { deflateSync } from 'node:zlib';
 import { recordRefusal } from '../../qualification/record.mjs';
-import { checkReceipts, derivedRecord, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
+import { run as runCommand } from '../../scripts/lib/process.mjs';
+import { checkReceipts, derivedRecord, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
 import { commit as fixtureCommit, fixtureRepo, git as fixtureGit } from './fixture-repo.mjs';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 import { BASIC_HOST, PATCHED_SERVE, SOURCE_RECORD, lsRemoteArgs, patchServe, rawUrl, sourceProblems, sourceRecord, tagCommit } from '../../qualification/mcp-apps/lib/basic-host.mjs';
@@ -3956,8 +3958,10 @@ function doclingRunFor(only, source, over = {}) {
  * for doclingReceipt. `today`: the library joins font runs with a space, as it does now;
  * without it the double is the library with that fixed.
  */
-async function realDoclingReceipt(header, overrides = {}, parts = {}, { today = false } = {}) {
+async function realDoclingReceipt(header, overrides = {}, parts = {}, { today = false, only = null } = {}) {
   const sources = JSON.parse(await readFile(join(root, 'tests/fixtures/documents/SOURCES.json'), 'utf8'));
+  // `only`: the single-fixture mode of run.mjs, which runs the named fixtures and says so in `scope`.
+  const selected = only ? FIXTURE_RUNS.filter((name) => only.includes(name)) : FIXTURE_RUNS;
   return buildDoclingReceipt({
     header,
     converter: DOCLING_CONVERTER,
@@ -3966,19 +3970,28 @@ async function realDoclingReceipt(header, overrides = {}, parts = {}, { today = 
     assets: DOCLING_ASSETS,
     environment: { DOCLING_RS_MODELS_DIR: 'C:\\models' },
     sources,
-    runs: FIXTURE_RUNS.map((only) => doclingRunFor(only, sources.files[only], { ...overrides[only], font_runs_spaced: today })),
-    scope: { mode: 'all', fixtures: FIXTURE_RUNS, qualification: true },
+    runs: selected.map((name) => doclingRunFor(name, sources.files[name], { ...overrides[name], font_runs_spaced: today })),
+    scope: only ? { mode: 'only', fixtures: selected, qualification: false } : { mode: 'all', fixtures: FIXTURE_RUNS, qualification: true },
     paths: { fixtures_dir: 'tests/fixtures/documents' },
     finishedAt: '2026-10-06T10:00:00.000Z',
     ...parts,
   });
 }
 
-/** A repository shaped like this one: the real record and the real criteria files, committed. */
-async function joinRepository(t) {
+/**
+ * A repository shaped like this one: the real record and the real criteria files, committed.
+ * With `tools` it also holds the real scripts/ and qualification/record.mjs, committed before
+ * any receipt cites a commit, so the recording command itself runs in it.
+ */
+async function joinRepository(t, { tools = false } = {}) {
   const tracked = ['verification.json', 'qualification/docling/criteria.json', 'qualification/mcp-apps/criteria.json'];
   const files = Object.fromEntries(await Promise.all(tracked.map(async (path) => [path, await readFile(join(root, path), 'utf8')])));
-  const { root: repo } = await fixtureRepo(t, { ...files, 'qualification/receipts/.gitkeep': '' });
+  const { root: repo } = await fixtureRepo(t, { ...files, 'qualification/receipts/.gitkeep': '', ...(tools ? { '.gitignore': '/.artifacts/\n' } : {}) });
+  if (tools) {
+    cpSync(join(root, 'scripts'), join(repo, 'scripts'), { recursive: true });
+    cpSync(join(root, 'qualification', 'record.mjs'), join(repo, 'qualification', 'record.mjs'));
+    await fixtureCommit(repo, {}, 'the recording tools');
+  }
   const sha = await fixtureGit(repo, 'rev-parse', 'HEAD');
   /** Commit these receipts as recorded, with the statuses record.mjs would write. */
   const record = async (receipts) => {
@@ -4079,4 +4092,88 @@ test('join: a failed and an unfinished receipt from each harness are clean evide
   // The checker's own rule about not_judged holds a harness to its list: one id hidden is named.
   const hidden = { ...doclingStopped, not_judged: doclingStopped.not_judged.slice(1) };
   assert.match(derivedFailures(await record({ docling: hidden })).join('\n'), /^docling\.json: not_judged is \[.*\] but its criteria derive \["assets\/hashes_match",/);
+});
+
+test('join: a Docling run that did not judge everything never qualifies, although its one failure is the accepted one', async (t) => {
+  const { repo } = await joinRepository(t, { tools: true });
+  const produced_at = '2026-10-06T09:00:00.000Z';
+  const recordCommand = (...names) => runCommand(process.execPath, ['qualification/record.mjs', ...names], { cwd: repo, capture: true, allowFailure: true });
+  const artifact = async (harness, receipt) => {
+    await mkdir(join(repo, '.artifacts', 'qualification', harness), { recursive: true });
+    await writeFile(join(repo, '.artifacts', 'qualification', harness, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
+  };
+  const typedRecord = async () => JSON.parse(await readFile(join(repo, 'verification.json'), 'utf8'));
+  const doclingGate = (record) => record.current.gates.phase_0.find((gate) => gate.harness === 'docling');
+  const unjudgedRequired = (receipt) => receipt.criteria.filter((criterion) => criterion.required && criterion.result === 'not_judged').length;
+  // The MCP Apps gate passes throughout, so the Docling gate alone decides.
+  const first = await fixtureGit(repo, 'rev-parse', 'HEAD');
+  await artifact('mcp-apps', (await (await qualifyDouble({ change: { header: async () => ({ git_sha: first, inputs: MCP_APPS_INPUTS, produced_at }) } })).run()).receipt);
+
+  // Each is the Docling run of today (the accepted criterion fails) in which something else was not judged.
+  const cutShort = [
+    ['a converter process that crashed', { overrides: { 'table_heavy.pdf': { run: { exitCode: 101, stderr: 'thread main panicked at docling-pdf' } } } }, /^the converter process for table_heavy\.pdf exited 101: /, 8],
+    ['a process killed at the harness timeout', { overrides: { 'scanned_text.pdf': { report: null, run: { exitCode: null, signal: 'SIGTERM', timedOut: true } } } }, /^the converter process for scanned_text\.pdf was killed at the harness timeout$/, 8],
+    ['a memory peak that could not be read', { overrides: { 'sample_sheet.xlsx': { run: { peakRssBytes: null, peakRssNote: 'Get-Process reported no PeakWorkingSet64' } } } }, /^the peak memory of the converter process for sample_sheet\.xlsx was not measured: /, 1],
+    ['a single-fixture run', { only: ['corpus/redp5110_sampled.pdf'] }, null, 87],
+  ];
+  for (const [what, { overrides = {}, only = null }, harnessError, unjudged] of cutShort) {
+    const head = await fixtureGit(repo, 'rev-parse', 'HEAD');
+    const receipt = await realDoclingReceipt({ git_sha: head, inputs: DOCLING_INPUTS, produced_at }, overrides, {}, { today: true, only });
+    // The shape both reviews showed: FAIL, only the accepted criterion failing, required criteria nobody judged.
+    assert.equal(receipt.result, 'FAIL', what);
+    assert.deepEqual(doclingFailedIds(receipt), [FONT_RUN_CRITERION], what);
+    assert.equal(unjudgedRequired(receipt), unjudged, what);
+    if (harnessError) assert.match(receipt.harness_error, harnessError, what);
+    else assert.equal(receipt.harness_error, null, what);
+    assert.equal(await recordRefusal(repo, 'docling', receipt), null, `${what}: clean evidence, so it is recorded`);
+
+    // Recorded by the real command: the gate is incomplete and Phase 0 is not qualified.
+    await artifact('docling', receipt);
+    const said = await recordCommand('docling', ...(head === first ? ['mcp-apps'] : []));
+    assert.equal(said.code, 0, `${what}: ${said.stderr}`);
+    assert.match(said.stdout, /^docling-library-qualification: incomplete \(qualification\/receipts\/docling\.json result FAIL with every failing criterion accepted, but the run did not judge everything: /m, what);
+    assert.match(said.stdout, /^phase_0_qualified: false \(docling-library-qualification is incomplete\)$/m, what);
+    const derived = await derivedRecord(repo);
+    assert.deepEqual(derivedFailures(derived), [], what);
+    assert.deepEqual(derivedStatuses(derived), { docling: 'incomplete', 'mcp-apps': 'passed' }, what);
+    assert.equal(derived.phase_0_qualified, false, what);
+    assert.deepEqual(derived.limitations, [], what);
+    const agreeing = await readFile(join(repo, 'verification.json'), 'utf8');
+    const written = JSON.parse(agreeing);
+    assert.deepEqual([doclingGate(written).status, written.phase_0_qualified], ['incomplete', false], what);
+    const recorded = await fixtureCommit(repo, {}, `record: ${what}`);
+    assert.match(await checkReceipts(repo), /^check-receipts: 2 receipt\(s\) valid against HEAD; docling-library-qualification: incomplete \(.*\); mcp-apps-protocol-qualification: passed \(.*\); phase_0_qualified: false \(docling-library-qualification is incomplete\); verification\.json agrees\.$/, what);
+    assert.deepEqual(await staleReceiptLines(repo, recorded), [], what);
+
+    // What such a run derived before, typed by hand, is refused by the working-tree check and at the pushed commit.
+    const forged = await typedRecord();
+    doclingGate(forged).status = 'accepted_with_limitations';
+    forged.phase_0_qualified = true;
+    const typed = await fixtureCommit(repo, { 'verification.json': `${JSON.stringify(forged, null, 2)}\n` }, `type a qualification over: ${what}`);
+    await assert.rejects(checkReceipts(repo), (error) => /^docling-library-qualification: verification\.json types status "accepted_with_limitations" but the derived status is "incomplete" /m.test(error.message)
+      && /^phase_0_qualified: verification\.json types true but the derived value is false \(docling-library-qualification is incomplete\)/m.test(error.message), what);
+    const lines = await staleReceiptLines(repo, typed);
+    assert.equal(lines.length, 2, `${what}: ${lines.join(' | ')}`);
+    assert.match(lines[0], /^typed record docling-library-qualification: verification\.json at [0-9a-f]{40} types status "accepted_with_limitations" but the derived status is "incomplete" /, what);
+    assert.match(lines[1], /^typed record phase_0_qualified: verification\.json at [0-9a-f]{40} types true but the derived value is false /, what);
+    // The recording command writes the derived values back.
+    const rewritten = await recordCommand();
+    assert.equal(rewritten.code, 0, `${what}: ${rewritten.stderr}`);
+    assert.match(rewritten.stdout, /^verification\.json rewritten from the receipts\.$/m, what);
+    assert.equal(await readFile(join(repo, 'verification.json'), 'utf8'), agreeing, what);
+    await fixtureCommit(repo, {}, `the derived record again: ${what}`);
+  }
+
+  // The same run with every fixture judged is still what the owner accepted.
+  const head = await fixtureGit(repo, 'rev-parse', 'HEAD');
+  const whole = await realDoclingReceipt({ git_sha: head, inputs: DOCLING_INPUTS, produced_at }, {}, {}, { today: true });
+  assert.deepEqual([whole.result, whole.harness_error, unjudgedRequired(whole)], ['FAIL', null, 0]);
+  await artifact('docling', whole);
+  const said = await recordCommand('docling');
+  assert.equal(said.code, 0, said.stderr);
+  assert.ok(said.stdout.split(/\r?\n/).includes(`docling-library-qualification: accepted_with_limitations (qualification/receipts/docling.json result FAIL; the owner accepted every failing criterion: ${FONT_RUN_CRITERION})`), said.stdout);
+  assert.match(said.stdout, /^phase_0_qualified: true \(with accepted limitations: docling-library-qualification\)$/m);
+  const recorded = await fixtureCommit(repo, {}, 'record the whole run');
+  assert.match(await checkReceipts(repo), /phase_0_qualified: true \(with accepted limitations: docling-library-qualification\); verification\.json agrees\.$/);
+  assert.deepEqual(await staleReceiptLines(repo, recorded), []);
 });

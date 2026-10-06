@@ -9,11 +9,13 @@
  *
  * A receipt gate may carry `accepted_failures`: criteria the owner has decided to accept as
  * failing, each tied to the gate that tracks its cure. A FAIL receipt whose every failing
- * required criterion is accepted derives `accepted_with_limitations`, which qualifies Phase 0
- * as `passed` does. Nothing else is upgraded: not an INCOMPLETE receipt, not a FAIL with one
- * failing criterion nobody accepted, not a receipt whose envelope cannot be trusted. An
- * acceptance that names a criterion its receipt no longer fails is stale and is itself a
- * failure, so the limitation cannot outlive its cause.
+ * required criterion is accepted, and whose run judged everything else (no harness error, no
+ * required criterion `not_judged`), derives `accepted_with_limitations`, which qualifies Phase 0
+ * as `passed` does. Nothing else is upgraded: not an INCOMPLETE receipt, not a FAIL from a run
+ * that was cut short, not a FAIL with one failing criterion nobody accepted, not a receipt whose
+ * envelope cannot be trusted. `receiptGateStatus` is that rule. An acceptance that names a
+ * criterion its receipt no longer fails is stale and is itself a failure, so the limitation
+ * cannot outlive its cause.
  */
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -163,6 +165,42 @@ function failingRequired(receipt) {
 }
 
 /**
+ * The status a receipt gate derives from its receipt, and why: `{ status, basis }`. This
+ * function is the whole rule, and nothing else names a status for a receipt that exists.
+ *
+ * - A result of PASS is `passed`, INCOMPLETE is `incomplete`, and anything that is not one of
+ *   `receiptResults` is `incomplete`.
+ * - A FAIL is `failed` when a failing required criterion is not one the owner soundly accepted:
+ *   `accepted` (the criteria of the sound entries of the gate's `accepted_failures`) lacks one
+ *   of them, an entry is unsound or stale (`acceptanceSound` false), or the receipt cannot be
+ *   trusted (`trusted` false), so that what it says is accepted proves nothing.
+ * - A FAIL whose every failing required criterion is accepted is `accepted_with_limitations`
+ *   only when the run judged everything else: `harness_error` is null and NO required criterion
+ *   is `not_judged`. Otherwise it is `incomplete`. A required failure outranks a harness error
+ *   in `foldCriteria`, so while an accepted criterion fails on every run the result word cannot
+ *   tell a run that was cut short (a converter process killed, a peak that could not be read, a
+ *   single-fixture run) from a whole one; this rule can, and such a run never qualifies.
+ *
+ * `path` is the receipt's path, for the sentence.
+ */
+export function receiptGateStatus(receipt, { path, trusted, accepted, acceptanceSound }) {
+  const result = receipt?.result;
+  if (!receiptResults.includes(result)) return { status: 'incomplete', basis: `${path} has no result of ${receiptResults.join(', ')}` };
+  const plain = { status: statusOf(result), basis: `${path} result ${result}` };
+  if (result !== 'FAIL') return plain;
+  const failing = failingRequired(receipt);
+  const everyFailureAccepted = failing.length > 0 && failing.every(criterion => accepted.includes(criterion));
+  if (!trusted || !acceptanceSound || !everyFailureAccepted) return plain;
+  const unjudged = receipt.criteria.filter(entry => entry.required === true && entry.result === 'not_judged').length;
+  const stopped = receipt.harness_error !== null;
+  if (stopped || unjudged > 0) {
+    const why = [...(stopped ? ['it records a harness error'] : []), ...(unjudged > 0 ? [`${unjudged} required criteri${unjudged === 1 ? 'on was' : 'a were'} not judged`] : [])];
+    return { status: 'incomplete', basis: `${path} result FAIL with every failing criterion accepted, but the run did not judge everything: ${why.join(' and ')}` };
+  }
+  return { status: 'accepted_with_limitations', basis: `${path} result FAIL; the owner accepted every failing criterion: ${failing.join(', ')}` };
+}
+
+/**
  * Why the content of `receipt` cannot be trusted as the receipt of `gate` in `tree`; empty when
  * it can. This is the whole content rule, for a receipt about to be recorded and for one already
  * committed: the gate's criteria file is usable, the envelope is one `envelopeFailures` accepts
@@ -196,9 +234,10 @@ export async function recordFailures(root, name, receipt) {
  *
  * `head` is a commit, read with git and independent of the checkout; without it the working tree
  * is read. A receipt gate is `incomplete` when its receipt file does not exist, otherwise the
- * status its receipt's result supports, with one upgrade: a FAIL receipt with a clean envelope
- * whose every failing required criterion is a sound entry of the gate's `accepted_failures`
- * is `accepted_with_limitations`. `phase_0_qualified` is true only when every receipt gate is
+ * status `receiptGateStatus` gives: the one its receipt's result supports, except that a FAIL
+ * with a clean envelope whose every failing required criterion is a sound entry of the gate's
+ * `accepted_failures` is `accepted_with_limitations` when the run judged everything else and
+ * `incomplete` when it did not. `phase_0_qualified` is true only when every receipt gate is
  * `passed` or `accepted_with_limitations`, nothing has a failure and no Phase 0 gate is still
  * hand-typed (has none of `gateKinds`).
  *
@@ -265,9 +304,6 @@ export async function derivedRecord(root, head) {
     const found = receipts.find(candidate => candidate.name === file);
     if (!found) continue;
     if (found.receipt === null) { entry.basis = `${gate.receipt} is not valid JSON`; continue; }
-    const known = receiptResults.includes(found.receipt?.result);
-    entry.status = statusOf(found.receipt?.result);
-    entry.basis = known ? `${gate.receipt} result ${found.receipt.result}` : `${gate.receipt} has no result of ${receiptResults.join(', ')}`;
     // The receipt is read, not only its header: its result must be the fold of its criteria,
     // and every criterion its harness pins must be present and required.
     const untrusted = await contentFailures(tree, gate, found.receipt);
@@ -282,12 +318,9 @@ export async function derivedRecord(root, head) {
       const now = resultOf(criterion);
       failures.push({ name: gate.id, message: `accepted failure ${criterion} is not failing in ${gate.receipt} (${now === undefined ? 'the receipt has no such criterion' : `its result there is ${now}`}); the acceptance is stale: remove the entry from accepted_failures` });
     }
-    // The one upgrade: a trusted FAIL whose every failing required criterion the owner accepted.
-    const everyFailureAccepted = failing.length > 0 && failing.every(criterion => acceptance.accepted.includes(criterion));
-    if (found.receipt.result === 'FAIL' && untrusted.length === 0 && acceptance.problems.length === 0 && stale.length === 0 && everyFailureAccepted) {
-      entry.status = 'accepted_with_limitations';
-      entry.basis = `${gate.receipt} result FAIL; the owner accepted every failing criterion: ${failing.join(', ')}`;
-    }
+    const derived = receiptGateStatus(found.receipt, { path: gate.receipt, trusted: untrusted.length === 0, accepted: acceptance.accepted, acceptanceSound: acceptance.problems.length === 0 && stale.length === 0 });
+    entry.status = derived.status;
+    entry.basis = derived.basis;
   }
   // A receipt is recorded only for the gate it closes: one file, one gate.
   const named = result.gates.map(gate => gate.file).filter(file => file !== null);

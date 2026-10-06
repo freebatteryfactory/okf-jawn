@@ -416,6 +416,29 @@ test('nothing but a trusted FAIL with every failing criterion accepted is upgrad
   assert.equal(derived.gates[0].status, 'incomplete');
   assert.match(derivedFailureText(derived), /^docling\.json: result is INCOMPLETE but its criteria fold to FAIL$/m);
 
+  // A FAIL whose one failure is accepted is still not upgraded when its run did not judge everything:
+  // a required failure outranks a harness error in the fold, so the result word cannot tell the two apart.
+  for (const [why, overrides, basis] of [
+    ['a harness error beside the accepted failure', { criteria: failing, harness_error: 'the converter process for b.pdf was killed at the harness timeout' }, 'it records a harness error'],
+    ['a required criterion nobody judged', { criteria: [{ id: 'corpus/a.pdf/content', required: true, result: 'not_judged' }, failing[1]] }, '1 required criterion was not judged'],
+    ['both', { criteria: [{ id: 'corpus/a.pdf/content', required: true, result: 'not_judged' }, failing[1]], harness_error: 'the peak memory was not measured' }, 'it records a harness error and 1 required criterion was not judged'],
+  ]) {
+    const receipt = fixtureReceipt('docling', sha, overrides);
+    assert.equal(JSON.parse(receipt).result, 'FAIL', `${why}: the fold says FAIL, as the harness wrote it`);
+    derived = await derive(receipt, [fixtureAcceptance()], why);
+    assert.deepEqual(derived.failures, [], `${why}: the receipt is clean evidence`);
+    assert.deepEqual(statuses(derived), { [docling]: 'incomplete', [apps]: 'passed', qualified: false }, why);
+    assert.deepEqual(derived.limitations, [], why);
+    assert.equal(derived.gates[0].basis, `${at('docling')} result FAIL with every failing criterion accepted, but the run did not judge everything: ${basis}`, why);
+  }
+  // A failure nobody accepted is a failure whatever else the run did not judge.
+  derived = await derive(fixtureReceipt('docling', sha, { criteria: failingBoth, harness_error: 'the peak memory was not measured' }), [fixtureAcceptance()], 'a harness error beside a failure nobody accepted');
+  assert.deepEqual(statuses(derived), { [docling]: 'failed', [apps]: 'passed', qualified: false });
+  // A measurement recorded without a verdict (not required) holds nothing back.
+  const measured = [...failing, { id: 'memory/peak', required: false, result: 'not_judged' }];
+  derived = await derive(fixtureReceipt('docling', sha, { criteria: measured }), [fixtureAcceptance()], 'an optional criterion not judged');
+  assert.deepEqual(statuses(derived), { [docling]: accepted, [apps]: 'passed', qualified: true });
+
   // A receipt whose envelope cannot be trusted is not upgraded, whatever is accepted.
   derived = await derive(fixtureReceipt('docling', sha, { criteria: failing, not_judged: ['corpus/a.pdf/content'] }), [fixtureAcceptance()], 'a FAIL with a wrong not_judged list');
   assert.deepEqual(statuses(derived), { [docling]: 'failed', [apps]: 'passed', qualified: false });
