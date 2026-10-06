@@ -511,6 +511,7 @@ mod tests {
         let key = MutationKey {
             tenant_id: tenant("tenant-local")?,
             subject: "alice".to_owned(),
+            client_id: None,
             operation: OperationName::CreateItem,
             key: idempotency_key("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")?,
         };
@@ -575,6 +576,7 @@ mod tests {
         let key = MutationKey {
             tenant_id: tenant("tenant-local")?,
             subject: "alice".to_owned(),
+            client_id: None,
             operation: OperationName::CreateItem,
             key: idempotency_key("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")?,
         };

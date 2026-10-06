@@ -185,17 +185,25 @@ fn created_workspace() -> Value {
 }
 
 fn open_proposal_body(key: &str) -> Value {
+    open_proposal_described(key, "d")
+}
+
+fn open_proposal_described(key: &str, description: &str) -> Value {
     json!({
         "workspace_id": WORKSPACE_A,
         "base_revision": REVISION,
         "title": "t",
-        "description": "d",
+        "description": description,
         "changes": [],
         "idempotency_key": key
     })
 }
 
 fn proposal() -> Value {
+    proposal_described("d")
+}
+
+fn proposal_described(description: &str) -> Value {
     json!({
         "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
         "workspace_id": WORKSPACE_A,
@@ -203,7 +211,7 @@ fn proposal() -> Value {
         "proposal_revision": REVISION,
         "content_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "title": "t",
-        "description": "d",
+        "description": description,
         "changes": [],
         "status": "open",
         "created_by": "alice",
@@ -766,6 +774,65 @@ async fn the_same_subject_and_key_on_two_operations_are_two_mutations() -> TestR
     let cancel_context = some(cancel_seen.first(), "the cancel_job call")?;
     assert!(retry_context.mutation.is_some());
     assert_ne!(retry_context.mutation, cancel_context.mutation);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_connector_does_not_replay_the_stored_response_of_its_subject() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let agent = connector("alice", vec![Permission::Read, Permission::Propose])?;
+    let input = open_proposal_body(KEY_ONE);
+
+    app.set_response("open_proposal", proposal_described("for alice"))?;
+    let own = call(&app, &ports, &alice, "open_proposal", input.clone()).await?;
+    assert_eq!(own.get("description"), Some(&json!("for alice")));
+
+    // The connector acts for the same subject and sends her key and her body.
+    app.set_response("open_proposal", proposal_described("for the connector"))?;
+    let delegated = call(&app, &ports, &agent, "open_proposal", input.clone()).await?;
+    assert_eq!(
+        delegated.get("description"),
+        Some(&json!("for the connector"))
+    );
+    assert_eq!(app.call_count("open_proposal")?, 2);
+    let seen = app.contexts("open_proposal")?;
+    let own_context = some(seen.first(), "the subject's own call")?;
+    let delegated_context = some(seen.get(1), "the connector's call")?;
+    assert!(own_context.mutation.is_some());
+    assert_ne!(own_context.mutation, delegated_context.mutation);
+    assert_eq!(delegated_context.attempt, Attempt::First);
+
+    // Each caller still replays its own response.
+    assert_eq!(
+        call(&app, &ports, &alice, "open_proposal", input.clone()).await?,
+        own
+    );
+    assert_eq!(
+        call(&app, &ports, &agent, "open_proposal", input).await?,
+        delegated
+    );
+    assert_eq!(app.call_count("open_proposal")?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_connector_does_not_conflict_with_the_key_of_its_subject() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("open_proposal", proposal())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let agent = connector("alice", vec![Permission::Read, Permission::Propose])?;
+
+    let own = open_proposal_described(KEY_ONE, "written by alice");
+    call(&app, &ports, &alice, "open_proposal", own).await?;
+    // The same subject and key with another body, from another client: its own mutation, not a
+    // reuse of the subject's key.
+    let delegated = open_proposal_described(KEY_ONE, "written by the connector");
+    let opened = call(&app, &ports, &agent, "open_proposal", delegated).await?;
+    assert_eq!(opened.get("status"), Some(&json!("open")));
+    assert_eq!(app.call_count("open_proposal")?, 2);
     Ok(())
 }
 

@@ -105,6 +105,7 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
     let mutation_key = MutationKey {
         tenant_id: context.principal.tenant_id.clone(),
         subject: context.principal.subject.clone(),
+        client_id: context.principal.client_id.clone(),
         operation: context.operation,
         key,
     };

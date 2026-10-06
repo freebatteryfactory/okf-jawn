@@ -127,6 +127,16 @@ pub struct MutationLease {
     pub token: u64,
 }
 
+/// Ledger key. `client_id` is `Principal::client_id`: a connector acting for a subject is a
+/// different caller from the subject and shares neither its stored responses nor its keys.
+pub struct MutationKey {
+    pub tenant_id: TenantId,
+    pub subject: String,
+    pub client_id: Option<String>,
+    pub operation: OperationName,
+    pub key: IdempotencyKey,
+}
+
 pub enum BeginOutcome {
     New(MutationLease),
     Replay(StoredResponse),

@@ -1,4 +1,4 @@
-//! Durable mutation ledger: one write identity per (tenant, subject, operation, key).
+//! Durable mutation ledger: one write identity per (tenant, subject, client, operation, key).
 //!
 //! # Retention
 //! Completed mutations are retained for 7 days; a key reused after that starts a new mutation.
@@ -38,12 +38,18 @@ use sha2::{Digest as ShaDigest, Sha256};
 use crate::ports::PortFuture;
 
 /// Ledger key: one caller can never read another caller's stored response.
+///
+/// Subject and client are separate components: a connector acting for a subject is a
+/// different caller from the subject, so it neither replays the subject's stored response nor
+/// conflicts with the subject's key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MutationKey {
     /// Tenant boundary.
     pub tenant_id: TenantId,
     /// Authenticated subject.
     pub subject: String,
+    /// Client the subject acts through (`Principal::client_id`); `None` for a direct caller.
+    pub client_id: Option<String>,
     /// Canonical operation name.
     pub operation: OperationName,
     /// Caller-chosen retry identity.
