@@ -2,6 +2,7 @@
   "generated_at": "2026-10-05T12:00:00+00:00",
   "generator": "okf-jawn qualification fixture builder + docling-project corpus fetch; scanned_text.pdf and text_image.png are drawn by qualification/docling/lib/ocr-fixture.mjs",
   "license_note": "Self-generated fixtures remain MIT for qualification. Corpus files are copied from docling-project/docling (MIT) at commit 4e650af5.",
+  "kind_note": "Each fixture declares `kind`: what the file is (pdf, image, docx, xlsx or pptx), read from its bytes and not from what a converter reports. qualification/docling/lib/criteria.mjs decides from the declared kind which criteria are judged for the fixture; the format the library reports is itself judged against it (format_recognised).",
   "expect_note": "Each supported fixture declares `expect`: what its content is, written from the fixture itself (its generator, its XML parts, or an independent text extraction named in confirmed_by) and never from converter output. qualification/docling/lib/expect.mjs holds the comparison rules; the receipt records every expectation with whether it was found. An expectation is not loosened to make a run pass.",
   "corpus_source": {
     "repository": "https://github.com/docling-project/docling",
@@ -12,6 +13,7 @@
   "files": {
     "sample_image.png": {
       "role": "image_without_text",
+      "kind": "image",
       "url": "generated://okf-jawn/fixtures/sample_image.png",
       "license": "MIT (generated for qualification; not third-party copyrighted content)",
       "notes": "Minimal valid 120x80 RGB PNG: a blue field with two plain light rectangles and no glyphs. It exercises the image pipeline, not OCR recognition; text_image.png does that.",
@@ -25,6 +27,7 @@
     },
     "text_image.png": {
       "role": "image_with_text",
+      "kind": "image",
       "url": "generated://okf-jawn/fixtures/text_image.png",
       "license": "MIT (generated for qualification; the letterforms are authored in the generator)",
       "notes": "480x160 8-bit greyscale PNG showing two lines of black text on white, PLANT 74 and KEPT LATE, drawn by qualification/docling/lib/ocr-fixture.mjs (bun qualification/docling/make-ocr-fixtures.mjs). The text exists only as pixels.",
@@ -38,6 +41,7 @@
     },
     "sample_with_image.docx": {
       "role": "docx_with_images",
+      "kind": "docx",
       "url": "generated://okf-jawn/fixtures/sample_with_image.docx",
       "license": "MIT (generated for qualification)",
       "notes": "Valid OOXML DOCX zip with word/media/image1.png",
@@ -52,6 +56,7 @@
     },
     "sample_sheet.xlsx": {
       "role": "xlsx",
+      "kind": "xlsx",
       "url": "generated://okf-jawn/fixtures/sample_sheet.xlsx",
       "license": "MIT (generated for qualification)",
       "notes": "Valid OOXML XLSX with shared strings and numeric cells",
@@ -72,6 +77,7 @@
     },
     "born_digital_text.pdf": {
       "role": "born_digital_pdf",
+      "kind": "pdf",
       "url": "generated://okf-jawn/fixtures/born_digital_text.pdf",
       "license": "MIT (generated for qualification)",
       "notes": "Valid PDF-1.4 with Helvetica text operators (text layer)",
@@ -86,6 +92,7 @@
     },
     "scanned_image_only.pdf": {
       "role": "image_only_pdf_without_text",
+      "kind": "pdf",
       "url": "generated://okf-jawn/fixtures/scanned_image_only.pdf",
       "license": "MIT (generated for qualification)",
       "notes": "Image-only PDF with one DeviceRGB XObject and no text operators. The image is a light field with two plain dark bars and no glyphs, so this fixture exercises the image-only page path and the timeout probe, not OCR recognition; scanned_text.pdf does that.",
@@ -99,6 +106,7 @@
     },
     "scanned_text.pdf": {
       "role": "scanned_pdf_with_text",
+      "kind": "pdf",
       "url": "generated://okf-jawn/fixtures/scanned_text.pdf",
       "license": "MIT (generated for qualification; the letterforms are authored in the generator)",
       "notes": "One-page PDF-1.4 whose only content is a 612x792 Flate-compressed DeviceGray image showing two lines of black text on white, WATER METER and TAX YEAR 47, drawn by qualification/docling/lib/ocr-fixture.mjs (bun qualification/docling/make-ocr-fixtures.mjs). No text operators: the text exists only as pixels.",
@@ -112,6 +120,7 @@
     },
     "table_heavy.pdf": {
       "role": "table_heavy_pdf",
+      "kind": "pdf",
       "url": "generated://okf-jawn/fixtures/table_heavy.pdf",
       "license": "MIT (generated for qualification)",
       "notes": "Born-digital PDF with multi-column tabular text + stroked grid",
@@ -132,6 +141,7 @@
     },
     "must_fail_truncated.pdf": {
       "role": "must_fail",
+      "kind": "pdf",
       "url": "generated://okf-jawn/fixtures/must_fail_truncated.pdf",
       "license": "MIT (generated for qualification)",
       "notes": "Valid PDF-1.4 header truncated mid-stream. PASS only when the converter itself refuses it: DocumentConverter::convert returns Err (stage converter_error) or Ok with ConversionStatus::Failure (stage converter_status). A SourceDocument::from_file error (stage source) is FAIL: the fixture never reached the converter. Success or PartialSuccess is FAIL with the finding \"converter accepts truncated PDF\". The fixture is never altered to force a pass. The receipt also states what kind of refusal it was (refusal_kind), computed from the error text.",
@@ -142,6 +152,7 @@
     },
     "corpus/word_sample.docx": {
       "role": "corpus_docx",
+      "kind": "docx",
       "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/docx/word_sample.docx",
       "license": "MIT (docling-project/docling)",
       "source_commit": "4e650af5",
@@ -171,6 +182,7 @@
     },
     "corpus/xlsx_01.xlsx": {
       "role": "corpus_xlsx",
+      "kind": "xlsx",
       "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/xlsx/xlsx_01.xlsx",
       "license": "MIT (docling-project/docling)",
       "source_commit": "4e650af5",
@@ -193,6 +205,7 @@
     },
     "corpus/powerpoint_sample.pptx": {
       "role": "corpus_pptx",
+      "kind": "pptx",
       "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/pptx/powerpoint_sample.pptx",
       "license": "MIT (docling-project/docling)",
       "source_commit": "4e650af5",
@@ -221,6 +234,7 @@
     },
     "corpus/redp5110_sampled.pdf": {
       "role": "corpus_pdf",
+      "kind": "pdf",
       "url": "https://raw.githubusercontent.com/docling-project/docling/4e650af5/tests/data/pdf/redp5110_sampled.pdf",
       "license": "MIT (docling-project/docling; sample content from IBM Redbooks materials used in upstream tests)",
       "source_commit": "4e650af5",
@@ -244,7 +258,9 @@
           ["SYSTEM_USER", "The authorization ID that initiated the connection."]
         ],
         "headings_at_least": 9,
-        "pages": 18
+        "pages": 18,
+        "blank_pages": [17],
+        "blank_pages_confirmed_by": "reading the file: page 17 is object 410, whose /Contents is object 411, an 8-byte FlateDecode stream that inflates to zero bytes, and whose /Resources is << /ProcSet [/PDF] >> with no font and no XObject, so the page paints nothing; xpdf pdftotext 4.06 -f 17 -l 17 prints no character, while pages 16 and 18 print 1779 and 1245 non-space characters"
       }
     }
   }

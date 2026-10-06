@@ -36,9 +36,12 @@ import {
   TIMEOUT_PROBE,
   buildDoclingReceipt,
 } from '../../qualification/docling/lib/receipt.mjs';
-import { inventoryCheck, parseManifest, unverifiedEnvPaths, verifyAssets } from '../../qualification/docling/lib/assets.mjs';
+import { assetsMatched, inventoryCheck, parseManifest, unverifiedEnvPaths, verifyAssets } from '../../qualification/docling/lib/assets.mjs';
 import { buildFacts, classifyRefusal, declaredDoclingFeatures, resolvedFeatures } from '../../qualification/docling/lib/build.mjs';
+import * as doclingCriteria from '../../qualification/docling/lib/criteria.mjs';
+import * as doclingEnvelope from '../../scripts/lib/receipt-envelope.mjs';
 import {
+  PAGE_RENDER_RULE,
   bboxProblem,
   bodyFacts,
   converterOptions,
@@ -47,8 +50,13 @@ import {
   judgeProvenance,
   pngSize,
 } from '../../qualification/docling/lib/document.mjs';
+import { loadEvidence } from '../../qualification/docling/lib/evidence.mjs';
+import { qualify } from '../../qualification/docling/lib/orchestrate.mjs';
+import { distRows, onnxRuntimeRecord, ortBuildMessage, readOnnxRuntime } from '../../qualification/docling/lib/native.mjs';
 import { MATCH_RULES, collapse, judgeContent, rowHasCells, textTokens } from '../../qualification/docling/lib/expect.mjs';
-import { OCR_FIXTURES, decodeFixture, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
+import { OCR_FIXTURES, decodeFixture, encodePng, fixtureWords, renderLines } from '../../qualification/docling/lib/ocr-fixture.mjs';
+import { pngInk } from '../../qualification/docling/lib/png.mjs';
+import { deflateSync } from 'node:zlib';
 import { killProcessTree, spawnGroup, waitForListening } from '../../qualification/mcp-apps/lib/process.mjs';
 import {
   APP_ONLY_TOOLS,
@@ -519,9 +527,13 @@ test('every supported fixture declares what it contains and how that was confirm
     Object.entries(sources.files).filter(([, entry]) => entry.expect?.no_text === true).map(([name]) => name).sort(),
     ['sample_image.png', 'scanned_image_only.pdf'],
   );
+  // A blank page is a declared fact with its confirmation, and only one page of one fixture is blank.
+  const blank = Object.entries(sources.files).filter(([, entry]) => entry.expect?.blank_pages !== undefined);
+  assert.deepEqual(blank.map(([name, entry]) => [name, entry.expect.blank_pages]), [['corpus/redp5110_sampled.pdf', [17]]]);
+  assert.match(blank[0][1].expect.blank_pages_confirmed_by, /inflates to zero bytes.*pdftotext 4\.06 -f 17 -l 17 prints no character/);
 });
 
-const VERIFIED_MODEL = { file: 'layout.onnx', path: 'C:\\models\\layout.onnx', bytes: 10, sha256: 'd'.repeat(64) };
+const VERIFIED_MODEL = { file: 'layout.onnx', path: 'C:\\models\\layout.onnx', bytes: 10, sha256: 'd'.repeat(64), manifest_bytes: 10, manifest_sha256: 'd'.repeat(64) };
 
 const DOCLING_INVENTORY = [
   { stage: 'layout', path: 'C:/models/layout.onnx', found: true, bytes: 10 },
@@ -549,8 +561,22 @@ test('model assets are re-hashed at run time and any missing or changed file sto
   const { manifest, verified } = await verifyAssets(Buffer.from(text));
   assert.equal(manifest.DOCLING_RS_MODELS_DIR, fixture.dir);
   assert.equal(verified.count, 2);
-  assert.equal(verified.all_match, true);
-  assert.equal(verified.hashed_at_run_time, true);
+  // No literal says "all match": the counts come from each file's own hash beside its manifest entry.
+  assert.equal(verified.all_match, undefined);
+  assert.equal(verified.hashed_at_run_time, undefined);
+  assert.equal(verified.matched, 2);
+  assert.deepEqual(verified.unmatched, []);
+  for (const [index, file] of verified.files.entries()) {
+    assert.equal(file.manifest_sha256, fixture.assets[index].sha256);
+    assert.equal(file.manifest_bytes, fixture.assets[index].bytes);
+    assert.equal(file.sha256, createHash('sha256').update(await readFile(file.path)).digest('hex'), 'the recorded hash is the hash of the bytes on disk');
+  }
+  assert.deepEqual(assetsMatched(verified.files), { count: 2, matched: 2, unmatched: [] });
+  const [first, second] = verified.files;
+  assert.deepEqual(assetsMatched([first, { ...second, sha256: '0'.repeat(64) }]), { count: 2, matched: 1, unmatched: ['tableformer/encoder.onnx'] });
+  assert.deepEqual(assetsMatched([{ ...first, bytes: first.bytes + 1 }, second]).unmatched, ['layout.onnx']);
+  assert.deepEqual(assetsMatched([{ file: 'x.onnx', bytes: 1, sha256: 'a'.repeat(64) }]).unmatched, ['x.onnx'], 'a record with no manifest entry beside it matches nothing');
+  assert.deepEqual(assetsMatched(undefined), { count: 0, matched: 0, unmatched: [] });
   assert.equal(verified.manifest_sha256, createHash('sha256').update(Buffer.from(text)).digest('hex'), 'the manifest is hashed as read, BOM included');
   assert.deepEqual(verified.files.map((file) => file.file), ['layout.onnx', 'tableformer/encoder.onnx']);
   assert.equal(verified.files[0].sha256, fixture.assets[0].sha256);
@@ -595,18 +621,25 @@ test('the models the library resolves must be verified files', () => {
 const CONVERTER_DEBUG =
   'DocumentConverter { allowed_formats: None, strict: false, compact_tables: false, no_table_former: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some("en"), artifacts_dir: "C:\\\\t", document_timeout: None }';
 
-/** The first 24 bytes of a PNG of this size: all pngSize reads. */
-function pngHead(width, height) {
-  const head = Buffer.alloc(24);
-  head.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
-  head.writeUInt32BE(width, 16);
-  head.writeUInt32BE(height, 20);
-  return head;
+/** A greyscale PNG of this size: `paper` everywhere, with one dark bar when `ink` is set. */
+function pagePng(width, height, { paper = 255, ink = true } = {}) {
+  const gray = new Uint8Array(width * height).fill(paper);
+  if (ink) gray.fill(0, width * 10, width * 12);
+  return encodePng({ width, height }, gray);
 }
 
-const PAGE_PNG = pngHead(1224, 1584);
+/** What lib/evidence.mjs records for a page image file it re-read. */
+const pageFile = (bytes) => ({ sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length, png: pngSize(bytes), ink: pngInk(bytes) });
+
+const PAGE_PNG = pagePng(1224, 1584);
 
 const PAGE_PNG_SHA = createHash('sha256').update(PAGE_PNG).digest('hex');
+
+/** PAGE_PNG as re-read from disk, decoded once: the receipt stubs share it. */
+const PAGE_FILE = pageFile(PAGE_PNG);
+
+/** An all-white render of the right size: the image the review showed passing. */
+const BLANK_PNG = pagePng(1224, 1584, { ink: false });
 
 const PAGE_IMAGE = { page_no: 1, mimetype: 'image/png', width: 1224, height: 1584, dpi: 144, bytes: PAGE_PNG.length, sha256: PAGE_PNG_SHA, file: 'page-1.png' };
 
@@ -641,14 +674,14 @@ function stubDocument(over = {}) {
 
 test('page renders: one image per page with matching bytes and size, or the criterion fails', () => {
   const pages = [{ page_no: 1, width: 612, height: 792 }];
-  const image = { ...PAGE_IMAGE, file: { sha256: PAGE_PNG_SHA, bytes: PAGE_PNG.length, png: pngSize(PAGE_PNG) } };
+  const image = { ...PAGE_IMAGE, file: pageFile(PAGE_PNG) };
   const judge = (over = {}) =>
     judgePageRenders({ applicable: true, expectedPages: 1, libraryPageCount: { value: 1, error: null }, pages, images: [image], ...over });
 
   const good = judge();
   assert.equal(good.status, 'PASS');
   assert.deepEqual(good.renders, [
-    { page_no: 1, width_px: 1224, height_px: 1584, mimetype: 'image/png', dpi: 144, bytes: 24, sha256: PAGE_PNG_SHA, px_per_page_unit: 2 },
+    { page_no: 1, width_px: 1224, height_px: 1584, mimetype: 'image/png', dpi: 144, bytes: PAGE_PNG.length, sha256: PAGE_PNG_SHA, px_per_page_unit: 2, declared_blank: false, uniform: false, differing_pixels: 2448 },
   ]);
   assert.deepEqual(pngSize(PAGE_PNG), { width: 1224, height: 1584 });
   assert.equal(pngSize(Buffer.from('not a png, but long enough to read')), null);
@@ -675,7 +708,168 @@ test('page renders: one image per page with matching bytes and size, or the crit
   assert.equal(judge({ applicable: false, images: [] }).status, 'not_applicable');
 });
 
-test('provenance: every text item of a paginated fixture needs a page of the document and a box inside it', () => {
+test('page renders: a render that is one flat colour fails unless the fixture declares that page blank', () => {
+  const pages = [{ page_no: 1, width: 612, height: 792 }, { page_no: 2, width: 612, height: 792 }];
+  const shown = (page_no, bytes) => ({ ...PAGE_IMAGE, page_no, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), file: pageFile(bytes) });
+  const judge = (images, blankPages = []) =>
+    judgePageRenders({ applicable: true, expectedPages: 2, libraryPageCount: { value: 2, error: null }, pages, images, blankPages });
+
+  // The right size, the right hash, a valid PNG, and nothing on it.
+  assert.deepEqual(pngSize(BLANK_PNG), { width: 1224, height: 1584 });
+  const flat = judge([shown(1, PAGE_PNG), shown(2, BLANK_PNG)]);
+  assert.equal(flat.status, 'FAIL');
+  assert.deepEqual(flat.problems, ['page 2: the render is one flat colour (sample bytes 255) and SOURCES.json does not declare this page blank']);
+  assert.equal(flat.renders[1].uniform, true);
+  assert.equal(flat.renders[1].differing_pixels, 0);
+
+  // The same render passes when the fixture says the page is blank, and the rule says so.
+  const declared = judge([shown(1, PAGE_PNG), shown(2, BLANK_PNG)], [2]);
+  assert.equal(declared.status, 'PASS');
+  assert.equal(declared.renders[1].declared_blank, true);
+  assert.deepEqual(declared.blank_pages, [2]);
+  assert.match(declared.rule, /single flat colour fails unless SOURCES\.json declares that page blank/);
+  assert.match(declared.rule, /declared blank must render flat/);
+
+  // A declaration is an expectation, not a waiver.
+  assert.match(judge([shown(1, PAGE_PNG), shown(2, PAGE_PNG)], [2]).problems.join('; '), /page 2: declared blank in SOURCES\.json but 2448 of 1938816 pixel\(s\) differ from the first/);
+  assert.match(judge([shown(1, PAGE_PNG), shown(2, PAGE_PNG)], [3]).problems.join('; '), /blank page 3 is declared in SOURCES\.json and is not a page of the document/);
+
+  // Pixels that cannot be read are not judged; they are never taken for ink.
+  const unread = judge([shown(1, PAGE_PNG), { ...shown(2, PAGE_PNG), file: { ...pageFile(PAGE_PNG), ink: { decoded: false, reason: 'bit depth 1' } } }]);
+  assert.equal(unread.status, 'not_judged');
+  assert.deepEqual(unread.undecoded, ['page 2: the pixels could not be read (bit depth 1)']);
+  assert.equal(judge([shown(1, PAGE_PNG), { ...shown(2, PAGE_PNG), mimetype: 'image/jpeg' }]).status, 'not_judged');
+  assert.equal(judge([shown(1, BLANK_PNG), { ...shown(2, PAGE_PNG), mimetype: 'image/jpeg' }]).status, 'FAIL', 'a flat page fails whatever else could not be read');
+});
+
+test('evidence is what is on disk: every file a converter process wrote is re-read and re-hashed', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'okf-docling-evidence-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  const markdown = Buffer.from('## Title\n\nHello world\n');
+  const json = Buffer.from(JSON.stringify(stubDocument()));
+  const written = {
+    markdown_file: 'document.md',
+    markdown_sha256: sha(markdown),
+    json_file: 'document.json',
+    json_sha256: sha(json),
+    page_images: [{ ...PAGE_IMAGE, file: 'page-1.png' }],
+  };
+  const write = async (over = {}) => {
+    const files = { 'document.md': markdown, 'document.json': json, 'page-1.png': PAGE_PNG, ...over };
+    for (const [name, bytes] of Object.entries(files)) {
+      if (bytes === null) await rm(join(dir, name), { force: true });
+      else await writeFile(join(dir, name), bytes);
+    }
+  };
+
+  await write();
+  const good = await loadEvidence(dir, written);
+  assert.deepEqual(good.problems, []);
+  assert.equal(good.markdown, markdown.toString('utf8'));
+  assert.deepEqual(good.document, stubDocument());
+  assert.deepEqual(good.pageFiles, { 'page-1.png': pageFile(PAGE_PNG) });
+  assert.equal(good.pageFiles['page-1.png'].ink.uniform, false, 'the pixels of the file on disk are read');
+
+  // The bytes on disk changed after the process recorded their hash.
+  await write({ 'document.md': Buffer.from('## Title\n\nGoodbye\n') });
+  assert.deepEqual((await loadEvidence(dir, written)).problems, ['document.md: hash on disk differs from the receipt']);
+  await write({ 'document.json': Buffer.from(JSON.stringify(stubDocument({ texts: [] }))) });
+  assert.deepEqual((await loadEvidence(dir, written)).problems, ['document.json: hash on disk differs from the receipt']);
+  await write({ 'page-1.png': BLANK_PNG });
+  const swapped = await loadEvidence(dir, written);
+  assert.deepEqual(swapped.problems, ['page-1.png: hash on disk differs from the receipt']);
+  assert.equal(swapped.pageFiles['page-1.png'].sha256, sha(BLANK_PNG), 'what is recorded is the file as found');
+
+  // A file that is not there, or not what its name says.
+  await write({ 'document.md': null, 'page-1.png': null });
+  const missing = await loadEvidence(dir, written);
+  assert.equal(missing.markdown, null);
+  assert.equal(missing.pageFiles['page-1.png'], null);
+  assert.equal(missing.problems.length, 2);
+  assert.match(missing.problems[0], /^document\.md: .*ENOENT/);
+  assert.match(missing.problems[1], /^page-1\.png: .*ENOENT/);
+  const notJson = Buffer.from('{ not json');
+  await write({ 'document.json': notJson });
+  const broken = await loadEvidence(dir, { ...written, json_sha256: sha(notJson) });
+  assert.equal(broken.document, null);
+  assert.match(broken.problems.join(' | '), /document\.json: not JSON/);
+
+  // A process that returned no document wrote nothing to read.
+  assert.deepEqual(await loadEvidence(dir, null), { markdown: null, document: null, pageFiles: {}, problems: [] });
+});
+
+/** One PNG row filtered the way an encoder would write it (PNG specification, filter types 0 to 4). */
+function filterRow(type, row, previous, step) {
+  const paeth = (a, b, c) => {
+    const p = a + b - c;
+    const [pa, pb, pc] = [Math.abs(p - a), Math.abs(p - b), Math.abs(p - c)];
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+  };
+  return Uint8Array.from(row, (value, i) => {
+    const left = i >= step ? row[i - step] : 0;
+    const up = previous ? previous[i] : 0;
+    const upLeft = previous && i >= step ? previous[i - step] : 0;
+    return [value, value - left, value - up, value - ((left + up) >> 1), value - paeth(left, up, upLeft)][type] & 0xff;
+  });
+}
+
+/** A PNG whose rows all use one filter type. Chunk checksums are zero: the reader under test does not check them. */
+function filteredPng({ width, height, colourType, depth = 8, interlace = 0 }, pixels, type) {
+  const step = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colourType] * (depth / 8);
+  const stride = width * step;
+  const rows = [];
+  for (let y = 0; y < height; y += 1) {
+    const row = pixels.subarray(y * stride, (y + 1) * stride);
+    rows.push(Buffer.from([type]), Buffer.from(filterRow(type, row, y > 0 ? pixels.subarray((y - 1) * stride, y * stride) : null, step)));
+  }
+  const chunk = (tag, data) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(data.length);
+    head.write(tag, 4, 'latin1');
+    return Buffer.concat([head, data, Buffer.alloc(4)]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header.set([depth, colourType, 0, 0, interlace], 8);
+  const data = deflateSync(Buffer.concat(rows));
+  // Two IDAT chunks: the image data of a real file is often split.
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', header), chunk('IDAT', data.subarray(0, 5)), chunk('IDAT', data.subarray(5)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+test('the PNG reader undoes every row filter before it calls an image flat or inked', async () => {
+  const shape = { width: 5, height: 4, colourType: 2 };
+  const flat = new Uint8Array(5 * 4 * 3);
+  for (let i = 0; i < flat.length; i += 3) flat.set([200, 120, 40], i);
+  const dotted = Uint8Array.from(flat);
+  dotted.set([200, 121, 40], (2 * 5 + 3) * 3);
+  for (const type of [0, 1, 2, 3, 4]) {
+    // A flat image written with a filter has rows of unequal bytes: only the unfiltered pixels are flat.
+    assert.deepEqual(pngInk(filteredPng(shape, flat, type)), { decoded: true, width: 5, height: 4, pixels: 20, differing_pixels: 0, uniform: true, first_pixel: [200, 120, 40] }, `filter ${type}`);
+    const inked = pngInk(filteredPng(shape, dotted, type));
+    assert.equal(inked.uniform, false, `filter ${type}`);
+    assert.equal(inked.differing_pixels, 1, `filter ${type}: one pixel differs by one sample`);
+  }
+  assert.equal(pngInk(filteredPng({ width: 2, height: 2, colourType: 6 }, new Uint8Array(16).fill(9), 4)).uniform, true);
+  assert.equal(pngInk(filteredPng({ width: 2, height: 2, colourType: 0, depth: 16 }, Uint8Array.from([1, 2, 1, 2, 1, 2, 1, 3]), 1)).differing_pixels, 1, '16-bit samples are compared whole');
+
+  assert.deepEqual(pngInk(Buffer.from('not a png at all')), { decoded: false, reason: 'the bytes do not start with the PNG signature' });
+  assert.match(pngInk(filteredPng({ width: 2, height: 2, colourType: 3 }, new Uint8Array(4), 0)).reason, /colour type 3.*not a format this reader decodes/);
+  assert.match(pngInk(filteredPng({ width: 2, height: 2, colourType: 2, interlace: 1 }, new Uint8Array(12), 0)).reason, /interlace 1/);
+  assert.equal(pngInk(filteredPng({ width: 3, height: 2, colourType: 2 }, new Uint8Array(18), 0).subarray(0, 50)).reason, 'image data does not inflate: unexpected end of file');
+  assert.equal(pngInk(PAGE_PNG.subarray(0, 60)).reason, 'chunk IDAT is cut short');
+  assert.match(pngInk(filteredPng({ width: 3, height: 2, colourType: 2 }, new Uint8Array(12), 0)).reason, /image data is 14 bytes; 3x2 at 3 byte\(s\) per pixel needs 20/);
+  assert.equal(pngInk(null).decoded, false);
+
+  // The committed OCR fixture is a real file with strokes on it; an all-white page is not.
+  const fixture = pngInk(await readFile(join(root, 'tests/fixtures/documents/text_image.png')));
+  assert.equal(fixture.uniform, false);
+  assert.ok(fixture.differing_pixels > 1000);
+  assert.equal(pngInk(BLANK_PNG).uniform, true);
+});
+
+test('provenance: every text item, table and picture of a paginated fixture needs a page of the document and a box inside it', () => {
   const judge = (over, paginated = true) => judgeProvenance(describeDocument(stubDocument(over)), { paginated });
   const good = judge();
   assert.equal(good.status, 'PASS');
@@ -713,7 +907,28 @@ test('provenance: every text item of a paginated fixture needs a page of the doc
   assert.equal(mixed.status, 'FAIL');
   assert.deepEqual(mixed.text_items.invalid, [{ ref: '#/texts/2', label: 'text', problem: 'no provenance' }]);
 
-  assert.equal(judge({ texts: [] }).status, 'not_exercised');
+  // Tables and pictures decide the status exactly as text items do (review note N3).
+  const lostTable = judge({ tables: stubDocument().tables.map((table) => ({ ...table, prov: [] })) });
+  assert.equal(lostTable.status, 'FAIL', 'a table with empty prov fails although every text item is located');
+  assert.deepEqual(lostTable.text_items.invalid, []);
+  assert.deepEqual(lostTable.tables.invalid, [{ ref: '#/tables/0', label: 'table', problem: 'no provenance' }]);
+  assert.deepEqual(lostTable.items, { total: 3, located: 2 });
+  const picture = (provValue) => ({ pictures: [{ self_ref: '#/pictures/0', label: 'picture', prov: provValue }] });
+  assert.equal(judge(picture(prov(BOX))).status, 'PASS');
+  assert.deepEqual(judge(picture(prov(BOX))).items, { total: 4, located: 4 });
+  const lostPicture = judge(picture(prov({ l: 0, t: 0, r: 0, b: 0 })));
+  assert.equal(lostPicture.status, 'FAIL');
+  assert.deepEqual(lostPicture.pictures.invalid, [{ ref: '#/pictures/0', label: 'picture', problem: 'bbox has no area' }]);
+  assert.match(good.rule, /every text item, table and picture has provenance/);
+  assert.doesNotMatch(good.rule, /do not decide/);
+
+  // A document without text is still judged by what it does hold; only an empty one is not.
+  assert.equal(judge({ texts: [] }).status, 'PASS');
+  assert.equal(judge({ texts: [], tables: [], ...picture(prov(BOX)) }).status, 'PASS');
+  assert.equal(judge({ texts: [], tables: [], ...picture([]) }).status, 'FAIL');
+  const empty = judge({ texts: [], tables: [] });
+  assert.equal(empty.status, 'not_exercised');
+  assert.equal(empty.reason, 'the converted document holds no text item, table or picture');
   const office = judge({ pages: {}, texts: [{ self_ref: '#/texts/0', label: 'text', text: 'x', prov: [] }], tables: [], groups: [{ label: 'sheet', name: 'Sheet1' }] }, false);
   assert.equal(office.status, 'recorded_not_judged');
   assert.equal(office.locator, 'none');
@@ -835,18 +1050,21 @@ const DOCLING_BUILD = buildFacts({
   command: 'cargo build --locked --release -p okf-qualify-docling',
 });
 
-const DOCLING_ASSETS = { count: 1, all_match: true, manifest_sha256: 'e'.repeat(64), hashed_at_run_time: true, files: [VERIFIED_MODEL] };
-
-const STUB_SOURCE = (paginated) => ({
-  role: 'stub',
-  expect: { confirmed_by: 'test stub', markdown_contains: ['Hello world'], tables: 1, ...(paginated ? { pages: 1 } : {}) },
-});
+const DOCLING_ASSETS = { ...assetsMatched([VERIFIED_MODEL]), manifest_sha256: 'e'.repeat(64), bytes_total: 10, files: [VERIFIED_MODEL] };
 
 const isPaginated = (only) => /\.(pdf|png)$/.test(only);
 
+const STUB_KIND = (only) => ({ pdf: 'pdf', png: 'image', docx: 'docx', xlsx: 'xlsx', pptx: 'pptx' })[only.split('.').pop()];
+
+const STUB_SOURCE = (only) => ({
+  role: 'stub',
+  kind: STUB_KIND(only),
+  expect: { confirmed_by: 'test stub', markdown_contains: ['Hello world'], tables: 1, ...(isPaginated(only) ? { pages: 1 } : {}) },
+});
+
 const DOCLING_SOURCES = {
   files: Object.fromEntries(
-    FIXTURE_RUNS.filter((only) => only !== TIMEOUT_PROBE && only !== MUST_FAIL).map((only) => [only, STUB_SOURCE(isPaginated(only))]),
+    FIXTURE_RUNS.filter((only) => only !== TIMEOUT_PROBE).map((only) => [only, only === MUST_FAIL ? { role: 'must_fail', kind: 'pdf' } : STUB_SOURCE(only)]),
   ),
 };
 
@@ -868,18 +1086,25 @@ function doclingRun(only, over = {}) {
         ? [{ component_type: 'converter', module_name: 'DocumentConverter::convert', error_message: NO_FALLBACK_ERROR }]
         : [],
     settings: { converter_debug: CONVERTER_DEBUG },
-    document: supported
-      ? { markdown_file: 'document.md', json_file: 'document.json', page_images: paginated ? [PAGE_IMAGE] : [] }
-      : null,
+    // The probe converts the bytes of scanned_image_only.pdf, as the Rust harness does.
+    sha256_before: createHash('sha256').update(only === TIMEOUT_PROBE ? 'scanned_image_only.pdf' : only).digest('hex'),
+    document:
+      only === MUST_FAIL
+        ? null
+        : { markdown_file: 'document.md', json_file: 'document.json', page_images: supported && paginated ? [PAGE_IMAGE] : [] },
     ...over.fixture,
   };
-  const evidence = {
-    markdown: '## Title\n\nHello   world\n',
-    document: stubDocument(paginated ? {} : { pages: {}, texts: stubDocument().texts.map((item) => ({ ...item, prov: [] })), tables: stubDocument().tables.map((item) => ({ ...item, prov: [] })) }),
-    pageFiles: { 'page-1.png': { sha256: PAGE_PNG_SHA, bytes: PAGE_PNG.length, png: pngSize(PAGE_PNG) } },
-    problems: [],
-    ...over.evidence,
-  };
+  // The spent budget of the real run returned an empty document: no page, no item.
+  const evidence =
+    only === TIMEOUT_PROBE
+      ? { markdown: '', document: { pages: {}, texts: [], tables: [], pictures: [], groups: [] }, pageFiles: {}, problems: [], ...over.evidence }
+      : {
+          markdown: '## Title\n\nHello   world\n',
+          document: stubDocument(paginated ? {} : { pages: {}, texts: stubDocument().texts.map((item) => ({ ...item, prov: [] })), tables: stubDocument().tables.map((item) => ({ ...item, prov: [] })) }),
+          pageFiles: { 'page-1.png': PAGE_FILE },
+          problems: [],
+          ...over.evidence,
+        };
   return {
     only,
     run: {
@@ -900,7 +1125,7 @@ function doclingRun(only, over = {}) {
         : only === TIMEOUT_PROBE
           ? { model_inventory: DOCLING_INVENTORY, receipts: [], timeout_case: fixture }
           : { model_inventory: DOCLING_INVENTORY, receipts: [fixture], timeout_case: null },
-    evidence: supported ? evidence : undefined,
+    evidence: 'evidence' in over && over.evidence === undefined ? undefined : only === MUST_FAIL ? undefined : evidence,
   };
 }
 
@@ -924,25 +1149,119 @@ function doclingReceipt(overrides = {}, parts = {}) {
 
 const entryOf = (receipt, only) => receipt.receipts.find((item) => item.only === only);
 
-test('a Docling receipt carries the shared header at its top level and passes when every rule holds', () => {
+const doclingCriterion = (receipt, id) => receipt.criteria.find((item) => item.id === id);
+
+const doclingFailedIds = (receipt) => receipt.criteria.filter((item) => item.result === 'fail').map((item) => item.id);
+
+/** The envelope can be trusted: the result is the shared fold and every pinned criterion is there. */
+function assertDoclingEnvelope(receipt, sources = DOCLING_SOURCES) {
+  assert.deepEqual(doclingEnvelope.envelopeFailures(receipt, doclingCriteria.GATE, doclingCriteria.requiredIds(sources)), []);
+  assert.equal(receipt.result, doclingEnvelope.foldCriteria(receipt.criteria, receipt.harness_error));
+  assert.deepEqual(receipt.not_judged, receipt.criteria.filter((item) => item.result === 'not_judged' || item.result === 'not_applicable').map((item) => item.id));
+  assert.deepEqual(Object.keys(receipt.not_judged_reasons), receipt.not_judged);
+  for (const item of receipt.criteria) {
+    if (item.result !== 'pass') assert.ok(typeof item.detail === 'string' && item.detail.length > 10, `${item.id} is ${item.result} without a reason`);
+  }
+}
+
+test('a Docling receipt carries the shared header and envelope, and passes when every rule holds', () => {
   const receipt = doclingReceipt();
   assert.deepEqual(receiptHeaderProblems(receipt), []);
-  assert.deepEqual(Object.keys(receipt).slice(0, 3), ['git_sha', 'inputs', 'produced_at']);
+  assert.deepEqual(Object.keys(receipt).slice(0, 9), ['git_sha', 'inputs', 'produced_at', 'gate', 'result', 'harness_error', 'not_judged', 'not_judged_reasons', 'criteria']);
+  assert.equal(receipt.gate, 'docling-library-qualification');
+  assert.equal(receipt.gate, doclingCriteria.GATE);
+  assert.equal(receipt.result, 'PASS');
+  assert.equal(receipt.harness_error, null);
+  assertDoclingEnvelope(receipt);
+  assert.deepEqual(receipt.criteria.map(({ id, required }) => ({ id, required })), doclingCriteria.expectedCriteria(DOCLING_SOURCES));
   assert.equal(receipt.orchestrator, undefined);
   assert.deepEqual(receipt.failures, []);
-  assert.equal(receipt.result, 'PASS');
   assert.equal(receipt.receipts.length, FIXTURE_RUNS.length - 1);
   assert.equal(receipt.timeout_case.outcome, 'PASS');
   assert.deepEqual(Object.keys(receipt.summary), FIXTURE_RUNS);
-  assert.deepEqual(Object.keys(receipt.criteria_summary), ['conversion', 'content', 'page_renders', 'provenance', 'memory_measured', 'refusal']);
+  assert.deepEqual([...new Set(Object.values(receipt.summary))], ['PASS']);
+  assert.deepEqual(Object.keys(receipt.criteria_summary), ['conversion', 'evidence', 'format_recognised', 'content', 'page_renders', 'provenance', 'memory_measured', 'refused', 'refusal_attributed', 'timeout_reported', 'budget_had_effect']);
   const pdf = entryOf(receipt, 'born_digital_text.pdf');
-  assert.deepEqual(Object.keys(pdf.criteria), ['conversion', 'content', 'page_renders', 'provenance', 'memory_measured']);
+  assert.deepEqual(Object.keys(pdf.criteria), ['conversion', 'evidence', 'format_recognised', 'content', 'page_renders', 'provenance', 'memory_measured']);
+  assert.deepEqual([...new Set(Object.values(pdf.criteria).map((item) => item.result))], ['pass']);
+  assert.equal(pdf.criteria.page_renders.status, undefined, 'a criterion carries one verdict word: its result');
+  assert.equal(pdf.outcome, 'PASS');
   assert.equal(pdf.page_image_count, 1);
   assert.deepEqual(pdf.page_provenance, [{ page_no: 1, text_items: 2, tables: 1, pictures: 0, has_image: true }]);
   assert.equal(pdf.role, 'stub');
+  // Every criterion states what it asserts, in the receipt.
+  for (const { id } of doclingCriteria.expectedCriteria(DOCLING_SOURCES)) {
+    const rule = receipt.criterion_rules[id] ?? receipt.criterion_rules[id.split('/').pop()];
+    assert.ok(typeof rule === 'string' && rule.length > 40, `${id} has no rule sentence`);
+  }
+  assert.match(receipt.match_rules.markdown_contains, /every run of whitespace is collapsed to one space/);
 });
 
-test('memory is a measurement with no limit applied, and an unmeasured fixture fails memory_measured', () => {
+test('the result of a Docling receipt is the shared fold of its criteria, and nothing else decides it', async () => {
+  const scenarios = {
+    PASS: doclingReceipt(),
+    FAIL: doclingReceipt({ 'corpus/word_sample.docx': { evidence: { markdown: '## Title\n\nGoodbye\n' } } }),
+    INCOMPLETE: doclingReceipt({ 'table_heavy.pdf': { report: null, run: { exitCode: 1 } } }),
+  };
+  for (const [expected, receipt] of Object.entries(scenarios)) {
+    assert.equal(receipt.result, expected);
+    assertDoclingEnvelope(receipt);
+    // A fixture's label and the summary are the same fold over that fixture's own criteria.
+    for (const only of FIXTURE_RUNS) {
+      const own = receipt.criteria.filter((item) => item.id.startsWith(`${only}/`));
+      const entry = only === TIMEOUT_PROBE ? receipt.timeout_case : entryOf(receipt, only);
+      const stopped = Object.values(entry.criteria).find((item) => item.harness_error)?.harness_error ?? null;
+      assert.equal(receipt.summary[only], doclingEnvelope.foldCriteria(own, stopped), only);
+      assert.equal(entry.outcome, receipt.summary[only], only);
+      for (const item of own) assert.equal(receipt.criteria_summary[item.id.slice(only.length + 1)][only], item.result, item.id);
+    }
+  }
+  // A result typed over the criteria is caught by the shared check.
+  assert.deepEqual(doclingEnvelope.envelopeFailures({ ...scenarios.FAIL, result: 'PASS' }, doclingCriteria.GATE, doclingCriteria.requiredIds(DOCLING_SOURCES)), ['result is PASS but its criteria fold to FAIL']);
+  // No harness file writes a result word of its own; only criteria.mjs calls the fold.
+  for (const file of ['run.mjs', 'lib/receipt.mjs', 'lib/criteria.mjs', 'lib/document.mjs', 'lib/expect.mjs', 'lib/assets.mjs']) {
+    const source = await readFile(join(root, 'qualification/docling', file), 'utf8');
+    assert.doesNotMatch(source, /\bresult\s*[:=]\s*[^;\n]*['"`](PASS|FAIL|INCOMPLETE)['"`]/, `${file} types a result`);
+    assert.equal(/foldCriteria\(/.test(source), file === 'lib/criteria.mjs', `${file}: only criteria.mjs folds`);
+  }
+  assert.deepEqual(doclingCriteria.EXIT_CODES, { PASS: 0, FAIL: 2, INCOMPLETE: 3 });
+  assert.deepEqual(['PASS', 'FAIL', 'INCOMPLETE', 'anything else'].map(doclingCriteria.exitCodeFor), [0, 2, 3, 3]);
+});
+
+test('criteria.json lists exactly the criteria the Docling harness can emit as required', async () => {
+  const sources = JSON.parse(await readFile(join(root, 'tests/fixtures/documents/SOURCES.json'), 'utf8'));
+  const tracked = JSON.parse(await readFile(join(root, 'qualification/docling/criteria.json'), 'utf8'));
+  assert.deepEqual(Object.keys(tracked), ['gate', 'required']);
+  assert.equal(tracked.gate, doclingCriteria.GATE);
+  // Derived from SOURCES.json and the run-level list, without converting anything.
+  assert.deepEqual(tracked.required, doclingCriteria.requiredIds(sources));
+  assert.deepEqual(tracked.required, [...tracked.required].sort());
+  const emitted = doclingCriteria.expectedCriteria(sources);
+  assert.equal(new Set(emitted.map((item) => item.id)).size, emitted.length, 'every id is emitted once');
+  for (const { id } of emitted) assert.match(id, /^\S+\/[a-z_]+$/, id);
+  assert.deepEqual(emitted.slice(0, 2), [{ id: 'assets/hashes_match', required: true }, { id: 'assets/model_inventory', required: true }]);
+  // The only criteria not required are measurements recorded without a verdict.
+  assert.deepEqual(emitted.filter((item) => !item.required).map((item) => item.id), ['sample_sheet.xlsx/provenance', 'corpus/xlsx_01.xlsx/provenance', 'corpus/powerpoint_sample.pptx/provenance']);
+
+  // The receipt emits every one of them even when nothing ran, so none can go missing unseen.
+  const nothing = buildDoclingReceipt({ header: DOCLING_HEADER, platform: 'win32', sources, runs: [], scope: { mode: 'all' }, paths: {}, finishedAt: 'x' });
+  assert.deepEqual(nothing.criteria.map(({ id, required }) => ({ id, required })), emitted);
+  assert.deepEqual(doclingEnvelope.envelopeFailures(nothing, tracked.gate, tracked.required), []);
+  assert.equal(nothing.result, 'INCOMPLETE');
+  const dropped = { ...nothing, criteria: nothing.criteria.filter((item) => item.id !== 'corpus/redp5110_sampled.pdf/provenance') };
+  assert.deepEqual(doclingEnvelope.envelopeFailures(dropped, tracked.gate, tracked.required), ['pinned criterion corpus/redp5110_sampled.pdf/provenance is missing']);
+
+  // What is judged follows the declared kind, and the declared kind is what the bytes are.
+  const magic = { pdf: /^%PDF-1\.\d/, image: /^\x89PNG\r\n\x1a\n/, docx: /^PK[\s\S]*word\/document\.xml/, xlsx: /^PK[\s\S]*xl\/workbook\.xml/, pptx: /^PK[\s\S]*ppt\/presentation\.xml/ };
+  for (const [name, entry] of Object.entries(sources.files)) {
+    assert.ok(Object.hasOwn(doclingCriteria.KINDS, entry.kind), `${name} declares kind ${entry.kind}`);
+    assert.match((await readFile(join(root, 'tests/fixtures/documents', name))).toString('latin1'), magic[entry.kind], `${name} is not a ${entry.kind} file`);
+  }
+  assert.throws(() => doclingCriteria.fixtureAspects('x.pdf', { role: 'stub' }), /x\.pdf must declare kind as one of pdf, image, docx, xlsx, pptx; found null/);
+  assert.deepEqual(doclingCriteria.fixtureAspects('a.docx', { kind: 'docx' }).find((item) => item.aspect === 'provenance'), { aspect: 'provenance', required: true });
+});
+
+test('memory is a measurement with no limit applied, and a peak that could not be read is a harness error', () => {
   const measured = doclingReceipt();
   assert.deepEqual(measured.memory.limit_bytes, null);
   assert.equal(measured.memory.limit_applied, false);
@@ -963,11 +1282,14 @@ test('memory is a measurement with no limit applied, and an unmeasured fixture f
   const entry = entryOf(receipt, 'sample_sheet.xlsx');
   assert.equal(entry.memory.peak_rss_bytes, null);
   assert.equal(entry.memory.peak_rss_note, 'Get-Process reported no PeakWorkingSet64');
-  assert.equal(entry.criteria.memory_measured.status, 'FAIL');
+  assert.equal(entry.criteria.memory_measured.result, 'not_judged');
   assert.equal(entry.conversion_outcome, 'PASS');
-  assert.equal(entry.outcome, 'FAIL_memory_measured');
-  assert.equal(receipt.criteria_summary.memory_measured['sample_sheet.xlsx'], 'FAIL');
-  assert.equal(receipt.result, 'FAIL');
+  assert.equal(entry.outcome, 'INCOMPLETE');
+  assert.equal(receipt.criteria_summary.memory_measured['sample_sheet.xlsx'], 'not_judged');
+  assert.equal(receipt.harness_error, 'the peak memory of the converter process for sample_sheet.xlsx was not measured: Get-Process reported no PeakWorkingSet64');
+  assert.deepEqual(doclingFailedIds(receipt), [], 'a sampler that did not answer says nothing about the library');
+  assert.equal(receipt.result, 'INCOMPLETE');
+  assertDoclingEnvelope(receipt);
 });
 
 test('a truncated PDF the converter accepts is a finding and a FAIL, recorded as observed', () => {
@@ -983,25 +1305,36 @@ test('a truncated PDF the converter accepts is a finding and a FAIL, recorded as
     },
   });
   assert.equal(receipt.finding, 'converter accepts truncated PDF');
-  assert.equal(receipt.summary[MUST_FAIL], 'FAIL_expected_failure');
+  assert.equal(receipt.summary[MUST_FAIL], 'FAIL');
+  assert.deepEqual(doclingFailedIds(receipt), [`${MUST_FAIL}/refused`]);
+  assert.equal(doclingCriterion(receipt, `${MUST_FAIL}/refused`).detail, 'the converter did not refuse the truncated input: FAIL_expected_failure (converter accepts truncated PDF)');
+  assert.equal(doclingCriterion(receipt, `${MUST_FAIL}/refusal_attributed`).result, 'not_judged');
   assert.equal(entryOf(receipt, MUST_FAIL).refusal, undefined, 'an accepted input has no refusal to classify');
   assert.equal(receipt.result, 'FAIL');
+  assertDoclingEnvelope(receipt);
 });
 
 test('a refusal counts only when another PDF converted in the same run', () => {
   const pdfs = FIXTURE_RUNS.filter((only) => only.endsWith('.pdf') && only !== MUST_FAIL);
   const overrides = Object.fromEntries(
-    pdfs.map((only) => [only, { fixture: { outcome: 'FAIL_converter_error', stage: 'converter_error', status: null } }]),
+    pdfs.map((only) => [only, { fixture: { outcome: 'FAIL_converter_error', stage: 'converter_error', status: null, document: null } }]),
   );
   const receipt = doclingReceipt(overrides);
-  assert.equal(receipt.summary[MUST_FAIL], 'FAIL_refusal_unproven');
-  assert.match(entryOf(receipt, MUST_FAIL).refusal_note, /no other PDF fixture converted/);
-  assert.equal(receipt.criteria_summary.refusal[MUST_FAIL], 'FAIL');
+  const attributed = doclingCriterion(receipt, `${MUST_FAIL}/refusal_attributed`);
+  assert.equal(attributed.result, 'not_judged');
+  assert.match(attributed.detail, /no other PDF fixture converted successfully in this run/);
+  assert.equal(doclingCriterion(receipt, `${MUST_FAIL}/refused`).result, 'pass');
+  assert.equal(receipt.summary[MUST_FAIL], 'INCOMPLETE', 'an unattributed refusal is not a pass');
+  assert.deepEqual(entryOf(receipt, MUST_FAIL).refusal.other_pdfs_converted, []);
+  assert.deepEqual(doclingFailedIds(receipt), pdfs.map((only) => `${only}/conversion`));
   assert.equal(receipt.result, 'FAIL');
 
   const counted = entryOf(doclingReceipt(), MUST_FAIL);
-  assert.equal(counted.criteria.refusal.status, 'PASS');
+  assert.equal(counted.criteria.refusal_attributed.result, 'pass');
   assert.deepEqual(counted.refusal.other_pdfs_converted, pdfs);
+  // A PDF whose process failed did not convert either.
+  const crashed = doclingReceipt(Object.fromEntries(pdfs.map((only) => [only, { run: { exitCode: 1 } }])));
+  assert.equal(doclingCriterion(crashed, `${MUST_FAIL}/refusal_attributed`).result, 'not_judged');
 });
 
 test('the must-fail receipt says what kind of refusal it was, from the error text and the build', () => {
@@ -1024,64 +1357,488 @@ test('the must-fail receipt says what kind of refusal it was, from the error tex
 
   // The text says "no pdfium" while cargo resolved pdfium: the classification cannot stand.
   const contradicted = doclingReceipt({}, { build: { ...DOCLING_BUILD, pdfium_compiled_in: true } });
-  assert.equal(contradicted.summary[MUST_FAIL], 'FAIL_refusal');
+  assert.deepEqual(doclingFailedIds(contradicted), [`${MUST_FAIL}/refusal_attributed`]);
+  assert.match(doclingCriterion(contradicted, `${MUST_FAIL}/refusal_attributed`).detail, /cargo did not resolve this build without pdfium/);
+  assert.equal(contradicted.summary[MUST_FAIL], 'FAIL');
   assert.equal(contradicted.result, 'FAIL');
 });
 
-test('a fixture process that wrote no receipt, or never ran, is a harness FAIL', () => {
-  const crashed = doclingReceipt({
-    'table_heavy.pdf': { report: null, run: { exitCode: 1, stderr: 'okf-qualify-docling: missing fixture' } },
+test('a converter process that failed, or a fixture that never ran, is INCOMPLETE with a harness error and no library verdict', () => {
+  const stoppedBy = (over, sentence) => {
+    const receipt = doclingReceipt({ 'table_heavy.pdf': over });
+    const entry = entryOf(receipt, 'table_heavy.pdf');
+    assert.equal(entry.outcome, 'INCOMPLETE', sentence);
+    assert.equal(receipt.summary['table_heavy.pdf'], 'INCOMPLETE');
+    assert.deepEqual([...new Set(Object.values(entry.criteria).map((item) => item.result))], ['not_judged'], 'nothing is judged from a process that failed');
+    assert.equal(receipt.harness_error, sentence);
+    assert.deepEqual(doclingFailedIds(receipt), [], 'an environment failure is never a fail');
+    assert.equal(receipt.result, 'INCOMPLETE');
+    assert.deepEqual(receipt.failures, [{ fixture: 'table_heavy.pdf', criterion: null, result: 'not_judged', detail: sentence }], 'a fixture whose process failed has one entry of its own');
+    assertDoclingEnvelope(receipt);
+    return entry;
+  };
+  const crashed = stoppedBy(
+    { report: null, run: { exitCode: 1, stderr: 'okf-qualify-docling: missing fixture\n' } },
+    'the converter process for table_heavy.pdf exited 1: okf-qualify-docling: missing fixture',
+  );
+  assert.equal(crashed.harness_exit_code, 1);
+  assert.match(crashed.harness_stderr, /missing fixture/);
+  // A non-zero exit is not trusted although a receipt is on disk (the review's surviving mutant).
+  stoppedBy({ run: { exitCode: 101, stderr: 'thread main panicked' } }, 'the converter process for table_heavy.pdf exited 101: thread main panicked');
+  stoppedBy({ report: null }, 'the converter process for table_heavy.pdf exited 0 without a readable receipt');
+  stoppedBy({ report: null, run: { exitCode: null, spawnError: 'ENOENT: no such file or directory, uv_spawn' } }, 'the converter process for table_heavy.pdf could not be started: ENOENT: no such file or directory, uv_spawn');
+  stoppedBy({ report: null, run: { exitCode: null, signal: 'SIGTERM', timedOut: true } }, 'the converter process for table_heavy.pdf was killed at the harness timeout');
+  stoppedBy({ report: null, run: { exitCode: null, signal: 'SIGKILL' } }, 'the converter process for table_heavy.pdf ended on signal SIGKILL');
+
+  // A harness error does not hide a failure the library did produce, and several are counted.
+  const both = doclingReceipt({
+    'table_heavy.pdf': { report: null, run: { exitCode: 1 } },
+    'scanned_text.pdf': { report: null, run: { exitCode: 1 } },
+    'corpus/word_sample.docx': { evidence: { markdown: 'Goodbye' } },
   });
-  const entry = entryOf(crashed, 'table_heavy.pdf');
-  assert.equal(entry.outcome, 'FAIL_harness');
-  assert.equal(entry.harness_exit_code, 1);
-  assert.match(entry.harness_error, /missing fixture/);
-  assert.equal(crashed.result, 'FAIL');
+  assert.equal(both.result, 'FAIL');
+  assert.equal(both.harness_error, 'the converter process for scanned_text.pdf exited 1 (and 1 more harness error(s); each is the detail of the criteria it stopped)');
+  assert.deepEqual(doclingFailedIds(both), ['corpus/word_sample.docx/content']);
 
   const partial = doclingReceipt({}, { runs: [doclingRun('sample_sheet.xlsx')], scope: { mode: 'only', fixtures: ['sample_sheet.xlsx'], qualification: false } });
   assert.equal(partial.summary['sample_sheet.xlsx'], 'PASS');
-  assert.equal(partial.summary[TIMEOUT_PROBE], 'FAIL_not_run');
-  assert.equal(partial.result, 'FAIL', 'a single-fixture run is never the qualification');
+  assert.equal(partial.summary[TIMEOUT_PROBE], 'INCOMPLETE');
+  assert.equal(partial.result, 'INCOMPLETE', 'a single-fixture run is never the qualification');
+  assert.equal(partial.harness_error, null, 'nothing in the environment failed: the fixtures were not asked for');
+  const notRun = FIXTURE_RUNS.filter((only) => only !== 'sample_sheet.xlsx');
+  assert.deepEqual(partial.failures.filter((item) => item.criterion === null), notRun.map((fixture) => ({ fixture, criterion: null, result: 'not_judged', detail: 'the fixture did not run' })));
+  assert.equal(doclingCriterion(partial, 'born_digital_text.pdf/content').detail, 'the fixture did not run');
+  assertDoclingEnvelope(partial);
 });
 
-test('each content, page-render and provenance failure fails its fixture and the receipt, with the evidence named', () => {
+test('a run that stopped before any conversion writes an INCOMPLETE envelope with every criterion not judged', () => {
+  const sentence = 'the Docling model assets could not be verified: Docling model asset missing: C:\\models\\layout.onnx (ENOENT). A missing asset is never qualified.';
+  const receipt = buildDoclingReceipt({
+    header: DOCLING_HEADER,
+    platform: 'win32',
+    sources: DOCLING_SOURCES,
+    runs: [],
+    scope: { mode: 'all', fixtures: FIXTURE_RUNS, qualification: true },
+    paths: {},
+    finishedAt: '2026-10-05T18:10:00.000Z',
+    harnessError: sentence,
+  });
+  assert.equal(receipt.result, 'INCOMPLETE');
+  assert.equal(receipt.harness_error, sentence);
+  assert.deepEqual([...new Set(receipt.criteria.map((item) => item.result))], ['not_judged']);
+  assert.equal(receipt.criteria.length, doclingCriteria.expectedCriteria(DOCLING_SOURCES).length);
+  assert.equal(doclingCriterion(receipt, 'assets/hashes_match').detail, `not reached: ${sentence}`);
+  assert.equal(doclingCriterion(receipt, 'scanned_text.pdf/conversion').detail, `the fixture did not run: ${sentence}`);
+  assert.deepEqual([...new Set(Object.values(receipt.summary))], ['INCOMPLETE']);
+  assert.equal(receipt.assets_verified, null);
+  assert.equal(receipt.build, null);
+  assertDoclingEnvelope(receipt);
+});
+
+test('each content, page-render and provenance failure fails its fixture and the receipt, and its detail gives the total and the examples', () => {
   {
     const receipt = doclingReceipt({ 'corpus/word_sample.docx': { evidence: { markdown: '## Title\n\nGoodbye\n' } } });
     const entry = entryOf(receipt, 'corpus/word_sample.docx');
     assert.equal(entry.fixture, 'corpus/word_sample.docx');
-    assert.equal(entry.outcome, 'FAIL_content');
+    assert.equal(entry.outcome, 'FAIL');
     assert.equal(entry.conversion_outcome, 'PASS');
     assert.deepEqual(entry.failed_criteria, ['content']);
     assert.equal(receipt.result, 'FAIL');
-    const failure = receipt.failures.find((item) => item.criterion === 'content');
-    assert.equal(failure.fixture, 'corpus/word_sample.docx');
-    assert.deepEqual(failure.detail.map((check) => check.expected), ['Hello world']);
+    assert.deepEqual(receipt.failures, [
+      { fixture: 'corpus/word_sample.docx', criterion: 'content', result: 'fail', detail: '1 of 2 expectations are not met; all: markdown_contains "Hello world"' },
+    ]);
+    assert.deepEqual(entry.criteria.content.checks.filter((check) => !check.ok).map((check) => check.expected), ['Hello world']);
+    const counted = doclingReceipt({ 'table_heavy.pdf': { evidence: { document: stubDocument({ tables: [] }) } } });
+    assert.equal(doclingCriterion(counted, 'table_heavy.pdf/content').detail, '1 of 2 expectations are not met; all: tables 1 (observed 0)');
   }
   {
     const receipt = doclingReceipt({ 'scanned_text.pdf': { fixture: { document: { markdown_file: 'document.md', json_file: 'document.json', page_images: [] } } } });
     const entry = entryOf(receipt, 'scanned_text.pdf');
-    assert.equal(entry.criteria.page_renders.status, 'unavailable');
-    assert.equal(entry.outcome, 'FAIL_page_renders');
+    assert.equal(entry.criteria.page_renders.result, 'fail');
+    assert.match(entry.criteria.page_renders.detail, /generate_page_images\(true\) was applied and the returned document\.page_images is empty for 1 page/);
+    assert.equal(entry.outcome, 'FAIL');
     assert.equal(entry.page_image_count, 0);
     assert.equal(entry.page_provenance[0].has_image, false);
     assert.equal(receipt.result, 'FAIL');
-    assert.equal(entryOf(receipt, 'sample_sheet.xlsx').criteria.page_renders.status, 'not_applicable');
+    assert.equal(entryOf(receipt, 'sample_sheet.xlsx').criteria.page_renders.result, 'not_applicable');
   }
   {
+    // The image the review showed passing: the right size and hash, and all white.
+    const blank = { ...PAGE_IMAGE, bytes: BLANK_PNG.length, sha256: createHash('sha256').update(BLANK_PNG).digest('hex') };
     const receipt = doclingReceipt({
-      'born_digital_text.pdf': { evidence: { document: stubDocument({ texts: [{ self_ref: '#/texts/0', label: 'text', text: 'x', prov: [] }] }) } },
+      'born_digital_text.pdf': {
+        fixture: { document: { markdown_file: 'document.md', json_file: 'document.json', page_images: [blank] } },
+        evidence: { pageFiles: { 'page-1.png': pageFile(BLANK_PNG) } },
+      },
     });
-    const entry = entryOf(receipt, 'born_digital_text.pdf');
-    assert.equal(entry.criteria.provenance.status, 'FAIL');
-    assert.deepEqual(entry.failed_criteria, ['provenance']);
-    assert.equal(entry.outcome, 'FAIL_provenance');
-    assert.deepEqual(receipt.failures, [
-      { fixture: 'born_digital_text.pdf', criterion: 'provenance', status: 'FAIL', detail: [{ ref: '#/texts/0', label: 'text', problem: 'no provenance' }] },
-    ]);
-    assert.equal(receipt.criteria_summary.provenance['born_digital_text.pdf'], 'FAIL');
-    assert.equal(receipt.criteria_summary.provenance['sample_sheet.xlsx'], 'recorded_not_judged');
+    assert.deepEqual(doclingFailedIds(receipt), ['born_digital_text.pdf/page_renders']);
+    assert.equal(
+      doclingCriterion(receipt, 'born_digital_text.pdf/page_renders').detail,
+      '1 problem(s) over 1 page image(s) for 1 page(s); all: page 1: the render is one flat colour (sample bytes 255) and SOURCES.json does not declare this page blank',
+    );
+    assert.equal(receipt.criterion_rules.page_renders, PAGE_RENDER_RULE);
     assert.equal(receipt.result, 'FAIL');
+    // The same render passes for a fixture that declares the page blank.
+    const sources = structuredClone(DOCLING_SOURCES);
+    sources.files['born_digital_text.pdf'].expect.blank_pages = [1];
+    const declared = doclingReceipt({ 'born_digital_text.pdf': { fixture: { document: { markdown_file: 'document.md', json_file: 'document.json', page_images: [blank] } }, evidence: { pageFiles: { 'page-1.png': pageFile(BLANK_PNG) } } } }, { sources });
+    assert.equal(declared.result, 'PASS');
+    // Pixels that could not be read leave the criterion unjudged.
+    const unread = doclingReceipt({ 'born_digital_text.pdf': { evidence: { pageFiles: { 'page-1.png': { ...pageFile(PAGE_PNG), ink: { decoded: false, reason: 'bit depth 1' } } } } } });
+    assert.equal(doclingCriterion(unread, 'born_digital_text.pdf/page_renders').detail, 'the pixels of 1 of 1 page image(s) for 1 page(s) could not be read; all: page 1: the pixels could not be read (bit depth 1)');
+    assert.equal(unread.result, 'INCOMPLETE');
   }
+  {
+    const captions = Array.from({ length: 12 }, (_, index) => ({ self_ref: `#/texts/${index}`, label: 'caption', text: 'c', prov: [] }));
+    const receipt = doclingReceipt({ 'born_digital_text.pdf': { evidence: { document: stubDocument({ texts: captions }) } } });
+    const entry = entryOf(receipt, 'born_digital_text.pdf');
+    assert.equal(entry.criteria.provenance.result, 'fail');
+    assert.deepEqual(entry.failed_criteria, ['provenance']);
+    assert.equal(entry.outcome, 'FAIL');
+    const shown = captions.slice(0, 10).map((item) => `${item.self_ref} caption: no provenance`).join('; ');
+    assert.deepEqual(receipt.failures, [
+      {
+        fixture: 'born_digital_text.pdf',
+        criterion: 'provenance',
+        result: 'fail',
+        detail: `12 of 13 items are not located (12 of 12 text items, 0 of 1 tables, 0 of 0 pictures); first 10: ${shown}`,
+      },
+    ]);
+    assert.equal(entry.criteria.provenance.text_items.invalid_total, 12);
+    assert.equal(receipt.criteria_summary.provenance['born_digital_text.pdf'], 'fail');
+    assert.equal(receipt.criteria_summary.provenance['sample_sheet.xlsx'], 'not_judged');
+    assert.equal(receipt.result, 'FAIL');
+    // A table without a location fails the fixture although every text item is located.
+    const lostTable = doclingReceipt({ 'table_heavy.pdf': { evidence: { document: stubDocument({ tables: stubDocument().tables.map((table) => ({ ...table, prov: [] })) }) } } });
+    assert.equal(doclingCriterion(lostTable, 'table_heavy.pdf/provenance').detail, '1 of 3 items are not located (0 of 2 text items, 1 of 1 tables, 0 of 0 pictures); all: #/tables/0 table: no provenance');
+    assert.deepEqual(doclingFailedIds(lostTable), ['table_heavy.pdf/provenance']);
+  }
+});
+
+test('what is judged for a fixture follows its declared kind, and a format the library reports otherwise fails', () => {
+  // The review's case: a PDF the library reports as Markdown, with no page image and no locator.
+  const unlocated = stubDocument({ pages: {}, texts: stubDocument().texts.map((item) => ({ ...item, prov: [] })), tables: stubDocument().tables.map((item) => ({ ...item, prov: [] })) });
+  const receipt = doclingReceipt({
+    'born_digital_text.pdf': {
+      fixture: { input_format: 'md', library_page_count: null, document: { markdown_file: 'document.md', json_file: 'document.json', page_images: [] } },
+      evidence: { document: unlocated },
+    },
+  });
+  const entry = entryOf(receipt, 'born_digital_text.pdf');
+  assert.equal(entry.criteria.format_recognised.result, 'fail');
+  assert.equal(entry.criteria.format_recognised.detail, 'the library reports format "md" for a fixture SOURCES.json declares pdf (format "pdf")');
+  assert.equal(entry.criteria.page_renders.result, 'fail', 'page renders are still judged: the fixture is a PDF');
+  assert.equal(entry.criteria.provenance.result, 'fail', 'provenance is still judged: the fixture is a PDF');
+  assert.deepEqual(entry.failed_criteria, ['format_recognised', 'page_renders', 'provenance']);
+  assert.equal(entry.outcome, 'FAIL');
+  assert.equal(receipt.result, 'FAIL');
+  assert.match(receipt.criterion_rules.format_recognised, /follows the declared kind, never the reported format/);
+
+  // The other direction: an Office file reported as a PDF does not gain page-render criteria, and fails on the format.
+  const office = doclingReceipt({ 'sample_with_image.docx': { fixture: { input_format: 'pdf' } } });
+  assert.deepEqual(doclingFailedIds(office), ['sample_with_image.docx/format_recognised']);
+  assert.equal(doclingCriterion(office, 'sample_with_image.docx/page_renders').result, 'not_applicable');
+  assert.equal(doclingCriterion(doclingReceipt({ 'sample_image.png': { fixture: { input_format: null } } }), 'sample_image.png/format_recognised').detail, 'the library reports format null for a fixture SOURCES.json declares image (format "image")');
+});
+
+test('the receipt lists at its top every criterion that was not judged or not applicable, with the reason', () => {
+  const receipt = doclingReceipt();
+  const office = FIXTURE_RUNS.filter((only) => /\.(docx|xlsx|pptx)$/.test(only));
+  assert.deepEqual(
+    receipt.not_judged,
+    office.flatMap((only) => [`${only}/page_renders`, `${only}/provenance`]),
+    'ten judgements were not made in a passing run, and the receipt says which',
+  );
+  assert.equal(receipt.not_judged_reasons['corpus/word_sample.docx/provenance'], 'not_applicable: the library gives DOCX items no page or box');
+  assert.equal(receipt.not_judged_reasons['sample_sheet.xlsx/page_renders'], 'not_applicable: the library keeps page images for the PDF/image pipeline only (docling converter.rs:756 generate_page_images)');
+  assert.equal(
+    receipt.not_judged_reasons['corpus/powerpoint_sample.pptx/provenance'],
+    'not_judged: not a PDF or image fixture: the locator the library gives is recorded as observed and no rule is applied (0 of 3 items located, locator none)',
+  );
+  // A DOCX locator is not applicable, never a pass; a spreadsheet's is a measurement and is not required.
+  const docx = doclingCriterion(receipt, 'sample_with_image.docx/provenance');
+  assert.deepEqual(docx, { id: 'sample_with_image.docx/provenance', required: true, result: 'not_applicable', detail: 'the library gives DOCX items no page or box' });
+  assert.equal(entryOf(receipt, 'sample_with_image.docx').criteria.provenance.locator, 'none');
+  assert.deepEqual(entryOf(receipt, 'sample_with_image.docx').not_judged, ['page_renders', 'provenance']);
+  assert.equal(doclingCriterion(receipt, 'corpus/xlsx_01.xlsx/provenance').required, false);
+  assert.equal(entryOf(receipt, 'corpus/xlsx_01.xlsx').criteria.provenance.items.total, 3);
+
+  // If the library did locate DOCX items, "no page or box" would be untrue: the run stops short of PASS for a decision.
+  const located = doclingReceipt({ 'sample_with_image.docx': { evidence: { document: stubDocument() } } });
+  assert.equal(doclingCriterion(located, 'sample_with_image.docx/provenance').detail, 'the library located 3 of 3 DOCX items; this harness has no rule for a DOCX locator');
+  assert.equal(located.result, 'INCOMPLETE');
+});
+
+test('a fixture that shows no glyphs is judged for invented text, by a criterion named for it', async () => {
+  const sources = JSON.parse(await readFile(join(root, 'tests/fixtures/documents/SOURCES.json'), 'utf8'));
+  const ids = doclingCriteria.expectedCriteria(sources).map((item) => item.id);
+  for (const name of ['scanned_image_only.pdf', 'sample_image.png']) {
+    assert.ok(ids.includes(`${name}/no_invented_text`), name);
+    assert.ok(!ids.includes(`${name}/content`), `${name}: "content" would claim more than is asserted`);
+    assert.ok(ids.includes(`${name}/text_provenance`), name);
+    assert.ok(ids.includes(`${name}/provenance`), `${name}: its pictures are still located`);
+  }
+  assert.equal(ids.filter((id) => id.endsWith('/no_invented_text')).length, 2);
+  assert.equal(ids.filter((id) => id.endsWith('/text_provenance')).length, 2);
+
+  // One picture, no text: the stub of a page without glyphs.
+  const stub = structuredClone(DOCLING_SOURCES);
+  stub.files['scanned_image_only.pdf'].expect = { confirmed_by: 'test stub', no_text: true, pages: 1 };
+  const picture = stubDocument({ texts: [], tables: [], pictures: [{ self_ref: '#/pictures/0', label: 'picture', prov: prov(BOX) }] });
+  const receipt = (markdown, document = picture) => doclingReceipt({ 'scanned_image_only.pdf': { evidence: { markdown, document } } }, { sources: stub });
+
+  const silent = receipt('<!-- image -->\n\n<!-- image -->\n');
+  assert.equal(silent.result, 'PASS');
+  const entry = entryOf(silent, 'scanned_image_only.pdf');
+  assert.deepEqual(Object.keys(entry.criteria), ['conversion', 'evidence', 'format_recognised', 'no_invented_text', 'page_renders', 'provenance', 'text_provenance', 'memory_measured']);
+  assert.equal(entry.criteria.no_invented_text.result, 'pass');
+  assert.equal(entry.criteria.provenance.result, 'pass', 'the picture is located');
+  assert.deepEqual(doclingCriterion(silent, 'scanned_image_only.pdf/text_provenance'), {
+    id: 'scanned_image_only.pdf/text_provenance',
+    required: true,
+    result: 'not_applicable',
+    detail: 'the fixture shows no glyphs, so the converter is to produce no text item and there is none whose location could be judged; its pictures and tables are located by provenance',
+  });
+  assert.ok(silent.not_judged.includes('scanned_image_only.pdf/text_provenance'));
+  assert.match(silent.criterion_rules.no_invented_text, /the converter invents no text for a page without glyphs/);
+  assert.match(silent.criterion_rules.no_invented_text, /holds no letter and no digit/);
+  assertDoclingEnvelope(silent, stub);
+
+  // Any letter or digit outside the picture placeholders is invented text.
+  for (const [markdown, tokens, shown] of [
+    ['<!-- image -->\n\nIll\n', 1, 'ill'],
+    ['<!-- image -->\n\n7\n', 1, '7'],
+    ['<!-- image -->\n\nl I 1 | O 0\n', 5, 'l i 1 o 0'],
+  ]) {
+    const invented = receipt(markdown);
+    assert.deepEqual(doclingFailedIds(invented), ['scanned_image_only.pdf/no_invented_text'], markdown);
+    assert.equal(
+      doclingCriterion(invented, 'scanned_image_only.pdf/no_invented_text').detail,
+      `1 of 1 expectations are not met; all: no_text: ${tokens} letter or digit token(s) outside the picture placeholders (${shown})`,
+    );
+    assert.equal(invented.result, 'FAIL');
+  }
+  assert.equal(receipt('<!-- WATER 47 -->\n').result, 'PASS', 'a placeholder comment is not text');
+});
+
+test('the timeout probe passes only when the budget changed the result, compared with the same bytes converted in full', () => {
+  const budget = (receipt) => doclingCriterion(receipt, `${TIMEOUT_PROBE}/budget_had_effect`);
+  const good = doclingReceipt();
+  assert.deepEqual(Object.keys(good.timeout_case.criteria), ['timeout_reported', 'evidence', 'budget_had_effect', 'memory_measured']);
+  assert.equal(good.timeout_case.sha256_before, entryOf(good, 'scanned_image_only.pdf').sha256_before, 'the probe converts the bytes of a fixture that is also converted in full');
+  assert.deepEqual(budget(good), {
+    id: `${TIMEOUT_PROBE}/budget_had_effect`,
+    required: true,
+    result: 'pass',
+    detail: 'the probe returned 0 of 1 page(s) and 0 of 3 item(s) of the full conversion of scanned_image_only.pdf',
+  });
+  assert.deepEqual(good.timeout_case.criteria.budget_had_effect.full, { fixture: 'scanned_image_only.pdf', pages: 1, items: 3 });
+  assert.match(good.criterion_rules.budget_had_effect, /fewer pages or fewer items than the conversion of the same bytes without a budget/);
+  assert.match(good.criterion_rules.budget_had_effect, /elapsed time is recorded and not judged/);
+
+  // A timeout that did nothing: the status and the error item are there, and so is the whole document.
+  const noop = doclingReceipt({ [TIMEOUT_PROBE]: { evidence: { document: stubDocument() } } });
+  assert.equal(doclingCriterion(noop, `${TIMEOUT_PROBE}/timeout_reported`).result, 'pass');
+  assert.equal(budget(noop).result, 'fail');
+  assert.equal(
+    budget(noop).detail,
+    'the probe reported a spent budget and still returned 1 page(s) and 3 item(s), no fewer than the full conversion of scanned_image_only.pdf (1 page(s), 3 item(s)): the budget had no visible effect',
+  );
+  assert.equal(noop.summary[TIMEOUT_PROBE], 'FAIL');
+  assert.equal(noop.result, 'FAIL');
+  // Fewer items on the same page count is an effect.
+  assert.equal(budget(doclingReceipt({ [TIMEOUT_PROBE]: { evidence: { document: stubDocument({ tables: [] }) } } })).detail, 'the probe returned 1 of 1 page(s) and 2 of 3 item(s) of the full conversion of scanned_image_only.pdf');
+
+  // Nothing to compare with is not judged, with the reason; it is never a pass.
+  const unjudged = (overrides, reason, result = 'INCOMPLETE') => {
+    const receipt = doclingReceipt(overrides);
+    assert.deepEqual([budget(receipt).result, budget(receipt).detail], ['not_judged', reason]);
+    assert.equal(receipt.result, result, reason);
+  };
+  unjudged(
+    { 'scanned_image_only.pdf': { fixture: { outcome: 'FAIL_converter_error', stage: 'converter_error', status: null, document: null } } },
+    'the full conversion of scanned_image_only.pdf did not succeed in this run, so there is nothing to compare the probe with',
+    'FAIL',
+  );
+  unjudged({ 'scanned_image_only.pdf': { run: { exitCode: 1 } } }, 'the full conversion of scanned_image_only.pdf did not succeed in this run, so there is nothing to compare the probe with');
+  // A process that left no receipt recorded no input hash: which fixture held the same bytes is not known.
+  unjudged({ 'scanned_image_only.pdf': { report: null, run: { exitCode: 1 } } }, 'no fixture of this run converted the same bytes without a budget, so there is nothing to compare the probe with');
+  unjudged({ 'scanned_image_only.pdf': { fixture: { sha256_before: '0'.repeat(64) } } }, 'no fixture of this run converted the same bytes without a budget, so there is nothing to compare the probe with');
+  unjudged({ [TIMEOUT_PROBE]: { fixture: { document: null } } }, 'the library returned no document for the probe, so nothing distinguishes it from the full conversion');
+  unjudged({ [TIMEOUT_PROBE]: { evidence: { problems: ['document.json: hash on disk differs from the receipt'] } } }, 'the files the probe process wrote are not the ones it recorded (see evidence), so nothing is judged from them');
+  unjudged(
+    { [TIMEOUT_PROBE]: { fixture: { outcome: 'FAIL_timeout_not_honoured', status: 'Success' }, evidence: { document: stubDocument() } } },
+    'the converter did not report a spent budget, so there is no effect to compare',
+    'FAIL',
+  );
+  const silent = doclingReceipt({ [TIMEOUT_PROBE]: { fixture: { outcome: 'FAIL_timeout_not_honoured', status: 'Success' }, evidence: { document: stubDocument() } } });
+  assert.equal(doclingCriterion(silent, `${TIMEOUT_PROBE}/timeout_reported`).detail, 'the converter did not report the spent budget as documented: FAIL_timeout_not_honoured, status Success, no error item');
+  assert.deepEqual(doclingFailedIds(silent), [`${TIMEOUT_PROBE}/timeout_reported`]);
+  assert.deepEqual(good.timeout_case.criteria.budget_had_effect.probe, { pages: 0, items: 0 });
+});
+
+const ORT_HASH = 'f7c654b3729cb9e5ad2a36a0c38e5b48e63bf4eed22968931aed33a0ad0b527d';
+
+const ORT_DIRECTORY = `C:\\Users\\x\\AppData\\Local\\ort.pyke.io\\dfbin\\x86_64-pc-windows-msvc\\${ORT_HASH}`;
+
+/** cargo's JSON message stream for a build: an artifact line, the ort-sys build script, another build script. */
+const cargoMessages = (linkedPaths = [`native=${ORT_DIRECTORY}`]) =>
+  [
+    JSON.stringify({ reason: 'compiler-artifact', package_id: 'registry+https://github.com/rust-lang/crates.io-index#ort-sys@2.0.0-rc.13', fresh: true }),
+    JSON.stringify({ reason: 'build-script-executed', package_id: 'registry+https://github.com/rust-lang/crates.io-index#zstd-sys@2.0.16', linked_libs: [], linked_paths: ['native=D:\\t\\out'] }),
+    JSON.stringify({
+      reason: 'build-script-executed',
+      package_id: 'registry+https://github.com/rust-lang/crates.io-index#ort-sys@2.0.0-rc.13',
+      linked_libs: ['dxguid', 'DirectML', 'static=onnxruntime'],
+      linked_paths: linkedPaths,
+      out_dir: 'D:\\t\\target\\release\\build\\ort-sys-bf63\\out',
+    }),
+    '{"reason":"build-finished","success":true}',
+    'not json at all',
+  ].join('\n');
+
+const ORT_DIST = [
+  'target\tfeature_set\turl\tsha256_hash',
+  '# a comment line',
+  `x86_64-pc-windows-msvc\tdirectml\thttps://cdn.pyke.io/0/pyke:ort-rs/ms@1.28.0/x86_64-pc-windows-msvc+directml.tar.lzma2\t${ORT_HASH}`,
+  `x86_64-pc-windows-msvc\twebgpu\thttps://cdn.pyke.io/0/pyke:ort-rs/ms@1.28.0/x86_64-pc-windows-msvc+webgpu.tar.lzma2\t${'7'.repeat(64)}`,
+  '',
+].join('\n');
+
+test('the ONNX Runtime library is recorded from what the build left, or as not_recorded with the reason', async () => {
+  assert.equal(ortBuildMessage(cargoMessages()).linked_libs.at(-1), 'static=onnxruntime');
+  assert.equal(ortBuildMessage('{"reason":"build-finished","success":true}'), null);
+  assert.deepEqual(distRows(ORT_DIST).map((row) => row.feature_set), ['directml', 'webgpu']);
+
+  const record = onnxRuntimeRecord({ messagesText: cargoMessages(), distTsv: ORT_DIST, distPath: 'C:\\registry\\ort-sys-2.0.0-rc.13\\build\\download\\dist.tsv' });
+  assert.deepEqual(
+    { name: record.name, status: record.status, version: record.version, sha256: record.sha256, url: record.url, target: record.target, feature_set: record.feature_set, crate: record.crate, crate_version: record.crate_version, directory: record.directory },
+    {
+      name: 'onnxruntime',
+      status: 'recorded',
+      version: '1.28.0',
+      sha256: ORT_HASH,
+      url: 'https://cdn.pyke.io/0/pyke:ort-rs/ms@1.28.0/x86_64-pc-windows-msvc+directml.tar.lzma2',
+      target: 'x86_64-pc-windows-msvc',
+      feature_set: 'directml',
+      crate: 'ort-sys',
+      crate_version: '2.0.0-rc.13',
+      directory: ORT_DIRECTORY,
+    },
+  );
+  assert.deepEqual(record.linked_libs, ['dxguid', 'DirectML', 'static=onnxruntime']);
+  assert.match(record.sha256_is, /ort-sys compares the downloaded archive with/);
+  assert.equal(record.read_from.length, 2);
+
+  // Nothing is assumed: each thing that cannot be read is the stated reason.
+  const reason = (input) => {
+    const judged = onnxRuntimeRecord({ messagesText: cargoMessages(), distTsv: ORT_DIST, distPath: 'dist.tsv', ...input });
+    assert.deepEqual(Object.keys(judged), ['name', 'status', 'reason']);
+    assert.equal(judged.status, 'not_recorded');
+    return judged.reason;
+  };
+  assert.equal(reason({ messagesText: '{"reason":"build-finished","success":true}' }), 'cargo printed no build-script-executed message for ort-sys in this build');
+  assert.match(reason({ messagesText: cargoMessages(['native=D:\\onnxruntime\\lib']) }), /none of which is a download directory named by a SHA-256/);
+  assert.equal(reason({ distTsv: ORT_DIST.replaceAll(ORT_HASH, '0'.repeat(64)) }), `dist.tsv has no row with the hash ${ORT_HASH} of the directory this build links from`);
+  assert.match(reason({ distTsv: null }), /has no row with the hash/);
+  assert.equal(onnxRuntimeRecord({ messagesText: cargoMessages(), distTsv: ORT_DIST.replace('ms@1.28.0', 'ms'), distPath: 'dist.tsv' }).version, null, 'a URL that names no version gives none');
+
+  // With I/O: cargo is asked, the crate's table is read from where cargo metadata says the crate is, the files are hashed now.
+  const asked = [];
+  const io = (over = {}) => ({
+    root: 'D:\\repo',
+    pkg: 'okf-qualify-docling',
+    exec: async (command, args) => {
+      asked.push([command, ...args].join(' '));
+      return args[0] === 'build'
+        ? { code: 0, stdout: cargoMessages(), stderr: '' }
+        : { code: 0, stdout: JSON.stringify({ packages: [{ name: 'ort-sys', manifest_path: join('C:', 'registry', 'ort-sys-2.0.0-rc.13', 'Cargo.toml') }] }), stderr: '' };
+    },
+    readFile: async (path) => {
+      asked.push(`read ${path}`);
+      return ORT_DIST;
+    },
+    readdir: async () => ['onnxruntime.lib', 'DirectML.dll'],
+    hashFile: async (path) => ({ bytes: path.length, sha256: createHash('sha256').update(path).digest('hex') }),
+    ...over,
+  });
+  const read = await readOnnxRuntime(io());
+  assert.equal(read.status, 'recorded');
+  assert.deepEqual(asked, [
+    'cargo build --locked --release -p okf-qualify-docling --message-format=json',
+    'cargo metadata --format-version 1 --locked',
+    `read ${join('C:', 'registry', 'ort-sys-2.0.0-rc.13', 'build', 'download', 'dist.tsv')}`,
+  ]);
+  assert.deepEqual(read.files.map((file) => file.file), ['DirectML.dll', 'onnxruntime.lib']);
+  assert.equal(read.files[1].sha256, createHash('sha256').update(join(ORT_DIRECTORY, 'onnxruntime.lib')).digest('hex'));
+  assert.equal((await readOnnxRuntime(io({ exec: async () => ({ code: 101, stdout: '', stderr: 'error' }) }))).reason, 'cargo build --locked --release -p okf-qualify-docling --message-format=json exited 101');
+  assert.equal((await readOnnxRuntime(io({ readdir: async () => { throw new Error('ENOENT: no such directory'); } }))).reason, 'reading the ONNX Runtime record failed: ENOENT: no such directory');
+  assert.equal(
+    (await readOnnxRuntime(io({ exec: async (command, args) => (args[0] === 'build' ? { code: 0, stdout: cargoMessages(), stderr: '' } : { code: 0, stdout: '{"packages":[]}', stderr: '' }) }))).reason,
+    'cargo metadata lists no ort-sys package',
+  );
+
+  // The record sits in the receipt's asset section, beside the model assets.
+  const receipt = doclingReceipt({}, { assets: { ...DOCLING_ASSETS, native_libraries: [read] } });
+  assert.equal(receipt.assets_verified.native_libraries[0].version, '1.28.0');
+  assert.equal(receipt.result, 'PASS');
+});
+
+/** Every repository file `entry` imports, directly or through its imports. */
+async function doclingImportGraph(entry) {
+  const seen = new Set();
+  const visit = async (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = await readFile(join(root, file), 'utf8');
+    for (const match of source.matchAll(/^import\s[^'"]*['"](\.{1,2}\/[^'"]+)['"];?\s*$/gm)) {
+      await visit(join(file, '..', match[1]).replaceAll('\\', '/'));
+    }
+  };
+  await visit(entry);
+  return [...seen].sort();
+}
+
+test('the Docling receipt inputs cover what the run executes and what decides its result', async () => {
+  for (const input of ['rust-toolchain.toml', '.cargo/config.toml', 'scripts/lib/provenance.mjs', 'scripts/lib/receipt-envelope.mjs', 'qualification/docling/criteria.json', 'Cargo.toml', 'Cargo.lock', 'tests/fixtures/documents']) {
+    assert.ok(DOCLING_INPUTS.includes(input), `${input} is not an input of the Docling receipt`);
+  }
+  assert.equal(new Set(DOCLING_INPUTS).size, DOCLING_INPUTS.length);
+  const tracked = execFileSync('git', ['ls-files', '--', ...DOCLING_INPUTS], { cwd: root }).toString().split('\n').filter(Boolean);
+  for (const input of DOCLING_INPUTS) assert.ok(tracked.some((file) => file === input || file.startsWith(`${input}/`)), `${input} is not tracked, so check-receipts could never see it change`);
+  // Every repository file the orchestrator loads lies under an input.
+  const loaded = await doclingImportGraph('qualification/docling/run.mjs');
+  assert.ok(loaded.includes('scripts/lib/receipt-envelope.mjs') && loaded.includes('qualification/docling/lib/png.mjs'), loaded.join(', '));
+  for (const file of loaded) assert.ok(DOCLING_INPUTS.some((input) => file === input || file.startsWith(`${input}/`)), `${file} is loaded by run.mjs and is not covered by an input`);
+});
+
+test('evidence that is not what the process recorded stops the judgements made from it', () => {
+  const receipt = doclingReceipt({ 'table_heavy.pdf': { evidence: { problems: ['document.md: hash on disk differs from the receipt', 'page-1.png: hash on disk differs from the receipt'] } } });
+  const entry = entryOf(receipt, 'table_heavy.pdf');
+  const sentence = '2 file(s) the converter process for table_heavy.pdf wrote are not the ones it recorded; all: document.md: hash on disk differs from the receipt; page-1.png: hash on disk differs from the receipt';
+  assert.equal(entry.criteria.evidence.result, 'not_judged');
+  assert.equal(entry.criteria.evidence.detail, sentence);
+  assert.equal(receipt.harness_error, sentence);
+  assert.deepEqual(['conversion', 'format_recognised', 'content', 'page_renders', 'provenance'].map((aspect) => entry.criteria[aspect].result), ['pass', 'pass', 'not_judged', 'not_judged', 'not_judged']);
+  assert.match(entry.criteria.content.detail, /are not the ones it recorded \(see evidence\)/);
+  assert.equal(entry.outcome, 'INCOMPLETE');
+  assert.deepEqual(doclingFailedIds(receipt), []);
+  assert.equal(receipt.result, 'INCOMPLETE');
+  assert.equal(entryOf(doclingReceipt(), 'table_heavy.pdf').criteria.evidence.result, 'pass');
+  // Files that were never re-read are not trusted either.
+  const unread = doclingReceipt({ 'table_heavy.pdf': { evidence: undefined } });
+  assert.equal(doclingCriterion(unread, 'table_heavy.pdf/evidence').detail, 'the files the converter process for table_heavy.pdf wrote were not re-read');
+  assert.equal(unread.result, 'INCOMPLETE');
+
+  // A conversion the library reported as failed is a fail; what would have been read from its document is not judged.
+  const failed = doclingReceipt({
+    'table_heavy.pdf': { fixture: { outcome: 'FAIL_converter_error', stage: 'converter_error', status: null, document: null, errors: [{ component_type: 'converter', module_name: 'm', error_message: 'layout model failed' }] } },
+  });
+  assert.deepEqual(doclingFailedIds(failed), ['table_heavy.pdf/conversion']);
+  assert.equal(doclingCriterion(failed, 'table_heavy.pdf/conversion').detail, 'the converter did not convert the fixture: FAIL_converter_error: layout model failed');
+  assert.equal(doclingCriterion(failed, 'table_heavy.pdf/content').detail, 'the conversion did not succeed (FAIL_converter_error), so there is no converted document to judge');
+  assert.equal(doclingCriterion(failed, 'table_heavy.pdf/evidence').result, 'not_judged');
+  assert.equal(failed.summary['table_heavy.pdf'], 'FAIL');
 });
 
 test('the receipt lists the converter settings the processes held and the assets it verified', () => {
@@ -1104,30 +1861,244 @@ test('the receipt lists the converter settings the processes held and the assets
   assert.equal(probe.options.document_timeout, 'Some(1ms)');
   assert.deepEqual(probe.used_by, [TIMEOUT_PROBE]);
   assert.deepEqual(receipt.settings.environment, { DOCLING_RS_MODELS_DIR: 'C:\\models' });
-  assert.equal(receipt.assets_verified.all_match, true);
+  assert.deepEqual([receipt.assets_verified.count, receipt.assets_verified.matched], [1, 1]);
+  assert.equal(doclingCriterion(receipt, 'assets/hashes_match').result, 'pass');
 });
 
-test('the receipt fails when a model the library resolves is not a verified file', () => {
-  const receipt = doclingReceipt({}, { assets: { ...DOCLING_ASSETS, files: [] } });
-  assert.equal(receipt.model_inventory.status, 'FAIL');
-  assert.deepEqual(Object.values(receipt.summary).filter((outcome) => !outcome.startsWith('PASS')), []);
-  assert.equal(receipt.result, 'FAIL');
-  assert.equal(receipt.failures[0].criterion, 'model_inventory');
+test('assets or models that are not the verified ones make the run INCOMPLETE, never a library verdict', () => {
+  // The record says a file's hash is not the manifest's: the criterion is counted from the record, not assumed.
+  const changed = { ...VERIFIED_MODEL, sha256: '0'.repeat(64) };
+  const receipt = doclingReceipt({}, { assets: { ...DOCLING_ASSETS, files: [VERIFIED_MODEL, { ...changed, file: 'ocr_det.onnx' }] } });
+  const sentence = '1 of 2 model assets do not have the length and hash the manifest gives; all: ocr_det.onnx';
+  assert.deepEqual(doclingCriterion(receipt, 'assets/hashes_match'), { id: 'assets/hashes_match', required: true, result: 'not_judged', detail: sentence });
+  assert.equal(receipt.harness_error, sentence);
+  assert.equal(receipt.result, 'INCOMPLETE');
+  assert.deepEqual(receipt.failures, [{ fixture: null, criterion: 'assets/hashes_match', result: 'not_judged', detail: sentence }]);
+  assert.equal(doclingCriterion(doclingReceipt({}, { assets: null }), 'assets/hashes_match').detail, 'no asset was hashed in this run');
+  assert.equal(doclingCriterion(doclingReceipt({}, { assets: { ...DOCLING_ASSETS, files: [] } }), 'assets/hashes_match').detail, 'the asset manifest lists no file that was hashed');
+
+  // A model the library resolves is not a verified file.
+  const unverified = doclingReceipt({}, { assets: { ...DOCLING_ASSETS, files: [{ ...VERIFIED_MODEL, path: 'C:\\models\\other.onnx' }] } });
+  assert.equal(unverified.model_inventory.result, 'not_judged');
+  assert.equal(unverified.model_inventory.status, undefined);
+  assert.deepEqual(unverified.model_inventory.unverified, ['layout']);
+  assert.equal(doclingCriterion(unverified, 'assets/model_inventory').detail, '1 of 1 models the library resolves are not verified files; all: layout');
+  assert.deepEqual(Object.values(unverified.summary).filter((label) => label !== 'PASS'), []);
+  assert.deepEqual(doclingFailedIds(unverified), []);
+  assert.equal(unverified.result, 'INCOMPLETE');
+  assert.equal(unverified.failures[0].criterion, 'assets/model_inventory');
+  assert.equal(doclingReceipt().model_inventory.result, 'pass');
 });
 
-test('the Docling orchestrator verifies assets before it builds, and the harness labels what it writes', async () => {
-  const run = await readFile(join(root, 'qualification/docling/run.mjs'), 'utf8');
-  assert.ok(run.indexOf('await verifyAssets(manifestBytes)') > 0, 'run.mjs must re-hash the assets');
-  assert.ok(run.indexOf('await verifyAssets(manifestBytes)') < run.indexOf('await buildRelease('), 'assets are verified before anything is built or converted');
-  assert.ok(run.indexOf('await receiptHeader(') < run.indexOf('await verifyAssets('), 'the clean-tree guard still comes first');
-  assert.match(run, /if \(only\.length && record\) throw new Error/);
-  assert.match(run, /exec\('cargo', TREE_ARGS/);
+/**
+ * Run lib/orchestrate.mjs `qualify` with every external step stubbed: no cargo, no converter,
+ * no model file. Files are really written, under a temporary output directory. `over` replaces
+ * steps; `calls` records the order in which they ran.
+ */
+async function doclingQualify(t, over = {}) {
+  const outDir = await mkdtemp(join(tmpdir(), 'okf-docling-run-'));
+  t.after(() => rm(outDir, { recursive: true, force: true }));
+  const manifestPath = join(outDir, 'assets.json');
+  const calls = [];
+  const sourcesPath = join(root, 'tests/fixtures/documents/SOURCES.json');
+  const distPath = join('C:', 'registry', 'ort-sys-2.0.0-rc.13', 'build', 'download', 'dist.tsv');
+  const nameOf = (dir) => dir.split(/[\\/]/).pop().replaceAll('__', '/');
+  const io = {
+    readFile: async (path, encoding) => {
+      if (path === sourcesPath) return JSON.stringify(DOCLING_SOURCES);
+      if (path === distPath) return ORT_DIST;
+      if (path === manifestPath) {
+        calls.push('read manifest');
+        if (over.manifestMissing) throw Object.assign(new Error(`ENOENT: no such file or directory, open '${path}'`), { code: 'ENOENT' });
+        return Buffer.from('{}');
+      }
+      return readFile(path, encoding);
+    },
+    writeFile,
+    mkdir,
+    rm,
+    readdir: async () => ['onnxruntime.lib'],
+    stat: async () => ({ size: 7 }),
+    sha256File: async () => 'c'.repeat(64),
+    verifyAssets: async () => {
+      calls.push('verifyAssets');
+      return { manifest: { DOCLING_RS_MODELS_DIR: 'C:\\models', recommended_env: { DOCLING_LAYOUT_ONNX: 'C:\\models\\layout.onnx' } }, verified: DOCLING_ASSETS };
+    },
+    buildRelease: async () => {
+      calls.push('buildRelease');
+      return 'D:\\target\\release\\okf-qualify-docling.exe';
+    },
+    exec: async (command, args) => {
+      calls.push(`${command} ${args[0]}${args.includes('--message-format=json') ? ' --message-format=json' : ''}`);
+      if (args[0] === 'tree') return { code: 0, stdout: DOCLING_TREE, stderr: '' };
+      if (args[0] === 'metadata') return { code: 0, stdout: JSON.stringify({ packages: [{ name: 'ort-sys', manifest_path: join('C:', 'registry', 'ort-sys-2.0.0-rc.13', 'Cargo.toml') }] }), stderr: '' };
+      return { code: 0, stdout: cargoMessages(), stderr: '' };
+    },
+    runFixtureProcess: async ({ command, env }) => {
+      const only = env.OKF_DOCLING_ONLY;
+      calls.push(`convert ${only}`);
+      assert.equal(command, 'D:\\target\\release\\okf-qualify-docling.exe');
+      assert.equal(env.DOCLING_LAYOUT_ONNX, 'C:\\models\\layout.onnx', 'the converter is given the manifest environment');
+      const stub = doclingRun(only);
+      await writeFile(join(env.OKF_DOCLING_OUT, 'receipt.json'), JSON.stringify(stub.report));
+      return { ...stub.run, stdout: 'Wrote receipt\n' };
+    },
+    loadEvidence: async (dir) => doclingRun(nameOf(dir)).evidence,
+    log: () => {},
+    logError: () => {},
+    now: () => '2026-10-05T18:10:00.000Z',
+    ...over.io,
+  };
+  const outcome = await qualify({
+    root,
+    header: DOCLING_HEADER,
+    outDir,
+    manifestPath,
+    selected: over.selected ?? FIXTURE_RUNS,
+    scope: { mode: 'all', fixtures: FIXTURE_RUNS, qualification: true },
+    env: { PATH: 'x' },
+    platform: 'win32',
+    io,
+  });
+  const written = JSON.parse(await readFile(join(outDir, 'receipt.json'), 'utf8'));
+  return { ...outcome, outDir, calls, written };
+}
+
+test('the Docling run verifies assets before it builds, builds before it converts, and writes the receipt it returns', async (t) => {
+  const { receipt, receiptPath, converted, calls, written, outDir } = await doclingQualify(t);
+  assert.equal(receipt.result, 'PASS');
+  assert.equal(converted, true);
+  assert.equal(receiptPath, join(outDir, 'receipt.json'));
+  assert.deepEqual(written, JSON.parse(JSON.stringify(receipt)), 'the file on disk is the receipt that was judged');
+  assert.deepEqual(calls.slice(0, 7), ['read manifest', 'verifyAssets', 'buildRelease', 'cargo tree', 'cargo build --message-format=json', 'cargo metadata', `convert ${FIXTURE_RUNS[0]}`]);
+  assert.deepEqual(calls.slice(6), FIXTURE_RUNS.map((only) => `convert ${only}`), 'one process per fixture, in order');
+  assert.equal(receipt.git_sha, DOCLING_HEADER.git_sha);
+  assert.equal(receipt.converter.version, lockedPackage(await readFile(join(root, 'Cargo.lock'), 'utf8'), 'docling').version, 'the converter version is read from Cargo.lock');
+  assert.equal(receipt.build.command, 'cargo build --locked --release -p okf-qualify-docling');
+  assert.match(receipt.assets_verified.manifest, /^[^\\]*assets\.json$/, 'the manifest is named relative to the repository, with forward slashes');
+  assert.equal(receipt.assets_verified.native_libraries[0].version, '1.28.0');
+  assert.equal(receipt.settings.environment.OKF_DOCLING_CRATE_VERSION, receipt.converter.version);
+  assert.equal(receipt.per_fixture.length, FIXTURE_RUNS.length);
+  assert.match(receipt.per_fixture[0].stdout_sha256, /^[0-9a-f]{64}$/);
+  assertDoclingEnvelope(receipt);
+  assert.equal(doclingCriteria.exitCodeFor(receipt.result), 0);
 
   const harness = await readFile(join(root, 'qualification/docling/src/main.rs'), 'utf8');
   assert.doesNotMatch(harness, /SuccessNonEmpty|must_contain|peak_rss_bytes/, 'no label for a rule that is not applied, no expectation outside SOURCES.json, no field that is always null');
   assert.match(harness, /\.generate_page_images\(applied\.generate_page_images\)/);
   assert.match(harness, /version_source: VERSION_SOURCE/);
   assert.match(harness, /Rule::TimeoutHonoured => "partial_success_with_pipeline_timeout_error"/);
+  const run = await readFile(join(root, 'qualification/docling/run.mjs'), 'utf8');
+  assert.match(run, /if \(only\.length && record\) throw new Error/);
+  assert.ok(run.indexOf('await receiptHeader(') < run.indexOf('await qualify('), 'the clean-tree guard comes before the run');
+  assert.match(run, /process\.exitCode = exitCodeFor\(receipt\.result\);/);
+  assert.doesNotMatch(run, /process\.exit\(|throw new Error\(`Docling qualification/, 'run.mjs reports the folded result; it does not decide one');
+});
+
+test('a failure before conversion replaces the previous receipt with an INCOMPLETE one for this run', async (t) => {
+  // What an earlier run left behind: a receipt that says PASS for another commit, and its evidence.
+  const stale = async (outDir) => {
+    await mkdir(join(outDir, 'partial', 'born_digital_text.pdf'), { recursive: true });
+    await writeFile(join(outDir, 'partial', 'born_digital_text.pdf', 'document.md'), 'old run');
+    await writeFile(join(outDir, 'receipt.json'), JSON.stringify({ git_sha: 'b'.repeat(40), result: 'PASS' }));
+  };
+  const stoppedAt = async (over, sentence, ranBefore) => {
+    let outDir = null;
+    const io = {
+      ...over.io,
+      mkdir: async (path, options) => {
+        // The first thing the run touches is its output directory: plant the stale files just before.
+        if (outDir === null) {
+          outDir = path;
+          await mkdir(path, options);
+          await stale(path);
+          return undefined;
+        }
+        return mkdir(path, options);
+      },
+    };
+    const { receipt, converted, calls, written } = await doclingQualify(t, { ...over, io });
+    assert.equal(receipt.result, 'INCOMPLETE', String(sentence));
+    if (typeof sentence === 'string') assert.equal(receipt.harness_error, sentence);
+    else assert.match(receipt.harness_error, sentence);
+    assert.equal(converted, false);
+    assert.deepEqual(calls, ranBefore, 'nothing runs after the step that failed');
+    assert.deepEqual(doclingFailedIds(receipt), [], 'the environment is never a library verdict');
+    assert.deepEqual([...new Set(receipt.criteria.filter((item) => !item.id.startsWith('assets/')).map((item) => item.result))], ['not_judged'], 'no fixture criterion is judged');
+    // The receipt on disk is this run's, not the earlier PASS; the earlier evidence is gone.
+    assert.equal(written.result, 'INCOMPLETE');
+    assert.equal(written.git_sha, DOCLING_HEADER.git_sha);
+    assert.equal(written.harness_error, receipt.harness_error);
+    await assert.rejects(stat(join(outDir, 'partial', 'born_digital_text.pdf', 'document.md')), /ENOENT/);
+    assertDoclingEnvelope(receipt);
+    assert.equal(doclingCriteria.exitCodeFor(receipt.result), 3);
+    return receipt;
+  };
+
+  const noManifest = await stoppedAt(
+    { manifestMissing: true },
+    /^the Docling model assets manifest is not readable at .*assets\.json \(qualification needs the verified model assets\): ENOENT: no such file or directory/,
+    ['read manifest'],
+  );
+  assert.equal(noManifest.assets_verified, null);
+  assert.equal(doclingCriterion(noManifest, 'assets/hashes_match').result, 'not_judged');
+  await stoppedAt(
+    { io: { verifyAssets: async () => { throw new Error('Docling model asset missing: C:\\models\\layout.onnx (ENOENT). A missing asset is never qualified.'); } } },
+    'the Docling model assets could not be verified: Docling model asset missing: C:\\models\\layout.onnx (ENOENT). A missing asset is never qualified.',
+    ['read manifest'],
+  );
+  const noBuild = await stoppedAt(
+    { io: { buildRelease: async () => { throw new Error('cargo build --locked --release -p okf-qualify-docling exited 101'); } } },
+    'the harness build failed: cargo build --locked --release -p okf-qualify-docling exited 101',
+    ['read manifest', 'verifyAssets'],
+  );
+  assert.equal(doclingCriterion(noBuild, 'assets/hashes_match').result, 'pass', 'what was verified before the failure stays recorded');
+  assert.equal(noBuild.build, null);
+  const noTree = await stoppedAt(
+    { io: { exec: async () => ({ code: 101, stdout: '', stderr: 'error: no such package' }) } },
+    'the docling features of this build could not be read from cargo: cargo tree --locked -p okf-qualify-docling -e normal --prefix none -f {p}|{f} exited 101 error: no such package',
+    ['read manifest', 'verifyAssets', 'buildRelease'],
+  );
+  assert.equal(noTree.converter.crate, 'docling');
+});
+
+test('a converter binary that is missing, or declarations that cannot be read, end INCOMPLETE and never as a library failure', async (t) => {
+  const missing = { exitCode: null, signal: null, spawnError: 'ENOENT: no such file or directory, uv_spawn', timedOut: false, done: null, peakRssBytes: null, peakRssNote: 'not sampled', stdout: '', stderr: '' };
+  const { receipt, converted, written } = await doclingQualify(t, { io: { runFixtureProcess: async () => missing, loadEvidence: async () => ({ markdown: null, document: null, pageFiles: {}, problems: [] }) } });
+  assert.equal(converted, true, 'the run reached conversion; each process failed to start');
+  assert.equal(receipt.result, 'INCOMPLETE');
+  assert.equal(
+    receipt.harness_error,
+    `the converter process for ${FIXTURE_RUNS[0]} could not be started: ENOENT: no such file or directory, uv_spawn (and ${FIXTURE_RUNS.length - 1} more harness error(s); each is the detail of the criteria it stopped)`,
+  );
+  assert.deepEqual(doclingFailedIds(receipt), []);
+  assert.equal(doclingCriterion(receipt, 'assets/model_inventory').detail, 'no converter process reported docling::model_inventory()');
+  assert.deepEqual(receipt.failures.filter((item) => item.fixture !== null).map((item) => item.fixture), FIXTURE_RUNS, 'each fixture has an entry of its own');
+  assert.equal(written.result, 'INCOMPLETE');
+  assertDoclingEnvelope(receipt);
+
+  // Without the declarations there is no list of fixtures: the receipt still says what stopped the run.
+  const unread = await doclingQualify(t, { io: { readFile: async (path, encoding) => (path.endsWith('SOURCES.json') ? '{ not json' : readFile(path, encoding)) } });
+  assert.equal(unread.receipt.result, 'INCOMPLETE');
+  assert.match(unread.receipt.harness_error, /^the fixture declarations in SOURCES\.json could not be read: /);
+  assert.deepEqual(unread.calls, []);
+  assert.deepEqual(doclingFailedIds(unread.receipt), []);
+
+  // A step that fails between two fixtures keeps what was judged and leaves the rest not judged.
+  let seen = 0;
+  const midway = await doclingQualify(t, {
+    io: {
+      loadEvidence: async (dir) => {
+        seen += 1;
+        if (seen === 3) throw new Error('EIO: read failed');
+        return doclingRun(dir.split(/[\\/]/).pop().replaceAll('__', '/')).evidence;
+      },
+    },
+  });
+  assert.equal(midway.receipt.result, 'INCOMPLETE');
+  assert.equal(midway.receipt.harness_error, 'EIO: read failed');
+  assert.deepEqual(Object.values(midway.receipt.summary).slice(0, 3), ['PASS', 'PASS', 'INCOMPLETE']);
+  assert.equal(doclingCriterion(midway.receipt, `${FIXTURE_RUNS[2]}/conversion`).detail, 'the fixture did not run: EIO: read failed');
 });
 
 const pidAlive = (pid) => {

@@ -9,8 +9,12 @@
  *
  * SPEC section 7 promises "inclusive pages/lines" selections and "exact resolved citations";
  * section 5 "relevant page renders, source locators". So a paginated fixture (PDF, image)
- * must give every text item a page inside the document and a box inside that page, and one
- * render per page. Other formats are recorded as the library reports them, not judged.
+ * must give every text item, table and picture a page inside the document and a box inside
+ * that page, and one render per page. Other formats are recorded as the library reports them, not judged.
+ *
+ * A render must also depict its page: the orchestrator decodes each image (lib/png.mjs) and
+ * this module fails one that is a single flat colour, unless the fixture's entry in
+ * SOURCES.json declares that page blank, in which case the render must be flat.
  */
 
 const HEADING_LABELS = ['title', 'section_header'];
@@ -19,6 +23,14 @@ const ROUNDING = 0.011;
 /** `invalid` lists at most this many items; `invalid_total` is the full count. */
 const INVALID_SHOWN = 10;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/** What a passing provenance criterion asserts; the receipt carries this sentence. */
+export const PROVENANCE_RULE =
+  'every text item, table and picture has provenance, each page_no is a page of the document and each bbox has area and lies inside that page';
+
+/** What a passing page_renders criterion asserts; the receipt carries this sentence. */
+export const PAGE_RENDER_RULE =
+  'one image per page of the document, the page count the fixture declares and the library reports, each file re-read with the hash and pixel size the library gave; every image is decoded, and a render that is a single flat colour fails unless SOURCES.json declares that page blank (expect.blank_pages); a page declared blank must render flat';
 
 const list = (value) => (Array.isArray(value) ? value : []);
 const layerOf = (item) => item?.content_layer ?? 'body';
@@ -157,6 +169,7 @@ export function judgeProvenance(doc, { paginated }) {
   const located = texts.located + tables.located + pictures.located;
   const base = {
     page_count: doc.pages.length,
+    items: { total: items, located },
     text_items: texts,
     tables,
     pictures,
@@ -178,14 +191,10 @@ export function judgeProvenance(doc, { paginated }) {
       ...base,
     };
   }
-  if (texts.total === 0) {
-    return { status: 'not_exercised', reason: 'the converted document holds no text item', ...base };
+  if (items === 0) {
+    return { status: 'not_exercised', reason: 'the converted document holds no text item, table or picture', ...base };
   }
-  return {
-    status: texts.located === texts.total ? 'PASS' : 'FAIL',
-    rule: 'every text item has provenance, each page_no is a page of the document and each bbox has area and lies inside that page; tables and pictures are counted the same way but do not decide the status',
-    ...base,
-  };
+  return { status: located === items ? 'PASS' : 'FAIL', rule: PROVENANCE_RULE, ...base };
 }
 
 /** Width and height from a PNG's IHDR, or null when the bytes do not start as a PNG. */
@@ -204,9 +213,11 @@ export function pngSize(bytes) {
  * @param {{ value: number|null, error: string|null }|null} input.libraryPageCount docling::pdf_page_count
  * @param {{ page_no: number, width: number, height: number }[]} input.pages pages of the document
  * @param {object[]} input.images what the harness recorded per page image, with `file` = the
- *   written file re-read by the orchestrator ({ sha256, bytes, png }) or null when unreadable
+ *   written file re-read by the orchestrator ({ sha256, bytes, png, ink }) or null when unreadable;
+ *   `ink` is what lib/png.mjs pngInk read from the pixels
+ * @param {number[]} [input.blankPages] pages the fixture declares blank in SOURCES.json
  */
-export function judgePageRenders({ applicable, expectedPages, libraryPageCount, pages, images }) {
+export function judgePageRenders({ applicable, expectedPages, libraryPageCount, pages, images, blankPages = [] }) {
   if (!applicable) {
     return {
       status: 'not_applicable',
@@ -219,6 +230,7 @@ export function judgePageRenders({ applicable, expectedPages, libraryPageCount, 
     page_image_count: images.length,
     expected_pages: expectedPages ?? null,
     library_page_count: libraryPageCount ?? null,
+    blank_pages: blankPages,
   };
   if (images.length === 0) {
     return {
@@ -228,6 +240,7 @@ export function judgePageRenders({ applicable, expectedPages, libraryPageCount, 
     };
   }
   const problems = [];
+  const undecoded = [];
   if (pages.length === 0) problems.push('the document has no pages map');
   if (Number.isInteger(expectedPages) && pages.length !== expectedPages) {
     problems.push(`the document has ${pages.length} page(s); the fixture has ${expectedPages}`);
@@ -236,6 +249,9 @@ export function judgePageRenders({ applicable, expectedPages, libraryPageCount, 
     problems.push(`docling::pdf_page_count says ${libraryPageCount.value}; the document has ${pages.length}`);
   }
   if (images.length !== pages.length) problems.push(`${images.length} page image(s) for ${pages.length} page(s)`);
+  for (const blank of blankPages) {
+    if (!pages.some((page) => page.page_no === blank)) problems.push(`blank page ${blank} is declared in SOURCES.json and is not a page of the document`);
+  }
   const renders = images.map((image) => {
     const page = pages.find((candidate) => candidate.page_no === image.page_no);
     if (!page) problems.push(`page image ${image.page_no} belongs to no page of the document`);
@@ -252,6 +268,17 @@ export function judgePageRenders({ applicable, expectedPages, libraryPageCount, 
         }
       }
     }
+    const declaredBlank = blankPages.includes(image.page_no);
+    const ink = image.mimetype === 'image/png' ? (image.file?.ink ?? null) : null;
+    if (image.file) {
+      if (image.mimetype !== 'image/png') undecoded.push(`page ${image.page_no}: ${image.mimetype} pixels are not read by this harness`);
+      else if (!ink?.decoded) undecoded.push(`page ${image.page_no}: the pixels could not be read (${ink?.reason ?? 'the file was not decoded'})`);
+      else if (ink.uniform && !declaredBlank) {
+        problems.push(`page ${image.page_no}: the render is one flat colour (sample bytes ${ink.first_pixel.join(' ')}) and SOURCES.json does not declare this page blank`);
+      } else if (!ink.uniform && declaredBlank) {
+        problems.push(`page ${image.page_no}: declared blank in SOURCES.json but ${ink.differing_pixels} of ${ink.pixels} pixel(s) differ from the first`);
+      }
+    }
     return {
       page_no: image.page_no,
       width_px: image.width,
@@ -261,12 +288,17 @@ export function judgePageRenders({ applicable, expectedPages, libraryPageCount, 
       bytes: image.bytes,
       sha256: image.sha256,
       px_per_page_unit: page && page.width > 0 ? Math.round((image.width / page.width) * 1e4) / 1e4 : null,
+      declared_blank: declaredBlank,
+      uniform: ink?.decoded ? ink.uniform : null,
+      differing_pixels: ink?.decoded ? ink.differing_pixels : null,
     };
   });
   for (const page of pages) {
     if (!images.some((image) => image.page_no === page.page_no)) problems.push(`page ${page.page_no} has no image`);
   }
-  return { status: problems.length ? 'FAIL' : 'PASS', ...base, problems, renders };
+  // A problem that was found stands; pixels that could not be read leave the rest unjudged, never passed.
+  const status = problems.length ? 'FAIL' : undecoded.length ? 'not_judged' : 'PASS';
+  return { status, rule: PAGE_RENDER_RULE, ...base, problems, undecoded, renders };
 }
 
 /**
