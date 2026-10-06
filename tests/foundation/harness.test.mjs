@@ -1007,6 +1007,20 @@ test('the MCP Apps receipt inputs cover everything the run renders and executes'
   assert.doesNotMatch(source, /const MCP_APPS_INPUTS/, 'the orchestrator must use the tested list');
 });
 
+test('the MCP Apps harness serves the committed fixtures and bundle whatever environment the caller inherited', async () => {
+  const source = await readFile(join(root, 'qualification/mcp-apps/run.mjs'), 'utf8');
+  // tests/fixtures/views is a receipt input; an inherited OKF_MCP_APPS_FIXTURES must not swap it.
+  assert.ok(MCP_APPS_INPUTS.includes('tests/fixtures/views'));
+  assert.ok(PRESENT_DATASET.fixture.startsWith('tests/fixtures/views/'));
+  assert.match(source, /const fixturesDir = join\(root, 'tests\/fixtures\/views'\);/);
+  assert.match(source, /const harnessEnv = \{ \.\.\.process\.env, OKF_MCP_APPS_DIST: distApps, OKF_MCP_APPS_FIXTURES: fixturesDir \};/);
+  assert.match(source, /run\(harnessBin, \['--check'\], \{\s*env: harnessEnv,/);
+  assert.match(source, /spawnGroup\(harnessBin, harnessArgs, \{\s*env: \{\s*\.\.\.harnessEnv,/);
+  assert.equal(source.match(/OKF_MCP_APPS_(DIST|FIXTURES):/g).length, 2, 'no second place builds the harness environment');
+  // And what the harness says it serves is compared with the committed dataset before anything renders.
+  assert.match(source, /check\.dataset\?\.sha256 !== committedDataset\.digest/);
+});
+
 test('all three orchestrators take their header from receiptHeader and record only through recordReceipt', async () => {
   for (const name of ['docling', 'mcp-apps', 'iii']) {
     const source = await readFile(join(root, 'qualification', name, 'run.mjs'), 'utf8');

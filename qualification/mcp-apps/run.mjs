@@ -34,6 +34,7 @@ import {
   APP_ONLY_TOOLS,
   APP_RESOURCE_URI,
   MCP_APPS_INPUTS,
+  PRESENT_DATASET,
   appBundleBuild,
   UPSTREAM_HOST_RULES,
   VIEWS,
@@ -719,8 +720,13 @@ const harnessBin = await buildRelease(root, HARNESS_PACKAGE);
 const harnessBytes = await readFile(harnessBin);
 const harnessArgs = ['--http', HTTP_BIND];
 
+// The harness reads the bundle and the fixtures this run names, never ones an inherited
+// OKF_MCP_APPS_DIST or OKF_MCP_APPS_FIXTURES points at: the receipt cites the repository's.
+const fixturesDir = join(root, 'tests/fixtures/views');
+const harnessEnv = { ...process.env, OKF_MCP_APPS_DIST: distApps, OKF_MCP_APPS_FIXTURES: fixturesDir };
+
 const checkRun = await run(harnessBin, ['--check'], {
-  env: { ...process.env, OKF_MCP_APPS_DIST: distApps },
+  env: harnessEnv,
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 if (checkRun.code !== 0) {
@@ -738,6 +744,13 @@ try {
   throw new Error(`could not parse harness check JSON: ${error.message}\n${checkRun.stdout}`);
 }
 
+const committedDataset = await loadDatasetExpectation(PRESENT_DATASET);
+if (check.dataset?.sha256 !== committedDataset.digest) {
+  throw new Error(
+    `the harness serves dataset ${check.dataset?.sha256}; the committed ${PRESENT_DATASET.fixture} is ${committedDataset.digest}`,
+  );
+}
+
 const readable = Object.fromEntries(
   (check.resources ?? []).map((resource) => [resource.name, Boolean(resource.readable)]),
 );
@@ -747,8 +760,7 @@ if (!readable.app) {
 
 const harness = spawnGroup(harnessBin, harnessArgs, {
   env: {
-    ...process.env,
-    OKF_MCP_APPS_DIST: distApps,
+    ...harnessEnv,
     // Explicit either way: an inherited value must not lift Host protection.
     OKF_MCP_APPS_NGROK: NGROK_ENABLED && !PROTOCOL_ONLY ? '1' : '0',
   },
