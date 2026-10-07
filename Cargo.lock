@@ -1244,8 +1244,7 @@ dependencies = [
 [[package]]
 name = "docling-core"
 version = "1.93.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a9612b6016fa242f6b9c0075ff6f74688a9190bd62f7870ee62181f7f0280f1"
+source = "git+https://github.com/Heyoub/docling.rs?rev=e500c2323bcf5c3c84d3731ed00de65b15d0709a#e500c2323bcf5c3c84d3731ed00de65b15d0709a"
 dependencies = [
  "png 0.18.1",
  "serde_json",
@@ -1255,8 +1254,7 @@ dependencies = [
 [[package]]
 name = "docling-onnx"
 version = "1.93.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e05e93f30284836ff159d7870bf8d45b1ef26ea4df5f7869bcb07fe22d15de13"
+source = "git+https://github.com/Heyoub/docling.rs?rev=e500c2323bcf5c3c84d3731ed00de65b15d0709a#e500c2323bcf5c3c84d3731ed00de65b15d0709a"
 dependencies = [
  "docling-core",
  "ort",
@@ -1265,8 +1263,7 @@ dependencies = [
 [[package]]
 name = "docling-pdf"
 version = "1.93.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61cfc0d963a53cc989cdd5c427161d2d8eaa5e809cdeb82d8524c003428ead9a"
+source = "git+https://github.com/Heyoub/docling.rs?rev=e500c2323bcf5c3c84d3731ed00de65b15d0709a#e500c2323bcf5c3c84d3731ed00de65b15d0709a"
 dependencies = [
  "docling-core",
  "docling-onnx",

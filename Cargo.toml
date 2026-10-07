@@ -72,6 +72,17 @@ base64 = { version = "=0.22.1" }
 clap_complete = "=4.6.11"
 clap_mangen = "=0.3.3"
 
+# Owner decision 2026-10-06 (verification.json gate converter-docling-pdf-font-run-patch):
+# docling-pdf is built from a one-commit fork of docling.rs on upstream 434cc4e (published as
+# 1.93.6) so that a phrase that changes font is one text run, as in docling-parse >= 7.21 (#351).
+# docling-core and docling-onnx come from the same tree, because the fork's docling-pdf takes them
+# by path; docling itself stays 1.93.5 from crates.io. Remove this section when a docling.rs
+# release ports the docling-parse >= 7.21 line contractor.
+[patch.crates-io]
+docling-pdf = { git = "https://github.com/Heyoub/docling.rs", rev = "e500c2323bcf5c3c84d3731ed00de65b15d0709a" }
+docling-core = { git = "https://github.com/Heyoub/docling.rs", rev = "e500c2323bcf5c3c84d3731ed00de65b15d0709a" }
+docling-onnx = { git = "https://github.com/Heyoub/docling.rs", rev = "e500c2323bcf5c3c84d3731ed00de65b15d0709a" }
+
 # Workspace fragment. Each authored member needs [lints] workspace = true.
 [workspace.lints.rust]
 unsafe_code = "forbid"
