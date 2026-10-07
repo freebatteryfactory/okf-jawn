@@ -21,7 +21,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 import { pathContext, scrubReceiptPaths } from '../../../scripts/lib/provenance.mjs';
 import { lockedPackage, lockedPackages } from '../../lib/cargo.mjs';
 import { TREE_ARGS, buildFacts } from './build.mjs';
@@ -82,7 +82,7 @@ export async function qualify({ root, header, outDir, manifestPath = join(root, 
     io.log('Verifying Docling model assets against the manifest hashes...\n');
     const { manifest, verified } = await step('the Docling model assets could not be verified', () => io.verifyAssets(manifestBytes));
     io.log(`Verified ${verified.matched} of ${verified.count} assets (${verified.bytes_total} bytes) against the manifest hashes.\n`);
-    facts.assets = { ...verified, manifest: relative(root, manifestPath).replaceAll('\\', '/'), models_dir: manifest.DOCLING_RS_MODELS_DIR, models_source: manifest.models_source ?? null };
+    facts.assets = { ...verified, manifest: manifestPath, models_dir: manifest.DOCLING_RS_MODELS_DIR, models_source: manifest.models_source ?? null };
 
     const docling = await step('Cargo.lock does not pin the docling crate', async () => {
       const lockText = await io.readFile(join(root, 'Cargo.lock'), 'utf8');
