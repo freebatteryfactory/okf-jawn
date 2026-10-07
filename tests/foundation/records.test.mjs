@@ -103,6 +103,7 @@ const phase0Gates=[
  ['authored-typescript-seams','ci'],
  ['deterministic-foundation','ci'],
  ['docling-library-qualification','receipt'],
+ ['converter-docling-pdf-font-run-patch','decision'],
  ['mcp-apps-protocol-qualification','receipt'],
  ['json-render-catalog-round-trip','ci'],
  ['hey-api-generated-runtime-probe','decision'],
@@ -231,29 +232,28 @@ test('every Phase 0 gate has exactly one kind and only the fields of that kind',
  const references=JSON.parse(await read('ui/tsconfig.json')).references.map(reference=>reference.path);
  assert.deepEqual(references,['./tsconfig.generated.json','./tsconfig.tooling.json'],'ui/tsconfig.json references changed: the sentence in typescript_policy.authored must follow');
 });
-test('the Docling gate carries the one failure the owner accepted, and the gates that carry the cures exist',async()=>{
+test('the Docling gate accepts no failure, its PDF crate is the fork the owner decided on, and the gates that carry the cures exist',async()=>{
  const gates=(await record()).current.gates;
  const docling=gates.phase_0.find(gate=>gate.id==='docling-library-qualification');
- // The owner's decision of 2026-10-06, word for word; nobody but the owner changes or adds to it.
- assert.deepEqual(docling.accepted_failures,[{
-  criterion:'corpus/redp5110_sampled.pdf/content_across_font_runs',
-  decision:'Docling stays the converter. Where a phrase changes font the library ends a text cell and joins cells with a space, so "(WRKFCNUSG)" is extracted as "( WRKFCNUSG )". Accepted for now; no newer version, option or pdfium changes it.',
-  decided_on:'2026-10-06',
-  decided_by:'owner',
-  tracked_by:'converter-font-run-spacing',
- }]);
- for(const gate of gates.phase_0.filter(entry=>entry.id!==docling.id))assert.ok(!Object.hasOwn(gate,'accepted_failures'),`${gate.id} accepts a failure`);
- const pinned=JSON.parse(await read('qualification/docling/criteria.json')).required;
- assert.ok(pinned.includes(docling.accepted_failures[0].criterion),'the accepted criterion is not one the harness pins');
- // The cures and the limitation are construction work, each with an owner lane.
+ // The font-run failure the owner accepted on 2026-10-06 is cured by the patched docling-pdf, so no criterion is accepted as failing.
+ for(const gate of gates.phase_0)assert.ok(!Object.hasOwn(gate,'accepted_failures'),`${gate.id} accepts a failure`);
+ assert.match(docling.covers,/for the Docling crate Cargo\.lock pins \(its PDF crate the fork of converter-docling-pdf-font-run-patch\), called directly/);
+ // The owner's decision of 2026-10-06, word for word.
+ const patch=gates.phase_0.find(gate=>gate.id==='converter-docling-pdf-font-run-patch');
+ assert.deepEqual([patch.kind,patch.decision,patch.decided_on,patch.decided_by],['decision','docling-pdf is built from a one-commit fork of docling.rs so that a phrase that changes font is extracted as one run, as docling-parse 7.21 and later do.','2026-10-06','owner']);
+ // What it covers: the fork and the commit Cargo.toml patches in (named there, not here: no gate text carries a commit hash), the upstream base, the rule, upstream's change, nothing reported, and when it goes.
+ const rev=/^docling-pdf = \{ git = "https:\/\/github\.com\/Heyoub\/docling\.rs", rev = "([0-9a-f]{40})" \}$/m.exec(await read('Cargo.toml'))?.[1];
+ assert.ok(rev,'Cargo.toml does not take docling-pdf from the fork by rev');
+ for(const part of ['the fork https://github.com/Heyoub/docling.rs','the commit the [patch.crates-io] section of Cargo.toml names by rev','one commit on the upstream docling.rs commit that crates.io publishes as 1.93.6','dp_lines.rs, applicable','#351 (7.21.0)','docling.rs has not ported it','Nothing was reported upstream','when a docling.rs release ports the docling-parse 7.21 or later line contractor'])assert.ok(patch.covers.includes(part),`converter-docling-pdf-font-run-patch does not say ${part}`);
+ // The tracker of the removed acceptance is gone, and nothing names it.
+ assert.doesNotMatch(await read('verification.json'),/converter-font-run-spacing/);
+ // The cures are construction work, each with an owner lane.
  const construction=Object.fromEntries(gates.construction.map(gate=>[gate.id,gate]));
  for(const gate of gates.construction)assert.deepEqual(Object.keys(gate),['id','status','owner','receipt','meaning'],gate.id);
  assert.deepEqual([construction['ingest-locates-unlocated-items'].owner,construction['ingest-locates-unlocated-items'].status],['ingest','blocked_on_lanes']);
  assert.deepEqual([construction['ingest-flags-undecodable-text'].owner,construction['ingest-flags-undecodable-text'].status],['ingest','blocked_on_lanes']);
- assert.deepEqual([construction['converter-font-run-spacing'].owner,construction['converter-font-run-spacing'].status],['integration-owner','blocked_upstream']);
  assert.match(construction['ingest-locates-unlocated-items'].meaning,/qualification\/docling\/src\/locate\.rs.*never given a guessed box/);
  assert.match(construction['ingest-flags-undecodable-text'].meaning,/qualification\/docling\/src\/glyphs\.rs.*never indexed as words.*reported as partly extracted/);
- assert.match(construction['converter-font-run-spacing'].meaning,/the acceptance entry is removed$/);
  // What the two rules cannot do is said where the lane reads it: in its gates and in its own rules.
  const detectorLimits="The detector has two known limits: it flags real text of the placeholder's shape that stands after a space (`/B747`, `/v100`, `/tmp123`), and it misses a placeholder glued to a preceding character (`x/g12`). A signal from the library that a glyph had no Unicode is preferred to this detector as soon as the library gives one";
  assert.ok(construction['ingest-flags-undecodable-text'].meaning.endsWith(detectorLimits),'ingest-flags-undecodable-text does not state the detector\'s two known limits');
@@ -268,8 +268,7 @@ test('the Docling gate carries the one failure the owner accepted, and the gates
  assert.match(await read('qualification/docling/src/locate.rs'),/^pub\(crate\) const LOCATE_LIMITS: &str = "/m);
  // The status words of the two hand-typed groups are a closed list; none of them is a pass.
  const words=group=>[...new Set(gates[group].map(gate=>gate.status))].sort();
- assert.deepEqual(words('construction'),['blocked_on_lanes','blocked_upstream']);
- assert.deepEqual(gates.construction.filter(gate=>gate.status==='blocked_upstream').map(gate=>gate.id),['converter-font-run-spacing'],'blocked_upstream is for a limitation only an upstream release cures');
+ assert.deepEqual(words('construction'),['blocked_on_lanes']);
  assert.deepEqual(words('acceptance'),['blocked_on_product','not_run']);
  // The ingest lane is told: its gate table lists both gates, and its rules name the harness functions as the reference.
  const lane=await read('crates/ingest/AGENTS.md');
