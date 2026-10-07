@@ -1,0 +1,847 @@
+{
+  "git_sha": "2f0fe2d9d99611b1d4149cd43ea2409394a5c798",
+  "inputs": [
+    ".bun-version",
+    ".cargo/config.toml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "api/mcp-apps.json",
+    "api/mcp-tools.json",
+    "bun.lock",
+    "bunfig.toml",
+    "package.json",
+    "qualification/lib",
+    "qualification/mcp-apps",
+    "rust-toolchain.toml",
+    "scripts/lib/provenance.mjs",
+    "scripts/lib/receipt-envelope.mjs",
+    "tests/fixtures/views",
+    "ui/index.html",
+    "ui/package.json",
+    "ui/scripts",
+    "ui/src",
+    "ui/tsconfig.json",
+    "ui/vite.config.ts"
+  ],
+  "produced_at": "2026-10-07T05:06:41.640Z",
+  "component": "mcp-apps-protocol-qualification",
+  "gate": "mcp-apps-protocol-qualification",
+  "result": "PASS",
+  "harness_error": null,
+  "criteria": [
+    {
+      "id": "bundle/single_app_resource",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "bundle/mime_type",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "bundle/react_production_build",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "bundle/served_as_html",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/render_tools",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/app_only_tools",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/read_object_declaration",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/resource_listed",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/resource_mime_type",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/resource_meta_ui",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/resource_is_built_bundle",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/render_tool_results",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/show_bound_sources",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/read_object_ranged_loop",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/read_object_digest",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/read_object_unknown_digest_refused",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "protocol/read_object_unknown_argument_refused",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_source/text",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_source/no_alert",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_source/accessibility",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_changes/text",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_changes/no_alert",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_changes/accessibility",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_timeline/text",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_timeline/no_alert",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_timeline/accessibility",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_present/text",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_present/no_alert",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_present/accessibility",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_present/chart_marks",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_present/table_rows",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_present/chart_source_table",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_present/show_calls",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_present/read_object_calls",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_present/no_refused_call",
+      "required": true,
+      "result": "pass"
+    },
+    {
+      "id": "render_present/dataset_exercised",
+      "required": true,
+      "result": "pass"
+    }
+  ],
+  "not_judged": [],
+  "harness_error_detail": [],
+  "finished_at": "2026-10-07T05:07:40.021Z",
+  "scope": {
+    "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
+    "real": [
+      "the MCP App bundle (ui/dist-apps/app.html), built by this run with the product build script",
+      "the View code in that bundle: the product Source, Changes, Timeline and Present views, with the chart and data table",
+      "the host implementation: the ext-apps basic-host example, in Chromium"
+    ],
+    "fixture": [
+      "the MCP server is okf-qualify-mcp-apps, this harness; it is not the product server",
+      "the render tools, show and read_object answer from committed files under tests/fixtures/views",
+      "read_object is declared with the product schemas from api/mcp-tools.json, but its handler is the harness"
+    ],
+    "not_covered": [
+      "the product server's show and read_object handlers",
+      "the product blob store and the product's authorization of a read",
+      "any host other than basic-host: claude.ai and ChatGPT belong to the gate mcp-apps-web-hosts"
+    ],
+    "reading_note": "\"dataset_exercised\" and present_dataset.status \"exercised\" mean the App fetched the fixture dataset through the harness read_object and drew it. They do not mean the product read_object tool was called."
+  },
+  "rules": {
+    "bundle/single_app_resource": "The bundle manifest this run built lists exactly one resource, ui://okf-jawn/app.html.",
+    "bundle/mime_type": "Every mimeType in that manifest is the ext-apps SDK's RESOURCE_MIME_TYPE.",
+    "bundle/react_production_build": "The built App bundle does not contain react-dom's development build: its DevTools notice is absent from the file.",
+    "bundle/served_as_html": "The harness, loading the bundle the manifest names, reads every resource back through its own resources/read handler as an HTML document.",
+    "protocol/render_tools": "tools/list lists exactly the four render tools, each with _meta.ui.resourceUri naming the shared App resource.",
+    "protocol/app_only_tools": "The tools whose _meta.ui.visibility is exactly [\"app\"] are read_object and show, and every listed tool is a render tool or one of these.",
+    "protocol/read_object_declaration": "The listed read_object carries the product's inputSchema and outputSchema from api/mcp-tools.json unchanged.",
+    "protocol/resource_listed": "resources/list lists exactly one resource, the shared App resource.",
+    "protocol/resource_mime_type": "resources/read returns text whose mimeType is the ext-apps SDK's RESOURCE_MIME_TYPE.",
+    "protocol/resource_meta_ui": "resources/read attaches _meta.ui.csp as an object with connectDomains and resourceDomains arrays.",
+    "protocol/resource_is_built_bundle": "The text resources/read returns hashes to the sha256 the bundle manifest of this run records.",
+    "protocol/render_tool_results": "Every render tool returns structuredContent for the App and a non-empty text block for hosts without Apps.",
+    "protocol/show_bound_sources": "show, called as PresentView calls it, returns the bound item and revision for every resolved binding of the present result.",
+    "protocol/read_object_ranged_loop": "read_object, called in PresentView's loop, serves each retained dataset in more than one block, each block naming the object and the offset asked for, until has_more is false.",
+    "protocol/read_object_digest": "The bytes assembled from those blocks hash to the binding's materialized digest, and total_size is their count.",
+    "protocol/read_object_unknown_digest_refused": "read_object answers a digest nobody retains with isError and no structuredContent.",
+    "protocol/read_object_unknown_argument_refused": "read_object answers a request with an argument the product request type does not have with isError and no structuredContent, as the product's deny_unknown_fields does.",
+    "render_source/text": "In the App frame of the reference host, render_source shows the source view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message.",
+    "render_source/no_alert": "The App frame holds no element with role=\"alert\". Only the App frame is read: an alert in the host page or in the sandbox proxy frame is not seen by this rule.",
+    "render_source/accessibility": "axe analysed the App frame and found no serious or critical violation in it.",
+    "render_changes/text": "In the App frame of the reference host, render_changes shows the changes view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message.",
+    "render_changes/no_alert": "The App frame holds no element with role=\"alert\". Only the App frame is read: an alert in the host page or in the sandbox proxy frame is not seen by this rule.",
+    "render_changes/accessibility": "axe analysed the App frame and found no serious or critical violation in it.",
+    "render_timeline/text": "In the App frame of the reference host, render_timeline shows the timeline view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message.",
+    "render_timeline/no_alert": "The App frame holds no element with role=\"alert\". Only the App frame is read: an alert in the host page or in the sandbox proxy frame is not seen by this rule.",
+    "render_timeline/accessibility": "axe analysed the App frame and found no serious or critical violation in it.",
+    "render_present/text": "In the App frame of the reference host, render_present shows the present view's own text for the committed fixture and none of another view's, and no waiting, disconnected or unparsed-result message.",
+    "render_present/no_alert": "The App frame holds no element with role=\"alert\". Only the App frame is read: an alert in the host page or in the sandbox proxy frame is not seen by this rule.",
+    "render_present/accessibility": "axe analysed the App frame and found no serious or critical violation in it.",
+    "render_present/chart_marks": "The chart svg holds exactly as many mark elements (children of g.role-mark) as the dataset has rows. Equality is right for this fixture because its chart is one unit bar with a plain nominal field against a plain quantitative field: Vega-Lite compiles that to one rect per row, and nothing aggregates, bins, stacks, filters or layers. The expectation is derived from the fixture; another specification is refused, not guessed.",
+    "render_present/table_rows": "A visible table captioned with the binding shows the dataset: the same columns, the same cells row by row in order, and every value in the visible text.",
+    "render_present/chart_source_table": "The chart's own \"Source data\" table (inside <details>) holds the dataset cell by cell: the same columns and the same rows in order.",
+    "render_present/show_calls": "While the view rendered, the harness server logged at least one successful show call.",
+    "render_present/read_object_calls": "While the view rendered, the harness server logged successful read_object calls for the dataset's digest that form one or more complete reads: each starts at offset 0, every block starts where the one before ended, and the last ends at the dataset's size with has_more false, after more than one block.",
+    "render_present/no_refused_call": "While the view rendered, the harness server refused no tool call.",
+    "render_present/dataset_exercised": "The App fetched the retained dataset through the harness read_object and drew it: every dataset rule of this view passed and the App frame showed no alert. Fixture evidence; the product server is not involved."
+  },
+  "harness": "okf-qualify-mcp-apps",
+  "protocol_only": false,
+  "transport": {
+    "stdio": {
+      "status": "not_run",
+      "reason": "this orchestrator drives the harness over Streamable HTTP only"
+    },
+    "http": {
+      "status": "listening",
+      "endpoint": "http://127.0.0.1:18765/mcp",
+      "requested": "http://127.0.0.1:18765/mcp"
+    }
+  },
+  "harness_binary": {
+    "path": "target/release/okf-qualify-mcp-apps.exe",
+    "bytes": 5135360,
+    "sha256": "762ecebfeb4e1fd3212919301400fe7bd74a26239303dd85da77bcb9bbe21e53",
+    "args": [
+      "--http",
+      "127.0.0.1:18765"
+    ]
+  },
+  "harness_process": {
+    "exited_before_teardown": false,
+    "exit": {
+      "code": 1,
+      "signal": null,
+      "error": null
+    },
+    "stderr_tail": "l_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"128\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":31,\"has_more\":false,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"192\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"ok\":false,\"tool\":\"read_object\"}\nokf-qualify-mcp-apps tool-call {\"ok\":false,\"tool\":\"read_object\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_source\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_source\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_changes\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_changes\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_timeline\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_timeline\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_present\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_present\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"show\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"show\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"0\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"64\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"128\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":31,\"has_more\":false,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"192\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\n"
+  },
+  "mime_check": {
+    "sdk_constant": "text/html;profile=mcp-app",
+    "manifest_mime_types": [
+      {
+        "name": "app",
+        "mimeType": "text/html;profile=mcp-app"
+      }
+    ]
+  },
+  "bundle_sizes": {
+    "app": 1573924
+  },
+  "app_bundle": {
+    "node_env": null,
+    "react_development_build": false,
+    "marker": "Download the React DevTools"
+  },
+  "resources_readable": {
+    "app": true
+  },
+  "check": {
+    "app_tools": [
+      "show",
+      "read_object"
+    ],
+    "dataset": {
+      "byteLength": 223,
+      "fixture": "present-metrics-dataset.json",
+      "maxBlockBytes": 64,
+      "sha256": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff"
+    },
+    "mode": "check",
+    "resource_count": 1,
+    "resources": [
+      {
+        "byteLength": 1573924,
+        "metaUi": {
+          "csp": {
+            "connectDomains": [],
+            "resourceDomains": []
+          },
+          "prefersBorder": true
+        },
+        "mimeType": "text/html;profile=mcp-app",
+        "name": "app",
+        "path": "ui/dist-apps/app.html",
+        "readable": true,
+        "sha256": "97c9dfd7c8f21d5143225f71b70947417a607bc2de7e5f520a7c46bbe16dbc99",
+        "uri": "ui://okf-jawn/app.html"
+      }
+    ],
+    "tool_count": 4,
+    "tools": [
+      {
+        "hasStructuredContent": true,
+        "name": "render_source",
+        "resourceUri": "ui://okf-jawn/app.html"
+      },
+      {
+        "hasStructuredContent": true,
+        "name": "render_changes",
+        "resourceUri": "ui://okf-jawn/app.html"
+      },
+      {
+        "hasStructuredContent": true,
+        "name": "render_timeline",
+        "resourceUri": "ui://okf-jawn/app.html"
+      },
+      {
+        "hasStructuredContent": true,
+        "name": "render_present",
+        "resourceUri": "ui://okf-jawn/app.html"
+      }
+    ]
+  },
+  "protocol_check": {
+    "status": "passed",
+    "server": {
+      "name": "okf-qualify-mcp-apps",
+      "version": "0.1.0"
+    },
+    "tools": [
+      {
+        "name": "render_source",
+        "ui": {
+          "resourceUri": "ui://okf-jawn/app.html"
+        },
+        "input_schema_sha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+        "output_schema_sha256": null
+      },
+      {
+        "name": "render_changes",
+        "ui": {
+          "resourceUri": "ui://okf-jawn/app.html"
+        },
+        "input_schema_sha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+        "output_schema_sha256": null
+      },
+      {
+        "name": "render_timeline",
+        "ui": {
+          "resourceUri": "ui://okf-jawn/app.html"
+        },
+        "input_schema_sha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+        "output_schema_sha256": null
+      },
+      {
+        "name": "render_present",
+        "ui": {
+          "resourceUri": "ui://okf-jawn/app.html"
+        },
+        "input_schema_sha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+        "output_schema_sha256": null
+      },
+      {
+        "name": "show",
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "input_schema_sha256": "cb75d38fa6b2c0ec9084c0c379c9ac5b7bfbb64d2f343853220fda5cbcfb168e",
+        "output_schema_sha256": null
+      },
+      {
+        "name": "read_object",
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "input_schema_sha256": "0aabb07eeb7f993b96dc584dddac2acadf5091cd7a8f7c8a51b984caa6676ab6",
+        "output_schema_sha256": "86221fcf16d504e6e51dd487e8633a2fb34707f7b22318213d1bd307aaf67c09"
+      }
+    ],
+    "product_read_object": {
+      "input_schema_sha256": "0aabb07eeb7f993b96dc584dddac2acadf5091cd7a8f7c8a51b984caa6676ab6",
+      "output_schema_sha256": "86221fcf16d504e6e51dd487e8633a2fb34707f7b22318213d1bd307aaf67c09"
+    },
+    "resources": [
+      {
+        "uri": "ui://okf-jawn/app.html",
+        "name": "app",
+        "mime_type": "text/html;profile=mcp-app"
+      }
+    ],
+    "resource_reads": [
+      {
+        "uri": "ui://okf-jawn/app.html",
+        "mime_type": "text/html;profile=mcp-app",
+        "text_sha256": "97c9dfd7c8f21d5143225f71b70947417a607bc2de7e5f520a7c46bbe16dbc99",
+        "csp": {
+          "connectDomains": [],
+          "resourceDomains": []
+        }
+      }
+    ],
+    "render_calls": [
+      {
+        "tool": "render_source",
+        "structured": true,
+        "text_fallback": "Qualification source fixture (text fallback)."
+      },
+      {
+        "tool": "render_changes",
+        "structured": true,
+        "text_fallback": "Qualification changes fixture (text fallback)."
+      },
+      {
+        "tool": "render_timeline",
+        "structured": true,
+        "text_fallback": "Qualification timeline fixture (text fallback)."
+      },
+      {
+        "tool": "render_present",
+        "structured": true,
+        "text_fallback": "Qualification present fixture (text fallback)."
+      }
+    ],
+    "show_calls": [
+      {
+        "binding": "venue",
+        "requested": {
+          "item_id": "11111111-2222-4333-8444-555555555555",
+          "revision": "0123456789abcdef0123456789abcdef01234567"
+        },
+        "returned": {
+          "item_id": "11111111-2222-4333-8444-555555555555",
+          "revision": "0123456789abcdef0123456789abcdef01234567"
+        },
+        "is_error": false
+      },
+      {
+        "binding": "metrics",
+        "requested": {
+          "item_id": "22222222-3333-4444-8555-666666666666",
+          "revision": "0123456789abcdef0123456789abcdef01234567"
+        },
+        "returned": {
+          "item_id": "22222222-3333-4444-8555-666666666666",
+          "revision": "0123456789abcdef0123456789abcdef01234567"
+        },
+        "is_error": false
+      }
+    ],
+    "object_reads": [
+      {
+        "binding": "metrics",
+        "object": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff",
+        "blocks": 4,
+        "stopped": "finished",
+        "assembled_bytes": 223,
+        "assembled_sha256": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff",
+        "block_offsets": [
+          "0",
+          "64",
+          "128",
+          "192"
+        ]
+      }
+    ],
+    "unknown_digest": {
+      "is_error": true,
+      "structured": false,
+      "text": "read_object: no retained object 0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "unknown_argument": {
+      "is_error": true,
+      "structured": false,
+      "text": "read_object: unknown argument `not_a_product_argument`"
+    }
+  },
+  "basic_host": {
+    "status": "passed",
+    "source": {
+      "status": "cached",
+      "repository": "https://github.com/modelcontextprotocol/ext-apps",
+      "requested_tag": "v2.0.3",
+      "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
+      "commit_resolved_at": "2026-10-06T17:56:44.952Z",
+      "files_verified": 14,
+      "files_expected": 14,
+      "package": {
+        "name": "@modelcontextprotocol/ext-apps-basic-host",
+        "version": "2.0.3"
+      },
+      "lockfile_sha256": "74f5c3c38334007800b812aaeb42c003c7ecc833d1b682f4fc1efe526213173c"
+    },
+    "browser": {
+      "name": "chromium",
+      "version": "153.0.8010.12"
+    },
+    "views": [
+      {
+        "tool": "render_source",
+        "view": "source",
+        "status": "passed",
+        "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_source&call=true&theme=hide",
+        "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_source.png",
+        "app_frame_depth": 2,
+        "feature_text": "fixtures/qualification-source.md\n0123456789abcdef0123456789abcdef01234567\nQualification source\n\nContract-valid ReadItemResponse fixture for the MCP Apps harness.",
+        "alerts": [],
+        "expected_alerts": [],
+        "axe": {
+          "app_frame_analysed": true,
+          "app_frame": [],
+          "host_blocking": [],
+          "host_tolerated": [
+            {
+              "id": "color-contrast",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(2) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsiblePreview_199dp_253"
+                ]
+              ]
+            },
+            {
+              "id": "frame-title",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "iframe"
+                ],
+                [
+                  "iframe",
+                  "iframe"
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "tool": "render_changes",
+        "view": "changes",
+        "status": "passed",
+        "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_changes&call=true&theme=hide",
+        "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_changes.png",
+        "app_frame_depth": 2,
+        "feature_text": "Changes\n\n0123456789abcdef0123456789abcdef01234567 → 89abcdef0123456789abcdef0123456789abcdef\n\nfixtures/qualification-source.md\n@@ -1,3 +1,4 @@\n # Qualification source\n+\n+Harness fixture line.\n",
+        "alerts": [],
+        "expected_alerts": [],
+        "axe": {
+          "app_frame_analysed": true,
+          "app_frame": [],
+          "host_blocking": [],
+          "host_tolerated": [
+            {
+              "id": "color-contrast",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(2) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsiblePreview_199dp_253"
+                ]
+              ]
+            },
+            {
+              "id": "frame-title",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "iframe"
+                ],
+                [
+                  "iframe",
+                  "iframe"
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "tool": "render_timeline",
+        "view": "timeline",
+        "status": "passed",
+        "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_timeline&call=true&theme=hide",
+        "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_timeline.png",
+        "app_frame_depth": 2,
+        "feature_text": "Timeline\nQualification timeline fixture\n\nokf-qualify-mcp-apps · 2026-10-05T12:00:00Z\n\n89abcdef0123456789abcdef0123456789abcdef",
+        "alerts": [],
+        "expected_alerts": [],
+        "axe": {
+          "app_frame_analysed": true,
+          "app_frame": [],
+          "host_blocking": [],
+          "host_tolerated": [
+            {
+              "id": "color-contrast",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(2) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsiblePreview_199dp_253"
+                ]
+              ]
+            },
+            {
+              "id": "frame-title",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "iframe"
+                ],
+                [
+                  "iframe",
+                  "iframe"
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "tool": "render_present",
+        "view": "present",
+        "status": "passed",
+        "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_present&call=true&theme=hide",
+        "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_present.png",
+        "app_frame_depth": 2,
+        "feature_text": "Six-component catalog\nfixtures/qualification-source.md\n0123456789abcdef0123456789abcdef01234567\nQualification source\n\nContract-valid ReadItemResponse fixture for the MCP Apps harness.\n\nmetrics\ncategory\tvalue\nIngested\t412\nConverted\t397\nIndexed\t389\nReviewed\t127\nPublished\t61\nMetrics chart\nConverted\nIndexed\nIngested\nPublished\nReviewed\ncategory\n0\n50\n100\n150\n200\n250\n300\n350\n400\n450\nvalue\nSource data\nfix",
+        "alerts": [],
+        "expected_alerts": [],
+        "present_dataset": {
+          "status": "exercised",
+          "expected_binding": "metrics",
+          "expected_digest": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff",
+          "expected_bytes": 223,
+          "expected_rows": 5,
+          "expected_chart_marks": 5,
+          "table_captions": [
+            "metrics",
+            "metrics"
+          ],
+          "read_object_digests": [
+            "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff"
+          ],
+          "read_object_calls": 4,
+          "read_object_offsets": [
+            "0",
+            "64",
+            "128",
+            "192"
+          ],
+          "read_object_bytes": [
+            64,
+            64,
+            64,
+            31
+          ],
+          "read_object_total_sizes": [
+            "223"
+          ],
+          "read_object_resolutions": 1,
+          "show_calls": 2,
+          "chart_svgs": 1,
+          "chart_marks": 5,
+          "table_rows": 5,
+          "chart_table_rows": 5,
+          "alerts": [],
+          "problems": []
+        },
+        "axe": {
+          "app_frame_analysed": true,
+          "app_frame": [],
+          "host_blocking": [],
+          "host_tolerated": [
+            {
+              "id": "color-contrast",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(2) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsibleHeader_199dp_231 > ._collapsibleSize_199dp_242"
+                ],
+                [
+                  "._collapsiblePanel_199dp_175[title=\"Click to expand\"]:nth-child(4) > ._collapsiblePreview_199dp_253"
+                ]
+              ]
+            },
+            {
+              "id": "frame-title",
+              "impact": "serious",
+              "nodes": [
+                [
+                  "iframe"
+                ],
+                [
+                  "iframe",
+                  "iframe"
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "axe_tolerated_upstream_host_rules": [
+      "color-contrast",
+      "frame-title"
+    ],
+    "present_dataset": {
+      "status": "exercised",
+      "expected_binding": "metrics",
+      "expected_digest": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff",
+      "expected_bytes": 223,
+      "expected_rows": 5,
+      "expected_chart_marks": 5,
+      "table_captions": [
+        "metrics",
+        "metrics"
+      ],
+      "read_object_digests": [
+        "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff"
+      ],
+      "read_object_calls": 4,
+      "read_object_offsets": [
+        "0",
+        "64",
+        "128",
+        "192"
+      ],
+      "read_object_bytes": [
+        64,
+        64,
+        64,
+        31
+      ],
+      "read_object_total_sizes": [
+        "223"
+      ],
+      "read_object_resolutions": 1,
+      "show_calls": 2,
+      "chart_svgs": 1,
+      "chart_marks": 5,
+      "table_rows": 5,
+      "chart_table_rows": 5,
+      "alerts": [],
+      "problems": []
+    },
+    "note": "The ext-apps basic-host example is a reference host; this is not a claude.ai or ChatGPT claim."
+  },
+  "ngrok": {
+    "status": "not_run",
+    "opened_at": null,
+    "closed_at": null,
+    "public_url": null,
+    "local_port": 18765,
+    "note": "OKF_MCP_APPS_NGROK is not 1"
+  },
+  "host_render": {
+    "status": "not_run",
+    "meaning": "hosts/ directory exists but is empty. Place screenshots or notes from claude.ai / ChatGPT before claiming an observed host render.",
+    "gate": "mcp-apps-web-hosts"
+  },
+  "static_bundle_smoke": {
+    "status": "not_run",
+    "reason": "ui/tests/e2e/mcp-apps-static-bundle-smoke.spec.ts is a separate smoke test; this orchestrator does not run it and it is not a host-render check"
+  },
+  "note": "host_render (claude.ai / ChatGPT) belongs to the acceptance gate mcp-apps-web-hosts and is never invented here.",
+  "paths": {
+    "unmapped": []
+  }
+}
