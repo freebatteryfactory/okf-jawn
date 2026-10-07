@@ -12,7 +12,7 @@
     "direct_versions": {
       "okf-core": "0.2.7",
       "okf-validator": "0.2.7 (default-features=false)",
-      "docling": "1.93.5 (default-features=false, features=[pdf]; owns docling-core 1.93.6)",
+      "docling": "1.93.5 (default-features=false, features=[pdf]; owns docling-core 1.93.6; docling-pdf, docling-core and docling-onnx built from the fork of converter-docling-pdf-font-run-patch)",
       "swagger-ui-dist": "5.33.1",
       "@modelcontextprotocol/client": "2.3.0",
       "@modelcontextprotocol/core": "2.3.0",
@@ -109,16 +109,15 @@
           "receipt": "qualification/receipts/docling.json",
           "criteria": "qualification/docling/criteria.json",
           "status": "incomplete",
-          "accepted_failures": [
-            {
-              "criterion": "corpus/redp5110_sampled.pdf/content_across_font_runs",
-              "decision": "Docling stays the converter. Where a phrase changes font the library ends a text cell and joins cells with a space, so \"(WRKFCNUSG)\" is extracted as \"( WRKFCNUSG )\". Accepted for now; no newer version, option or pdfium changes it.",
-              "decided_on": "2026-10-06",
-              "decided_by": "owner",
-              "tracked_by": "converter-font-run-spacing"
-            }
-          ],
-          "covers": "A pass proves that every criterion pinned in qualification/docling/criteria.json passed, or is not applicable by design with the reason stated in the receipt, for the Docling crate Cargo.lock pins, called directly as a library on the clean commit the receipt cites: the model assets on the machine were hashed again in the run and have the lengths and SHA-256 hashes of a machine-local manifest that is not in the repository (the receipt records that manifest's SHA-256 and every file's; nothing compares them with a hash published upstream), and every model file the library's inventory reports is one of them, by path and length; every fixture converts, is recognised as its declared format and holds the content SOURCES.json declares, a phrase set across a font change included, and a fixture without glyphs yields no invented text; each PDF and image fixture has one render per page that is not a flat colour unless the page is declared blank, and every text item, table and picture is located on a page with a box, by its own provenance or, for a PDF item the export leaves without one, by the one text-layer item with exactly its text; each PDF shows the library's placeholders for glyphs its fonts give no Unicode for on exactly the pages and in the numbers its fixture declares, which detects text that cannot be decoded and does not recover it; a truncated PDF is refused; a 1 ms budget is reported and changes the result; and a peak memory was read for every converter process. With accepted_with_limitations the same holds except for the criteria listed in accepted_failures, which fail. It does not prove that a box found through the text layer is the item's own (the receipt states the rule's two known wrong placements, and records each such item's distance to the item whose page was searched as a measurement with no threshold), a locator for DOCX items (the library gives none) or for XLSX and PPTX items (recorded without a rule and not pinned), the production ingest worker (locating through the text layer and detecting undecodable text are harness rules here; the construction gates ingest-locates-unlocated-items and ingest-flags-undecodable-text carry them into the product), a memory limit (peak memory is measured, never limited) or a conversion through the application."
+          "covers": "A pass proves that every criterion pinned in qualification/docling/criteria.json passed, or is not applicable by design with the reason stated in the receipt, for the Docling crate Cargo.lock pins (its PDF crate the fork of converter-docling-pdf-font-run-patch), called directly as a library on the clean commit the receipt cites: the model assets on the machine were hashed again in the run and have the lengths and SHA-256 hashes of a machine-local manifest that is not in the repository (the receipt records that manifest's SHA-256 and every file's; nothing compares them with a hash published upstream), and every model file the library's inventory reports is one of them, by path and length; every fixture converts, is recognised as its declared format and holds the content SOURCES.json declares, a phrase set across a font change included, and a fixture without glyphs yields no invented text; each PDF and image fixture has one render per page that is not a flat colour unless the page is declared blank, and every text item, table and picture is located on a page with a box, by its own provenance or, for a PDF item the export leaves without one, by the one text-layer item with exactly its text; each PDF shows the library's placeholders for glyphs its fonts give no Unicode for on exactly the pages and in the numbers its fixture declares, which detects text that cannot be decoded and does not recover it; a truncated PDF is refused; a 1 ms budget is reported and changes the result; and a peak memory was read for every converter process. With accepted_with_limitations the same holds except for the criteria listed in accepted_failures, which fail. It does not prove that a box found through the text layer is the item's own (the receipt states the rule's two known wrong placements, and records each such item's distance to the item whose page was searched as a measurement with no threshold), a locator for DOCX items (the library gives none) or for XLSX and PPTX items (recorded without a rule and not pinned), the production ingest worker (locating through the text layer and detecting undecodable text are harness rules here; the construction gates ingest-locates-unlocated-items and ingest-flags-undecodable-text carry them into the product), a memory limit (peak memory is measured, never limited) or a conversion through the application."
+        },
+        {
+          "id": "converter-docling-pdf-font-run-patch",
+          "kind": "decision",
+          "decision": "docling-pdf is built from a one-commit fork of docling.rs so that a phrase that changes font is extracted as one run, as docling-parse 7.21 and later do.",
+          "decided_on": "2026-10-06",
+          "decided_by": "owner",
+          "covers": "docling-pdf, docling-core and docling-onnx 1.93.6 are built from the fork https://github.com/Heyoub/docling.rs, branch okf/docling-pdf-1.93.6-font-runs, at the commit the [patch.crates-io] section of Cargo.toml names by rev (Cargo.lock records it as their source): one commit on the upstream docling.rs commit that crates.io publishes as 1.93.6 (the .cargo_vcs_info.json of that release names it). docling-core and docling-onnx come from the same tree so that Cargo.lock holds one of each, and docling stays 1.93.5 from crates.io. The one rule changed: in the line contraction of docling-pdf (dp_lines.rs, applicable) a change of font no longer ends a line cell; word cells still end at a change of font. Upstream docling-parse made this change in #351 (7.21.0), and docling.rs has not ported it. Nothing was reported upstream. The patch is removed, and the three crates return to crates.io, when a docling.rs release ports the docling-parse 7.21 or later line contractor."
         },
         {
           "id": "mcp-apps-protocol-qualification",
@@ -304,13 +303,6 @@
           "owner": "views",
           "receipt": "bun --bun run --cwd ui test",
           "meaning": "Saved-view persist and reopen using server diagnostics as the source of truth"
-        },
-        {
-          "id": "converter-font-run-spacing",
-          "status": "blocked_upstream",
-          "owner": "integration-owner",
-          "receipt": "bun qualification/docling/run.mjs with corpus/redp5110_sampled.pdf/content_across_font_runs passing",
-          "meaning": "The Docling library ends a text cell at every font change and joins cells with a space, so a phrase set in more than one font is extracted with spaces the page does not show. No rule on our side cures it. Python Docling's reference output for the same file has read \"(WRKFCNUSG)\" since 2026-09-30 and the Rust library follows that reference, so the fix is expected with an upstream sync; no upstream issue is filed for it. Closes when a library release fixes it: the criterion then passes, check-receipts reports the acceptance on docling-library-qualification as stale, and the acceptance entry is removed"
         }
       ],
       "acceptance": [

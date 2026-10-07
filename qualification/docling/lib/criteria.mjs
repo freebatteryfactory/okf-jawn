@@ -73,7 +73,7 @@ export const CRITERION_RULES = Object.freeze({
   content:
     'every expectation the fixture declares in SOURCES.json holds for the converted document; match_rules says how each kind of expectation is compared',
   content_across_font_runs:
-    'every expectation SOURCES.json marks as crossing a font change (crosses_font_runs) holds for the converted document, by the same comparison as content and with nothing forgiven; kept apart from content because the library ends a text cell at every font change and joins cells with a space (docling-pdf dp_lines.rs:227-229, assemble.rs:2084), so a phrase set in more than one font is extracted with spaces the page does not show',
+    'every expectation SOURCES.json marks as crossing a font change (crosses_font_runs) holds for the converted document, by the same comparison as content and with nothing forgiven; kept apart from content because the published docling-pdf 1.93.6 ends a text cell at every font change and joins cells with a space (dp_lines.rs:227-229, assemble.rs:2084), so a phrase set in more than one font is extracted with spaces the page does not show; the docling-pdf this build uses is the one-commit fork that keeps such a phrase in one cell (verification.json gate converter-docling-pdf-font-run-patch)',
   no_invented_text:
     'the converter invents no text for a page without glyphs: the fixture shows none, so the Markdown with HTML comments (the picture placeholders) removed holds no letter and no digit; every other expectation the fixture declares holds as well',
   page_renders: PAGE_RENDER_RULE,
