@@ -260,6 +260,7 @@ const leakPatterns = [
   ['a POSIX absolute path under /home, /Users, /tmp or /root', /(?<![\w.\-:/~])\/(?:home|Users|tmp|root)\//],
   ['a file: URL naming a machine path', /file:\/\/\/?(?:[A-Za-z]:|home|Users|tmp|root)/i],
   ['an expanded user directory variable', /%(?:USERPROFILE|HOMEPATH|HOMEDRIVE|APPDATA|LOCALAPPDATA|TEMP|TMP)%/i],
+  ['a relative path that climbs out of the repository', /(?:^|[\s"'(=])\.\.[\\/]/],
 ];
 
 /** Why one string holds a machine path, or null. `home` and `user` are the current account's. */

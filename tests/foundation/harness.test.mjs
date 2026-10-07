@@ -4736,6 +4736,8 @@ test('the Docling receipt a run writes holds no path of this machine: repository
     assert.ok(!text.includes(absolute.replaceAll('\\', '\\\\')) && !text.includes(absolute.replaceAll('\\', '/')), `${name} ${absolute} is not in the receipt`);
   }
   assert.doesNotMatch(text, /(?<![A-Za-z0-9])[A-Za-z]:(?:\\|\/(?!\/))/, 'no drive path');
+  assert.doesNotMatch(text, /"\.\.[\\/]/, 'no path climbs out of the repository');
+  assert.match(written.assets_verified.manifest, /^<tmp>\/okf-docling-run-[^/]+\/assets\.json$/, 'the manifest outside the repository is mapped like any other path');
   assert.equal(written.settings.environment.OKF_DOCLING_FIXTURES, 'tests/fixtures/documents');
   assert.match(written.paths.per_fixture_evidence, /^<tmp>\/okf-docling-run-[^/]+\/partial$/);
   assert.deepEqual(written.paths.unmapped.filter((path) => path.endsWith('layout.onnx')), ['<abs>/models/layout.onnx']);

@@ -969,6 +969,8 @@ const leakyStrings = {
   'a file URL': 'file:///home/x/y',
   'a USERPROFILE expansion': '%USERPROFILE%\\x',
   'an APPDATA expansion': 'under %appdata%',
+  'a relative path out of the repository': '../../../tmp/okf-docling-run-x/assets.json',
+  'a relative Windows path out of the repository': 'read ..\\..\\AppData\\x',
 };
 
 test('leakFailures refuses each machine path pattern, naming the field in the JSON, and wants a re-run', () => {
