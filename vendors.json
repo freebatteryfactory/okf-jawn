@@ -2,36 +2,8 @@
   "schema_version": 1,
   "project": "okf-jawn",
   "scope": "Offline navigation notes and exact lookup instructions, not a licensed mirror of vendor documentation or a compatibility certification. use_sites exist in the repository now; planned_use_sites are where a lane will integrate the library; generated_sites are written by gen. context7_queries_executed counts the lookups whose library and query are recorded here.",
-  "context7_queries_executed": 7,
+  "context7_queries_executed": 5,
   "vendors": [
-    {
-      "name": "utoipa",
-      "use_sites": [
-        "xtask/src/api.rs",
-        "crates/contract/src"
-      ],
-      "official_sources": [
-        "https://docs.rs/utoipa/6.0.0/utoipa/",
-        "https://github.com/juhaku/utoipa/blob/master/utoipa/README.md"
-      ],
-      "symbols": [
-        "ToSchema::schemas",
-        "PartialSchema::schema",
-        "OpenApiBuilder",
-        "ComponentsBuilder",
-        "PathItem"
-      ],
-      "context7_library_id": "/juhaku/utoipa",
-      "context7_query": "Construct a standalone OpenAPI document with OpenApiBuilder, PathsBuilder, OperationBuilder, RequestBodyBuilder, ContentBuilder and ComponentsBuilder; API generation independent of runtime handlers.",
-      "knowledge_source": "Context7 query and official API documentation",
-      "offline_notes": [
-        "API generation must compile independently of runtime storage and UI.",
-        "The canonical operation table is authored Rust. The generated OpenAPI is the public interchange artifact.",
-        "References collected from request and response types are checked for conflicting component names; do not silently replace them."
-      ],
-      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
-    },
     {
       "name": "schemars",
       "use_sites": [
@@ -339,7 +311,7 @@
         "Pin the action to a commit SHA of a version tag (e.g. v2.87.25 = 183e4297cca2404691e9380e1307288dced5c82a). Do not pin @<tool_name> tags by hash.",
         "Use with: tool: cargo-audit@0.22.2,cargo-deny@0.20.2. Explicit versions bypass the action's dependency cooldown.",
         "checksum defaults to true (SHA256 of GitHub release assets).",
-        "actions/checkout pin for foundation-repair: v4.2.2 = 11bd71901bbe5b1630ceea73d27597364c9af683."
+        "actions/checkout pin: v7.0.1 = 3d3c42e5aac5ba805825da76410c181273ba90b1 (node24). v4.2.2 (11bd7190) and actions/upload-artifact v4.6.2 (ea165f8d) declare the deprecated node20 runtime; tests/foundation/ci.test.mjs rejects both."
       ],
       "version_authority": "GitHub Actions workflow pin",
       "qualification": "Manifest at v2 lists cargo-deny 0.20.2 and cargo-audit 0.22.2."
@@ -650,6 +622,7 @@
       "offline_notes": [
         "Pinned =1.93.5 with default-features = false and features = [\"pdf\"]. Do not enable asr, fetch-images or vlm without a shared change.",
         "Do not direct-depend on docling-core; docling owns the matching core version (currently resolves docling-core 1.93.6).",
+        "docling-pdf, docling-core and docling-onnx 1.93.6 are built from the fork https://github.com/Heyoub/docling.rs at e500c2323bcf5c3c84d3731ed00de65b15d0709a through [patch.crates-io] in Cargo.toml (verification.json gate converter-docling-pdf-font-run-patch); docling 1.93.5 still comes from crates.io. On a docling bump, re-check that the patch still applies or remove it.",
         "resvg 0.47 (rustybuzz, ttf-parser unmaintained advisories) is pinned upstream for Docling MSRV 1.88; ignored exactly in .cargo/audit.toml until Docling moves to resvg 0.48+.",
         "paste is pulled via docling → image → pulp/rav1e/tokenizers; ignored exactly with the same policy.",
         "Converter API and native/model assets still need an executed qualification. Retain originals; record converter version/settings."
@@ -738,37 +711,6 @@
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
       "qualification": "Not compiled or integrated in this environment"
-    },
-    {
-      "name": "iii",
-      "use_sites": [
-        "crates/core/src/jobs.rs",
-        ".agents/skills/qualify-iii/SKILL.md"
-      ],
-      "official_sources": [
-        "https://iii.dev/docs/creating-workers/functions",
-        "https://iii.dev/docs/creating-workers/channels",
-        "https://github.com/iii-hq/workers/tree/main/queue",
-        "https://github.com/iii-hq/iii/blob/main/engine/LICENSE"
-      ],
-      "symbols": [
-        "RegisterFunction",
-        "request_format",
-        "response_format",
-        "queue::define",
-        "durable:subscriber",
-        "channels"
-      ],
-      "context7_library_id": null,
-      "context7_query": null,
-      "knowledge_source": "Official documentation reference; qualify installed version before use",
-      "offline_notes": [
-        "REJECTED WITH FALLBACK (commit 32a10ba receipt): engine+queue+worker SIGKILL before Ok, effect ledger, blob paths, startup/RSS and ELv2 from tag iii/v0.24.4 observed; dlq_messages browse empty so inspected DLQ could not be claimed. Selected runtime is Tokio+RecordStore.",
-        "Pinned artifact sha256: engine tar b1dd2714e1411bb2c59f7aa0f76edc2f2655857e1cbe692d3dce9deec745628b; worker tar f7b95e6103f6fedd5d9cf730c418f0ceb8a482c7534fabcd55bb96a5b345f514; ELv2 text aa94db7315d297192247f2254026cacbdb433a7742d841f27506a4d974c42c85.",
-        "Registry schemas are metadata; typed deserialization and application validation still run."
-      ],
-      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "REJECTED_WITH_FALLBACK on commit 32a10ba: crash redelivery and effect-ledger passed; channel blob refs passed; DLQ browse empty (inspected=false). Fallback Tokio+RecordStore. Receipt .artifacts/qualification/iii/receipt.json."
     },
     {
       "name": "pdfjs",

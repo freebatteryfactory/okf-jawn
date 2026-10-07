@@ -115,6 +115,11 @@ pub enum At {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityError(pub &'static str);
 
+/// The part of the workspace-path rule a regular expression can state: `/`-separated
+/// segments, none empty, none containing `\`, `:` or a C0 control. The `.`, `..` and `.git`
+/// segment rules, DEL and C1 controls, and the byte length are enforced by `TryFrom<String>`.
+const WORKSPACE_PATH_PATTERN: &str = r"^[^/\\:\x00-\x1f]+(/[^/\\:\x00-\x1f]+)*$";
+
 impl JsonSchema for Revision {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Revision".into()
@@ -136,7 +141,12 @@ impl JsonSchema for WorkspacePath {
         "WorkspacePath".into()
     }
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({"type": "string", "minLength": 1, "maxLength": 4096})
+        schemars::json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": WORKSPACE_PATH_PATTERN
+        })
     }
 }
 impl JsonSchema for TenantId {

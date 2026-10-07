@@ -1,11 +1,16 @@
 {
   "resources": [
     {
-      "csp": {
-        "connectDomains": [],
-        "resourceDomains": []
+      "_meta": {
+        "ui": {
+          "csp": {
+            "connectDomains": [],
+            "resourceDomains": []
+          }
+        }
       },
       "mimeType": "text/html;profile=mcp-app",
+      "name": "app",
       "uri": "ui://okf-jawn/app.html"
     }
   ]

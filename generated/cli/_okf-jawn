@@ -38,6 +38,14 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(workspaces)
+_arguments "${_arguments_options[@]}" : \
+'--server=[]: :_default' \
+'--json=[JSON request, @file, or - for stdin]: :_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (create_workspace)
 _arguments "${_arguments_options[@]}" : \
 '--server=[]: :_default' \
@@ -1070,7 +1078,8 @@ esac
 (( $+functions[_okf-jawn_commands] )) ||
 _okf-jawn_commands() {
     local commands; commands=(
-'list_workspaces:List only workspaces visible to the authenticated principal.' \
+'list_workspaces:List the workspaces this connection may read, each with its current head revision. Treat head as a pin\: pass it to later reads as at = {"kind"\: "revision", "revision"\: head} so every call sees one consistent state, and compare it with a later listing to detect change.' \
+'workspaces:List the workspaces this connection may read, each with its current head revision. Treat head as a pin\: pass it to later reads as at = {"kind"\: "revision", "revision"\: head} so every call sees one consistent state, and compare it with a later listing to detect change.' \
 'create_workspace:Create a blank workspace; no example content is inserted.' \
 'open_workspace:Open an existing authorized workspace.' \
 'update_workspace:Update workspace metadata at the supplied base revision.' \
@@ -1110,8 +1119,8 @@ _okf-jawn_commands() {
 'diff_items:Compare two explicit versions and retain both references.' \
 'diff:Compare two explicit versions and retain both references.' \
 'changes:Compare two explicit versions and retain both references.' \
-'commit_items:Name a snapshot from saved drafts against an unchanged base.' \
-'snapshot:Name a snapshot from saved drafts against an unchanged base.' \
+'commit_items:Name a snapshot from the caller'\''s saved drafts; blocked only when a selected item was changed or deleted since its draft'\''s base.' \
+'snapshot:Name a snapshot from the caller'\''s saved drafts; blocked only when a selected item was changed or deleted since its draft'\''s base.' \
 'restore_items:Restore selected historical content as a new commit without rewriting history.' \
 'rewind:Restore selected historical content as a new commit without rewriting history.' \
 'blame_item:Show which commit last changed each selected line, not the origin of each fact.' \
@@ -1364,7 +1373,7 @@ _okf-jawn__subcmd__get_view_commands() {
 (( $+functions[_okf-jawn__subcmd__help_commands] )) ||
 _okf-jawn__subcmd__help_commands() {
     local commands; commands=(
-'list_workspaces:List only workspaces visible to the authenticated principal.' \
+'list_workspaces:List the workspaces this connection may read, each with its current head revision. Treat head as a pin\: pass it to later reads as at = {"kind"\: "revision", "revision"\: head} so every call sees one consistent state, and compare it with a later listing to detect change.' \
 'create_workspace:Create a blank workspace; no example content is inserted.' \
 'open_workspace:Open an existing authorized workspace.' \
 'update_workspace:Update workspace metadata at the supplied base revision.' \
@@ -1393,7 +1402,7 @@ _okf-jawn__subcmd__help_commands() {
 'get_graph:Read a bounded graph projection using the same authorized source identities.' \
 'log_items:Read content snapshots; Git history is not the complete application event log.' \
 'diff_items:Compare two explicit versions and retain both references.' \
-'commit_items:Name a snapshot from saved drafts against an unchanged base.' \
+'commit_items:Name a snapshot from the caller'\''s saved drafts; blocked only when a selected item was changed or deleted since its draft'\''s base.' \
 'restore_items:Restore selected historical content as a new commit without rewriting history.' \
 'blame_item:Show which commit last changed each selected line, not the origin of each fact.' \
 'open_proposal:Create a suggested change set without merging or marking anything reviewed.' \

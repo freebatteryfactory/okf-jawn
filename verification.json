@@ -1,137 +1,32 @@
 {
   "project": "okf-jawn",
-  "delivery": "Full-scope executable foundation source; not a completed or qualified application",
-  "phase_0_qualified": false,
+  "phase_0_qualified": true,
   "reopened": {
-    "at_utc": "2026-10-05T16:24:00Z",
-    "from_commit": "b13fcd0",
-    "findings": [
-      "Principal carried workspace_ids and permissions as identity; authorize skipped when workspace was absent",
-      "No MutationId / MutationStore; jobs used a separate key+digest and pending_jobs took a tenant_id string",
-      "Sandbox path was authenticated:false without a capability token",
-      "Closed-set fields were free strings; drafts were update_item producing a revision",
-      "OpenAPI components came from utoipa ToSchema while runtime validation used schemars",
-      "catalog.schema.json left component props unconstrained (additionalProperties: {})",
-      "PresentView charts map was never filled; ViewDocument had no charts field",
-      "Four byte-identical MCP App HTML resources; mime test read a gitignored build output",
-      "Docling must_fail used a corrupt bin failing before the converter; peak memory sampled cargo.pid",
-      "Qualification receipts cited dirty-tree SHAs; CI uploaded receipts it did not produce",
-      "mcp-apps-web-hosts was recorded as BOUNDED_UPSTREAM_EXCEPTION instead of acceptance not_run",
-      "cargo-deny all-features=false and wildcards=warn; CI cargo-install for audit/deny"
-    ]
+    "decision": "Phase 0 was reopened because the terminal record made before it claimed more than its harnesses had tested and the shared contract and ports had gaps. The web-host check moved to acceptance, and both library qualifications are run again on a clean commit.",
+    "decided_on": "2026-10-05",
+    "decided_by": "integration-owner",
+    "findings_at": "6ca72dd:verification.json"
   },
   "application_implemented": false,
   "current": {
-    "recorded_at_utc": "2026-10-05T16:24:00Z",
-    "base_commit": "b13fcd0 (Phase 0 reopened; foundation repair in progress)",
-    "environment": {
-      "os": "Windows 10.0.26200 (developer workstation, not CI or the build container)",
-      "bun": "1.4.2 (process.versions.bun, C:\\Users\\eayou\\.bun\\bin\\bun.exe)",
-      "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
-      "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
-      "cargo_audit": "0.22.2",
-      "git": "2.55.0.windows.2",
-      "typescript_checker": "7.0.2 (tsc, from @typescript/native = npm:typescript@7.0.2)",
-      "typescript_compiler_api": "6.0.3 (the typescript package = npm:@typescript/typescript6@6.0.2, consumed by Hey API openapi-ts 0.99.0)",
-      "node": "Not a project prerequisite. UI Vitest runs under Bun with happy-dom 20.8.9 (ui package.json test script; Node special-case removed)."
-    },
-    "lockfiles_resolved": true,
-    "lockfile_provenance": "Cargo.lock from cargo update after OKF/Docling feature-slicing; bun.lock from bun install with exact pins and a js-yaml 4.3.2 override. Neither is handwritten.",
-    "rust_compiled": true,
-    "rust_generator_executed": true,
-    "frontend_generation_executed": true,
-    "generation_deterministic": true,
-    "project_typescript_checked": true,
-    "project_typescript_passed": true,
-    "authored_typescript_error_count": 0,
-    "deterministic_foundation_green": true,
-    "phase_0_note": "Phase 0 reopened. Prior terminal record at b13fcd0 overclaimed harness evidence and left shared contract/port gaps. Foundation repair in progress; requalify on one clean SHA after contract and port repairs. iii REJECTED_WITH_FALLBACK (Tokio+RecordStore) stands. web-host gate moved to acceptance as not_run. Docling and MCP Apps protocol gates return to incomplete pending clean-tree requalification.",
     "direct_versions": {
       "okf-core": "0.2.7",
       "okf-validator": "0.2.7 (default-features=false)",
-      "docling": "1.93.5 (default-features=false, features=[pdf]; owns docling-core 1.93.6)",
+      "docling": "1.93.5 (default-features=false, features=[pdf]; owns docling-core 1.93.6; docling-pdf, docling-core and docling-onnx built from the fork of converter-docling-pdf-font-run-patch)",
       "swagger-ui-dist": "5.33.1",
       "@modelcontextprotocol/client": "2.3.0",
       "@modelcontextprotocol/core": "2.3.0",
       "@modelcontextprotocol/ext-apps": "2.0.3",
       "@types/bun": "1.4.2",
       "@hey-api/openapi-ts": "0.99.0",
-      "shadcn": "4.21.1",
-      "iii-sdk": "0.24.4",
-      "iii_engine": "iii/v0.24.4"
+      "shadcn": "4.21.1"
     },
     "typescript_policy": {
-      "authored": "ui/tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes on authored source and generated files except the Hey API client runtime. skipLibCheck for third-party .d.ts only. Tooling configs are a separate composite project (ui/tsconfig.tooling.json) with types:[bun]. ui/tests is type-checked via ui/tsconfig.tests.json referenced from ui/tsconfig.json.",
+      "authored": "ui/tsconfig.json: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes on authored source and generated files except the Hey API client runtime. skipLibCheck for third-party .d.ts only. Tooling configs are a separate composite project (ui/tsconfig.tooling.json) with types:[bun]. ui/tests is type-checked by ui/tsconfig.tests.json, which ui/tsconfig.json does not reference: the `typecheck` script of ui/package.json runs it after the build mode check (`tsc -b && tsc -p tsconfig.tests.json --noEmit`).",
       "generated_client_runtime": "ui/tsconfig.generated.json: client/ and core/ only; exactOptionalPropertyTypes false (hey-api/openapi-ts#3157). Removal probe: typecheck:generated-strict.",
       "wire_validation_boundary": "Host/tool payloads validated with generated Zod schemas keep z.infer/z.output (equivalent in Zod 4) in authored UI. types.gen remains the HTTP-client shape. At a real SDK/wire boundary, construct the generated request object explicitly and omit undefined optionals once in main.tsx. No cast through unknown in ui/src; RulesForm tests mount the form and assert displayed AJV errors.",
       "node_ambient": "No MCP Apps Node-types island. Buffer appears only in @modelcontextprotocol/client .d.ts; skipLibCheck covers it. @types/node is not a direct dependency."
     },
-    "checks": [
-      {
-        "command": [
-          "bun",
-          "scripts/dev.mjs",
-          "check-offline"
-        ],
-        "exit_code": 0,
-        "status": "passed",
-        "meaning": "37 bun test cases."
-      },
-      {
-        "command": [
-          "bun",
-          "scripts/dev.mjs",
-          "gen-check"
-        ],
-        "exit_code": 0,
-        "status": "passed",
-        "log": "CI 37322344115 on e3dd8bf (supersedes earlier 37257588545 / 5799109 logs)"
-      },
-      {
-        "command": [
-          "bun",
-          "scripts/dev.mjs",
-          "foundation"
-        ],
-        "exit_code": 0,
-        "status": "passed",
-        "log": "CI 37322344115 foundation step on e3dd8bf",
-        "meaning": "gen-check, cargo test for contract/core/xtask only, UI build, typecheck and offline."
-      },
-      {
-        "command": [
-          "bun",
-          "--bun",
-          "run",
-          "lint"
-        ],
-        "cwd": "ui",
-        "exit_code": 0,
-        "status": "passed"
-      },
-      {
-        "command": [
-          "bun",
-          "--bun",
-          "run",
-          "typecheck"
-        ],
-        "cwd": "ui",
-        "exit_code": 0,
-        "status": "passed",
-        "meaning": "0 errors in ui/src and ui/tests (tsc -b via ui/tsconfig.json referencing ui/tsconfig.tests.json) on e3dd8bf / CI 37322344115."
-      },
-      {
-        "command": [
-          "bun",
-          "scripts/dev.mjs",
-          "audit"
-        ],
-        "exit_code": 0,
-        "status": "passed",
-        "meaning": "Re-run in the clean checkout and CI 37322344115 on e3dd8bf. GHSA-vfj7-8cjw-p6xm remains, ignored as build-time tooling."
-      }
-    ],
     "typescript_boundary_fixes": [
       "Feature components that consume Zod-parsed tool results take z.infer<typeof z…> instead of types.gen (exactOptionalPropertyTypes). Zod 4 treats z.infer and z.output as equivalent; no respelling.",
       "RulesForm uses customizeValidator<NamingRules>() and Form<NamingRules> from @rjsf/validator-ajv8.",
@@ -167,56 +62,119 @@
       "phase_0": [
         {
           "id": "authored-typescript-seams",
-          "status": "passed",
-          "receipt": "ui/tests/unit/",
-          "meaning": "Vitest under Bun+happy-dom; ui/tsconfig.tests.json type-checks tests; Layout strictObject rejects on/watch and passes visible; wire missing-key + generated request cases; RulesForm mounts with invalid data and asserts AJV errors; mcp-apps-mime reads real manifest; PresentView validates Vega via compile; omitUndefined once in main.tsx."
+          "kind": "ci",
+          "enforced_by": {
+            "workflow": ".github/workflows/ci.yml",
+            "job": "foundation",
+            "check": "Actual pinned generators and consumers, every feature",
+            "evidence": [
+              "bun scripts/dev.mjs premerge --step ui-typecheck",
+              "bun scripts/dev.mjs premerge --step ui-test",
+              "ui/tests/unit/layout.test.tsx",
+              "ui/tests/unit/wire.test.ts",
+              "ui/tests/unit/rules-form.test.tsx",
+              "ui/tests/unit/mcp-apps-mime.test.ts",
+              "ui/tests/unit/mcp-apps-dispatch.test.tsx"
+            ]
+          },
+          "covers": "On every push the authored UI source and its tests type-check under the authored policy (ui/tsconfig.tests.json covers ui/tests), and the unit tests run in Vitest under Bun with happy-dom. They hold these seams: the json-render Layout rejects on and watch and passes visible through; the wire helper omits an undefined optional and keeps null; RulesForm mounts with invalid data and shows the AJV errors; the SDK's resource MIME type is the one api/mcp-apps.json declares; PresentView refuses a chart specification that Vega-Lite's compile rejects, before any host call, with an alert that names the chart and no chart drawn; and the Apps bridge in ui/src/mcp-apps/main.tsx omits undefined optionals once, as a tool call leaves for the host, while PresentView passes its fields through. It does not prove that a valid chart beside a rejected one is still drawn (PresentView refuses the whole view, and no test holds either behaviour), rendering in a real host (the receipt gate mcp-apps-protocol-qualification) or any behaviour against a running server."
         },
         {
           "id": "deterministic-foundation",
-          "status": "passed",
-          "receipt": "https://github.com/freebatteryfactory/okf-jawn/actions/runs/37322344115",
-          "meaning": "CI 37322344115 and clean-checkout at e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807: bootstrap, foundation, check, test, audit."
+          "kind": "ci",
+          "enforced_by": {
+            "workflow": ".github/workflows/ci.yml",
+            "job": "foundation",
+            "check": "Actual pinned generators and consumers, every feature",
+            "evidence": [
+              "bun scripts/dev.mjs premerge --step check-offline",
+              "bun scripts/dev.mjs premerge --step gen-check",
+              "bun scripts/dev.mjs premerge --step fmt",
+              "bun scripts/dev.mjs premerge --step clippy",
+              "bun scripts/dev.mjs premerge --step source-policy",
+              "bun scripts/dev.mjs premerge --step test",
+              "bun scripts/dev.mjs premerge --step ui-lint",
+              "bun scripts/dev.mjs premerge --step ui-build",
+              "bun scripts/dev.mjs premerge --step ui-typecheck",
+              "bun scripts/dev.mjs premerge --step ui-test",
+              "tests/foundation/ci.test.mjs"
+            ]
+          },
+          "covers": "On every push the foundation job runs the pinned generators twice from the committed lockfiles and requires both passes and the checkout to agree byte for byte; it then requires the workspace to format, pass strict Clippy and the source policy, pass every crate's tests with every feature, and the UI to lint, build, type-check and pass its unit tests. It does not prove a library qualification, any behaviour against a running server, or dependency advisories: the audit job runs on main, nightly and on dispatch and is not a required check."
         },
         {
           "id": "docling-library-qualification",
-          "status": "incomplete",
-          "receipt": null,
-          "meaning": "Reopened: prior PASS cited a dirty-tree SHA, sampled cargo.pid peak memory, and used must_fail_corrupt.bin which failed before the converter. Requalify on a clean SHA with per-fixture peak memory and must_fail_truncated.pdf."
+          "kind": "receipt",
+          "harness": "docling",
+          "receipt": "qualification/receipts/docling.json",
+          "criteria": "qualification/docling/criteria.json",
+          "status": "passed",
+          "covers": "A pass proves that every criterion pinned in qualification/docling/criteria.json passed, or is not applicable by design with the reason stated in the receipt, for the Docling crate Cargo.lock pins (docling-pdf, docling-core and docling-onnx from the fork of converter-docling-pdf-font-run-patch), called directly as a library on the clean commit the receipt cites: the model assets on the machine were hashed again in the run and have the lengths and SHA-256 hashes of a machine-local manifest that is not in the repository (the receipt records that manifest's SHA-256 and every file's; nothing compares them with a hash published upstream), and every model file the library's inventory reports is one of them, by path and length; every fixture converts, is recognised as its declared format and holds the content SOURCES.json declares, a phrase set across a font change included, and a fixture without glyphs yields no invented text; each PDF and image fixture has one render per page that is not a flat colour unless the page is declared blank, and every text item, table and picture is located on a page with a box, by its own provenance or, for a PDF item the export leaves without one, by the one text-layer item with exactly its text; each PDF shows the library's placeholders for glyphs its fonts give no Unicode for on exactly the pages and in the numbers its fixture declares, which detects text that cannot be decoded and does not recover it; a truncated PDF is refused; a 1 ms budget is reported and changes the result; and a peak memory was read for every converter process. It does not prove that a box found through the text layer is the item's own (the receipt states the rule's two known wrong placements, and records each such item's distance to the item whose page was searched as a measurement with no threshold), a locator for DOCX items (the library gives none) or for XLSX and PPTX items (recorded without a rule and not pinned), the production ingest worker (locating through the text layer and detecting undecodable text are harness rules here; the construction gates ingest-locates-unlocated-items and ingest-flags-undecodable-text carry them into the product), a memory limit (peak memory is measured, never limited) or a conversion through the application."
         },
         {
-          "id": "iii-library-qualification",
-          "status": "rejected_with_fallback",
-          "receipt": ".artifacts/qualification/iii/receipt.json",
-          "meaning": "REJECTED_WITH_FALLBACK on 32a10ba4125719d4132e29d8679980113b6fc0a6: engine+queue kill/restart, crash redelivery, effect ledger, blob refs, startup/RSS, ELv2 from tag iii/v0.24.4 observed; DLQ browse empty (inspected=false). Fallback Tokio+RecordStore selected in SPEC/README. Decision stands; provenance guard will be added before any re-run."
+          "id": "converter-docling-pdf-font-run-patch",
+          "kind": "decision",
+          "decision": "docling-pdf is built from a one-commit fork of docling.rs so that a phrase that changes font is extracted as one run, as docling-parse 7.21 and later do.",
+          "decided_on": "2026-10-06",
+          "decided_by": "owner",
+          "covers": "docling-pdf, docling-core and docling-onnx 1.93.6 are built from the fork https://github.com/Heyoub/docling.rs, branch okf/docling-pdf-1.93.6-font-runs, at the commit the [patch.crates-io] section of Cargo.toml names by rev (Cargo.lock records it as their source): one commit on the upstream docling.rs commit that crates.io publishes as 1.93.6 (the .cargo_vcs_info.json of that release names it). docling-core and docling-onnx come from the same tree so that Cargo.lock holds one of each, and docling stays 1.93.5 from crates.io. The one rule changed: in the line contraction of docling-pdf (dp_lines.rs, applicable) a change of font no longer ends a line cell; word cells still end at a change of font. Upstream docling-parse made this change in #351 (7.21.0), and docling.rs has not ported it (upstream master, 2026-10-06). Nothing was reported upstream. The patch is removed, and the three crates return to crates.io, when a docling.rs release ports the docling-parse 7.21 or later line contractor."
         },
         {
           "id": "mcp-apps-protocol-qualification",
-          "status": "incomplete",
-          "receipt": null,
-          "meaning": "Reopened: prior PASS cited a dirty-tree SHA and did not record ngrok lifecycle close. Requalify on a clean SHA with provenance guard and ngrok closed_at."
+          "kind": "receipt",
+          "harness": "mcp-apps",
+          "receipt": "qualification/receipts/mcp-apps.json",
+          "criteria": "qualification/mcp-apps/criteria.json",
+          "status": "passed",
+          "covers": "A pass proves that every criterion pinned in qualification/mcp-apps/criteria.json was judged and passed on the clean commit the receipt cites: the App bundle built in the run is one HTML resource with the SDK's MIME type and a production React build; a fixture MCP server (the harness, answering from committed fixtures) lists and serves that resource over Streamable HTTP with four render tools of its own (render_source, render_changes, render_timeline, render_present: the product catalog has no tool of these names; their results are fixtures the App parses with the product's generated schemas) and with show and read_object marked app-only, of which only read_object carries the product's schemas (the harness declares show itself; the product declares show for the model and the App), and read_object is served in ranged blocks that hash to the dataset's digest and refuses an unknown digest or argument; and in the ext-apps basic-host example under Chromium each of the four views shows its own text with no alert and no serious or critical axe violation in the App frame, the present view drawing its chart and tables from the dataset it fetched. It does not prove the product's tool declarations other than the read_object schemas, the product server's show and read_object handlers or its blob store, rendering in claude.ai or ChatGPT (the acceptance gate mcp-apps-web-hosts) or the production MCP server over the Application."
         },
         {
           "id": "json-render-catalog-round-trip",
-          "status": "passed",
-          "receipt": "ui/tests/unit/view-document-roundtrip.test.tsx",
-          "meaning": "ViewDocument fixture: Rust serde deny_unknown_fields round trip (crates/contract/tests/semantic.rs) and UI Zod parse + prepareSpec + render equivalence (ui/tests/unit/view-document-roundtrip.test.tsx)."
+          "kind": "ci",
+          "enforced_by": {
+            "workflow": ".github/workflows/ci.yml",
+            "job": "foundation",
+            "check": "Actual pinned generators and consumers, every feature",
+            "evidence": [
+              "crates/contract/tests/semantic.rs",
+              "ui/tests/unit/view-document-roundtrip.test.tsx"
+            ]
+          },
+          "covers": "One ViewDocument fixture round-trips through the Rust contract types with unknown fields denied, and in the UI parses with the generated Zod schema, survives prepareSpec and a JSON round trip unchanged, and renders all six catalog components twice: with nothing resolved, where each data component shows its unavailable state, and with the committed source, dataset and binding fixtures, where the Stack and the Columns hold the others, the source excerpt shows the source's words, the data table a row per record, the chart one mark per row and the source list each resolved path. It does not prove the resolution of a binding through the host's tools, a View saved through storage or rendering in an MCP host."
         },
         {
           "id": "hey-api-generated-runtime-probe",
-          "status": "bounded_upstream_exception",
-          "meaning": "generated-strict typecheck remains the documented Hey API EOPT island probe"
+          "kind": "decision",
+          "decision": "generated-strict typecheck remains the documented Hey API EOPT island probe",
+          "decided_on": "2026-10-04",
+          "decided_by": "integration-owner",
+          "covers": "The Hey API client runtime under ui/src/api/generated/client and core is type-checked by ui/tsconfig.generated.json with exactOptionalPropertyTypes off (hey-api/openapi-ts#3157); every other generated file and all authored code stay under the authored policy. The probe typecheck:generated-strict, run by the local foundation task and not by CI, never blocks; it reports when a pinned release passes and the exception can be removed."
         },
         {
           "id": "clean-checkout-rerun",
-          "status": "passed",
-          "receipt": ".artifacts/qualification/clean-checkout/receipt.json",
-          "meaning": "Uninterrupted single-SHA run on e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807: bootstrap, gen-check x2 (no drift), foundation, check, test, check-offline, audit all exit 0; git status empty. Logs beside .artifacts/qualification/clean-checkout/receipt.json. Will be re-run on foundation-repair SHA S."
+          "kind": "ci",
+          "enforced_by": {
+            "workflow": ".github/workflows/ci.yml",
+            "job": "foundation",
+            "check": "Actual pinned generators and consumers, every feature",
+            "evidence": [
+              "bun scripts/dev.mjs bootstrap"
+            ]
+          },
+          "covers": "Every CI run starts from a fresh clone of the pushed commit: bootstrap installs from the committed lockfiles only, builds the generator, generates, and builds and type-checks the UI before the gated steps run, so nothing can depend on an uncommitted file. Cargo's registry and target directory are restored from a cache keyed on rust-toolchain.toml and Cargo.lock, with a fallback to the newest cargo cache of the same runner OS when none has that key, so `target` can come from another lockfile state and cargo's own fingerprints under `--locked` decide what is rebuilt; Bun's install cache is keyed on .bun-version and bun.lock and has no fallback. CI asserts that the checkout is unchanged directly after bootstrap (the deterministic-foundation gate) and not again after the gated steps, and it does not run the audit; `bun scripts/dev.mjs clean-checkout` asserts a clean tree after the whole sequence and runs the audit locally, and is a tool, not a gate."
         },
         {
           "id": "github-actions-ci-receipt",
-          "status": "passed",
-          "receipt": "https://github.com/freebatteryfactory/okf-jawn/actions/runs/37322344115",
-          "meaning": "Push CI 37322344115 on e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807: source-tooling, foundation (bootstrap/foundation/test/check/audit), runtime-clippy all success. Includes Vitest (via bun test task) and workspace cargo tests. Will be re-run on foundation-repair SHA S."
+          "kind": "ci",
+          "enforced_by": {
+            "workflow": ".github/workflows/ci.yml",
+            "job": "source-tooling",
+            "check": "Dependency-free source tooling, not product acceptance",
+            "evidence": [
+              "bun scripts/dev.mjs check-offline"
+            ]
+          },
+          "covers": "Every push runs the dependency-free offline suite in a fresh clone with nothing installed but Bun. The ruleset on main requires this check and \"Actual pinned generators and consumers, every feature\" (the deterministic-foundation gate), so a commit reaches main only with both green; the lane and audit jobs are not required checks."
         }
       ],
       "construction": [
@@ -225,14 +183,21 @@
           "status": "blocked_on_lanes",
           "owner": "storage",
           "receipt": "cargo test -p okf-jawn-storage --features runtime",
-          "meaning": "VersionStore (trailer, find_mutation, candidates), BlobStore, WorkspaceCatalog, SQLite stores (Record/Mutation/Draft/Confirmation/SandboxCapability/Proposal/Upload/Event/Credential), SearchIndex (no drafts), local AccessControl"
+          "meaning": "VersionStore (trailer, find_commit: commit is idempotent on MutationId, candidates), BlobStore, WorkspaceCatalog, SQLite stores (Record/Mutation/Draft/Confirmation/SandboxCapability/Proposal/Upload/Event/Credential), SearchIndex (no drafts), local AccessControl"
         },
         {
           "id": "mutation-crash-reconcile",
           "status": "blocked_on_lanes",
           "owner": "storage",
           "receipt": "cargo test -p okf-jawn-storage --features runtime -- mutation_crash_reconcile",
-          "meaning": "Commit succeeds, mutation complete is never written, retry finds the revision through find_mutation and creates no second commit"
+          "meaning": "Commit succeeds, mutation complete is never written, retry finds the revision through find_commit and creates no second commit (commit is idempotent on MutationId)"
+        },
+        {
+          "id": "mutation-lease-compare-and-set",
+          "status": "blocked_on_lanes",
+          "owner": "storage",
+          "receipt": "cargo test -p okf-jawn-storage --features runtime -- mutation_lease_compare_and_set",
+          "meaning": "A superseded attempt can neither complete nor release the mutation; both takeover orders are exercised"
         },
         {
           "id": "confirmation-single-use",
@@ -260,7 +225,21 @@
           "status": "blocked_on_lanes",
           "owner": "ingest",
           "receipt": ".artifacts/qualification/ or construction receipt for import restart",
-          "meaning": "Kill and restart against the real RecordStore with JobHandler(&ClaimedJob); no duplicate effect. Tokio+RecordStore path (iii rejected)."
+          "meaning": "Kill and restart against the real RecordStore with JobHandler(&ClaimedJob); no duplicate effect; after restart leases are expired and pending jobs re-enqueued (`expire_leases`, `pending_jobs`); an attempt that dies without a restart is retried after its lease expires."
+        },
+        {
+          "id": "ingest-locates-unlocated-items",
+          "status": "blocked_on_lanes",
+          "owner": "ingest",
+          "receipt": "cargo test -p okf-jawn-ingest --features runtime -- locates_unlocated_items",
+          "meaning": "An item the converter leaves without a location (a PDF caption: the library drops its box) is located through the page text layer by the rule of qualification/docling/src/locate.rs: docling::pdf_text_layer_pages, the one text-layer item with exactly its text on the page of its parent or of its nearest located earlier sibling, with a box that has area and lies inside the page. An item the rule does not find is recorded as unlocated; it is never given a guessed box, and every location records which source gave it. The rule does not guarantee that the box it finds is the item's own: that file states the two known wrong placements (LOCATE_LIMITS), and the harness records each item's distance to the item whose page was searched without applying a threshold. Whether the product bounds that distance is the owner's decision, open until this gate is built"
+        },
+        {
+          "id": "ingest-flags-undecodable-text",
+          "status": "blocked_on_lanes",
+          "owner": "ingest",
+          "receipt": "cargo test -p okf-jawn-ingest --features runtime -- flags_undecodable_text",
+          "meaning": "Text the PDF's fonts cannot map to Unicode is detected by the rule of qualification/docling/src/glyphs.rs (the library prints `/` and the glyph's name for each such glyph), is never indexed as words, and its page is reported as partly extracted. The detector has two known limits: it flags real text of the placeholder's shape that stands after a space (`/B747`, `/v100`, `/tmp123`), and it misses a placeholder glued to a preceding character (`x/g12`). A signal from the library that a glyph had no Unicode is preferred to this detector as soon as the library gives one"
         },
         {
           "id": "application-operations",
@@ -274,7 +253,7 @@
           "status": "blocked_on_lanes",
           "owner": "core-cli",
           "receipt": "cargo test -p okf-jawn-core -- views::",
-          "meaning": "views::validate against catalog.schema.json and vega-lite.schema.json plus referential checks; present and saved-view writes call it first"
+          "meaning": "views::validate against catalog.schema.json and vega-lite.schema.json plus referential checks, and a binding outside the View's workspace is rejected (`ViewDocument::bindings_outside`); present and saved-view writes call it first"
         },
         {
           "id": "draft-visibility",
@@ -289,6 +268,13 @@
           "owner": "server",
           "receipt": "cargo test -p okf-jawn-server --features runtime",
           "meaning": "WorkOS AccessControl, session/CSRF, TransportAuth, sandbox capability origin route, ReadinessProbe and startup composition"
+        },
+        {
+          "id": "http-fallback-errors",
+          "status": "blocked_on_lanes",
+          "owner": "server",
+          "receipt": "cargo test -p okf-jawn-server --features runtime -- http_fallback_errors",
+          "meaning": "An unknown path and a wrong method return ApiError JSON, not an empty axum default body"
         },
         {
           "id": "grant-cache-ttl",
@@ -357,12 +343,6 @@
           "meaning": "Connected product acceptance against a real server"
         }
       ]
-    },
-    "code_tested_commits": {
-      "clean_checkout": "e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807",
-      "ci": "e3dd8bf8d9bcca0856ad5da1c98fcc8b88547807",
-      "ci_run": "https://github.com/freebatteryfactory/okf-jawn/actions/runs/37322344115",
-      "qualification_receipts": "32a10ba4125719d4132e29d8679980113b6fc0a6"
     }
   },
   "historical_archive_record": {
@@ -500,7 +480,6 @@
       "MCP App and Scalar bundling",
       "actual converter/native/model asset qualification",
       "WorkOS integration and hosted authentication",
-      "iii restart/channel qualification",
       "Claude/ChatGPT host rendering and WebMCP",
       "complete app, raw transport routes, backup/export and UI journeys"
     ],

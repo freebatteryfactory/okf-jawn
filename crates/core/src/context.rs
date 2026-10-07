@@ -1,7 +1,8 @@
 //! Per-request authorization and mutation identity assembled by dispatch.
 //!
 //! Identity (`Principal`) is not authorization. Effective permissions arrive as grants;
-//! every mutation that runs carries a durable `MutationId`.
+//! every mutation that runs carries a durable `MutationId`, and a handler is told whether an
+//! earlier attempt under that id may already have written rows.
 
 use okf_jawn_contract::access::{Permission, Principal};
 use okf_jawn_contract::identity::{MutationId, TenantId, WorkspaceId};
@@ -27,11 +28,23 @@ pub struct TenantGrant {
     pub permissions: Vec<Permission>,
 }
 
+/// Whether a handler is the first to run under its `MutationId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attempt {
+    /// No earlier attempt ran under this identity; also every invocation that is not a mutation.
+    First,
+    /// An earlier attempt under the same `MutationId` ended without completing. Stores that
+    /// create rows may already hold them and return the prior row for the repeated id.
+    Resumed,
+}
+
 /// Authorization and mutation identity for one operation invocation.
 #[derive(Debug, Clone)]
 pub struct OperationContext {
     /// Authenticated caller; never taken from a request body.
     pub principal: Principal,
+    /// Browser session the request arrived in; `None` for bearer and connector callers.
+    pub session_id: Option<String>,
     /// Canonical operation being executed.
     pub operation: OperationName,
     /// Tenant grant when the request authorized a deployment target.
@@ -40,6 +53,8 @@ pub struct OperationContext {
     pub grants: Vec<WorkspaceGrant>,
     /// Durable write identity when this invocation is a mutation under an idempotency key.
     pub mutation: Option<MutationId>,
+    /// Whether an earlier attempt already ran under `mutation`.
+    pub attempt: Attempt,
 }
 
 impl WorkspaceGrant {

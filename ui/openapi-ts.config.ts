@@ -6,18 +6,22 @@ import { defineConfig } from '@hey-api/openapi-ts';
 const input = process.env['OKF_OPENAPI'] ?? '../api/openapi.json';
 const metadata: unknown = JSON.parse(readFileSync(join(dirname(input), 'operations.json'), 'utf8'));
 if (!Array.isArray(metadata)) throw new Error('Generated operation metadata must be an array');
+/** Reads that mint a new credential on every call; a cached query would hand back an expiring one. */
+const neverCached = new Set(['create_sandbox_capability']);
 const readPaths = new Set<string>();
 for (const value of metadata) {
   if (
     typeof value !== 'object' ||
     value === null ||
+    !('id' in value) ||
     !('path' in value) ||
     !('permission' in value)
   ) {
     throw new Error('Invalid generated operation metadata');
   }
   if (typeof value.path !== 'string') throw new Error('Operation path must be a string');
-  if (value.permission === 'read') readPaths.add(value.path);
+  if (value.permission === 'read' && !(typeof value.id === 'string' && neverCached.has(value.id)))
+    readPaths.add(value.path);
 }
 
 export default defineConfig({

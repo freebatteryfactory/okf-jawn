@@ -14,6 +14,43 @@ use crate::context::{TenantGrant, WorkspaceGrant};
 use crate::ports::PortFuture;
 use crate::storage::StorageScope;
 
+/// Resolves effective workspace and tenant grants for an authenticated principal.
+///
+/// Adapters own WorkOS / local lookup. Pure route and delegation rules live in this module
+/// and are applied by dispatch after a raw grant is returned.
+pub trait AccessControl: Send + Sync {
+    /// Look up the caller's raw grant on one workspace (before route/delegation intersection).
+    ///
+    /// Hosted: may cache only when [`may_cache`] is true, for at most 60 seconds.
+    /// Approve, Review, and Admin must always be fetched fresh.
+    fn authorize<'a>(
+        &'a self,
+        principal: &'a Principal,
+        workspace: WorkspaceId,
+        permission: Permission,
+    ) -> PortFuture<'a, WorkspaceGrant>;
+
+    /// Look up the caller's raw tenant grant (before route/delegation intersection).
+    ///
+    /// Locally the owner session is tenant Admin and connectors never are. Hosted, the
+    /// WorkOS org role maps to tenant permissions.
+    fn authorize_tenant<'a>(
+        &'a self,
+        principal: &'a Principal,
+        permission: Permission,
+    ) -> PortFuture<'a, TenantGrant>;
+
+    /// Enumerate workspace grants for listing; results are filtered by the caller.
+    fn grants<'a>(&'a self, principal: &'a Principal) -> PortFuture<'a, Vec<WorkspaceGrant>>;
+
+    /// Grant the creator Admin on a newly created workspace.
+    fn grant_creator<'a>(
+        &'a self,
+        principal: &'a Principal,
+        workspace: WorkspaceId,
+    ) -> PortFuture<'a, WorkspaceGrant>;
+}
+
 /// Reject routes that cannot exercise `permission` regardless of grants.
 ///
 /// # Errors
@@ -104,43 +141,6 @@ pub fn authorize_tenant(
         ));
     }
     Ok(grant)
-}
-
-/// Resolves effective workspace and tenant grants for an authenticated principal.
-///
-/// Adapters own WorkOS / local lookup. Pure route and delegation rules live in this module
-/// and are applied by dispatch after a raw grant is returned.
-pub trait AccessControl: Send + Sync {
-    /// Look up the caller's raw grant on one workspace (before route/delegation intersection).
-    ///
-    /// Hosted: may cache only when [`may_cache`] is true, for at most 60 seconds.
-    /// Approve, Review, and Admin must always be fetched fresh.
-    fn authorize<'a>(
-        &'a self,
-        principal: &'a Principal,
-        workspace: WorkspaceId,
-        permission: Permission,
-    ) -> PortFuture<'a, WorkspaceGrant>;
-
-    /// Look up the caller's raw tenant grant (before route/delegation intersection).
-    ///
-    /// Locally the owner session is tenant Admin and connectors never are. Hosted, the
-    /// WorkOS org role maps to tenant permissions.
-    fn authorize_tenant<'a>(
-        &'a self,
-        principal: &'a Principal,
-        permission: Permission,
-    ) -> PortFuture<'a, TenantGrant>;
-
-    /// Enumerate workspace grants for listing; results are filtered by the caller.
-    fn grants<'a>(&'a self, principal: &'a Principal) -> PortFuture<'a, Vec<WorkspaceGrant>>;
-
-    /// Grant the creator Admin on a newly created workspace.
-    fn grant_creator<'a>(
-        &'a self,
-        principal: &'a Principal,
-        workspace: WorkspaceId,
-    ) -> PortFuture<'a, WorkspaceGrant>;
 }
 
 /// Build a scope from an already-authorized workspace grant.

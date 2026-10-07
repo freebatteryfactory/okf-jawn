@@ -1,18 +1,48 @@
 #!/usr/bin/env bun
 /** Agent-agnostic task entrypoint. Every task fails honestly when prerequisites are missing. */
-import { readFile, mkdir, readdir } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { run, version } from './lib/process.mjs';
+import { gitLocalEnvironment, run, version } from './lib/process.mjs';
 import { files, exists } from './lib/files.mjs';
 import { generate, requireLockfiles } from './lib/generation.mjs';
-import { initialize } from './lib/init.mjs';
+import { initialize, installHooks } from './lib/init.mjs';
 import { tree } from './lib/tree.mjs';
 import { bun, pins } from './lib/toolchain.mjs';
+import { checkScope, createLanes, resetLanes, syncLaneTable } from './lib/lanes.mjs';
+import { checkReceipts, staleReceiptLines } from './lib/receipts.mjs';
+import { cleanCheckout, foundationTests, premergeSteps, runLane, runPremerge } from './lib/gates.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ui = join(root, 'ui');
 const [task = 'help', ...args] = process.argv.slice(2);
+// Git exports these to hooks. Every task addresses the checkout that contains this file, and
+// the offline tests create disposable repositories; an inherited GIT_DIR or GIT_INDEX_FILE
+// would aim their git commands at this repository.
+for (const name of gitLocalEnvironment) delete process.env[name];
+/** The options that take a value, with what the value is (`noun`) and how the usage shows it (`hint`): the one list `option()` and `positional` read. */
+const valueOptions = Object.freeze({
+  '--base': { noun: 'commit', hint: 'sha' },
+  '--head': { noun: 'commit', hint: 'sha' },
+  '--step': { noun: 'step id', hint: 'id' },
+});
+/**
+ * The value of the option `--name`, written `--name value` or `--name=value`, or undefined when it is not
+ * given. An option that is given with no value (nothing after it, an empty `=`, or another flag), or
+ * given twice, is an error: it is never ignored and never quietly takes the next argument.
+ * The option must be one of `valueOptions`.
+ */
+function option(name) {
+  const { noun, hint } = valueOptions[name];
+  const given = args.filter(value => value === name || value.startsWith(`${name}=`));
+  if (given.length > 1) throw new Error(`${task} ${name} was given more than once; name one ${noun}`);
+  if (given.length === 0) return undefined;
+  const value = given[0] === name ? args[args.indexOf(name) + 1] : given[0].slice(name.length + 1);
+  if (value === undefined || value === '' || value.startsWith('--')) throw new Error(`${task} ${name} needs a ${noun}: bun scripts/dev.mjs ${task} ${name} <${hint}>`);
+  return value;
+}
+/** Arguments that are neither a `--flag` nor the value of a value-taking option written in two tokens (`--head HEAD`); what follows `--head=HEAD` or a flag with no value (`--fast`) is positional. */
+const positional = args.filter((value, index) => !value.startsWith('--') && !Object.hasOwn(valueOptions, args[index - 1] ?? ''));
 
 async function doctor() {
   const selected = await pins(root);
@@ -36,9 +66,11 @@ async function prerequisites() {
 
 async function lock() {
   await prerequisites();
-  await run('cargo', ['generate-lockfile'], { cwd: root });
+  // Minimal update: workspace members' own entries follow their manifests; every package already
+  // in Cargo.lock keeps its version unless a manifest requirement no longer admits it.
+  await run('cargo', ['update', '--workspace'], { cwd: root });
   await run(bun(), ['install', '--lockfile-only'], { cwd: root });
-  process.stdout.write('Resolved Cargo.lock and bun.lock with the selected tools. Review and commit them; nothing was installed.\n');
+  process.stdout.write('Updated Cargo.lock and bun.lock for manifest changes only; already locked versions were kept. Review `git diff Cargo.lock bun.lock` and commit; nothing was installed.\n');
 }
 
 async function uiScript(name) {
@@ -56,9 +88,23 @@ async function generatedStrictProbe() {
   }
 }
 
+/**
+ * Write ui/src/routeTree.gen.ts without bundling. The TanStack Router Vite plugin generates
+ * the tree from its configResolved hook, so resolving the Vite config is enough. The plugin
+ * logs and swallows generator errors, so the file is removed first and required afterwards.
+ */
+async function routes() {
+  const target = join(ui, 'src', 'routeTree.gen.ts');
+  await rm(target, { force: true });
+  await run(bun(), ['-e', "const { resolveConfig } = await import('vite'); await resolveConfig({}, 'build');"], { cwd: ui });
+  if (!await exists(target)) throw new Error('Route tree was not generated: ui/src/routeTree.gen.ts is missing after resolving the Vite config.');
+  process.stdout.write('Generated ui/src/routeTree.gen.ts.\n');
+}
+
 async function bootstrap() {
   await prerequisites();
   await requireLockfiles(root);
+  await installHooks(root);
   await run('cargo', ['fetch', '--locked'], { cwd: root });
   await run(bun(), ['install', '--frozen-lockfile'], { cwd: root });
   await run('cargo', ['build', '--locked', '--package', 'xtask'], { cwd: root });
@@ -77,81 +123,14 @@ async function vendor() {
   process.stdout.write(`${JSON.stringify(selected, null, 2)}\n`);
 }
 
-async function lanes() {
-  const status = await run('git', ['status', '--porcelain'], { cwd: root, capture: true });
-  if (status.stdout.trim()) throw new Error('Commit the foundation before creating worktrees; no dirty-state fan-out.');
-  const base = (await run('git', ['rev-parse', '--verify', 'HEAD'], { cwd: root, capture: true })).stdout.trim();
-  const parent = resolve(root, '..', 'okf-jawn-lanes'); await mkdir(parent, { recursive: true });
-  for (const lane of ['storage', 'ingest', 'core-cli', 'server', 'mcp-execution', 'workspace-ui', 'views']) {
-    await run('git', ['worktree', 'add', '-b', `build/${lane}`, join(parent, lane), base], { cwd: root });
-  }
-}
-
-/**
- * Remove empty construction lanes created by `lanes`.
- *
- * Refuses if any build/* branch has commits beyond its merge-base with HEAD, or if any
- * lane worktree is dirty. Otherwise removes the worktrees and deletes the local branches.
- */
-async function lanesReset() {
-  const parent = resolve(root, '..', 'okf-jawn-lanes');
-  const lanes = ['storage', 'ingest', 'core-cli', 'server', 'mcp-execution', 'workspace-ui', 'views'];
-  for (const lane of lanes) {
-    const branch = `build/${lane}`;
-    const worktree = join(parent, lane);
-    const exists = await run('git', ['rev-parse', '--verify', branch], {
-      cwd: root,
-      capture: true,
-      allowFailure: true,
-    });
-    if (exists.code !== 0) continue;
-    if (await existsPath(worktree)) {
-      const dirty = await run('git', ['status', '--porcelain'], {
-        cwd: worktree,
-        capture: true,
-        allowFailure: true,
-      });
-      if (dirty.code === 0 && dirty.stdout.trim()) {
-        throw new Error(`lanes-reset refused: worktree ${worktree} is dirty`);
-      }
-    }
-    const base = (await run('git', ['merge-base', branch, 'HEAD'], { cwd: root, capture: true })).stdout.trim();
-    const ahead = await run('git', ['rev-list', '--count', `${base}..${branch}`], {
-      cwd: root,
-      capture: true,
-    });
-    if (Number(ahead.stdout.trim()) > 0) {
-      throw new Error(
-        `lanes-reset refused: ${branch} has ${ahead.stdout.trim()} commit(s) beyond its base; reset would discard lane work`,
-      );
-    }
-  }
-  for (const lane of lanes) {
-    const branch = `build/${lane}`;
-    const worktree = join(parent, lane);
-    if (await existsPath(worktree)) {
-      await run('git', ['worktree', 'remove', '--force', worktree], { cwd: root });
-    }
-    const exists = await run('git', ['rev-parse', '--verify', branch], {
-      cwd: root,
-      capture: true,
-      allowFailure: true,
-    });
-    if (exists.code === 0) {
-      await run('git', ['branch', '-D', branch], { cwd: root });
-    }
-  }
-  process.stdout.write('lanes-reset: removed empty build/* worktrees and branches.\n');
-}
-
-async function existsPath(path) {
-  return exists(path);
-}
-
-async function offlineChecks() {
-  const tests = (await files(join(root, 'tests/foundation'))).filter(name => name.endsWith('.test.mjs')).map(name => `./tests/foundation/${name}`);
+async function offlineChecks({ fast = false } = {}) {
+  const discovered = (await files(join(root, 'tests/foundation'))).filter(name => name.endsWith('.test.mjs'));
+  const unlisted = discovered.filter(name => !foundationTests.fast.includes(name) && !foundationTests.slow.includes(name));
+  if (unlisted.length) throw new Error(`Foundation test(s) in neither foundationTests.fast nor .slow (scripts/lib/gates.mjs): ${unlisted.join(', ')}`);
+  const tests = discovered.filter(name => !fast || foundationTests.fast.includes(name)).map(name => `./tests/foundation/${name}`);
   if (!tests.length) throw new Error('No foundation tests discovered');
-  await run(bun(), ['test', ...tests], { cwd: root });
+  // Fixture repositories run many git processes; the bun default of 5 s is too short on a loaded Windows machine.
+  await run(bun(), ['test', '--timeout', '60000', ...tests], { cwd: root });
 }
 
 async function audit() {
@@ -172,73 +151,6 @@ async function audit() {
   process.stdout.write(`Ignored high tooling advisory ${bracesException} (shadcn braces path; see vendors.json / verification).\n`);
 }
 
-/**
- * Validate qualification receipts under qualification/receipts/.
- *
- * Expected minimum JSON shape per receipt:
- *   { "git_sha": "<full sha>", "inputs": ["path/relative/to/repo", ...] }
- *
- * Fails when git_sha is not an ancestor of HEAD, or when any listed input path
- * changed after that SHA (git diff --name-only <sha> HEAD -- <inputs...>).
- */
-async function checkReceipts() {
-  const receiptsDir = join(root, 'qualification', 'receipts');
-  await mkdir(receiptsDir, { recursive: true });
-  const entries = (await readdir(receiptsDir)).filter((name) => name.endsWith('.json')).sort();
-  if (!entries.length) {
-    process.stdout.write('check-receipts: no *.json receipts under qualification/receipts/ (ok while empty).\n');
-    return;
-  }
-  const failures = [];
-  for (const name of entries) {
-    const path = join(receiptsDir, name);
-    let receipt;
-    try {
-      receipt = JSON.parse(await readFile(path, 'utf8'));
-    } catch (error) {
-      failures.push(`${name}: not valid JSON (${error.message})`);
-      continue;
-    }
-    const sha = receipt.git_sha ?? receipt.commit_sha;
-    if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/i.test(sha)) {
-      failures.push(`${name}: missing git_sha (expected 40-hex); shape is { git_sha, inputs: string[] }`);
-      continue;
-    }
-    if (!Array.isArray(receipt.inputs) || !receipt.inputs.every((item) => typeof item === 'string')) {
-      failures.push(`${name}: inputs must be a string[] of repo-relative paths`);
-      continue;
-    }
-    const ancestor = await run('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], {
-      cwd: root,
-      capture: true,
-      allowFailure: true,
-    });
-    if (ancestor.code !== 0) {
-      failures.push(`${name}: git_sha ${sha} is not an ancestor of HEAD`);
-      continue;
-    }
-    if (receipt.inputs.length === 0) continue;
-    const changed = await run(
-      'git',
-      ['diff', '--name-only', sha, 'HEAD', '--', ...receipt.inputs],
-      { cwd: root, capture: true },
-    );
-    const names = changed.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    if (names.length) {
-      failures.push(
-        `${name}: inputs changed after ${sha}:\n  ${names.join('\n  ')}`,
-      );
-    }
-  }
-  if (failures.length) {
-    throw new Error(`check-receipts failed:\n${failures.join('\n')}`);
-  }
-  process.stdout.write(`check-receipts: ${entries.length} receipt(s) valid against HEAD.\n`);
-}
-
 async function qualify() {
   const name = args[0];
   if (name === 'mcp-wire') {
@@ -247,12 +159,20 @@ async function qualify() {
     await run(bun(), ['tests/integration/acceptance.mjs'], { cwd: root });
   } else if (name === 'docling') {
     await run(bun(), ['qualification/docling/run.mjs'], { cwd: root, timeout: 1_800_000 });
-  } else if (name === 'iii') {
-    await run(bun(), ['qualification/iii/run.mjs'], { cwd: root, timeout: 1_800_000 });
   } else if (name === 'mcp-apps') {
     await run(bun(), ['qualification/mcp-apps/run.mjs'], { cwd: root, timeout: 1_800_000 });
   } else {
-    throw new Error('Available: qualify mcp-wire | application | docling | iii | mcp-apps. None is recorded as passed by this command until its receipt is written.');
+    throw new Error('Available: qualify mcp-wire | application | docling | mcp-apps. None is recorded as passed by this command until its receipt is written.');
+  }
+}
+
+/** Run named premerge steps in order, stopping at the first failure. */
+async function runNamed(ids) {
+  const steps = premergeSteps(root);
+  for (const id of ids) {
+    const step = steps.find(entry => entry.id === id);
+    if (!step) throw new Error(`No premerge step named ${id}.`);
+    await run(step.command, step.args, { cwd: step.cwd });
   }
 }
 
@@ -260,28 +180,50 @@ async function main() {
   switch (task) {
     case 'doctor': await doctor(); break;
     case 'init': process.stdout.write(`${JSON.stringify(await initialize(root), null, 2)}\n`); break;
-    case 'check-offline': await offlineChecks(); break;
+    case 'check-offline': await offlineChecks({ fast: args.includes('--fast') }); break;
     case 'lock': await lock(); break;
     case 'bootstrap': await bootstrap(); break;
     case 'gen': await generate(root); break;
     case 'gen-check': await generate(root, true); break;
+    case 'routes': await routes(); break;
     case 'vendor': await vendor(); break;
     case 'tree': process.stdout.write(await tree(root)); break;
-    case 'lanes': await lanes(); break;
-    case 'lanes-reset': await lanesReset(); break;
+    case 'lanes': process.stdout.write(`${(await createLanes(root, { names: args })).join('\n')}\n`); break;
+    case 'lanes-table': process.stdout.write(await syncLaneTable(root) ? 'AGENTS.md lane table regenerated.\n' : 'AGENTS.md lane table is current.\n'); break;
+    case 'scope': {
+      const result = await checkScope(root, { lane: positional[0], base: option('--base'), head: option('--head') });
+      process.stdout.write(`scope: ${result.changed.length} changed path(s) since ${result.base}, all inside ${result.name}.\n`);
+      break;
+    }
+    case 'lane': {
+      const result = await runLane(root, positional[0]);
+      if (!result.passed) process.exitCode = 1;
+      break;
+    }
+    case 'premerge': {
+      const result = await runPremerge(root, { only: option('--step') });
+      if (!result.passed) process.exitCode = 1;
+      break;
+    }
+    case 'clean-checkout': {
+      const result = await cleanCheckout(root);
+      process.stdout.write(`${result.passed ? 'CLEAN_CHECKOUT_PASS' : 'CLEAN_CHECKOUT_FAIL'} ${result.receipt.git_sha}\nreceipt: ${result.receiptPath}\n`);
+      if (!result.passed) process.exitCode = 1;
+      break;
+    }
+    case 'lanes-reset': process.stdout.write(`${await resetLanes(root)}\n`); break;
     case 'qualify': await qualify(); break;
-    case 'check-receipts': await checkReceipts(); break;
+    case 'check-receipts': {
+      const head = option('--head');
+      if (head === undefined) { process.stdout.write(`${await checkReceipts(root)}\n`); break; }
+      const lines = await staleReceiptLines(root, head);
+      if (lines.length) { process.stderr.write(`${lines.join('\n')}\n`); process.exitCode = 1; }
+      else process.stdout.write(`check-receipts: nothing at ${head} is untrusted, and its typed statuses are the ones its receipts derive.\n`);
+      break;
+    }
     case 'audit': await audit(); break;
-    case 'check':
-      await run('cargo', ['fmt', '--all', '--check'], { cwd: root });
-      await run('cargo', ['clippy', '--locked', '--workspace', '--all-targets', '--', '-D', 'warnings'], { cwd: root });
-      await run('cargo', ['xtask', 'source-policy', '--root', root], { cwd: root });
-      await uiScript('lint');
-      await uiScript('typecheck');
-      await generate(root, true); break;
-    case 'test':
-      await run('cargo', ['test', '--locked', '--workspace'], { cwd: root });
-      await uiScript('test'); break;
+    case 'check': await runNamed(['fmt', 'clippy', 'source-policy', 'ui-lint', 'ui-typecheck', 'gen-check']); break;
+    case 'test': await runNamed(['test', 'ui-test']); break;
     case 'foundation':
       await generate(root, true);
       await run('cargo', ['test', '--locked', '-p', 'okf-jawn-contract', '-p', 'okf-jawn-core', '-p', 'xtask'], { cwd: root });
@@ -289,7 +231,7 @@ async function main() {
       await generatedStrictProbe();
       await uiScript('typecheck');
       await offlineChecks(); break;
-    case 'help': process.stdout.write('Tasks: init doctor lock bootstrap gen gen-check check-offline check test foundation vendor tree lanes lanes-reset qualify check-receipts audit\n'); break;
+    case 'help': process.stdout.write('Tasks: init doctor lock bootstrap gen gen-check routes check-offline check test foundation premerge lane scope vendor tree lanes lanes-table lanes-reset clean-checkout qualify check-receipts audit\n'); break;
     default: throw new Error(`Unknown task: ${task}. Use help.`);
   }
 }

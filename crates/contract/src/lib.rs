@@ -23,7 +23,7 @@ pub mod identity;
 pub mod import;
 /// User-defined OKF types, editable notes, and source appearances.
 pub mod item;
-/// Operation names, labels, and declared policy.
+/// Operation names, aliases, hints and declared policy.
 pub mod metadata;
 /// Canonical operation declarations and their adapter projections.
 pub mod operations;
@@ -46,6 +46,3 @@ pub mod workspace;
 
 /// Streaming, discovery, and session transport declarations.
 pub mod transport;
-
-/// Human-facing command aliases; canonical operations remain unchanged.
-pub mod labels;

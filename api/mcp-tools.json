@@ -15,6 +15,181 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
+      "description": "List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {\"kind\": \"revision\", \"revision\": head} so every call sees one consistent state, and compare it with a later listing to detect change.",
+      "inputSchema": {
+        "$defs": {
+          "PageRequest": {
+            "additionalProperties": false,
+            "description": "A bounded page request; the cursor is opaque and scoped to the query.",
+            "properties": {
+              "cursor": {
+                "description": "Opaque continuation cursor.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "description": "Maximum results requested; server may return fewer.",
+                "format": "uint16",
+                "maximum": 200,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "limit"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "List only workspaces visible to the authenticated principal.",
+        "properties": {
+          "page": {
+            "$ref": "#/$defs/PageRequest",
+            "description": "Bounded pagination with an opaque cursor."
+          }
+        },
+        "required": [
+          "page"
+        ],
+        "title": "ListWorkspacesRequest",
+        "type": "object"
+      },
+      "name": "workspaces",
+      "outputSchema": {
+        "$defs": {
+          "Permission": {
+            "description": "Application capabilities checked on every operation.",
+            "oneOf": [
+              {
+                "const": "read",
+                "description": "Read authorized workspace data.",
+                "type": "string"
+              },
+              {
+                "const": "write",
+                "description": "Edit authorized workspace content.",
+                "type": "string"
+              },
+              {
+                "const": "propose",
+                "description": "Create or update proposals without merging.",
+                "type": "string"
+              },
+              {
+                "const": "approve",
+                "description": "Accept proposals at exact preconditions.",
+                "type": "string"
+              },
+              {
+                "const": "review",
+                "description": "Record an explicit content review.",
+                "type": "string"
+              },
+              {
+                "const": "admin",
+                "description": "Manage deployment or workspace access.",
+                "type": "string"
+              }
+            ]
+          },
+          "Revision": {
+            "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+            "type": "string"
+          },
+          "Workspace": {
+            "additionalProperties": false,
+            "description": "A user-owned OKF workspace with a resolved head revision.",
+            "properties": {
+              "created_at": {
+                "description": "RFC 3339 creation time.",
+                "type": "string"
+              },
+              "description": {
+                "description": "One-line context for people and agents.",
+                "type": "string"
+              },
+              "head": {
+                "$ref": "#/$defs/Revision",
+                "description": "Current resolved Git commit."
+              },
+              "id": {
+                "$ref": "#/$defs/WorkspaceId",
+                "description": "Stable application identity."
+              },
+              "name": {
+                "description": "Human-selected workspace name.",
+                "type": "string"
+              },
+              "permissions": {
+                "description": "The caller's effective grant on this workspace after any delegation ceiling.",
+                "items": {
+                  "$ref": "#/$defs/Permission"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "description",
+              "head",
+              "created_at",
+              "permissions"
+            ],
+            "type": "object"
+          },
+          "WorkspaceId": {
+            "description": "Stable application identity for one user-organized workspace.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "A bounded workspace listing.",
+        "properties": {
+          "items": {
+            "description": "Authorized workspaces.",
+            "items": {
+              "$ref": "#/$defs/Workspace"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Continuation cursor.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ListWorkspacesResponse",
+        "type": "object"
+      },
+      "title": "Workspaces"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "model",
+            "app"
+          ]
+        }
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "List a folder with one-line descriptions at one resolved revision.",
       "inputSchema": {
         "$defs": {
@@ -231,6 +406,7 @@
           "WorkspacePath": {
             "maxLength": 4096,
             "minLength": 1,
+            "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
             "type": "string"
           }
         },
@@ -1040,6 +1216,7 @@
           "WorkspacePath": {
             "maxLength": 4096,
             "minLength": 1,
+            "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
             "type": "string"
           }
         },
@@ -1549,6 +1726,7 @@
           "WorkspacePath": {
             "maxLength": 4096,
             "minLength": 1,
+            "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
             "type": "string"
           }
         },
@@ -1581,8 +1759,7 @@
         },
         "required": [
           "revision",
-          "sources",
-          "appearance"
+          "sources"
         ],
         "title": "GetSourcesResponse",
         "type": "object"
@@ -1855,6 +2032,7 @@
           "WorkspacePath": {
             "maxLength": 4096,
             "minLength": 1,
+            "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
             "type": "string"
           }
         },
@@ -2358,6 +2536,7 @@
           "WorkspacePath": {
             "maxLength": 4096,
             "minLength": 1,
+            "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
             "type": "string"
           }
         },
@@ -2939,8 +3118,6 @@
               }
             },
             "required": [
-              "old_path",
-              "new_path",
               "patch",
               "binary",
               "kind"
@@ -3480,6 +3657,7 @@
           "WorkspacePath": {
             "maxLength": 4096,
             "minLength": 1,
+            "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
             "type": "string"
           }
         },
@@ -3661,6 +3839,7 @@
           "WorkspacePath": {
             "maxLength": 4096,
             "minLength": 1,
+            "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
             "type": "string"
           }
         },
@@ -3874,6 +4053,7 @@
           "WorkspacePath": {
             "maxLength": 4096,
             "minLength": 1,
+            "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
             "type": "string"
           }
         },
@@ -4224,7 +4404,7 @@
           },
           "ViewBinding": {
             "additionalProperties": false,
-            "description": "A named source selection used by a chart or layout.",
+            "description": "A named source selection used by a chart or layout.\n\nA saved View binds only to sources in its own workspace: `source.workspace_id` must equal\nthe workspace the View is saved or presented in (`ViewDocument::bindings_outside`).",
             "properties": {
               "materialized": {
                 "anyOf": [
@@ -4342,12 +4522,13 @@
           "WorkspacePath": {
             "maxLength": 4096,
             "minLength": 1,
+            "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
             "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
-        "description": "Render a candidate from already resolved bindings without saving or approving it.\n\nEvery binding's source workspace is an authorization target, not only `workspace_id`.",
+        "description": "Render a candidate from already resolved bindings without saving or approving it.\n\nEvery binding must name `workspace_id`; the handler rejects a view for which\n`view.bindings_outside(workspace_id)` is not empty. Each binding's source workspace is\nstill an authorization target, so a foreign binding is refused before the handler runs.",
         "properties": {
           "view": {
             "$ref": "#/$defs/ViewDocument",
@@ -4631,7 +4812,7 @@
           },
           "ViewBinding": {
             "additionalProperties": false,
-            "description": "A named source selection used by a chart or layout.",
+            "description": "A named source selection used by a chart or layout.\n\nA saved View binds only to sources in its own workspace: `source.workspace_id` must equal\nthe workspace the View is saved or presented in (`ViewDocument::bindings_outside`).",
             "properties": {
               "materialized": {
                 "anyOf": [
@@ -4775,6 +4956,7 @@
           "WorkspacePath": {
             "maxLength": 4096,
             "minLength": 1,
+            "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
             "type": "string"
           }
         },

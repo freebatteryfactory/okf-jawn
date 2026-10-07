@@ -14,11 +14,18 @@ async function containsFile(path){
  return false;
 }
 
-test('offline index records only the three executed Context7 queries as such',async()=>{
+test('recorded Context7 lookups are counted from the entries, never from memory',async()=>{
  const data=JSON.parse(await readFile(new URL('vendors.json',root),'utf8'));
- assert.equal(data.context7_queries_executed,3);
- assert.equal(data.vendors.filter(v=>v.context7_library_id!==null).length,3);
+ const recorded=data.vendors.filter(v=>v.context7_library_id!==null);
+ assert.equal(data.context7_queries_executed,recorded.length,'context7_queries_executed must equal the entries that record a library id and its query');
+ assert.equal(new Set(data.vendors.map(v=>v.name)).size,data.vendors.length,'vendor names must be unique');
  for(const v of data.vendors){
+  if(v.context7_library_id===null)assert.equal(v.context7_query,null,`${v.name} records a query without a library id`);
+  else{
+   assert.match(v.context7_library_id,/^\/[^/\s]+\/\S+$/,`${v.name} library id`);
+   assert.ok(typeof v.context7_query==='string'&&v.context7_query.length>0,`${v.name} records a library id without its query`);
+   assert.match(v.knowledge_source,/Context7/,`${v.name} knowledge_source must name the lookup`);
+  }
   assert.ok(v.official_sources.length);assert.ok(v.offline_notes.length);
   const planned=v.planned_use_sites??[],generated=v.generated_sites??[];
   assert.ok(v.use_sites.length+planned.length+generated.length,`${v.name} has no site`);

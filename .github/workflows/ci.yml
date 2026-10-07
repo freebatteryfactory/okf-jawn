@@ -1,14 +1,22 @@
 name: Source and foundation diagnostics
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 5 * * *"
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   source-tooling:
     name: Dependency-free source tooling, not product acceptance
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -16,29 +24,77 @@ jobs:
           bun-version-file: .bun-version
       - run: bun scripts/dev.mjs check-offline
   foundation:
-    name: Actual pinned generators and consumers
+    name: Actual pinned generators and consumers, every feature
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       SCARF_ANALYTICS: "false"
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
       - name: Install the toolchain selected by rust-toolchain.toml
         run: rustup toolchain install
-      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('.bun-version', 'bun.lock') }}
       - run: bun scripts/dev.mjs bootstrap
-      - run: bun scripts/dev.mjs foundation
-      - run: bun scripts/dev.mjs test
-      - run: bun scripts/dev.mjs check
-      - run: bun scripts/dev.mjs audit
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      # bootstrap has just replaced api/, generated/cli/ and ui/src/api/generated/ with what the
+      # pinned generators write, so the gen-check step below compares a new pass with bootstrap's
+      # output, not with the commit. This step is the comparison with the commit: a tracked file
+      # that changed, or a new file git does not ignore, means the committed generated output is
+      # stale. What bootstrap writes elsewhere (node_modules, target, ui/dist) is ignored by git.
+      - name: The checkout is unchanged by generation
+        run: |
+          status="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$status" ]; then
+            echo "::error::bootstrap changed the checkout: the committed generated output is not what the pinned generators write. Run 'bun scripts/dev.mjs gen' and commit the result."
+            printf '%s\n' "$status"
+            git diff
+            exit 1
+          fi
+      # One step per premerge step, in premerge order (tests/foundation/ci.test.mjs holds them
+      # equal). Each runs unless the run was cancelled, so one failure cannot hide the others.
+      - if: ${{ !cancelled() }}
+        run: bun scripts/dev.mjs premerge --step check-offline
+      - if: ${{ !cancelled() }}
+        run: bun scripts/dev.mjs premerge --step gen-check
+      - if: ${{ !cancelled() }}
+        run: bun scripts/dev.mjs premerge --step fmt
+      - if: ${{ !cancelled() }}
+        run: bun scripts/dev.mjs premerge --step clippy
+      - if: ${{ !cancelled() }}
+        run: bun scripts/dev.mjs premerge --step source-policy
+      - if: ${{ !cancelled() }}
+        run: bun scripts/dev.mjs premerge --step test
+      - if: ${{ !cancelled() }}
+        run: bun scripts/dev.mjs premerge --step ui-lint
+      - if: ${{ !cancelled() }}
+        run: bun scripts/dev.mjs premerge --step ui-build
+      - if: ${{ !cancelled() }}
+        run: bun scripts/dev.mjs premerge --step ui-typecheck
+      - if: ${{ !cancelled() }}
+        run: bun scripts/dev.mjs premerge --step ui-test
+      - if: ${{ !cancelled() }}
+        run: bun scripts/dev.mjs premerge --step check-receipts
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
         with:
           name: resolved-foundation
           if-no-files-found: error
@@ -50,20 +106,65 @@ jobs:
             ui/src/api/generated/
             ui/dist/
             ui/dist-apps/
-  runtime-clippy:
-    name: Clippy with runtime features (storage, ingest, server)
+  lane:
+    name: Lane gate for build/* branches
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/build/')
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
+    env:
+      SCARF_ANALYTICS: "false"
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
       - name: Install the toolchain selected by rust-toolchain.toml
         run: rustup toolchain install
-      - name: Clippy runtime feature graph
-        run: |
-          cargo clippy --locked \
-            -p okf-jawn-storage --features runtime \
-            -p okf-jawn-ingest --features runtime \
-            -p okf-jawn-server --features runtime \
-            --all-targets -- -D warnings
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-lane-${{ github.ref_name }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            cargo-lane-${{ github.ref_name }}-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('.bun-version', 'bun.lock') }}
+      - run: bun install --frozen-lockfile
+      - name: Lane gate
+        run: bun scripts/dev.mjs lane "${GITHUB_REF_NAME#build/}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: lane-log
+          if-no-files-found: error
+          include-hidden-files: true
+          path: .artifacts/lane/
+  audit:
+    name: Dependency advisories and licences
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SCARF_ANALYTICS: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - name: Install the toolchain selected by rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+      - run: bun install --frozen-lockfile
+      - run: bun scripts/dev.mjs audit

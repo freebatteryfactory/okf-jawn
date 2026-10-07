@@ -152,7 +152,8 @@ export const zErrorCode = z.union([
     z.literal('unsupported'),
     z.literal('unavailable'),
     z.literal('cancelled'),
-    z.literal('internal')
+    z.literal('internal'),
+    z.literal('not_implemented')
 ]);
 
 /**
@@ -188,22 +189,11 @@ export const zFileChangeKind = z.union([
 /**
  * A changed file with before and after locators.
  */
-export const zFileChangeInput = z.object({
+export const zFileChange = z.object({
     binary: z.boolean(),
     kind: zFileChangeKind,
     new_path: z.string().nullish(),
     old_path: z.string().nullish(),
-    patch: z.string()
-});
-
-/**
- * A changed file with before and after locators.
- */
-export const zFileChangeOutput = z.object({
-    binary: z.boolean(),
-    kind: zFileChangeKind,
-    new_path: z.string().nullable(),
-    old_path: z.string().nullable(),
     patch: z.string()
 });
 
@@ -269,6 +259,19 @@ export const zItemKind = z.union([
  * Durable background work identity retained across retries.
  */
 export const zJobId = z.uuid();
+
+/**
+ * What a durable job does; fixed when the job is accepted.
+ */
+export const zJobKind = z.union([
+    z.literal('import'),
+    z.literal('redigest'),
+    z.literal('export_workspace'),
+    z.literal('backup_workspace'),
+    z.literal('restore_workspace'),
+    z.literal('rebuild_index'),
+    z.literal('export_view')
+]);
 
 /**
  * Job progress retained independently of diagnostic traces.
@@ -639,6 +642,17 @@ export const zDraft = z.object({
 });
 
 /**
+ * One snapshotted item whose committed content moved after its draft's base.
+ */
+export const zDraftConflictItem = z.object({
+    changes: z.array(zFileChange),
+    current_revision: zRevision,
+    deleted: z.boolean(),
+    draft_base: zRevision,
+    item_id: zItemId
+});
+
+/**
  * The caller's own draft content returned beside committed content.
  */
 export const zDraftContent = z.object({
@@ -661,10 +675,7 @@ export const zErrorDetail = z.union([
         retry_after: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
     }),
     z.object({
-        current_revision: zRevision,
-        diff: z.unknown(),
-        draft_base: zRevision,
-        item_id: zItemId,
+        items: z.array(zDraftConflictItem).min(1),
         kind: z.literal('draft_conflict')
     }),
     z.object({
@@ -864,18 +875,8 @@ export const zWarning = z.object({
 /**
  * A comparison tied to both source revisions.
  */
-export const zDiffResponseInput = z.object({
-    changes: z.array(zFileChangeInput),
-    from: zRevision,
-    to: zRevision,
-    warnings: z.array(zWarning)
-});
-
-/**
- * A comparison tied to both source revisions.
- */
-export const zDiffResponseOutput = z.object({
-    changes: z.array(zFileChangeOutput),
+export const zDiffResponse = z.object({
+    changes: z.array(zFileChange),
     from: zRevision,
     to: zRevision,
     warnings: z.array(zWarning)
@@ -946,11 +947,13 @@ export const zCancelJobRequest = z.object({
 /**
  * Snapshot the caller's drafts of the selected items in one commit.
  *
- * If any selected item changed after its draft's base, or was deleted, the whole commit is
- * rejected with a `draft_conflict` error detail. On success the snapshotted drafts are removed.
+ * Each draft's own base revision is the precondition. The Snapshot is blocked only when an
+ * item being snapshotted was itself changed or deleted since its draft's base; head movement
+ * that did not touch a selected item never blocks. When blocked, nothing is committed and the
+ * `draft_conflict` error detail lists every conflicting item, not only the first. On success
+ * the snapshotted drafts are removed.
  */
 export const zCommitRequest = z.object({
-    expected_head: zRevision,
     idempotency_key: zIdempotencyKey,
     item_ids: z.array(zItemId).min(1),
     message: z.string(),
@@ -1220,6 +1223,7 @@ export const zJob = z.object({
     error: zApiError.nullish(),
     id: zJobId,
     item_ids: z.array(zItemId),
+    kind: zJobKind,
     progress: z.int().gte(0).lte(255),
     revision: zRevision.nullish(),
     state: zJobState,
@@ -1545,7 +1549,7 @@ export const zListWorkspacesResponse = z.object({
     next_cursor: z.string().nullish()
 });
 
-export const zWorkspacePath = z.string().min(1).max(4096);
+export const zWorkspacePath = z.string().min(1).max(4096).regex(/^[^\/\\:\x00-\x1f]+(\/[^\/\\:\x00-\x1f]+)*$/);
 
 /**
  * Permitted proposal mutations; no review or acceptance variants exist.
@@ -1788,17 +1792,8 @@ export const zGetObjectRequest = z.object({
 /**
  * Citations and source appearances for the selected item.
  */
-export const zGetSourcesResponseInput = z.object({
+export const zGetSourcesResponse = z.object({
     appearance: zSourceAppearance.nullish(),
-    revision: zRevision,
-    sources: z.array(zSourceReference)
-});
-
-/**
- * Citations and source appearances for the selected item.
- */
-export const zGetSourcesResponseOutput = z.object({
-    appearance: zSourceAppearance.nullable(),
     revision: zRevision,
     sources: z.array(zSourceReference)
 });
@@ -1886,6 +1881,9 @@ export const zSearchResponse = z.object({
 
 /**
  * A named source selection used by a chart or layout.
+ *
+ * A saved View binds only to sources in its own workspace: `source.workspace_id` must equal
+ * the workspace the View is saved or presented in (`ViewDocument::bindings_outside`).
  */
 export const zViewBinding = z.object({
     materialized: zDigest.nullish(),
@@ -1912,7 +1910,9 @@ export const zViewDocument = z.object({
 /**
  * Render a candidate from already resolved bindings without saving or approving it.
  *
- * Every binding's source workspace is an authorization target, not only `workspace_id`.
+ * Every binding must name `workspace_id`; the handler rejects a view for which
+ * `view.bindings_outside(workspace_id)` is not empty. Each binding's source workspace is
+ * still an authorization target, so a foreign binding is refused before the handler runs.
  */
 export const zPresentRequest = z.object({
     view: zViewDocument,
@@ -2023,7 +2023,7 @@ export const zDiffItemsBody = zDiffRequest;
 /**
  * Successful operation result
  */
-export const zDiffItemsResponse = zDiffResponseOutput;
+export const zDiffItemsResponse = zDiffResponse;
 
 export const zLogItemsBody = zLogRequest;
 
@@ -2233,7 +2233,7 @@ export const zGetSourcesBody = zGetSourcesRequest;
 /**
  * Successful operation result
  */
-export const zGetSourcesResponse = zGetSourcesResponseOutput;
+export const zGetSourcesResponse2 = zGetSourcesResponse;
 
 export const zReadItemBody = zReadItemRequest;
 

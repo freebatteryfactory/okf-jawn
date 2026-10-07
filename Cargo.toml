@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/contract", "crates/core", "crates/storage", "crates/ingest", "crates/server", "crates/mcp", "crates/cli", "xtask", "qualification/docling", "qualification/mcp-apps", "qualification/iii"]
+members = ["crates/contract", "crates/core", "crates/storage", "crates/ingest", "crates/server", "crates/mcp", "crates/cli", "xtask", "qualification/docling", "qualification/mcp-apps"]
 default-members = ["crates/contract", "crates/core", "xtask"]
 
 [workspace.package]
@@ -16,8 +16,6 @@ tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "
 tokio-util = { version = "=0.7.19" }
 tower = { version = "=0.5.3" }
 tower-http = { version = "=0.7.1" }
-utoipa = { version = "=6.0.0", features = ["uuid", "yaml"] }
-utoipa-axum = { version = "=0.3.0" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151" }
 schemars = { version = "=1.2.2", features = ["uuid1"] }
@@ -70,11 +68,20 @@ proptest = { version = "=1.11.0" }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
 sha2 = { version = "=0.10.9" }
 base64 = { version = "=0.22.1" }
-# Phase 0 qualification only. Pin matches engine release iii/v0.24.4.
-iii-sdk = { version = "=0.24.4" }
 
 clap_complete = "=4.6.11"
 clap_mangen = "=0.3.3"
+
+# Owner decision 2026-10-06 (verification.json gate converter-docling-pdf-font-run-patch):
+# docling-pdf is built from a one-commit fork of docling.rs on upstream 434cc4e (published as
+# 1.93.6) so that a phrase that changes font is one text run, as in docling-parse >= 7.21 (#351).
+# docling-core and docling-onnx come from the same tree, because the fork's docling-pdf takes them
+# by path; docling itself stays 1.93.5 from crates.io. Remove this section when a docling.rs
+# release ports the docling-parse >= 7.21 line contractor.
+[patch.crates-io]
+docling-pdf = { git = "https://github.com/Heyoub/docling.rs", rev = "e500c2323bcf5c3c84d3731ed00de65b15d0709a" }
+docling-core = { git = "https://github.com/Heyoub/docling.rs", rev = "e500c2323bcf5c3c84d3731ed00de65b15d0709a" }
+docling-onnx = { git = "https://github.com/Heyoub/docling.rs", rev = "e500c2323bcf5c3c84d3731ed00de65b15d0709a" }
 
 # Workspace fragment. Each authored member needs [lints] workspace = true.
 [workspace.lints.rust]

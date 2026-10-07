@@ -1,7 +1,8 @@
 //! Structured transport-independent application errors.
 //!
 //! `detail` carries the typed outcome a client can act on; adapters map `conflict`,
-//! `already_issued` and `in_progress` to HTTP 409 with this body.
+//! `already_issued` and `in_progress` to HTTP 409 with this body. `detail` is boxed so that
+//! `Result<_, ApiError>` stays small.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -34,10 +35,12 @@ pub enum ErrorCode {
     Cancelled,
     /// An unexpected server failure occurred without exposing secrets.
     Internal,
+    /// The operation is declared but this build does not implement it; never a success.
+    NotImplemented,
 }
 
 /// Typed failure context the UI and agents can act on without parsing messages.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ErrorDetail {
     /// The connector was already issued under this idempotency key; its secret is not replayed.
@@ -52,22 +55,33 @@ pub enum ErrorDetail {
         /// Whole seconds the caller should wait before retrying the same request.
         retry_after: u32,
     },
-    /// The head moved under a draft; the editor resolves and saves against the new head.
+    /// One or more snapshotted items changed or were deleted after their drafts' bases.
     DraftConflict {
-        /// Item whose draft no longer applies cleanly.
-        item_id: crate::identity::ItemId,
-        /// Revision the draft was based on.
-        draft_base: crate::identity::Revision,
-        /// Head revision at which the item changed or was deleted.
-        current_revision: crate::identity::Revision,
-        /// Structured comparison between the draft base and the current revision.
-        diff: serde_json::Value,
+        /// Every conflicting item, never only the first.
+        #[schemars(length(min = 1))]
+        items: Vec<DraftConflictItem>,
     },
     /// The idempotency key was reused with a different request body.
     IdempotencyConflict {
         /// Operation that first used the key.
         operation: crate::metadata::OperationName,
     },
+}
+
+/// One snapshotted item whose committed content moved after its draft's base.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DraftConflictItem {
+    /// Item whose draft no longer applies cleanly.
+    pub item_id: crate::identity::ItemId,
+    /// Revision the draft was based on.
+    pub draft_base: crate::identity::Revision,
+    /// Head revision at which the item was found changed or deleted.
+    pub current_revision: crate::identity::Revision,
+    /// The item no longer exists at `current_revision`.
+    pub deleted: bool,
+    /// The item's committed changes from `draft_base` to `current_revision`.
+    pub changes: Vec<crate::history::FileChange>,
 }
 
 /// A safe error response, not an internal backtrace.
@@ -86,7 +100,7 @@ pub struct ApiError {
     pub request_id: Option<String>,
     /// Typed context for conflict, replay, and in-progress outcomes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<ErrorDetail>,
+    pub detail: Option<Box<ErrorDetail>>,
 }
 
 impl std::fmt::Display for ApiError {
@@ -111,7 +125,14 @@ impl ApiError {
     /// Attach typed context the caller can act on.
     #[must_use]
     pub fn with_detail(mut self, detail: ErrorDetail) -> Self {
-        self.detail = Some(detail);
+        self.detail = Some(Box::new(detail));
+        self
+    }
+
+    /// Name the input field that needs correction.
+    #[must_use]
+    pub fn with_field(mut self, field: impl Into<String>) -> Self {
+        self.field = Some(field.into());
         self
     }
 }

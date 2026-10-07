@@ -20,7 +20,41 @@ export interface PresentViewProps {
 const rowsSchema = z
   .array(z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])))
   .max(100000);
-const toolResult = z.object({ structuredContent: z.unknown() });
+const toolResult = z.object({
+  isError: z.boolean().optional(),
+  content: z.array(z.looseObject({ type: z.string(), text: z.string().optional() })).optional(),
+  structuredContent: z.unknown().optional(),
+});
+const refusalLimit = 512;
+
+/** The tool's own refusal text, bounded; cut on a code point boundary, ending with an ellipsis. */
+function refusalMessage(output: z.infer<typeof toolResult>, fallback: string): string {
+  const text = (output.content ?? [])
+    .flatMap((part) => (part.type === 'text' && part.text ? [part.text] : []))
+    .join('\n')
+    .trim();
+  if (text.length === 0) return fallback;
+  if (text.length <= refusalLimit) return text;
+  let end = refusalLimit - 1;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1; // do not leave half a surrogate pair
+  return `${text.slice(0, end)}…`;
+}
+
+/**
+ * One host tool call whose refusal is surfaced as the tool's own bounded message. `isError` is
+ * checked before `structuredContent` is parsed, because a refusal carries no structured content.
+ */
+async function callChecked(
+  callTool: PresentViewProps['callTool'],
+  name: string,
+  input: Record<string, unknown>,
+  fallback: string,
+) {
+  const output = toolResult.parse(await callTool(name, input));
+  if (output.isError === true) throw new Error(refusalMessage(output, fallback));
+  return output;
+}
 
 /** Runtime-validate a Vega-Lite grammar value (SPEC §10); never cast untrusted specs. */
 export function parseVegaLiteSpec(value: unknown): TopLevelSpec {
@@ -41,13 +75,16 @@ async function dataset(
   let offset = 0n;
   let more = true;
   while (more) {
-    const output = toolResult.parse(
-      await callTool('read_object', {
+    const output = await callChecked(
+      callTool,
+      'read_object',
+      {
         source: binding.source,
         object: binding.materialized,
         offset: offset.toString(),
         length: 1048576,
-      }),
+      },
+      'The host refused to read the dataset.',
     );
     const part = zGetObjectResponse.parse(output.structuredContent);
     if (part.sha256 !== binding.materialized || BigInt(part.offset) !== offset)
@@ -111,8 +148,10 @@ export function PresentView({ response, callTool }: PresentViewProps) {
       const tables = new Map(resolved.tables);
       for (const binding of response.resolved_bindings) {
         definitions.set(binding.name, binding);
-        const output = toolResult.parse(
-          await callTool('show', {
+        const output = await callChecked(
+          callTool,
+          'show',
+          {
             workspace_id: binding.source.workspace_id,
             item_id: binding.source.item_id,
             at: { kind: 'revision', revision: binding.source.revision },
@@ -120,7 +159,8 @@ export function PresentView({ response, callTool }: PresentViewProps) {
             selection: binding.source.selection,
             max_bytes: 65536,
             max_images: 0,
-          }),
+          },
+          'The host refused to read the source.',
         );
         const source = zReadItemResponse.parse(output.structuredContent);
         if (source.source.revision !== binding.source.revision)

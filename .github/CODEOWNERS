@@ -1,6 +1,6 @@
-# Review routing only — not a local filesystem lock. No branch protection is configured yet.
+# Review routing only — not a local filesystem lock. A ruleset on `main` requires the CI jobs and blocks force-push; merges are merge commits only.
 # Placeholder handles: replace with real GitHub teams/users before enabling required reviews.
-# Lane comments match AGENTS.md ownership.
+# Lane rows are checked against scripts/lib/lanes.mjs by tests/foundation/lanes.test.mjs.
 
 # Integration owner
 /AGENTS.md @okf-jawn-integration-owner
@@ -16,8 +16,7 @@
 /bunfig.toml @okf-jawn-integration-owner
 /.bun-version @okf-jawn-integration-owner
 /rust-toolchain.toml @okf-jawn-integration-owner
-/Justfile @okf-jawn-integration-owner
-/REPOSITORY-TREE.txt @okf-jawn-integration-owner
+/justfile @okf-jawn-integration-owner
 /scripts/ @okf-jawn-integration-owner
 /crates/contract/ @okf-jawn-integration-owner
 /xtask/ @okf-jawn-integration-owner
@@ -54,3 +53,9 @@
 # views lane (saved Views + MCP Apps bundles) — more specific paths win
 /ui/src/features/views/ @okf-jawn-integration-owner # lane: views
 /ui/src/mcp-apps/ @okf-jawn-integration-owner # lane: views
+/ui/tests/unit/catalog-schema.test.ts @okf-jawn-integration-owner # lane: views
+/ui/tests/unit/json-render-roundtrip.test.tsx @okf-jawn-integration-owner # lane: views
+/ui/tests/unit/layout.test.tsx @okf-jawn-integration-owner # lane: views
+/ui/tests/unit/mcp-apps-dispatch.test.tsx @okf-jawn-integration-owner # lane: views
+/ui/tests/unit/mcp-apps-mime.test.ts @okf-jawn-integration-owner # lane: views
+/ui/tests/unit/view-document-roundtrip.test.tsx @okf-jawn-integration-owner # lane: views

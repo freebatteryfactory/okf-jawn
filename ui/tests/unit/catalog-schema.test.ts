@@ -92,10 +92,7 @@ describe('catalog.schema.json', () => {
   });
 
   it('is generated next to the pinned vega-lite schema', () => {
-    const presentation = join(
-      dirname(fileURLToPath(import.meta.url)),
-      '../../../api/presentation',
-    );
+    const presentation = join(dirname(fileURLToPath(import.meta.url)), '../../../api/presentation');
     const raw = readFileSync(join(presentation, 'vega-lite.schema.json'), 'utf8');
     expect(JSON.parse(raw).$schema).toMatch(/draft-07|draft\/2020-12/i);
   });

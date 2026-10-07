@@ -18,6 +18,8 @@ schemars.workspace = true
 tokio.workspace = true
 sha2.workspace = true
 uuid.workspace = true
+time.workspace = true
+base64.workspace = true
 # Conformance and lint are application policy. Call validate_bundle / lint_bundle from
 # application operations; do not move this responsibility into storage or ingest.
 # okf-core is required because Bundle is not re-exported by the validator.
@@ -26,3 +28,5 @@ okf-validator.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+# Tests must see insertion-ordered JSON maps, as the real server graph does (docling-core).
+serde_json = { workspace = true, features = ["preserve_order"] }

@@ -1,0 +1,7 @@
+[
+  { "category": "Ingested", "value": 412 },
+  { "category": "Converted", "value": 397 },
+  { "category": "Indexed", "value": 389 },
+  { "category": "Reviewed", "value": 127 },
+  { "category": "Published", "value": 61 }
+]

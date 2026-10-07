@@ -8,7 +8,7 @@ import { bun } from './toolchain.mjs';
 
 async function onePass(root, output) {
   await run('cargo', ['run', '--frozen', '--package', 'xtask', '--', 'generate', '--out', output], { cwd: root });
-  await run(bun(), ['scripts/generate-catalog.mjs'], { cwd: join(root, 'ui'), env: { OKF_CATALOG_OUT: join(output, 'api', 'presentation') } });
+  await run(bun(), ['scripts/generate-catalog.mjs'], { cwd: join(root, 'ui'), env: { OKF_CATALOG_OUT: join(output, 'api', 'presentation'), OKF_VIEW_SCHEMA: join(output, 'api', 'forms', 'view.schema.json') } });
   await mkdir(join(output, 'client'), { recursive: true });
   // `bun run <bin>` executes only the installed, locked binary; it never downloads a package.
   await run(bun(), ['--bun', 'run', 'openapi-ts', '--file', 'openapi-ts.config.ts'], {
@@ -20,6 +20,12 @@ export async function requireLockfiles(root) {
   for (const name of ['Cargo.lock', 'bun.lock']) {
     if (!await exists(join(root, name))) throw new Error(`Missing resolved ${name}. Run the explicit lock task; do not fabricate lockfiles.`);
   }
+}
+
+/** Run both generators once into `output`; the committed generated directories are not touched. */
+export async function generateInto(root, output) {
+  await requireLockfiles(root);
+  await onePass(root, output);
 }
 
 export async function generate(root, check = false) {

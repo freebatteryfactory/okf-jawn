@@ -237,7 +237,7 @@ export const blameItem = <ThrowOnError extends boolean = false>(options: Options
 /**
  * Snapshot
  *
- * Name a snapshot from saved drafts against an unchanged base.
+ * Name a snapshot from the caller's saved drafts; blocked only when a selected item was changed or deleted since its draft's base.
  */
 export const commitItems = <ThrowOnError extends boolean = false>(options: Options<CommitItemsData, ThrowOnError>): RequestResult<CommitItemsResponses, CommitItemsErrors, ThrowOnError> => (options.client ?? client).post<CommitItemsResponses, CommitItemsErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }, {
@@ -1278,7 +1278,7 @@ export const exportWorkspace = <ThrowOnError extends boolean = false>(options: O
 /**
  * Workspaces
  *
- * List only workspaces visible to the authenticated principal.
+ * List the workspaces this connection may read, each with its current head revision. Treat head as a pin: pass it to later reads as at = {"kind": "revision", "revision": head} so every call sees one consistent state, and compare it with a later listing to detect change.
  */
 export const listWorkspaces = <ThrowOnError extends boolean = false>(options: Options<ListWorkspacesData, ThrowOnError>): RequestResult<ListWorkspacesResponses, ListWorkspacesErrors, ThrowOnError> => (options.client ?? client).post<ListWorkspacesResponses, ListWorkspacesErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }, {

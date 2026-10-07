@@ -7,8 +7,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 macro_rules! fixture_operations {
-    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal, $visibility:literal,
-        $permission:ident, $ui:literal, $status:literal, $description:literal)),* $(,)?) => {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
         impl Application for FixtureApplication {
             $(fn $id<'a>(&'a self, _context: &'a OperationContext, _request: $request) -> PortFuture<'a, $response> {
                 Box::pin(async move {

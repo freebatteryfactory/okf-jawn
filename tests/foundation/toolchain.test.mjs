@@ -32,7 +32,7 @@ test('CI and the build container take Bun from the version declarations',async()
  assert.match(docker,/ARG BUN_IMAGE/);assert.doesNotMatch(docker,/pnpm|NODE_IMAGE|npm install/);
 });
 test('no active configuration requires pnpm or a Node version',async()=>{
- for(const file of ['package.json','ui/package.json','justfile','lefthook.yml','scripts/dev.mjs','scripts/lib/generation.mjs','deploy/compose.yaml','deploy/.env.example','AGENTS.md','README.md']){
+ for(const file of ['package.json','ui/package.json','justfile','scripts/hooks/pre-commit','scripts/hooks/pre-push','scripts/dev.mjs','scripts/lib/generation.mjs','deploy/compose.yaml','deploy/.env.example','AGENTS.md','README.md']){
   const source=await read(file);
   assert.doesNotMatch(source,/\bpnpm(?:@|\s+(?:install|i|add|run|exec|dlx|test|build|-r|--filter)\b)|pnpm-(?:lock|workspace)|onlyBuiltDependencies|strict-peer-dependencies=|\.node-version|NODE_IMAGE|\bnode scripts\//,file);
  }
