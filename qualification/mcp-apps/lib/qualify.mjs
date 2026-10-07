@@ -18,6 +18,7 @@
  *   finished receipt of any result, and refuses one whose envelope cannot be trusted.
  */
 
+import { scrubReceiptPaths } from '../../../scripts/lib/provenance.mjs';
 import {
   GATE,
   SCOPE,
@@ -42,9 +43,10 @@ const sentence = ({ what, detail }) => (detail === null || firstLine(detail) ===
 /**
  * Run the qualification through `effects` and return `{ receipt, exitCode }`.
  * `options`: `protocolOnly`, `pinned` (criteria.json's required ids), `config`
- * (`harness`, `mcp_url`, `http_port`, `ngrok`) and, for tests, `views`.
+ * (`harness`, `mcp_url`, `http_port`, `ngrok`), `paths` (pathContext of scripts/lib/provenance.mjs, which
+ * every path in the receipt is rewritten against; required, so a run cannot write raw paths) and, for tests, `views`.
  */
-export async function qualify(effects, { protocolOnly = false, pinned, config, views = VIEWS }) {
+export async function qualify(effects, { protocolOnly = false, pinned, config, paths, views = VIEWS }) {
   await effects.removeReceipt();
   // A dirty tree throws here: there is no commit a receipt could cite.
   const header = await effects.header();
@@ -151,7 +153,7 @@ export async function qualify(effects, { protocolOnly = false, pinned, config, v
   const envelope = sealEnvelope({ criteria, harnessErrors: harnessErrors.map(sentence), pinned });
   const skipped = protocolOnly ? SKIPPED : 'OKF_MCP_APPS_NGROK is not 1';
 
-  const receipt = {
+  const unscrubbed = {
     ...header,
     component: GATE,
     ...envelope,
@@ -202,6 +204,9 @@ export async function qualify(effects, { protocolOnly = false, pinned, config, v
     },
     note: 'host_render (claude.ai / ChatGPT) belongs to the acceptance gate mcp-apps-web-hosts and is never invented here.',
   };
+
+  // Every path in the receipt is written by one rule, here and nowhere else (scripts/lib/provenance.mjs).
+  const receipt = scrubReceiptPaths(unscrubbed, paths);
 
   // Nothing was written until here: the result is known and is the fold of the criteria.
   await effects.writeReceipt(receipt);

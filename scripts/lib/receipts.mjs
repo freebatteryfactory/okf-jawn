@@ -23,6 +23,7 @@
  * cannot outlive its cause.
  */
 import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { run } from './process.mjs';
 import { exists } from './files.mjs';
@@ -243,7 +244,63 @@ export function receiptGateStatus(receipt, { path, untrusted, stale, accepted, a
  */
 async function contentFailures(tree, gate, receipt) {
   const { pinned, problems } = await pinnedCriteria(tree, gate);
-  return [...problems, ...envelopeFailures(receipt, gate.id, pinned), ...notJudgedFailures(receipt)];
+  return [...problems, ...envelopeFailures(receipt, gate.id, pinned), ...notJudgedFailures(receipt), ...leakFailures(receipt)];
+}
+
+/** Who is running the check: the home directory and the account name a receipt must not carry. */
+function currentIdentity() {
+  let user = '';
+  try { user = userInfo().username; } catch { /* no account name is known here; the path patterns still apply */ }
+  return { home: homedir(), user };
+}
+
+/** Patterns for a machine path in a string, with the kind each names. A URL is not one: its `//` and host precede any `/home` or drive letter. */
+const leakPatterns = [
+  ['a Windows drive path', /(?<![A-Za-z0-9])[A-Za-z]:(?:\\|\/(?!\/))/],
+  ['a POSIX absolute path under /home, /Users, /tmp or /root', /(?<![\w.\-:/~])\/(?:home|Users|tmp|root)\//],
+  ['a file: URL naming a machine path', /file:\/\/\/?(?:[A-Za-z]:|home|Users|tmp|root)/i],
+  ['an expanded user directory variable', /%(?:USERPROFILE|HOMEPATH|HOMEDRIVE|APPDATA|LOCALAPPDATA|TEMP|TMP)%/i],
+];
+
+/** Why one string holds a machine path, or null. `home` and `user` are the current account's. */
+function leakKind(text, { home, user }) {
+  for (const [kind, pattern] of leakPatterns) if (pattern.test(text)) return kind;
+  const flat = text.replace(/\\+/g, '/').toLowerCase();
+  const root = home.replace(/\\+/g, '/').replace(/\/$/, '').toLowerCase();
+  if (root.length > 1) {
+    const at = flat.indexOf(root);
+    if (at !== -1 && (at === 0 || !/[\w.-]/.test(flat[at - 1])) && (flat.length === at + root.length || flat[at + root.length] === '/')) return 'the home directory of the current user';
+  }
+  if (user.length >= 3 && flat.includes('/') && flat.split('/').includes(user.toLowerCase())) return 'the current user name as a path segment';
+  return null;
+}
+
+/**
+ * One failure per place a receipt holds a machine path, naming the field in its JSON. A receipt
+ * is committed to a public repository and carries repo-relative, `~/`, `<tmp>/` or `<abs>/`
+ * paths only (scripts/lib/provenance.mjs scrubReceiptPaths); keys are checked like values.
+ * @param {unknown} receipt parsed receipt
+ * @param {{ home: string, user: string }} [identity] defaults to the current account
+ * @returns {string[]}
+ */
+export function leakFailures(receipt, identity = currentIdentity()) {
+  const failures = [];
+  const visit = (value, field) => {
+    if (typeof value === 'string') {
+      const kind = leakKind(value, identity);
+      if (kind) failures.push(`${field || '(receipt)'} holds ${kind}; re-run the harness, which writes repo-relative, ~/, <tmp>/ or <abs>/ paths only`);
+    } else if (Array.isArray(value)) value.forEach((item, index) => visit(item, `${field}[${index}]`));
+    else if (value !== null && typeof value === 'object') {
+      for (const [key, item] of Object.entries(value)) {
+        const name = field ? `${field}.${key}` : key;
+        const kind = leakKind(key, identity);
+        if (kind) failures.push(`${name} (the key) holds ${kind}; re-run the harness, which writes repo-relative, ~/, <tmp>/ or <abs>/ paths only`);
+        visit(item, name);
+      }
+    }
+  };
+  visit(receipt, '');
+  return failures;
 }
 
 /**

@@ -22,6 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import { join, relative } from 'node:path';
+import { pathContext, scrubReceiptPaths } from '../../../scripts/lib/provenance.mjs';
 import { lockedPackage, lockedPackages } from '../../lib/cargo.mjs';
 import { TREE_ARGS, buildFacts } from './build.mjs';
 import { readOnnxRuntime } from './native.mjs';
@@ -52,12 +53,14 @@ async function step(what, action) {
  * @param {object} input.scope recorded as is
  * @param {Record<string, string|undefined>} input.env the caller's environment
  * @param {string} input.platform
+ * @param {ReturnType<typeof pathContext>} [input.paths] the roots path strings are judged against (scripts/lib/provenance.mjs);
+ *   defaults to this machine's repository, home and temp directories
  * @param {object} input.io readFile, writeFile, mkdir, rm, readdir, stat, sha256File, verifyAssets,
  *   buildRelease, exec, runFixtureProcess, loadEvidence, log(text), logError(text), now()
  * @returns {Promise<{ receipt: object, receiptPath: string, converted: boolean }>} `converted`
  *   is false when the run stopped before any fixture was converted
  */
-export async function qualify({ root, header, outDir, manifestPath = join(root, MANIFEST), selected, scope, env, platform, io }) {
+export async function qualify({ root, header, outDir, manifestPath = join(root, MANIFEST), selected, scope, env, platform, io, paths = pathContext({ root }) }) {
   const partialDir = join(outDir, 'partial');
   const receiptPath = join(outDir, 'receipt.json');
   const fixturesDir = join(root, FIXTURES);
@@ -155,7 +158,8 @@ export async function qualify({ root, header, outDir, manifestPath = join(root, 
     harnessError = oneLine(error.message);
   }
 
-  const receipt = buildDoclingReceipt({
+  // Every path in the receipt is written by one rule, here and nowhere else (scripts/lib/provenance.mjs).
+  const receipt = scrubReceiptPaths(buildDoclingReceipt({
     header,
     converter: facts.converter,
     platform,
@@ -168,7 +172,7 @@ export async function qualify({ root, header, outDir, manifestPath = join(root, 
     paths: { fixtures_dir: FIXTURES, sources: `${FIXTURES}/SOURCES.json`, per_fixture_evidence: partialDir },
     finishedAt: io.now(),
     harnessError,
-  });
+  }), paths);
   await io.writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
   return { receipt, receiptPath, converted: runs.length > 0 };
 }

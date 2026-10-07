@@ -7,7 +7,9 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
-import { acceptedFailureFields, acceptingRole, checkReceipts, derivedLines, derivedRecord, gateKinds, qualifyingStatuses, receiptGateStatuses, rewriteCommand, staleLines, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
+import { createHash } from 'node:crypto';
+import { pathContext, scrubReceiptPaths } from '../../scripts/lib/provenance.mjs';
+import { acceptedFailureFields, acceptingRole, checkReceipts, derivedLines, derivedRecord, gateKinds, leakFailures, qualifyingStatuses, receiptGateStatuses, recordFailures, rewriteCommand, staleLines, staleReceiptLines, writeDerivedRecord } from '../../scripts/lib/receipts.mjs';
 import { commit, copyRepo, eachCase, fixtureAcceptance, fixtureCriteria, fixtureGates, fixturePinned, fixtureReceipt, fixtureRecord, fixtureRecordFiles, fixtureTracker, git, sharedRepos } from './fixture-repo.mjs';
 
 const source = fileURLToPath(new URL('../../', import.meta.url));
@@ -943,4 +945,94 @@ test('record.mjs says what it refuses in one sentence each, with the command tha
   // A record this command cannot rewrite.
   await writeFile(join(root, 'verification.json'), `${JSON.stringify(JSON.parse(before), null, 4)}\n`);
   await refused([], ['verification.json was not rewritten: verification.json is not in its two-space JSON form, so only the derived values cannot be rewritten; restore its formatting first.'], 'a reformatted record');
+});
+
+// A receipt names no machine path, and the checker refuses one that does (leakFailures, reached by check-receipts, its --head path and record.mjs); each test fails when its rule is removed.
+const leakWindows = pathContext({ root: 'D:\\work\\okf-jawn', home: 'C:\\Users\\eayou', tmp: 'C:\\Users\\eayou\\AppData\\Local\\Temp' });
+const sha256Of = text => createHash('sha256').update(text).digest('hex');
+test('the scrubbed receipt is one the checker accepts, the unscrubbed one is not', () => {
+  const identity = { home: 'C:\\Users\\eayou', user: 'eayou' };
+  const receipt = { settings: { dir: 'C:\\Users\\eayou\\.cache\\m', repo: 'D:\\work\\okf-jawn\\a', other: 'E:\\t\\u\\v', posix: '/home/dev/.cargo/x' } };
+  assert.equal(leakFailures(receipt, identity).length, 4);
+  assert.deepEqual(leakFailures(scrubReceiptPaths(receipt, leakWindows), identity), [], 'the one rule leaves nothing for the check to find');
+});
+
+const leakyStrings = {
+  'a Windows drive path with a backslash': 'C:\\Windows\\x',
+  'a Windows drive path with a slash': 'D:/work/x',
+  'a Windows drive path inside a sentence': 'wrote it to e:\\out\\x.json.',
+  'a Windows drive path in Debug text': 'Some("C:\\\\Users\\\\x")',
+  '/home': 'at /home/runner/work/x',
+  '/Users': '/Users/dev/x',
+  '/tmp': 'in /tmp/abc',
+  '/root': '/root/.cargo',
+  'a file URL': 'file:///home/x/y',
+  'a USERPROFILE expansion': '%USERPROFILE%\\x',
+  'an APPDATA expansion': 'under %appdata%',
+};
+
+test('leakFailures refuses each machine path pattern, naming the field in the JSON, and wants a re-run', () => {
+  const identity = { home: '/nowhere', user: '' };
+  for (const [name, text] of Object.entries(leakyStrings)) {
+    const failures = leakFailures({ a: { b: [{ c: text }] } }, identity);
+    assert.equal(failures.length, 1, name);
+    assert.match(failures[0], /^a\.b\[0\]\.c holds /, name);
+    assert.match(failures[0], /re-run the harness/, name);
+  }
+});
+
+test('leakFailures refuses the current home directory and user name, and a key that holds a path', () => {
+  const identity = { home: 'C:\\Users\\eayou', user: 'eayou' };
+  assert.match(leakFailures({ x: 'C:\\Users\\eayou2\\a' }, identity)[0], /^x holds a Windows drive path/);
+  assert.deepEqual(leakFailures({ x: 'eayou2/a', y: 'prefix-eayou/a' }, identity), [], 'the name is a whole segment, not a substring');
+  assert.match(leakFailures({ x: 'cache/eayou/models' }, identity)[0], /^x holds the current user name as a path segment/);
+  assert.match(leakFailures({ x: 'cache\\EAYOU\\models' }, identity)[0], /^x holds the current user name as a path segment/);
+  assert.equal(leakFailures({ x: 'the user eayou ran it' }, identity).length, 0, 'prose is not a path');
+  const posixHome = { home: '/srv/dev', user: '' };
+  assert.match(leakFailures({ x: '/srv/dev/code' }, posixHome)[0], /^x holds the home directory of the current user/);
+  assert.deepEqual(leakFailures({ x: '/srv/devs/code', y: '~/code' }, posixHome), []);
+  assert.match(leakFailures({ 'D:\\work\\x': 1 }, identity)[0], /^D:\\work\\x \(the key\) holds a Windows drive path/);
+  assert.match(leakFailures('C:\\x', identity)[0], /^\(receipt\) holds/);
+});
+
+test('leakFailures accepts a clean receipt: repo-relative, ~/, <tmp>/ and <abs>/ paths, URLs, hashes', () => {
+  const clean = {
+    git_sha: 'a'.repeat(40), sha256: sha256Of('x'),
+    paths: { fixtures_dir: 'tests/fixtures/documents', unmapped: ['<abs>/chrome-win/chrome.exe'] },
+    settings: { models: '~/.cache/okf-jawn/docling/models', tmp: '<tmp>/.tmpAB' },
+    transport: { requested: 'http://127.0.0.1:18765/mcp', reported: 'https://cdn.pyke.io/a/b.tgz', resource: 'ui://okf-jawn/app.html' },
+    time: '12:30', note: 'a/b and c/d, the ratio 3:4',
+  };
+  assert.deepEqual(leakFailures(clean, { home: 'C:\\Users\\eayou', user: 'eayou' }), []);
+});
+
+test('check-receipts, check-receipts --head and record.mjs refuse a receipt that holds a machine path, and accept it once clean', async t => {
+  const { root, sha: base } = await recorded(t);
+  const leaking = fixtureReceipt('docling', base, { settings: { models: 'C:\\Users\\someone\\models' }, note: 'at /home/runner/x' });
+  const head = await commit(root, { [at('docling')]: leaking, 'verification.json': fixtureRecord({ statuses: { docling: 'incomplete' } }) }, 'a leaking receipt');
+  // The working-tree path.
+  const derived = await derivedRecord(root, undefined);
+  const said = derived.failures.map(failure => `${failure.name}: ${failure.message}`);
+  assert.ok(said.includes('docling.json: settings.models holds a Windows drive path; re-run the harness, which writes repo-relative, ~/, <tmp>/ or <abs>/ paths only'), said.join('\n'));
+  assert.ok(said.some(line => line.startsWith('docling.json: note holds a POSIX absolute path')), said.join('\n'));
+  await assert.rejects(checkReceipts(root), /check-receipts failed:\n(?:.*\n)*docling\.json: settings\.models holds a Windows drive path/);
+  assert.equal(derived.gates.find(gate => gate.harness === 'docling').status, 'incomplete', 'a receipt that cannot be trusted qualifies nothing');
+  // The --head path, with the commit given.
+  const lines = await staleReceiptLines(root, head);
+  assert.ok(lines.some(line => /^untrusted receipt docling\.json: settings\.models holds a Windows drive path.* -- re-run: bun qualification\/docling\/run\.mjs/.test(line)), lines.join('\n'));
+  // The recording path.
+  const refused = await recordFailures(root, 'docling', JSON.parse(leaking));
+  assert.ok(refused.some(line => line.startsWith('settings.models holds a Windows drive path')), refused.join('\n'));
+  // A clean receipt is accepted by all three.
+  const clean = fixtureReceipt('docling', base, { settings: { models: '~/.cache/models' }, note: 'at <tmp>/x', paths: { unmapped: [] } });
+  assert.deepEqual(await recordFailures(root, 'docling', JSON.parse(clean)), []);
+  await commit(root, { [at('docling')]: clean, 'verification.json': fixtureRecord({ statuses: { docling: 'passed' } }) }, 'a clean receipt');
+  assert.match(await checkReceipts(root), /1 receipt\(s\) valid against HEAD; /);
+  assert.deepEqual((await derivedRecord(root, undefined)).failures, []);
+});
+
+test('a URL in a receipt is not a path', async t => {
+  const { root, sha: base } = await recorded(t);
+  const receipt = fixtureReceipt('docling', base, { transport: { requested: 'http://127.0.0.1:18765/mcp', cdn: 'https://cdn.pyke.io/x/y.tgz', home: 'https://github.com/home/x', app: 'ui://okf-jawn/app.html' } });
+  assert.deepEqual(await recordFailures(root, 'docling', JSON.parse(receipt)), []);
 });
