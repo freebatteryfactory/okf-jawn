@@ -63,6 +63,23 @@ export function resolvedFeatures(treeText) {
   return resolved;
 }
 
+/**
+ * Every docling crate Cargo.lock pins (`docling` and `docling-*`), by name, with the source Cargo
+ * builds it from. The converter is these crates together, and they need not share one source: a
+ * `registry+` source is the crates.io release (with its checksum), a `git+` source names the
+ * repository and the commit the crate is built from, as `[patch.crates-io]` in Cargo.toml
+ * directs (verification.json gate converter-docling-pdf-font-run-patch). The receipt records
+ * this instead of a crates.io version for a crate that is not built from crates.io.
+ */
+export function doclingPackages(lockText) {
+  const field = (block, key) => new RegExp(`^${key} = "([^"]+)"\\r?$`, 'm').exec(block)?.[1] ?? null;
+  return String(lockText ?? '')
+    .split(/\r?\n\[\[package\]\]\r?\n/)
+    .map((block) => ({ name: field(block, 'name'), version: field(block, 'version'), source: field(block, 'source'), checksum: field(block, 'checksum') }))
+    .filter((entry) => entry.name !== null && /^docling(?:-|$)/.test(entry.name))
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+}
+
 /** The `build` block of the receipt. Throws when cargo's output does not show the docling crates. */
 export function buildFacts({ harnessToml, workspaceToml, treeText, command }) {
   const declared = declaredDoclingFeatures(harnessToml, workspaceToml);

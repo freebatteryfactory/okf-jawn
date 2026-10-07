@@ -24,7 +24,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { pathContext, scrubReceiptPaths } from '../../../scripts/lib/provenance.mjs';
 import { lockedPackage, lockedPackages } from '../../lib/cargo.mjs';
-import { TREE_ARGS, buildFacts } from './build.mjs';
+import { TREE_ARGS, buildFacts, doclingPackages } from './build.mjs';
 import { readOnnxRuntime } from './native.mjs';
 import { TIMEOUT_PROBE, buildDoclingReceipt } from './receipt.mjs';
 
@@ -92,6 +92,8 @@ export async function qualify({ root, header, outDir, manifestPath = join(root, 
         version: pinned.version,
         checksum: pinned.checksum,
         docling_core_versions: lockedPackages(lockText, 'docling-core').map((entry) => entry.version),
+        // Where each docling crate is built from: crates.io, or a git repository at a commit.
+        packages: doclingPackages(lockText),
         source: 'Cargo.lock',
       };
       return pinned;
