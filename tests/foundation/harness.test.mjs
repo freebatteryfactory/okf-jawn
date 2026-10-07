@@ -16,7 +16,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { reviewCoversRevision, readResolvedRevision } from '../support/assertions.mjs';
 import {
+  mapReceiptPath,
+  pathContext,
   receiptHeader,
+  scrubReceiptPaths,
   receiptHeaderProblems,
   recordReceipt,
   requireCleanTree,
@@ -2819,7 +2822,7 @@ test('a failure before conversion replaces the previous receipt with an INCOMPLE
   assert.equal(doclingCriterion(noManifest, 'assets/hashes_match').result, 'not_judged');
   await stoppedAt(
     { io: { verifyAssets: async () => { throw new Error('Docling model asset missing: C:\\models\\layout.onnx (ENOENT). A missing asset is never qualified.'); } } },
-    'the Docling model assets could not be verified: Docling model asset missing: C:\\models\\layout.onnx (ENOENT). A missing asset is never qualified.',
+    'the Docling model assets could not be verified: Docling model asset missing: <abs>/models/layout.onnx (ENOENT). A missing asset is never qualified.',
     ['read manifest'],
   );
   const noBuild = await stoppedAt(
@@ -3456,7 +3459,7 @@ async function qualifyDouble({ change = {}, observe = (_view, good) => good } = 
   );
   const pinned = JSON.parse(await readFile(join(root, 'qualification/mcp-apps/criteria.json'), 'utf8')).required;
   const config = { harness: 'okf-qualify-mcp-apps', mcp_url: 'http://127.0.0.1:18765/mcp', http_port: 18765, ngrok: false };
-  const run = (options = {}) => qualifyMcpApps(effects, { pinned, config, ...options });
+  const run = (options = {}) => qualifyMcpApps(effects, { pinned, config, paths: pathContext({ root }), ...options });
   return { run, calls, written, pinned, observations };
 }
 
@@ -3528,7 +3531,7 @@ test('the MCP Apps receipt carries the shared envelope, and its result is the fo
 
 test('the receipt says in words what was the product and what was this harness', async () => {
   const { receipt } = await (await qualifyDouble()).run();
-  assert.equal(receipt.scope, SCOPE);
+  assert.deepEqual(receipt.scope, SCOPE);
   assert.deepEqual(Object.keys(SCOPE), ['summary', 'real', 'fixture', 'not_covered', 'reading_note']);
   assert.match(SCOPE.summary, /real MCP App bundle .* real MCP Apps host.* fixture MCP server.*does not test the product server/);
   assert.match(SCOPE.real.join('\n'), /App bundle[\s\S]*View code[\s\S]*host implementation/);
@@ -3614,7 +3617,7 @@ test('what the machine could not do is a harness error: INCOMPLETE, a receipt fo
     ['startHarness', boom('okf-qualify-mcp-apps exited before listening (exit 1)\nstderr:\nbind 127.0.0.1:18765: access denied'), /^the harness server did not start: okf-qualify-mcp-apps exited before listening \(exit 1\)$/, 4],
     ['observeProtocol', boom('fetch failed'), /^the MCP client could not reach the harness server: fetch failed$/, 4],
     ['startHost', boom('fetch basic-host package.json: HTTP 503'), /^the reference host \(basic-host\) did not start: fetch basic-host package\.json: HTTP 503$/, 17],
-    ['launchBrowser', boom(noBrowser), /^Chromium did not start: browserType\.launch: Executable doesn't exist at D:\\empty\\chromium-1243\\chrome-win\\chrome\.exe$/, 17],
+    ['launchBrowser', boom(noBrowser), /^Chromium did not start: browserType\.launch: Executable doesn't exist at <abs>\/chrome-win\/chrome\.exe$/, 17],
   ];
   for (const [effect, behaviour, sentence, judgedCount] of stages) {
     const double = await qualifyDouble({ change: { [effect]: behaviour } });
@@ -4417,7 +4420,8 @@ async function realDoclingReceipt(header, overrides = {}, parts = {}, { today = 
   const sources = JSON.parse(await readFile(join(root, 'tests/fixtures/documents/SOURCES.json'), 'utf8'));
   // `only`: the single-fixture mode of run.mjs, which runs the named fixtures and says so in `scope`.
   const selected = only ? FIXTURE_RUNS.filter((name) => only.includes(name)) : FIXTURE_RUNS;
-  return buildDoclingReceipt({
+  // As the harness does (qualification/docling/lib/orchestrate.mjs): every path goes through the one rule before the receipt exists.
+  return scrubReceiptPaths(buildDoclingReceipt({
     header,
     converter: DOCLING_CONVERTER,
     platform: 'win32',
@@ -4430,7 +4434,7 @@ async function realDoclingReceipt(header, overrides = {}, parts = {}, { today = 
     paths: { fixtures_dir: 'tests/fixtures/documents' },
     finishedAt: '2026-10-06T10:00:00.000Z',
     ...parts,
-  });
+  }), pathContext({ root }));
 }
 
 /**
@@ -4722,4 +4726,127 @@ concurrently('join: a receipt recorded over an earlier committed receipt of the 
   await fixtureCommit(repo, {}, 'record the second run over the first');
   assert.match(await checkReceipts(repo), /docling-library-qualification: incomplete \(.*did not judge everything/);
   assert.deepEqual(await staleReceiptLines(repo, await fixtureGit(repo, 'rev-parse', 'HEAD')), []);
+});
+
+test('the Docling receipt a run writes holds no path of this machine: repository, temp and unmapped forms only', async (t) => {
+  const { receipt, written, outDir } = await doclingQualify(t);
+  const text = JSON.stringify(written);
+  assert.deepEqual(written, JSON.parse(JSON.stringify(receipt)), 'the file is the receipt that was judged');
+  for (const [name, absolute] of [['the repository', root], ['the temp directory', tmpdir()], ['the output directory', outDir]]) {
+    assert.ok(!text.includes(absolute.replaceAll('\\', '\\\\')) && !text.includes(absolute.replaceAll('\\', '/')), `${name} ${absolute} is not in the receipt`);
+  }
+  assert.doesNotMatch(text, /(?<![A-Za-z0-9])[A-Za-z]:(?:\\|\/(?!\/))/, 'no drive path');
+  assert.equal(written.settings.environment.OKF_DOCLING_FIXTURES, 'tests/fixtures/documents');
+  assert.match(written.paths.per_fixture_evidence, /^<tmp>\/okf-docling-run-[^/]+\/partial$/);
+  assert.deepEqual(written.paths.unmapped.filter((path) => path.endsWith('layout.onnx')), ['<abs>/models/layout.onnx']);
+  assert.equal(written.settings.environment.DOCLING_RS_MODELS_DIR, '<abs>/models', 'a directory outside every root keeps its last segments');
+  assert.match(written.assets_verified.native_libraries[0].read_from[1], /^<abs>\/[^/]+\/dist\.tsv$/);
+});
+
+test('the MCP Apps receipt a run writes holds repository-relative paths and lists what fits no root', async () => {
+  const { digest } = await goodObservations();
+  const double = await qualifyDouble({
+    change: {
+      buildHarness: async () => ({ path: join(root, 'target', 'release', 'okf-qualify-mcp-apps.exe'), bytes: 1, sha256: 'b'.repeat(64), args: [] }),
+      checkHarness: async () => ({
+        code: 0,
+        report: { resources: [{ name: 'app', readable: true, path: join(root, 'ui', 'dist-apps', 'app.html') }, { name: 'x', readable: true, path: join('E:', 'elsewhere', 'a', 'b.html') }], dataset: { sha256: digest } },
+        stderr: '',
+      }),
+    },
+  });
+  const { receipt } = await double.run();
+  assert.equal(receipt.harness_binary.path, 'target/release/okf-qualify-mcp-apps.exe');
+  assert.deepEqual(receipt.check.resources.map((resource) => resource.path), ['ui/dist-apps/app.html', '<abs>/a/b.html']);
+  assert.deepEqual(receipt.paths, { unmapped: ['<abs>/a/b.html'] });
+  assert.equal(receipt.harness_binary.sha256, 'b'.repeat(64));
+  assert.deepEqual(double.written[0], JSON.parse(JSON.stringify(receipt)), 'the file is the receipt that was judged');
+  assert.ok(!JSON.stringify(receipt).includes(root.replaceAll('\\', '\\\\')), 'the repository path is not in the receipt');
+});
+
+// The path rule of every receipt (scripts/lib/provenance.mjs scrubReceiptPaths); each test fails when its rule is removed.
+const pathsWindows = pathContext({ root: 'D:\\work\\okf-jawn', home: 'C:\\Users\\eayou', tmp: 'C:\\Users\\eayou\\AppData\\Local\\Temp' });
+const pathsPosix = pathContext({ root: '/srv/okf-jawn', home: '/home/dev', tmp: '/tmp' });
+const sha256Of = text => createHash('sha256').update(text).digest('hex');
+
+test('a path inside the repository becomes repo-relative with forward slashes, in either separator style', () => {
+  assert.deepEqual(mapReceiptPath('D:\\work\\okf-jawn\\tests\\fixtures\\documents\\x.pdf', pathsWindows), { path: 'tests/fixtures/documents/x.pdf', mapped: true });
+  assert.deepEqual(mapReceiptPath('D:/work/okf-jawn/target/release/okf.exe', pathsWindows), { path: 'target/release/okf.exe', mapped: true });
+  assert.deepEqual(mapReceiptPath('d:\\WORK\\okf-jawn\\ui\\dist-apps\\app.html', pathsWindows), { path: 'ui/dist-apps/app.html', mapped: true }, 'a Windows drive path is compared without case');
+  assert.deepEqual(mapReceiptPath('D:\\work\\okf-jawn', pathsWindows), { path: '.', mapped: true });
+  assert.deepEqual(mapReceiptPath('/srv/okf-jawn/api/mcp-tools.json', pathsPosix), { path: 'api/mcp-tools.json', mapped: true });
+  assert.deepEqual(mapReceiptPath('/srv/Okf-Jawn/api', pathsPosix), { path: '<abs>/Okf-Jawn/api', mapped: false }, 'a POSIX path is compared with case');
+});
+
+test('a path inside the home directory becomes ~/..., and the temp directory is judged before the home it sits in', () => {
+  assert.deepEqual(mapReceiptPath('C:\\Users\\eayou\\.cache\\okf-jawn\\docling\\models\\layout.onnx', pathsWindows), { path: '~/.cache/okf-jawn/docling/models/layout.onnx', mapped: true });
+  assert.deepEqual(mapReceiptPath('C:\\Users\\eayou', pathsWindows), { path: '~', mapped: true });
+  assert.deepEqual(mapReceiptPath('/home/dev/.cargo/registry', pathsPosix), { path: '~/.cargo/registry', mapped: true });
+  assert.deepEqual(mapReceiptPath('C:\\Users\\eayou\\AppData\\Local\\Temp\\.tmpAB12', pathsWindows), { path: '<tmp>/.tmpAB12', mapped: true });
+  assert.deepEqual(mapReceiptPath('/tmp/.tmpAB12/partial', pathsPosix), { path: '<tmp>/.tmpAB12/partial', mapped: true });
+});
+
+test('a repository inside the home directory is repo-relative, not ~', () => {
+  const nested = pathContext({ root: 'C:\\Users\\eayou\\code\\okf-jawn', home: 'C:\\Users\\eayou', tmp: 'C:\\Windows\\Temp' });
+  assert.deepEqual(mapReceiptPath('C:\\Users\\eayou\\code\\okf-jawn\\api\\x.json', nested), { path: 'api/x.json', mapped: true });
+  assert.deepEqual(mapReceiptPath('C:\\Users\\eayou\\code\\other', nested), { path: '~/code/other', mapped: true });
+});
+
+test('a path that only shares a prefix with a root is not inside it', () => {
+  assert.deepEqual(mapReceiptPath('C:\\Users\\eayou2\\secret\\file.txt', pathsWindows), { path: '<abs>/secret/file.txt', mapped: false });
+  assert.deepEqual(mapReceiptPath('D:\\work\\okf-jawn-old\\a\\b.txt', pathsWindows), { path: '<abs>/a/b.txt', mapped: false });
+  assert.deepEqual(mapReceiptPath('/home/dev2/x/y', pathsPosix), { path: '<abs>/x/y', mapped: false });
+  assert.deepEqual(mapReceiptPath('/srv/okf-jawn2/x', pathsPosix), { path: '<abs>/okf-jawn2/x', mapped: false });
+});
+
+test('any other absolute path keeps its last two segments and is listed in paths.unmapped', () => {
+  assert.deepEqual(mapReceiptPath('E:\\tools\\chromium-1243\\chrome-win\\chrome.exe', pathsWindows), { path: '<abs>/chrome-win/chrome.exe', mapped: false });
+  assert.deepEqual(mapReceiptPath('/opt/onnx/lib/libonnxruntime.so', pathsPosix), { path: '<abs>/lib/libonnxruntime.so', mapped: false });
+  const out = scrubReceiptPaths({ a: 'E:\\tools\\x\\y.exe', b: ['/opt/onnx/lib/z.so', 'E:/tools/x/y.exe'] }, pathsWindows);
+  assert.deepEqual(out.paths.unmapped, ['<abs>/lib/z.so', '<abs>/x/y.exe']);
+  assert.deepEqual(scrubReceiptPaths({ ok: 'plain' }, pathsWindows).paths, { unmapped: [] }, 'the list is always present, empty when everything mapped');
+});
+
+test('every string in a receipt is rewritten: values, keys, nesting, Debug text with escaped separators and verbatim prefixes', () => {
+  const receipt = {
+    git_sha: 'a'.repeat(40),
+    settings: {
+      environment: { DOCLING_RS_MODELS_DIR: 'C:\\Users\\eayou\\.cache\\okf-jawn\\docling\\models', OKF_DOCLING_FIXTURES: 'D:\\work\\okf-jawn\\tests\\fixtures\\documents' },
+      converter_debug: 'ConverterOptions { artifacts_dir: Some("C:\\\\Users\\\\eayou\\\\AppData\\\\Local\\\\Temp\\\\.tmpQ1"), models: "C:\\\\Users\\\\eayou\\\\.cache" }',
+    },
+    receipts: [{ path: 'D:\\work\\okf-jawn\\tests\\fixtures\\documents\\a.pdf', note: 'wrote \\\\?\\D:\\work\\okf-jawn\\out.json.' }],
+    by_name: { 'D:\\work\\okf-jawn\\x.png': 1 },
+    pathsPosix: 'read /home/dev/.cargo/x and (/tmp/.tmpZ).',
+  };
+  const out = scrubReceiptPaths(receipt, pathsWindows);
+  assert.equal(out.settings.environment.DOCLING_RS_MODELS_DIR, '~/.cache/okf-jawn/docling/models');
+  assert.equal(out.settings.environment.OKF_DOCLING_FIXTURES, 'tests/fixtures/documents');
+  assert.equal(out.settings.converter_debug, 'ConverterOptions { artifacts_dir: Some("<tmp>/.tmpQ1"), models: "~/.cache" }');
+  assert.deepEqual(out.receipts, [{ path: 'tests/fixtures/documents/a.pdf', note: 'wrote out.json.' }]);
+  assert.deepEqual(Object.keys(out.by_name), ['x.png']);
+  assert.equal(out.pathsPosix, 'read <abs>/.cargo/x and (<abs>/tmp/.tmpZ).', 'a POSIX path outside the roots of this machine is rewritten too');
+  assert.equal(out.git_sha, receipt.git_sha);
+  assert.doesNotMatch(JSON.stringify(out), /eayou|[A-Za-z]:\\\\|[A-Za-z]:\//);
+});
+
+test('POSIX paths under the roots of this machine are rewritten inside a sentence', () => {
+  const out = scrubReceiptPaths({ note: 'read /home/dev/.cargo/x and (/tmp/.tmpZ). Also /srv/okf-jawn/api/a.json, /opt/x/y/z.' }, pathsPosix);
+  assert.equal(out.note, 'read ~/.cargo/x and (<tmp>/.tmpZ). Also api/a.json, <abs>/y/z.');
+  assert.deepEqual(out.paths.unmapped, ['<abs>/y/z']);
+});
+
+test('hashes, lengths, URLs, schemes and relative paths are not touched', () => {
+  const receipt = {
+    sha256: sha256Of('x'), bytes: 4096, ratio: 0.5, flag: true, none: null,
+    url: 'http://127.0.0.1:18765/mcp', cdn: 'https://cdn.pyke.io/a/b.tgz', resource: 'ui://okf-jawn/app.html',
+    relative: 'tests/fixtures/documents/x.pdf', route: '/mcp', time: '2026-10-06T10:00:00.000Z', path_like_text: 'api/mcp-tools.json',
+  };
+  const { paths, ...rest } = scrubReceiptPaths(receipt, pathsWindows);
+  assert.deepEqual(rest, receipt);
+  assert.deepEqual(paths, { unmapped: [] });
+});
+
+test('scrubbing twice changes nothing more', () => {
+  const once = scrubReceiptPaths({ a: 'C:\\Users\\eayou\\x', b: 'E:\\t\\u\\v' }, pathsWindows);
+  assert.deepEqual(scrubReceiptPaths(once, pathsWindows), once);
 });

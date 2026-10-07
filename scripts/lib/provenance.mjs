@@ -16,6 +16,7 @@
 
 import { spawn } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -167,4 +168,106 @@ export async function recordReceipt(root, name, receipt) {
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, `${JSON.stringify(receipt, null, 2)}\n`);
   return target;
+}
+
+/**
+ * The path rule of every receipt. A receipt is committed to a public repository, so it carries
+ * no path that names this machine or its user. scrubReceiptPaths is the single place that
+ * rewrites them, applied by each harness to its finished receipt; the harness binaries and
+ * the evidence files under .artifacts/ keep their raw paths.
+ *   inside the repository       -> repo-relative, `/` separators
+ *   inside the home directory   -> `~/...`
+ *   inside the temp directory   -> `<tmp>/...`
+ *   any other absolute path     -> `<abs>/<last two segments>`, also listed in `paths.unmapped`
+ * The longest matching root wins, so a worktree or temp directory under home is not `~`.
+ * A root matches only on a segment boundary: `C:\Users\eayou2` is not inside `C:\Users\eayou`.
+ * Only path text changes; hashes, lengths and every other value are copied as they are.
+ */
+
+const WINDOWS_PATH = /(?:\\{2,4}\?\\{1,2})?(?<![A-Za-z0-9])[A-Za-z]:(?:\\{1,4}|\/(?!\/))[^\s"'<>|*?`,;]*/g;
+const POSIX_ROOTS = ['home', 'Users', 'tmp', 'root', 'var', 'private', 'opt', 'mnt'];
+const TRAILING_PUNCTUATION = /[.:)\]}]+$/;
+
+/** Windows drive paths are compared without case, POSIX paths with it. */
+const folded = (path) => (/^[A-Za-z]:/.test(path) ? path.toLowerCase() : path);
+
+/** `path` with `/` separators, no verbatim prefix and no trailing separator. */
+function slashed(path) {
+  const plain = path.replace(/^\\{2,4}\?\\{1,2}/, '').replace(/\\+/g, '/').replace(/\/+/g, '/');
+  return plain.length > 1 ? plain.replace(/\/$/, '') : plain;
+}
+
+/**
+ * The roots a receipt path is judged against.
+ * @param {{ root: string, home?: string, tmp?: string }} roots absolute directories; home and
+ *   tmp default to this machine's
+ */
+export function pathContext({ root, home = homedir(), tmp = tmpdir() }) {
+  const entries = [
+    { root: slashed(root), label: null },
+    { root: slashed(home), label: '~' },
+    { root: slashed(tmp), label: '<tmp>' },
+  ];
+  return { entries: entries.map((entry) => ({ ...entry, key: folded(entry.root) })) };
+}
+
+/**
+ * The receipt form of one absolute path, as `{ path, mapped }`; `mapped` is false when the path
+ * is in none of the known roots and only its last two segments are kept.
+ */
+export function mapReceiptPath(path, context) {
+  const plain = slashed(path);
+  const lower = folded(plain);
+  let best = null;
+  for (const entry of context.entries) {
+    const inside = lower === entry.key || lower.startsWith(`${entry.key}/`);
+    if (inside && (best === null || entry.key.length > best.key.length)) best = entry;
+  }
+  if (best !== null) {
+    const rest = plain.slice(best.root.length).replace(/^\//, '');
+    if (best.label === null) return { path: rest === '' ? '.' : rest, mapped: true };
+    return { path: rest === '' ? best.label : `${best.label}/${rest}`, mapped: true };
+  }
+  const segments = plain.split('/').filter((part) => part !== '' && !/^[A-Za-z]:$/.test(part));
+  return { path: `<abs>/${segments.slice(-2).join('/')}`, mapped: false };
+}
+
+function posixPath(context) {
+  const roots = context.entries.filter((entry) => entry.root.startsWith('/')).map((entry) => entry.root.slice(1).split('/')[0]);
+  const names = [...new Set([...POSIX_ROOTS, ...roots])].map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return new RegExp(`(?<![\\w.\\-:/~])/(?:${names.join('|')})(?:/[^\\s"'<>|*?\`,;]*)?`, 'g');
+}
+
+/** `text` with every absolute path in it rewritten; unmapped results are added to `unmapped`. */
+function scrubText(text, context, posix, unmapped) {
+  const rewrite = (token) => {
+    const trailing = token.match(TRAILING_PUNCTUATION)?.[0] ?? '';
+    const found = mapReceiptPath(trailing ? token.slice(0, -trailing.length) : token, context);
+    if (!found.mapped) unmapped.add(found.path);
+    return `${found.path}${trailing}`;
+  };
+  return text.replace(WINDOWS_PATH, rewrite).replace(posix, rewrite);
+}
+
+/**
+ * A copy of `receipt` with every path string, in values and in keys, rewritten by the path
+ * rule, and `paths.unmapped` (sorted, possibly empty, keeping what an earlier pass listed) listing
+ * the paths that fit no root.
+ * @param {object} receipt
+ * @param {ReturnType<typeof pathContext>} context
+ */
+export function scrubReceiptPaths(receipt, context) {
+  const posix = posixPath(context);
+  const unmapped = new Set();
+  const walk = (value) => {
+    if (typeof value === 'string') return scrubText(value, context, posix, unmapped);
+    if (Array.isArray(value)) return value.map(walk);
+    if (value !== null && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [scrubText(key, context, posix, unmapped), walk(item)]));
+    }
+    return value;
+  };
+  const scrubbed = walk(receipt);
+  const earlier = Array.isArray(scrubbed.paths?.unmapped) ? scrubbed.paths.unmapped : [];
+  return { ...scrubbed, paths: { ...(scrubbed.paths ?? {}), unmapped: [...new Set([...earlier, ...unmapped])].sort() } };
 }

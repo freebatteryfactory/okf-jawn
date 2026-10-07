@@ -35,7 +35,7 @@ import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { receiptHeader } from '../../scripts/lib/provenance.mjs';
+import { pathContext, receiptHeader } from '../../scripts/lib/provenance.mjs';
 import { buildRelease } from '../lib/cargo.mjs';
 import { BASIC_HOST, PATCHED_SERVE, SOURCE_RECORD, lsRemoteArgs, patchServe, rawUrl, sourceProblems, sourceRecord, tagCommit } from './lib/basic-host.mjs';
 import { EXIT_REFUSED } from './lib/criteria.mjs';
@@ -439,6 +439,7 @@ try {
   const { receipt, exitCode } = await qualify(effects, {
     protocolOnly: PROTOCOL_ONLY,
     pinned,
+    paths: pathContext({ root }),
     config: { harness: HARNESS_PACKAGE, mcp_url: MCP_URL, http_port: HTTP_PORT, ngrok: NGROK_ENABLED },
   });
   process.stdout.write(`MCP Apps qualification receipt: ${receiptPath}\n`);
