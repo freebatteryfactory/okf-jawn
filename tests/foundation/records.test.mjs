@@ -237,7 +237,7 @@ test('the Docling gate accepts no failure, its PDF crate is the fork the owner d
  const docling=gates.phase_0.find(gate=>gate.id==='docling-library-qualification');
  // The font-run failure the owner accepted on 2026-10-06 is cured by the patched docling-pdf, so no criterion is accepted as failing.
  for(const gate of gates.phase_0)assert.ok(!Object.hasOwn(gate,'accepted_failures'),`${gate.id} accepts a failure`);
- assert.match(docling.covers,/for the Docling crate Cargo\.lock pins \(its PDF crate the fork of converter-docling-pdf-font-run-patch\), called directly/);
+ assert.match(docling.covers,/for the Docling crate Cargo\.lock pins \(docling-pdf, docling-core and docling-onnx from the fork of converter-docling-pdf-font-run-patch\), called directly/);
  // The owner's decision of 2026-10-06, word for word.
  const patch=gates.phase_0.find(gate=>gate.id==='converter-docling-pdf-font-run-patch');
  assert.deepEqual([patch.kind,patch.decision,patch.decided_on,patch.decided_by],['decision','docling-pdf is built from a one-commit fork of docling.rs so that a phrase that changes font is extracted as one run, as docling-parse 7.21 and later do.','2026-10-06','owner']);
