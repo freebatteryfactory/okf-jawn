@@ -1921,9 +1921,10 @@ what Purge (§8) removed. Restore must be exercised." with:
 > and application records, drafts included, except what Purge (§8) removed; and one installation
 > archive with the installation's identities, tenant grants, connector records without secrets,
 > purge records and tenant events, and no workspace content. Only an administrator in a human
-> browser session takes or downloads a backup, or an operator runs the offline command: the
-> download boundary decides by artifact kind and route, so no agent, service route, export or
-> object read returns one, and the custodian of an unencrypted backup can read it. Replacing an
+> browser session requests or downloads a backup, or an operator runs the offline command; the
+> service itself takes one before an upgrade migration. The download boundary decides by
+> artifact kind and route, so no agent, service route, export or object read returns one, and
+> the custodian of an unencrypted backup can read it. Replacing an
 > installation runs with no service on the data directory, restores the installation archive
 > first and then every workspace archive, and keeps the original identities and drafts.
 > Importing a workspace archive into another installation fills a blank workspace, gives each
