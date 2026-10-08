@@ -41,7 +41,7 @@ const operations: Operation[] = JSON.parse(
 );
 const journeyUrl = new URL('../../../tests/integration/acceptance.mjs', import.meta.url).href;
 const exportsByName = contract as unknown as Record<string, ZodType | undefined>;
-const now = '2026-01-01T00:00:00Z';
+const now = '2026-01-01T00:00:00.000Z';
 const sha = (digit: string) => digit.repeat(40);
 
 const pascal = (id: string) =>
@@ -120,8 +120,10 @@ function standIn(
         properties: {},
       },
     ],
+    kind: 'content',
     status: accepted ? 'accepted' : 'open',
     created_by: 'agent',
+    created_via: 'mcp_delegation',
     created_at: now,
   });
   const workspace = (): Json => ({
@@ -147,7 +149,8 @@ function standIn(
             type_name: 'Note',
             kind: 'note',
             revision: sha('a'),
-            lifecycle: 'active',
+            status: 'stable',
+            archived: false,
           },
           body: body.body,
           properties: body.properties,
