@@ -29,7 +29,7 @@ okf-validator = { version = "=0.2.7", default-features = false }
 # Newest published matching release. default-features off: no asr, fetch-images or vlm.
 # pdf enables the ML PDF/image path. Office/HTML and other declarative converters need no feature.
 # Do not direct-depend on docling-core; docling owns the matching core version.
-docling = { version = "=1.93.5", default-features = false, features = ["pdf"] }
+docling = { version = "=2.3.0", default-features = false, features = ["pdf"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rusqlite_migration = { version = "=2.6.0" }
 git2 = { version = "=0.21.0", default-features = false, features = ["vendored-libgit2"] }
@@ -72,16 +72,16 @@ base64 = { version = "=0.22.1" }
 clap_complete = "=4.6.11"
 clap_mangen = "=0.3.3"
 
-# Owner decision 2026-10-06 (verification.json gate converter-docling-pdf-font-run-patch):
-# docling-pdf is built from a one-commit fork of docling.rs on upstream 434cc4e (published as
-# 1.93.6) so that a phrase that changes font is one text run, as in docling-parse >= 7.21 (#351).
-# docling-core and docling-onnx come from the same tree, because the fork's docling-pdf takes them
-# by path; docling itself stays 1.93.5 from crates.io. Remove this section when a docling.rs
-# release ports the docling-parse >= 7.21 line contractor.
+# Owner decisions 2026-10-06 and 2026-10-08 (verification.json gate converter-docling-pdf-font-run-patch):
+# docling-pdf is built from a two-commit fork of docling.rs on upstream 33d3d6f (published as 2.3.0):
+# a phrase that changes font is one line cell, as in docling-parse >= 7.21 (#351), and a blank cell is
+# never taken for overpaint on the text-layer path. docling-core and docling-onnx come from the same
+# tree, because the fork's docling-pdf takes them by path; docling itself is 2.3.0 from crates.io.
+# Remove this section when a docling.rs release carries both changes.
 [patch.crates-io]
-docling-pdf = { git = "https://github.com/Heyoub/docling.rs", rev = "e500c2323bcf5c3c84d3731ed00de65b15d0709a" }
-docling-core = { git = "https://github.com/Heyoub/docling.rs", rev = "e500c2323bcf5c3c84d3731ed00de65b15d0709a" }
-docling-onnx = { git = "https://github.com/Heyoub/docling.rs", rev = "e500c2323bcf5c3c84d3731ed00de65b15d0709a" }
+docling-pdf = { git = "https://github.com/Heyoub/docling.rs", rev = "f9094e66edd3b215ad7d43d2ca9be534180a06b4" }
+docling-core = { git = "https://github.com/Heyoub/docling.rs", rev = "f9094e66edd3b215ad7d43d2ca9be534180a06b4" }
+docling-onnx = { git = "https://github.com/Heyoub/docling.rs", rev = "f9094e66edd3b215ad7d43d2ca9be534180a06b4" }
 
 # Workspace fragment. Each authored member needs [lints] workspace = true.
 [workspace.lints.rust]

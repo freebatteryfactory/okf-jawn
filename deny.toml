@@ -9,8 +9,7 @@ all-features = true
 version = 2
 ignore = [
   # Transitive through docling/qualification only; no maintained upgrade yet.
-  { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained via docling/usvg; tracked until docling moves off it" },
-  { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained via docling/usvg; tracked until docling moves off it" },
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained, declared by docling-pdf 2.3.0; tracked until docling-pdf drops it" },
   { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; transitive only, no drop-in replacement in current graph" },
 ]
 
