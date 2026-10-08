@@ -346,13 +346,21 @@ impl ConversionOutcome {
 }
 
 impl PageCoverage {
-    /// Refuse coverage whose lists are not ascending, overlap, leave a gap, or reach past
-    /// `page_count`.
+    /// Refuse coverage of no pages, and coverage whose lists are not ascending, overlap, leave
+    /// a gap, or reach past `page_count`.
     ///
     /// # Errors
     /// Returns `InvalidInput` whose field is a JSON Pointer, relative to the coverage, to the
-    /// first range at fault, or to `/page_count` when the pages end short of it.
+    /// first range at fault, or to `/page_count` when it is zero or the pages end short of it.
     pub fn check(&self) -> Result<(), ApiError> {
+        // A paginated original has at least one page; the schema's minimum is not enough,
+        // because a value built in Rust or read from a stored record never meets the schema.
+        if self.page_count == 0 {
+            return Err(coverage_error(
+                "a paginated original has at least one page",
+                "/page_count".to_owned(),
+            ));
+        }
         let lists: [(&str, &[PageRange]); 3] = [
             ("converted", &self.converted),
             ("partly_extracted", &self.partly_extracted),

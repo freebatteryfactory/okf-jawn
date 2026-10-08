@@ -428,6 +428,8 @@ fn page_coverage_covers_every_page_once() -> Result<(), Box<dyn Error>> {
         (coverage(5, &[(4, 5), (1, 3)], &[], &[])?, "/converted/1"),
         (coverage(5, &[(1, 4)], &[], &[])?, "/page_count"),
         (coverage(3, &[(0, 3)], &[], &[])?, "/converted/0"),
+        (coverage(0, &[], &[], &[])?, "/page_count"),
+        (coverage(0, &[(1, 1)], &[], &[])?, "/page_count"),
     ] {
         let error = refused.check().err().ok_or("refused coverage")?;
         assert_eq!(error.field.as_deref(), Some(field), "{refused:?}");
