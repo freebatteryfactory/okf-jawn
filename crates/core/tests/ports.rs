@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use okf_jawn_contract::access::{AccessRoute, Connector, IssuedConnector, Permission, Principal};
-use okf_jawn_contract::common::{PageRequest, TextRange, Warning};
+use okf_jawn_contract::common::{PageRange, PageRequest, TextRange, Warning};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::{Event, EventKind, Receipt};
 use okf_jawn_contract::identity::{
@@ -22,15 +22,16 @@ use okf_jawn_contract::identity::{
 use okf_jawn_contract::import::{Job, JobKind, JobState};
 use okf_jawn_contract::item::{Draft, ItemKind};
 use okf_jawn_contract::proposal::{Change, Comment, Proposal, ProposalStatus};
-use okf_jawn_contract::read::Selection;
+use okf_jawn_contract::read::AssetRole;
 use okf_jawn_contract::review::{Confirmation, Review};
 use okf_jawn_contract::search::{GetGraphResponse, LinkDirection};
+use okf_jawn_contract::source::{SourceLocation, SourceLocator};
 use okf_jawn_contract::transport::TRANSPORTS;
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::conversion::{
-    ConversionInput, ConversionSettings, ConversionStatus, ConvertedAsset, Converter, OcrPolicy,
-    PixelSize,
+    ConversionInput, ConversionSettings, ConversionStatus, ConvertedAsset, Converter,
+    ConverterLimits, OcrPolicy, PixelSize,
 };
 use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, NewConnector, SessionRecord, secret_hash,
@@ -278,11 +279,18 @@ async fn converter_calls(
     source: LocalSource,
     output_directory: PathBuf,
 ) -> Result<ConversionStatus, ApiError> {
+    let pages = converter.page_count(&source, "report.pdf").await?;
+    let ConverterLimits { window_pages, .. } = converter.limits();
+    let window = pages.map(|count| PageRange {
+        start: 1,
+        end: count.min(window_pages),
+    });
     let conversion = converter
         .convert(ConversionInput {
             source,
             file_name: "report.pdf".to_owned(),
             settings: ConversionSettings::default(),
+            window,
             timeout: Duration::from_secs(120),
             output_directory,
         })
@@ -1108,7 +1116,10 @@ fn a_converted_image_carries_its_size_and_its_own_caption() {
     let asset = ConvertedAsset {
         path: PathBuf::from("out/figure-1.png"),
         media_type: "image/png".to_owned(),
-        selection: Selection::All,
+        role: AssetRole::Picture,
+        location: SourceLocation::Direct {
+            locator: SourceLocator::Page { page_no: 2 },
+        },
         pixel_size: Some(PixelSize {
             width: 640,
             height: 480,
