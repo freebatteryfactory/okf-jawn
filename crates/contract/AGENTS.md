@@ -2,11 +2,7 @@
 
 Read root AGENTS.md and SPEC.md.
 
-**Directories:** `crates/contract/`
-
-**Gate:** `bun scripts/dev.mjs gen-check` and `cargo test -p okf-jawn-contract`
-
-**Receipt:** operations/schemas regenerate cleanly; semantic tests pass.
+This lane's directories and gate command are in the root AGENTS.md table, and its construction gates are the `verification.json` entries whose `owner` is `integration-owner` (each names its command). Operations and schemas regenerate cleanly and the semantic tests pass.
 
 Own wire types, semantic descriptions, source and revision identities, operation declarations and generated schema agreement. Do not depend on storage or runtime startup. Regeneration must work before the application exists.
 

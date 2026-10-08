@@ -2,11 +2,7 @@
 
 Read root AGENTS.md and SPEC.md.
 
-**Directories:** `crates/server/`
-
-**Gate:** `cargo test -p okf-jawn-server --features runtime`
-
-**Receipt:** startup composes storage/ingest/mcp adapters; local and hosted auth paths; sandbox-origin serving; readiness/liveness
+This lane's directories and gate command are in the root AGENTS.md table, and its construction gates are the `verification.json` entries whose `owner` is `server` (each names its command).
 
 Supply executable startup that constructs the storage and ingest adapters, injects them into `core::application::ApplicationService`, and serves it; startup wires dependencies and holds no operation behavior. Implement both authentication entry paths from SPEC section 11: local (persistent installation identity, single-use launch token exchanged at `/auth/local` for the session cookie, Host/Origin/CSRF checks, connector-secret bearer auth for local MCP) and hosted (WorkOS AuthKit browser sessions and Connect validation). Hosted mode with missing or invalid configuration fails startup; it never falls back to local. Also supply static assets, declared binary/SSE/OAuth/MCP routes, sandbox-origin HTML serving (`serve_sandbox_representation` transport; WebMCP and the sandbox viewer UI live in workspace-ui), readiness and graceful shutdown. Existing JSON router expects a real Application and authenticated Principal. No guest-owner fallback and no trust granted for loopback.
 
