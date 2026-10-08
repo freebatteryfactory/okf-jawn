@@ -26,7 +26,7 @@ Run the same service locally in a browser and hosted in a container; the two aut
 
 BrowserPod, Forgejo/Gitea, S3 deployment, a hosted OTel stack and Windmill are outside this iteration. A desktop launcher is in scope as a trial: Electrobun first, Tauri 2 if Electrobun fails the trial. It starts the server on a loopback port, shows the workspace in the system web engine and adds no product behavior; local authentication (§11) applies unchanged. Because that engine is WebKit on macOS and Linux, the workspace browser tests run in both Chromium and WebKit. Signed installers and automatic updates are decided after the trial. Bun remains the JavaScript toolchain. Object storage interfaces must not dictate user folder organization.
 
-The service, CLI, browser tests and examples default to 127.0.0.1:7711 locally. Remote endpoints require HTTPS. The CLI and MCP adapters must not become independent uncoordinated repository writers.
+The service, CLI, browser tests and examples default to 127.0.0.1:7711 locally. Remote endpoints require HTTPS. The CLI and MCP adapters must not become independent uncoordinated repository writers. One process owns a data directory's writable Git, SQLite and object stores at a time, through an exclusive lock on a file in that directory held for the process's life; a launcher or stdio relay connects to the running service instead of starting a second writer. A data directory on a network filesystem is unsupported unless qualified. Stored data carries a format version: startup refuses data newer than it understands without changing it, and takes a recoverable backup before an upgrade migration, then verifies the result.
 
 ## 3. Workspace, items and vocabulary
 
@@ -37,6 +37,8 @@ Built-in rendering roles are Note, Source and View. User type names are not a cl
 Canonical operation identifiers use verb_noun, with standard/library terminology when meanings match. UI terms are projections: Timeline, Snapshot, Changes, Rewind, Propose, Approve, Decline, Who, Comment, Verify/Verified, Archive, Expires, Import, Export, Attention. Attribution says who changed a passage, not who originated every fact. Review, merge and business approval are different concepts.
 
 Revision is a resolved Git commit. At::Latest is a request selector resolved once before the operation reads. Source references retain workspace, stable item identity, resolved relative path, revision, digest where relevant, and selection. A rename must not make historical references point to today's content.
+
+Instants are UTC in storage and on the wire (RFC 3339); the browser shows them in the reader's locale and time zone. A document date whose interpretation is ambiguous stays flagged, not converted.
 
 ## 4. Sources and content addressing
 
@@ -55,6 +57,8 @@ Multi-file and folder upload preserves relative paths. Upload slots are authenti
 Import is durable work: status, attempts, cancellation, retry and reconciliation survive interruption. Jobs run on an in-process Tokio worker over durable `RecordStore`, which is the application's source of job truth. Acceptance is persisted with `create_job` before the job is enqueued or reported to the caller; `create_job` is unique on the request's `MutationId`, so a retried request returns the job it already created. `JobQueue` only delivers wake-ups and may deliver twice: a worker runs a job only after `claim_job` grants it a lease and returns a `ClaimedJob`, and progress, completion and failure are written through that lease, so a superseded attempt cannot complete the job. Handlers (`JobHandler::handle`) are idempotent on the job's `MutationId`, and a handler stops when the state returned by `update_progress` shows the job was cancelled. A delivered wake-up is not proof of durable completion. At startup the worker reconciles from the store: `expire_leases` returns the jobs of dead attempts to the runnable set, and every job in `pending_jobs` is enqueued again. An attempt that dies while the service keeps running does not leave its job waiting for the next restart: its lease expires and the job is retried. Blob writes, SQLite transactions and Git commits need explicit recovery because they are not one transaction. Product crash durability is claimed only after the crash/restart check in section 12 passes against the real RecordStore and import implementation.
 
 Use the pinned Docling Rust implementation through its actual supported API; do not replace it merely because a newer release exists. Establish its real native library and model asset requirements, with verified download locations, versions, hashes and configured local paths; never invent a hash or call a missing asset qualified. Retain structured Markdown, images/captions, relevant page renders, source locators and converter/version/settings. Heavy conversion runs in bounded workers with time, memory and cancellation controls. Model assets and native libraries are checked deployment inputs, not magic downloads hidden in reads.
+
+Every source location records its provenance: direct from the document representation, inferred by matching text or layout, or unresolved. The interface never presents an inferred location with the certainty of a direct one.
 
 Uploaded bytes are preserved while conversion is pending or after it fails, and the item shows that state accurately. "Bytes retained, extraction unsupported" is a fallback state, not completion of supported-format ingestion. No fake success, empty digest or text-only substitute may stand in for the converter.
 
@@ -82,11 +86,15 @@ Search and folder lists return descriptions/snippets and identities rather than 
 
 Search, link and graph data are a rebuildable derived index behind core's SearchIndex port. Storage implements it with SQLite FTS, including index updates and rebuild mechanics. The Application owns authorization, workspace scoping, revision resolution and coordinating index updates and rebuilds with content changes. Reviews, jobs and retrieval receipts are not rebuildable; rebuilding search never removes durable application records.
 
+Design envelope: 10,000 items per workspace, with indexed search at p95 under 500 ms on a warm local index. The reference machine, corpus and query set are fixed when first measured; only then do the numbers become release criteria. Speed never justifies dropping source detail or shortening an answer.
+
 The human viewer includes Markdown, PDF, images, sandboxed HTML/artifacts and snapshots, Office extraction with original access, spreadsheet tables/ranges, plain text/code and editing. Original and digest may be compared side by side. Browser caching keys include workspace, source, revision, representation and selection.
 
 ## 8. History, proposals and review
 
 Drafts may autosave; named snapshots are explicit. One draft exists per (item, editor). Saving a draft never creates a revision. `get_item` may return the caller's own draft beside committed content; `read_item`, search, export, MCP tools and agent routes never see drafts. Snapshot (`commit_items`) commits the caller's selected drafts in one commit. It is blocked only when an item being snapshotted was itself changed or deleted since that draft's base; unrelated changes elsewhere in the workspace never block it. The typed conflict lists every affected item with its draft base, the current revision and a diff, and the editor rebases each by saving against the new head. Create, move, delete, import, Rewind and accepting a proposal remain immediate commits. History, Changes and Who project versioned content. Rewind restores selected historical state in a new snapshot and does not erase history. Keep conflict resolution understandable; raw Git internals are not the operator interface.
+
+Archive is reversible and keeps history. Purge is explicit and destructive: it removes the original bytes, derivatives, index entries, historical content and installation-managed backups of an item or a workspace, and marks the revisions, citations and Views that referred to them as invalidated. Purge never claims to erase exports, clones or backups outside the application's control. Workspace purge is built first; item purge follows with the same guarantees.
 
 A connected answerer is read-only. An explicitly allowed drafter may create proposals. Neither receives merge or review authority. Proposals carry base and proposed revisions and allowed content changes; they cannot set the review identity or turn an unapproved proposal into a fact.
 
