@@ -1,6 +1,6 @@
 // @vitest-environment node
 /**
- * Every request the independent acceptance journey (tests/integration/acceptance-journey.mjs) sends must
+ * Every request the independent acceptance journey (tests/integration/acceptance.mjs) sends must
  * validate against the GENERATED contract: the Zod request schema of its operation and the path in
  * api/operations.json. The journey runs against a recording stand-in for the server; the stand-in is
  * not an oracle for behaviour (the 403 refusals are scripted, not derived from the Application), and
@@ -39,8 +39,7 @@ interface Journey {
 const operations: Operation[] = JSON.parse(
   readFileSync(new URL('../../../api/operations.json', import.meta.url), 'utf8'),
 );
-const journeyUrl = new URL('../../../tests/integration/acceptance-journey.mjs', import.meta.url)
-  .href;
+const journeyUrl = new URL('../../../tests/integration/acceptance.mjs', import.meta.url).href;
 const exportsByName = contract as unknown as Record<string, ZodType | undefined>;
 const now = '2026-01-01T00:00:00Z';
 const sha = (digit: string) => digit.repeat(40);
