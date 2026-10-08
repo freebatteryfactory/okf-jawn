@@ -33,7 +33,7 @@ pub mod proposal;
 pub mod read;
 /// Review evidence covers exact content, never all future edits.
 pub mod review;
-/// Authorization targets and retry identity declared by every request type.
+/// Authorization targets, retry identity and schema-inexpressible rules of every request type.
 pub mod scope;
 /// Search and link navigation over retained, authorized workspace content.
 pub mod search;

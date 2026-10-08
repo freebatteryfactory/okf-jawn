@@ -7,6 +7,8 @@ use std::pin::Pin;
 use okf_jawn_contract::access::{AccessRoute, DelegationCeiling, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::IdentityError;
+use okf_jawn_contract::metadata::OperationName;
+use okf_jawn_contract::operations::DRAFT_BEARING;
 use okf_jawn_core::context::Attempt;
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use okf_jawn_core::mutations::request_digest;
@@ -258,6 +260,103 @@ fn issued_connector() -> Value {
     })
 }
 
+/// A View with one binding to an item in `binding_workspace`.
+fn view_document(binding_workspace: &str) -> Value {
+    json!({
+        "schema_version": 1,
+        "title": "t",
+        "description": "d",
+        "mode": "pinned",
+        "grammar": "json_render",
+        "bindings": [{
+            "name": "src",
+            "source": {
+                "workspace_id": binding_workspace,
+                "item_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                "path": "notes/a.md",
+                "revision": REVISION,
+                "selection": { "kind": "all" }
+            },
+            "units": {},
+            "transforms": []
+        }],
+        "spec": {},
+        "charts": {}
+    })
+}
+
+/// Present, in `view_workspace`, a View bound to `binding_workspace`.
+fn present_body(view_workspace: &str, binding_workspace: &str) -> Value {
+    json!({ "workspace_id": view_workspace, "view": view_document(binding_workspace) })
+}
+
+fn presented(workspace_id: &str) -> Value {
+    let view = view_document(workspace_id);
+    let bindings = view.get("bindings").cloned().unwrap_or_else(|| json!([]));
+    json!({
+        "view": view,
+        "resolved_bindings": bindings,
+        "warnings": [],
+        "receipt_id": "ffffffff-ffff-4fff-8fff-ffffffffffff"
+    })
+}
+
+/// A valid request for one draft-bearing operation in workspace A, retried under `key` when it
+/// is a mutation, and the response its handler answers with.
+fn draft_exchange(operation: OperationName, key: &str) -> Result<(Value, Value), String> {
+    let item_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let draft = json!({
+        "item_id": item_id,
+        "editor": "alice",
+        "base_revision": REVISION,
+        "content_digest": "a".repeat(64),
+        "saved_at": "2026-01-01T00:00:00Z"
+    });
+    let committed = json!({
+        "revision": REVISION,
+        "receipt_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "warnings": []
+    });
+    match operation {
+        OperationName::GetItem => Ok((
+            json!({ "workspace_id": WORKSPACE_A, "item_id": item_id, "at": { "kind": "latest" } }),
+            item_document("committed"),
+        )),
+        OperationName::SaveDraft => Ok((
+            json!({
+                "workspace_id": WORKSPACE_A,
+                "item_id": item_id,
+                "base_revision": REVISION,
+                "body": "drafted",
+                "properties": {},
+                "idempotency_key": key
+            }),
+            draft,
+        )),
+        OperationName::ListDrafts => Ok((
+            json!({ "workspace_id": WORKSPACE_A, "page": { "limit": 10 } }),
+            json!({ "items": [draft] }),
+        )),
+        OperationName::DiscardDraft => Ok((
+            json!({ "workspace_id": WORKSPACE_A, "item_id": item_id, "idempotency_key": key }),
+            draft,
+        )),
+        OperationName::CommitItems => Ok((
+            json!({
+                "workspace_id": WORKSPACE_A,
+                "item_ids": [item_id],
+                "message": "snapshot",
+                "idempotency_key": key
+            }),
+            committed,
+        )),
+        other => Err(format!(
+            "{} is draft-bearing but has no request here",
+            other.as_str()
+        )),
+    }
+}
+
 #[tokio::test]
 async fn write_needs_a_write_grant_and_read_needs_only_read() -> TestResult {
     let ports = ports_admin_a_read_b()?;
@@ -290,37 +389,89 @@ async fn write_needs_a_write_grant_and_read_needs_only_read() -> TestResult {
 }
 
 #[tokio::test]
-async fn present_with_a_foreign_binding_is_forbidden_before_the_handler() -> TestResult {
+async fn a_view_bound_to_another_workspace_is_invalid_before_authorization() -> TestResult {
+    // Alice may read B and holds nothing on C; neither makes a binding outside A valid.
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
+    app.set_response("present_view", presented(WORKSPACE_A))?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
-    let input = json!({
-        "workspace_id": WORKSPACE_A,
-        "view": {
-            "schema_version": 1,
-            "title": "t",
-            "description": "d",
-            "mode": "pinned",
-            "grammar": "json_render",
-            "bindings": [{
-                "name": "src",
-                "source": {
-                    "workspace_id": WORKSPACE_C,
-                    "item_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-                    "path": "notes/a.md",
-                    "revision": REVISION,
-                    "selection": { "kind": "all" }
-                },
-                "units": {},
-                "transforms": []
-            }],
-            "spec": {},
-            "charts": {}
-        }
-    });
-    let refused = err_of(call(&app, &ports, &alice, "present_view", input).await)?;
-    assert_eq!(refused.code, ErrorCode::Forbidden);
+    for elsewhere in [WORKSPACE_B, WORKSPACE_C] {
+        let input = present_body(WORKSPACE_A, elsewhere);
+        let refused = err_of(call(&app, &ports, &alice, "present_view", input).await)?;
+        assert_eq!(
+            refused.code,
+            ErrorCode::InvalidInput,
+            "bound to {elsewhere}"
+        );
+        assert_eq!(refused.field.as_deref(), Some("/view/bindings"));
+    }
+    assert_eq!(ports.access.lookups(), 0);
     assert_eq!(app.call_count("present_view")?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_view_bound_to_its_own_workspace_reaches_the_handler() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("present_view", presented(WORKSPACE_B))?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = present_body(WORKSPACE_B, WORKSPACE_B);
+    let presented = call(&app, &ports, &alice, "present_view", input).await?;
+    assert_eq!(
+        presented.pointer("/view/bindings/0/source/workspace_id"),
+        Some(&json!(WORKSPACE_B))
+    );
+    // Read on the View's own workspace is the only grant asked for.
+    assert_eq!(ports.access.lookups(), 1);
+    assert_eq!(app.call_count("present_view")?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_agent_route_of_the_same_person_never_reaches_a_draft() -> TestResult {
+    // Alice holds every permission on A. Her connector's ceiling and her service identity add
+    // nothing she lacks; only the route differs from her browser session.
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let connector = connector("alice", all_permissions())?;
+    let service = principal("alice", AccessRoute::Service)?;
+    let human = principal("alice", AccessRoute::BrowserSession)?;
+    let owner = principal("alice", AccessRoute::LocalOwner)?;
+    for operation in DRAFT_BEARING.iter().copied() {
+        let id = operation.as_str();
+        let (input, response) = draft_exchange(operation, KEY_ONE)?;
+        app.set_response(id, response.clone())?;
+        for agent in [&connector, &service] {
+            let refused = err_of(call(&app, &ports, agent, id, input.clone()).await)?;
+            assert_eq!(
+                refused.code,
+                ErrorCode::Forbidden,
+                "{id} via {:?}",
+                agent.route
+            );
+        }
+        // Refused by route before any grant was asked for: the grants would have allowed it.
+        assert_eq!(ports.access.lookups(), 0, "{id}");
+        assert_eq!(app.call_count(id)?, 0, "{id}");
+    }
+    for operation in DRAFT_BEARING.iter().copied() {
+        let id = operation.as_str();
+        // The ledger keys a mutation by subject, not route: each session takes its own key so
+        // the second call runs its handler instead of replaying the first.
+        for (person, key) in [(&human, KEY_ONE), (&owner, KEY_TWO)] {
+            let (input, response) = draft_exchange(operation, key)?;
+            let caller = Caller {
+                principal: person,
+                session_id: Some("session-1"),
+            };
+            let answered = dispatch(&app, &dispatch_ports(&ports), &caller, id, input).await?;
+            assert_eq!(answered, response, "{id} via {:?}", person.route);
+        }
+    }
+    for operation in DRAFT_BEARING.iter().copied() {
+        assert_eq!(app.call_count(operation.as_str())?, 2);
+    }
     Ok(())
 }
 

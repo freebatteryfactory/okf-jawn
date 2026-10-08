@@ -79,7 +79,7 @@ bun scripts/dev.mjs vendor mcp
 bun scripts/dev.mjs vendor bun
 ```
 
-`vendors.json` records existing use sites, planned use sites, generated sites, official documentation locations, concrete symbols, short offline notes, and, for each entry that records an executed Context7 lookup, its library ID and query (`context7_queries_executed` equals the number of such entries). Other entries are explicitly reference pointers rather than invented Context7 research receipts. Follow the installed package's exact version when a latest-page example disagrees. After packages are fetched, Cargo and installed package sources provide local source documentation too.
+`vendors.json` records existing use sites, planned use sites, generated sites, official documentation locations, concrete symbols, short offline notes, the `verification.json` gates that record what has been proved about the library (its status is read there, never typed here), and, for each entry that records an executed Context7 lookup, its library ID and query (`context7_queries_executed` equals the number of such entries). Other entries are explicitly reference pointers rather than invented Context7 research receipts. Follow the installed package's exact version when a latest-page example disagrees. After packages are fetched, Cargo and installed package sources provide local source documentation too.
 
 ## Constructing the whole product
 

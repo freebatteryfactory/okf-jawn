@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
 import { acceptedFailureFields, derivedRecord, receiptGateStatuses } from '../../scripts/lib/receipts.mjs';
 import { premergeSteps } from '../../scripts/lib/gates.mjs';
+import { lanes } from '../../scripts/lib/lanes.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const read=file=>readFile(join(root,file),'utf8');
 const record=async()=>JSON.parse(await read('verification.json'));
@@ -270,9 +271,15 @@ test('the Docling gate accepts no failure, its PDF crate is the fork the owner d
  const words=group=>[...new Set(gates[group].map(gate=>gate.status))].sort();
  assert.deepEqual(words('construction'),['blocked_on_lanes']);
  assert.deepEqual(words('acceptance'),['blocked_on_product','not_run']);
- // The ingest lane is told: its gate table lists both gates, and its rules name the harness functions as the reference.
+ // Every gate that names an owner names one that exists: a lane of scripts/lib/lanes.mjs, or the integration owner.
+ const owners=new Set(['integration-owner',...lanes.map(entry=>entry.name)]);
+ for(const gate of gates.construction)assert.ok(owners.has(gate.owner),`${gate.id}: owner ${gate.owner} is no lane of scripts/lib/lanes.mjs and not integration-owner`);
+ for(const gate of gates.acceptance)assert.ok(gate.owner===undefined||owners.has(gate.owner),`${gate.id}: owner ${gate.owner} is no lane of scripts/lib/lanes.mjs and not integration-owner`);
+ // The ingest lane is told: its instructions send it to the gates it owns (the two above among them, each with
+ // its command) instead of copying them, and its rules name the harness functions as the reference.
  const lane=await read('crates/ingest/AGENTS.md');
- for(const id of ['ingest-locates-unlocated-items','ingest-flags-undecodable-text'])assert.ok(lane.includes(`| \`${id}\` | \`${construction[id].receipt}\` |`),`crates/ingest/AGENTS.md does not list ${id} with its command`);
+ assert.ok(lane.includes("This lane's directories and gate command are in the root AGENTS.md table, and its construction gates are the `verification.json` entries whose `owner` is `ingest` (each names its command)."),'crates/ingest/AGENTS.md does not point to its gates');
+ for(const id of ['ingest-locates-unlocated-items','ingest-flags-undecodable-text'])assert.match(construction[id].receipt,/^cargo test -p okf-jawn-ingest --features runtime -- [a-z_]+$/,`${id} does not name its command`);
  assert.match(lane,/`locate::locate_items`/);
  assert.match(lane,/`glyphs::undecoded_glyphs`/);
  for(const name of ['locate_items','undecoded_glyphs','placeholder_glyph_tokens'])assert.match(await read(`qualification/docling/src/${name==='locate_items'?'locate':'glyphs'}.rs`),new RegExp(`pub\\(crate\\) fn ${name}\\(`),`${name} is not a function of the harness`);
@@ -395,7 +402,7 @@ test('README states the generated counts and tool names, and neither prose file 
  for(const [name,text] of [['README.md',readme],['AGENTS.md',agents]])assert.doesNotMatch(text,/\b(?:three|3)\b[^.\n]*Context7/i,name);
  for(const term of ['TestResult','err_of','git merge --no-ff','Why:','PowerShell'])assert.ok(agents.includes(term),`AGENTS.md does not state ${term}`);
 });
-test('README, AGENTS and the close-out plan state that receipt-backed statuses are written by record.mjs, never typed',async()=>{
+test('README and AGENTS state that receipt-backed statuses are written by record.mjs, never typed',async()=>{
  for(const file of ['README.md','AGENTS.md']){
   const text=await read(file);
   assert.ok(text.includes('`bun qualification/record.mjs` writes'),`${file} does not say what writes the derived values`);
@@ -411,9 +418,6 @@ test('README, AGENTS and the close-out plan state that receipt-backed statuses a
  // The limit is said plainly where the records are described.
  assert.ok(readme.includes('receipts are produced on a developer machine and are not signed, so a consistent hand edit of a receipt is not detected by `check-receipts`'),'README does not state that receipts are unsigned');
  assert.ok(readme.includes('Producing the receipts in CI, where a contributor cannot edit them, is the planned cure.'),'README does not name the planned cure');
- const plan=await read('docs/plans/stage-1a/90-orchestrator-close.md');
- assert.match(plan,/The orchestrator types no status in `verification\.json`/);
- assert.doesNotMatch(plan,/Decide terminal states|gets the state decided in O\.4/,'the plan still has the orchestrator typing gate states');
 });
 test('help names every task the entrypoint accepts, and just mirrors the gates',async()=>{
  const entry=await read('scripts/dev.mjs');

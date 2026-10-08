@@ -4,16 +4,49 @@ use std::collections::BTreeSet;
 use std::error::Error;
 
 use okf_jawn_contract::access::Permission;
-use okf_jawn_contract::metadata::{OperationInfo, operations};
+use okf_jawn_contract::metadata::{OperationInfo, OperationName, operations};
+use okf_jawn_contract::operations::DRAFT_BEARING;
+use schemars::{JsonSchema, generate::SchemaSettings};
+use serde_json::Value;
 
-/// Operations that carry or reveal a draft; agents never see drafts (SPEC section 8).
-const DRAFT_BEARING: &[&str] = &[
+macro_rules! schema_names {
+    ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
+        $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
+        $destructive:literal, $description:literal)),* $(,)?) => {
+        /// Every operation with the type names its generated input and output schemas contain.
+        fn schema_type_names() -> Result<Vec<(&'static str, BTreeSet<String>)>, serde_json::Error> {
+            Ok(vec![$((stringify!($id), {
+                let mut names = type_names::<$request>()?;
+                names.extend(type_names::<$response>()?);
+                names
+            })),*])
+        }
+    };
+}
+
+/// SPEC section 8, held by name and independently of `DRAFT_BEARING`: the operations that
+/// return, store, list, remove or commit the caller's own drafts.
+const EXPECTED_DRAFT_BEARING: &[&str] = &[
+    "get_item",
     "save_draft",
     "list_drafts",
     "discard_draft",
     "commit_items",
-    "get_item",
 ];
+/// Contract types that hold a draft or its content.
+const DRAFT_TYPES: &[&str] = &["Draft", "DraftContent"];
+/// Contract types named `Draft…` that hold no draft content, each with why. A new `Draft…` type
+/// must be added here or to `DRAFT_TYPES`.
+const DRAFT_NAMED_NOT_DRAFT: &[(&str, &str)] = &[(
+    "DraftConflictItem",
+    "The `draft_conflict` error detail of commit_items, reachable from any schema holding an      ApiError (a Job's error). It names the item, the draft's base revision and the committed      changes since; never the drafted body or properties.",
+)];
+/// Operations whose schemas name a draft type but which never carry a draft, each with why.
+const DRAFT_SCHEMA_EXEMPT: &[(&str, &str)] = &[(
+    "create_item",
+    "Its response is an ItemDocument, whose optional `draft` field is how get_item returns the      caller's draft. A created item is an immediate commit with a fresh identity, so no draft      of it can exist: the create_item handler must return `draft: None` on every route.",
+)];
+
 /// Operations that destroy or overwrite user state, in table order.
 const DESTRUCTIVE: &[&str] = &[
     "archive_workspace",
@@ -53,6 +86,24 @@ const MODEL_TOOLS: &[&str] = &[
     "present",
     "catalog",
 ];
+
+/// The root title and every `$defs` name of `T`'s generated schema.
+fn type_names<T: JsonSchema>() -> Result<BTreeSet<String>, serde_json::Error> {
+    let schema = serde_json::to_value(
+        SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<T>(),
+    )?;
+    let mut names: BTreeSet<String> = schema
+        .get("$defs")
+        .and_then(Value::as_object)
+        .map(|defs| defs.keys().cloned().collect())
+        .unwrap_or_default();
+    if let Some(title) = schema.get("title").and_then(Value::as_str) {
+        names.insert(title.to_owned());
+    }
+    Ok(names)
+}
 
 fn declared(id: &str) -> Result<OperationInfo, Box<dyn Error>> {
     operations()
@@ -113,7 +164,17 @@ fn only_read_and_propose_operations_are_visible_to_agents() {
 #[test]
 fn draft_bearing_operations_are_never_agent_tools() -> Result<(), Box<dyn Error>> {
     // `alias` and `visibility` are the agent surface; `operator_alias` is CLI vocabulary.
-    for id in DRAFT_BEARING {
+    // SPEC section 8 names `get_item` as the operation that returns the caller's own draft.
+    assert!(DRAFT_BEARING.contains(&OperationName::GetItem));
+    let positions: Vec<usize> = DRAFT_BEARING
+        .iter()
+        .filter_map(|name| OperationName::ALL.iter().position(|each| each == name))
+        .collect();
+    let distinct: BTreeSet<usize> = positions.iter().copied().collect();
+    assert_eq!(distinct.len(), DRAFT_BEARING.len(), "listed once each");
+    assert!(positions.is_sorted(), "listed in table order");
+    for name in DRAFT_BEARING {
+        let id = name.as_str();
         let operation = declared(id)?;
         assert!(
             operation.alias.is_empty(),
@@ -124,6 +185,52 @@ fn draft_bearing_operations_are_never_agent_tools() -> Result<(), Box<dyn Error>
             "{id} carries drafts and must not be visible to agents"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn the_draft_bearing_list_is_exactly_the_spec_operations() {
+    let listed: Vec<&str> = DRAFT_BEARING.iter().map(|name| name.as_str()).collect();
+    assert_eq!(listed, EXPECTED_DRAFT_BEARING);
+}
+
+#[test]
+fn every_operation_whose_schema_names_a_draft_type_is_draft_bearing_or_exempt()
+-> Result<(), Box<dyn Error>> {
+    let bearing: BTreeSet<&str> = DRAFT_BEARING.iter().map(|name| name.as_str()).collect();
+    let exempt: BTreeSet<&str> = DRAFT_SCHEMA_EXEMPT.iter().map(|(id, _)| *id).collect();
+    let mut found = BTreeSet::new();
+    for (id, names) in schema_type_names()? {
+        for name in names.iter().filter(|name| name.starts_with("Draft")) {
+            assert!(
+                DRAFT_TYPES.contains(&name.as_str())
+                    || DRAFT_NAMED_NOT_DRAFT.iter().any(|(other, _)| other == name),
+                "{id}: classify the new type {name} as a draft type or not"
+            );
+        }
+        let drafts: Vec<&String> = names
+            .iter()
+            .filter(|name| DRAFT_TYPES.contains(&name.as_str()))
+            .collect();
+        if drafts.is_empty() {
+            continue;
+        }
+        found.insert(id);
+        assert!(
+            bearing.contains(id) || exempt.contains(id),
+            "{id} names {drafts:?} in its schema but is neither draft-bearing nor exempt"
+        );
+        assert!(
+            !(bearing.contains(id) && exempt.contains(id)),
+            "{id} is both draft-bearing and exempt"
+        );
+    }
+    // Every exemption is still needed, and the scan sees the draft types at all.
+    for id in &exempt {
+        assert!(found.contains(id), "{id} is exempt but names no draft type");
+    }
+    assert!(found.contains("list_drafts"), "the scan must see Draft");
+    assert!(found.contains("get_item"), "the scan must see DraftContent");
     Ok(())
 }
 
@@ -187,3 +294,5 @@ fn snapshot_states_the_per_item_precondition() -> Result<(), Box<dyn Error>> {
     assert!(!commit.description.contains("unchanged base"));
     Ok(())
 }
+
+okf_jawn_contract::for_each_operation!(schema_names);

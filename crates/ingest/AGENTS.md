@@ -2,18 +2,7 @@
 
 Read root AGENTS.md and SPEC.md.
 
-**Directories:** `crates/ingest/`
-
-**Gates** (construction gates in `verification.json` owned by this lane):
-
-| Gate | Command or receipt |
-| --- | --- |
-| `converter-worker-memory-ceiling` | `cargo test -p okf-jawn-ingest --features runtime` |
-| `job-crash-against-record-store` | `.artifacts/qualification/` or a construction receipt for import restart: kill and restart against the real `RecordStore`; no duplicate effect |
-| `ingest-locates-unlocated-items` | `cargo test -p okf-jawn-ingest --features runtime -- locates_unlocated_items` |
-| `ingest-flags-undecodable-text` | `cargo test -p okf-jawn-ingest --features runtime -- flags_undecodable_text` |
-
-**Receipt:** conversion and job-handler tests; restart and idempotency evidence under `.artifacts/` (not a claim until the SPEC §12 check passes).
+This lane's directories and gate command are in the root AGENTS.md table, and its construction gates are the `verification.json` entries whose `owner` is `ingest` (each names its command). Crash durability is not claimed until the SPEC §12 check passes.
 
 ## Ports to implement
 
