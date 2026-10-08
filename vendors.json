@@ -226,7 +226,8 @@
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
       "qualification": [
-        "authored-typescript-seams"
+        "authored-typescript-seams",
+        "views-chart-failure-isolation"
       ]
     },
     {
@@ -636,7 +637,9 @@
         "Preserve unknown frontmatter fields. Do not turn format conformance into factual approval."
       ],
       "version_authority": "Cargo.toml and Cargo.lock",
-      "qualification": []
+      "qualification": [
+        "candidate-check-runs-validator"
+      ]
     },
     {
       "name": "docling",
@@ -672,7 +675,8 @@
         "converter-docling-pdf-font-run-patch",
         "converter-worker-memory-ceiling",
         "ingest-locates-unlocated-items",
-        "ingest-flags-undecodable-text"
+        "ingest-flags-undecodable-text",
+        "release-model-inventory"
       ]
     },
     {
@@ -734,6 +738,7 @@
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
       "qualification": [
         "storage-git-cas-sqlite",
+        "storage-format-version-and-migrations",
         "index-rebuild"
       ]
     },

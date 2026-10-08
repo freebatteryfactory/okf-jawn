@@ -183,7 +183,7 @@
           "status": "blocked_on_lanes",
           "owner": "integration-owner",
           "receipt": "bun scripts/dev.mjs premerge",
-          "meaning": "First work of the next stage, before the storage, ingest and views lanes start: the contract can express every SPEC sentence about extraction, sources and views; the core ports follow in core-ports-carry-extraction-and-views. Missing in the contract today: extraction state on ItemSummary, ItemDocument and SourceAppearance, with a typed failure reason; converter, version, settings and model identity on the wire; page and box locators in Selection, with locator kinds per format; a tabular type for a View's materialized dataset. Owner decisions it carries, 2026-10-05: when a later re-extraction succeeds for a file whose text an agent supplied, the converter's text is shown and indexed by default, the agent's text stays in history and a person may keep it; no chart reads agent-supplied numbers before a person approves them; sending originals to a connected AI is a separate switch, off by default; a damaged PDF is refused clearly and recovery is decided in the ingest lane; unprocessed files (failed, unsupported or partial) are listable by people and by a connected agent, and an agent may propose extracted text as its own proposal kind labelled as supplied by an agent, applied only on approval. 2026-10-06: local mode keeps upload and import and never reorganizes an existing directory in place; a snapshot conflict is resolved per item, keep mine or take theirs, with a diff; status words are OKF's Draft, Stable and Deprecated, with Archived as a separate flag; an app review is written into the file as OKF verified on export, and an imported verified is an unconfirmed claim; the item id is in the file's header; a source card is named from the original name with its extension joined by a hyphen (report.pdf becomes report-pdf.md) and its header carries the original name; an imported file whose header does not parse needs attention and blocks nothing. 2026-10-07: a partly converted file stays readable, names its unconverted pages, is listed as unprocessed, and a retry converts only those pages"
+          "meaning": "First work of the next stage, before the storage, ingest and views lanes start: the contract can express every SPEC sentence about extraction, sources and views; the core ports follow in core-ports-carry-extraction-and-views. Missing in the contract today: extraction state on ItemSummary, ItemDocument and SourceAppearance, with a typed failure reason; converter, version, settings and model identity on the wire; page and box locators in Selection, with locator kinds per format; a tabular type for a View's materialized dataset. Owner decisions it carries, 2026-10-05: when a later re-extraction succeeds for a file whose text an agent supplied, the converter's text is shown and indexed by default, the agent's text stays in history and a person may keep it; no chart reads agent-supplied numbers before a person approves them; sending originals to a connected AI is a separate switch, off by default; a damaged PDF is refused clearly and recovery is decided in the ingest lane; unprocessed files (failed, unsupported or partial) are listable by people and by a connected agent, and an agent may propose extracted text as its own proposal kind labelled as supplied by an agent, applied only on approval. 2026-10-06: local mode keeps upload and import and never reorganizes an existing directory in place; a snapshot conflict is resolved per item, keep mine or take theirs, with a diff; status words are OKF's Draft, Stable and Deprecated, with Archived as a separate flag; an app review is written into the file as OKF verified on export, and an imported verified is an unconfirmed claim; the item id is in the file's header; a source card is named from the original name with its extension joined by a hyphen (report.pdf becomes report-pdf.md) and its header carries the original name; an imported file whose header does not parse needs attention and blocks nothing. 2026-10-07: a partly converted file stays readable, names its unconverted pages, is listed as unprocessed, and a retry converts only those pages. 2026-10-08: instants are UTC RFC 3339 `date-time` on the wire; every source location records its provenance (direct, inferred, unresolved); WorkspacePath refuses Windows reserved names, trailing dots and spaces, and NFC and case collisions; EventKind gains security events (connector issued and revoked, sign-in, permission denied); Archive and Purge operations as SPEC §8 states them, workspace purge first"
         },
         {
           "id": "core-ports-carry-extraction-and-views",
@@ -226,6 +226,27 @@
           "owner": "storage",
           "receipt": "cargo test -p okf-jawn-storage --features runtime -- draft_per_editor",
           "meaning": "Two editors on one item get independent drafts; the second Snapshot conflicts after the first"
+        },
+        {
+          "id": "storage-single-writer-lock",
+          "status": "blocked_on_lanes",
+          "owner": "storage",
+          "receipt": "cargo test -p okf-jawn-storage --features runtime -- single_writer",
+          "meaning": "SPEC §2: one process owns a data directory's writable Git, SQLite and object stores. It takes an exclusive lock on a file inside the data directory (std `File::try_lock`, stable since Rust 1.89) before any writable store opens and holds it for the process's life; a second process is refused with a clear error. A data directory on a network filesystem is not supported unless qualified"
+        },
+        {
+          "id": "storage-format-version-and-migrations",
+          "status": "blocked_on_lanes",
+          "owner": "storage",
+          "receipt": "cargo test -p okf-jawn-storage --features runtime -- migrations",
+          "meaning": "SPEC §2: SQLite schemas migrate with the already-selected `rusqlite_migration` (user_version; `to_latest`, `pending_migrations`), and application-owned on-disk formats carry a version. Startup refuses data newer than it understands without modifying it; before an upgrade it takes a recoverable backup, applies the migration and verifies the result"
+        },
+        {
+          "id": "storage-purge-workspace",
+          "status": "blocked_on_lanes",
+          "owner": "storage",
+          "receipt": "cargo test -p okf-jawn-storage --features runtime -- purge",
+          "meaning": "SPEC §8, workspace purge first: purging a workspace removes its original bytes, derivatives, index entries, historical content and installation-managed backups, and marks the revisions, citations and Views that referred to them as invalidated; it never claims to erase exports, clones or backups outside the application's control. Archive stays reversible and keeps history. Item purge follows with the same guarantees"
         },
         {
           "id": "converter-worker-memory-ceiling",
@@ -277,6 +298,20 @@
           "meaning": "read_item never returns a draft; get_item returns only the caller's own"
         },
         {
+          "id": "candidate-check-runs-validator",
+          "status": "blocked_on_lanes",
+          "owner": "core-cli",
+          "receipt": "cargo test -p okf-jawn-core -- candidate_check",
+          "meaning": "The production `CandidateCheck` runs `okf-validator` on a staged candidate directory before commit: storage stages the tree and calls the check it is given, and a candidate the check refuses is never committed. Storage and ingest never decide OKF conformance themselves"
+        },
+        {
+          "id": "cli-mcp-stdio-relay",
+          "status": "blocked_on_lanes",
+          "owner": "core-cli",
+          "receipt": "cargo test -p okf-jawn-cli -- mcp_stdio",
+          "meaning": "SPEC §11: the CLI's `mcp --stdio` command is a relay. It forwards each MCP message to the running local service with a connector credential and holds no store of its own; it starts the service when none is running and otherwise connects to the running one, so the service remains the only writer"
+        },
+        {
           "id": "server-binary-and-startup",
           "status": "blocked_on_lanes",
           "owner": "server",
@@ -317,6 +352,13 @@
           "owner": "views",
           "receipt": "bun --bun run --cwd ui test",
           "meaning": "Saved-view persist and reopen using server diagnostics as the source of truth"
+        },
+        {
+          "id": "views-chart-failure-isolation",
+          "status": "blocked_on_lanes",
+          "owner": "views",
+          "receipt": "bun scripts/dev.mjs lane views",
+          "meaning": "SPEC §10: a chart that fails to render shows its own alert, and the View's text and other charts still render. ui/tests/unit/layout.test.tsx currently pins the opposite: its test \"refuses a chart specification that compile rejects\" has the whole view refused before any host call. The views lane changes that test with the behaviour; the authored-typescript-seams gate text and tests/foundation/records.test.mjs, which name it, change with it at merge"
         }
       ],
       "acceptance": [
@@ -344,7 +386,7 @@
         {
           "id": "explorer-playwright-journeys",
           "status": "blocked_on_product",
-          "meaning": "Import, naming, viewer, Changes, Timeline, View, keyboard, axe, workspace isolation"
+          "meaning": "Import, naming, viewer, Changes, Timeline, View, keyboard, axe, workspace isolation; the same tests run in Chromium and WebKit (one Playwright config with two projects)"
         },
         {
           "id": "saved-view-persist-reopen",
@@ -355,6 +397,21 @@
           "id": "qualify-application",
           "status": "blocked_on_product",
           "meaning": "Connected product acceptance against a real server"
+        },
+        {
+          "id": "desktop-launcher-trial",
+          "status": "blocked_on_product",
+          "meaning": "SPEC §2 trial, Electrobun first and Tauri 2 if Electrobun fails it: package the server, start and stop it, show the workspace UI in the system web engine, build a signed installer on Windows and macOS and apply one update. Whether installers and updates ship is decided after the trial"
+        },
+        {
+          "id": "release-model-inventory",
+          "status": "blocked_on_product",
+          "meaning": "Before any installer or image ships models: every model and native library is listed with its upstream source, version, SHA-256 and licence, and the installer verifies that pinned inventory and never discovers a different set. Today the Docling receipt verifies hashes against a machine-local manifest, which proves consistency, not origin or distribution rights"
+        },
+        {
+          "id": "scale-reference-workload",
+          "status": "blocked_on_product",
+          "meaning": "SPEC §7: 10,000 items per workspace, with indexed search at p95 under 500 ms on a warm local index, measured on a deliberately chaotic corpus (duplicates, ambiguous names, malformed files, mixed PDF, Office and Markdown, deep folders, long histories). The reference machine, corpus and query set are fixed when first measured; only then do the numbers become release criteria"
         }
       ]
     }

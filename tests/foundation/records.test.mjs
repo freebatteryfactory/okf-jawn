@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { run } from '../../scripts/lib/process.mjs';
 import { acceptedFailureFields, derivedRecord, receiptGateStatuses } from '../../scripts/lib/receipts.mjs';
 import { premergeSteps } from '../../scripts/lib/gates.mjs';
+import { lanes } from '../../scripts/lib/lanes.mjs';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const read=file=>readFile(join(root,file),'utf8');
 const record=async()=>JSON.parse(await read('verification.json'));
@@ -270,6 +271,10 @@ test('the Docling gate accepts no failure, its PDF crate is the fork the owner d
  const words=group=>[...new Set(gates[group].map(gate=>gate.status))].sort();
  assert.deepEqual(words('construction'),['blocked_on_lanes']);
  assert.deepEqual(words('acceptance'),['blocked_on_product','not_run']);
+ // Every gate that names an owner names one that exists: a lane of scripts/lib/lanes.mjs, or the integration owner.
+ const owners=new Set(['integration-owner',...lanes.map(entry=>entry.name)]);
+ for(const gate of gates.construction)assert.ok(owners.has(gate.owner),`${gate.id}: owner ${gate.owner} is no lane of scripts/lib/lanes.mjs and not integration-owner`);
+ for(const gate of gates.acceptance)assert.ok(gate.owner===undefined||owners.has(gate.owner),`${gate.id}: owner ${gate.owner} is no lane of scripts/lib/lanes.mjs and not integration-owner`);
  // The ingest lane is told: its gate table lists both gates, and its rules name the harness functions as the reference.
  const lane=await read('crates/ingest/AGENTS.md');
  for(const id of ['ingest-locates-unlocated-items','ingest-flags-undecodable-text'])assert.ok(lane.includes(`| \`${id}\` | \`${construction[id].receipt}\` |`),`crates/ingest/AGENTS.md does not list ${id} with its command`);
