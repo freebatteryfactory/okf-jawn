@@ -16,12 +16,13 @@ use okf_jawn_contract::common::{PageRange, PageRequest, TextRange, Warning};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::{Event, EventKind, Receipt};
 use okf_jawn_contract::identity::{
-    ArtifactId, Digest, ItemId, JobId, MutationId, ProposalId, Revision, TenantId, Timestamp,
-    UploadId, WorkspaceId, WorkspacePath,
+    ArtifactId, Digest, ItemId, JobId, MutationId, ProposalId, PurgeId, Revision, TenantId,
+    Timestamp, UploadId, WorkspaceId, WorkspacePath,
 };
 use okf_jawn_contract::import::{Job, JobKind, JobState};
 use okf_jawn_contract::item::{Draft, ItemKind};
 use okf_jawn_contract::proposal::{Change, Comment, Proposal, ProposalStatus};
+use okf_jawn_contract::purge::PurgeTarget;
 use okf_jawn_contract::read::AssetRole;
 use okf_jawn_contract::review::{Confirmation, Review};
 use okf_jawn_contract::search::{GetGraphResponse, LinkDirection};
@@ -39,8 +40,8 @@ use okf_jawn_core::credentials::{
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::events::{EventLog, EventQuery, NewEvent};
 use okf_jawn_core::jobs::{
-    ArtifactKind, ArtifactRecord, ClaimedJob, JobCompletion, JobHandler, JobLease, JobQueue,
-    JobSpec, NewArtifact, NewJob, RecordStore,
+    ArtifactKind, ArtifactRecord, ClaimedJob, DerivedObject, JobCompletion, JobHandler, JobLease,
+    JobQueue, JobScope, JobSpec, NewArtifact, NewJob, NewPurge, RecordStore,
 };
 use okf_jawn_core::proposals::{CommentPage, ProposalFilter, ProposalStore};
 use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolved, token_hash};
@@ -49,7 +50,7 @@ use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, ChangeContext,
     CommitChanges, Committed, DiffQuery, LocalSource, LogQuery, NewWorkspace, ObjectInfo, Page,
     Promotion, Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
-    WorkspaceCatalog, WorkspaceUpdate, derive_item_id, derive_proposal_id,
+    WorkspaceCatalog, WorkspaceUpdate, derive_item_id, derive_proposal_id, derive_purge_id,
     workspace_with_permissions,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
@@ -305,11 +306,13 @@ fn job_specs() -> Result<Vec<JobSpec>, Box<dyn Error>> {
             upload_ids: vec![UploadId(Uuid::from_u128(9))],
             destination: Some(WorkspacePath::try_from("inbox".to_owned())?),
             apply_naming_rules: true,
+            settings: ConversionSettings::default(),
         },
         JobSpec::Redigest {
             item_id: ItemId(Uuid::from_u128(10)),
             base_revision: revision('a')?,
             settings: ConversionSettings::default(),
+            pages: Some(vec![PageRange { start: 5, end: 8 }]),
         },
         JobSpec::ExportWorkspace {
             revision: revision('a')?,
@@ -317,13 +320,23 @@ fn job_specs() -> Result<Vec<JobSpec>, Box<dyn Error>> {
         },
         JobSpec::BackupWorkspace,
         JobSpec::RestoreWorkspace {
-            artifact_id: ArtifactId(Uuid::from_u128(12)),
-            sha256: Some(digest('c')?),
+            upload_id: UploadId(Uuid::from_u128(12)),
+            archive: digest('c')?,
         },
         JobSpec::RebuildIndex,
         JobSpec::ExportView {
             item_id: ItemId(Uuid::from_u128(10)),
             revision: revision('a')?,
+        },
+        JobSpec::BackupInstallation,
+        JobSpec::PurgeWorkspace {
+            purge_id: PurgeId(Uuid::from_u128(13)),
+            workspace_id: WorkspaceId(Uuid::from_u128(1)),
+        },
+        JobSpec::PurgeItem {
+            purge_id: PurgeId(Uuid::from_u128(14)),
+            workspace_id: WorkspaceId(Uuid::from_u128(1)),
+            item_id: ItemId(Uuid::from_u128(10)),
         },
     ])
 }
@@ -350,13 +363,14 @@ async fn record_store_calls(
     receipt: Receipt,
 ) -> Result<Vec<Review>, ApiError> {
     let mutation_id = new_job.mutation_id;
-    let job = records.create_job(scope, new_job).await?;
-    records.get_job(scope, job.id).await?;
+    let job_scope = JobScope::Workspace(scope.clone());
+    let job = records.create_job(&job_scope, new_job).await?;
+    records.get_job(&job_scope, job.id).await?;
     let page = Page {
         cursor: None,
         limit: 50,
     };
-    records.list_jobs(scope, page).await?;
+    records.list_jobs(&job_scope, page).await?;
     if let Some(claimed) = records.claim_job(job.id).await? {
         records.update_progress(&claimed.lease, 40).await?;
         records
@@ -365,6 +379,7 @@ async fn record_store_calls(
                 revision: None,
                 item_ids: Vec::new(),
                 artifact: None,
+                restore: None,
                 outputs: Vec::new(),
                 warnings: Vec::new(),
             })
@@ -373,8 +388,8 @@ async fn record_store_calls(
             .fail_job(claimed.lease, "converter stopped".to_owned(), true)
             .await?;
     }
-    records.cancel_job(scope, mutation_id, job.id).await?;
-    records.retry_job(scope, mutation_id, job.id).await?;
+    records.cancel_job(&job_scope, mutation_id, job.id).await?;
+    records.retry_job(&job_scope, mutation_id, job.id).await?;
     records.pending_jobs().await?;
     records.expire_leases().await?;
     let item_id = review.source.item_id;
@@ -386,13 +401,57 @@ async fn record_store_calls(
     records.list_reviews(scope, item_id).await
 }
 
+/// What a purge request, its tenant job and a View binding's dataset do with the records.
+async fn purge_and_derived_calls(
+    records: &dyn RecordStore,
+    scope: &StorageScope,
+    mutation_id: MutationId,
+    target: PurgeTarget,
+    dataset: DerivedObject,
+) -> Result<Option<DerivedObject>, ApiError> {
+    let tenant = &scope.tenant_id;
+    let purge = records
+        .create_purge(
+            tenant,
+            mutation_id,
+            NewPurge {
+                id: derive_purge_id(mutation_id),
+                target,
+                initiator: initiator(),
+            },
+        )
+        .await?;
+    let purge = records.get_purge(tenant, purge.id).await?;
+    records.update_purge(tenant, purge).await?;
+    let tenant_scope = JobScope::Tenant(tenant.clone());
+    records
+        .list_jobs(
+            &tenant_scope,
+            Page {
+                cursor: None,
+                limit: 20,
+            },
+        )
+        .await?;
+    records.revision_mapping(scope, &dataset.revision).await?;
+    let recorded = records.record_derived_object(scope, dataset).await?;
+    records
+        .derived_object(
+            scope,
+            recorded.item_id,
+            &recorded.revision,
+            &recorded.digest,
+        )
+        .await
+}
+
 async fn job_runtime_calls(
     queue: &dyn JobQueue,
     handler: &dyn JobHandler,
     claimed: &ClaimedJob,
 ) -> Result<(), ApiError> {
     queue
-        .enqueue(claimed.scope.workspace_id, claimed.lease.job_id)
+        .enqueue(claimed.scope.clone(), claimed.lease.job_id)
         .await?;
     handler.handle(claimed).await
 }
@@ -544,7 +603,10 @@ async fn upload_calls(
     uploads
         .put_content(scope, slot.id, body, slot.expected_size)
         .await?;
-    uploads.complete(scope, slot.id, sha256).await
+    let complete = uploads.complete(scope, slot.id, sha256).await?;
+    uploads
+        .consume(scope, complete.id, JobId(Uuid::from_u128(7)))
+        .await
 }
 
 async fn event_calls(
@@ -649,13 +711,18 @@ async fn artifact_calls(
             revision: None,
             item_ids: Vec::new(),
             artifact: Some(record.id),
+            restore: None,
             outputs: vec![record.object.digest.clone()],
             warnings: Vec::new(),
         })
         .await?;
     let found = records.get_artifact(&claimed.scope, record.id).await?;
+    // A workspace artifact's bytes; no port opens a tenant artifact's bytes yet.
+    let JobScope::Workspace(workspace) = &found.scope else {
+        return Err(ApiError::new(ErrorCode::NotFound, "no tenant blob reader"));
+    };
     let read = blobs
-        .open(&claimed.scope, &found.object.digest, 0, found.object.size)
+        .open(workspace, &found.object.digest, 0, found.object.size)
         .await?;
     Ok(read.object)
 }
@@ -896,7 +963,10 @@ fn every_job_spec_reports_its_kind_and_survives_storage() -> TestResult {
             JobKind::BackupWorkspace,
             JobKind::RestoreWorkspace,
             JobKind::RebuildIndex,
-            JobKind::ExportView
+            JobKind::ExportView,
+            JobKind::BackupInstallation,
+            JobKind::PurgeWorkspace,
+            JobKind::PurgeItem
         ]
     ));
     for spec in &specs {
@@ -919,15 +989,17 @@ fn a_commit_is_built_from_a_claimed_job_alone() -> TestResult {
         upload_ids: vec![UploadId(Uuid::from_u128(9))],
         destination: None,
         apply_naming_rules: true,
+        settings: ConversionSettings::default(),
     };
     let mutation_id = MutationId(Uuid::from_u128(5));
     let job_id = JobId(Uuid::from_u128(7));
     let claimed = ClaimedJob {
-        scope: scope.clone(),
+        scope: JobScope::Workspace(scope.clone()),
         lease: JobLease {
             job_id,
             token: "claim-1".to_owned(),
             attempt: 1,
+            expires_at: instant("2026-10-08T12:05:00.000Z")?,
         },
         job: Job {
             id: job_id,
@@ -961,6 +1033,7 @@ fn a_commit_is_built_from_a_claimed_job_alone() -> TestResult {
     );
     assert!(type_checked(&record_store_calls));
     assert!(type_checked(&job_runtime_calls));
+    assert!(type_checked(&purge_and_derived_calls));
     Ok(())
 }
 
@@ -1084,6 +1157,10 @@ fn an_artifact_record_yields_the_wire_download_for_its_transport() -> TestResult
     let workspace = WorkspaceId(Uuid::from_u128(1));
     let record = ArtifactRecord {
         id: ArtifactId(Uuid::from_u128(12)),
+        scope: JobScope::Workspace(StorageScope {
+            tenant_id: TenantId::try_from("local".to_owned())?,
+            workspace_id: workspace,
+        }),
         kind: ArtifactKind::WorkspaceBackup,
         object: ObjectInfo {
             digest: digest('c')?,
@@ -1100,7 +1177,7 @@ fn an_artifact_record_yields_the_wire_download_for_its_transport() -> TestResult
         .path
         .replace("{workspace_id}", &workspace.0.to_string())
         .replace("{artifact_id}", &record.id.0.to_string());
-    let download = record.download(workspace);
+    let download = record.download();
     assert_eq!(download.download_path, expected_path);
     assert_eq!(download.kind, ArtifactKind::WorkspaceBackup);
     assert_eq!(download.artifact_id, record.id);

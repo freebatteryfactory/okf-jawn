@@ -17,7 +17,8 @@ use okf_jawn_contract::{
     error::ApiError,
     history::{BlameResponse, DiffResponse, LogResponse},
     identity::{
-        Digest, ItemId, MutationId, ProposalId, Revision, TenantId, WorkspaceId, WorkspacePath,
+        Digest, ItemId, MutationId, ProposalId, PurgeId, Revision, TenantId, WorkspaceId,
+        WorkspacePath,
     },
     item::{ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition},
     proposal::Change,
@@ -725,6 +726,15 @@ pub fn derive_item_id(mutation_id: MutationId, ordinal: u32) -> ItemId {
 #[must_use]
 pub fn derive_proposal_id(mutation_id: MutationId) -> ProposalId {
     ProposalId(derived_uuid(b"proposal", mutation_id, 0))
+}
+
+/// The identity of the purge recorded under one mutation.
+///
+/// Derived, not allocated, so the tenant job that carries the purge out can name it in its
+/// specification and both are written in one transaction (`RecordStore::create_purge`).
+#[must_use]
+pub fn derive_purge_id(mutation_id: MutationId) -> PurgeId {
+    PurgeId(derived_uuid(b"purge", mutation_id, 0))
 }
 
 /// A version-8 UUID from SHA-256 of a label, a mutation identity and a count.

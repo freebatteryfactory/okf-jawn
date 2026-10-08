@@ -4,7 +4,7 @@
 //! hash) so the import that follows preserves the occurrence. Opening a slot takes
 //! `MutationId`; a repeated id opens nothing and returns the prior slot.
 
-use okf_jawn_contract::identity::{Digest, MutationId, UploadId};
+use okf_jawn_contract::identity::{Digest, JobId, MutationId, UploadId};
 
 use crate::ports::PortFuture;
 use crate::storage::{ByteReader, ObjectInfo, Provenance, StorageScope};
@@ -45,6 +45,9 @@ pub struct UploadRecord {
     pub received_bytes: u64,
     /// Retained object identity; present exactly when the upload is complete.
     pub object: Option<ObjectInfo>,
+    /// The job that took the upload as its input (an import or a restore); an upload is
+    /// consumed once.
+    pub consumed_by: Option<JobId>,
 }
 
 /// Durable upload registration and completion; storage owns the implementation.
@@ -80,5 +83,16 @@ pub trait UploadStore: Send + Sync {
         scope: &'a StorageScope,
         upload: UploadId,
         sha256: Digest,
+    ) -> PortFuture<'a, UploadRecord>;
+    /// Mark a complete upload as the input of `job`.
+    ///
+    /// Consuming it again for the same job changes nothing and returns the same record; a
+    /// second consumer is refused with `Conflict`, and an incomplete upload with
+    /// `InvalidInput`.
+    fn consume<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        upload: UploadId,
+        job: JobId,
     ) -> PortFuture<'a, UploadRecord>;
 }
