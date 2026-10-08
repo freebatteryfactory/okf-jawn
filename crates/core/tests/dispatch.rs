@@ -146,7 +146,8 @@ fn item_document(text: &str) -> Value {
             "type_name": "note",
             "kind": "note",
             "revision": REVISION,
-            "lifecycle": "active"
+            "status": "stable",
+            "archived": false
         },
         "body": text,
         "properties": {}
@@ -176,7 +177,7 @@ fn created_workspace() -> Value {
         "name": "n",
         "description": "d",
         "head": REVISION,
-        "created_at": "2026-01-01T00:00:00Z",
+        "created_at": "2026-01-01T00:00:00.000Z",
         "permissions": ["admin"]
     })
 }
@@ -210,9 +211,11 @@ fn proposal_described(description: &str) -> Value {
         "title": "t",
         "description": description,
         "changes": [],
+        "kind": "content",
         "status": "open",
         "created_by": "alice",
-        "created_at": "2026-01-01T00:00:00Z"
+        "created_via": "local_owner",
+        "created_at": "2026-01-01T00:00:00.000Z"
     })
 }
 
@@ -254,7 +257,7 @@ fn issued_connector() -> Value {
             "label": "agent",
             "workspace_ids": [WORKSPACE_A],
             "permissions": ["read"],
-            "created_at": "2026-01-01T00:00:00Z"
+            "created_at": "2026-01-01T00:00:00.000Z"
         },
         "secret": "super-secret-value"
     })
@@ -296,6 +299,8 @@ fn presented(workspace_id: &str) -> Value {
     json!({
         "view": view,
         "resolved_bindings": bindings,
+        "charts": [],
+        "as_of": "2026-01-01T00:00:00.000Z",
         "warnings": [],
         "receipt_id": "ffffffff-ffff-4fff-8fff-ffffffffffff"
     })
@@ -310,7 +315,7 @@ fn draft_exchange(operation: OperationName, key: &str) -> Result<(Value, Value),
         "editor": "alice",
         "base_revision": REVISION,
         "content_digest": "a".repeat(64),
-        "saved_at": "2026-01-01T00:00:00Z"
+        "saved_at": "2026-01-01T00:00:00.000Z"
     });
     let committed = json!({
         "revision": REVISION,
@@ -1240,7 +1245,7 @@ async fn an_omitted_optional_field_and_an_explicit_null_replay_each_other() -> T
             "id": "comment-1",
             "author": "alice",
             "text": "hello",
-            "created_at": "2026-01-01T00:00:00Z"
+            "created_at": "2026-01-01T00:00:00.000Z"
         }),
     )?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;

@@ -15,13 +15,16 @@ use okf_jawn_contract::{
     },
     import::{Job, JobKind, ListJobsResponse},
     review::Review,
-    workspace::DownloadArtifact,
+    workspace::{ArtifactScope, DownloadArtifact},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::conversion::ConversionSettings;
 use crate::ports::PortFuture;
 use crate::storage::{ObjectInfo, Page, Provenance, StorageScope};
+
+/// What a retained artifact is; the contract's, so the record and the wire agree.
+pub use okf_jawn_contract::workspace::ArtifactKind;
 
 /// What a job must do: the inputs of the request that started it, with selectors resolved.
 ///
@@ -131,17 +134,6 @@ pub struct JobCompletion {
     pub outputs: Vec<Digest>,
     /// Non-fatal issues recorded during the work.
     pub warnings: Vec<Warning>,
-}
-
-/// What a retained artifact is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArtifactKind {
-    /// A portable export of a workspace.
-    Export,
-    /// A full backup of content, retained objects and application records.
-    Backup,
-    /// An export of one View.
-    ViewExport,
 }
 
 /// An artifact a job produced, recorded once its bytes are retained in the blob store.
@@ -290,14 +282,20 @@ pub trait JobHandler: Send + Sync {
 }
 
 impl ArtifactRecord {
-    /// The wire form shown on a job, with the `download_artifact` transport path.
+    /// The wire form shown on a job, with the path of the transport that serves its kind:
+    /// `download_artifact` for a workspace artifact, `download_tenant_artifact` for a tenant one.
     #[must_use]
     pub fn download(&self, workspace: WorkspaceId) -> DownloadArtifact {
+        let download_path = match self.kind.scope() {
+            ArtifactScope::Workspace => artifact_download_path(workspace, self.id),
+            ArtifactScope::Tenant => tenant_artifact_download_path(self.id),
+        };
         DownloadArtifact {
             artifact_id: self.id,
+            kind: self.kind,
             sha256: self.object.digest.clone(),
             size: self.object.size.to_string(),
-            download_path: artifact_download_path(workspace, self.id),
+            download_path,
         }
     }
 }
@@ -324,4 +322,10 @@ impl JobSpec {
 #[must_use]
 pub fn artifact_download_path(workspace: WorkspaceId, artifact: ArtifactId) -> String {
     format!("/api/workspaces/{}/artifacts/{}", workspace.0, artifact.0)
+}
+
+/// The application-relative path of the `download_tenant_artifact` transport for one artifact.
+#[must_use]
+pub fn tenant_artifact_download_path(artifact: ArtifactId) -> String {
+    format!("/api/artifacts/{}", artifact.0)
 }
