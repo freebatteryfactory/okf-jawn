@@ -11,7 +11,7 @@
   },
   {
     "auth": "principal",
-    "description": "Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission.",
+    "description": "Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission. Never serves a backup artifact's object.",
     "id": "download_object",
     "method": "get",
     "path": "/api/workspaces/{workspace_id}/items/{item_id}/revisions/{revision}/objects/{digest}",
@@ -21,10 +21,20 @@
   },
   {
     "auth": "principal",
-    "description": "Download a completed authorized export or backup.",
+    "description": "Download a completed workspace export, View export or workspace archive. The artifact kind decides the permission and the routes (ArtifactKind::download_permission and download_routes); an archive is served only to a workspace administrator in a human browser session.",
     "id": "download_artifact",
     "method": "get",
     "path": "/api/workspaces/{workspace_id}/artifacts/{artifact_id}",
+    "request_media": null,
+    "response_media": "application/zip",
+    "status": 200
+  },
+  {
+    "auth": "principal",
+    "description": "Download a completed installation archive; only a tenant administrator in a human browser session.",
+    "id": "download_tenant_artifact",
+    "method": "get",
+    "path": "/api/artifacts/{artifact_id}",
     "request_media": null,
     "response_media": "application/zip",
     "status": 200

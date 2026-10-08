@@ -64,8 +64,13 @@
           "type": "string"
         },
         {
-          "const": "extraction",
-          "description": "Extraction has warnings or failed.",
+          "const": "unprocessed",
+          "description": "A source whose conversion is partial, failed or unsupported; action `redigest_item`.",
+          "type": "string"
+        },
+        {
+          "const": "extraction_warnings",
+          "description": "A completed source whose conversion recorded warnings; action `read_item`.",
           "type": "string"
         },
         {
@@ -76,6 +81,16 @@
         {
           "const": "instruction_like",
           "description": "Possible instruction-like source text; advisory only.",
+          "type": "string"
+        },
+        {
+          "const": "invalidated",
+          "description": "A saved View or a citation refers to purged content; action `get_view`.",
+          "type": "string"
+        },
+        {
+          "const": "unparseable_header",
+          "description": "An imported file's header does not parse; its bytes are kept and nothing is blocked.\nAction `get_item`.",
           "type": "string"
         }
       ]
@@ -114,6 +129,21 @@
           "type": "string"
         },
         {
+          "const": "unarchive_workspace",
+          "description": "The `unarchive_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "purge_workspace",
+          "description": "The `purge_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_purge",
+          "description": "The `get_purge` operation.",
+          "type": "string"
+        },
+        {
           "const": "export_workspace",
           "description": "The `export_workspace` operation.",
           "type": "string"
@@ -126,6 +156,11 @@
         {
           "const": "restore_workspace",
           "description": "The `restore_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "backup_installation",
+          "description": "The `backup_installation` operation.",
           "type": "string"
         },
         {
@@ -171,6 +206,11 @@
         {
           "const": "delete_item",
           "description": "The `delete_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "purge_item",
+          "description": "The `purge_item` operation.",
           "type": "string"
         },
         {
@@ -319,6 +359,16 @@
           "type": "string"
         },
         {
+          "const": "get_tenant_job",
+          "description": "The `get_tenant_job` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_tenant_jobs",
+          "description": "The `list_tenant_jobs` operation.",
+          "type": "string"
+        },
+        {
           "const": "retry_job",
           "description": "The `retry_job` operation.",
           "type": "string"
@@ -401,6 +451,11 @@
         {
           "const": "list_events",
           "description": "The `list_events` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_tenant_events",
+          "description": "The `list_tenant_events` operation.",
           "type": "string"
         },
         {

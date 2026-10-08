@@ -1,0 +1,23 @@
+{
+  "$defs": {
+    "JobId": {
+      "description": "Durable background work identity retained across retries.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read one installation-level job: an installation backup or a purge.",
+  "properties": {
+    "job_id": {
+      "$ref": "#/$defs/JobId",
+      "description": "Job identity."
+    }
+  },
+  "required": [
+    "job_id"
+  ],
+  "title": "GetTenantJobRequest",
+  "type": "object"
+}

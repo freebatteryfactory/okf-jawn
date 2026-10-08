@@ -25,8 +25,8 @@
           "description": "Drafted item."
         },
         "saved_at": {
-          "description": "RFC 3339 time of the latest save.",
-          "type": "string"
+          "$ref": "#/$defs/Timestamp",
+          "description": "Time of the latest save."
         }
       },
       "required": [
@@ -45,6 +45,11 @@
     },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
       "type": "string"
     }
   },

@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-list_tenant_jobs 1  "list_tenant_jobs " 
+.SH NAME
+okf\-jawn\-list_tenant_jobs \- List installation\-level jobs, newest first, with their artifacts.
+.SH SYNOPSIS
+\fBokf\-jawn list_tenant_jobs\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+List installation\-level jobs, newest first, with their artifacts.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

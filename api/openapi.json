@@ -180,7 +180,7 @@
       },
       "ArchiveWorkspaceRequest": {
         "additionalProperties": false,
-        "description": "Archive the workspace without deleting retained content.",
+        "description": "Archive the workspace without deleting retained content.\n\nWhile a workspace is archived, an operation that would change its content or open work on\nit (a commit, a draft, a proposal, an upload, an import or redigest) is refused as\n`conflict`; reads, export, backup, `unarchive_workspace` and purge are allowed.",
         "properties": {
           "base_revision": {
             "$ref": "#/components/schemas/Revision",
@@ -206,6 +206,46 @@
         "description": "Identity of a retained export or backup artifact.",
         "format": "uuid",
         "type": "string"
+      },
+      "ArtifactKind": {
+        "description": "What a retained artifact is.",
+        "oneOf": [
+          {
+            "const": "export",
+            "description": "A portable export of a workspace.",
+            "type": "string"
+          },
+          {
+            "const": "workspace_backup",
+            "description": "A workspace archive.",
+            "type": "string"
+          },
+          {
+            "const": "installation_backup",
+            "description": "An installation archive (hosted: one tenant's).",
+            "type": "string"
+          },
+          {
+            "const": "view_export",
+            "description": "An export of one View.",
+            "type": "string"
+          }
+        ]
+      },
+      "AssetRole": {
+        "description": "What a retained image is.",
+        "oneOf": [
+          {
+            "const": "page_image",
+            "description": "A render of one whole page (docling page image).",
+            "type": "string"
+          },
+          {
+            "const": "picture",
+            "description": "A picture item's own image (docling `PictureItem` image).",
+            "type": "string"
+          }
+        ]
       },
       "At": {
         "description": "A requested version selector; resolved responses contain a `Revision` instead.",
@@ -309,8 +349,13 @@
             "type": "string"
           },
           {
-            "const": "extraction",
-            "description": "Extraction has warnings or failed.",
+            "const": "unprocessed",
+            "description": "A source whose conversion is partial, failed or unsupported; action `redigest_item`.",
+            "type": "string"
+          },
+          {
+            "const": "extraction_warnings",
+            "description": "A completed source whose conversion recorded warnings; action `read_item`.",
             "type": "string"
           },
           {
@@ -322,12 +367,36 @@
             "const": "instruction_like",
             "description": "Possible instruction-like source text; advisory only.",
             "type": "string"
+          },
+          {
+            "const": "invalidated",
+            "description": "A saved View or a citation refers to purged content; action `get_view`.",
+            "type": "string"
+          },
+          {
+            "const": "unparseable_header",
+            "description": "An imported file's header does not parse; its bytes are kept and nothing is blocked.\nAction `get_item`.",
+            "type": "string"
           }
         ]
       },
+      "BackupInstallationRequest": {
+        "additionalProperties": false,
+        "description": "Start an installation archive: identities, tenant grants, connector records without\nsecrets, purge records and tenant events; no workspace content.",
+        "properties": {
+          "idempotency_key": {
+            "$ref": "#/components/schemas/IdempotencyKey",
+            "description": "Retry identity."
+          }
+        },
+        "required": [
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
       "BackupWorkspaceRequest": {
         "additionalProperties": false,
-        "description": "Back up content plus application records; distinct from portable export.",
+        "description": "Back up one workspace into one self-contained archive; distinct from portable export.",
         "properties": {
           "idempotency_key": {
             "$ref": "#/components/schemas/IdempotencyKey",
@@ -421,6 +490,44 @@
         ],
         "type": "object"
       },
+      "BoundingBox": {
+        "additionalProperties": false,
+        "description": "Docling's bounding box, copied as the converter gave it (rounded to two decimals).",
+        "properties": {
+          "b": {
+            "description": "Bottom edge.",
+            "format": "double",
+            "type": "number"
+          },
+          "coord_origin": {
+            "$ref": "#/components/schemas/CoordOrigin",
+            "description": "Corner `t` and `b` are measured from."
+          },
+          "l": {
+            "description": "Left edge.",
+            "format": "double",
+            "type": "number"
+          },
+          "r": {
+            "description": "Right edge.",
+            "format": "double",
+            "type": "number"
+          },
+          "t": {
+            "description": "Top edge.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "l",
+          "t",
+          "r",
+          "b",
+          "coord_origin"
+        ],
+        "type": "object"
+      },
       "CancelJobRequest": {
         "additionalProperties": false,
         "description": "Cancel pending or running work without discarding the uploaded original.",
@@ -506,30 +613,30 @@
       },
       "CellRange": {
         "additionalProperties": false,
-        "description": "A one-based rectangular spreadsheet selection.",
+        "description": "A one-based inclusive rectangular spreadsheet selection; the XLSX source locator.",
         "properties": {
           "column_end": {
             "description": "Last column, inclusive.",
             "format": "uint32",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           },
           "column_start": {
-            "description": "First column, inclusive.",
+            "description": "First column, inclusive, starting at one.",
             "format": "uint32",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           },
           "row_end": {
             "description": "Last row, inclusive.",
             "format": "uint32",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           },
           "row_start": {
-            "description": "First row, inclusive.",
+            "description": "First row, inclusive, starting at one.",
             "format": "uint32",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           },
           "sheet": {
@@ -656,6 +763,193 @@
               "item_id"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Propose the complete text of an unprocessed source.",
+            "properties": {
+              "based_on": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Digest the agent saw; absent when the source has none. A different current digest is a conflict."
+              },
+              "item_id": {
+                "$ref": "#/components/schemas/ItemId",
+                "description": "Source item."
+              },
+              "kind": {
+                "const": "supply_extraction",
+                "type": "string"
+              },
+              "markdown": {
+                "description": "The complete proposed text, Markdown.",
+                "type": "string"
+              },
+              "pages": {
+                "description": "Pages the text covers, as the agent claims; empty for the whole.",
+                "items": {
+                  "$ref": "#/components/schemas/PageRange"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "item_id",
+              "markdown"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ChartFailure": {
+        "description": "Why one chart cannot be drawn.",
+        "oneOf": [
+          {
+            "const": "invalid_spec",
+            "description": "The Vega-Lite specification fails server validation.",
+            "type": "string"
+          },
+          {
+            "const": "unknown_binding",
+            "description": "The chart reads a dataset name no binding declares.",
+            "type": "string"
+          },
+          {
+            "const": "dataset_unavailable",
+            "description": "A binding's data could not be resolved or materialized.",
+            "type": "string"
+          },
+          {
+            "const": "invalidated",
+            "description": "A binding cites purged content.",
+            "type": "string"
+          },
+          {
+            "const": "too_large",
+            "description": "The dataset exceeds the row or byte limit.",
+            "type": "string"
+          }
+        ]
+      },
+      "ChartRef": {
+        "description": "Which chart of a View a result is about.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The View's own `spec`, for `vega_lite` grammar.",
+            "properties": {
+              "kind": {
+                "const": "spec",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A named entry of `ViewDocument::charts`, for `json_render` grammar.",
+            "properties": {
+              "kind": {
+                "const": "named",
+                "type": "string"
+              },
+              "name": {
+                "description": "The key in `charts`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ChartResult": {
+        "additionalProperties": false,
+        "description": "One chart and its state.",
+        "properties": {
+          "chart": {
+            "$ref": "#/components/schemas/ChartRef",
+            "description": "Which chart."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ChartStatus",
+            "description": "Its state."
+          }
+        },
+        "required": [
+          "chart",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ChartStatus": {
+        "description": "The state of one chart in a present or resolve result.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Every dataset it reads is materialized.",
+            "properties": {
+              "bindings": {
+                "description": "Binding names it reads.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "ready",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "bindings"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "It cannot be drawn; the View's text and other charts are unaffected.",
+            "properties": {
+              "binding": {
+                "description": "The binding at fault, when one is.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "description": "Safe explanation for the chart's own alert.",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/ChartFailure",
+                "description": "Typed cause."
+              },
+              "status": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason",
+              "message"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -679,6 +973,36 @@
           }
         ]
       },
+      "ColumnKind": {
+        "description": "The data kind of one column.",
+        "oneOf": [
+          {
+            "const": "string",
+            "description": "Text.",
+            "type": "string"
+          },
+          {
+            "const": "number",
+            "description": "A real number.",
+            "type": "string"
+          },
+          {
+            "const": "integer",
+            "description": "A whole number.",
+            "type": "string"
+          },
+          {
+            "const": "boolean",
+            "description": "True or false.",
+            "type": "string"
+          },
+          {
+            "const": "date_time",
+            "description": "A UTC instant in the canonical `Timestamp` spelling; an ambiguous document date stays a\n`string` (SPEC section 3).",
+            "type": "string"
+          }
+        ]
+      },
       "Comment": {
         "additionalProperties": false,
         "description": "A server-attributed discussion entry.",
@@ -688,12 +1012,23 @@
             "type": "string"
           },
           "created_at": {
-            "description": "RFC 3339 timestamp.",
-            "type": "string"
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "Creation time."
           },
           "id": {
             "description": "Comment identity.",
             "type": "string"
+          },
+          "invalidated_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PurgeId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The purge that invalidated the comment's `source`, whose stored path was scrubbed."
           },
           "text": {
             "description": "Discussion text.",
@@ -717,8 +1052,8 @@
             "type": "string"
           },
           "committed_at": {
-            "description": "RFC 3339 commit timestamp.",
-            "type": "string"
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "Commit time, converted to UTC from the commit's own offset."
           },
           "message": {
             "description": "Commit message.",
@@ -812,8 +1147,8 @@
         "description": "A short-lived challenge; issuance alone is not a review.",
         "properties": {
           "expires_at": {
-            "description": "RFC 3339 expiration.",
-            "type": "string"
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "Expiration."
           },
           "id": {
             "$ref": "#/components/schemas/ConfirmationId",
@@ -903,8 +1238,8 @@
             "description": "Stable connector identity."
           },
           "created_at": {
-            "description": "RFC 3339 issue time.",
-            "type": "string"
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "Issue time."
           },
           "label": {
             "description": "Owner-chosen name.",
@@ -918,11 +1253,15 @@
             "type": "array"
           },
           "revoked_at": {
-            "description": "RFC 3339 revocation time; a revoked connector authenticates nothing.",
-            "type": [
-              "string",
-              "null"
-            ]
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Revocation time; a revoked connector authenticates nothing."
           },
           "workspace_ids": {
             "description": "Workspaces the connector may access.",
@@ -946,10 +1285,279 @@
         "format": "uuid",
         "type": "string"
       },
+      "ConversionOutcome": {
+        "description": "What the converter did; supplied text and corrections never change it.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Accepted; the card was committed before conversion and shows no text.",
+            "properties": {
+              "status": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Docling's `Success`.",
+            "properties": {
+              "status": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Docling's `PartialSuccess`, or a windowed conversion with windows not converted.",
+            "properties": {
+              "coverage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PageCoverage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Pages converted and not converted; absent for a format docling converts whole."
+              },
+              "issues": {
+                "description": "Why it is partial, as the converter recorded it.",
+                "items": {
+                  "$ref": "#/components/schemas/ConverterIssue"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "partial",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "issues"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "No document was produced.",
+            "properties": {
+              "issues": {
+                "description": "What the converter recorded, when it recorded anything.",
+                "items": {
+                  "$ref": "#/components/schemas/ConverterIssue"
+                },
+                "type": "array"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/FailureReason",
+                "description": "Typed cause; never the converter's raw text alone."
+              },
+              "status": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason",
+              "issues"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "No converter handles this format (docling `UnknownFormat` or `UnsupportedFormat`).",
+            "properties": {
+              "status": {
+                "const": "unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ConversionSettings": {
+        "additionalProperties": false,
+        "description": "Converter settings; part of the identity of the digest they produce.\n\n`Default` is a Rust convenience for a deployment's defaults, never a serde default: every\nfield is required on the wire.",
+        "properties": {
+          "ocr": {
+            "$ref": "#/components/schemas/OcrPolicy",
+            "description": "When recognition runs."
+          },
+          "ocr_language": {
+            "description": "Docling `ocr_lang`, such as `en` or `ch`; absent uses docling's default (`en`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "page_image_dpi": {
+            "description": "Render resolution; docling `images_scale` = this / 72. At most 144, docling's own render\nresolution: a higher scale only upsamples that render and adds no detail.",
+            "format": "uint16",
+            "maximum": 144,
+            "minimum": 36,
+            "type": "integer"
+          },
+          "page_images": {
+            "description": "Keep a render of every page (docling `generate_page_images`).",
+            "type": "boolean"
+          },
+          "table_structure": {
+            "description": "Reconstruct table structure with the model (docling `no_table_former` off).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ocr",
+          "table_structure",
+          "page_images",
+          "page_image_dpi"
+        ],
+        "type": "object"
+      },
+      "ConverterIdentity": {
+        "additionalProperties": false,
+        "description": "The converter that produced a digest; part of the digest's identity (SPEC section 4).",
+        "properties": {
+          "models": {
+            "description": "Model files the pipeline loads, hashed once when the worker starts; empty for formats\nthat load none.",
+            "items": {
+              "$ref": "#/components/schemas/ModelIdentity"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "`docling`.",
+            "type": "string"
+          },
+          "packages": {
+            "description": "The converter crates as Cargo.lock resolves them; a patched fork is visible here.\nGenerated from Cargo.lock by xtask into `generated/converter/packages.json`, so\ngen-check holds it to the lock.",
+            "items": {
+              "$ref": "#/components/schemas/ConverterPackage"
+            },
+            "type": "array"
+          },
+          "page_window": {
+            "description": "Pages per conversion window; absent when the document was converted whole.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "settings": {
+            "$ref": "#/components/schemas/ConversionSettings",
+            "description": "Settings applied."
+          },
+          "version": {
+            "description": "The docling crate version, such as `1.93.5`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "packages",
+          "settings",
+          "models"
+        ],
+        "type": "object"
+      },
+      "ConverterIssue": {
+        "additionalProperties": false,
+        "description": "Docling's `ErrorItem`, with its own field names.",
+        "properties": {
+          "component_type": {
+            "description": "`document_backend`, `model`, `doc_assembler` or `user_input`.",
+            "type": "string"
+          },
+          "error_message": {
+            "description": "The converter's message, with every worker filesystem path reduced to its file name.",
+            "type": "string"
+          },
+          "module_name": {
+            "description": "Stage that recorded it, such as `pipeline`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "component_type",
+          "module_name",
+          "error_message"
+        ],
+        "type": "object"
+      },
+      "ConverterPackage": {
+        "additionalProperties": false,
+        "description": "One converter crate, as Cargo.lock records it.",
+        "properties": {
+          "name": {
+            "description": "Crate name, such as `docling-pdf`.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Cargo.lock `source`, such as `git+https://github.com/Heyoub/docling.rs?rev=...`.",
+            "type": "string"
+          },
+          "version": {
+            "description": "Crate version.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "source"
+        ],
+        "type": "object"
+      },
+      "CoordOrigin": {
+        "description": "Docling's `coord_origin`: which corner `t` and `b` are measured from.",
+        "oneOf": [
+          {
+            "const": "top_left",
+            "description": "Docling `TOPLEFT`.",
+            "type": "string"
+          },
+          {
+            "const": "bottom_left",
+            "description": "Docling `BOTTOMLEFT`.",
+            "type": "string"
+          }
+        ]
+      },
       "CorrectDigestRequest": {
         "additionalProperties": false,
         "description": "Record human corrections separately from the generated extraction.",
         "properties": {
+          "adopts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProposalId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Keep the accepted agent-supplied text of this proposal over a later complete\nconversion: `corrected_markdown` must equal that text (compared by digest), and the\nresult records who kept it instead of a correction."
+          },
           "base_revision": {
             "$ref": "#/components/schemas/Revision",
             "description": "Exact revision on which this change is based; stale writes conflict."
@@ -1267,6 +1875,108 @@
         ],
         "type": "object"
       },
+      "Dataset": {
+        "additionalProperties": false,
+        "description": "A typed table resolved from cited application data; its canonical JSON bytes are the blob\n`ViewBinding::materialized` names.",
+        "properties": {
+          "columns": {
+            "description": "Columns, in order.",
+            "items": {
+              "$ref": "#/components/schemas/DatasetColumn"
+            },
+            "maxItems": 1024,
+            "minItems": 1,
+            "type": "array"
+          },
+          "rows": {
+            "description": "Rows; each has exactly one value per column.",
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/DatasetValue"
+              },
+              "type": "array"
+            },
+            "maxItems": 100000,
+            "type": "array"
+          },
+          "schema_version": {
+            "description": "Format version, currently 1.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SourceReference",
+            "description": "The exact citation the rows were read from."
+          },
+          "text_origin": {
+            "$ref": "#/components/schemas/TextOrigin",
+            "description": "Whose text the values were read from."
+          },
+          "warnings": {
+            "description": "Extraction warnings of the source that bear on these values, such as\n`cell_values_only` for a dataset read from spreadsheet cells.",
+            "items": {
+              "$ref": "#/components/schemas/ExtractionWarning"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "source",
+          "text_origin",
+          "columns",
+          "rows"
+        ],
+        "type": "object"
+      },
+      "DatasetColumn": {
+        "additionalProperties": false,
+        "description": "One column of a dataset.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ColumnKind",
+            "description": "Data kind."
+          },
+          "name": {
+            "description": "Field name a chart encodes.",
+            "type": "string"
+          },
+          "unit": {
+            "description": "Unit, such as `EUR` or `kg`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "DatasetValue": {
+        "anyOf": [
+          {
+            "description": "Missing.",
+            "type": "null"
+          },
+          {
+            "description": "A boolean.",
+            "type": "boolean"
+          },
+          {
+            "description": "A number, kept exact.",
+            "type": "number"
+          },
+          {
+            "description": "Text, or a `Timestamp` for a `date_time` column.",
+            "type": "string"
+          }
+        ],
+        "description": "One cell: a JSON scalar of its column's kind, or null. Untagged because a tag per cell would\nmultiply the dataset's size; the only untagged enum on the wire."
+      },
       "DateOrder": {
         "description": "Declared date interpretation; ambiguous input is not guessed.",
         "oneOf": [
@@ -1508,8 +2218,12 @@
             "description": "Stable downloadable artifact."
           },
           "download_path": {
-            "description": "Application-relative authorized download path.",
+            "description": "Application-relative authorized download path:\n`/api/workspaces/{workspace_id}/artifacts/{artifact_id}` for a workspace artifact,\n`/api/artifacts/{artifact_id}` for a tenant artifact.",
             "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ArtifactKind",
+            "description": "What the artifact is; it decides the download permission and routes."
           },
           "sha256": {
             "$ref": "#/components/schemas/Digest",
@@ -1522,6 +2236,7 @@
         },
         "required": [
           "artifact_id",
+          "kind",
           "sha256",
           "size",
           "download_path"
@@ -1549,8 +2264,8 @@
             "description": "Drafted item."
           },
           "saved_at": {
-            "description": "RFC 3339 time of the latest save.",
-            "type": "string"
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "Time of the latest save."
           }
         },
         "required": [
@@ -1564,7 +2279,7 @@
       },
       "DraftConflictItem": {
         "additionalProperties": false,
-        "description": "One snapshotted item whose committed content moved after its draft's base.",
+        "description": "One snapshotted item whose committed content moved after its draft's base.\n\nThe editor resolves it per item, with `changes` as the diff: keep mine is `save_draft` with\n`base_revision` = `current_revision`, then `commit_items`; take theirs is `discard_draft`.",
         "properties": {
           "changes": {
             "description": "The item's committed changes from `draft_base` to `current_revision`.",
@@ -1626,7 +2341,7 @@
       },
       "DuplicateObservation": {
         "additionalProperties": false,
-        "description": "One path observed as a duplicate during rename preview.",
+        "description": "One path observed as a duplicate during rename preview, including paths that differ only in\ncase or Unicode normalization (`WorkspacePath::collision_key`).",
         "properties": {
           "item_ids": {
             "description": "Item identities that collide on that path.",
@@ -1815,13 +2530,69 @@
               "operation"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The named revision was removed or rewritten by a purge; the code is `not_found`.",
+            "properties": {
+              "kind": {
+                "const": "invalidated",
+                "type": "string"
+              },
+              "purge_id": {
+                "$ref": "#/components/schemas/PurgeId",
+                "description": "The purge that removed or rewrote it."
+              },
+              "replacement": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Revision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "After an item purge, the rewritten revision to re-pin to; absent after a\nworkspace purge."
+              }
+            },
+            "required": [
+              "kind",
+              "purge_id"
+            ],
+            "type": "object"
           }
         ]
       },
       "Event": {
         "additionalProperties": false,
-        "description": "A resumable workspace change notification, not canonical content.",
+        "description": "A resumable change notification, not canonical content.\n\nA tenant-level event (a sign-in, a connector issued or revoked, a refusal outside a\nworkspace) has no `workspace_id`. Security events carry their `actor`.",
         "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EventActor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who caused it; present on security events."
+          },
+          "at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When the store recorded it."
+          },
+          "connector_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectorId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Affected connector."
+          },
           "id": {
             "description": "Opaque monotonic event cursor.",
             "type": "string"
@@ -1852,6 +2623,17 @@
             "$ref": "#/components/schemas/EventKind",
             "description": "What changed."
           },
+          "operation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperationName"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The refused operation of a `permission_denied` event."
+          },
           "revision": {
             "anyOf": [
               {
@@ -1864,14 +2646,47 @@
             "description": "Content revision when applicable."
           },
           "workspace_id": {
-            "$ref": "#/components/schemas/WorkspaceId",
-            "description": "Workspace whose permissions and storage scope apply."
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Workspace whose permissions and storage scope apply; absent for a tenant-level event."
           }
         },
         "required": [
           "id",
-          "workspace_id",
-          "kind"
+          "kind",
+          "at"
+        ],
+        "type": "object"
+      },
+      "EventActor": {
+        "additionalProperties": false,
+        "description": "Who caused a security event.",
+        "properties": {
+          "client_id": {
+            "description": "OAuth or connector client.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route": {
+            "$ref": "#/components/schemas/AccessRoute",
+            "description": "Route it came by."
+          },
+          "subject": {
+            "description": "Authenticated subject.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "route"
         ],
         "type": "object"
       },
@@ -1901,6 +2716,26 @@
           {
             "const": "proposal_updated",
             "description": "A proposal's state or discussion changed.",
+            "type": "string"
+          },
+          {
+            "const": "connector_issued",
+            "description": "A local connector credential was issued (tenant-level).",
+            "type": "string"
+          },
+          {
+            "const": "connector_revoked",
+            "description": "A local connector credential was revoked (tenant-level).",
+            "type": "string"
+          },
+          {
+            "const": "signed_in",
+            "description": "A browser session began (tenant-level).",
+            "type": "string"
+          },
+          {
+            "const": "permission_denied",
+            "description": "An authenticated request was refused for lack of a grant or by its route.",
             "type": "string"
           }
         ]
@@ -1936,7 +2771,7 @@
       },
       "ExportWorkspaceRequest": {
         "additionalProperties": false,
-        "description": "Export portable OKF content and all selected referenced assets.",
+        "description": "Export portable OKF content and all selected referenced assets.\n\nCommitted content at one revision with the originals and retained derivatives it\nreferences, and its history when asked. A current app review is written into its item's\nheader as an OKF `verified` entry. Drafts, sessions and credentials are never included.",
         "properties": {
           "at": {
             "$ref": "#/components/schemas/At",
@@ -1980,6 +2815,329 @@
             "const": "strip",
             "description": "Drop the extension from the normalized note path (never from originals).",
             "type": "string"
+          }
+        ]
+      },
+      "Extraction": {
+        "additionalProperties": false,
+        "description": "Everything recorded about turning one source occurrence's bytes into text.",
+        "properties": {
+          "converter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConverterIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present exactly when a converter ran (not for `pending` or `unsupported`)."
+          },
+          "corrected": {
+            "description": "A human correction is shown over that text.",
+            "type": "boolean"
+          },
+          "digest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Digest"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The retained conversion record; present exactly when a document was produced\n(`completed`, `partial`)."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ConversionOutcome",
+            "description": "What the converter did."
+          },
+          "page_count": {
+            "description": "Pages in the original, for a paginated format.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "supplied": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SuppliedText"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The latest accepted agent-supplied text, shown or kept in history."
+          },
+          "text_origin": {
+            "$ref": "#/components/schemas/TextOrigin",
+            "description": "Whose text is shown."
+          },
+          "warnings": {
+            "description": "Findings of the conversion.",
+            "items": {
+              "$ref": "#/components/schemas/ExtractionWarning"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "outcome",
+          "text_origin",
+          "corrected",
+          "warnings"
+        ],
+        "type": "object"
+      },
+      "ExtractionFilter": {
+        "description": "A filter over sources by extraction.\n\nOne variant on purpose: a defaulted `bool` would split the one wire shape, and `Option<bool>`\nwould have a third state with no meaning.",
+        "oneOf": [
+          {
+            "const": "unprocessed",
+            "description": "Sources whose converter status is `partial`, `failed` or `unsupported`, whether or not\ntext was supplied for them.",
+            "type": "string"
+          }
+        ]
+      },
+      "ExtractionStatus": {
+        "description": "The converter's verdict on one source, as a listing and a filter use it.",
+        "oneOf": [
+          {
+            "const": "pending",
+            "description": "Accepted; no conversion has finished.",
+            "type": "string"
+          },
+          {
+            "const": "completed",
+            "description": "Every page, or the whole non-paginated document, was converted.",
+            "type": "string"
+          },
+          {
+            "const": "partial",
+            "description": "A document was produced but part of the source is missing from it.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "The converter produced no document; the bytes are retained.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported",
+            "description": "No converter exists for this format; the bytes are retained.",
+            "type": "string"
+          }
+        ]
+      },
+      "ExtractionSummary": {
+        "additionalProperties": false,
+        "description": "What a listing shows about one source.",
+        "properties": {
+          "corrected": {
+            "description": "A human correction is shown over that text.",
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ExtractionStatus",
+            "description": "The converter's verdict."
+          },
+          "text_origin": {
+            "$ref": "#/components/schemas/TextOrigin",
+            "description": "Whose text is shown."
+          }
+        },
+        "required": [
+          "status",
+          "text_origin",
+          "corrected"
+        ],
+        "type": "object"
+      },
+      "ExtractionWarning": {
+        "description": "Findings that leave a document usable but lessen what it says.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Glyphs the PDF's fonts give no Unicode for; detected, not recovered, never indexed as words.",
+            "properties": {
+              "kind": {
+                "const": "undecodable_glyphs",
+                "type": "string"
+              },
+              "pages": {
+                "description": "Pages holding placeholders, ascending.",
+                "items": {
+                  "$ref": "#/components/schemas/PageGlyphs"
+                },
+                "type": "array"
+              },
+              "unlocated_glyphs": {
+                "description": "Placeholders in items that have no page.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "pages",
+              "unlocated_glyphs"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Items located through the page text layer instead of by the converter.",
+            "properties": {
+              "items": {
+                "description": "How many.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inferred_locations",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "items"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Items with no location in the original.",
+            "properties": {
+              "items": {
+                "description": "How many.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "unlocated_items",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "items"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A spreadsheet's cells were read as the values the file stores; formulas and number\nformats were not extracted (SPEC section 5 formula/value/format distinction).",
+            "properties": {
+              "kind": {
+                "const": "cell_values_only",
+                "type": "string"
+              },
+              "sheets": {
+                "description": "Sheets read, in workbook order.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "sheets"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "FailureReason": {
+        "description": "Why a conversion produced no document.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The converter refused the bytes as unreadable: truncated, corrupt, or not what the\nname says (docling `Parse`, `WithSource`, or `Failure`).",
+            "properties": {
+              "kind": {
+                "const": "damaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The worker reached its memory cap before any page converted.",
+            "properties": {
+              "kind": {
+                "const": "memory_limit",
+                "type": "string"
+              },
+              "limit_bytes": {
+                "description": "The cap, in bytes, as a decimal string.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "limit_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The worker's hard time bound ended it before any page converted.",
+            "properties": {
+              "kind": {
+                "const": "time_limit",
+                "type": "string"
+              },
+              "limit_seconds": {
+                "description": "The bound, in whole seconds.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "limit_seconds"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The converter process ended abnormally (docling `Panic`, an abort, a signal).",
+            "properties": {
+              "kind": {
+                "const": "converter_crashed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Any other converter error (docling `Io`, `Streaming`, `Browser`).",
+            "properties": {
+              "kind": {
+                "const": "converter_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -2371,6 +3529,20 @@
         ],
         "type": "object"
       },
+      "GetPurgeRequest": {
+        "additionalProperties": false,
+        "description": "Read one purge record.",
+        "properties": {
+          "purge_id": {
+            "$ref": "#/components/schemas/PurgeId",
+            "description": "Purge identity."
+          }
+        },
+        "required": [
+          "purge_id"
+        ],
+        "type": "object"
+      },
       "GetReceiptRequest": {
         "additionalProperties": false,
         "description": "Inspect one durable record within workspace permissions.",
@@ -2463,6 +3635,20 @@
         "required": [
           "revision",
           "sources"
+        ],
+        "type": "object"
+      },
+      "GetTenantJobRequest": {
+        "additionalProperties": false,
+        "description": "Read one installation-level job: an installation backup or a purge.",
+        "properties": {
+          "job_id": {
+            "$ref": "#/components/schemas/JobId",
+            "description": "Job identity."
+          }
+        },
+        "required": [
+          "job_id"
         ],
         "type": "object"
       },
@@ -2559,7 +3745,7 @@
           },
           "properties": {
             "additionalProperties": true,
-            "description": "All user and OKF properties; unknown extension values are retained.",
+            "description": "All user and OKF properties; unknown extension values are retained. The server-owned\napplication header appears under `APP_HEADER_KEY`.",
             "type": "object"
           },
           "source": {
@@ -2610,13 +3796,53 @@
           }
         ]
       },
+      "ItemStatus": {
+        "description": "OKF's `status` word of an item, distinct from business approval and from archiving.\n\nAn absent OKF `status` reads `stable`. `other` is a producer's value outside the three,\nkept exactly as written in the file's `status` property; it cannot be set through\n`set_lifecycle`.",
+        "oneOf": [
+          {
+            "const": "draft",
+            "description": "Work in progress.",
+            "type": "string"
+          },
+          {
+            "const": "stable",
+            "description": "Current and usable content.",
+            "type": "string"
+          },
+          {
+            "const": "deprecated",
+            "description": "Retained, superseded content; still searchable.",
+            "type": "string"
+          },
+          {
+            "const": "other",
+            "description": "A status word outside the three, preserved in the file.",
+            "type": "string"
+          }
+        ]
+      },
       "ItemSummary": {
         "additionalProperties": false,
         "description": "A navigable item description bound to a resolved workspace revision.",
         "properties": {
+          "archived": {
+            "description": "Hidden from ordinary current listings; reversible and keeps history.",
+            "type": "boolean"
+          },
           "description": {
             "description": "One-line navigation summary.",
             "type": "string"
+          },
+          "extraction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExtractionSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The converter's verdict and whose text is shown; present exactly when `kind` is `source`."
           },
           "id": {
             "$ref": "#/components/schemas/ItemId",
@@ -2625,10 +3851,6 @@
           "kind": {
             "$ref": "#/components/schemas/ItemKind",
             "description": "Built-in rendering role."
-          },
-          "lifecycle": {
-            "$ref": "#/components/schemas/Lifecycle",
-            "description": "Presentation lifecycle."
           },
           "media_type": {
             "description": "Original MIME type if there is a source object.",
@@ -2644,6 +3866,10 @@
           "revision": {
             "$ref": "#/components/schemas/Revision",
             "description": "Resolved revision for this summary."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ItemStatus",
+            "description": "OKF status word."
           },
           "title": {
             "description": "Human-readable title.",
@@ -2662,13 +3888,14 @@
           "type_name",
           "kind",
           "revision",
-          "lifecycle"
+          "status",
+          "archived"
         ],
         "type": "object"
       },
       "Job": {
         "additionalProperties": false,
-        "description": "Durable work status; acknowledgement is not a claim of completion.",
+        "description": "Durable work status; acknowledgement is not a claim of completion.\n\n`workspace_id` is present exactly for a workspace job kind and absent exactly for a tenant\njob kind (`JobKind::is_tenant`); `check` enforces it.",
         "properties": {
           "artifact": {
             "anyOf": [
@@ -2720,6 +3947,17 @@
             "minimum": 0,
             "type": "integer"
           },
+          "restore": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RestoreReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What a completed restore did."
+          },
           "revision": {
             "anyOf": [
               {
@@ -2743,13 +3981,19 @@
             "type": "array"
           },
           "workspace_id": {
-            "$ref": "#/components/schemas/WorkspaceId",
-            "description": "Workspace whose permissions and storage scope apply."
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Workspace whose permissions and storage scope apply; absent for a tenant job."
           }
         },
         "required": [
           "id",
-          "workspace_id",
           "kind",
           "state",
           "progress",
@@ -2800,6 +4044,21 @@
           {
             "const": "export_view",
             "description": "Export one View with its sources, data table and rendering.",
+            "type": "string"
+          },
+          {
+            "const": "backup_installation",
+            "description": "Write an installation archive (tenant-level).",
+            "type": "string"
+          },
+          {
+            "const": "purge_workspace",
+            "description": "Remove a workspace permanently (tenant-level).",
+            "type": "string"
+          },
+          {
+            "const": "purge_item",
+            "description": "Remove one item permanently (tenant-level).",
             "type": "string"
           }
         ]
@@ -2865,26 +4124,6 @@
           {
             "const": "kebab",
             "description": "Kebab case.",
-            "type": "string"
-          }
-        ]
-      },
-      "Lifecycle": {
-        "description": "Application lifecycle distinct from business approval.",
-        "oneOf": [
-          {
-            "const": "active",
-            "description": "Current and usable content.",
-            "type": "string"
-          },
-          {
-            "const": "deprecated",
-            "description": "Retained historical content.",
-            "type": "string"
-          },
-          {
-            "const": "archived",
-            "description": "Hidden from ordinary current listings; still retrievable.",
             "type": "string"
           }
         ]
@@ -3083,6 +4322,17 @@
             "$ref": "#/components/schemas/At",
             "description": "Requested revision selector; latest is resolved once before reading."
           },
+          "extraction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExtractionFilter"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "List only the sources that match among the folder's items; child folders are listed\nas before."
+          },
           "folder": {
             "description": "Empty string for the root; otherwise a validated relative folder.",
             "type": "string"
@@ -3279,6 +4529,41 @@
         ],
         "type": "object"
       },
+      "ListTenantEventsRequest": {
+        "additionalProperties": false,
+        "description": "Read installation-level events after an opaque cursor.",
+        "properties": {
+          "after": {
+            "description": "Last seen event cursor.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageRequest",
+            "description": "Bounded pagination with an opaque cursor."
+          }
+        },
+        "required": [
+          "page"
+        ],
+        "type": "object"
+      },
+      "ListTenantJobsRequest": {
+        "additionalProperties": false,
+        "description": "List installation-level jobs, newest first.",
+        "properties": {
+          "page": {
+            "$ref": "#/components/schemas/PageRequest",
+            "description": "Bounded pagination with an opaque cursor."
+          }
+        },
+        "required": [
+          "page"
+        ],
+        "type": "object"
+      },
       "ListTypesRequest": {
         "additionalProperties": false,
         "description": "List type definitions available in a workspace.",
@@ -3314,6 +4599,13 @@
         "additionalProperties": false,
         "description": "List only workspaces visible to the authenticated principal.",
         "properties": {
+          "include_archived": {
+            "description": "Also list archived workspaces; absent means false. Optional, so the `workspaces` model\ntool gains no required argument.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "page": {
             "$ref": "#/components/schemas/PageRequest",
             "description": "Bounded pagination with an opaque cursor."
@@ -3412,12 +4704,11 @@
         "description": "An authorized image or artifact associated with a source range.",
         "properties": {
           "caption": {
-            "description": "Caption text; caption origin is separate.",
-            "type": "string"
-          },
-          "caption_origin": {
-            "description": "source, process, human, or agent.",
-            "type": "string"
+            "description": "The document's own caption or alternative text; absent when the document gives none.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "height": {
             "description": "Pixel height.",
@@ -3433,9 +4724,13 @@
             "$ref": "#/components/schemas/Digest",
             "description": "Retained image bytes."
           },
+          "role": {
+            "$ref": "#/components/schemas/AssetRole",
+            "description": "What the image is."
+          },
           "source": {
             "$ref": "#/components/schemas/SourceReference",
-            "description": "Original source location."
+            "description": "Original source location: a page image's location is `direct` `page`; a picture's is\nits region."
           },
           "width": {
             "description": "Pixel width.",
@@ -3447,11 +4742,39 @@
         "required": [
           "object",
           "media_type",
+          "role",
           "source",
-          "caption",
-          "caption_origin",
           "width",
           "height"
+        ],
+        "type": "object"
+      },
+      "ModelIdentity": {
+        "additionalProperties": false,
+        "description": "One model file of `docling::model_inventory()`, hashed by the worker at startup.",
+        "properties": {
+          "file": {
+            "description": "File name only; never a filesystem path.",
+            "type": "string"
+          },
+          "sha256": {
+            "$ref": "#/components/schemas/Digest",
+            "description": "SHA-256 of the file as loaded."
+          },
+          "size": {
+            "description": "Byte count as a decimal string.",
+            "type": "string"
+          },
+          "stage": {
+            "description": "Pipeline stage, such as `layout` or `ocr.rec`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage",
+          "file",
+          "size",
+          "sha256"
         ],
         "type": "object"
       },
@@ -3625,6 +4948,26 @@
         ],
         "type": "object"
       },
+      "OcrPolicy": {
+        "description": "When optical character recognition runs.",
+        "oneOf": [
+          {
+            "const": "auto",
+            "description": "Recognise only regions with no embedded text layer (docling default).",
+            "type": "string"
+          },
+          {
+            "const": "skip",
+            "description": "Never run recognition; layout and tables are still detected (docling `skip_ocr`).",
+            "type": "string"
+          },
+          {
+            "const": "force_full_page",
+            "description": "Recognise every page from its render (docling `force_full_page_ocr`).",
+            "type": "string"
+          }
+        ]
+      },
       "OpenProposalRequest": {
         "additionalProperties": false,
         "description": "Suggest changes without changing the accepted workspace.",
@@ -3710,6 +5053,21 @@
             "type": "string"
           },
           {
+            "const": "unarchive_workspace",
+            "description": "The `unarchive_workspace` operation.",
+            "type": "string"
+          },
+          {
+            "const": "purge_workspace",
+            "description": "The `purge_workspace` operation.",
+            "type": "string"
+          },
+          {
+            "const": "get_purge",
+            "description": "The `get_purge` operation.",
+            "type": "string"
+          },
+          {
             "const": "export_workspace",
             "description": "The `export_workspace` operation.",
             "type": "string"
@@ -3722,6 +5080,11 @@
           {
             "const": "restore_workspace",
             "description": "The `restore_workspace` operation.",
+            "type": "string"
+          },
+          {
+            "const": "backup_installation",
+            "description": "The `backup_installation` operation.",
             "type": "string"
           },
           {
@@ -3767,6 +5130,11 @@
           {
             "const": "delete_item",
             "description": "The `delete_item` operation.",
+            "type": "string"
+          },
+          {
+            "const": "purge_item",
+            "description": "The `purge_item` operation.",
             "type": "string"
           },
           {
@@ -3915,6 +5283,16 @@
             "type": "string"
           },
           {
+            "const": "get_tenant_job",
+            "description": "The `get_tenant_job` operation.",
+            "type": "string"
+          },
+          {
+            "const": "list_tenant_jobs",
+            "description": "The `list_tenant_jobs` operation.",
+            "type": "string"
+          },
+          {
             "const": "retry_job",
             "description": "The `retry_job` operation.",
             "type": "string"
@@ -3997,6 +5375,11 @@
           {
             "const": "list_events",
             "description": "The `list_events` operation.",
+            "type": "string"
+          },
+          {
+            "const": "list_tenant_events",
+            "description": "The `list_tenant_events` operation.",
             "type": "string"
           },
           {
@@ -4093,6 +5476,69 @@
           }
         ]
       },
+      "PageCoverage": {
+        "additionalProperties": false,
+        "description": "Page by page coverage of a source converted in page windows (a PDF; an image is one page).\nFormats docling converts whole (Office, HTML) have no coverage.\n\nThe three lists are ascending, disjoint, and together cover exactly `1..=page_count`;\n`check` enforces it.",
+        "properties": {
+          "converted": {
+            "description": "Pages converted with no known loss.",
+            "items": {
+              "$ref": "#/components/schemas/PageRange"
+            },
+            "type": "array"
+          },
+          "not_converted": {
+            "description": "Pages with no extraction; a retry converts exactly these.",
+            "items": {
+              "$ref": "#/components/schemas/PageRange"
+            },
+            "type": "array"
+          },
+          "page_count": {
+            "description": "Pages in the original.",
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "partly_extracted": {
+            "description": "Pages converted whose text is partly undecodable (`ExtractionWarning::UndecodableGlyphs`).",
+            "items": {
+              "$ref": "#/components/schemas/PageRange"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "page_count",
+          "converted",
+          "partly_extracted",
+          "not_converted"
+        ],
+        "type": "object"
+      },
+      "PageGlyphs": {
+        "additionalProperties": false,
+        "description": "Undecodable glyphs on one page.",
+        "properties": {
+          "glyphs": {
+            "description": "Placeholders the library printed on that page.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "page_no": {
+            "description": "One-based page.",
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "page_no",
+          "glyphs"
+        ],
+        "type": "object"
+      },
       "PageRange": {
         "additionalProperties": false,
         "description": "A one-based inclusive document page range.",
@@ -4113,6 +5559,32 @@
         "required": [
           "start",
           "end"
+        ],
+        "type": "object"
+      },
+      "PageRegion": {
+        "additionalProperties": false,
+        "description": "A box on one page, slide or image of the original.",
+        "properties": {
+          "bbox": {
+            "$ref": "#/components/schemas/BoundingBox",
+            "description": "The box."
+          },
+          "page_no": {
+            "description": "One-based page or slide number.",
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "page_size": {
+            "$ref": "#/components/schemas/PageSize",
+            "description": "The page's extent, so the box can be drawn over a page image on its own."
+          }
+        },
+        "required": [
+          "page_no",
+          "bbox",
+          "page_size"
         ],
         "type": "object"
       },
@@ -4137,6 +5609,27 @@
         },
         "required": [
           "limit"
+        ],
+        "type": "object"
+      },
+      "PageSize": {
+        "additionalProperties": false,
+        "description": "Extent of the page the box lies on, in the box's own unit (PDF points, image pixels, PPTX\nEMU). A reader draws the box over a page image by the ratio of the two, so it needs no unit.",
+        "properties": {
+          "height": {
+            "description": "Page height.",
+            "format": "double",
+            "type": "number"
+          },
+          "width": {
+            "description": "Page width.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "width",
+          "height"
         ],
         "type": "object"
       },
@@ -4196,14 +5689,25 @@
       },
       "PresentResponse": {
         "additionalProperties": false,
-        "description": "A candidate presentation and the exact sources available to its UI.",
+        "description": "A candidate presentation and the exact sources available to its UI.\n\nA View-level fault (schema, a binding outside the workspace) refuses the whole request; a\nchart-level fault never does and is reported in `charts`.",
         "properties": {
+          "as_of": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When the bindings were resolved; for a pinned View, when the pinned inputs were read."
+          },
+          "charts": {
+            "description": "Exactly one per entry of `view.chart_refs()`, in that order.",
+            "items": {
+              "$ref": "#/components/schemas/ChartResult"
+            },
+            "type": "array"
+          },
           "receipt_id": {
             "$ref": "#/components/schemas/ReceiptId",
             "description": "Tool response record."
           },
           "resolved_bindings": {
-            "description": "Exact data supplied for this render.",
+            "description": "Exact data supplied for this render; each binding's `source.revision` is the resolved\nrevision.",
             "items": {
               "$ref": "#/components/schemas/ViewBinding"
             },
@@ -4224,6 +5728,8 @@
         "required": [
           "view",
           "resolved_bindings",
+          "charts",
+          "as_of",
           "warnings",
           "receipt_id"
         ],
@@ -4318,17 +5824,28 @@
             },
             "type": "array"
           },
+          "client_id": {
+            "description": "OAuth or connector client it came through, recorded by the server.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "content_digest": {
             "$ref": "#/components/schemas/Digest",
             "description": "Server-computed digest of the exact displayed change set."
           },
           "created_at": {
-            "description": "RFC 3339 creation time.",
-            "type": "string"
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "Creation time."
           },
           "created_by": {
             "description": "Server-recorded principal.",
             "type": "string"
+          },
+          "created_via": {
+            "$ref": "#/components/schemas/AccessRoute",
+            "description": "Route the proposal came by, recorded by the server."
           },
           "description": {
             "description": "Rationale and limitations.",
@@ -4337,6 +5854,10 @@
           "id": {
             "$ref": "#/components/schemas/ProposalId",
             "description": "Proposal identity."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ProposalKind",
+            "description": "What the proposal does, derived from `changes` by the server."
           },
           "proposal_revision": {
             "$ref": "#/components/schemas/Revision",
@@ -4364,8 +5885,10 @@
           "title",
           "description",
           "changes",
+          "kind",
           "status",
           "created_by",
+          "created_via",
           "created_at"
         ],
         "type": "object"
@@ -4374,6 +5897,21 @@
         "description": "Identity of a suggested change set, not a review.",
         "format": "uuid",
         "type": "string"
+      },
+      "ProposalKind": {
+        "description": "What a proposal does; derived from its changes, never chosen by the proposer.",
+        "oneOf": [
+          {
+            "const": "content",
+            "description": "Content changes: create, edit, move, archive.",
+            "type": "string"
+          },
+          {
+            "const": "supply_extraction",
+            "description": "Agent-supplied extraction text.",
+            "type": "string"
+          }
+        ]
       },
       "ProposalStatus": {
         "description": "Lifecycle of a suggestion, not approval of a fact in it.",
@@ -4399,6 +5937,291 @@
             "type": "string"
           }
         ]
+      },
+      "Purge": {
+        "additionalProperties": false,
+        "description": "A durable, tenant-level purge record; it holds no content of the target.",
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When it completed."
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Last failure."
+          },
+          "id": {
+            "$ref": "#/components/schemas/PurgeId",
+            "description": "Identity."
+          },
+          "job_id": {
+            "$ref": "#/components/schemas/JobId",
+            "description": "The tenant job doing the work."
+          },
+          "report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PurgeReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present exactly when completed."
+          },
+          "requested_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it was accepted."
+          },
+          "requested_by": {
+            "description": "Administrator subject.",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PurgeState",
+            "description": "Progress."
+          },
+          "target": {
+            "$ref": "#/components/schemas/PurgeTarget",
+            "description": "What is removed."
+          }
+        },
+        "required": [
+          "id",
+          "target",
+          "state",
+          "job_id",
+          "requested_by",
+          "requested_at"
+        ],
+        "type": "object"
+      },
+      "PurgeId": {
+        "description": "Identity of one purge; its record outlives what it removed.",
+        "format": "uuid",
+        "type": "string"
+      },
+      "PurgeItemRequest": {
+        "additionalProperties": false,
+        "description": "Permanently remove one item, its history and its derivatives.",
+        "properties": {
+          "base_revision": {
+            "$ref": "#/components/schemas/Revision",
+            "description": "Exact revision on which this purge is based; a moved head conflicts."
+          },
+          "idempotency_key": {
+            "$ref": "#/components/schemas/IdempotencyKey",
+            "description": "Retry identity."
+          },
+          "item_id": {
+            "$ref": "#/components/schemas/ItemId",
+            "description": "Item to remove."
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId",
+            "description": "Workspace of the item."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "item_id",
+          "base_revision",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "PurgeReport": {
+        "additionalProperties": false,
+        "description": "What a completed purge did; counts only.",
+        "properties": {
+          "backups_removed": {
+            "description": "Managed backups deleted (workspace archives, and their copies in pre-migration backups).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "backups_rewritten": {
+            "description": "Managed backups rewritten without the target.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "citations_invalidated": {
+            "description": "Stored citations (reviews, receipts, comments, View bindings) of the target invalidated.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "citations_remapped": {
+            "description": "Stored citations of other items remapped to a rewritten revision.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "drafts_removed": {
+            "description": "Drafts deleted.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exports_removed": {
+            "description": "Retained export and View export artifacts deleted.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "objects_kept_shared": {
+            "description": "Objects kept because a surviving item still references them, as a decimal string.",
+            "type": "string"
+          },
+          "objects_removed": {
+            "description": "Stored objects deleted, as a decimal string.",
+            "type": "string"
+          },
+          "proposals_removed": {
+            "description": "Proposals deleted with their candidate references and comments.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revisions_invalidated": {
+            "description": "Revisions that no longer exist or were rewritten.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "views_invalidated": {
+            "description": "Saved Views with an invalidated binding.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "objects_removed",
+          "objects_kept_shared",
+          "backups_removed",
+          "backups_rewritten",
+          "exports_removed",
+          "proposals_removed",
+          "drafts_removed",
+          "revisions_invalidated",
+          "citations_remapped",
+          "citations_invalidated",
+          "views_invalidated"
+        ],
+        "type": "object"
+      },
+      "PurgeState": {
+        "description": "Progress of a purge.",
+        "oneOf": [
+          {
+            "const": "requested",
+            "description": "Accepted; nothing removed yet.",
+            "type": "string"
+          },
+          {
+            "const": "running",
+            "description": "Removing.",
+            "type": "string"
+          },
+          {
+            "const": "completed",
+            "description": "Every application-managed copy is removed or rewritten; no affected backup is restorable.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "Stopped; repeating the request resumes it.",
+            "type": "string"
+          }
+        ]
+      },
+      "PurgeTarget": {
+        "description": "What a purge removes; identities only, never a name or a path.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "A whole workspace.",
+            "properties": {
+              "kind": {
+                "const": "workspace",
+                "type": "string"
+              },
+              "workspace_id": {
+                "$ref": "#/components/schemas/WorkspaceId",
+                "description": "Removed workspace."
+              }
+            },
+            "required": [
+              "kind",
+              "workspace_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One item.",
+            "properties": {
+              "item_id": {
+                "$ref": "#/components/schemas/ItemId",
+                "description": "Removed item."
+              },
+              "kind": {
+                "const": "item",
+                "type": "string"
+              },
+              "workspace_id": {
+                "$ref": "#/components/schemas/WorkspaceId",
+                "description": "Its workspace."
+              }
+            },
+            "required": [
+              "kind",
+              "workspace_id",
+              "item_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PurgeWorkspaceRequest": {
+        "additionalProperties": false,
+        "description": "Permanently remove a workspace.",
+        "properties": {
+          "base_revision": {
+            "$ref": "#/components/schemas/Revision",
+            "description": "Exact revision on which this purge is based; a moved head conflicts."
+          },
+          "idempotency_key": {
+            "$ref": "#/components/schemas/IdempotencyKey",
+            "description": "Retry identity."
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId",
+            "description": "Workspace to remove."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "base_revision",
+          "idempotency_key"
+        ],
+        "type": "object"
       },
       "ReadItemRequest": {
         "additionalProperties": false,
@@ -4461,6 +6284,17 @@
         "additionalProperties": false,
         "description": "What the tool actually returned, not a claim about the host model context.",
         "properties": {
+          "extraction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExtractionSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a source: whether its text is partial, supplied by an agent or corrected."
+          },
           "markdown": {
             "description": "Text within the declared budget.",
             "type": "string"
@@ -4621,6 +6455,17 @@
             "$ref": "#/components/schemas/ReceiptId",
             "description": "Durable operation record."
           },
+          "invalidated_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PurgeId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The purge that invalidated a source this receipt cites; its stored path was scrubbed."
+          },
           "operation_id": {
             "$ref": "#/components/schemas/OperationName",
             "description": "Canonical operation identifier."
@@ -4630,8 +6475,8 @@
             "type": "string"
           },
           "returned_at": {
-            "description": "RFC 3339 response time.",
-            "type": "string"
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "Response time."
           },
           "route": {
             "$ref": "#/components/schemas/AccessRoute",
@@ -4705,9 +6550,12 @@
             "description": "Stable application item identity; paths remain the portable OKF identity."
           },
           "settings": {
-            "additionalProperties": true,
-            "description": "Converter options that participate in the digest cache key.",
-            "type": "object"
+            "$ref": "#/components/schemas/ConversionSettings",
+            "description": "Converter settings; they are part of the new digest's identity. With\n`unconverted_only` they must equal the current digest's settings, or the request is\n`invalid_input` on `/settings`."
+          },
+          "unconverted_only": {
+            "description": "Convert exactly the `not_converted` pages of the current extraction and merge them into\na new digest, instead of converting the whole source again.",
+            "type": "boolean"
           },
           "workspace_id": {
             "$ref": "#/components/schemas/WorkspaceId",
@@ -4719,6 +6567,7 @@
           "item_id",
           "base_revision",
           "settings",
+          "unconverted_only",
           "idempotency_key"
         ],
         "type": "object"
@@ -4880,6 +6729,36 @@
         ],
         "type": "object"
       },
+      "RestoreReport": {
+        "additionalProperties": false,
+        "description": "What a restore did.",
+        "properties": {
+          "drafts_restored": {
+            "description": "Drafts given back to their editors.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "drafts_unassigned": {
+            "description": "Drafts whose editor is not a validated identity here; kept in the archive.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "items": {
+            "description": "Items restored.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "drafts_restored",
+          "drafts_unassigned"
+        ],
+        "type": "object"
+      },
       "RestoreRequest": {
         "additionalProperties": false,
         "description": "Restore the selected state as a new commit without rewriting history.",
@@ -4927,35 +6806,29 @@
       },
       "RestoreWorkspaceRequest": {
         "additionalProperties": false,
-        "description": "Restore a workspace from a retained backup artifact (full restore of content and app records).",
+        "description": "Fill a blank workspace of this installation from an uploaded workspace archive.\n\nThe restore keeps item ids, rewrites View bindings to this workspace, gives each draft\nwhose editor is a validated subject with `write` here back to that editor, and keeps the\nothers in the archive, unassigned and counted. An archive of this tenant whose workspace\nstill exists, or has a purge record, is refused: purged content never comes back through\nan import. The upload is consumed when the restore completes.",
         "properties": {
-          "artifact_id": {
-            "$ref": "#/components/schemas/ArtifactId",
-            "description": "Retained backup artifact to restore from."
-          },
           "idempotency_key": {
             "$ref": "#/components/schemas/IdempotencyKey",
-            "description": "Retry identity for the restore job."
+            "description": "Retry identity."
           },
           "sha256": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Digest"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Optional integrity check against the artifact digest before restore begins."
+            "$ref": "#/components/schemas/Digest",
+            "description": "SHA-256 the archive must have; checked before anything is written."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Completed upload of the archive into this workspace."
           },
           "workspace_id": {
             "$ref": "#/components/schemas/WorkspaceId",
-            "description": "Workspace whose permissions and storage scope apply."
+            "description": "Blank target workspace."
           }
         },
         "required": [
           "workspace_id",
-          "artifact_id",
+          "upload_id",
+          "sha256",
           "idempotency_key"
         ],
         "type": "object"
@@ -5001,8 +6874,8 @@
             "description": "Durable review identity."
           },
           "reviewed_at": {
-            "description": "RFC 3339 action time.",
-            "type": "string"
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "Action time."
           },
           "reviewer_subject": {
             "description": "Server-established subject; not supplied in request.",
@@ -5045,6 +6918,11 @@
             "const": "unreviewed",
             "description": "No covering review exists.",
             "type": "string"
+          },
+          {
+            "const": "invalidated",
+            "description": "The reviewed content was purged; the review covers nothing that still exists.",
+            "type": "string"
           }
         ]
       },
@@ -5081,8 +6959,8 @@
         "description": "A capability URL on the sandbox origin; the token is the only credential and is never logged.",
         "properties": {
           "expires_at": {
-            "description": "RFC 3339 expiry after which the capability resolves nothing.",
-            "type": "string"
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "Expiry after which the capability resolves nothing."
           },
           "url": {
             "description": "Absolute `/sandbox/{capability}` URL on the configured sandbox origin.",
@@ -5153,6 +7031,17 @@
         "additionalProperties": false,
         "description": "A bounded excerpt linked to its exact source.",
         "properties": {
+          "extraction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExtractionSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a source: whether its text is partial, supplied by an agent or corrected."
+          },
           "score": {
             "description": "Ranking signal, never a truth or trust score.",
             "format": "double",
@@ -5181,11 +7070,22 @@
       },
       "SearchRequest": {
         "additionalProperties": false,
-        "description": "Search the workspace at one revision with explicit scope and pagination.",
+        "description": "Search the workspace at one revision with explicit scope and pagination.\n\n`query` may be empty (or only whitespace) only when `extraction` is set: then every\nmatching source under `folder` is a hit, ordered by path, with its description as snippet\n(`check_rules`).",
         "properties": {
           "at": {
             "$ref": "#/components/schemas/At",
             "description": "Requested revision selector; latest is resolved once before reading."
+          },
+          "extraction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExtractionFilter"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only sources that match; with an empty query, every such source is a hit."
           },
           "folder": {
             "description": "Limit to a relative folder.",
@@ -5195,7 +7095,7 @@
             ]
           },
           "include_archived": {
-            "description": "Include historical lifecycle items.",
+            "description": "Include archived items; deprecated items are always searchable.",
             "type": "boolean"
           },
           "page": {
@@ -5250,7 +7150,7 @@
         "type": "object"
       },
       "Selection": {
-        "description": "Explicit bounded source selection.",
+        "description": "Explicit bounded source selection.\n\n`PartialEq` only: a `region` holds coordinates as `f64`.",
         "oneOf": [
           {
             "additionalProperties": false,
@@ -5341,6 +7241,25 @@
               "heading"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A box on one page: the extracted items whose location lies inside it; the `pages` view\nreturns that page's image.",
+            "properties": {
+              "kind": {
+                "const": "region",
+                "type": "string"
+              },
+              "region": {
+                "$ref": "#/components/schemas/PageRegion",
+                "description": "Region."
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -5365,8 +7284,15 @@
       },
       "SetLifecycleRequest": {
         "additionalProperties": false,
-        "description": "Retire or reactivate an item without claiming a business decision.",
+        "description": "Change an item's status word or archive flag without claiming a business decision.\n\nAt least one of `status` and `archived` is present, and `status` is never `other`\n(`check_rules`).",
         "properties": {
+          "archived": {
+            "description": "Archive (`true`) or unarchive (`false`); absent leaves it unchanged.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "base_revision": {
             "$ref": "#/components/schemas/Revision",
             "description": "Exact revision on which this change is based; stale writes conflict."
@@ -5379,9 +7305,16 @@
             "$ref": "#/components/schemas/ItemId",
             "description": "Stable application item identity; paths remain the portable OKF identity."
           },
-          "lifecycle": {
-            "$ref": "#/components/schemas/Lifecycle",
-            "description": "Requested lifecycle."
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ItemStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "New OKF status word; absent leaves it unchanged."
           },
           "workspace_id": {
             "$ref": "#/components/schemas/WorkspaceId",
@@ -5392,7 +7325,6 @@
           "workspace_id",
           "item_id",
           "base_revision",
-          "lifecycle",
           "idempotency_key"
         ],
         "type": "object"
@@ -5459,6 +7391,10 @@
         "additionalProperties": false,
         "description": "One source occurrence; identical bytes do not imply identical meaning.",
         "properties": {
+          "extraction": {
+            "$ref": "#/components/schemas/Extraction",
+            "description": "Everything recorded about turning these bytes into text, converter identity included."
+          },
           "media_type": {
             "description": "Sniffed MIME type.",
             "type": "string"
@@ -5511,9 +7447,136 @@
           "names",
           "media_type",
           "size",
-          "metadata"
+          "metadata",
+          "extraction"
         ],
         "type": "object"
+      },
+      "SourceLocation": {
+        "description": "A location and how it was obtained; an inferred location is a different variant from a\ndirect one, so no consumer can show it as direct by accident.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "From the converter's own provenance.",
+            "properties": {
+              "locator": {
+                "$ref": "#/components/schemas/SourceLocator",
+                "description": "Where."
+              },
+              "provenance": {
+                "const": "direct",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provenance",
+              "locator"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Found by matching text against the page text layer (ingest-locates-unlocated-items).",
+            "properties": {
+              "locator": {
+                "$ref": "#/components/schemas/SourceLocator",
+                "description": "Where."
+              },
+              "provenance": {
+                "const": "inferred",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provenance",
+              "locator"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Not known; never given a guessed box.",
+            "properties": {
+              "provenance": {
+                "const": "unresolved",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/UnresolvedReason",
+                "description": "Why."
+              }
+            },
+            "required": [
+              "provenance",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SourceLocator": {
+        "description": "Where in the original bytes something is.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "A whole page or slide.",
+            "properties": {
+              "kind": {
+                "const": "page",
+                "type": "string"
+              },
+              "page_no": {
+                "description": "One-based page or slide number.",
+                "format": "uint32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "page_no"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A box on a page, slide or image.",
+            "properties": {
+              "kind": {
+                "const": "region",
+                "type": "string"
+              },
+              "region": {
+                "$ref": "#/components/schemas/PageRegion",
+                "description": "The box."
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Spreadsheet cells.",
+            "properties": {
+              "kind": {
+                "const": "cells",
+                "type": "string"
+              },
+              "range": {
+                "$ref": "#/components/schemas/CellRange",
+                "description": "Sheet and one-based inclusive cell range."
+              }
+            },
+            "required": [
+              "kind",
+              "range"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "SourceName": {
         "additionalProperties": false,
@@ -5528,8 +7591,8 @@
             "type": "string"
           },
           "observed_at": {
-            "description": "RFC 3339 observation time.",
-            "type": "string"
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "Observation time."
           },
           "supplied_by": {
             "description": "Server-recorded source identity.",
@@ -5563,6 +7626,13 @@
             "$ref": "#/components/schemas/ItemId",
             "description": "Stable application item identity; paths remain the portable OKF identity."
           },
+          "locations": {
+            "description": "Where the cited selection of the digest lies in the original, one entry per located\nitem it covers, in reading order.\n\nThe server computes it from (item, revision, digest, selection). A response always\nfills it. In a request an omitted list means \"fill it\"; a present list must equal what\nthe server computes, or the request is `invalid_input` on `.../locations`, so a caller\nnever supplies a location. A saved View file does not keep locations: they are derived,\nand the server fills them when it returns the View.",
+            "items": {
+              "$ref": "#/components/schemas/SourceLocation"
+            },
+            "type": "array"
+          },
           "path": {
             "$ref": "#/components/schemas/WorkspacePath",
             "description": "Relative path at the resolved source revision."
@@ -5573,7 +7643,7 @@
           },
           "selection": {
             "$ref": "#/components/schemas/Selection",
-            "description": "Resolved page, lines, cells, section, or entire source."
+            "description": "Resolved page, lines, cells, region, section, or entire source."
           },
           "workspace_id": {
             "$ref": "#/components/schemas/WorkspaceId",
@@ -5609,6 +7679,17 @@
             "$ref": "#/components/schemas/IdempotencyKey",
             "description": "Durable retry identity."
           },
+          "settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConversionSettings"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Converter settings; absent means the deployment's defaults, resolved into the job at\nacceptance so a retry converts with the same settings."
+          },
           "upload_ids": {
             "description": "Completed upload slots.",
             "items": {
@@ -5631,9 +7712,85 @@
         ],
         "type": "object"
       },
+      "SuppliedText": {
+        "additionalProperties": false,
+        "description": "Accepted agent-supplied text of one source.",
+        "properties": {
+          "approved_at": {
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "When it was accepted."
+          },
+          "approved_by": {
+            "description": "Subject who accepted the proposal.",
+            "type": "string"
+          },
+          "client_id": {
+            "description": "OAuth or connector client it came through.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content_digest": {
+            "$ref": "#/components/schemas/Digest",
+            "description": "SHA-256 of the supplied Markdown."
+          },
+          "kept_by": {
+            "description": "Who chose this text over a later complete conversion.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pages": {
+            "description": "Pages the agent says the text covers: a claim, never a location; empty for the whole.",
+            "items": {
+              "$ref": "#/components/schemas/PageRange"
+            },
+            "type": "array"
+          },
+          "proposal_id": {
+            "$ref": "#/components/schemas/ProposalId",
+            "description": "The accepted proposal."
+          },
+          "supplied_by": {
+            "description": "Subject of the agent that proposed it, recorded by the server.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposal_id",
+          "supplied_by",
+          "approved_by",
+          "approved_at",
+          "content_digest",
+          "pages"
+        ],
+        "type": "object"
+      },
       "TenantId": {
         "pattern": "^[A-Za-z0-9_-]{1,128}$",
         "type": "string"
+      },
+      "TextOrigin": {
+        "description": "Whose text a source card shows and search indexes.",
+        "oneOf": [
+          {
+            "const": "converter",
+            "description": "The converter's extraction.",
+            "type": "string"
+          },
+          {
+            "const": "supplied_by_agent",
+            "description": "Text an agent proposed and a person accepted.",
+            "type": "string"
+          },
+          {
+            "const": "none",
+            "description": "No text: pending, failed or unsupported, with nothing supplied.",
+            "type": "string"
+          }
+        ]
       },
       "TextRange": {
         "additionalProperties": false,
@@ -5657,6 +7814,11 @@
           "end"
         ],
         "type": "object"
+      },
+      "Timestamp": {
+        "format": "date-time",
+        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+        "type": "string"
       },
       "TypeDefinition": {
         "additionalProperties": false,
@@ -5686,6 +7848,177 @@
           "ui_schema"
         ],
         "type": "object"
+      },
+      "UnarchiveWorkspaceRequest": {
+        "additionalProperties": false,
+        "description": "Return an archived workspace to ordinary listings.",
+        "properties": {
+          "idempotency_key": {
+            "$ref": "#/components/schemas/IdempotencyKey",
+            "description": "Retry identity."
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId",
+            "description": "Workspace whose permissions and storage scope apply."
+          }
+        },
+        "required": [
+          "workspace_id",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "UnresolvedReason": {
+        "description": "Why a location is not known; one variant per reason the producing rule states.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The format has no page geometry (DOCX, HTML, Markdown).",
+            "properties": {
+              "kind": {
+                "const": "format_has_no_locator",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The converter gave this item no location and no rule locates it (PPTX, XLSX).",
+            "properties": {
+              "kind": {
+                "const": "not_located_by_converter",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The page text layer could not be read.",
+            "properties": {
+              "kind": {
+                "const": "no_text_layer",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A table or picture: there is no text to look up.",
+            "properties": {
+              "kind": {
+                "const": "no_text_to_match",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Neither the parent nor an earlier sibling is located.",
+            "properties": {
+              "kind": {
+                "const": "no_page_to_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "No text-layer item on the searched pages has exactly this text.",
+            "properties": {
+              "kind": {
+                "const": "no_match",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Several text-layer items have exactly this text.",
+            "properties": {
+              "kind": {
+                "const": "ambiguous_match",
+                "type": "string"
+              },
+              "occurrences": {
+                "description": "How many.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "occurrences"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The one match has no area or lies outside the page.",
+            "properties": {
+              "kind": {
+                "const": "match_not_a_location",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The cited text is a human correction, which has no place in the original.",
+            "properties": {
+              "kind": {
+                "const": "corrected_text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The cited text was supplied by an agent; its page claims are not locations.",
+            "properties": {
+              "kind": {
+                "const": "supplied_text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "UpdateWorkspaceRequest": {
         "additionalProperties": false,
@@ -5773,7 +8106,7 @@
                 "type": "null"
               }
             ],
-            "description": "Retained dataset bytes for reproducibility."
+            "description": "Retained `Dataset` bytes for reproducibility; in a present or resolve result, absent\nfor a binding whose dataset could not be produced."
           },
           "name": {
             "description": "Dataset or component binding name.",
@@ -5902,9 +8235,20 @@
         "additionalProperties": false,
         "description": "A user-owned OKF workspace with a resolved head revision.",
         "properties": {
+          "archived_at": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When it was archived; absent while it is not archived."
+          },
           "created_at": {
-            "description": "RFC 3339 creation time.",
-            "type": "string"
+            "$ref": "#/components/schemas/Timestamp",
+            "description": "Creation time."
           },
           "description": {
             "description": "One-line context for people and agents.",
@@ -5948,7 +8292,7 @@
       "WorkspacePath": {
         "maxLength": 4096,
         "minLength": 1,
-        "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
+        "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
         "type": "string"
       }
     },
@@ -5992,6 +8336,40 @@
         },
         "security": [],
         "summary": "get_resource_metadata",
+        "tags": [
+          "transport"
+        ],
+        "x-agent-tool": false,
+        "x-transport-binding": true
+      }
+    },
+    "/api/artifacts/{artifact_id}": {
+      "get": {
+        "description": "Download a completed installation archive; only a tenant administrator in a human browser session.",
+        "operationId": "download_tenant_artifact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Download a completed installation archive; only a tenant administrator in a human browser session."
+          }
+        },
+        "summary": "download_tenant_artifact",
         "tags": [
           "transport"
         ],
@@ -7162,6 +9540,152 @@
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": true
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
+    "/api/events/list-tenant-events": {
+      "post": {
+        "description": "Read installation-level notifications: sign-ins, connector issue and revocation, and refusals outside a workspace.",
+        "operationId": "list_tenant_events",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListTenantEventsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEventsResponse"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Security activity",
+        "tags": [
+          "events"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-cli-alias": null,
+        "x-mcp-tool": false,
+        "x-operator-label": "Security activity",
+        "x-permission": "admin",
+        "x-tool-annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
         },
         "x-tool-visibility": "",
         "x-ui-resource": null
@@ -8919,6 +11443,152 @@
         "x-ui-resource": null
       }
     },
+    "/api/imports/get-tenant-job": {
+      "post": {
+        "description": "Read an installation-level job: an installation backup or a purge.",
+        "operationId": "get_tenant_job",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetTenantJobRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Progress",
+        "tags": [
+          "imports"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-cli-alias": null,
+        "x-mcp-tool": false,
+        "x-operator-label": "Progress",
+        "x-permission": "admin",
+        "x-tool-annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
     "/api/imports/list-jobs": {
       "post": {
         "description": "List conversion, export, and maintenance work.",
@@ -9060,6 +11730,152 @@
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": true
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
+    "/api/imports/list-tenant-jobs": {
+      "post": {
+        "description": "List installation-level jobs, newest first, with their artifacts.",
+        "operationId": "list_tenant_jobs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListTenantJobsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListJobsResponse"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Installation jobs",
+        "tags": [
+          "imports"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-cli-alias": null,
+        "x-mcp-tool": false,
+        "x-operator-label": "Installation jobs",
+        "x-permission": "admin",
+        "x-tool-annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
         },
         "x-tool-visibility": "",
         "x-ui-resource": null
@@ -10381,7 +13197,7 @@
     },
     "/api/items/list-items": {
       "post": {
-        "description": "List a folder with one-line descriptions at one resolved revision.",
+        "description": "List a folder with one-line descriptions at one resolved revision. With extraction = \"unprocessed\", list only the source files whose conversion is partial, failed or unsupported.",
         "operationId": "list_items",
         "requestBody": {
           "content": {
@@ -10663,6 +13479,152 @@
         "x-permission": "write",
         "x-tool-annotations": {
           "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
+    "/api/items/purge-item": {
+      "post": {
+        "description": "Permanently remove one item's bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.",
+        "operationId": "purge_item",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PurgeItemRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Purge"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Purge",
+        "tags": [
+          "items"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-cli-alias": null,
+        "x-mcp-tool": false,
+        "x-operator-label": "Purge",
+        "x-permission": "admin",
+        "x-tool-annotations": {
+          "destructiveHint": true,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
@@ -11695,7 +14657,7 @@
     },
     "/api/proposals/open-proposal": {
       "post": {
-        "description": "Create a suggested change set without merging or marking anything reviewed.",
+        "description": "Create a suggested change set without merging or marking anything reviewed. A `supply_extraction` change proposes the complete text of an unprocessed source file; it is applied only when a person accepts it and is labelled as supplied by an agent.",
         "operationId": "open_proposal",
         "requestBody": {
           "content": {
@@ -13187,7 +16149,7 @@
     },
     "/api/search/search-items": {
       "post": {
-        "description": "Search authorized content and return cited snippets, not whole-document dumps.",
+        "description": "Search authorized content and return cited snippets, not whole-document dumps. The query may be empty only with a filter; extraction = \"unprocessed\" lists every source file whose text the converter could not fully extract.",
         "operationId": "search_items",
         "requestBody": {
           "content": {
@@ -15074,7 +18036,153 @@
         "x-operator-label": "Archive",
         "x-permission": "admin",
         "x-tool-annotations": {
-          "destructiveHint": true,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
+    "/api/workspaces/backup-installation": {
+      "post": {
+        "description": "Back up the installation's identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only.",
+        "operationId": "backup_installation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupInstallationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Back up installation",
+        "tags": [
+          "workspaces"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-cli-alias": null,
+        "x-mcp-tool": false,
+        "x-operator-label": "Back up installation",
+        "x-permission": "admin",
+        "x-tool-annotations": {
+          "destructiveHint": false,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
@@ -15085,7 +18193,7 @@
     },
     "/api/workspaces/backup-workspace": {
       "post": {
-        "description": "Back up content and durable application records.",
+        "description": "Back up the workspace's history, retained objects and application records, drafts included, into one self-contained archive. Human administrator session only.",
         "operationId": "backup_workspace",
         "requestBody": {
           "content": {
@@ -15377,7 +18485,7 @@
     },
     "/api/workspaces/export-workspace": {
       "post": {
-        "description": "Build a portable export with resolvable referenced assets.",
+        "description": "Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.",
         "operationId": "export_workspace",
         "requestBody": {
           "content": {
@@ -15511,6 +18619,152 @@
         "x-mcp-tool": false,
         "x-operator-label": "Export",
         "x-permission": "write",
+        "x-tool-annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
+    "/api/workspaces/get-purge": {
+      "post": {
+        "description": "Read a purge's progress and counts; available after the workspace is gone.",
+        "operationId": "get_purge",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetPurgeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Purge"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Purge status",
+        "tags": [
+          "workspaces"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-cli-alias": null,
+        "x-mcp-tool": false,
+        "x-operator-label": "Purge status",
+        "x-permission": "admin",
         "x-tool-annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -15813,9 +19067,155 @@
         "x-ui-resource": null
       }
     },
+    "/api/workspaces/purge-workspace": {
+      "post": {
+        "description": "Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.",
+        "operationId": "purge_workspace",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PurgeWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Purge"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Purge",
+        "tags": [
+          "workspaces"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-cli-alias": null,
+        "x-mcp-tool": false,
+        "x-operator-label": "Purge",
+        "x-permission": "admin",
+        "x-tool-annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
     "/api/workspaces/restore-workspace": {
       "post": {
-        "description": "Restore content and durable application records from a retained backup artifact.",
+        "description": "Fill a blank workspace from an uploaded workspace archive, keeping item identities; drafts of editors unknown here stay in the archive and are counted. Human administrator session only.",
         "operationId": "restore_workspace",
         "requestBody": {
           "content": {
@@ -15951,6 +19351,152 @@
         "x-permission": "admin",
         "x-tool-annotations": {
           "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "x-tool-visibility": "",
+        "x-ui-resource": null
+      }
+    },
+    "/api/workspaces/unarchive-workspace": {
+      "post": {
+        "description": "Return an archived workspace to ordinary listings; its history and records were kept.",
+        "operationId": "unarchive_workspace",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnarchiveWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResult"
+                }
+              }
+            },
+            "description": "Successful operation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Structured application failure"
+          }
+        },
+        "summary": "Unarchive",
+        "tags": [
+          "workspaces"
+        ],
+        "x-agent-alias": "",
+        "x-agent-tool": false,
+        "x-cli-alias": null,
+        "x-mcp-tool": false,
+        "x-operator-label": "Unarchive",
+        "x-permission": "admin",
+        "x-tool-annotations": {
+          "destructiveHint": false,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
@@ -16107,7 +19653,7 @@
     },
     "/api/workspaces/{workspace_id}/artifacts/{artifact_id}": {
       "get": {
-        "description": "Download a completed authorized export or backup.",
+        "description": "Download a completed workspace export, View export or workspace archive. The artifact kind decides the permission and the routes (ArtifactKind::download_permission and download_routes); an archive is served only to a workspace administrator in a human browser session.",
         "operationId": "download_artifact",
         "parameters": [
           {
@@ -16136,7 +19682,7 @@
                 }
               }
             },
-            "description": "Download a completed authorized export or backup."
+            "description": "Download a completed workspace export, View export or workspace archive. The artifact kind decides the permission and the routes (ArtifactKind::download_permission and download_routes); an archive is served only to a workspace administrator in a human browser session."
           }
         },
         "summary": "download_artifact",
@@ -16183,7 +19729,7 @@
     },
     "/api/workspaces/{workspace_id}/items/{item_id}/revisions/{revision}/objects/{digest}": {
       "get": {
-        "description": "Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission.",
+        "description": "Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission. Never serves a backup artifact's object.",
         "operationId": "download_object",
         "parameters": [
           {
@@ -16228,7 +19774,7 @@
                 }
               }
             },
-            "description": "Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission."
+            "description": "Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission. Never serves a backup artifact's object."
           }
         },
         "summary": "download_object",

@@ -55,7 +55,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Export portable OKF content and all selected referenced assets.",
+  "description": "Export portable OKF content and all selected referenced assets.\n\nCommitted content at one revision with the originals and retained derivatives it\nreferences, and its history when asked. A current app review is written into its item's\nheader as an OKF `verified` entry. Drafts, sessions and credentials are never included.",
   "properties": {
     "at": {
       "$ref": "#/$defs/At",

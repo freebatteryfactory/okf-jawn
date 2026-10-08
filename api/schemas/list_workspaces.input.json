@@ -29,6 +29,13 @@
   "additionalProperties": false,
   "description": "List only workspaces visible to the authenticated principal.",
   "properties": {
+    "include_archived": {
+      "description": "Also list archived workspaces; absent means false. Optional, so the `workspaces` model\ntool gains no required argument.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "page": {
       "$ref": "#/$defs/PageRequest",
       "description": "Bounded pagination with an opaque cursor."

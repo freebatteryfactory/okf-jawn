@@ -38,6 +38,16 @@
         }
       ]
     },
+    "ExtractionFilter": {
+      "description": "A filter over sources by extraction.\n\nOne variant on purpose: a defaulted `bool` would split the one wire shape, and `Option<bool>`\nwould have a third state with no meaning.",
+      "oneOf": [
+        {
+          "const": "unprocessed",
+          "description": "Sources whose converter status is `partial`, `failed` or `unsupported`, whether or not\ntext was supplied for them.",
+          "type": "string"
+        }
+      ]
+    },
     "PageRequest": {
       "additionalProperties": false,
       "description": "A bounded page request; the cursor is opaque and scoped to the query.",
@@ -74,11 +84,22 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Search the workspace at one revision with explicit scope and pagination.",
+  "description": "Search the workspace at one revision with explicit scope and pagination.\n\n`query` may be empty (or only whitespace) only when `extraction` is set: then every\nmatching source under `folder` is a hit, ordered by path, with its description as snippet\n(`check_rules`).",
   "properties": {
     "at": {
       "$ref": "#/$defs/At",
       "description": "Requested revision selector; latest is resolved once before reading."
+    },
+    "extraction": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExtractionFilter"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Only sources that match; with an empty query, every such source is a hit."
     },
     "folder": {
       "description": "Limit to a relative folder.",
@@ -88,7 +109,7 @@
       ]
     },
     "include_archived": {
-      "description": "Include historical lifecycle items.",
+      "description": "Include archived items; deprecated items are always searchable.",
       "type": "boolean"
     },
     "page": {

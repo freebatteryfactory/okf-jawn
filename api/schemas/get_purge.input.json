@@ -1,0 +1,23 @@
+{
+  "$defs": {
+    "PurgeId": {
+      "description": "Identity of one purge; its record outlives what it removed.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read one purge record.",
+  "properties": {
+    "purge_id": {
+      "$ref": "#/$defs/PurgeId",
+      "description": "Purge identity."
+    }
+  },
+  "required": [
+    "purge_id"
+  ],
+  "title": "GetPurgeRequest",
+  "type": "object"
+}

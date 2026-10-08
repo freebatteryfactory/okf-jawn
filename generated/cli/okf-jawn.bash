@@ -34,6 +34,9 @@ _okf__jawn() {
             okf__jawn,attention)
                 cmd="okf__jawn__subcmd__get_attention"
                 ;;
+            okf__jawn,backup_installation)
+                cmd="okf__jawn__subcmd__backup_installation"
+                ;;
             okf__jawn,backup_workspace)
                 cmd="okf__jawn__subcmd__backup_workspace"
                 ;;
@@ -139,6 +142,9 @@ _okf__jawn() {
             okf__jawn,get_proposal)
                 cmd="okf__jawn__subcmd__get_proposal"
                 ;;
+            okf__jawn,get_purge)
+                cmd="okf__jawn__subcmd__get_purge"
+                ;;
             okf__jawn,get_readiness)
                 cmd="okf__jawn__subcmd__get_readiness"
                 ;;
@@ -153,6 +159,9 @@ _okf__jawn() {
                 ;;
             okf__jawn,get_sources)
                 cmd="okf__jawn__subcmd__get_sources"
+                ;;
+            okf__jawn,get_tenant_job)
+                cmd="okf__jawn__subcmd__get_tenant_job"
                 ;;
             okf__jawn,get_view)
                 cmd="okf__jawn__subcmd__get_view"
@@ -190,6 +199,12 @@ _okf__jawn() {
             okf__jawn,list_reviews)
                 cmd="okf__jawn__subcmd__list_reviews"
                 ;;
+            okf__jawn,list_tenant_events)
+                cmd="okf__jawn__subcmd__list_tenant_events"
+                ;;
+            okf__jawn,list_tenant_jobs)
+                cmd="okf__jawn__subcmd__list_tenant_jobs"
+                ;;
             okf__jawn,list_types)
                 cmd="okf__jawn__subcmd__list_types"
                 ;;
@@ -225,6 +240,12 @@ _okf__jawn() {
                 ;;
             okf__jawn,propose)
                 cmd="okf__jawn__subcmd__open_proposal"
+                ;;
+            okf__jawn,purge_item)
+                cmd="okf__jawn__subcmd__purge_item"
+                ;;
+            okf__jawn,purge_workspace)
+                cmd="okf__jawn__subcmd__purge_workspace"
                 ;;
             okf__jawn,read_item)
                 cmd="okf__jawn__subcmd__read_item"
@@ -286,6 +307,9 @@ _okf__jawn() {
             okf__jawn,timeline)
                 cmd="okf__jawn__subcmd__log_items"
                 ;;
+            okf__jawn,unarchive_workspace)
+                cmd="okf__jawn__subcmd__unarchive_workspace"
+                ;;
             okf__jawn,update_workspace)
                 cmd="okf__jawn__subcmd__update_workspace"
                 ;;
@@ -309,6 +333,9 @@ _okf__jawn() {
                 ;;
             okf__jawn__subcmd__help,archive_workspace)
                 cmd="okf__jawn__subcmd__help__subcmd__archive_workspace"
+                ;;
+            okf__jawn__subcmd__help,backup_installation)
+                cmd="okf__jawn__subcmd__help__subcmd__backup_installation"
                 ;;
             okf__jawn__subcmd__help,backup_workspace)
                 cmd="okf__jawn__subcmd__help__subcmd__backup_workspace"
@@ -397,6 +424,9 @@ _okf__jawn() {
             okf__jawn__subcmd__help,get_proposal)
                 cmd="okf__jawn__subcmd__help__subcmd__get_proposal"
                 ;;
+            okf__jawn__subcmd__help,get_purge)
+                cmd="okf__jawn__subcmd__help__subcmd__get_purge"
+                ;;
             okf__jawn__subcmd__help,get_readiness)
                 cmd="okf__jawn__subcmd__help__subcmd__get_readiness"
                 ;;
@@ -411,6 +441,9 @@ _okf__jawn() {
                 ;;
             okf__jawn__subcmd__help,get_sources)
                 cmd="okf__jawn__subcmd__help__subcmd__get_sources"
+                ;;
+            okf__jawn__subcmd__help,get_tenant_job)
+                cmd="okf__jawn__subcmd__help__subcmd__get_tenant_job"
                 ;;
             okf__jawn__subcmd__help,get_view)
                 cmd="okf__jawn__subcmd__help__subcmd__get_view"
@@ -439,6 +472,12 @@ _okf__jawn() {
             okf__jawn__subcmd__help,list_reviews)
                 cmd="okf__jawn__subcmd__help__subcmd__list_reviews"
                 ;;
+            okf__jawn__subcmd__help,list_tenant_events)
+                cmd="okf__jawn__subcmd__help__subcmd__list_tenant_events"
+                ;;
+            okf__jawn__subcmd__help,list_tenant_jobs)
+                cmd="okf__jawn__subcmd__help__subcmd__list_tenant_jobs"
+                ;;
             okf__jawn__subcmd__help,list_types)
                 cmd="okf__jawn__subcmd__help__subcmd__list_types"
                 ;;
@@ -462,6 +501,12 @@ _okf__jawn() {
                 ;;
             okf__jawn__subcmd__help,preview_names)
                 cmd="okf__jawn__subcmd__help__subcmd__preview_names"
+                ;;
+            okf__jawn__subcmd__help,purge_item)
+                cmd="okf__jawn__subcmd__help__subcmd__purge_item"
+                ;;
+            okf__jawn__subcmd__help,purge_workspace)
+                cmd="okf__jawn__subcmd__help__subcmd__purge_workspace"
                 ;;
             okf__jawn__subcmd__help,read_item)
                 cmd="okf__jawn__subcmd__help__subcmd__read_item"
@@ -505,6 +550,9 @@ _okf__jawn() {
             okf__jawn__subcmd__help,start_import)
                 cmd="okf__jawn__subcmd__help__subcmd__start_import"
                 ;;
+            okf__jawn__subcmd__help,unarchive_workspace)
+                cmd="okf__jawn__subcmd__help__subcmd__unarchive_workspace"
+                ;;
             okf__jawn__subcmd__help,update_workspace)
                 cmd="okf__jawn__subcmd__help__subcmd__update_workspace"
                 ;;
@@ -515,7 +563,7 @@ _okf__jawn() {
 
     case "${cmd}" in
         okf__jawn)
-            opts="-h -V --server --json --help --version list_workspaces workspaces create_workspace open_workspace update_workspace archive_workspace export_workspace export backup_workspace restore_workspace list_items ls get_item create_item save_draft list_drafts discard_draft move_item set_lifecycle delete_item create_folder list_types set_type read_item show get_sources sources get_object read_object create_sandbox_capability search_items grep get_links links get_graph log_items log timeline diff_items diff changes commit_items snapshot restore_items rewind blame_item blame who open_proposal propose list_proposals get_proposal accept_proposal approve decline_proposal decline add_comment create_confirmation create_review verify list_reviews create_upload complete_upload start_import import get_job list_jobs retry_job cancel_job redigest_item correct_digest get_rules set_rules preview_names apply_names get_attention attention rebuild_index get_view present_view present resolve_view export_view get_catalog catalog get_receipt list_events get_session create_connector list_connectors revoke_connector get_health get_readiness help"
+            opts="-h -V --server --json --help --version list_workspaces workspaces create_workspace open_workspace update_workspace archive_workspace unarchive_workspace purge_workspace get_purge export_workspace export backup_workspace restore_workspace backup_installation list_items ls get_item create_item save_draft list_drafts discard_draft move_item set_lifecycle delete_item purge_item create_folder list_types set_type read_item show get_sources sources get_object read_object create_sandbox_capability search_items grep get_links links get_graph log_items log timeline diff_items diff changes commit_items snapshot restore_items rewind blame_item blame who open_proposal propose list_proposals get_proposal accept_proposal approve decline_proposal decline add_comment create_confirmation create_review verify list_reviews create_upload complete_upload start_import import get_job list_jobs get_tenant_job list_tenant_jobs retry_job cancel_job redigest_item correct_digest get_rules set_rules preview_names apply_names get_attention attention rebuild_index get_view present_view present resolve_view export_view get_catalog catalog get_receipt list_events list_tenant_events get_session create_connector list_connectors revoke_connector get_health get_readiness help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -603,6 +651,28 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__archive_workspace)
+            opts="-h --server --json --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --server)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        okf__subcmd__jawn__subcmd__backup_installation)
             opts="-h --server --json --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1262,6 +1332,28 @@ _okf__jawn() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        okf__subcmd__jawn__subcmd__get_purge)
+            opts="-h --server --json --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --server)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         okf__subcmd__jawn__subcmd__get_readiness)
             opts="-h --server --json --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
@@ -1372,6 +1464,28 @@ _okf__jawn() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        okf__subcmd__jawn__subcmd__get_tenant_job)
+            opts="-h --server --json --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --server)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         okf__subcmd__jawn__subcmd__get_view)
             opts="-h --server --json --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
@@ -1395,7 +1509,7 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__help)
-            opts="list_workspaces create_workspace open_workspace update_workspace archive_workspace export_workspace backup_workspace restore_workspace list_items get_item create_item save_draft list_drafts discard_draft move_item set_lifecycle delete_item create_folder list_types set_type read_item get_sources get_object create_sandbox_capability search_items get_links get_graph log_items diff_items commit_items restore_items blame_item open_proposal list_proposals get_proposal accept_proposal decline_proposal add_comment create_confirmation create_review list_reviews create_upload complete_upload start_import get_job list_jobs retry_job cancel_job redigest_item correct_digest get_rules set_rules preview_names apply_names get_attention rebuild_index get_view present_view resolve_view export_view get_catalog get_receipt list_events get_session create_connector list_connectors revoke_connector get_health get_readiness help"
+            opts="list_workspaces create_workspace open_workspace update_workspace archive_workspace unarchive_workspace purge_workspace get_purge export_workspace backup_workspace restore_workspace backup_installation list_items get_item create_item save_draft list_drafts discard_draft move_item set_lifecycle delete_item purge_item create_folder list_types set_type read_item get_sources get_object create_sandbox_capability search_items get_links get_graph log_items diff_items commit_items restore_items blame_item open_proposal list_proposals get_proposal accept_proposal decline_proposal add_comment create_confirmation create_review list_reviews create_upload complete_upload start_import get_job list_jobs get_tenant_job list_tenant_jobs retry_job cancel_job redigest_item correct_digest get_rules set_rules preview_names apply_names get_attention rebuild_index get_view present_view resolve_view export_view get_catalog get_receipt list_events list_tenant_events get_session create_connector list_connectors revoke_connector get_health get_readiness help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1451,6 +1565,20 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__help__subcmd__archive_workspace)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        okf__subcmd__jawn__subcmd__help__subcmd__backup_installation)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1870,6 +1998,20 @@ _okf__jawn() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        okf__subcmd__jawn__subcmd__help__subcmd__get_purge)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         okf__subcmd__jawn__subcmd__help__subcmd__get_readiness)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -1927,6 +2069,20 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__help__subcmd__get_sources)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        okf__subcmd__jawn__subcmd__help__subcmd__get_tenant_job)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2066,6 +2222,34 @@ _okf__jawn() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        okf__subcmd__jawn__subcmd__help__subcmd__list_tenant_events)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        okf__subcmd__jawn__subcmd__help__subcmd__list_tenant_jobs)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         okf__subcmd__jawn__subcmd__help__subcmd__list_types)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -2165,6 +2349,34 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__help__subcmd__preview_names)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        okf__subcmd__jawn__subcmd__help__subcmd__purge_item)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        okf__subcmd__jawn__subcmd__help__subcmd__purge_workspace)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2374,6 +2586,20 @@ _okf__jawn() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        okf__subcmd__jawn__subcmd__help__subcmd__unarchive_workspace)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         okf__subcmd__jawn__subcmd__help__subcmd__update_workspace)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -2521,6 +2747,50 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__list_reviews)
+            opts="-h --server --json --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --server)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        okf__subcmd__jawn__subcmd__list_tenant_events)
+            opts="-h --server --json --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --server)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        okf__subcmd__jawn__subcmd__list_tenant_jobs)
             opts="-h --server --json --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2697,6 +2967,50 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__preview_names)
+            opts="-h --server --json --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --server)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        okf__subcmd__jawn__subcmd__purge_item)
+            opts="-h --server --json --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --server)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        okf__subcmd__jawn__subcmd__purge_workspace)
             opts="-h --server --json --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3005,6 +3319,28 @@ _okf__jawn() {
             return 0
             ;;
         okf__subcmd__jawn__subcmd__start_import)
+            opts="-h --server --json --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --server)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        okf__subcmd__jawn__subcmd__unarchive_workspace)
             opts="-h --server --json --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

@@ -1,0 +1,49 @@
+{
+  "$defs": {
+    "PageRequest": {
+      "additionalProperties": false,
+      "description": "A bounded page request; the cursor is opaque and scoped to the query.",
+      "properties": {
+        "cursor": {
+          "description": "Opaque continuation cursor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "Maximum results requested; server may return fewer.",
+          "format": "uint16",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "limit"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read installation-level events after an opaque cursor.",
+  "properties": {
+    "after": {
+      "description": "Last seen event cursor.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "page": {
+      "$ref": "#/$defs/PageRequest",
+      "description": "Bounded pagination with an opaque cursor."
+    }
+  },
+  "required": [
+    "page"
+  ],
+  "title": "ListTenantEventsRequest",
+  "type": "object"
+}

@@ -1,5 +1,44 @@
 {
   "$defs": {
+    "ConversionSettings": {
+      "additionalProperties": false,
+      "description": "Converter settings; part of the identity of the digest they produce.\n\n`Default` is a Rust convenience for a deployment's defaults, never a serde default: every\nfield is required on the wire.",
+      "properties": {
+        "ocr": {
+          "$ref": "#/$defs/OcrPolicy",
+          "description": "When recognition runs."
+        },
+        "ocr_language": {
+          "description": "Docling `ocr_lang`, such as `en` or `ch`; absent uses docling's default (`en`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "page_image_dpi": {
+          "description": "Render resolution; docling `images_scale` = this / 72. At most 144, docling's own render\nresolution: a higher scale only upsamples that render and adds no detail.",
+          "format": "uint16",
+          "maximum": 144,
+          "minimum": 36,
+          "type": "integer"
+        },
+        "page_images": {
+          "description": "Keep a render of every page (docling `generate_page_images`).",
+          "type": "boolean"
+        },
+        "table_structure": {
+          "description": "Reconstruct table structure with the model (docling `no_table_former` off).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ocr",
+        "table_structure",
+        "page_images",
+        "page_image_dpi"
+      ],
+      "type": "object"
+    },
     "IdempotencyKey": {
       "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
       "format": "uuid",
@@ -9,6 +48,26 @@
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
       "type": "string"
+    },
+    "OcrPolicy": {
+      "description": "When optical character recognition runs.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Recognise only regions with no embedded text layer (docling default).",
+          "type": "string"
+        },
+        {
+          "const": "skip",
+          "description": "Never run recognition; layout and tables are still detected (docling `skip_ocr`).",
+          "type": "string"
+        },
+        {
+          "const": "force_full_page",
+          "description": "Recognise every page from its render (docling `force_full_page_ocr`).",
+          "type": "string"
+        }
+      ]
     },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
@@ -37,9 +96,12 @@
       "description": "Stable application item identity; paths remain the portable OKF identity."
     },
     "settings": {
-      "additionalProperties": true,
-      "description": "Converter options that participate in the digest cache key.",
-      "type": "object"
+      "$ref": "#/$defs/ConversionSettings",
+      "description": "Converter settings; they are part of the new digest's identity. With\n`unconverted_only` they must equal the current digest's settings, or the request is\n`invalid_input` on `/settings`."
+    },
+    "unconverted_only": {
+      "description": "Convert exactly the `not_converted` pages of the current extraction and merge them into\na new digest, instead of converting the whole source again.",
+      "type": "boolean"
     },
     "workspace_id": {
       "$ref": "#/$defs/WorkspaceId",
@@ -51,6 +113,7 @@
     "item_id",
     "base_revision",
     "settings",
+    "unconverted_only",
     "idempotency_key"
   ],
   "title": "RedigestRequest",
