@@ -232,8 +232,10 @@ fn synthesize(schema: &Value, defs: &Value, depth: u8) -> Result<Value, Box<dyn 
 }
 
 fn sample_string(schema: &Map<String, Value>) -> String {
-    if schema.get("format").and_then(Value::as_str) == Some("uuid") {
-        return "11111111-1111-4111-8111-111111111111".to_owned();
+    match schema.get("format").and_then(Value::as_str) {
+        Some("uuid") => return "11111111-1111-4111-8111-111111111111".to_owned(),
+        Some("date-time") => return "2026-10-08T14:03:07.250Z".to_owned(),
+        _ => {}
     }
     match schema.get("pattern").and_then(Value::as_str) {
         Some(pattern) if pattern.contains("{40}") => "a".repeat(40),

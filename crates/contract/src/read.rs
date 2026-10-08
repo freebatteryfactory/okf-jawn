@@ -35,8 +35,20 @@ pub enum OutlineEntryKind {
     Sheet,
 }
 
+/// What a retained image is.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetRole {
+    /// A render of one whole page (docling page image).
+    PageImage,
+    /// A picture item's own image (docling `PictureItem` image).
+    Picture,
+}
+
 /// Explicit bounded source selection.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+///
+/// `PartialEq` only: a `region` holds coordinates as `f64`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Selection {
     /// The complete source, subject to a visible response budget.
@@ -60,6 +72,12 @@ pub enum Selection {
     Section {
         #[doc = "Heading."]
         heading: String,
+    },
+    /// A box on one page: the extracted items whose location lies inside it; the `pages` view
+    /// returns that page's image.
+    Region {
+        #[doc = "Region."]
+        region: crate::source::PageRegion,
     },
 }
 
@@ -122,8 +140,8 @@ pub struct CreateSandboxCapabilityRequest {
 pub struct SandboxCapability {
     /// Absolute `/sandbox/{capability}` URL on the configured sandbox origin.
     pub url: String,
-    /// RFC 3339 expiry after which the capability resolves nothing.
-    pub expires_at: String,
+    /// Expiry after which the capability resolves nothing.
+    pub expires_at: crate::identity::Timestamp,
 }
 
 /// An authorized image or artifact associated with a source range.
@@ -134,12 +152,14 @@ pub struct MediaReference {
     pub object: crate::identity::Digest,
     /// MIME type.
     pub media_type: String,
-    /// Original source location.
+    /// What the image is.
+    pub role: AssetRole,
+    /// Original source location: a page image's location is `direct` `page`; a picture's is
+    /// its region.
     pub source: crate::source::SourceReference,
-    /// Caption text; caption origin is separate.
-    pub caption: String,
-    /// source, process, human, or agent.
-    pub caption_origin: String,
+    /// The document's own caption or alternative text; absent when the document gives none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
     /// Pixel width.
     pub width: u32,
     /// Pixel height.
@@ -169,4 +189,7 @@ pub struct ReadItemResponse {
     pub next_cursor: Option<String>,
     /// Durable record of returned content.
     pub receipt_id: crate::identity::ReceiptId,
+    /// For a source: whether its text is partial, supplied by an agent or corrected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<crate::extraction::ExtractionSummary>,
 }

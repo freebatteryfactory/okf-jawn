@@ -156,7 +156,8 @@ pub struct RenameEntry {
     pub warnings: Vec<crate::common::Warning>,
 }
 
-/// One path observed as a duplicate during rename preview.
+/// One path observed as a duplicate during rename preview, including paths that differ only in
+/// case or Unicode normalization (`WorkspacePath::collision_key`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DuplicateObservation {
@@ -196,4 +197,20 @@ pub struct ApplyNamesRequest {
     pub rules: NamingRules,
     /// Retry identity.
     pub idempotency_key: crate::identity::IdempotencyKey,
+}
+
+/// The file name of the source card for an original named `original`.
+///
+/// Split at the last `.`: the stem, `-`, the extension, then `.md` (`report.pdf` gives
+/// `report-pdf.md`, `v1.2.notes.txt` gives `v1.2.notes-txt.md`). A name with no `.`, or whose
+/// only `.` is its first character, gets `.md` alone (`README` gives `README.md`, `.env` gives
+/// `.env.md`). Case is kept. A collision then takes the numbered-suffix rule
+/// (`report-pdf-2.md`) and the naming rules apply; the original name is kept exactly as
+/// supplied in the card's application header.
+#[must_use]
+pub fn source_card_name(original: &str) -> String {
+    match original.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem}-{extension}.md"),
+        _ => format!("{original}.md"),
+    }
 }

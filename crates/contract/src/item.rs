@@ -1,4 +1,8 @@
 //! User-defined OKF types, editable notes, and source appearances.
+//!
+//! Every item file carries one application-owned header mapping under `APP_HEADER_KEY`: the
+//! item id, the archived flag when set, and on a source card the original name and digest and
+//! the extraction. The server owns it; a write that changes it is refused.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -15,16 +19,22 @@ pub enum ItemKind {
     View,
 }
 
-/// Application lifecycle distinct from business approval.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+/// OKF's `status` word of an item, distinct from business approval and from archiving.
+///
+/// An absent OKF `status` reads `stable`. `other` is a producer's value outside the three,
+/// kept exactly as written in the file's `status` property; it cannot be set through
+/// `set_lifecycle`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Lifecycle {
+pub enum ItemStatus {
+    /// Work in progress.
+    Draft,
     /// Current and usable content.
-    Active,
-    /// Retained historical content.
+    Stable,
+    /// Retained, superseded content; still searchable.
     Deprecated,
-    /// Hidden from ordinary current listings; still retrievable.
-    Archived,
+    /// A status word outside the three, preserved in the file.
+    Other,
 }
 
 /// A navigable item description bound to a resolved workspace revision.
@@ -45,11 +55,16 @@ pub struct ItemSummary {
     pub kind: ItemKind,
     /// Resolved revision for this summary.
     pub revision: crate::identity::Revision,
-    /// Presentation lifecycle.
-    pub lifecycle: Lifecycle,
+    /// OKF status word.
+    pub status: ItemStatus,
+    /// Hidden from ordinary current listings; reversible and keeps history.
+    pub archived: bool,
     /// Original MIME type if there is a source object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
+    /// The converter's verdict and whose text is shown; present exactly when `kind` is `source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<crate::extraction::ExtractionSummary>,
 }
 
 /// Editable Markdown and preserved frontmatter extension properties.
@@ -60,7 +75,8 @@ pub struct ItemDocument {
     pub summary: ItemSummary,
     /// Markdown body, preserving source locators.
     pub body: String,
-    /// All user and OKF properties; unknown extension values are retained.
+    /// All user and OKF properties; unknown extension values are retained. The server-owned
+    /// application header appears under `APP_HEADER_KEY`.
     pub properties: std::collections::BTreeMap<String, serde_json::Value>,
     /// Source occurrence metadata when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,8 +98,8 @@ pub struct Draft {
     pub base_revision: crate::identity::Revision,
     /// Digest of the drafted body and properties.
     pub content_digest: crate::identity::Digest,
-    /// RFC 3339 time of the latest save.
-    pub saved_at: String,
+    /// Time of the latest save.
+    pub saved_at: crate::identity::Timestamp,
 }
 
 /// The caller's own draft content returned beside committed content.
@@ -108,6 +124,10 @@ pub struct ListItemsRequest {
     pub at: crate::identity::At,
     /// Empty string for the root; otherwise a validated relative folder.
     pub folder: String,
+    /// List only the sources that match among the folder's items; child folders are listed
+    /// as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<crate::extraction::ExtractionFilter>,
     /// Bounded pagination with an opaque cursor.
     pub page: crate::common::PageRequest,
 }
@@ -233,7 +253,10 @@ pub struct MoveItemRequest {
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
-/// Retire or reactivate an item without claiming a business decision.
+/// Change an item's status word or archive flag without claiming a business decision.
+///
+/// At least one of `status` and `archived` is present, and `status` is never `other`
+/// (`check_rules`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetLifecycleRequest {
@@ -243,8 +266,12 @@ pub struct SetLifecycleRequest {
     pub item_id: crate::identity::ItemId,
     /// Exact revision on which this change is based; stale writes conflict.
     pub base_revision: crate::identity::Revision,
-    /// Requested lifecycle.
-    pub lifecycle: Lifecycle,
+    /// New OKF status word; absent leaves it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ItemStatus>,
+    /// Archive (`true`) or unarchive (`false`); absent leaves it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
     /// Retry identity.
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
@@ -320,3 +347,6 @@ pub struct SetTypeRequest {
     /// Retry identity.
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
+
+/// The frontmatter key of the application-owned header every item file carries.
+pub const APP_HEADER_KEY: &str = "okf_jawn";
