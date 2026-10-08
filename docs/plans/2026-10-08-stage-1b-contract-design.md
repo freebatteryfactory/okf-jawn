@@ -10,9 +10,15 @@ ingest, MCP and the UI mean the same thing by the same object. It is the input o
 `core-ports-carry-extraction-and-views` (core-cli, section 9). It is not a lane plan.
 
 Marks. `[verified: path:line]` cites the source that shows a library capability; library paths
-are relative to the crate root in the Cargo registry (`docling-1.93.5/src/...`,
-`docling-core-1.93.6/src/...`, `docling-pdf-1.93.6/src/...`) or to this repository.
-`[inferred]` marks what was not read in source.
+are relative to the crate root of `docling-1.93.5/src/...` (crates.io, as Cargo.lock pins it),
+to `docling.rs@e500c23/crates/...` (the fork commit Cargo.lock pins for docling-core, docling-onnx
+and docling-pdf 1.93.6; every file cited from it was compared with the crates.io 1.93.6 copy and is
+identical), to `okf-core-0.2.7/src/...`, or to this repository. `[inferred]` marks what was not
+read in source.
+
+Fix round 1 (after the independent review, CHANGES_REQUIRED) changed every section; the
+owner questions of round 0 are answered by the orchestrator's rulings and carried in sections 6,
+8, 13 and 14.
 
 ## 0. Conventions this design applies everywhere
 
@@ -35,7 +41,7 @@ are relative to the crate root in the Cargo registry (`docling-1.93.5/src/...`,
 New contract files: `crates/contract/src/extraction.rs` ("Conversion outcome, converter
 identity, settings and supplied text of a source") and `crates/contract/src/purge.rs`
 ("Archive is reversible; purge is explicit, destructive and recorded"). Both are added to
-`lib.rs`. The operation table grows from 69 to 74 operations (section 10); the model tool set (12)
+`lib.rs`. The operation table grows from 69 to 77 operations (section 10); the model tool set (12)
 and the app tool set (`read_object`) do not change.
 
 ## 1. Conversion outcome and converter identity
@@ -62,7 +68,7 @@ retry converts only those pages."
 - A truncated PDF is refused: `convert` returns `Err` or `Ok` with `Failure`
   [verified: qualification/docling/lib/criteria.mjs:87-88].
 - The model set is reported by `docling::model_inventory()` as `ModelEntry { stage, path, found,
-  bytes }`, with no hash [verified: docling-pdf-1.93.6/src/lib.rs:372-383]; the qualification
+  bytes }`, with no hash [verified: docling.rs@e500c23/crates/docling-pdf/src/lib.rs:372-383]; the qualification
   hashes the files itself. The converter's crate sources come from Cargo.lock, as the receipt's
   `converter.packages` records them (docling 1.93.5 from crates.io; docling-core, docling-onnx and
   docling-pdf 1.93.6 from the fork) [verified: qualification/receipts/docling.json:602-634].
@@ -166,10 +172,12 @@ pub struct ConverterIdentity {
     /// The docling crate version, such as `1.93.5`.
     pub version: String,
     /// The converter crates as Cargo.lock resolves them; a patched fork is visible here.
+    /// Generated from Cargo.lock by xtask (section 9.1), so gen-check holds it to the lock.
     pub packages: Vec<ConverterPackage>,
     /// Settings applied.
     pub settings: ConversionSettings,
-    /// Model files the pipeline loaded; empty for formats that load none.
+    /// Model files the pipeline loads, hashed once when the worker starts; empty for formats
+    /// that load none.
     pub models: Vec<ModelIdentity>,
     /// Pages per conversion window; absent when the document was converted whole.
     pub page_window: Option<u32>, // opt
@@ -185,7 +193,7 @@ pub struct ConverterPackage {
     pub source: String,
 }
 
-/// One model file of `docling::model_inventory()`, hashed by the worker.
+/// One model file of `docling::model_inventory()`, hashed by the worker at startup.
 pub struct ModelIdentity {
     /// Pipeline stage, such as `layout` or `ocr.rec`.
     pub stage: String,
@@ -215,6 +223,12 @@ pub enum ExtractionWarning {       // tag "kind"
     UnlocatedItems {
         /// How many.
         items: u32,
+    },
+    /// A spreadsheet's cells were read as the values the file stores; formulas and number
+    /// formats were not extracted (SPEC §5 formula/value/format distinction).
+    CellValuesOnly {
+        /// Sheets read, in workbook order.
+        sheets: Vec<String>,
     },
 }
 
@@ -287,6 +301,7 @@ Docling to outcome, applied by ingest:
 | `Err(Io)`, `Err(Streaming)`, `Err(Browser)` | `failed`, `converter_error` |
 | `Err(UnknownFormat)`, `Err(UnsupportedFormat)`, no extractor for the media type | `unsupported` |
 | undecodable glyphs found on a page of a `Success` | `partial`; that page in `partly_extracted` |
+| any XLSX result with a document | the outcome above, plus warning `cell_values_only` |
 | model asset or native library missing | not an outcome: the worker errs, the job fails retryable, the card stays `pending` |
 
 ### Operations whose shapes change
@@ -320,12 +335,18 @@ Docling to outcome, applied by ingest:
 ### Deliberately left out
 
 Per-page OCR confidence: docling has a per-page `ocr_score` in its `ConfidenceReport`
-[verified: docling-core-1.93.6/src/confidence.rs:1-21] and no per-item OCR flag in the export
+[verified: docling.rs@e500c23/crates/docling-core/src/confidence.rs:1-21] and no per-item OCR flag in the export
 [inferred: no `from_ocr` field appears in docling-pdf 1.93.6]; nothing consumes it yet. Sheets the
 XLSX backend skips past `DOCLING_RS_SHEET_MAX_CELLS` are reported only on stderr
 [verified: docling-1.93.5/src/backend/xlsx.rs:66-72]; no typed warning is designed until ingest can
-observe it other than by parsing stderr. Formula versus value distinctions (SPEC §5) are not
-given by the backend and are not modelled here.
+observe it other than by parsing stderr.
+
+Formula versus value (SPEC §5 "Formula/value/format distinctions and extraction limitations must
+be visible where they matter"): the XLSX backend reads cell values and has no formula or number
+format handling [verified: docling-1.93.5/src/backend/xlsx.rs, no occurrence of `formula` or a
+number-format reader]. Ingest therefore adds `cell_values_only` to every XLSX extraction, and a
+dataset read from cells carries the warning (section 4), which is where the distinction matters.
+Extracting the formulas themselves is not designed: the converter does not give them.
 
 ## 2. Source locators and location provenance
 
@@ -340,26 +361,16 @@ locators and converter/version/settings."
 
 | Format | What docling gives | Locator here |
 | --- | --- | --- |
-| PDF | `prov` per item: `page_no`, `bbox {l,t,r,b,coord_origin}`, `charspan`; captions lose their box [verified: qualification/docling/src/locate.rs:3-9, 228-242] | `region`, unit `point` [inferred: PDF page units], `direct`; or `inferred` by the text-layer rule; or `unresolved` with the rule's reason |
-| Image | one page; every item needs a page and a box, and the fixture's picture is located by the export [verified: qualification/docling/lib/criteria.mjs:52; qualification/receipts/docling.json:84-87] | `region`, unit `pixel` [inferred], `direct` |
-| PPTX | `page_no` is the slide; the box is in EMU and the page size is the slide size in EMU; top-left origin [verified: docling-core-1.93.6/src/tree.rs:117-133]; 26 of 28 items located in the corpus deck [verified: qualification/receipts/docling.json:45] | `region`, unit `emu`, `direct`; an item with no `prov` is `unresolved`, `not_located_by_converter` |
+| PDF | `prov` per item: `page_no`, `bbox {l,t,r,b,coord_origin}`, `charspan`; captions lose their box [verified: qualification/docling/src/locate.rs:3-9, 228-242] | `region` (in PDF points [inferred]), `direct`; or `inferred` by the text-layer rule; or `unresolved` with the rule's reason |
+| Image | one page; every item needs a page and a box, and the fixture's picture is located by the export [verified: qualification/docling/lib/criteria.mjs:52; qualification/receipts/docling.json:84-87] | `region` (in pixels [inferred]), `direct` |
+| PPTX | `page_no` is the slide; the box is in EMU and the page size is the slide size in EMU; top-left origin [verified: docling.rs@e500c23/crates/docling-core/src/tree.rs:117-133]; 26 of 28 items located in the corpus deck [verified: qualification/receipts/docling.json:45] | `region` (in EMU), `direct`; an item with no `prov` is `unresolved`, `not_located_by_converter` |
 | XLSX | every sheet is a page in workbook order; the box is the item's cell-index box, top-left origin, half-open on the right and bottom [verified: docling-1.93.5/src/backend/xlsx.rs:137-139, 268-271, 309-311, 370-381] | `cells`: sheet name from the page number's position in workbook order, rows and columns converted to one-based inclusive, `direct` |
-| DOCX, HTML | `prov: []` [verified: docling-core-1.93.6/src/tree.rs:163-165] | `unresolved`, `format_has_no_locator` |
-| OCR text (scanned PDF, image) | recognition runs per layout region, so recognised text arrives as ordinary items with the region's box [verified: docling-pdf-1.93.6/src/ocr.rs:1-6] | the same `region` at item granularity; no word or line boxes exist in the export |
+| DOCX, HTML | `prov: []` [verified: docling.rs@e500c23/crates/docling-core/src/tree.rs:163-165] | `unresolved`, `format_has_no_locator` |
+| OCR text (scanned PDF, image) | recognition runs per layout region, so recognised text arrives as ordinary items with the region's box [verified: docling.rs@e500c23/crates/docling-pdf/src/ocr.rs:1-6] | the same `region` at item granularity; no word or line boxes exist in the export |
 
 ### Types (`crates/contract/src/source.rs`, with `Selection` in `read.rs`)
 
 ```rust
-/// Unit of a region's coordinates; fixed by the format, stated so readers need no format logic.
-pub enum RegionUnit {
-    /// PDF points.
-    Point,
-    /// Image pixels.
-    Pixel,
-    /// PPTX English Metric Units.
-    Emu,
-}
-
 /// Docling's `coord_origin`: which corner `t` and `b` are measured from.
 pub enum CoordOrigin {
     /// Docling `TOPLEFT`.
@@ -382,7 +393,8 @@ pub struct BoundingBox {
     pub coord_origin: CoordOrigin,
 }
 
-/// Extent of the page the box lies on, in the same unit.
+/// Extent of the page the box lies on, in the box's own unit (PDF points, image pixels, PPTX
+/// EMU). A reader draws the box over a page image by the ratio of the two, so it needs no unit.
 pub struct PageSize {
     /// Page width.
     pub width: f64,
@@ -399,8 +411,6 @@ pub struct PageRegion {
     pub bbox: BoundingBox,
     /// The page's extent, so the box can be drawn over a page image on its own.
     pub page_size: PageSize,
-    /// Coordinate unit.
-    pub unit: RegionUnit,
 }
 
 /// Where in the original bytes something is.
@@ -485,18 +495,24 @@ Changes to existing types:
   XLSX locator and is one-based inclusive.
 - `SourceReference` gains `locations: Vec<SourceLocation>` (opt-list): where the cited selection
   of the digest lies in the original, one entry per located item it covers, in reading order.
-  The server computes it from (item, revision, digest, selection). In a request it is accepted
-  only as the server returned it: the application recomputes it and refuses a difference as
-  `invalid_input` on `.../locations`. An agent therefore cannot supply a location. Because every
-  citation type holds a `SourceReference`, locations reach `ReadItemResponse`, `SearchHit`,
-  `MediaReference`, `ViewBinding`, `Review`, `Receipt`, `BlameResponse` and `AddCommentRequest`.
+  The rule, in one place: the server computes it from (item, revision, digest, selection). In a
+  response it is always filled. In a request, an omitted list means "fill it" and the server
+  fills it; a present list must equal what the server computes, or the request is
+  `invalid_input` on `.../locations`. An agent therefore cannot supply a location. A saved View
+  file does not persist locations: the server writes each binding's `SourceReference` without
+  them (they are derived, and an item purge must not leave them in Git) and fills them when it
+  returns the View. Because every citation type holds a `SourceReference`, locations reach
+  `ReadItemResponse`, `SearchHit`, `MediaReference`, `ViewBinding`, `Review`, `Receipt`,
+  `BlameResponse` and `AddCommentRequest`.
 
 No operation is added.
 
 ### Contract tests
 
-- `semantic::an_inferred_location_never_reads_as_direct`: `{"provenance":"inferred",...}` does
-  not deserialize as `Direct` and keeps its variant through a round trip.
+- `semantic::location_provenance_is_carried_by_the_tag`: each of the three variants serializes
+  with exactly `"provenance":"direct"`, `"inferred"` or `"unresolved"`, and each of those three
+  documents deserializes to that variant and no other; it fails if a variant is renamed,
+  aliased, or made to share a tag.
 - `semantic::an_unresolved_location_has_no_locator`: a `locator` field beside
   `"provenance":"unresolved"` is refused.
 - `semantic::a_region_keeps_docling_coordinates`: a PDF bottom-left and a PPTX top-left region
@@ -522,12 +538,12 @@ cancellation controls."
 
 - Docling produces two kinds of image: page images, kept per page when `generate_page_images` is
   on, in `DoclingDocument::page_images` keyed by page number
-  [verified: docling-1.93.5/src/converter.rs:750-759; docling-core-1.93.6/src/document.rs:58];
-  and a picture item's own image [verified: docling-core-1.93.6/src/tree.rs:87-105]. Page images
+  [verified: docling-1.93.5/src/converter.rs:750-759; docling.rs@e500c23/crates/docling-core/src/document.rs:58];
+  and a picture item's own image [verified: docling.rs@e500c23/crates/docling-core/src/tree.rs:87-105]. Page images
   exist for the PDF and image pipeline only [verified: qualification/receipts/docling.json:35].
   Nothing else is an image asset, so there are two roles.
 - `PictureImage` carries `mimetype`, `width`, `height`, `data`, `dpi`
-  [verified: docling-core-1.93.6/src/document.rs:655-669]; page renders are 144 dpi unless
+  [verified: docling.rs@e500c23/crates/docling-core/src/document.rs:655-669]; page renders are 144 dpi unless
   `images_scale` is set (dpi = 72 x scale) [verified: docling-1.93.5/src/converter.rs:738-748].
 - Settings that change the result: `ocr_lang` [verified: converter.rs:289], `skip_ocr`
   [verified: converter.rs:668-685], `force_full_page_ocr` [verified: converter.rs:687-697],
@@ -560,18 +576,25 @@ pub struct ConversionSettings {
     pub table_structure: bool,
     /// Keep a render of every page (docling `generate_page_images`).
     pub page_images: bool,
-    /// Render resolution; docling `images_scale` = this / 72. 144 is docling's own default.
-    #[schemars(range(min = 36, max = 600))]
+    /// Render resolution; docling `images_scale` = this / 72. At most 144, docling's own render
+    /// resolution: a higher scale only upsamples that render and adds no detail.
+    #[schemars(range(min = 36, max = 144))]
     pub page_image_dpi: u16,
 }
 ```
+
+The cap is 144 because docling renders a page once at 2.0 px/pt (144 dpi) and resamples to any
+other `images_scale`; above 2.0 it upsamples and does not re-render
+[verified: docling-1.93.5/src/converter.rs:739-744]. A larger value would cost memory and
+storage and claim detail that is not there. `ConversionSettings::check` refuses a value outside
+36..=144 as `invalid_input` on `/settings/page_image_dpi`.
 
 `impl Default for ConversionSettings` (Rust only, not a serde default): `ocr: Auto`,
 `ocr_language: None`, `table_structure: true`, `page_images: true`, `page_image_dpi: 144`.
 `page_images` changes from `false` to `true`: page renders are what a `region` citation is drawn
 on (section 2) and what SPEC §5 asks to retain; page windows (section 9.1) bound the memory.
 
-In `crates/contract/src/read.rs` (moved from core, and the free string replaced):
+In `crates/contract/src/read.rs`:
 
 ```rust
 /// What a retained image is.
@@ -581,23 +604,15 @@ pub enum AssetRole {
     /// A picture item's own image (docling `PictureItem` image).
     Picture,
 }
-
-/// Where a caption's text came from.
-pub enum CaptionOrigin {
-    /// The document's own caption or alternative text.
-    Source,
-    /// Generated by the conversion process.
-    Process,
-    /// Written by a person.
-    Human,
-    /// Supplied by an agent and accepted by a person.
-    Agent,
-}
 ```
 
-`MediaReference` gains `role: AssetRole`; `caption_origin` changes from `String` to
-`CaptionOrigin`. Its `source` locates the image: a page image's location is `direct` `page`; a
-picture's is its region.
+`MediaReference` gains `role: AssetRole`. Its `caption: String` and `caption_origin: String`
+become one field, `caption: Option<String>` (opt): the document's own caption or alternative
+text, absent when the document gives none. The origin word is dropped because only one origin
+has a producer (ingest copies the docling caption item); `process`, `human` and `agent` captions
+would need caption generation or a caption-editing operation, and neither is selected. Core's
+`CaptionOrigin` and `AssetCaption::origin` go with it. Its `source` locates the image: a page
+image's location is `direct` `page`; a picture's is its region.
 
 ### Operations whose shapes change
 
@@ -694,6 +709,9 @@ pub struct Dataset {
     /// Rows; each has exactly one value per column.
     #[schemars(length(max = 100000))]
     pub rows: Vec<Vec<DatasetValue>>,
+    /// Extraction warnings of the source that bear on these values, such as
+    /// `cell_values_only` for a dataset read from spreadsheet cells.
+    pub warnings: Vec<crate::extraction::ExtractionWarning>, // opt-list
 }
 
 /// Which chart of a View a result is about.
@@ -761,10 +779,21 @@ value is null or of its column's kind; `date_time` values parse as `Timestamp`);
   View-level fault (schema, a binding outside the workspace) still refuses the whole request; a
   chart-level fault never does. `resolved_bindings[i].materialized` is absent for a binding whose
   dataset could not be produced, and every chart reading it is `failed`.
-- The dataset is produced by core while resolving (section 9.5) and written to the blob store;
-  writing a content-addressed derived blob during a `Read` operation is not a change of user state.
-  The UI fetches it through `read_object` as today, verifies the digest, and parses it with the
-  generated `zDataset`.
+- `PresentResponse` gains `as_of: Timestamp`: when the bindings were resolved. With the resolved
+  revision every binding's `source.revision` already carries, this is SPEC §10's "Explicit live
+  mode reports each resolved revision and as-of time". A View binds only to its own workspace,
+  so one resolution moment covers every binding; for a pinned View `as_of` is the time the
+  pinned inputs were read, and the revisions are the pinned ones.
+- The dataset is a derived object of the bound source. Core produces it while resolving
+  (section 9.5), writes it to the blob store, and records it with
+  `RecordStore::record_derived_object` against the binding's (item, revision). Because of that
+  record: `get_object` with `source` = the binding's citation accepts the dataset's digest as an
+  object of that item revision (the same check that serves originals and conversion assets);
+  the recorded object is a garbage-collection root; and an item or workspace purge reaches it as
+  a derivative of the item (SPEC §8 "derivatives"). Writing a content-addressed derived blob and
+  its record during a `Read` operation is not a change of user state, as an index entry is not.
+  The UI fetches the dataset through `read_object` as today, verifies the digest, and parses it
+  with the generated `zDataset`.
 - `xtask` registers `Dataset` as an OpenAPI component (it is in no operation's schema, being
   fetched as bytes) and writes `api/forms/dataset.schema.json`, so Hey API generates `zDataset`.
 - No operation is added.
@@ -777,11 +806,13 @@ value is null or of its column's kind; `date_time` values parse as `Timestamp`);
 - `semantic::every_chart_of_a_view_has_one_ref`: `chart_refs` for both grammars.
 - `semantic::a_failed_chart_states_a_typed_reason`: `ChartStatus` round trip; an unknown reason
   is refused.
+- Core (core-cli): `views::a_materialized_dataset_is_an_object_of_the_bound_revision`: after
+  `present_view`, `get_object` with the binding's citation serves the dataset's digest, and with
+  the citation of another revision of the same item it is `not_found`.
 
 ### Deliberately left out
 
-Live-mode as-of times per binding (SPEC §10 "reports each resolved revision and as-of time"):
-not in this list. The rendered image of a chart for `export_view`.
+The rendered image of a chart for `export_view`.
 
 ## 5. Unprocessed files and agent-supplied text
 
@@ -931,19 +962,23 @@ application's control. Workspace purge is built first; item purge follows with t
 guarantees." Ledger 2026-10-08: purge "eliminates recoverable target content from every
 application-managed copy incl. managed backups and retained history; never completes while an
 affected managed backup stays restorable; shared CAS objects with surviving legitimate references
-are tracked honestly; no tombstone-only substitute."
+are tracked honestly; no tombstone-only substitute." Ruling (owner Q2): "after item purge,
+citations of other items whose content digest is unchanged are remapped to the rewritten revision
+and keep review coverage; citations of the purged item are invalidated."
 
 ### Archive
 
 - `Workspace` gains `archived_at: Option<Timestamp>` (opt).
-- `ListWorkspacesRequest` gains `include_archived: bool` (required, as on `SearchRequest`).
+- `ListWorkspacesRequest` gains `include_archived: Option<bool>` (opt); absent means false. It is
+  optional so the `workspaces` model tool gains no required argument.
 - New operation `unarchive_workspace` (`UnarchiveWorkspaceRequest { workspace_id,
   idempotency_key }`, response `MutationResult`).
 - While a workspace is archived, an operation that would change its content or open work on it
   (a commit, a draft, a proposal, an upload, an import or redigest) is refused as `conflict`;
   reads, export, backup, `unarchive_workspace` and purge are allowed.
 - `archive_workspace` stops being marked destructive: it destroys nothing.
-- Items keep `set_lifecycle` with `archived` and `active`, which is already reversible.
+- An item's archive is the `archived` flag of section 13 (decision E), set and cleared through
+  `set_lifecycle`; it is reversible and keeps history.
 
 ### Types (`crates/contract/src/purge.rs`, `PurgeId` in `identity.rs`)
 
@@ -954,8 +989,8 @@ uuid_id!(PurgeId, "Identity of one purge; its record outlives what it removed.")
 pub struct PurgeWorkspaceRequest {
     /// Workspace to remove.
     pub workspace_id: crate::identity::WorkspaceId,
-    /// Head the administrator saw; a moved head conflicts.
-    pub expected_head: crate::identity::Revision,
+    /// Exact revision on which this purge is based; a moved head conflicts.
+    pub base_revision: crate::identity::Revision,
     /// Retry identity.
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
@@ -966,8 +1001,8 @@ pub struct PurgeItemRequest {
     pub workspace_id: crate::identity::WorkspaceId,
     /// Item to remove.
     pub item_id: crate::identity::ItemId,
-    /// Head the administrator saw; a moved head conflicts.
-    pub expected_head: crate::identity::Revision,
+    /// Exact revision on which this purge is based; a moved head conflicts.
+    pub base_revision: crate::identity::Revision,
     /// Retry identity.
     pub idempotency_key: crate::identity::IdempotencyKey,
 }
@@ -1000,9 +1035,9 @@ pub enum PurgeState {
     Requested,
     /// Removing.
     Running,
-    /// Every application-managed copy is removed; no affected backup is restorable.
+    /// Every application-managed copy is removed or rewritten; no affected backup is restorable.
     Completed,
-    /// Stopped; retrying the same request resumes it.
+    /// Stopped; repeating the request resumes it.
     Failed,
 }
 
@@ -1012,15 +1047,21 @@ pub struct PurgeReport {
     pub objects_removed: String,
     /// Objects kept because a surviving item still references them.
     pub objects_kept_shared: String,
-    /// Managed backups deleted.
+    /// Managed backups deleted (workspace archives, and their copies in pre-migration backups).
     pub backups_removed: u32,
     /// Managed backups rewritten without the target.
     pub backups_rewritten: u32,
-    /// Retained export artifacts deleted.
+    /// Retained export and View export artifacts deleted.
     pub exports_removed: u32,
+    /// Proposals deleted with their candidate references and comments.
+    pub proposals_removed: u32,
+    /// Drafts deleted.
+    pub drafts_removed: u32,
     /// Revisions that no longer exist or were rewritten.
     pub revisions_invalidated: u32,
-    /// Citations (reviews, receipts, View bindings) marked invalidated.
+    /// Stored citations of other items remapped to a rewritten revision.
+    pub citations_remapped: u32,
+    /// Stored citations (reviews, receipts, comments, View bindings) of the target invalidated.
     pub citations_invalidated: u32,
     /// Saved Views with an invalidated binding.
     pub views_invalidated: u32,
@@ -1034,7 +1075,7 @@ pub struct Purge {
     pub target: PurgeTarget,
     /// Progress.
     pub state: PurgeState,
-    /// The job doing the work.
+    /// The tenant job doing the work.
     pub job_id: crate::identity::JobId,
     /// Administrator subject.
     pub requested_by: String,
@@ -1049,59 +1090,125 @@ pub struct Purge {
 }
 ```
 
-### Invalidated state
+### Authorization, resumption and the job
 
-- Revisions: `ErrorDetail` gains `Invalidated { purge_id: PurgeId, replacement:
-  Option<Revision> }`, sent with `ErrorCode::NotFound` when a request names a revision or object a
-  purge removed (`replacement` is the rewritten revision, for item purge). A client that does not
-  know the detail still sees not-found.
-- Citations: `ReviewCoverage` gains `Invalidated`; `Receipt` gains
-  `invalidated_by: Option<PurgeId>` (opt).
-- Views: `ChartFailure::Invalidated` (section 4); `AttentionKind` gains `Invalidated` (a saved View
-  or citation refers to purged content; action `get_view`).
-- Workspace purge removes the workspace's whole record set except the purge job row and the
-  `Purge` record, which carry no content. Views bind only to their own workspace (SPEC §10), so a
-  workspace purge invalidates no View elsewhere.
+- `purge_workspace`, `purge_item` and `get_purge` authorize at the tenant (`Deployment(Admin)`)
+  only, and the two purges are in `HUMAN_SESSION_ONLY`. A purge removes the workspace's grants,
+  so a workspace target could not authorize the retry of a half-finished purge; a tenant target
+  can, before and after. A workspace administrator who is not a tenant administrator archives
+  instead.
+- A purge is unique per target while it is not completed: repeating `purge_workspace` or
+  `purge_item` for that target (any idempotency key) returns the unfinished `Purge`, and its job
+  is queued again; that is how a failed purge is resumed. A purge cannot be cancelled: a
+  half-removed target is worse than either end.
+- The work runs as a tenant job (section 9.2, `JobScope::Tenant`) of kind `purge_workspace` or
+  `purge_item`; tenant jobs are not reachable through `retry_job` and `cancel_job`, which take a
+  workspace.
+- `purge_item` is declared now and returns `not_implemented` until its storage gate passes.
+
+### What a purge reaches
+
+Workspace purge removes, for that workspace: its Git repository; every stored object only it
+references (originals, conversion records and their structured exports, page images, pictures,
+recorded datasets, retained export, View export and backup archive bytes); its SQLite rows (jobs,
+reviews, receipts, proposals with their candidate references, comments, drafts, uploads,
+confirmations, sandbox capabilities, events, artifact records, derived-object records), except
+its purge job row and the `Purge` record, which hold no content; its index entries; its grants;
+its id in every connector's workspace list; its workspace archives; and its archive inside every
+pre-migration backup storage retains (SPEC §2: "takes a recoverable backup before an upgrade
+migration"), which is a managed backup too. An upload slot whose object is a backup archive is
+not a surviving reference for this purpose. In other workspaces, a comment whose `source` cites
+the purged workspace is marked invalidated and its stored path is scrubbed. Installation
+archives hold no workspace content (section 8), so a purge neither deletes nor rewrites them;
+the next installation archive carries the completed `Purge` record, and a replacement restore
+refuses a workspace archive whose workspace that record says was purged.
+
+Item purge removes the item's files from every commit (a history rewrite, below); its source
+bytes and every derivative (conversion records, structured exports, page images, pictures, and
+the datasets recorded against any of its revisions), unless a surviving item references the same
+object; every proposal with a change touching it, including `SupplyExtraction` Markdown, with the
+proposal's candidate reference and comments; every draft of it, for every editor; every retained
+export or View export that contains it; and rewrites or deletes every workspace archive and
+pre-migration backup that holds it. Comments anywhere that cite it, and reviews, receipts and saved
+View bindings that cite it, are invalidated and scrubbed.
+
+### Invalidated state and the revision map
+
+- Item purge writes a durable revision map for the workspace (`RecordStore`, section 9.2): for
+  every rewritten commit, old revision to new revision. A commit whose only change was the purged
+  item has no rewrite and maps to the new revision of its parent. Stored receipts, reviews and
+  comments are not rewritten; the application resolves their revisions through the map when it
+  reads them.
+- A request that names a removed or rewritten revision is `not_found` with `ErrorDetail` gaining
+  `Invalidated { purge_id: PurgeId, replacement: Option<Revision> }`: `replacement` is the map's
+  new revision after an item purge and absent after a workspace purge. A client that does not
+  know the detail still sees not-found, and one that does re-pins to the replacement.
+- A stored citation of another item whose content digest at the new revision equals the one at
+  the old revision is shown remapped to the new revision and keeps its review coverage. A stored
+  citation of the purged item is invalidated: `ReviewCoverage` gains `Invalidated`; `Receipt` and
+  `Comment` gain `invalidated_by: Option<PurgeId>` (opt); `ChartFailure::Invalidated` (section 4);
+  `AttentionKind` gains `Invalidated` (a saved View or citation refers to purged content; action
+  `get_view`).
+- Scrubbing: the history rewrite removes the purged item's path and title from the messages of
+  the rewritten commits (each occurrence becomes "a purged item"); the stored `path` of every
+  invalidated citation is replaced by `purged/<item id>`, a valid `WorkspacePath` that names
+  nothing. Views bind only to their own workspace (SPEC §10), so a workspace purge invalidates
+  no View elsewhere.
 
 ### Operations
 
-Added (rows in section 10): `unarchive_workspace`, `purge_workspace`, `purge_item`,
-`get_purge`. `purge_workspace` and `purge_item` return `Purge` with status 202; the work runs as a
-job of the one execution system (`JobKind` gains `purge_workspace` and `purge_item`). `get_purge`
-authorizes at the tenant, because the workspace may be gone. `purge_item` is declared now and
-returns `not_implemented` until its storage gate passes; nothing claims it works earlier.
+Added (rows in section 10): `unarchive_workspace`, `purge_workspace`, `get_purge`, `purge_item`.
+`purge_workspace` and `purge_item` return `Purge` with status 202. `JobKind` gains
+`purge_workspace` and `purge_item`.
 
 Human-session rule, `crates/contract/src/operations.rs`, after `DRAFT_BEARING`:
 
 ```rust
 /// Operations refused on every route that is not a human browser session, whatever the grants:
 /// recovery and destruction belong to a person (ledger 2026-10-08), never to an agent or a
-/// service identity.
+/// service identity. In table order.
 pub const HUMAN_SESSION_ONLY: &[OperationName] = &[
+    OperationName::PurgeWorkspace,
     OperationName::BackupWorkspace,
     OperationName::RestoreWorkspace,
-    OperationName::PurgeWorkspace,
+    OperationName::BackupInstallation,
     OperationName::PurgeItem,
 ];
 ```
 
+The same rule reaches jobs those operations started. `retry_job` and `cancel_job` take `write`
+on the workspace, which would let a writer retry a backup or restore job on any route. So
+`JobKind` gains `started_by(self) -> OperationName` (the operation that creates a job of that
+kind), and the application, after loading the job, requires the table permission of `started_by`
+fresh from `AccessControl` and, when `started_by` is in `HUMAN_SESSION_ONLY`, a human route.
+For today's kinds that means `backup_workspace`, `restore_workspace` and `rebuild_index` jobs
+need `admin`, the first two also a human session; `import`, `redigest`, `export_workspace` and
+`export_view` jobs keep `write`. Tenant kinds are never controlled through these operations.
+
 ### Contract tests
 
-- `operations::the_surface_is_74_operations_12_model_tools_and_1_app_tool` (renamed from 69).
+- `operations::the_surface_is_77_operations_12_model_tools_and_1_app_tool` (renamed from 69).
 - `operations::human_session_only_operations_are_never_agent_tools` and
   `operations::the_human_session_only_list_is_exactly_recovery_and_purge`, pinned by name like
   the draft-bearing list.
-- `operations::destructive_hints_come_from_the_table`: list loses `archive_workspace`, gains
-  `purge_workspace` and `purge_item`.
-- `scope::get_purge_needs_only_the_tenant_grant`.
-- `error::an_invalidated_revision_is_a_typed_not_found`.
+- `operations::destructive_hints_come_from_the_table`: the list loses `archive_workspace` and
+  gains `purge_workspace` and `purge_item`.
+- `semantic::job_kinds_name_the_operation_that_starts_them`: `started_by` is a bijection from
+  workspace job kinds to the operations returning `Job` that create them, and tenant kinds map
+  to `backup_installation`, `purge_workspace`, `purge_item`.
+- `scope::purge_authorizes_at_the_tenant_only` and `scope::get_purge_needs_only_the_tenant_grant`.
+- `error::an_invalidated_revision_is_a_typed_not_found_with_its_replacement`.
 - `semantic::review_coverage_can_be_invalidated`.
+- Core (core-cli): `access::human_session_only_operations_are_refused_on_agent_and_service_routes`
+  (every member of `HUMAN_SESSION_ONLY` and `DRAFT_BEARING`, on `mcp_delegation` and `service`,
+  with every grant); `dispatch::retrying_or_cancelling_a_backup_or_restore_job_needs_a_human_admin`
+  (a `write`-only browser session is refused; `admin` on `mcp_delegation` and `service` is
+  refused; `admin` in a browser session succeeds; an `import` job still needs only `write`).
 
 ### Deliberately left out
 
-How storage removes an item from Git history: section 14 asks the owner what happens to
-unrelated citations at rewritten revisions. A purge preview operation and a confirmation
-challenge for purge: the human-session rule and `expected_head` are the guard.
+A purge preview operation and a confirmation challenge for purge: the tenant `admin` grant, the
+human-session rule and `base_revision` are the guard.
 
 ## 7. Instants, workspace paths and security events
 
@@ -1113,28 +1220,49 @@ and revoked, sign-in, permission denied)."
 ### `Timestamp` (`crates/contract/src/identity.rs`)
 
 ```rust
-/// A UTC instant in RFC 3339 with a `Z` offset, such as `2026-10-08T14:03:07.250Z`.
+/// A UTC instant in one canonical RFC 3339 spelling: `YYYY-MM-DDTHH:MM:SS.sssZ`, always three
+/// fraction digits and the `Z` offset, such as `2026-10-08T14:03:07.250Z`.
+///
+/// Every value has the same width, so comparing the strings compares the instants.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Timestamp(String);
 ```
 
-Schema: `{"type": "string", "format": "date-time", "pattern":
-"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$"}`. `TryFrom<String>`
-parses with `time::OffsetDateTime::parse(_, &Rfc3339)` and accepts only the pattern's form: an
-offset other than `Z`, a lower-case `t` or `z`, or an impossible date is refused. Because only one
-spelling is accepted, string order is time order. `Timestamp::from_utc(OffsetDateTime)` writes
-that form (fraction trimmed of trailing zeros) for producers. `time` is already a selected
-workspace dependency at 0.3.55; the contract crate needs it with the `parsing` and `formatting`
-features, which is a manifest change for the integration owner [inferred: no new package in
-Cargo.lock].
+Canonical form: exactly milliseconds. Schema: `{"type": "string", "format": "date-time",
+"pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$"}`.
+`TryFrom<String>` requires that pattern and then parses with
+`time::OffsetDateTime::parse(_, &Rfc3339)`, so an impossible date (`2026-02-30`) is refused too.
+Every other spelling is refused: no fraction (`...:07Z`), another fraction width (`...:07.5Z`,
+`...:07.250000Z`), an offset other than `Z` (`+00:00` included), a lower-case `t` or `z`, a
+leap second. Producers write with `Timestamp::from_utc(OffsetDateTime)`, which converts to UTC
+and truncates to the millisecond (never rounds, so a value is never later than the instant it
+records).
+
+Why milliseconds: it is the precision of JavaScript's `Date` and exactly what
+`Date.prototype.toISOString` writes, so the browser, the MCP App and Zod produce and compare the
+canonical form without a library; it is finer than any instant the product shows or orders by
+(sign-ins, saves, reviews, expiries); Git commit times are whole seconds and become `.000Z`. Nine
+digits would claim a precision no source here has and would not survive a JavaScript round trip.
+Two events in the same millisecond are ordered by their own identities (event cursor, job id),
+never by the timestamp alone.
+
+With one width, the derived `Ord` on the string is time order, and the old ambiguity
+(`...:07.500Z` sorting before `...:07Z` as text while being later in time) cannot arise because
+`...:07Z` is not a valid value.
+
+`time` is already a selected workspace dependency at 0.3.55; the contract crate needs it with the
+`parsing` and `formatting` features. That is a manifest change for the integration owner, and
+Cargo.lock changes with the new dependency edge (ruling: batched into one lock, then Docling and
+MCP Apps are requalified once; section 12).
 
 Fields that change from `String` to `Timestamp`: `Draft::saved_at`,
 `SandboxCapability::expires_at`, `SourceName::observed_at`, `Receipt::returned_at`,
 `Proposal::created_at`, `Comment::created_at`, `Review::reviewed_at`, `Confirmation::expires_at`,
 `Commit::committed_at` (converted to UTC from the commit's offset), `Workspace::created_at`,
 `Connector::created_at` and `revoked_at`; new: `Workspace::archived_at`, `Event::at`,
-`SuppliedText::approved_at`, `Purge::requested_at` and `completed_at`. Core:
+`SuppliedText::approved_at`, `Purge::requested_at` and `completed_at`,
+and `PresentResponse::as_of`. Core:
 `UploadRecord::created_at`, the expiry fields of `confirmations.rs`, `credentials.rs`,
 `sandbox.rs`, and the new `JobLease::expires_at`.
 
@@ -1208,9 +1336,14 @@ workspace only to callers holding `admin` on it. New operation `list_tenant_even
 
 ### Contract tests
 
-- `semantic::timestamps_are_utc_rfc3339`: accepts `Z` forms with and without a fraction; refuses
-  `+00:00`, `+02:00`, lower-case `z`, `2026-02-30T00:00:00Z` and a date alone; schema format is
-  `date-time`.
+- `semantic::timestamps_have_one_canonical_spelling`: accepts `2026-10-08T14:03:07.250Z`;
+  refuses `2026-10-08T14:03:07Z`, `...:07.5Z`, `...:07.250000Z`, `...:07.250+00:00`, lower-case
+  `z`, `2026-02-30T00:00:00.000Z` and a date alone; the schema states `date-time` and the pattern.
+- `semantic::timestamp_order_is_time_order`: for pairs including `...:07.999Z` against
+  `...:08.000Z`, `...:59.999Z` against the next minute's `.000Z`, and `2026-12-31T23:59:59.999Z`
+  against `2027-01-01T00:00:00.000Z`, the derived `Ord` agrees with the parsed instants; and
+  `from_utc` of an instant with sub-millisecond digits truncates (`07.2509Z`-precision input
+  writes `.250Z`).
 - `semantic::every_instant_is_a_timestamp`: in every operation schema, every property whose name
   ends in `_at` refers to `Timestamp`.
 - `semantic::workspace_paths_refuse_windows_reserved_names`: `CON`, `con.txt`, `docs/LPT1.md`,
@@ -1233,37 +1366,77 @@ A per-segment length limit; retention and rate limits for `permission_denied` ev
 SPEC §12: "Portable export gathers references into an independently readable folder/archive.
 Full backup additionally preserves promised app records, retained objects and versions, except
 what Purge (§8) removed. Restore must be exercised." SPEC §4: "Backups and garbage collection
-include retained history and app records as appropriate." The ledger decisions of 2026-10-08 bind
-this section (quoted in section 11).
+include retained history and app records as appropriate." SPEC §2: "takes a recoverable backup
+before an upgrade migration". The ledger decisions of 2026-10-08 bind this section, with the
+ruling on owner Q1: "backup unit = one self-contained archive per workspace + one installation
+archive (local identity and installation records needed to restore drafts to owners); replacement
+restore takes all; qualification remains 'delete data dir, restore'." Owner decision F
+(2026-10-06): "app reviews: written into the file as OKF verified on export; an imported verified
+is an unconfirmed claim."
 
-### Decisions this design takes
+### The two archives
 
-- Unit. A full backup is per workspace (owner question 1, section 14): one self-contained archive
-  of a consistent checkpoint, taken under the workspace's write lock, holding its Git history, a
-  `VACUUM INTO` snapshot of the SQLite records filtered to that workspace before publishing
-  (temporary file, integrity check, publish on success), every retained object it references
-  (copied, never a reference into the live store), drafts, and ownership metadata (the tenant id,
-  the installation's local identity, the workspace's grants). It never holds sessions or
-  connector credentials; after a replacement restore the owner issues connectors again. A
-  per-workspace unit keeps jobs, permissions and purge workspace-scoped: purging a workspace
-  deletes its backups, and purging an item rewrites or deletes its workspace's backups.
-- Replacement-installation restore is a server command, `okf-jawn-server restore --replacement
-  <archive>...`, run against a data directory with no running service (it takes the single-writer
-  lock): it restores original workspace ids, item ids, subjects, the local identity and drafts, and
-  refuses a data directory that already holds one of the archive's workspaces. It is not an
-  operation: a replacement installation has no session, workspace or upload slot to call one
-  with, and the local identity must be in place before the service starts.
-- Import into another installation is the operation `restore_workspace`: it fills a blank
-  workspace from a backup, keeps item ids, rewrites View bindings to the new workspace id (a View
-  binds only to its own workspace), restores each draft whose editor is a validated subject with
-  `write` on the target workspace, and keeps the others in the archive, unassigned, with their
-  count reported.
-- Export: committed content at one revision with the originals and retained derivatives it
-  references, with history when asked; never drafts, sessions, credentials or application
-  records. `export_workspace` is unchanged.
-- The download boundary decides by artifact kind and route (below). `get_object` and
-  `download_object` never serve a digest recorded as a backup artifact's object, even when a
-  caller names it.
+A **workspace archive** is one self-contained archive of a consistent checkpoint of one
+workspace, taken under its write lock: its Git history; a `VACUUM INTO` snapshot of the SQLite
+records filtered to that workspace before it is published (temporary file, integrity check,
+publish on success); every retained object it references, copied, never a reference into the
+live store; its drafts; its catalog entry (name, description, created and archived times); its
+grants by subject; and the tenant id it belongs to, so a restore can check it against the
+installation. It holds no installation identity, no connector record, no session, no tenant
+event, and no earlier backup or export archive.
+
+An **installation archive** holds no workspace content: the installation identity (the local
+identity, the tenant id), the tenant grants the installation stores, connector metadata without
+secrets (id, label, workspace ids, permissions, issue and revocation times; never a secret or its
+hash), purge records, and tenant-level events. Hosted, it is per tenant: the tenant's records
+only.
+
+Producers:
+
+- `backup_workspace` (unchanged request): a workspace job writing a workspace archive.
+- `backup_installation` (new, `BackupInstallationRequest { idempotency_key }`, response `Job`,
+  202): a tenant job writing an installation archive; tenant `admin`, human session only.
+- The offline command `okf-jawn-server backup --output <directory>` (server lane), run with no
+  service on the data directory (it takes the single-writer lock): writes the installation
+  archive and every workspace archive; hosted, `--tenant <id>` limits it to one tenant.
+- Before an upgrade migration, storage writes the same set as the offline command and keeps it as
+  a managed, pre-migration backup (SPEC §2); purge reaches it (section 6).
+
+Restore:
+
+- **Replacement of the installation** is the offline command `okf-jawn-server restore
+  --replacement <installation archive> <workspace archive>...`, run against a data directory with
+  no running service. The installation archive is restored first: identity, tenant grants,
+  purge records, tenant events, and connector records, each restored as revoked at the restore
+  time because no secret is kept (the owner issues new ones). Then each workspace archive, which
+  is refused when its tenant id differs from the installation archive's, when the installation
+  archive holds a completed purge of that workspace, or when the workspace already exists. It
+  keeps workspace ids, item ids and revisions, and gives each draft back to its editor, who is a
+  validated identity because the installation archive restored them. Qualification: delete the
+  data directory, run this command, start the service, find the same content and drafts.
+- **Import into another installation** is the operation `restore_workspace`: it fills a blank
+  workspace from a workspace archive uploaded into that workspace; the installation archive is
+  not used. It keeps item ids, rewrites View bindings to the new workspace id (a View binds only
+  to its own workspace), gives each draft whose editor is a validated subject with `write` on
+  the target workspace back to that editor, and keeps the others in the archive, unassigned, with
+  their count reported. Restoring a backup of another workspace of the same installation from a
+  retained artifact is not offered: its purge semantics for the copy are not simple (round 1
+  review, N5).
+- The upload a restore read is consumed when the restore completes: its slot records the
+  consuming job, its object is released unless something else references it, `start_import`
+  refuses it, and `restore_workspace` refuses an upload that was imported. An upload whose
+  object is a backup archive is never a surviving reference for purge.
+
+Export: committed content at one revision, with the originals and retained derivatives it
+references, and its history when asked. Each item that has an app review whose coverage is
+`current` at that revision gets that review written into its header as an OKF `verified` entry
+`{ by, at }` [verified: okf-core-0.2.7/src/trust.rs:69-74, frontmatter.rs:289-297]. Export
+excludes drafts, sessions and credentials. An imported `verified` stays an unconfirmed claim:
+it shows as `ReviewCoverage::Imported` and never creates a review record.
+
+Artifact access: the download boundary decides by artifact kind and route (below). `get_object`
+and `download_object` never serve a digest recorded as a backup artifact's object, even when a
+caller names it.
 
 ### Types (`crates/contract/src/workspace.rs`)
 
@@ -1272,43 +1445,46 @@ this section (quoted in section 11).
 pub enum ArtifactKind {
     /// A portable export of a workspace.
     Export,
-    /// A full backup of a workspace.
-    Backup,
+    /// A workspace archive.
+    WorkspaceBackup,
+    /// An installation archive (hosted: one tenant's).
+    InstallationBackup,
     /// An export of one View.
     ViewExport,
 }
 
+/// Where an artifact's records live, and so which transport serves it.
+pub enum ArtifactScope {
+    /// A workspace's artifact, served by `download_artifact`.
+    Workspace,
+    /// A tenant's artifact, served by `download_tenant_artifact`.
+    Tenant,
+}
+
 impl ArtifactKind {
-    /// Permission the `download_artifact` transport requires on the artifact's workspace.
-    pub const fn download_permission(self) -> crate::access::Permission; // Backup: Admin; others: Read
+    /// Where the artifact lives: `InstallationBackup` is tenant-scoped, the rest workspace-scoped.
+    pub const fn scope(self) -> ArtifactScope;
+    /// Permission the download transport requires, on the workspace or on the tenant.
+    /// `WorkspaceBackup` and `InstallationBackup`: `Admin`; `Export`, `ViewExport`: `Read`.
+    pub const fn download_permission(self) -> crate::access::Permission;
     /// Routes that may download it; every other route is refused whatever its grants.
+    /// Both backups: `[BrowserSession, LocalOwner]`.
+    /// `Export`, `ViewExport`: `[BrowserSession, LocalOwner, Service]`.
     pub const fn download_routes(self) -> &'static [crate::access::AccessRoute];
-    // Backup: [BrowserSession, LocalOwner]
-    // Export, ViewExport: [BrowserSession, LocalOwner, Service]
 }
 
-/// Where the bytes of a backup to restore are.
-pub enum BackupSource {            // tag "kind"
-    /// An archive uploaded into the target workspace's upload slots and completed.
-    Upload {
-        /// The completed upload.
-        upload_id: crate::identity::UploadId,
-    },
-    /// A retained backup artifact of a workspace in this installation.
-    Artifact {
-        /// Workspace that holds the artifact.
-        workspace_id: crate::identity::WorkspaceId,
-        /// The artifact.
-        artifact_id: crate::identity::ArtifactId,
-    },
+/// Start an installation archive.
+pub struct BackupInstallationRequest {
+    /// Retry identity.
+    pub idempotency_key: crate::identity::IdempotencyKey,
 }
 
-/// Restore a backup into a blank workspace of this installation (import mode).
+/// Fill a blank workspace of this installation from an uploaded workspace archive.
 pub struct RestoreWorkspaceRequest {
     /// Blank target workspace.
     pub workspace_id: crate::identity::WorkspaceId,
-    /// Where the archive is.
-    pub archive: BackupSource,
+    /// Completed upload of the archive into this workspace.
+    pub upload_id: crate::identity::UploadId,
     /// SHA-256 the archive must have; checked before anything is written.
     pub sha256: crate::identity::Digest,
     /// Retry identity.
@@ -1326,48 +1502,65 @@ pub struct RestoreReport {
 }
 ```
 
-`DownloadArtifact` gains `kind: ArtifactKind`. `Job` gains `restore: Option<RestoreReport>` (opt),
-present on a completed restore job. `BackupWorkspaceRequest` and `ExportWorkspaceRequest` are
-unchanged.
+`DownloadArtifact` gains `kind: ArtifactKind`; its `download_path` is
+`/api/workspaces/{workspace_id}/artifacts/{artifact_id}` for a workspace artifact and
+`/api/artifacts/{artifact_id}` for a tenant artifact. `Job` changes: `workspace_id` becomes
+`Option<WorkspaceId>` (opt; absent for a tenant job), and it gains `restore:
+Option<RestoreReport>` (opt), present on a completed restore job. `JobKind` gains
+`backup_installation` (with the purge kinds of section 6). `JobKind::BackupWorkspace` keeps its
+wire name. `ExportWorkspaceRequest` is unchanged.
 
 Exports are refused on `mcp_delegation`: an export holds originals, and the owner's switch for
 sending originals to a connected AI is off by default. Downloads are never MCP tools.
 
 ### Operations whose shapes change
 
-- `restore_workspace`: new request shape; description "Fill a blank workspace from a backup
-  archive, keeping item identities; drafts of editors unknown here stay in the archive and are
-  counted. Human administrator session only." Targets: `admin` on the target workspace, and
-  `admin` on the source workspace for an `artifact` source. Destructive hint stays: it overwrites
-  the blank target.
+- `restore_workspace`: the request above; description "Fill a blank workspace from an uploaded
+  workspace archive, keeping item identities; drafts of editors unknown here stay in the archive
+  and are counted. Human administrator session only." Target: `admin` on the target workspace.
+  Destructive hint stays: it overwrites the blank target.
 - `backup_workspace`: description "Back up the workspace's history, retained objects and
   application records, drafts included, into one self-contained archive. Human administrator
   session only."
-- `download_artifact` transport description: "Download a completed export or backup. The
-  artifact kind decides the permission and the routes (ArtifactKind::download_permission and
-  download_routes); a backup is served only to a workspace administrator in a human browser
-  session."
-- `download_object` transport description gains: "Never serves a backup artifact's object."
-- `backup_workspace` and `restore_workspace` are in `HUMAN_SESSION_ONLY` (section 6).
-- No operation is added.
+- `export_workspace`: description "Build a portable export with resolvable referenced assets;
+  current app reviews are written into the files as OKF verified. Drafts, sessions and
+  credentials are never included."
+- Added: `backup_installation`, and `get_tenant_job` and `list_tenant_jobs` to follow tenant jobs
+  (rows in section 10).
+- Transports: `download_artifact` description "Download a completed workspace export, View export
+  or workspace archive. The artifact kind decides the permission and the routes
+  (ArtifactKind::download_permission and download_routes); an archive is served only to a
+  workspace administrator in a human browser session."; new `download_tenant_artifact` (`get`,
+  `/api/artifacts/{artifact_id}`, `application/zip`, 200, `Principal`): "Download a completed
+  installation archive; only a tenant administrator in a human browser session."; `download_object`
+  gains "Never serves a backup artifact's object."
+- `backup_workspace`, `restore_workspace` and `backup_installation` are in `HUMAN_SESSION_ONLY`
+  (section 6), and so are their jobs.
 
 ### Contract tests
 
-- `semantic::artifact_kind_decides_the_download_rule`: backup needs `admin` and a human route;
-  export and view export need `read` and refuse `mcp_delegation`.
-- `scope::restore_names_every_workspace_it_reads`: an artifact source adds `admin` on the source
-  workspace; an upload source does not.
+- `semantic::artifact_kind_decides_the_download_rule`: for all four kinds, the scope, the
+  permission and the routes; both archives refuse `service` and `mcp_delegation`; exports refuse
+  `mcp_delegation`.
+- `scope::restore_reads_only_its_target_workspace`.
+- `scope::backup_installation_and_tenant_jobs_need_the_tenant_admin_grant`.
 - `semantic::a_download_artifact_states_its_kind`.
-- `semantic::every_job_states_its_kind` gains `purge_workspace` and `purge_item` in `JOB_KINDS`.
+- `semantic::every_job_states_its_kind`: `JOB_KINDS` gains `backup_installation`,
+  `purge_workspace` and `purge_item`.
+- `semantic::a_tenant_job_has_no_workspace`.
+- Core (core-cli): `reading::get_object_refuses_a_backup_artifact_digest` (a workspace archive's
+  digest, named with a valid citation of the workspace, is `not_found`).
+- Storage (construction receipt, storage lane): `backup::replacement_restore_after_deleting_the_data_directory`
+  and `backup::an_installation_archive_holds_no_workspace_content`.
 
 ### Deliberately left out
 
 Encryption of backups (the ledger: the recovery administrator is a trusted custodian, no
-crypto-privacy claim). Scheduled backups. A tenant-wide backup.
+crypto-privacy claim). Scheduled backups. Cancelling a tenant job.
 
 ## 9. Core ports (`core-ports-carry-extraction-and-views`, core-cli)
 
-These follow from sections 1 to 8. Each names its producer and consumer.
+These follow from sections 1 to 8 and 13. Each names its producer and consumer.
 
 ### 9.1 Conversion (`crates/core/src/conversion.rs`)
 
@@ -1401,21 +1594,30 @@ pub enum ConversionStatus {
     Failure(FailureReason), // contract type
 }
 
+/// Coverage of one window: the three lists are ascending, disjoint and together cover exactly
+/// `window`. `check` enforces it; the contract `PageCoverage::check` applies only to the merged,
+/// whole-document coverage over `1..=page_count`.
+pub struct WindowCoverage {
+    pub window: PageRange,
+    pub converted: Vec<PageRange>,
+    pub partly_extracted: Vec<PageRange>,
+    pub not_converted: Vec<PageRange>,
+}
+
 pub struct Conversion {
     pub source_digest: Digest,
     /// Identity including settings, packages, hashed models and the window size.
     pub converter: ConverterIdentity, // contract type; replaces `ConverterIdentity` and `settings`
     pub status: ConversionStatus,
     pub document: Option<ConvertedDocument>,
-    /// The window converted, as requested.
-    pub window: Option<PageRange>,
-    /// Pages of the window converted, partly extracted, not converted; for a paginated format.
-    pub coverage: Option<PageCoverage>, // contract type
-    pub issues: Vec<ConverterIssue>,    // contract type; replaces `ConversionIssue`
+    /// For a windowed (paginated) conversion: what this window converted.
+    pub coverage: Option<WindowCoverage>,
+    pub issues: Vec<ConverterIssue>, // contract type; replaces `ConversionIssue`
 }
 
 pub struct ConvertedDocument {
     pub markdown: String,
+    /// The docling JSON export of this window.
     pub structured: PathBuf,
     pub outline: Vec<OutlineEntry>,
     pub assets: Vec<ConvertedAsset>,
@@ -1454,10 +1656,18 @@ pub struct ConvertedCell {
 pub struct ConvertedAsset {
     pub path: PathBuf,
     pub media_type: String,
-    pub role: AssetRole,           // contract type
-    pub location: SourceLocation,  // replaces `selection`
+    pub role: AssetRole,            // contract type
+    pub location: SourceLocation,   // replaces `selection`
     pub pixel_size: Option<PixelSize>,
-    pub caption: Option<AssetCaption>, // its `origin` becomes the contract `CaptionOrigin`
+    /// The document's own caption or alternative text (replaces `AssetCaption`).
+    pub caption: Option<String>,
+}
+
+/// The docling JSON export of one window, retained.
+pub struct WindowExport {
+    /// The window; `None` when the document was converted whole.
+    pub window: Option<PageRange>,
+    pub digest: Digest,
 }
 
 /// The retained record a digest names; JSON in the blob store, written by ingest and read by
@@ -1466,8 +1676,8 @@ pub struct ConversionRecord {
     pub converter: ConverterIdentity,
     pub outcome: ConversionOutcome,
     pub page_count: Option<u32>,
-    /// Digest of the docling JSON export, retained.
-    pub structured: Digest,
+    /// One docling export per converted window, in page order.
+    pub structured: Vec<WindowExport>,
     /// SHA-256 of the Markdown the record describes.
     pub markdown: Digest,
     pub locations: Vec<LineLocation>,
@@ -1493,90 +1703,130 @@ pub trait Converter: Send + Sync {
 Library support: `page_range(first, last)` converts only that one-based window and skips other
 pages before rasterising [verified: docling-1.93.5/src/converter.rs:248-257]; `pdf_page_count` is
 re-exported [verified: docling-1.93.5/src/lib.rs:62-66] and takes the PDF's bytes and an optional
-password [verified: docling-pdf-1.93.6/src/lib.rs:3161], so `page_count` reads the retained bytes
-in the worker, not in the service process. Whether a window boundary changes what
-docling assembles across pages (a paragraph or heading level spanning the boundary) is not known
-[inferred]; the `converter-worker-memory-ceiling` measurement must compare the two and the
-`page_window` field records the size used. A hard memory cap on a child process needs an OS
-facility (rlimit on Linux, a job object on Windows); no selected dependency provides it without
-`unsafe` [inferred], so ingest may need a dependency decision from the integration owner.
+password [verified: docling.rs@e500c23/crates/docling-pdf/src/lib.rs:3161], so `page_count`
+reads the retained bytes in the worker, not in the service process. Whether a window boundary
+changes what docling assembles across pages (a paragraph or heading level spanning the boundary)
+is not known [inferred]; the `converter-worker-memory-ceiling` measurement compares the two, and
+`page_window` records the size used. A hard memory cap on a child process needs an OS facility;
+the ruling gives that to the ingest lane with a vendor lookup.
 
 The windowing loop is ingest's import and redigest handler: it asks `page_count`, converts window
 by window, merges the windows into one `ConversionRecord` (Markdown in page order, line ranges
-shifted, coverage joined), retains it, and writes the card. A window whose child hit the cap
-becomes `not_converted` pages, not a failed document.
+shifted, one `WindowExport` per window, each `WindowCoverage` checked and joined into the
+contract `PageCoverage`, which is then checked over `1..=page_count`), retains it, and writes the
+card. A window whose child hit the cap becomes `not_converted` pages, not a failed document. For
+`unconverted_only`, the new record joins the previous record's converted windows with the new
+ones.
 
-`CaptionOrigin` and `ConversionSettings`/`OcrPolicy` move to the contract (sections 3, 1).
+Converter identity inputs:
 
-### 9.2 Jobs (`crates/core/src/jobs.rs`)
+- `packages` is generated: `xtask` reads the `docling`, `docling-core`, `docling-onnx` and
+  `docling-pdf` entries of Cargo.lock and writes `generated/converter/packages.json` (name,
+  version, source); ingest embeds it with `include_str!` and parses it at startup. `gen-check`
+  fails when Cargo.lock changes and the file does not, so the identity cannot drift from the lock.
+- `models` is computed once when the worker starts: every entry of `docling::model_inventory()`
+  is hashed; a missing file stops the worker from starting (a worker fault, never a document
+  outcome), and readiness reports it.
 
+`ConversionSettings` and `OcrPolicy` move to the contract (section 3); `CaptionOrigin` and
+`AssetCaption` are removed (section 3).
+
+### 9.2 Jobs and records (`crates/core/src/jobs.rs`)
+
+- `JobScope { Tenant(TenantId), Workspace(StorageScope) }`. `RecordStore::create_job`,
+  `get_job`, `list_jobs`, `cancel_job`, `retry_job`, `record_artifact` and `get_artifact` take
+  `&JobScope`; `ClaimedJob::scope` and `pending_jobs` carry it; `JobQueue::enqueue` takes it. A
+  tenant job's wire `Job` has no `workspace_id`.
 - `JobSpec::Import` gains `settings: ConversionSettings` (resolved at acceptance).
 - `JobSpec::Redigest` gains `pages: Option<Vec<PageRange>>` (the `not_converted` pages at
   `base_revision`, when `unconverted_only`).
-- `JobSpec::RestoreWorkspace` becomes `{ archive: Digest }`: the archive's object, resolved from
-  the `BackupSource` and checked against the request's `sha256` at acceptance.
-- `JobSpec` gains `PurgeWorkspace { purge_id: PurgeId }` and `PurgeItem { purge_id: PurgeId,
-  item_id: ItemId }`; `JobSpec::kind` maps them.
+- `JobSpec::RestoreWorkspace` becomes `{ upload_id: UploadId, archive: Digest }`, the archive
+  checked against the request's `sha256` at acceptance.
+- New, tenant-scoped: `JobSpec::BackupInstallation`, `PurgeWorkspace { purge_id, workspace_id }`,
+  `PurgeItem { purge_id, workspace_id, item_id }`. `JobSpec::kind` maps them.
 - `JobLease` gains `expires_at: Timestamp`. `RecordStore::update_progress` renews the lease to
   now plus the lease duration and returns the job, so a handler converting a long window calls
   it as a heartbeat at most every third of the lease; a cancelled job is seen there.
 - `JobCompletion` gains `restore: Option<RestoreReport>`.
-- `ArtifactKind` moves to the contract and is re-exported.
-- `RecordStore` gains tenant-scoped purge records (they outlive the workspace):
-  `create_purge(&TenantId, MutationId, NewPurge) -> Purge` (unique on the id),
+- `ArtifactKind` moves to the contract and is re-exported; `NewArtifact` and `ArtifactRecord`
+  carry the `JobScope`; `artifact_download_path(&JobScope, ArtifactId)` gives either path.
+- Tenant-scoped purge records, which outlive the workspace: `create_purge(&TenantId, MutationId,
+  NewPurge) -> Purge` (unique on the id, and returning the unfinished purge of the same target),
   `get_purge(&TenantId, PurgeId) -> Purge`, `update_purge(&TenantId, Purge) -> Purge`.
+- Derived objects (section 4): `record_derived_object(&StorageScope, DerivedObject) ->
+  DerivedObject`, unique on (item, revision, digest), with `DerivedObject { item_id, revision,
+  digest, kind: DerivedKind::Dataset, media_type }`; `derived_object(&StorageScope, ItemId,
+  &Revision, &Digest) -> Option<DerivedObject>`. Recorded objects are garbage-collection roots.
+- Revision map (section 6): written by `Purger`; `revision_mapping(&StorageScope, &Revision) ->
+  Option<RevisionMapping { purge_id, replacement: Option<Revision> }>`.
+- `UploadRecord` gains `consumed_by: Option<JobId>`; `UploadStore` gains `consume(scope, upload,
+  job)`, refusing a second consumer.
 
 ### 9.3 Storage (`crates/core/src/storage.rs`)
 
 - `SourceCard::extraction` becomes the contract `Extraction`; core's `Extraction` enum is
   removed. The card body is the shown text of section 5 rule 3, empty when `text_origin` is
-  `none`. The card's frontmatter carries the `Extraction` under one key storage names, so index
-  rebuild and export keep it. The import handler commits each card with outcome `pending`
-  before converting (the producer of `pending`) and replaces it afterwards.
+  `none`. The card header carries the application header of section 13 (item id, archived flag,
+  original name and digest, the `Extraction`), so index rebuild and export keep it. The import
+  handler commits each card with outcome `pending` before converting (the producer of `pending`)
+  and replaces it afterwards.
+- `TreeEdit::SetLifecycle` becomes `SetStatus { item_id, status: Option<ItemStatus>, archived:
+  Option<bool> }` (section 13); `Change::Archive` maps to `archived: Some(true)`.
 - `TreeEdit::SupplyExtraction { item_id, based_on: Option<Digest>, pages: Vec<PageRange>,
   markdown: String, proposal_id: ProposalId, supplier: Provenance }`: writes the supplied text
   and its metadata beside the card. Approval is the promotion commit (its committer is the
-  approver), from which `VersionStore::show` fills `SuppliedText::approved_by` and
-  `approved_at`.
+  approver), from which `VersionStore::show` fills `SuppliedText::approved_by` and `approved_at`.
 - `TreeEdit::CorrectDigest` gains `adopts: Option<ProposalId>`.
 - `TreeEdit::from_change(change, &ChangeContext)` with `ChangeContext { new_item_id,
   new_item_kind, proposal_id, proposer: Provenance }`; still exhaustive over `Change`.
-- `VersionStore::commit` and `create_candidate` refuse a path collision (section 7).
+- `VersionStore::commit` and `create_candidate` refuse a path collision (section 7) and an edit
+  that changes the application header (section 13).
 - `WorkspaceCatalog::list(tenant, include_archived: bool)`; new `unarchive(scope, MutationId,
   author)`; `archive` and `unarchive` set `archived_at`.
 - New port `Purger` (storage implements; one call owns every store it must clear):
-  `purge_workspace(scope, MutationId, PurgeId) -> PurgeReport` and `purge_item(scope, MutationId,
-  PurgeId, ItemId) -> PurgeReport`. Idempotent on the mutation id and resumable after a crash;
-  returns only when no managed backup or retained export holds the target, and counts objects
-  kept for surviving references.
-- New port `Backups` (storage implements): `write_backup(scope, MutationId) -> ObjectInfo` (the
-  archive, retained; the handler records it with `ArtifactKind::Backup`), `restore_import(scope,
-  archive: Digest, MutationId, editors: Vec<String>) -> RestoreReport` (`editors`: subjects with
-  `write` on the target, computed by core from `AccessControl`). The replacement restore is a
-  storage function the server command calls, not a core port.
+  `purge_workspace(&TenantId, MutationId, PurgeId, WorkspaceId) -> PurgeReport` and
+  `purge_item(&StorageScope, MutationId, PurgeId, ItemId) -> PurgeReport`. Idempotent on the
+  mutation id and resumable after a crash; returns only when nothing section 6 lists still holds
+  the target, writes the revision map for an item purge, and counts objects kept for surviving
+  references.
+- New port `Backups` (storage implements): `write_workspace_archive(&StorageScope, MutationId) ->
+  ObjectInfo`, `write_installation_archive(&TenantId, MutationId) -> ObjectInfo` (the handlers
+  record them as artifacts of the two backup kinds), and `restore_import(&StorageScope, archive:
+  Digest, MutationId, editors: Vec<String>) -> RestoreReport` (`editors`: subjects with `write`
+  on the target, computed by core from `AccessControl`). The offline backup, the pre-migration
+  backup and the replacement restore are storage functions the server command and startup call,
+  not core ports.
 
-### 9.4 Search and events
+### 9.4 Search, events and access
 
 - `SearchQuery` gains `extraction: Option<ExtractionFilter>`; `text` may be empty only with a
-  filter. The index stores each source's `ExtractionStatus` from its card.
+  filter. The index stores each source's `ExtractionStatus` and each item's archived flag.
 - `EventLog` takes `EventScope { Tenant(TenantId), Workspace(StorageScope) }` for `append` and
   `list`; `NewEvent` gains `connector_id`, `actor: Option<EventActor>` and `operation`; the store
   stamps `at`.
 - `access::check_draft_route` becomes `check_human_route(principal, operation)`, refusing
   `DRAFT_BEARING` and `HUMAN_SESSION_ONLY` operations on `mcp_delegation` and `service`.
   Dispatch records `permission_denied` when authorization refuses an authenticated caller.
+- `retry_job` and `cancel_job` apply the job-kind rule of section 6 after loading the job.
 
 ### 9.5 Application duties these ports enable
 
 - Citations: core fills `SourceReference::locations` from the `ConversionRecord` of the cited
-  digest (lines of the shown converter text), `corrected_text` or `supplied_text` otherwise, and
-  recomputes request-supplied locations (section 2).
+  digest (lines of the shown converter text), `corrected_text` or `supplied_text` otherwise,
+  applies the omitted-fills, present-must-match rule, and strips locations from saved View
+  bindings (section 2).
+- Revisions: a request naming a revision is checked against the revision map first (section 6);
+  stored citations are remapped or invalidated when read.
 - Datasets: `present_view` and `resolve_view` materialize each binding from the record's
   `ConvertedTable` that the binding's selection covers (or the cells of an XLSX `cells`
-  selection), write the `Dataset` blob, and return `charts`. This is the "producer of a View's
+  selection), write the `Dataset` blob, record it with `record_derived_object` against the
+  binding's item and revision, and return `charts` and `as_of`. This is the "producer of a View's
   materialized dataset" of the gate.
-- `get_object` serves only an object that belongs to the cited item revision (the gate's
-  remaining item) and never a backup artifact's object.
+- `get_object` serves an object only when it belongs to the cited item revision: the original of
+  its source card, its conversion record, that record's structured exports and assets, or a
+  derived object recorded for that (item, revision). It never serves a backup artifact's object.
+- Export writes `verified` for current reviews (section 8); import reads an incoming `verified`
+  as `imported` coverage.
 
 ## 10. Operation table delta
 
@@ -1585,24 +1835,34 @@ Inserted rows, exact, in table order (with matching `OperationName` variants):
 ```rust
 // after archive_workspace
 (unarchive_workspace, $crate::workspace::UnarchiveWorkspaceRequest, $crate::common::MutationResult, "/api/workspaces/unarchive-workspace", "Unarchive", "", "", "", Admin, "", 200, false, "Return an archived workspace to ordinary listings; its history and records were kept."),
-(purge_workspace, $crate::purge::PurgeWorkspaceRequest, $crate::purge::Purge, "/api/workspaces/purge-workspace", "Purge", "", "", "", Admin, "", 202, true, "Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Human administrator session only."),
+(purge_workspace, $crate::purge::PurgeWorkspaceRequest, $crate::purge::Purge, "/api/workspaces/purge-workspace", "Purge", "", "", "", Admin, "", 202, true, "Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge."),
 (get_purge, $crate::purge::GetPurgeRequest, $crate::purge::Purge, "/api/workspaces/get-purge", "Purge status", "", "", "", Admin, "", 200, false, "Read a purge's progress and counts; available after the workspace is gone."),
+// after restore_workspace
+(backup_installation, $crate::workspace::BackupInstallationRequest, $crate::import::Job, "/api/workspaces/backup-installation", "Back up installation", "", "", "", Admin, "", 202, false, "Back up the installation's identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only."),
 // after delete_item
-(purge_item, $crate::purge::PurgeItemRequest, $crate::purge::Purge, "/api/items/purge-item", "Purge", "", "", "", Admin, "", 202, true, "Permanently remove one item's bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Human administrator session only."),
+(purge_item, $crate::purge::PurgeItemRequest, $crate::purge::Purge, "/api/items/purge-item", "Purge", "", "", "", Admin, "", 202, true, "Permanently remove one item's bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only."),
+// after list_jobs
+(get_tenant_job, $crate::import::GetTenantJobRequest, $crate::import::Job, "/api/imports/get-tenant-job", "Progress", "", "", "", Admin, "", 200, false, "Read an installation-level job: an installation backup or a purge."),
+(list_tenant_jobs, $crate::import::ListTenantJobsRequest, $crate::import::ListJobsResponse, "/api/imports/list-tenant-jobs", "Installation jobs", "", "", "", Admin, "", 200, false, "List installation-level jobs, newest first, with their artifacts."),
 // after list_events
 (list_tenant_events, $crate::events::ListTenantEventsRequest, $crate::events::ListEventsResponse, "/api/events/list-tenant-events", "Security activity", "", "", "", Admin, "", 200, false, "Read installation-level notifications: sign-ins, connector issue and revocation, and refusals outside a workspace."),
 ```
 
+New request types: `GetTenantJobRequest { job_id: JobId }` and `ListTenantJobsRequest { page:
+PageRequest }` (in `import.rs`).
+
 Changed rows: `archive_workspace` destructive `false`; descriptions of `list_items`,
-`search_items`, `open_proposal` (section 5), `backup_workspace` and `restore_workspace`
-(section 8).
+`search_items`, `open_proposal` (section 5), `export_workspace`, `backup_workspace` and
+`restore_workspace` (section 8). New transport `download_tenant_artifact` (section 8).
 
-`RequestScope`: `UnarchiveWorkspaceRequest`, `PurgeWorkspaceRequest`, `PurgeItemRequest` in
-`workspace_keyed!(Admin: ...)`; `GetPurgeRequest` and `ListTenantEventsRequest` target
-`Deployment(Admin)` with no key; `RestoreWorkspaceRequest` adds the source workspace for an
-artifact source; `SearchRequest` and `OpenProposalRequest` gain `check_rules` (section 5).
+`RequestScope`: `UnarchiveWorkspaceRequest` and `RestoreWorkspaceRequest` in
+`workspace_keyed!(Admin: ...)`; `PurgeWorkspaceRequest`, `PurgeItemRequest` and
+`BackupInstallationRequest` target `Deployment(Admin)` with their key; `GetPurgeRequest`,
+`GetTenantJobRequest`, `ListTenantJobsRequest` and `ListTenantEventsRequest` target
+`Deployment(Admin)` with no key; `SetLifecycleRequest`, `SearchRequest` and
+`OpenProposalRequest` gain `check_rules` (sections 13 and 5).
 
-None of the new operations is an MCP tool. Totals: 74 operations, 12 model tools, 1 app tool.
+None of the new operations is an MCP tool. Totals: 77 operations, 12 model tools, 1 app tool.
 
 ## 11. SPEC sentences
 
@@ -1613,19 +1873,22 @@ Full backup additionally preserves promised app records, retained objects and ve
 what Purge (§8) removed. Restore must be exercised." with:
 
 > Portable export gathers committed content at one revision, and the originals and derivatives
-> it references, into an independently readable folder/archive; it never contains drafts,
-> sessions, credentials or application records. A full backup of a workspace is independently
-> recoverable: one self-contained archive of a consistent checkpoint of its versions, retained
-> objects and application records, drafts included, except what Purge (§8) removed; it never
-> depends on the live object store. Only a workspace administrator in a human browser session
-> takes or downloads a backup: the download boundary decides by artifact kind and route, so no
-> agent, service route, export or object read returns one, and the custodian of an unencrypted
-> backup can read it. A backup restores in two modes. Replacing the installation it came from
-> runs against a data directory with no running service and restores the original identities
-> and drafts. Importing into another installation fills a blank workspace, gives each draft to
-> its editor when that editor is a validated identity there, and keeps the other drafts in the
-> backup, unassigned, with their count reported. Restore must be exercised, including after the
-> original data directory is deleted.
+> it references, into an independently readable folder/archive; a current app review is written
+> into its file as OKF `verified`, and drafts, sessions and credentials are never included. A
+> full backup is independently recoverable and never depends on the live object store. It is one
+> self-contained archive per workspace, a consistent checkpoint of its versions, retained objects
+> and application records, drafts included, except what Purge (§8) removed; and one installation
+> archive with the installation's identities, tenant grants, connector records without secrets,
+> purge records and tenant events, and no workspace content. Only an administrator in a human
+> browser session takes or downloads a backup, or an operator runs the offline command: the
+> download boundary decides by artifact kind and route, so no agent, service route, export or
+> object read returns one, and the custodian of an unencrypted backup can read it. Replacing an
+> installation runs with no service on the data directory, restores the installation archive
+> first and then every workspace archive, and keeps the original identities and drafts.
+> Importing a workspace archive into another installation fills a blank workspace, gives each
+> draft to its editor when that editor is a validated identity there, and keeps the other drafts
+> in the archive, unassigned, with their count reported. Restore must be exercised, including
+> after the original data directory is deleted.
 
 §8, after "Purge never claims to erase exports, clones or backups outside the application's
 control.", add:
@@ -1633,7 +1896,8 @@ control.", add:
 > A purge does not complete while a managed backup or retained export that holds the target can
 > still be restored or downloaded; stored objects that a surviving item still references are
 > kept and counted, and a record that only hides the target is not a purge. The purge leaves a
-> record of what was removed, by identity, with no content.
+> record of what was removed, by identity, with no content. After an item purge, a citation of
+> another, unchanged item follows its rewritten revision and keeps its review coverage.
 
 §5, after "Re-extraction must not erase corrections.", add:
 
@@ -1658,31 +1922,54 @@ control.", add:
 
 Every change above alters `api/`, `generated/cli/` and `ui/src/api/generated/`, including the
 generated Zod inside the MCP App bundle and the schemas of the `workspaces`, `ls`, `grep`, `show`,
-`propose` and `present` tools. The `mcp-apps-protocol-qualification` receipt goes stale with them
-and is requalified after the contract lands, as after the pre-lane corrections. The harness's
-dataset fixture becomes a `Dataset` document. The views lane's
-`views-chart-failure-isolation` gate consumes `charts`.
+`propose` and `present` tools; `generated/converter/packages.json` is new. Cargo.lock changes
+too: the contract crate gains `time` (features `parsing`, `formatting`) and
+`unicode-normalization`, both already selected and locked, so the lock gains dependency edges.
+The Docling receipt lists `Cargo.lock` among its inputs and the MCP App bundle contains the
+generated Zod, so both receipts go stale. Ruling: any other dependency change of this stage is
+batched into the same `lock`, and Docling and MCP Apps are requalified once, after the contract
+lands, before `check-receipts` is relied on again. The harness's dataset fixture becomes a
+`Dataset` document. The views lane's `views-chart-failure-isolation` gate consumes `charts`.
 
-## 13. In the contract gate but outside these eight shapes
+## 13. Addendum: the 2026-10-06 OKF decisions, mapped
 
-The gate `contract-expresses-extraction-sources-views` also carries owner decisions this bounded
-list does not design, so these eight shapes alone do not close it: status words Draft, Stable and
-Deprecated with Archived as a separate flag (today `Lifecycle` has `active`, `deprecated`,
-`archived`); an app review written as OKF `verified` on export, and an imported `verified` read as
-an unconfirmed claim; the item id in the file's header; source card naming (`report.pdf` becomes
-`report-pdf.md`, with the original name in its header); a header that does not parse needs
-attention and blocks nothing; a snapshot conflict resolved per item by keep mine or take theirs.
-The ledger also records idempotency keys not scoped by route (pre-lane concern 4).
+Ruling: these are decided; each is mapped here to a wire type or a storage behaviour. Idempotency
+keys scoped by route: ruled not needed (SPEC keys them by tenant, subject, client and operation).
+
+**Application header.** Every item file carries one application-owned header mapping under the
+key `okf_jawn` (contract constant `item::APP_HEADER_KEY`): `item_id`, `archived` (when true),
+and, on a source card, `source: { original_name, digest }` and `extraction` (section 1). It
+appears in `ItemDocument::properties` and is server-owned: `create_item`, `save_draft`,
+`Change::Create`, `Change::Edit` and `set_type` refuse a value that changes it as `invalid_input`
+on `/properties/okf_jawn`, and `VersionStore` refuses such an edit. OKF preserves unknown
+frontmatter keys, so the header survives export.
+
+| Decision | Mapping |
+| --- | --- |
+| D. Snapshot conflict: per item, keep mine or take theirs, with a diff | No new type. `DraftConflictItem` already carries the item's committed changes. Keep mine is `save_draft` with `base_revision` = the item's `current_revision`, then `commit_items`; take theirs is `discard_draft`. `DraftConflictItem`'s doc comment states the two. |
+| E. Status words Draft, Stable, Deprecated, Archived a separate flag | `item::Lifecycle` is removed. `ItemStatus { Draft, Stable, Deprecated, Other }` is OKF's `status` (absent reads `stable`; `other` is a producer value outside the three, kept exactly in the file's `status` property) [verified: okf-core-0.2.7/src/trust.rs:220-237]. `ItemSummary` replaces `lifecycle` with `status: ItemStatus` and `archived: bool`. `SetLifecycleRequest` replaces `lifecycle` with `status: Option<ItemStatus>` (opt) and `archived: Option<bool>` (opt); `check_rules` requires one of them and refuses `other`. `SearchRequest::include_archived` now means only the archived flag; deprecated items are always searchable. |
+| F. App reviews written as OKF `verified` on export; an imported `verified` is an unconfirmed claim | Export behaviour of section 8; import shows `ReviewCoverage::Imported` and creates no review. |
+| G. Item id in the file's header | `okf_jawn.item_id`. An ordinary import assigns a new id and writes it; restore keeps the archived ids. |
+| H. Source card name `report-pdf.md`, original name in the header | `conventions::source_card_name(original: &str) -> String`: split at the last `.`; stem, `-`, extension, then `.md` (`report.pdf` gives `report-pdf.md`, `v1.2.notes.txt` gives `v1.2.notes-txt.md`); a name with no `.`, or whose only `.` is its first character, gets `.md` alone (`README` gives `README.md`, `.env` gives `.env.md`). Case is kept. A collision takes the numbered-suffix rule (`report-pdf-2.md`), then naming rules apply. The header keeps `okf_jawn.source.original_name` exactly as supplied. A character outside OKF's portable set gets OKF's own portability warning and is not refused. |
+| I. An imported file whose header does not parse needs attention and blocks nothing | Its bytes are kept as the source and its card is written by the application with a valid header; the card body is the file's text; `AttentionKind` gains `UnparseableHeader` (action `get_item`). |
+
+Contract tests: `conventions::source_card_name_joins_the_extension` (the examples above);
+`semantic::item_status_words_are_okf_status_words`; `scope::set_lifecycle_needs_status_or_archived`;
+`semantic::the_application_header_key_is_one_constant`. Core (core-cli):
+`items::a_write_that_changes_the_application_header_is_refused`.
 
 ## 14. Owner questions
 
-1. **Backup unit.** The ledger says a backup is qualified "by restoring after deleting the
-   original data dir", which reads as an installation, while jobs, permissions and purge are
-   per workspace. Recommended default: per-workspace self-contained archives (section 8), with
-   replacement restore as an offline server command that takes the archives of every workspace,
-   so deleting the data directory and restoring is still the qualification.
-2. **Unrelated citations after an item purge.** Removing an item from Git history rewrites every
-   later commit, so revisions cited for other, unchanged items stop existing. Recommended
-   default: a citation of an item whose content digest is unchanged is remapped to the rewritten
-   revision and its review coverage kept; a citation of the purged item is invalidated. This
-   decides only item purge, which is built after workspace purge.
+None open. The two questions of round 0 were answered by the orchestrator's rulings (2026-10-08),
+recorded with what changes if a ruling is wrong:
+
+1. Backup unit: one self-contained archive per workspace plus one installation archive;
+   replacement restore takes all, installation archive first; qualification stays "delete the
+   data directory, restore" (section 8). If wrong: the archive layout changes before storage
+   writes it.
+2. Unrelated citations after an item purge: remapped to the rewritten revision when the cited
+   item's content digest is unchanged, keeping review coverage; citations of the purged item are
+   invalidated. Conditions carried in section 6: a durable old-to-new revision map instead of
+   rewriting receipts, feeding `ErrorDetail::Invalidated::replacement`; an emptied commit maps to
+   its parent's rewrite; commit messages and the `path` of invalidated citations are scrubbed.
+   If wrong: only item purge changes, and it is built after workspace purge.
