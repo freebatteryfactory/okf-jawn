@@ -3,7 +3,7 @@
 use okf_jawn_contract::access::{AccessRoute, DelegationCeiling, Permission, Principal};
 use okf_jawn_contract::error::ErrorCode;
 use okf_jawn_contract::identity::{IdentityError, TenantId, WorkspaceId};
-use okf_jawn_core::access::{authorize_tenant, authorize_workspace, check_route};
+use okf_jawn_core::access::{authorize_tenant, authorize_workspace, check_route, may_cache};
 use okf_jawn_core::context::{TenantGrant, WorkspaceGrant};
 use okf_jawn_core::storage::StorageScope;
 
@@ -134,6 +134,55 @@ fn local_owner_uses_the_same_rules_and_cannot_reach_other_workspaces() -> TestRe
         permissions: vec![Permission::Admin],
     };
     assert!(authorize_tenant(&owner, tenant, Permission::Admin)?.allows(Permission::Admin));
+    Ok(())
+}
+
+#[test]
+fn only_read_write_and_propose_grants_may_be_cached() {
+    // SPEC section 11: Approve, Review and Admin are always checked fresh.
+    for (permission, cacheable) in [
+        (Permission::Read, true),
+        (Permission::Write, true),
+        (Permission::Propose, true),
+        (Permission::Approve, false),
+        (Permission::Review, false),
+        (Permission::Admin, false),
+    ] {
+        assert_eq!(may_cache(permission), cacheable, "{permission:?}");
+    }
+}
+
+#[test]
+fn a_service_route_may_administer_but_never_review_or_approve() -> TestResult {
+    let workspace: WorkspaceId = serde_json::from_str("\"11111111-1111-4111-8111-111111111111\"")?;
+    let service = Principal {
+        subject: "test-service".to_owned(),
+        tenant_id: local_tenant()?,
+        route: AccessRoute::Service,
+        client_id: None,
+        delegation: None,
+    };
+    for forbidden in [Permission::Review, Permission::Approve] {
+        let refused = err_of(check_route(&service, forbidden))?;
+        assert_eq!(refused.code, ErrorCode::Forbidden, "{forbidden:?}");
+        // A grant holding every permission does not lift the route rule.
+        let refused = err_of(authorize_workspace(
+            &service,
+            grant(workspace, every_permission())?,
+            forbidden,
+        ))?;
+        assert_eq!(refused.code, ErrorCode::Forbidden, "{forbidden:?}");
+    }
+    for allowed in [
+        Permission::Read,
+        Permission::Write,
+        Permission::Propose,
+        Permission::Admin,
+    ] {
+        check_route(&service, allowed)?;
+        let effective = authorize_workspace(&service, grant(workspace, vec![allowed])?, allowed)?;
+        assert!(effective.allows(allowed), "{allowed:?}");
+    }
     Ok(())
 }
 

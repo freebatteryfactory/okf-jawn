@@ -9,6 +9,8 @@
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::WorkspaceId;
+use okf_jawn_contract::metadata::OperationName;
+use okf_jawn_contract::operations::DRAFT_BEARING;
 
 use crate::context::{TenantGrant, WorkspaceGrant};
 use crate::ports::PortFuture;
@@ -67,6 +69,29 @@ pub fn check_route(principal: &Principal, permission: Permission) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+/// Refuse a draft-bearing operation on every route that is not a human browser session.
+///
+/// SPEC section 8: MCP tools and agent routes never see drafts. The route decides, not the
+/// subject or the grants: a connector acting for the very person who owns the drafts is
+/// refused. `LocalOwner` is the local browser session, so it is a human session here.
+///
+/// # Errors
+/// Returns `Forbidden` when `operation` is in `DRAFT_BEARING` and the route is
+/// `McpDelegation` or `Service`.
+pub fn check_draft_route(principal: &Principal, operation: OperationName) -> Result<(), ApiError> {
+    let human_session = match principal.route {
+        AccessRoute::BrowserSession | AccessRoute::LocalOwner => true,
+        AccessRoute::McpDelegation | AccessRoute::Service => false,
+    };
+    if human_session || !DRAFT_BEARING.contains(&operation) {
+        return Ok(());
+    }
+    Err(ApiError::new(
+        ErrorCode::Forbidden,
+        "Drafts are visible only in a human browser session",
+    ))
 }
 
 /// Intersect granted permissions with the principal's delegation ceiling.

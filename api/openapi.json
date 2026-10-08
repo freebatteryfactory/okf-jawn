@@ -4177,7 +4177,7 @@
       },
       "PresentRequest": {
         "additionalProperties": false,
-        "description": "Render a candidate from already resolved bindings without saving or approving it.\n\nEvery binding must name `workspace_id`; the handler rejects a view for which\n`view.bindings_outside(workspace_id)` is not empty. Each binding's source workspace is\nstill an authorization target, so a foreign binding is refused before the handler runs.",
+        "description": "Render a candidate from already resolved bindings without saving or approving it.\n\nEvery binding must name `workspace_id`. Dispatch refuses a view for which\n`view.bindings_outside(workspace_id)` is not empty as `invalid_input`, before authorization\nand before the handler runs, whatever the caller may read: reading another workspace is not\npermission to republish its data here. `workspace_id` is the only authorization target.",
         "properties": {
           "view": {
             "$ref": "#/components/schemas/ViewDocument",

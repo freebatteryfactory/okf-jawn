@@ -1910,9 +1910,10 @@ export const zViewDocument = z.object({
 /**
  * Render a candidate from already resolved bindings without saving or approving it.
  *
- * Every binding must name `workspace_id`; the handler rejects a view for which
- * `view.bindings_outside(workspace_id)` is not empty. Each binding's source workspace is
- * still an authorization target, so a foreign binding is refused before the handler runs.
+ * Every binding must name `workspace_id`. Dispatch refuses a view for which
+ * `view.bindings_outside(workspace_id)` is not empty as `invalid_input`, before authorization
+ * and before the handler runs, whatever the caller may read: reading another workspace is not
+ * permission to republish its data here. `workspace_id` is the only authorization target.
  */
 export const zPresentRequest = z.object({
     view: zViewDocument,
