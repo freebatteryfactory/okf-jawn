@@ -146,7 +146,7 @@ Receipt records identify exactly what this server returned, including revision a
 
 The crash/restart check submits an import, kills execution immediately after acknowledgement, restarts and retries, then opens the same completed result without duplicate occurrence/commit or lost original. It runs against the real RecordStore, the Git/CAS/SQLite import path and the recovery behavior of section 5 (construction gate `job-crash-against-record-store`); nothing short of that proves product crash durability. There is one execution system: do not build a second one alongside the Tokio worker.
 
-Portable export gathers references into an independently readable folder/archive. Full backup additionally preserves promised app records, retained objects and versions. Restore must be exercised. The container requires persistent mounts, health/readiness distinction, HTTPS ingress, explicit WorkOS configuration and restart behavior.
+Portable export gathers references into an independently readable folder/archive. Full backup additionally preserves promised app records, retained objects and versions, except what Purge (§8) removed. Restore must be exercised. The container requires persistent mounts, health/readiness distinction, HTTPS ingress, explicit WorkOS configuration and restart behavior.
 
 The workshop is a usage scenario, not app state. Compare representations without confusing reorganizing facts with adding new facts. A useful model question or unresolved answer is a valid outcome. The final export should work without the polished interface.
 
