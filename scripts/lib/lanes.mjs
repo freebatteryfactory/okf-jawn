@@ -116,7 +116,7 @@ export async function createLanes(root, { names = [], parent = lanesParent(root)
 }
 
 /** Generated outputs any lane may commit after running `gen` (AGENTS.md, generator-input rule). */
-export const generatedRoots = Object.freeze(['api/', 'generated/cli/', 'ui/src/api/generated/']);
+export const generatedRoots = Object.freeze(['api/', 'generated/cli/', 'generated/converter/', 'ui/src/api/generated/']);
 
 const inside = (path, entry) => (entry.endsWith('/') ? path.startsWith(entry) : path === entry);
 
