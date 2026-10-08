@@ -7,8 +7,9 @@ use std::error::Error;
 use okf_jawn_contract::access::ResourceMetadata;
 use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::ApiError;
+use okf_jawn_contract::extraction::{ConversionSettings, ConverterIdentity, Extraction};
 use okf_jawn_contract::item::TypeDefinition;
-use okf_jawn_contract::views::ViewDocument;
+use okf_jawn_contract::views::{Dataset, ViewDocument};
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -100,6 +101,10 @@ fn every_request_and_response_has_one_wire_shape() -> Result<(), Box<dyn Error>>
     record_split::<NamingRules>("NamingRules", &mut split)?;
     record_split::<ViewDocument>("ViewDocument", &mut split)?;
     record_split::<TypeDefinition>("TypeDefinition", &mut split)?;
+    record_split::<Extraction>("Extraction", &mut split)?;
+    record_split::<ConverterIdentity>("ConverterIdentity", &mut split)?;
+    record_split::<ConversionSettings>("ConversionSettings", &mut split)?;
+    record_split::<Dataset>("Dataset", &mut split)?;
     assert!(
         split.is_empty(),
         "serialize and deserialize schemas differ for: {}",

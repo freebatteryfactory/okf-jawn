@@ -6,6 +6,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::metadata::OperationName;
+
 /// Job progress retained independently of diagnostic traces.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -281,6 +283,24 @@ impl JobKind {
             self,
             Self::BackupInstallation | Self::PurgeWorkspace | Self::PurgeItem
         )
+    }
+
+    /// The operation that creates a job of this kind. `retry_job` and `cancel_job` require its
+    /// table permission, and a human route when it is in `HUMAN_SESSION_ONLY`.
+    #[must_use]
+    pub const fn started_by(self) -> OperationName {
+        match self {
+            Self::Import => OperationName::StartImport,
+            Self::Redigest => OperationName::RedigestItem,
+            Self::ExportWorkspace => OperationName::ExportWorkspace,
+            Self::BackupWorkspace => OperationName::BackupWorkspace,
+            Self::RestoreWorkspace => OperationName::RestoreWorkspace,
+            Self::RebuildIndex => OperationName::RebuildIndex,
+            Self::ExportView => OperationName::ExportView,
+            Self::BackupInstallation => OperationName::BackupInstallation,
+            Self::PurgeWorkspace => OperationName::PurgeWorkspace,
+            Self::PurgeItem => OperationName::PurgeItem,
+        }
     }
 }
 

@@ -8,8 +8,9 @@
 //! `app` or empty), minimum permission, MCP App presentation key, HTTP success status,
 //! destructive hint, description. The `permission` column is the minimum capability;
 //! `create_confirmation` requires a stronger, action-specific one through its `targets()`.
-//! [`DRAFT_BEARING`], after the table, names the operations that carry or reveal a draft; it
-//! is the one list the contract test and core dispatch both read.
+//! [`DRAFT_BEARING`], after the table, names the operations that carry or reveal a draft, and
+//! [`HUMAN_SESSION_ONLY`] the recovery and destruction operations; each is the one list the
+//! contract test and core dispatch both read.
 
 use crate::metadata::OperationName;
 
@@ -22,11 +23,15 @@ macro_rules! for_each_operation {
             (create_workspace, $crate::workspace::CreateWorkspaceRequest, $crate::workspace::Workspace, "/api/workspaces/create-workspace", "New workspace", "", "", "", Admin, "", 200, false, "Create a blank workspace; no example content is inserted."),
             (open_workspace, $crate::workspace::OpenWorkspaceRequest, $crate::workspace::Workspace, "/api/workspaces/open-workspace", "Open", "", "", "", Read, "", 200, false, "Open an existing authorized workspace."),
             (update_workspace, $crate::workspace::UpdateWorkspaceRequest, $crate::common::MutationResult, "/api/workspaces/update-workspace", "Properties", "", "", "", Write, "", 200, false, "Update workspace metadata at the supplied base revision."),
-            (archive_workspace, $crate::workspace::ArchiveWorkspaceRequest, $crate::common::MutationResult, "/api/workspaces/archive-workspace", "Archive", "", "", "", Admin, "", 200, true, "Archive without deleting historical content."),
-            (export_workspace, $crate::workspace::ExportWorkspaceRequest, $crate::import::Job, "/api/workspaces/export-workspace", "Export", "", "export", "", Write, "", 202, false, "Build a portable export with resolvable referenced assets."),
-            (backup_workspace, $crate::workspace::BackupWorkspaceRequest, $crate::import::Job, "/api/workspaces/backup-workspace", "Backup", "", "", "", Admin, "", 202, false, "Back up content and durable application records."),
-            (restore_workspace, $crate::workspace::RestoreWorkspaceRequest, $crate::import::Job, "/api/workspaces/restore-workspace", "Restore", "", "", "", Admin, "", 202, true, "Restore content and durable application records from a retained backup artifact."),
-            (list_items, $crate::item::ListItemsRequest, $crate::item::ListItemsResponse, "/api/items/list-items", "Browse", "ls", "", "model", Read, "", 200, false, "List a folder with one-line descriptions at one resolved revision."),
+            (archive_workspace, $crate::workspace::ArchiveWorkspaceRequest, $crate::common::MutationResult, "/api/workspaces/archive-workspace", "Archive", "", "", "", Admin, "", 200, false, "Archive without deleting historical content."),
+            (unarchive_workspace, $crate::workspace::UnarchiveWorkspaceRequest, $crate::common::MutationResult, "/api/workspaces/unarchive-workspace", "Unarchive", "", "", "", Admin, "", 200, false, "Return an archived workspace to ordinary listings; its history and records were kept."),
+            (purge_workspace, $crate::purge::PurgeWorkspaceRequest, $crate::purge::Purge, "/api/workspaces/purge-workspace", "Purge", "", "", "", Admin, "", 202, true, "Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge."),
+            (get_purge, $crate::purge::GetPurgeRequest, $crate::purge::Purge, "/api/workspaces/get-purge", "Purge status", "", "", "", Admin, "", 200, false, "Read a purge's progress and counts; available after the workspace is gone."),
+            (export_workspace, $crate::workspace::ExportWorkspaceRequest, $crate::import::Job, "/api/workspaces/export-workspace", "Export", "", "export", "", Write, "", 202, false, "Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included."),
+            (backup_workspace, $crate::workspace::BackupWorkspaceRequest, $crate::import::Job, "/api/workspaces/backup-workspace", "Backup", "", "", "", Admin, "", 202, false, "Back up the workspace's history, retained objects and application records, drafts included, into one self-contained archive. Human administrator session only."),
+            (restore_workspace, $crate::workspace::RestoreWorkspaceRequest, $crate::import::Job, "/api/workspaces/restore-workspace", "Restore", "", "", "", Admin, "", 202, true, "Fill a blank workspace from an uploaded workspace archive, keeping item identities; drafts of editors unknown here stay in the archive and are counted. Human administrator session only."),
+            (backup_installation, $crate::workspace::BackupInstallationRequest, $crate::import::Job, "/api/workspaces/backup-installation", "Back up installation", "", "", "", Admin, "", 202, false, "Back up the installation's identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only."),
+            (list_items, $crate::item::ListItemsRequest, $crate::item::ListItemsResponse, "/api/items/list-items", "Browse", "ls", "", "model", Read, "", 200, false, "List a folder with one-line descriptions at one resolved revision. With extraction = \"unprocessed\", list only the source files whose conversion is partial, failed or unsupported."),
             (get_item, $crate::item::GetItemRequest, $crate::item::ItemDocument, "/api/items/get-item", "Properties", "", "", "", Read, "", 200, false, "Read the editable Markdown and preserved properties of an item."),
             (create_item, $crate::item::CreateItemRequest, $crate::item::ItemDocument, "/api/items/create-item", "New note", "", "", "", Write, "", 200, false, "Create authored content without modifying source bytes."),
             (save_draft, $crate::item::SaveDraftRequest, $crate::item::Draft, "/api/items/save-draft", "Save", "", "", "", Write, "", 200, false, "Autosave the caller's own draft against its base revision; never creates a revision, and only a Snapshot commits it."),
@@ -35,6 +40,7 @@ macro_rules! for_each_operation {
             (move_item, $crate::item::MoveItemRequest, $crate::common::MutationResult, "/api/items/move-item", "Move", "", "", "", Write, "", 200, false, "Move an item and rewrite references in one committed change."),
             (set_lifecycle, $crate::item::SetLifecycleRequest, $crate::common::MutationResult, "/api/items/set-lifecycle", "Archive", "", "", "", Write, "", 200, false, "Change lifecycle without approving any claim in the document."),
             (delete_item, $crate::item::DeleteItemRequest, $crate::common::MutationResult, "/api/items/delete-item", "Remove", "", "", "", Write, "", 200, true, "Remove the current reference while retaining historical source objects."),
+            (purge_item, $crate::purge::PurgeItemRequest, $crate::purge::Purge, "/api/items/purge-item", "Purge", "", "", "", Admin, "", 202, true, "Permanently remove one item's bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only."),
             (create_folder, $crate::item::CreateFolderRequest, $crate::common::MutationResult, "/api/items/create-folder", "New folder", "", "", "", Write, "", 200, false, "Create a user-selected folder with a maintained index."),
             (list_types, $crate::item::ListTypesRequest, $crate::item::ListTypesResponse, "/api/types/list-types", "Types", "", "", "", Read, "", 200, false, "List built-in and user-defined OKF property schemas."),
             (set_type, $crate::item::SetTypeRequest, $crate::common::MutationResult, "/api/types/set-type", "Save type", "", "", "", Write, "", 200, false, "Persist a user-defined type without dropping extension properties."),
@@ -42,7 +48,7 @@ macro_rules! for_each_operation {
             (get_sources, $crate::source::GetSourcesRequest, $crate::source::GetSourcesResponse, "/api/reads/get-sources", "Sources", "sources", "", "model", Read, "source", 200, false, "Show supporting sources and occurrence-specific provenance."),
             (get_object, $crate::source::GetObjectRequest, $crate::source::GetObjectResponse, "/api/reads/get-object", "Original", "read_object", "", "app", Read, "", 200, false, "Return a bounded binary block authorized through its source; knowing a hash never grants access."),
             (create_sandbox_capability, $crate::read::CreateSandboxCapabilityRequest, $crate::read::SandboxCapability, "/api/reads/create-sandbox-capability", "Open sandboxed", "", "", "", Read, "", 200, false, "Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only."),
-            (search_items, $crate::search::SearchRequest, $crate::search::SearchResponse, "/api/search/search-items", "Search", "grep", "", "model", Read, "", 200, false, "Search authorized content and return cited snippets, not whole-document dumps."),
+            (search_items, $crate::search::SearchRequest, $crate::search::SearchResponse, "/api/search/search-items", "Search", "grep", "", "model", Read, "", 200, false, "Search authorized content and return cited snippets, not whole-document dumps. The query may be empty only with a filter; extraction = \"unprocessed\" lists every source file whose text the converter could not fully extract."),
             (get_links, $crate::search::GetLinksRequest, $crate::search::GetLinksResponse, "/api/search/get-links", "Links", "links", "", "model", Read, "", 200, false, "Read incoming or outgoing references at the selected revision."),
             (get_graph, $crate::search::GetGraphRequest, $crate::search::GetGraphResponse, "/api/search/get-graph", "Graph", "", "", "", Read, "", 200, false, "Read a bounded graph projection using the same authorized source identities."),
             (log_items, $crate::history::LogRequest, $crate::history::LogResponse, "/api/history/log-items", "Timeline", "log", "timeline", "model", Read, "timeline", 200, false, "Read content snapshots; Git history is not the complete application event log."),
@@ -50,7 +56,7 @@ macro_rules! for_each_operation {
             (commit_items, $crate::history::CommitRequest, $crate::common::MutationResult, "/api/history/commit-items", "Snapshot", "", "snapshot", "", Write, "", 200, false, "Name a snapshot from the caller's saved drafts; blocked only when a selected item was changed or deleted since its draft's base."),
             (restore_items, $crate::history::RestoreRequest, $crate::common::MutationResult, "/api/history/restore-items", "Rewind", "", "rewind", "", Write, "", 200, true, "Restore selected historical content as a new commit without rewriting history."),
             (blame_item, $crate::history::BlameRequest, $crate::history::BlameResponse, "/api/history/blame-item", "Who", "blame", "who", "model", Read, "", 200, false, "Show which commit last changed each selected line, not the origin of each fact."),
-            (open_proposal, $crate::proposal::OpenProposalRequest, $crate::proposal::Proposal, "/api/proposals/open-proposal", "Propose", "propose", "", "model", Propose, "", 200, false, "Create a suggested change set without merging or marking anything reviewed."),
+            (open_proposal, $crate::proposal::OpenProposalRequest, $crate::proposal::Proposal, "/api/proposals/open-proposal", "Propose", "propose", "", "model", Propose, "", 200, false, "Create a suggested change set without merging or marking anything reviewed. A supply_extraction change proposes the complete text of an unprocessed source file; it is applied only when a person accepts it and is labelled as supplied by an agent."),
             (list_proposals, $crate::proposal::ListProposalsRequest, $crate::proposal::ListProposalsResponse, "/api/proposals/list-proposals", "Proposals", "", "", "", Read, "", 200, false, "List visible suggested changes."),
             (get_proposal, $crate::proposal::GetProposalRequest, $crate::proposal::Proposal, "/api/proposals/get-proposal", "Open proposal", "", "", "", Read, "", 200, false, "Read the exact proposed content and base revision."),
             (accept_proposal, $crate::proposal::AcceptProposalRequest, $crate::common::MutationResult, "/api/proposals/accept-proposal", "Approve", "", "approve", "", Approve, "", 200, false, "Accept exactly the confirmed proposal against the displayed head; never an agent tool."),
@@ -64,6 +70,8 @@ macro_rules! for_each_operation {
             (start_import, $crate::import::StartImportRequest, $crate::import::Job, "/api/imports/start-import", "Import", "", "import", "", Write, "", 202, false, "Durably register conversion and source creation, preserving originals."),
             (get_job, $crate::import::GetJobRequest, $crate::import::Job, "/api/imports/get-job", "Progress", "", "", "", Read, "", 200, false, "Read durable job progress; a receipt does not imply completion."),
             (list_jobs, $crate::import::ListJobsRequest, $crate::import::ListJobsResponse, "/api/imports/list-jobs", "Jobs", "", "", "", Read, "", 200, false, "List conversion, export, and maintenance work."),
+            (get_tenant_job, $crate::import::GetTenantJobRequest, $crate::import::Job, "/api/imports/get-tenant-job", "Progress", "", "", "", Admin, "", 200, false, "Read an installation-level job: an installation backup or a purge."),
+            (list_tenant_jobs, $crate::import::ListTenantJobsRequest, $crate::import::ListJobsResponse, "/api/imports/list-tenant-jobs", "Installation jobs", "", "", "", Admin, "", 200, false, "List installation-level jobs, newest first, with their artifacts."),
             (retry_job, $crate::import::RetryJobRequest, $crate::import::Job, "/api/imports/retry-job", "Retry", "", "", "", Write, "", 202, false, "Retry the same durable work identity without duplicating completed effects."),
             (cancel_job, $crate::import::CancelJobRequest, $crate::import::Job, "/api/imports/cancel-job", "Cancel", "", "", "", Write, "", 200, false, "Cancel work while retaining completed uploads and recorded state."),
             (redigest_item, $crate::import::RedigestRequest, $crate::import::Job, "/api/imports/redigest-item", "Reconvert", "", "", "", Write, "", 202, false, "Re-run extraction with declared settings; preserve prior digests and separate corrections."),
@@ -81,6 +89,7 @@ macro_rules! for_each_operation {
             (get_catalog, $crate::views::GetCatalogRequest, $crate::views::CatalogResponse, "/api/views/get-catalog", "Components", "catalog", "", "model", Read, "", 200, false, "Describe the allowed visual components; the catalog never grants capabilities."),
             (get_receipt, $crate::events::GetReceiptRequest, $crate::events::Receipt, "/api/events/get-receipt", "Tool results returned", "", "", "", Read, "", 200, false, "Inspect the exact sources returned through this server, not an external model internal state."),
             (list_events, $crate::events::ListEventsRequest, $crate::events::ListEventsResponse, "/api/events/list-events", "Activity", "", "", "", Read, "", 200, false, "Read resumable notifications without treating them as authoritative document content."),
+            (list_tenant_events, $crate::events::ListTenantEventsRequest, $crate::events::ListEventsResponse, "/api/events/list-tenant-events", "Security activity", "", "", "", Admin, "", 200, false, "Read installation-level notifications: sign-ins, connector issue and revocation, and refusals outside a workspace."),
             (get_session, $crate::common::Empty, $crate::access::SessionResponse, "/api/session/get-session", "Account", "", "", "", Read, "", 200, false, "Read the current authenticated principal without exposing credentials."),
             (create_connector, $crate::access::CreateConnectorRequest, $crate::access::IssuedConnector, "/api/session/create-connector", "Connect an agent", "", "", "", Admin, "", 200, false, "Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect."),
             (list_connectors, $crate::access::ListConnectorsRequest, $crate::access::ListConnectorsResponse, "/api/session/list-connectors", "Connected agents", "", "", "", Admin, "", 200, false, "List local connector credentials and their scopes without secrets. Local owner only."),
@@ -102,4 +111,18 @@ pub const DRAFT_BEARING: &[OperationName] = &[
     OperationName::ListDrafts,
     OperationName::DiscardDraft,
     OperationName::CommitItems,
+];
+
+/// Operations refused on every route that is not a human browser session, whatever the grants:
+/// recovery and destruction belong to a person (ledger 2026-10-08), never to an agent or a
+/// service identity. In table order.
+///
+/// The rule reaches the jobs they start: `retry_job` and `cancel_job` require the table
+/// permission of `JobKind::started_by` and, when that operation is listed here, a human route.
+pub const HUMAN_SESSION_ONLY: &[OperationName] = &[
+    OperationName::PurgeWorkspace,
+    OperationName::BackupWorkspace,
+    OperationName::RestoreWorkspace,
+    OperationName::BackupInstallation,
+    OperationName::PurgeItem,
 ];

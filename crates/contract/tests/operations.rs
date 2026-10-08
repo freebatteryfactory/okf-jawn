@@ -5,7 +5,7 @@ use std::error::Error;
 
 use okf_jawn_contract::access::Permission;
 use okf_jawn_contract::metadata::{OperationInfo, OperationName, operations};
-use okf_jawn_contract::operations::DRAFT_BEARING;
+use okf_jawn_contract::operations::{DRAFT_BEARING, HUMAN_SESSION_ONLY};
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde_json::Value;
 
@@ -33,6 +33,15 @@ const EXPECTED_DRAFT_BEARING: &[&str] = &[
     "discard_draft",
     "commit_items",
 ];
+/// The recovery and destruction operations a person runs in a browser session, never an agent
+/// or a service identity (ledger 2026-10-08), held by name and independently of the list.
+const EXPECTED_HUMAN_SESSION_ONLY: &[&str] = &[
+    "purge_workspace",
+    "backup_workspace",
+    "restore_workspace",
+    "backup_installation",
+    "purge_item",
+];
 /// Contract types that hold a draft or its content.
 const DRAFT_TYPES: &[&str] = &["Draft", "DraftContent"];
 /// Contract types named `Draft…` that hold no draft content, each with why. A new `Draft…` type
@@ -49,10 +58,11 @@ const DRAFT_SCHEMA_EXEMPT: &[(&str, &str)] = &[(
 
 /// Operations that destroy or overwrite user state, in table order.
 const DESTRUCTIVE: &[&str] = &[
-    "archive_workspace",
+    "purge_workspace",
     "restore_workspace",
     "discard_draft",
     "delete_item",
+    "purge_item",
     "restore_items",
     "apply_names",
     "revoke_connector",
@@ -113,9 +123,9 @@ fn declared(id: &str) -> Result<OperationInfo, Box<dyn Error>> {
 }
 
 #[test]
-fn the_surface_is_69_operations_12_model_tools_and_1_app_tool() {
+fn the_surface_is_77_operations_12_model_tools_and_1_app_tool() {
     let table = operations();
-    assert_eq!(table.len(), 69);
+    assert_eq!(table.len(), 77);
     let model: Vec<&str> = table
         .iter()
         .filter(|operation| operation.visibility == "model")
@@ -192,6 +202,87 @@ fn draft_bearing_operations_are_never_agent_tools() -> Result<(), Box<dyn Error>
 fn the_draft_bearing_list_is_exactly_the_spec_operations() {
     let listed: Vec<&str> = DRAFT_BEARING.iter().map(|name| name.as_str()).collect();
     assert_eq!(listed, EXPECTED_DRAFT_BEARING);
+}
+
+#[test]
+fn human_session_only_operations_are_never_agent_tools() -> Result<(), Box<dyn Error>> {
+    let positions: Vec<usize> = HUMAN_SESSION_ONLY
+        .iter()
+        .filter_map(|name| OperationName::ALL.iter().position(|each| each == name))
+        .collect();
+    let distinct: BTreeSet<usize> = positions.iter().copied().collect();
+    assert_eq!(distinct.len(), HUMAN_SESSION_ONLY.len(), "listed once each");
+    assert!(positions.is_sorted(), "listed in table order");
+    for name in HUMAN_SESSION_ONLY {
+        let id = name.as_str();
+        let operation = declared(id)?;
+        assert!(
+            operation.alias.is_empty(),
+            "{id} must not have a tool alias"
+        );
+        assert!(
+            operation.visibility.is_empty(),
+            "{id} must not be visible to agents"
+        );
+        assert_eq!(
+            operation.permission,
+            Permission::Admin,
+            "{id} is an administrator's operation"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_human_session_only_list_is_exactly_recovery_and_purge() {
+    let listed: Vec<&str> = HUMAN_SESSION_ONLY
+        .iter()
+        .map(|name| name.as_str())
+        .collect();
+    assert_eq!(listed, EXPECTED_HUMAN_SESSION_ONLY);
+}
+
+#[test]
+fn no_new_operation_is_an_agent_tool() -> Result<(), Box<dyn Error>> {
+    for id in [
+        "unarchive_workspace",
+        "purge_workspace",
+        "get_purge",
+        "backup_installation",
+        "purge_item",
+        "get_tenant_job",
+        "list_tenant_jobs",
+        "list_tenant_events",
+    ] {
+        let operation = declared(id)?;
+        assert!(
+            operation.alias.is_empty() && operation.visibility.is_empty(),
+            "{id} is not an MCP tool"
+        );
+        assert_eq!(operation.permission, Permission::Admin, "{id}");
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_tool_descriptions_name_the_unprocessed_filter_and_supplied_text()
+-> Result<(), Box<dyn Error>> {
+    assert!(
+        declared("list_items")?
+            .description
+            .contains(r#"With extraction = "unprocessed", list only the source files"#)
+    );
+    assert!(
+        declared("search_items")?
+            .description
+            .contains("The query may be empty only with a filter")
+    );
+    assert!(
+        declared("open_proposal")?
+            .description
+            .contains("labelled as supplied by an agent")
+    );
+    Ok(())
 }
 
 #[test]

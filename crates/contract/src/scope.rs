@@ -11,6 +11,10 @@
 //! required permission depends on the confirmed action. `Target::Authenticated` asks only
 //! for a signed-in principal: session, workspace listing, catalog and health results are
 //! filtered by the caller's grants instead of being gated by one.
+//!
+//! Purges, the installation backup, tenant jobs and tenant events authorize at the tenant
+//! (`Target::Deployment(Admin)`) only: a purge removes the workspace's grants, so a workspace
+//! target could not authorize the retry of a half-finished purge.
 
 use crate::access::{
     CreateConnectorRequest, ListConnectorsRequest, Permission, RevokeConnectorRequest,
@@ -20,24 +24,26 @@ use crate::common::Empty;
 use crate::conventions::{
     ApplyNamesRequest, GetRulesRequest, PreviewNamesRequest, SetRulesRequest,
 };
-use crate::error::ApiError;
-use crate::events::{GetReceiptRequest, ListEventsRequest};
+use crate::error::{ApiError, ErrorCode};
+use crate::events::{GetReceiptRequest, ListEventsRequest, ListTenantEventsRequest};
 use crate::health::{HealthRequest, ReadinessRequest};
 use crate::history::{BlameRequest, CommitRequest, DiffRequest, LogRequest, RestoreRequest};
 use crate::identity::{IdempotencyKey, WorkspaceId};
 use crate::import::{
     CancelJobRequest, CompleteUploadRequest, CorrectDigestRequest, CreateUploadRequest,
-    GetJobRequest, ListJobsRequest, RedigestRequest, RetryJobRequest, StartImportRequest,
+    GetJobRequest, GetTenantJobRequest, ListJobsRequest, ListTenantJobsRequest, RedigestRequest,
+    RetryJobRequest, StartImportRequest,
 };
 use crate::item::{
     CreateFolderRequest, CreateItemRequest, DeleteItemRequest, DiscardDraftRequest, GetItemRequest,
-    ListDraftsRequest, ListItemsRequest, ListTypesRequest, MoveItemRequest, SaveDraftRequest,
-    SetLifecycleRequest, SetTypeRequest,
+    ItemStatus, ListDraftsRequest, ListItemsRequest, ListTypesRequest, MoveItemRequest,
+    SaveDraftRequest, SetLifecycleRequest, SetTypeRequest,
 };
 use crate::proposal::{
     AcceptProposalRequest, AddCommentRequest, DeclineProposalRequest, GetProposalRequest,
-    ListProposalsRequest, OpenProposalRequest,
+    ListProposalsRequest, OpenProposalRequest, ProposalKind,
 };
+use crate::purge::{GetPurgeRequest, PurgeItemRequest, PurgeWorkspaceRequest};
 use crate::read::{CreateSandboxCapabilityRequest, ReadItemRequest};
 use crate::review::{
     ConfirmationAction, CreateConfirmationRequest, CreateReviewRequest, ListReviewsRequest,
@@ -48,9 +54,9 @@ use crate::views::{
     ExportViewRequest, GetCatalogRequest, GetViewRequest, PresentRequest, ResolveViewRequest,
 };
 use crate::workspace::{
-    ArchiveWorkspaceRequest, BackupWorkspaceRequest, CreateWorkspaceRequest,
-    ExportWorkspaceRequest, ListWorkspacesRequest, OpenWorkspaceRequest, RestoreWorkspaceRequest,
-    UpdateWorkspaceRequest,
+    ArchiveWorkspaceRequest, BackupInstallationRequest, BackupWorkspaceRequest,
+    CreateWorkspaceRequest, ExportWorkspaceRequest, ListWorkspacesRequest, OpenWorkspaceRequest,
+    RestoreWorkspaceRequest, UnarchiveWorkspaceRequest, UpdateWorkspaceRequest,
 };
 
 macro_rules! workspace_read {
@@ -74,6 +80,32 @@ macro_rules! workspace_keyed {
             }
             fn idempotency_key(&self) -> Option<&IdempotencyKey> {
                 Some(&self.idempotency_key)
+            }
+        })*
+    };
+}
+
+macro_rules! tenant_admin_keyed {
+    ($($request:ty),* $(,)?) => {
+        $(impl RequestScope for $request {
+            fn targets(&self) -> Vec<Target> {
+                vec![Target::Deployment(Permission::Admin)]
+            }
+            fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+                Some(&self.idempotency_key)
+            }
+        })*
+    };
+}
+
+macro_rules! tenant_admin_read {
+    ($($request:ty),* $(,)?) => {
+        $(impl RequestScope for $request {
+            fn targets(&self) -> Vec<Target> {
+                vec![Target::Deployment(Permission::Admin)]
+            }
+            fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+                None
             }
         })*
     };
@@ -159,7 +191,6 @@ workspace_read!(
     ReadItemRequest,
     GetSourcesRequest,
     CreateSandboxCapabilityRequest,
-    SearchRequest,
     GetLinksRequest,
     GetGraphRequest,
     LogRequest,
@@ -186,7 +217,6 @@ workspace_keyed!(Write:
     SaveDraftRequest,
     DiscardDraftRequest,
     MoveItemRequest,
-    SetLifecycleRequest,
     DeleteItemRequest,
     CreateFolderRequest,
     SetTypeRequest,
@@ -203,13 +233,26 @@ workspace_keyed!(Write:
     ApplyNamesRequest,
     ExportViewRequest,
 );
-workspace_keyed!(Propose: OpenProposalRequest);
 workspace_keyed!(Approve: AcceptProposalRequest, DeclineProposalRequest);
 workspace_keyed!(Admin:
     ArchiveWorkspaceRequest,
+    UnarchiveWorkspaceRequest,
     BackupWorkspaceRequest,
     RestoreWorkspaceRequest,
     RebuildIndexRequest,
+);
+
+tenant_admin_keyed!(
+    PurgeWorkspaceRequest,
+    PurgeItemRequest,
+    BackupInstallationRequest,
+);
+
+tenant_admin_read!(
+    GetPurgeRequest,
+    GetTenantJobRequest,
+    ListTenantJobsRequest,
+    ListTenantEventsRequest,
 );
 
 authenticated!(
@@ -226,6 +269,67 @@ impl RequestScope for CreateWorkspaceRequest {
     }
     fn idempotency_key(&self) -> Option<&IdempotencyKey> {
         Some(&self.idempotency_key)
+    }
+}
+
+impl RequestScope for SearchRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Read)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        None
+    }
+    /// An empty query matches nothing to rank; it lists sources only through a filter.
+    fn check_rules(&self) -> Result<(), ApiError> {
+        if self.query.trim().is_empty() && self.extraction.is_none() {
+            Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                "The query may be empty only with an extraction filter",
+            )
+            .with_field("/query"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl RequestScope for SetLifecycleRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    /// A change names a status word, the archive flag, or both; `other` is a word only a
+    /// producer outside the application writes.
+    fn check_rules(&self) -> Result<(), ApiError> {
+        if self.status.is_none() && self.archived.is_none() {
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                "Set the status, the archived flag, or both",
+            ));
+        }
+        if self.status == Some(ItemStatus::Other) {
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                "The status must be draft, stable or deprecated",
+            )
+            .with_field("/status"));
+        }
+        Ok(())
+    }
+}
+
+impl RequestScope for OpenProposalRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Propose)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    /// A supply proposal holds only supply changes, each for a different item.
+    fn check_rules(&self) -> Result<(), ApiError> {
+        ProposalKind::of(&self.changes).map(|_| ())
     }
 }
 
