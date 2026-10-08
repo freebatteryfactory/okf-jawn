@@ -1,6 +1,8 @@
 # Stage 1b: contract design for the eight shared shapes
 
-Status: design for review. Temporary working document, removed when Stage 1 closes like the
+Status: approved; sections 1 to 8, 10 to 13 implemented on `cure/stage-1b-contract` (contract,
+xtask, SPEC, generated outputs), section 9 is the core-cli package that follows. Temporary
+working document, removed when Stage 1 closes like the
 Stage 1 design beside it; SPEC.md, README.md and AGENTS.md stay the canonical prose. Base:
 `eda0253` on `main`. Branch: `cure/stage-1b-contract`.
 
@@ -18,7 +20,11 @@ read in source.
 
 Fix round 1 (after the independent review, CHANGES_REQUIRED) changed every section; the
 owner questions of round 0 are answered by the orchestrator's rulings and carried in sections 6,
-8, 13 and 14.
+8, 13 and 14. The final design review's eight decisions are applied where they bind: one
+`Timestamp` spelling with no leap second (section 7), the narrowed header rule (9.3), the import
+refusal of a live or purged workspace's archive (8), resumption before `base_revision` (6), the
+converse of `Job.workspace_id` (8), the rewritten core caption test (9.1), `generated/converter/`
+as a generated directory (12) and datasets through the revision map (6).
 
 ## 0. Conventions this design applies everywhere
 
@@ -933,8 +939,10 @@ pub enum ProposalKind {
     dumps. The query may be empty only with a filter; extraction = \"unprocessed\" lists every
     source file whose text the converter could not fully extract."
   - `open_proposal`: "Create a suggested change set without merging or marking anything
-    reviewed. A supply_extraction change proposes the complete text of an unprocessed source
+    reviewed. A `supply_extraction` change proposes the complete text of an unprocessed source
     file; it is applied only when a person accepts it and is labelled as supplied by an agent."
+    (The identifier is in code style because core's `Application` trait takes each description
+    as a doc comment and strict Clippy's `doc_markdown` refuses it bare.)
 - No operation is added.
 
 ### Contract tests
@@ -1099,7 +1107,9 @@ pub struct Purge {
   instead.
 - A purge is unique per target while it is not completed: repeating `purge_workspace` or
   `purge_item` for that target (any idempotency key) returns the unfinished `Purge`, and its job
-  is queued again; that is how a failed purge is resumed. A purge cannot be cancelled: a
+  is queued again; that is how a failed purge is resumed. The unfinished purge of the same target
+  is found and returned before `base_revision` is checked (final-review decision 4), so a head
+  that moved or no longer exists never blocks the resumption. A purge cannot be cancelled: a
   half-removed target is worse than either end.
 - The work runs as a tenant job (section 9.2, `JobScope::Tenant`) of kind `purge_workspace` or
   `purge_item`; tenant jobs are not reachable through `retry_job` and `cancel_job`, which take a
@@ -1136,7 +1146,9 @@ View bindings that cite it, are invalidated and scrubbed.
 
 - Item purge writes a durable revision map for the workspace (`RecordStore`, section 9.2): for
   every rewritten commit, old revision to new revision. A commit whose only change was the purged
-  item has no rewrite and maps to the new revision of its parent. Stored receipts, reviews and
+  item has no rewrite and maps to the new revision of its parent. Recorded datasets (derived
+  objects of other items' revisions) are mapped through the same durable map after an item purge
+  (final-review decision 8; storage implements). Stored receipts, reviews and
   comments are not rewritten; the application resolves their revisions through the map when it
   reads them.
 - A request that names a removed or rewritten revision is `not_found` with `ErrorDetail` gaining
@@ -1230,9 +1242,13 @@ pub struct Timestamp(String);
 ```
 
 Canonical form: exactly milliseconds. Schema: `{"type": "string", "format": "date-time",
-"pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$"}`.
-`TryFrom<String>` requires that pattern and then parses with
-`time::OffsetDateTime::parse(_, &Rfc3339)`, so an impossible date (`2026-02-30`) is refused too.
+"pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$"}`: minutes
+and seconds are `00` to `59`, so a leap second (`:60`) is refused by the pattern (final-review
+decision 1). `TryFrom<String>` requires that pattern, parses with
+`time::OffsetDateTime::parse(_, &Rfc3339)`, so an impossible date (`2026-02-30`) is refused too,
+and then requires that writing the parsed instant with `from_utc` reproduces the input exactly:
+one instant, one spelling, whatever leniency the parser has (time's RFC 3339 parser reads
+`:60` as the preceding nanosecond).
 Every other spelling is refused: no fraction (`...:07Z`), another fraction width (`...:07.5Z`,
 `...:07.250000Z`), an offset other than `Z` (`+00:00` included), a lower-case `t` or `z`, a
 leap second. Producers write with `Timestamp::from_utc(OffsetDateTime)`, which converts to UTC
@@ -1255,6 +1271,10 @@ With one width, the derived `Ord` on the string is time order, and the old ambig
 `parsing` and `formatting` features. That is a manifest change for the integration owner, and
 Cargo.lock changes with the new dependency edge (ruling: batched into one lock, then Docling and
 MCP Apps are requalified once; section 12).
+
+`from_utc` returns `Result`: a UTC year outside 0000 to 9999 has no RFC 3339 spelling. It
+writes through time's `Iso8601` formatter configured for three fraction digits, which truncates.
+`Timestamp::instant()` reads the value back as an `OffsetDateTime`.
 
 Fields that change from `String` to `Timestamp`: `Draft::saved_at`,
 `SandboxCapability::expires_at`, `SourceName::observed_at`, `Receipt::returned_at`,
@@ -1338,7 +1358,8 @@ workspace only to callers holding `admin` on it. New operation `list_tenant_even
 
 - `semantic::timestamps_have_one_canonical_spelling`: accepts `2026-10-08T14:03:07.250Z`;
   refuses `2026-10-08T14:03:07Z`, `...:07.5Z`, `...:07.250000Z`, `...:07.250+00:00`, lower-case
-  `z`, `2026-02-30T00:00:00.000Z` and a date alone; the schema states `date-time` and the pattern.
+  `t` and `z`, `2026-02-30T00:00:00.000Z`, `2026-10-08T24:00:00.000Z`,
+  `2026-12-31T23:59:60.000Z` and a date alone; the schema states `date-time` and the pattern.
 - `semantic::timestamp_order_is_time_order`: for pairs including `...:07.999Z` against
   `...:08.000Z`, `...:59.999Z` against the next minute's `.000Z`, and `2026-12-31T23:59:59.999Z`
   against `2027-01-01T00:00:00.000Z`, the derived `Ord` agrees with the parsed instants; and
@@ -1421,7 +1442,12 @@ Restore:
   the target workspace back to that editor, and keeps the others in the archive, unassigned, with
   their count reported. Restoring a backup of another workspace of the same installation from a
   retained artifact is not offered: its purge semantics for the copy are not simple (round 1
-  review, N5).
+  review, N5). For the same reason an uploaded archive of this tenant is refused when its
+  workspace still exists or has a purge record (final-review decision 3): purged content never
+  comes back through an import. The contract cannot express this (the archive's workspace and
+  tenant are inside the archive, which only storage reads); `RestoreWorkspaceRequest`'s doc
+  comment states it, and the storage lane pins it in
+  `backup::an_import_refuses_an_archive_of_a_live_or_purged_workspace`.
 - The upload a restore read is consumed when the restore completes: its slot records the
   consuming job, its object is released unless something else references it, `start_import`
   refuses it, and `restore_workspace` refuses an upload that was imported. An upload whose
@@ -1547,7 +1573,10 @@ sending originals to a connected AI is off by default. Downloads are never MCP t
 - `semantic::a_download_artifact_states_its_kind`.
 - `semantic::every_job_states_its_kind`: `JOB_KINDS` gains `backup_installation`,
   `purge_workspace` and `purge_item`.
-- `semantic::a_tenant_job_has_no_workspace`.
+- `semantic::a_tenant_job_has_no_workspace`: both directions (final-review decision 5).
+  `JobKind::is_tenant` names the tenant kinds and `Job::check` refuses, on `/workspace_id`, a
+  workspace job without `workspace_id` and a tenant job with one; the test decodes every kind
+  with and without the field.
 - Core (core-cli): `reading::get_object_refuses_a_backup_artifact_digest` (a workspace archive's
   digest, named with a valid citation of the workspace, is `not_found`).
 - Storage (construction receipt, storage lane): `backup::replacement_restore_after_deleting_the_data_directory`
@@ -1729,7 +1758,12 @@ Converter identity inputs:
   outcome), and readiness reports it.
 
 `ConversionSettings` and `OcrPolicy` move to the contract (section 3); `CaptionOrigin` and
-`AssetCaption` are removed (section 3).
+`AssetCaption` are removed (section 3). Both landed with the contract package, because the
+contract removed what they served: core re-exports the contract settings,
+`ConvertedAsset::caption` is `Option<String>`, and `crates/core/tests/ports.rs`
+`a_converted_image_carries_its_size_and_caption_origin` is rewritten as
+`a_converted_image_carries_its_size_and_its_own_caption` (final-review decision 6). The rest of
+9.1 is this package's.
 
 ### 9.2 Jobs and records (`crates/core/src/jobs.rs`)
 
@@ -1779,8 +1813,15 @@ Converter identity inputs:
 - `TreeEdit::CorrectDigest` gains `adopts: Option<ProposalId>`.
 - `TreeEdit::from_change(change, &ChangeContext)` with `ChangeContext { new_item_id,
   new_item_kind, proposal_id, proposer: Provenance }`; still exhaustive over `Change`.
-- `VersionStore::commit` and `create_candidate` refuse a path collision (section 7) and an edit
-  that changes the application header (section 13).
+- `VersionStore::commit` and `create_candidate` refuse a path collision (section 7) and a change
+  to the application header (`okf_jawn`, section 13) made through `CreateItem`, `EditItem`, a
+  type definition (`set_type`) or a draft (final-review decision 2). The server's own header
+  updates are allowed: `SetStatus` (the `archived` flag), a redigest's `WriteSourceCard`,
+  `CorrectDigest` and `SupplyExtraction`.
+- Already landed with the contract package, because the contract forced them:
+  `TreeEdit::SetStatus`, `TreeEdit::SupplyExtraction`, `TreeEdit::from_change(change,
+  &ChangeContext)`, and `ArtifactKind` re-exported from the contract (`ArtifactRecord::download`
+  sets `kind` and takes the path by the kind's scope).
 - `WorkspaceCatalog::list(tenant, include_archived: bool)`; new `unarchive(scope, MutationId,
   author)`; `archive` and `unarchive` set `archived_at`.
 - New port `Purger` (storage implements; one call owns every store it must clear):
@@ -1920,6 +1961,10 @@ control.", add:
 
 ## 12. Generated outputs and qualification
 
+`generated/converter/` is a generated directory like the others (final-review decision 7):
+AGENTS.md lists it, `scripts/lib/generation.mjs` replaces and compares it, `lanes.mjs`
+`generatedRoots` and CI's clean-tree step and artifact include it.
+
 Every change above alters `api/`, `generated/cli/` and `ui/src/api/generated/`, including the
 generated Zod inside the MCP App bundle and the schemas of the `workspaces`, `ls`, `grep`, `show`,
 `propose` and `present` tools; `generated/converter/packages.json` is new. Cargo.lock changes
@@ -1929,7 +1974,9 @@ The Docling receipt lists `Cargo.lock` among its inputs and the MCP App bundle c
 generated Zod, so both receipts go stale. Ruling: any other dependency change of this stage is
 batched into the same `lock`, and Docling and MCP Apps are requalified once, after the contract
 lands, before `check-receipts` is relied on again. The harness's dataset fixture becomes a
-`Dataset` document. The views lane's `views-chart-failure-isolation` gate consumes `charts`.
+`Dataset` document together with the views lane's switch of `PresentView` from its row-record
+Zod schema to `zDataset`; until then `tests/fixtures/views/present-metrics-dataset.json` stays
+rows of records, while `present-response.json` already carries `charts` and `as_of`. The views lane's `views-chart-failure-isolation` gate consumes `charts`.
 
 ## 13. Addendum: the 2026-10-06 OKF decisions, mapped
 
@@ -1941,7 +1988,8 @@ key `okf_jawn` (contract constant `item::APP_HEADER_KEY`): `item_id`, `archived`
 and, on a source card, `source: { original_name, digest }` and `extraction` (section 1). It
 appears in `ItemDocument::properties` and is server-owned: `create_item`, `save_draft`,
 `Change::Create`, `Change::Edit` and `set_type` refuse a value that changes it as `invalid_input`
-on `/properties/okf_jawn`, and `VersionStore` refuses such an edit. OKF preserves unknown
+on `/properties/okf_jawn`, and `VersionStore` refuses such an edit (made through Create, Edit,
+`set_type` or a draft; the server's own header updates are allowed, section 9.3). OKF preserves unknown
 frontmatter keys, so the header survives export.
 
 | Decision | Mapping |
