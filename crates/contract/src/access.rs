@@ -108,11 +108,11 @@ pub struct Connector {
     pub workspace_ids: Vec<crate::identity::WorkspaceId>,
     /// Granted capabilities: `read`, plus `propose` only when enabled.
     pub permissions: Vec<Permission>,
-    /// RFC 3339 issue time.
-    pub created_at: String,
-    /// RFC 3339 revocation time; a revoked connector authenticates nothing.
+    /// Issue time.
+    pub created_at: crate::identity::Timestamp,
+    /// Revocation time; a revoked connector authenticates nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revoked_at: Option<String>,
+    pub revoked_at: Option<crate::identity::Timestamp>,
 }
 
 /// A newly issued connector and its secret, which is returned exactly once and never stored in plain text.

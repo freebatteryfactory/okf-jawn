@@ -17,7 +17,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Archive the workspace without deleting retained content.",
+  "description": "Archive the workspace without deleting retained content.\n\nWhile a workspace is archived, an operation that would change its content or open work on\nit (a commit, a draft, a proposal, an upload, an import or redigest) is refused as\n`conflict`; reads, export, backup, `unarchive_workspace` and purge are allowed.",
   "properties": {
     "base_revision": {
       "$ref": "#/$defs/Revision",

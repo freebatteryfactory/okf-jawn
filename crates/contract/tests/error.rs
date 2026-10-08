@@ -119,3 +119,52 @@ fn an_untyped_diff_is_not_a_draft_conflict() {
     });
     assert!(serde_json::from_value::<ErrorDetail>(old).is_err());
 }
+
+#[test]
+fn an_invalidated_revision_is_a_typed_not_found_with_its_replacement() -> Result<(), Box<dyn Error>>
+{
+    let item_purge = json!({
+        "code": "not_found",
+        "message": "That revision was rewritten by a purge",
+        "detail": {
+            "kind": "invalidated",
+            "purge_id": "77777777-7777-4777-8777-777777777777",
+            "replacement": "b".repeat(40)
+        }
+    });
+    let error: ApiError = serde_json::from_value(item_purge.clone())?;
+    assert_eq!(error.code, ErrorCode::NotFound);
+    let Some(ErrorDetail::Invalidated {
+        purge_id,
+        replacement,
+    }) = error.detail.as_deref()
+    else {
+        return Err("expected an invalidated detail".into());
+    };
+    assert_eq!(
+        purge_id.0.to_string(),
+        "77777777-7777-4777-8777-777777777777"
+    );
+    assert_eq!(
+        replacement
+            .as_ref()
+            .map(okf_jawn_contract::identity::Revision::as_str),
+        Some("b".repeat(40).as_str())
+    );
+    assert_eq!(serde_json::to_value(&error)?, item_purge);
+    // After a workspace purge there is nothing to re-pin to, and no replacement is written.
+    let workspace_purge = json!({
+        "kind": "invalidated",
+        "purge_id": "77777777-7777-4777-8777-777777777777"
+    });
+    let detail: ErrorDetail = serde_json::from_value(workspace_purge.clone())?;
+    assert!(matches!(
+        &detail,
+        ErrorDetail::Invalidated {
+            replacement: None,
+            ..
+        }
+    ));
+    assert_eq!(serde_json::to_value(&detail)?, workspace_purge);
+    Ok(())
+}

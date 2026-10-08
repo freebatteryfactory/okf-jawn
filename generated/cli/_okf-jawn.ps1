@@ -33,12 +33,16 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('open_workspace', 'open_workspace', [CompletionResultType]::ParameterValue, 'Open an existing authorized workspace.')
             [CompletionResult]::new('update_workspace', 'update_workspace', [CompletionResultType]::ParameterValue, 'Update workspace metadata at the supplied base revision.')
             [CompletionResult]::new('archive_workspace', 'archive_workspace', [CompletionResultType]::ParameterValue, 'Archive without deleting historical content.')
-            [CompletionResult]::new('export_workspace', 'export_workspace', [CompletionResultType]::ParameterValue, 'Build a portable export with resolvable referenced assets.')
-            [CompletionResult]::new('export', 'export', [CompletionResultType]::ParameterValue, 'Build a portable export with resolvable referenced assets.')
-            [CompletionResult]::new('backup_workspace', 'backup_workspace', [CompletionResultType]::ParameterValue, 'Back up content and durable application records.')
-            [CompletionResult]::new('restore_workspace', 'restore_workspace', [CompletionResultType]::ParameterValue, 'Restore content and durable application records from a retained backup artifact.')
-            [CompletionResult]::new('list_items', 'list_items', [CompletionResultType]::ParameterValue, 'List a folder with one-line descriptions at one resolved revision.')
-            [CompletionResult]::new('ls', 'ls', [CompletionResultType]::ParameterValue, 'List a folder with one-line descriptions at one resolved revision.')
+            [CompletionResult]::new('unarchive_workspace', 'unarchive_workspace', [CompletionResultType]::ParameterValue, 'Return an archived workspace to ordinary listings; its history and records were kept.')
+            [CompletionResult]::new('purge_workspace', 'purge_workspace', [CompletionResultType]::ParameterValue, 'Permanently remove a workspace''s originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.')
+            [CompletionResult]::new('get_purge', 'get_purge', [CompletionResultType]::ParameterValue, 'Read a purge''s progress and counts; available after the workspace is gone.')
+            [CompletionResult]::new('export_workspace', 'export_workspace', [CompletionResultType]::ParameterValue, 'Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.')
+            [CompletionResult]::new('export', 'export', [CompletionResultType]::ParameterValue, 'Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.')
+            [CompletionResult]::new('backup_workspace', 'backup_workspace', [CompletionResultType]::ParameterValue, 'Back up the workspace''s history, retained objects and application records, drafts included, into one self-contained archive. Human administrator session only.')
+            [CompletionResult]::new('restore_workspace', 'restore_workspace', [CompletionResultType]::ParameterValue, 'Fill a blank workspace from an uploaded workspace archive, keeping item identities; drafts of editors unknown here stay in the archive and are counted. Human administrator session only.')
+            [CompletionResult]::new('backup_installation', 'backup_installation', [CompletionResultType]::ParameterValue, 'Back up the installation''s identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only.')
+            [CompletionResult]::new('list_items', 'list_items', [CompletionResultType]::ParameterValue, 'List a folder with one-line descriptions at one resolved revision. With extraction = "unprocessed", list only the source files whose conversion is partial, failed or unsupported.')
+            [CompletionResult]::new('ls', 'ls', [CompletionResultType]::ParameterValue, 'List a folder with one-line descriptions at one resolved revision. With extraction = "unprocessed", list only the source files whose conversion is partial, failed or unsupported.')
             [CompletionResult]::new('get_item', 'get_item', [CompletionResultType]::ParameterValue, 'Read the editable Markdown and preserved properties of an item.')
             [CompletionResult]::new('create_item', 'create_item', [CompletionResultType]::ParameterValue, 'Create authored content without modifying source bytes.')
             [CompletionResult]::new('save_draft', 'save_draft', [CompletionResultType]::ParameterValue, 'Autosave the caller''s own draft against its base revision; never creates a revision, and only a Snapshot commits it.')
@@ -47,6 +51,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('move_item', 'move_item', [CompletionResultType]::ParameterValue, 'Move an item and rewrite references in one committed change.')
             [CompletionResult]::new('set_lifecycle', 'set_lifecycle', [CompletionResultType]::ParameterValue, 'Change lifecycle without approving any claim in the document.')
             [CompletionResult]::new('delete_item', 'delete_item', [CompletionResultType]::ParameterValue, 'Remove the current reference while retaining historical source objects.')
+            [CompletionResult]::new('purge_item', 'purge_item', [CompletionResultType]::ParameterValue, 'Permanently remove one item''s bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.')
             [CompletionResult]::new('create_folder', 'create_folder', [CompletionResultType]::ParameterValue, 'Create a user-selected folder with a maintained index.')
             [CompletionResult]::new('list_types', 'list_types', [CompletionResultType]::ParameterValue, 'List built-in and user-defined OKF property schemas.')
             [CompletionResult]::new('set_type', 'set_type', [CompletionResultType]::ParameterValue, 'Persist a user-defined type without dropping extension properties.')
@@ -57,8 +62,8 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('get_object', 'get_object', [CompletionResultType]::ParameterValue, 'Return a bounded binary block authorized through its source; knowing a hash never grants access.')
             [CompletionResult]::new('read_object', 'read_object', [CompletionResultType]::ParameterValue, 'Return a bounded binary block authorized through its source; knowing a hash never grants access.')
             [CompletionResult]::new('create_sandbox_capability', 'create_sandbox_capability', [CompletionResultType]::ParameterValue, 'Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.')
-            [CompletionResult]::new('search_items', 'search_items', [CompletionResultType]::ParameterValue, 'Search authorized content and return cited snippets, not whole-document dumps.')
-            [CompletionResult]::new('grep', 'grep', [CompletionResultType]::ParameterValue, 'Search authorized content and return cited snippets, not whole-document dumps.')
+            [CompletionResult]::new('search_items', 'search_items', [CompletionResultType]::ParameterValue, 'Search authorized content and return cited snippets, not whole-document dumps. The query may be empty only with a filter; extraction = "unprocessed" lists every source file whose text the converter could not fully extract.')
+            [CompletionResult]::new('grep', 'grep', [CompletionResultType]::ParameterValue, 'Search authorized content and return cited snippets, not whole-document dumps. The query may be empty only with a filter; extraction = "unprocessed" lists every source file whose text the converter could not fully extract.')
             [CompletionResult]::new('get_links', 'get_links', [CompletionResultType]::ParameterValue, 'Read incoming or outgoing references at the selected revision.')
             [CompletionResult]::new('links', 'links', [CompletionResultType]::ParameterValue, 'Read incoming or outgoing references at the selected revision.')
             [CompletionResult]::new('get_graph', 'get_graph', [CompletionResultType]::ParameterValue, 'Read a bounded graph projection using the same authorized source identities.')
@@ -75,8 +80,8 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('blame_item', 'blame_item', [CompletionResultType]::ParameterValue, 'Show which commit last changed each selected line, not the origin of each fact.')
             [CompletionResult]::new('blame', 'blame', [CompletionResultType]::ParameterValue, 'Show which commit last changed each selected line, not the origin of each fact.')
             [CompletionResult]::new('who', 'who', [CompletionResultType]::ParameterValue, 'Show which commit last changed each selected line, not the origin of each fact.')
-            [CompletionResult]::new('open_proposal', 'open_proposal', [CompletionResultType]::ParameterValue, 'Create a suggested change set without merging or marking anything reviewed.')
-            [CompletionResult]::new('propose', 'propose', [CompletionResultType]::ParameterValue, 'Create a suggested change set without merging or marking anything reviewed.')
+            [CompletionResult]::new('open_proposal', 'open_proposal', [CompletionResultType]::ParameterValue, 'Create a suggested change set without merging or marking anything reviewed. A `supply_extraction` change proposes the complete text of an unprocessed source file; it is applied only when a person accepts it and is labelled as supplied by an agent.')
+            [CompletionResult]::new('propose', 'propose', [CompletionResultType]::ParameterValue, 'Create a suggested change set without merging or marking anything reviewed. A `supply_extraction` change proposes the complete text of an unprocessed source file; it is applied only when a person accepts it and is labelled as supplied by an agent.')
             [CompletionResult]::new('list_proposals', 'list_proposals', [CompletionResultType]::ParameterValue, 'List visible suggested changes.')
             [CompletionResult]::new('get_proposal', 'get_proposal', [CompletionResultType]::ParameterValue, 'Read the exact proposed content and base revision.')
             [CompletionResult]::new('accept_proposal', 'accept_proposal', [CompletionResultType]::ParameterValue, 'Accept exactly the confirmed proposal against the displayed head; never an agent tool.')
@@ -94,6 +99,8 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('import', 'import', [CompletionResultType]::ParameterValue, 'Durably register conversion and source creation, preserving originals.')
             [CompletionResult]::new('get_job', 'get_job', [CompletionResultType]::ParameterValue, 'Read durable job progress; a receipt does not imply completion.')
             [CompletionResult]::new('list_jobs', 'list_jobs', [CompletionResultType]::ParameterValue, 'List conversion, export, and maintenance work.')
+            [CompletionResult]::new('get_tenant_job', 'get_tenant_job', [CompletionResultType]::ParameterValue, 'Read an installation-level job: an installation backup or a purge.')
+            [CompletionResult]::new('list_tenant_jobs', 'list_tenant_jobs', [CompletionResultType]::ParameterValue, 'List installation-level jobs, newest first, with their artifacts.')
             [CompletionResult]::new('retry_job', 'retry_job', [CompletionResultType]::ParameterValue, 'Retry the same durable work identity without duplicating completed effects.')
             [CompletionResult]::new('cancel_job', 'cancel_job', [CompletionResultType]::ParameterValue, 'Cancel work while retaining completed uploads and recorded state.')
             [CompletionResult]::new('redigest_item', 'redigest_item', [CompletionResultType]::ParameterValue, 'Re-run extraction with declared settings; preserve prior digests and separate corrections.')
@@ -114,6 +121,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('catalog', 'catalog', [CompletionResultType]::ParameterValue, 'Describe the allowed visual components; the catalog never grants capabilities.')
             [CompletionResult]::new('get_receipt', 'get_receipt', [CompletionResultType]::ParameterValue, 'Inspect the exact sources returned through this server, not an external model internal state.')
             [CompletionResult]::new('list_events', 'list_events', [CompletionResultType]::ParameterValue, 'Read resumable notifications without treating them as authoritative document content.')
+            [CompletionResult]::new('list_tenant_events', 'list_tenant_events', [CompletionResultType]::ParameterValue, 'Read installation-level notifications: sign-ins, connector issue and revocation, and refusals outside a workspace.')
             [CompletionResult]::new('get_session', 'get_session', [CompletionResultType]::ParameterValue, 'Read the current authenticated principal without exposing credentials.')
             [CompletionResult]::new('create_connector', 'create_connector', [CompletionResultType]::ParameterValue, 'Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect.')
             [CompletionResult]::new('list_connectors', 'list_connectors', [CompletionResultType]::ParameterValue, 'List local connector credentials and their scopes without secrets. Local owner only.')
@@ -165,6 +173,27 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
+        'okf-jawn;unarchive_workspace' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;purge_workspace' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;get_purge' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
         'okf-jawn;export_workspace' {
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
@@ -187,6 +216,13 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;restore_workspace' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;backup_installation' {
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
@@ -257,6 +293,13 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;delete_item' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;purge_item' {
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
@@ -592,6 +635,20 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
+        'okf-jawn;get_tenant_job' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'okf-jawn;list_tenant_jobs' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
         'okf-jawn;retry_job' {
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
@@ -732,6 +789,13 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
+        'okf-jawn;list_tenant_events' {
+            [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
         'okf-jawn;get_session' {
             [CompletionResult]::new('--server', '--server', [CompletionResultType]::ParameterName, 'server')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'JSON request, @file, or - for stdin')
@@ -780,10 +844,14 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('open_workspace', 'open_workspace', [CompletionResultType]::ParameterValue, 'Open an existing authorized workspace.')
             [CompletionResult]::new('update_workspace', 'update_workspace', [CompletionResultType]::ParameterValue, 'Update workspace metadata at the supplied base revision.')
             [CompletionResult]::new('archive_workspace', 'archive_workspace', [CompletionResultType]::ParameterValue, 'Archive without deleting historical content.')
-            [CompletionResult]::new('export_workspace', 'export_workspace', [CompletionResultType]::ParameterValue, 'Build a portable export with resolvable referenced assets.')
-            [CompletionResult]::new('backup_workspace', 'backup_workspace', [CompletionResultType]::ParameterValue, 'Back up content and durable application records.')
-            [CompletionResult]::new('restore_workspace', 'restore_workspace', [CompletionResultType]::ParameterValue, 'Restore content and durable application records from a retained backup artifact.')
-            [CompletionResult]::new('list_items', 'list_items', [CompletionResultType]::ParameterValue, 'List a folder with one-line descriptions at one resolved revision.')
+            [CompletionResult]::new('unarchive_workspace', 'unarchive_workspace', [CompletionResultType]::ParameterValue, 'Return an archived workspace to ordinary listings; its history and records were kept.')
+            [CompletionResult]::new('purge_workspace', 'purge_workspace', [CompletionResultType]::ParameterValue, 'Permanently remove a workspace''s originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.')
+            [CompletionResult]::new('get_purge', 'get_purge', [CompletionResultType]::ParameterValue, 'Read a purge''s progress and counts; available after the workspace is gone.')
+            [CompletionResult]::new('export_workspace', 'export_workspace', [CompletionResultType]::ParameterValue, 'Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.')
+            [CompletionResult]::new('backup_workspace', 'backup_workspace', [CompletionResultType]::ParameterValue, 'Back up the workspace''s history, retained objects and application records, drafts included, into one self-contained archive. Human administrator session only.')
+            [CompletionResult]::new('restore_workspace', 'restore_workspace', [CompletionResultType]::ParameterValue, 'Fill a blank workspace from an uploaded workspace archive, keeping item identities; drafts of editors unknown here stay in the archive and are counted. Human administrator session only.')
+            [CompletionResult]::new('backup_installation', 'backup_installation', [CompletionResultType]::ParameterValue, 'Back up the installation''s identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only.')
+            [CompletionResult]::new('list_items', 'list_items', [CompletionResultType]::ParameterValue, 'List a folder with one-line descriptions at one resolved revision. With extraction = "unprocessed", list only the source files whose conversion is partial, failed or unsupported.')
             [CompletionResult]::new('get_item', 'get_item', [CompletionResultType]::ParameterValue, 'Read the editable Markdown and preserved properties of an item.')
             [CompletionResult]::new('create_item', 'create_item', [CompletionResultType]::ParameterValue, 'Create authored content without modifying source bytes.')
             [CompletionResult]::new('save_draft', 'save_draft', [CompletionResultType]::ParameterValue, 'Autosave the caller''s own draft against its base revision; never creates a revision, and only a Snapshot commits it.')
@@ -792,6 +860,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('move_item', 'move_item', [CompletionResultType]::ParameterValue, 'Move an item and rewrite references in one committed change.')
             [CompletionResult]::new('set_lifecycle', 'set_lifecycle', [CompletionResultType]::ParameterValue, 'Change lifecycle without approving any claim in the document.')
             [CompletionResult]::new('delete_item', 'delete_item', [CompletionResultType]::ParameterValue, 'Remove the current reference while retaining historical source objects.')
+            [CompletionResult]::new('purge_item', 'purge_item', [CompletionResultType]::ParameterValue, 'Permanently remove one item''s bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.')
             [CompletionResult]::new('create_folder', 'create_folder', [CompletionResultType]::ParameterValue, 'Create a user-selected folder with a maintained index.')
             [CompletionResult]::new('list_types', 'list_types', [CompletionResultType]::ParameterValue, 'List built-in and user-defined OKF property schemas.')
             [CompletionResult]::new('set_type', 'set_type', [CompletionResultType]::ParameterValue, 'Persist a user-defined type without dropping extension properties.')
@@ -799,7 +868,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('get_sources', 'get_sources', [CompletionResultType]::ParameterValue, 'Show supporting sources and occurrence-specific provenance.')
             [CompletionResult]::new('get_object', 'get_object', [CompletionResultType]::ParameterValue, 'Return a bounded binary block authorized through its source; knowing a hash never grants access.')
             [CompletionResult]::new('create_sandbox_capability', 'create_sandbox_capability', [CompletionResultType]::ParameterValue, 'Mint a short-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.')
-            [CompletionResult]::new('search_items', 'search_items', [CompletionResultType]::ParameterValue, 'Search authorized content and return cited snippets, not whole-document dumps.')
+            [CompletionResult]::new('search_items', 'search_items', [CompletionResultType]::ParameterValue, 'Search authorized content and return cited snippets, not whole-document dumps. The query may be empty only with a filter; extraction = "unprocessed" lists every source file whose text the converter could not fully extract.')
             [CompletionResult]::new('get_links', 'get_links', [CompletionResultType]::ParameterValue, 'Read incoming or outgoing references at the selected revision.')
             [CompletionResult]::new('get_graph', 'get_graph', [CompletionResultType]::ParameterValue, 'Read a bounded graph projection using the same authorized source identities.')
             [CompletionResult]::new('log_items', 'log_items', [CompletionResultType]::ParameterValue, 'Read content snapshots; Git history is not the complete application event log.')
@@ -807,7 +876,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('commit_items', 'commit_items', [CompletionResultType]::ParameterValue, 'Name a snapshot from the caller''s saved drafts; blocked only when a selected item was changed or deleted since its draft''s base.')
             [CompletionResult]::new('restore_items', 'restore_items', [CompletionResultType]::ParameterValue, 'Restore selected historical content as a new commit without rewriting history.')
             [CompletionResult]::new('blame_item', 'blame_item', [CompletionResultType]::ParameterValue, 'Show which commit last changed each selected line, not the origin of each fact.')
-            [CompletionResult]::new('open_proposal', 'open_proposal', [CompletionResultType]::ParameterValue, 'Create a suggested change set without merging or marking anything reviewed.')
+            [CompletionResult]::new('open_proposal', 'open_proposal', [CompletionResultType]::ParameterValue, 'Create a suggested change set without merging or marking anything reviewed. A `supply_extraction` change proposes the complete text of an unprocessed source file; it is applied only when a person accepts it and is labelled as supplied by an agent.')
             [CompletionResult]::new('list_proposals', 'list_proposals', [CompletionResultType]::ParameterValue, 'List visible suggested changes.')
             [CompletionResult]::new('get_proposal', 'get_proposal', [CompletionResultType]::ParameterValue, 'Read the exact proposed content and base revision.')
             [CompletionResult]::new('accept_proposal', 'accept_proposal', [CompletionResultType]::ParameterValue, 'Accept exactly the confirmed proposal against the displayed head; never an agent tool.')
@@ -821,6 +890,8 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('start_import', 'start_import', [CompletionResultType]::ParameterValue, 'Durably register conversion and source creation, preserving originals.')
             [CompletionResult]::new('get_job', 'get_job', [CompletionResultType]::ParameterValue, 'Read durable job progress; a receipt does not imply completion.')
             [CompletionResult]::new('list_jobs', 'list_jobs', [CompletionResultType]::ParameterValue, 'List conversion, export, and maintenance work.')
+            [CompletionResult]::new('get_tenant_job', 'get_tenant_job', [CompletionResultType]::ParameterValue, 'Read an installation-level job: an installation backup or a purge.')
+            [CompletionResult]::new('list_tenant_jobs', 'list_tenant_jobs', [CompletionResultType]::ParameterValue, 'List installation-level jobs, newest first, with their artifacts.')
             [CompletionResult]::new('retry_job', 'retry_job', [CompletionResultType]::ParameterValue, 'Retry the same durable work identity without duplicating completed effects.')
             [CompletionResult]::new('cancel_job', 'cancel_job', [CompletionResultType]::ParameterValue, 'Cancel work while retaining completed uploads and recorded state.')
             [CompletionResult]::new('redigest_item', 'redigest_item', [CompletionResultType]::ParameterValue, 'Re-run extraction with declared settings; preserve prior digests and separate corrections.')
@@ -838,6 +909,7 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             [CompletionResult]::new('get_catalog', 'get_catalog', [CompletionResultType]::ParameterValue, 'Describe the allowed visual components; the catalog never grants capabilities.')
             [CompletionResult]::new('get_receipt', 'get_receipt', [CompletionResultType]::ParameterValue, 'Inspect the exact sources returned through this server, not an external model internal state.')
             [CompletionResult]::new('list_events', 'list_events', [CompletionResultType]::ParameterValue, 'Read resumable notifications without treating them as authoritative document content.')
+            [CompletionResult]::new('list_tenant_events', 'list_tenant_events', [CompletionResultType]::ParameterValue, 'Read installation-level notifications: sign-ins, connector issue and revocation, and refusals outside a workspace.')
             [CompletionResult]::new('get_session', 'get_session', [CompletionResultType]::ParameterValue, 'Read the current authenticated principal without exposing credentials.')
             [CompletionResult]::new('create_connector', 'create_connector', [CompletionResultType]::ParameterValue, 'Issue a local MCP connector credential scoped to read, or read and propose; never review or approve. Local owner only; hosted agents use WorkOS Connect.')
             [CompletionResult]::new('list_connectors', 'list_connectors', [CompletionResultType]::ParameterValue, 'List local connector credentials and their scopes without secrets. Local owner only.')
@@ -862,6 +934,15 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
         'okf-jawn;help;archive_workspace' {
             break
         }
+        'okf-jawn;help;unarchive_workspace' {
+            break
+        }
+        'okf-jawn;help;purge_workspace' {
+            break
+        }
+        'okf-jawn;help;get_purge' {
+            break
+        }
         'okf-jawn;help;export_workspace' {
             break
         }
@@ -869,6 +950,9 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;help;restore_workspace' {
+            break
+        }
+        'okf-jawn;help;backup_installation' {
             break
         }
         'okf-jawn;help;list_items' {
@@ -896,6 +980,9 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;help;delete_item' {
+            break
+        }
+        'okf-jawn;help;purge_item' {
             break
         }
         'okf-jawn;help;create_folder' {
@@ -985,6 +1072,12 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
         'okf-jawn;help;list_jobs' {
             break
         }
+        'okf-jawn;help;get_tenant_job' {
+            break
+        }
+        'okf-jawn;help;list_tenant_jobs' {
+            break
+        }
         'okf-jawn;help;retry_job' {
             break
         }
@@ -1034,6 +1127,9 @@ Register-ArgumentCompleter -Native -CommandName 'okf-jawn' -ScriptBlock {
             break
         }
         'okf-jawn;help;list_events' {
+            break
+        }
+        'okf-jawn;help;list_tenant_events' {
             break
         }
         'okf-jawn;help;get_session' {

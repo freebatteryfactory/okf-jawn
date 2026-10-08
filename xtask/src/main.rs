@@ -48,6 +48,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Task::Generate { out } => {
             std::fs::create_dir_all(&out)?;
             api::generate(&out.join("api"))?;
+            converter::generate(&out.join("converter"))?;
             let path = out.join("cli");
             std::fs::create_dir_all(&path)?;
             for shell in [
@@ -66,6 +67,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 mod api;
+mod converter;
 mod fixtures;
 mod output;
 mod source_policy;

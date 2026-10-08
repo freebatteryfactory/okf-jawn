@@ -54,7 +54,7 @@
   {
     "alias": "",
     "description": "Archive without deleting historical content.",
-    "destructive": true,
+    "destructive": false,
     "id": "archive_workspace",
     "label": "Archive",
     "operator_alias": "",
@@ -66,7 +66,46 @@
   },
   {
     "alias": "",
-    "description": "Build a portable export with resolvable referenced assets.",
+    "description": "Return an archived workspace to ordinary listings; its history and records were kept.",
+    "destructive": false,
+    "id": "unarchive_workspace",
+    "label": "Unarchive",
+    "operator_alias": "",
+    "path": "/api/workspaces/unarchive-workspace",
+    "permission": "admin",
+    "success_status": 200,
+    "ui": "",
+    "visibility": ""
+  },
+  {
+    "alias": "",
+    "description": "Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.",
+    "destructive": true,
+    "id": "purge_workspace",
+    "label": "Purge",
+    "operator_alias": "",
+    "path": "/api/workspaces/purge-workspace",
+    "permission": "admin",
+    "success_status": 202,
+    "ui": "",
+    "visibility": ""
+  },
+  {
+    "alias": "",
+    "description": "Read a purge's progress and counts; available after the workspace is gone.",
+    "destructive": false,
+    "id": "get_purge",
+    "label": "Purge status",
+    "operator_alias": "",
+    "path": "/api/workspaces/get-purge",
+    "permission": "admin",
+    "success_status": 200,
+    "ui": "",
+    "visibility": ""
+  },
+  {
+    "alias": "",
+    "description": "Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.",
     "destructive": false,
     "id": "export_workspace",
     "label": "Export",
@@ -79,7 +118,7 @@
   },
   {
     "alias": "",
-    "description": "Back up content and durable application records.",
+    "description": "Back up the workspace's history, retained objects and application records, drafts included, into one self-contained archive. Human administrator session only.",
     "destructive": false,
     "id": "backup_workspace",
     "label": "Backup",
@@ -92,7 +131,7 @@
   },
   {
     "alias": "",
-    "description": "Restore content and durable application records from a retained backup artifact.",
+    "description": "Fill a blank workspace from an uploaded workspace archive, keeping item identities; drafts of editors unknown here stay in the archive and are counted. Human administrator session only.",
     "destructive": true,
     "id": "restore_workspace",
     "label": "Restore",
@@ -104,8 +143,21 @@
     "visibility": ""
   },
   {
+    "alias": "",
+    "description": "Back up the installation's identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only.",
+    "destructive": false,
+    "id": "backup_installation",
+    "label": "Back up installation",
+    "operator_alias": "",
+    "path": "/api/workspaces/backup-installation",
+    "permission": "admin",
+    "success_status": 202,
+    "ui": "",
+    "visibility": ""
+  },
+  {
     "alias": "ls",
-    "description": "List a folder with one-line descriptions at one resolved revision.",
+    "description": "List a folder with one-line descriptions at one resolved revision. With extraction = \"unprocessed\", list only the source files whose conversion is partial, failed or unsupported.",
     "destructive": false,
     "id": "list_items",
     "label": "Browse",
@@ -222,6 +274,19 @@
   },
   {
     "alias": "",
+    "description": "Permanently remove one item's bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.",
+    "destructive": true,
+    "id": "purge_item",
+    "label": "Purge",
+    "operator_alias": "",
+    "path": "/api/items/purge-item",
+    "permission": "admin",
+    "success_status": 202,
+    "ui": "",
+    "visibility": ""
+  },
+  {
+    "alias": "",
     "description": "Create a user-selected folder with a maintained index.",
     "destructive": false,
     "id": "create_folder",
@@ -313,7 +378,7 @@
   },
   {
     "alias": "grep",
-    "description": "Search authorized content and return cited snippets, not whole-document dumps.",
+    "description": "Search authorized content and return cited snippets, not whole-document dumps. The query may be empty only with a filter; extraction = \"unprocessed\" lists every source file whose text the converter could not fully extract.",
     "destructive": false,
     "id": "search_items",
     "label": "Search",
@@ -417,7 +482,7 @@
   },
   {
     "alias": "propose",
-    "description": "Create a suggested change set without merging or marking anything reviewed.",
+    "description": "Create a suggested change set without merging or marking anything reviewed. A `supply_extraction` change proposes the complete text of an unprocessed source file; it is applied only when a person accepts it and is labelled as supplied by an agent.",
     "destructive": false,
     "id": "open_proposal",
     "label": "Propose",
@@ -593,6 +658,32 @@
     "operator_alias": "",
     "path": "/api/imports/list-jobs",
     "permission": "read",
+    "success_status": 200,
+    "ui": "",
+    "visibility": ""
+  },
+  {
+    "alias": "",
+    "description": "Read an installation-level job: an installation backup or a purge.",
+    "destructive": false,
+    "id": "get_tenant_job",
+    "label": "Progress",
+    "operator_alias": "",
+    "path": "/api/imports/get-tenant-job",
+    "permission": "admin",
+    "success_status": 200,
+    "ui": "",
+    "visibility": ""
+  },
+  {
+    "alias": "",
+    "description": "List installation-level jobs, newest first, with their artifacts.",
+    "destructive": false,
+    "id": "list_tenant_jobs",
+    "label": "Installation jobs",
+    "operator_alias": "",
+    "path": "/api/imports/list-tenant-jobs",
+    "permission": "admin",
     "success_status": 200,
     "ui": "",
     "visibility": ""
@@ -814,6 +905,19 @@
     "operator_alias": "",
     "path": "/api/events/list-events",
     "permission": "read",
+    "success_status": 200,
+    "ui": "",
+    "visibility": ""
+  },
+  {
+    "alias": "",
+    "description": "Read installation-level notifications: sign-ins, connector issue and revocation, and refusals outside a workspace.",
+    "destructive": false,
+    "id": "list_tenant_events",
+    "label": "Security activity",
+    "operator_alias": "",
+    "path": "/api/events/list-tenant-events",
+    "permission": "admin",
     "success_status": 200,
     "ui": "",
     "visibility": ""

@@ -5,6 +5,9 @@
 //! read is a result whose status is `Unsupported` or `Failure`, never an error: the caller
 //! records that state on the source card and keeps the bytes. An error means the worker itself
 //! is at fault.
+//!
+//! `ConversionSettings` and `OcrPolicy` are the contract's (Stage 1b design section 3), so the
+//! wire request and the job carry one definition; they are re-exported here.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,36 +16,10 @@ use okf_jawn_contract::{
     identity::Digest,
     read::{OutlineEntry, Selection},
 };
-use serde::{Deserialize, Serialize};
 
 use crate::{ports::PortFuture, storage::LocalSource};
 
-/// When optical character recognition runs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OcrPolicy {
-    /// Recognize only regions that have no embedded text layer.
-    #[default]
-    Auto,
-    /// Never run recognition; layout and table structure are still detected.
-    Skip,
-    /// Recognize every page from its rendered image, ignoring an embedded text layer.
-    ForceFullPage,
-}
-
-/// Explicit converter settings; they are part of the identity of the digest they produce.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ConversionSettings {
-    /// When recognition runs.
-    pub ocr: OcrPolicy,
-    /// Recognition language, such as `en`; `None` uses the converter's default.
-    pub ocr_language: Option<String>,
-    /// Reconstruct table structure.
-    pub table_structure: bool,
-    /// Retain a rendered image of every page.
-    pub page_images: bool,
-}
+pub use okf_jawn_contract::extraction::{ConversionSettings, OcrPolicy};
 
 /// One document to convert inside a bounded worker.
 #[derive(Debug, Clone)]
@@ -71,8 +48,8 @@ pub struct ConvertedAsset {
     pub selection: Selection,
     /// Pixel dimensions; present exactly when the asset is a raster image.
     pub pixel_size: Option<PixelSize>,
-    /// Caption and where its text came from; `None` when the source gives the asset none.
-    pub caption: Option<AssetCaption>,
+    /// The document's own caption or alternative text; `None` when it gives the asset none.
+    pub caption: Option<String>,
 }
 
 /// Pixel dimensions of a raster image asset.
@@ -82,24 +59,6 @@ pub struct PixelSize {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
-}
-
-/// A caption with its origin, so generated text is never shown as the document's own.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssetCaption {
-    /// Caption text.
-    pub text: String,
-    /// Where the text came from.
-    pub origin: CaptionOrigin,
-}
-
-/// Where a caption's text came from, as far as a converter can know.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptionOrigin {
-    /// The document's own caption or alternative text.
-    Source,
-    /// Text the conversion process generated.
-    Process,
 }
 
 /// How a conversion ended.
@@ -172,26 +131,4 @@ pub trait Converter: Send + Sync {
     /// Dropping the returned future abandons the result; the worker supervisor owns
     /// cancellation and the memory bound.
     fn convert(&self, input: ConversionInput) -> PortFuture<'_, Conversion>;
-}
-
-impl Default for ConversionSettings {
-    fn default() -> Self {
-        Self {
-            ocr: OcrPolicy::Auto,
-            ocr_language: None,
-            table_structure: true,
-            page_images: false,
-        }
-    }
-}
-
-impl CaptionOrigin {
-    /// The word a read response uses for this origin.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Source => "source",
-            Self::Process => "process",
-        }
-    }
 }

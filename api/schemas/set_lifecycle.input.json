@@ -10,22 +10,27 @@
       "format": "uuid",
       "type": "string"
     },
-    "Lifecycle": {
-      "description": "Application lifecycle distinct from business approval.",
+    "ItemStatus": {
+      "description": "OKF's `status` word of an item, distinct from business approval and from archiving.\n\nAn absent OKF `status` reads `stable`. `other` is a producer's value outside the three,\nkept exactly as written in the file's `status` property; it cannot be set through\n`set_lifecycle`.",
       "oneOf": [
         {
-          "const": "active",
+          "const": "draft",
+          "description": "Work in progress.",
+          "type": "string"
+        },
+        {
+          "const": "stable",
           "description": "Current and usable content.",
           "type": "string"
         },
         {
           "const": "deprecated",
-          "description": "Retained historical content.",
+          "description": "Retained, superseded content; still searchable.",
           "type": "string"
         },
         {
-          "const": "archived",
-          "description": "Hidden from ordinary current listings; still retrievable.",
+          "const": "other",
+          "description": "A status word outside the three, preserved in the file.",
           "type": "string"
         }
       ]
@@ -42,8 +47,15 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Retire or reactivate an item without claiming a business decision.",
+  "description": "Change an item's status word or archive flag without claiming a business decision.\n\nAt least one of `status` and `archived` is present, and `status` is never `other`\n(`check_rules`).",
   "properties": {
+    "archived": {
+      "description": "Archive (`true`) or unarchive (`false`); absent leaves it unchanged.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "base_revision": {
       "$ref": "#/$defs/Revision",
       "description": "Exact revision on which this change is based; stale writes conflict."
@@ -56,9 +68,16 @@
       "$ref": "#/$defs/ItemId",
       "description": "Stable application item identity; paths remain the portable OKF identity."
     },
-    "lifecycle": {
-      "$ref": "#/$defs/Lifecycle",
-      "description": "Requested lifecycle."
+    "status": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ItemStatus"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "New OKF status word; absent leaves it unchanged."
     },
     "workspace_id": {
       "$ref": "#/$defs/WorkspaceId",
@@ -69,7 +88,6 @@
     "workspace_id",
     "item_id",
     "base_revision",
-    "lifecycle",
     "idempotency_key"
   ],
   "title": "SetLifecycleRequest",

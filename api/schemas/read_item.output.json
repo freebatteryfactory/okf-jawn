@@ -1,31 +1,84 @@
 {
   "$defs": {
+    "AssetRole": {
+      "description": "What a retained image is.",
+      "oneOf": [
+        {
+          "const": "page_image",
+          "description": "A render of one whole page (docling page image).",
+          "type": "string"
+        },
+        {
+          "const": "picture",
+          "description": "A picture item's own image (docling `PictureItem` image).",
+          "type": "string"
+        }
+      ]
+    },
+    "BoundingBox": {
+      "additionalProperties": false,
+      "description": "Docling's bounding box, copied as the converter gave it (rounded to two decimals).",
+      "properties": {
+        "b": {
+          "description": "Bottom edge.",
+          "format": "double",
+          "type": "number"
+        },
+        "coord_origin": {
+          "$ref": "#/$defs/CoordOrigin",
+          "description": "Corner `t` and `b` are measured from."
+        },
+        "l": {
+          "description": "Left edge.",
+          "format": "double",
+          "type": "number"
+        },
+        "r": {
+          "description": "Right edge.",
+          "format": "double",
+          "type": "number"
+        },
+        "t": {
+          "description": "Top edge.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "l",
+        "t",
+        "r",
+        "b",
+        "coord_origin"
+      ],
+      "type": "object"
+    },
     "CellRange": {
       "additionalProperties": false,
-      "description": "A one-based rectangular spreadsheet selection.",
+      "description": "A one-based inclusive rectangular spreadsheet selection; the XLSX source locator.",
       "properties": {
         "column_end": {
           "description": "Last column, inclusive.",
           "format": "uint32",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         },
         "column_start": {
-          "description": "First column, inclusive.",
+          "description": "First column, inclusive, starting at one.",
           "format": "uint32",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         },
         "row_end": {
           "description": "Last row, inclusive.",
           "format": "uint32",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         },
         "row_start": {
-          "description": "First row, inclusive.",
+          "description": "First row, inclusive, starting at one.",
           "format": "uint32",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         },
         "sheet": {
@@ -42,9 +95,78 @@
       ],
       "type": "object"
     },
+    "CoordOrigin": {
+      "description": "Docling's `coord_origin`: which corner `t` and `b` are measured from.",
+      "oneOf": [
+        {
+          "const": "top_left",
+          "description": "Docling `TOPLEFT`.",
+          "type": "string"
+        },
+        {
+          "const": "bottom_left",
+          "description": "Docling `BOTTOMLEFT`.",
+          "type": "string"
+        }
+      ]
+    },
     "Digest": {
       "pattern": "^[0-9a-f]{64}$",
       "type": "string"
+    },
+    "ExtractionStatus": {
+      "description": "The converter's verdict on one source, as a listing and a filter use it.",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Accepted; no conversion has finished.",
+          "type": "string"
+        },
+        {
+          "const": "completed",
+          "description": "Every page, or the whole non-paginated document, was converted.",
+          "type": "string"
+        },
+        {
+          "const": "partial",
+          "description": "A document was produced but part of the source is missing from it.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The converter produced no document; the bytes are retained.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported",
+          "description": "No converter exists for this format; the bytes are retained.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExtractionSummary": {
+      "additionalProperties": false,
+      "description": "What a listing shows about one source.",
+      "properties": {
+        "corrected": {
+          "description": "A human correction is shown over that text.",
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/ExtractionStatus",
+          "description": "The converter's verdict."
+        },
+        "text_origin": {
+          "$ref": "#/$defs/TextOrigin",
+          "description": "Whose text is shown."
+        }
+      },
+      "required": [
+        "status",
+        "text_origin",
+        "corrected"
+      ],
+      "type": "object"
     },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",
@@ -56,12 +178,11 @@
       "description": "An authorized image or artifact associated with a source range.",
       "properties": {
         "caption": {
-          "description": "Caption text; caption origin is separate.",
-          "type": "string"
-        },
-        "caption_origin": {
-          "description": "source, process, human, or agent.",
-          "type": "string"
+          "description": "The document's own caption or alternative text; absent when the document gives none.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "height": {
           "description": "Pixel height.",
@@ -77,9 +198,13 @@
           "$ref": "#/$defs/Digest",
           "description": "Retained image bytes."
         },
+        "role": {
+          "$ref": "#/$defs/AssetRole",
+          "description": "What the image is."
+        },
         "source": {
           "$ref": "#/$defs/SourceReference",
-          "description": "Original source location."
+          "description": "Original source location: a page image's location is `direct` `page`; a picture's is\nits region."
         },
         "width": {
           "description": "Pixel width.",
@@ -91,9 +216,8 @@
       "required": [
         "object",
         "media_type",
+        "role",
         "source",
-        "caption",
-        "caption_origin",
         "width",
         "height"
       ],
@@ -184,6 +308,53 @@
       ],
       "type": "object"
     },
+    "PageRegion": {
+      "additionalProperties": false,
+      "description": "A box on one page, slide or image of the original.",
+      "properties": {
+        "bbox": {
+          "$ref": "#/$defs/BoundingBox",
+          "description": "The box."
+        },
+        "page_no": {
+          "description": "One-based page or slide number.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "page_size": {
+          "$ref": "#/$defs/PageSize",
+          "description": "The page's extent, so the box can be drawn over a page image on its own."
+        }
+      },
+      "required": [
+        "page_no",
+        "bbox",
+        "page_size"
+      ],
+      "type": "object"
+    },
+    "PageSize": {
+      "additionalProperties": false,
+      "description": "Extent of the page the box lies on, in the box's own unit (PDF points, image pixels, PPTX\nEMU). A reader draws the box over a page image by the ratio of the two, so it needs no unit.",
+      "properties": {
+        "height": {
+          "description": "Page height.",
+          "format": "double",
+          "type": "number"
+        },
+        "width": {
+          "description": "Page width.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
     "ReadView": {
       "description": "Select a representation rather than silently truncating a source.",
       "oneOf": [
@@ -224,7 +395,7 @@
       "type": "string"
     },
     "Selection": {
-      "description": "Explicit bounded source selection.",
+      "description": "Explicit bounded source selection.\n\n`PartialEq` only: a `region` holds coordinates as `f64`.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -315,6 +486,151 @@
             "heading"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A box on one page: the extracted items whose location lies inside it; the `pages` view\nreturns that page's image.",
+          "properties": {
+            "kind": {
+              "const": "region",
+              "type": "string"
+            },
+            "region": {
+              "$ref": "#/$defs/PageRegion",
+              "description": "Region."
+            }
+          },
+          "required": [
+            "kind",
+            "region"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SourceLocation": {
+      "description": "A location and how it was obtained; an inferred location is a different variant from a\ndirect one, so no consumer can show it as direct by accident.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "From the converter's own provenance.",
+          "properties": {
+            "locator": {
+              "$ref": "#/$defs/SourceLocator",
+              "description": "Where."
+            },
+            "provenance": {
+              "const": "direct",
+              "type": "string"
+            }
+          },
+          "required": [
+            "provenance",
+            "locator"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Found by matching text against the page text layer (ingest-locates-unlocated-items).",
+          "properties": {
+            "locator": {
+              "$ref": "#/$defs/SourceLocator",
+              "description": "Where."
+            },
+            "provenance": {
+              "const": "inferred",
+              "type": "string"
+            }
+          },
+          "required": [
+            "provenance",
+            "locator"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Not known; never given a guessed box.",
+          "properties": {
+            "provenance": {
+              "const": "unresolved",
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/$defs/UnresolvedReason",
+              "description": "Why."
+            }
+          },
+          "required": [
+            "provenance",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SourceLocator": {
+      "description": "Where in the original bytes something is.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A whole page or slide.",
+          "properties": {
+            "kind": {
+              "const": "page",
+              "type": "string"
+            },
+            "page_no": {
+              "description": "One-based page or slide number.",
+              "format": "uint32",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "page_no"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A box on a page, slide or image.",
+          "properties": {
+            "kind": {
+              "const": "region",
+              "type": "string"
+            },
+            "region": {
+              "$ref": "#/$defs/PageRegion",
+              "description": "The box."
+            }
+          },
+          "required": [
+            "kind",
+            "region"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Spreadsheet cells.",
+          "properties": {
+            "kind": {
+              "const": "cells",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/CellRange",
+              "description": "Sheet and one-based inclusive cell range."
+            }
+          },
+          "required": [
+            "kind",
+            "range"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -337,6 +653,13 @@
           "$ref": "#/$defs/ItemId",
           "description": "Stable application item identity; paths remain the portable OKF identity."
         },
+        "locations": {
+          "description": "Where the cited selection of the digest lies in the original, one entry per located\nitem it covers, in reading order.\n\nThe server computes it from (item, revision, digest, selection). A response always\nfills it. In a request an omitted list means \"fill it\"; a present list must equal what\nthe server computes, or the request is `invalid_input` on `.../locations`, so a caller\nnever supplies a location. A saved View file does not keep locations: they are derived,\nand the server fills them when it returns the View.",
+          "items": {
+            "$ref": "#/$defs/SourceLocation"
+          },
+          "type": "array"
+        },
         "path": {
           "$ref": "#/$defs/WorkspacePath",
           "description": "Relative path at the resolved source revision."
@@ -347,7 +670,7 @@
         },
         "selection": {
           "$ref": "#/$defs/Selection",
-          "description": "Resolved page, lines, cells, section, or entire source."
+          "description": "Resolved page, lines, cells, region, section, or entire source."
         },
         "workspace_id": {
           "$ref": "#/$defs/WorkspaceId",
@@ -362,6 +685,26 @@
         "selection"
       ],
       "type": "object"
+    },
+    "TextOrigin": {
+      "description": "Whose text a source card shows and search indexes.",
+      "oneOf": [
+        {
+          "const": "converter",
+          "description": "The converter's extraction.",
+          "type": "string"
+        },
+        {
+          "const": "supplied_by_agent",
+          "description": "Text an agent proposed and a person accepted.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No text: pending, failed or unsupported, with nothing supplied.",
+          "type": "string"
+        }
+      ]
     },
     "TextRange": {
       "additionalProperties": false,
@@ -385,6 +728,158 @@
         "end"
       ],
       "type": "object"
+    },
+    "UnresolvedReason": {
+      "description": "Why a location is not known; one variant per reason the producing rule states.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The format has no page geometry (DOCX, HTML, Markdown).",
+          "properties": {
+            "kind": {
+              "const": "format_has_no_locator",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The converter gave this item no location and no rule locates it (PPTX, XLSX).",
+          "properties": {
+            "kind": {
+              "const": "not_located_by_converter",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The page text layer could not be read.",
+          "properties": {
+            "kind": {
+              "const": "no_text_layer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A table or picture: there is no text to look up.",
+          "properties": {
+            "kind": {
+              "const": "no_text_to_match",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Neither the parent nor an earlier sibling is located.",
+          "properties": {
+            "kind": {
+              "const": "no_page_to_search",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "No text-layer item on the searched pages has exactly this text.",
+          "properties": {
+            "kind": {
+              "const": "no_match",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Several text-layer items have exactly this text.",
+          "properties": {
+            "kind": {
+              "const": "ambiguous_match",
+              "type": "string"
+            },
+            "occurrences": {
+              "description": "How many.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "occurrences"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The one match has no area or lies outside the page.",
+          "properties": {
+            "kind": {
+              "const": "match_not_a_location",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The cited text is a human correction, which has no place in the original.",
+          "properties": {
+            "kind": {
+              "const": "corrected_text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The cited text was supplied by an agent; its page claims are not locations.",
+          "properties": {
+            "kind": {
+              "const": "supplied_text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "Warning": {
       "additionalProperties": false,
@@ -420,7 +915,7 @@
     "WorkspacePath": {
       "maxLength": 4096,
       "minLength": 1,
-      "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
+      "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
       "type": "string"
     }
   },
@@ -428,6 +923,17 @@
   "additionalProperties": false,
   "description": "What the tool actually returned, not a claim about the host model context.",
   "properties": {
+    "extraction": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExtractionSummary"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "For a source: whether its text is partial, supplied by an agent or corrected."
+    },
     "markdown": {
       "description": "Text within the declared budget.",
       "type": "string"

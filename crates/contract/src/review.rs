@@ -15,6 +15,8 @@ pub enum ReviewCoverage {
     Imported,
     /// No covering review exists.
     Unreviewed,
+    /// The reviewed content was purged; the review covers nothing that still exists.
+    Invalidated,
 }
 
 /// A review action linked to the content that was actually displayed.
@@ -29,8 +31,8 @@ pub struct Review {
     pub content_digest: crate::identity::Digest,
     /// Server-established subject; not supplied in request.
     pub reviewer_subject: String,
-    /// RFC 3339 action time.
-    pub reviewed_at: String,
+    /// Action time.
+    pub reviewed_at: crate::identity::Timestamp,
     /// Coverage relative to current content.
     pub coverage: ReviewCoverage,
 }
@@ -119,8 +121,8 @@ pub struct CreateConfirmationRequest {
 pub struct Confirmation {
     /// Opaque session-bound challenge.
     pub id: crate::identity::ConfirmationId,
-    /// RFC 3339 expiration.
-    pub expires_at: String,
+    /// Expiration.
+    pub expires_at: crate::identity::Timestamp,
     /// Bound revision.
     pub revision: crate::identity::Revision,
 }

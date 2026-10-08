@@ -1,16 +1,16 @@
 {
   "$defs": {
-    "ArtifactId": {
-      "description": "Identity of a retained export or backup artifact.",
-      "format": "uuid",
-      "type": "string"
-    },
     "Digest": {
       "pattern": "^[0-9a-f]{64}$",
       "type": "string"
     },
     "IdempotencyKey": {
       "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "UploadId": {
+      "description": "Identity of one authenticated source upload occurrence.",
       "format": "uuid",
       "type": "string"
     },
@@ -22,35 +22,29 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Restore a workspace from a retained backup artifact (full restore of content and app records).",
+  "description": "Fill a blank workspace of this installation from an uploaded workspace archive.\n\nThe restore keeps item ids, rewrites View bindings to this workspace, gives each draft\nwhose editor is a validated subject with `write` here back to that editor, and keeps the\nothers in the archive, unassigned and counted. An archive of this tenant whose workspace\nstill exists, or has a purge record, is refused: purged content never comes back through\nan import. The upload is consumed when the restore completes.",
   "properties": {
-    "artifact_id": {
-      "$ref": "#/$defs/ArtifactId",
-      "description": "Retained backup artifact to restore from."
-    },
     "idempotency_key": {
       "$ref": "#/$defs/IdempotencyKey",
-      "description": "Retry identity for the restore job."
+      "description": "Retry identity."
     },
     "sha256": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Digest"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Optional integrity check against the artifact digest before restore begins."
+      "$ref": "#/$defs/Digest",
+      "description": "SHA-256 the archive must have; checked before anything is written."
+    },
+    "upload_id": {
+      "$ref": "#/$defs/UploadId",
+      "description": "Completed upload of the archive into this workspace."
     },
     "workspace_id": {
       "$ref": "#/$defs/WorkspaceId",
-      "description": "Workspace whose permissions and storage scope apply."
+      "description": "Blank target workspace."
     }
   },
   "required": [
     "workspace_id",
-    "artifact_id",
+    "upload_id",
+    "sha256",
     "idempotency_key"
   ],
   "title": "RestoreWorkspaceRequest",

@@ -44,19 +44,23 @@ pub struct PageRange {
     pub end: u32,
 }
 
-/// A one-based rectangular spreadsheet selection.
+/// A one-based inclusive rectangular spreadsheet selection; the XLSX source locator.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CellRange {
     /// Exact sheet name.
     pub sheet: String,
-    /// First row, inclusive.
+    /// First row, inclusive, starting at one.
+    #[schemars(range(min = 1))]
     pub row_start: u32,
     /// Last row, inclusive.
+    #[schemars(range(min = 1))]
     pub row_end: u32,
-    /// First column, inclusive.
+    /// First column, inclusive, starting at one.
+    #[schemars(range(min = 1))]
     pub column_start: u32,
     /// Last column, inclusive.
+    #[schemars(range(min = 1))]
     pub column_end: u32,
 }
 

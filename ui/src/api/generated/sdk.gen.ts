@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, ServerSentEventsResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { AcceptProposalData, AcceptProposalErrors, AcceptProposalResponses, AddCommentData, AddCommentErrors, AddCommentResponses, ApplyNamesData, ApplyNamesErrors, ApplyNamesResponses, ArchiveWorkspaceData, ArchiveWorkspaceErrors, ArchiveWorkspaceResponses, BackupWorkspaceData, BackupWorkspaceErrors, BackupWorkspaceResponses, BeginLocalSessionData, BeginLoginData, BlameItemData, BlameItemErrors, BlameItemResponses, CancelJobData, CancelJobErrors, CancelJobResponses, CommitItemsData, CommitItemsErrors, CommitItemsResponses, CompleteLoginData, CompleteUploadData, CompleteUploadErrors, CompleteUploadResponses, CorrectDigestData, CorrectDigestErrors, CorrectDigestResponses, CreateConfirmationData, CreateConfirmationErrors, CreateConfirmationResponses, CreateConnectorData, CreateConnectorErrors, CreateConnectorResponses, CreateFolderData, CreateFolderErrors, CreateFolderResponses, CreateItemData, CreateItemErrors, CreateItemResponses, CreateReviewData, CreateReviewErrors, CreateReviewResponses, CreateSandboxCapabilityData, CreateSandboxCapabilityErrors, CreateSandboxCapabilityResponses, CreateUploadData, CreateUploadErrors, CreateUploadResponses, CreateWorkspaceData, CreateWorkspaceErrors, CreateWorkspaceResponses, DeclineProposalData, DeclineProposalErrors, DeclineProposalResponses, DeleteItemData, DeleteItemErrors, DeleteItemResponses, DiffItemsData, DiffItemsErrors, DiffItemsResponses, DiscardDraftData, DiscardDraftErrors, DiscardDraftResponses, DownloadArtifactData, DownloadArtifactResponses, DownloadObjectData, DownloadObjectResponses, EndSessionData, EndSessionResponses, ExportViewData, ExportViewErrors, ExportViewResponses, ExportWorkspaceData, ExportWorkspaceErrors, ExportWorkspaceResponses, GetAttentionData, GetAttentionErrors, GetAttentionResponses, GetCatalogData, GetCatalogErrors, GetCatalogResponses, GetFormSchemaData, GetFormSchemaResponses, GetGraphData, GetGraphErrors, GetGraphResponses, GetHealthData, GetHealthErrors, GetHealthResponses, GetItemData, GetItemErrors, GetItemResponses, GetJobData, GetJobErrors, GetJobResponses, GetLinksData, GetLinksErrors, GetLinksResponses, GetObjectData, GetObjectErrors, GetObjectResponses, GetProposalData, GetProposalErrors, GetProposalResponses, GetReadinessData, GetReadinessErrors, GetReadinessResponses, GetReceiptData, GetReceiptErrors, GetReceiptResponses, GetResourceMetadataData, GetResourceMetadataResponses, GetRulesData, GetRulesErrors, GetRulesResponses, GetSessionData, GetSessionErrors, GetSessionResponses, GetSourcesData, GetSourcesErrors, GetSourcesResponses, GetViewData, GetViewErrors, GetViewResponses, ListConnectorsData, ListConnectorsErrors, ListConnectorsResponses, ListDraftsData, ListDraftsErrors, ListDraftsResponses, ListEventsData, ListEventsErrors, ListEventsResponses, ListItemsData, ListItemsErrors, ListItemsResponses, ListJobsData, ListJobsErrors, ListJobsResponses, ListProposalsData, ListProposalsErrors, ListProposalsResponses, ListReviewsData, ListReviewsErrors, ListReviewsResponses, ListTypesData, ListTypesErrors, ListTypesResponses, ListWorkspacesData, ListWorkspacesErrors, ListWorkspacesResponses, LivenessData, LivenessResponses, LogItemsData, LogItemsErrors, LogItemsResponses, McpCloseData, McpCloseResponses, McpEventsData, McpEventsResponse, McpEventsResponses, McpRequestData, McpRequestResponses, MoveItemData, MoveItemErrors, MoveItemResponses, OpenProposalData, OpenProposalErrors, OpenProposalResponses, OpenWorkspaceData, OpenWorkspaceErrors, OpenWorkspaceResponses, PresentViewData, PresentViewErrors, PresentViewResponses, PreviewNamesData, PreviewNamesErrors, PreviewNamesResponses, ReadItemData, ReadItemErrors, ReadItemResponses, RebuildIndexData, RebuildIndexErrors, RebuildIndexResponses, RedigestItemData, RedigestItemErrors, RedigestItemResponses, ResolveViewData, ResolveViewErrors, ResolveViewResponses, RestoreItemsData, RestoreItemsErrors, RestoreItemsResponses, RestoreWorkspaceData, RestoreWorkspaceErrors, RestoreWorkspaceResponses, RetryJobData, RetryJobErrors, RetryJobResponses, RevokeConnectorData, RevokeConnectorErrors, RevokeConnectorResponses, SaveDraftData, SaveDraftErrors, SaveDraftResponses, SearchItemsData, SearchItemsErrors, SearchItemsResponses, ServeSandboxRepresentationData, ServeSandboxRepresentationResponses, SetLifecycleData, SetLifecycleErrors, SetLifecycleResponses, SetRulesData, SetRulesErrors, SetRulesResponses, SetTypeData, SetTypeErrors, SetTypeResponses, StartImportData, StartImportErrors, StartImportResponses, StreamEventsData, StreamEventsResponse, StreamEventsResponses, UpdateWorkspaceData, UpdateWorkspaceErrors, UpdateWorkspaceResponses, UploadContentData, UploadContentResponses } from './types.gen';
+import type { AcceptProposalData, AcceptProposalErrors, AcceptProposalResponses, AddCommentData, AddCommentErrors, AddCommentResponses, ApplyNamesData, ApplyNamesErrors, ApplyNamesResponses, ArchiveWorkspaceData, ArchiveWorkspaceErrors, ArchiveWorkspaceResponses, BackupInstallationData, BackupInstallationErrors, BackupInstallationResponses, BackupWorkspaceData, BackupWorkspaceErrors, BackupWorkspaceResponses, BeginLocalSessionData, BeginLoginData, BlameItemData, BlameItemErrors, BlameItemResponses, CancelJobData, CancelJobErrors, CancelJobResponses, CommitItemsData, CommitItemsErrors, CommitItemsResponses, CompleteLoginData, CompleteUploadData, CompleteUploadErrors, CompleteUploadResponses, CorrectDigestData, CorrectDigestErrors, CorrectDigestResponses, CreateConfirmationData, CreateConfirmationErrors, CreateConfirmationResponses, CreateConnectorData, CreateConnectorErrors, CreateConnectorResponses, CreateFolderData, CreateFolderErrors, CreateFolderResponses, CreateItemData, CreateItemErrors, CreateItemResponses, CreateReviewData, CreateReviewErrors, CreateReviewResponses, CreateSandboxCapabilityData, CreateSandboxCapabilityErrors, CreateSandboxCapabilityResponses, CreateUploadData, CreateUploadErrors, CreateUploadResponses, CreateWorkspaceData, CreateWorkspaceErrors, CreateWorkspaceResponses, DeclineProposalData, DeclineProposalErrors, DeclineProposalResponses, DeleteItemData, DeleteItemErrors, DeleteItemResponses, DiffItemsData, DiffItemsErrors, DiffItemsResponses, DiscardDraftData, DiscardDraftErrors, DiscardDraftResponses, DownloadArtifactData, DownloadArtifactResponses, DownloadObjectData, DownloadObjectResponses, DownloadTenantArtifactData, DownloadTenantArtifactResponses, EndSessionData, EndSessionResponses, ExportViewData, ExportViewErrors, ExportViewResponses, ExportWorkspaceData, ExportWorkspaceErrors, ExportWorkspaceResponses, GetAttentionData, GetAttentionErrors, GetAttentionResponses, GetCatalogData, GetCatalogErrors, GetCatalogResponses, GetFormSchemaData, GetFormSchemaResponses, GetGraphData, GetGraphErrors, GetGraphResponses, GetHealthData, GetHealthErrors, GetHealthResponses, GetItemData, GetItemErrors, GetItemResponses, GetJobData, GetJobErrors, GetJobResponses, GetLinksData, GetLinksErrors, GetLinksResponses, GetObjectData, GetObjectErrors, GetObjectResponses, GetProposalData, GetProposalErrors, GetProposalResponses, GetPurgeData, GetPurgeErrors, GetPurgeResponses, GetReadinessData, GetReadinessErrors, GetReadinessResponses, GetReceiptData, GetReceiptErrors, GetReceiptResponses, GetResourceMetadataData, GetResourceMetadataResponses, GetRulesData, GetRulesErrors, GetRulesResponses, GetSessionData, GetSessionErrors, GetSessionResponses, GetSourcesData, GetSourcesErrors, GetSourcesResponses, GetTenantJobData, GetTenantJobErrors, GetTenantJobResponses, GetViewData, GetViewErrors, GetViewResponses, ListConnectorsData, ListConnectorsErrors, ListConnectorsResponses, ListDraftsData, ListDraftsErrors, ListDraftsResponses, ListEventsData, ListEventsErrors, ListEventsResponses, ListItemsData, ListItemsErrors, ListItemsResponses, ListJobsData, ListJobsErrors, ListJobsResponses, ListProposalsData, ListProposalsErrors, ListProposalsResponses, ListReviewsData, ListReviewsErrors, ListReviewsResponses, ListTenantEventsData, ListTenantEventsErrors, ListTenantEventsResponses, ListTenantJobsData, ListTenantJobsErrors, ListTenantJobsResponses, ListTypesData, ListTypesErrors, ListTypesResponses, ListWorkspacesData, ListWorkspacesErrors, ListWorkspacesResponses, LivenessData, LivenessResponses, LogItemsData, LogItemsErrors, LogItemsResponses, McpCloseData, McpCloseResponses, McpEventsData, McpEventsResponse, McpEventsResponses, McpRequestData, McpRequestResponses, MoveItemData, MoveItemErrors, MoveItemResponses, OpenProposalData, OpenProposalErrors, OpenProposalResponses, OpenWorkspaceData, OpenWorkspaceErrors, OpenWorkspaceResponses, PresentViewData, PresentViewErrors, PresentViewResponses, PreviewNamesData, PreviewNamesErrors, PreviewNamesResponses, PurgeItemData, PurgeItemErrors, PurgeItemResponses, PurgeWorkspaceData, PurgeWorkspaceErrors, PurgeWorkspaceResponses, ReadItemData, ReadItemErrors, ReadItemResponses, RebuildIndexData, RebuildIndexErrors, RebuildIndexResponses, RedigestItemData, RedigestItemErrors, RedigestItemResponses, ResolveViewData, ResolveViewErrors, ResolveViewResponses, RestoreItemsData, RestoreItemsErrors, RestoreItemsResponses, RestoreWorkspaceData, RestoreWorkspaceErrors, RestoreWorkspaceResponses, RetryJobData, RetryJobErrors, RetryJobResponses, RevokeConnectorData, RevokeConnectorErrors, RevokeConnectorResponses, SaveDraftData, SaveDraftErrors, SaveDraftResponses, SearchItemsData, SearchItemsErrors, SearchItemsResponses, ServeSandboxRepresentationData, ServeSandboxRepresentationResponses, SetLifecycleData, SetLifecycleErrors, SetLifecycleResponses, SetRulesData, SetRulesErrors, SetRulesResponses, SetTypeData, SetTypeErrors, SetTypeResponses, StartImportData, StartImportErrors, StartImportResponses, StreamEventsData, StreamEventsResponse, StreamEventsResponses, UnarchiveWorkspaceData, UnarchiveWorkspaceErrors, UnarchiveWorkspaceResponses, UpdateWorkspaceData, UpdateWorkspaceErrors, UpdateWorkspaceResponses, UploadContentData, UploadContentResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -24,6 +24,21 @@ export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends 
  * Publish the configured MCP resource and WorkOS authorization server without leaking credentials.
  */
 export const getResourceMetadata = <ThrowOnError extends boolean = false>(options?: Options<GetResourceMetadataData, ThrowOnError>): RequestResult<GetResourceMetadataResponses, unknown, ThrowOnError> => (options?.client ?? client).get<GetResourceMetadataResponses, unknown, ThrowOnError>({ url: '/.well-known/oauth-protected-resource', ...options });
+
+/**
+ * download_tenant_artifact
+ *
+ * Download a completed installation archive; only a tenant administrator in a human browser session.
+ */
+export const downloadTenantArtifact = <ThrowOnError extends boolean = false>(options: Options<DownloadTenantArtifactData, ThrowOnError>): RequestResult<DownloadTenantArtifactResponses, unknown, ThrowOnError> => (options.client ?? client).get<DownloadTenantArtifactResponses, unknown, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/artifacts/{artifact_id}',
+    ...options
+});
 
 /**
  * Attention
@@ -170,6 +185,25 @@ export const listEvents = <ThrowOnError extends boolean = false>(options: Option
             type: 'apiKey'
         }],
     url: '/api/events/list-events',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Security activity
+ *
+ * Read installation-level notifications: sign-ins, connector issue and revocation, and refusals outside a workspace.
+ */
+export const listTenantEvents = <ThrowOnError extends boolean = false>(options: Options<ListTenantEventsData, ThrowOnError>): RequestResult<ListTenantEventsResponses, ListTenantEventsErrors, ThrowOnError> => (options.client ?? client).post<ListTenantEventsResponses, ListTenantEventsErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/events/list-tenant-events',
     ...options,
     headers: {
         'Content-Type': 'application/json',
@@ -406,6 +440,25 @@ export const getJob = <ThrowOnError extends boolean = false>(options: Options<Ge
 });
 
 /**
+ * Progress
+ *
+ * Read an installation-level job: an installation backup or a purge.
+ */
+export const getTenantJob = <ThrowOnError extends boolean = false>(options: Options<GetTenantJobData, ThrowOnError>): RequestResult<GetTenantJobResponses, GetTenantJobErrors, ThrowOnError> => (options.client ?? client).post<GetTenantJobResponses, GetTenantJobErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/imports/get-tenant-job',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * Jobs
  *
  * List conversion, export, and maintenance work.
@@ -417,6 +470,25 @@ export const listJobs = <ThrowOnError extends boolean = false>(options: Options<
             type: 'apiKey'
         }],
     url: '/api/imports/list-jobs',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Installation jobs
+ *
+ * List installation-level jobs, newest first, with their artifacts.
+ */
+export const listTenantJobs = <ThrowOnError extends boolean = false>(options: Options<ListTenantJobsData, ThrowOnError>): RequestResult<ListTenantJobsResponses, ListTenantJobsErrors, ThrowOnError> => (options.client ?? client).post<ListTenantJobsResponses, ListTenantJobsErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/imports/list-tenant-jobs',
     ...options,
     headers: {
         'Content-Type': 'application/json',
@@ -598,7 +670,7 @@ export const listDrafts = <ThrowOnError extends boolean = false>(options: Option
 /**
  * Browse
  *
- * List a folder with one-line descriptions at one resolved revision.
+ * List a folder with one-line descriptions at one resolved revision. With extraction = "unprocessed", list only the source files whose conversion is partial, failed or unsupported.
  */
 export const listItems = <ThrowOnError extends boolean = false>(options: Options<ListItemsData, ThrowOnError>): RequestResult<ListItemsResponses, ListItemsErrors, ThrowOnError> => (options.client ?? client).post<ListItemsResponses, ListItemsErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }, {
@@ -626,6 +698,25 @@ export const moveItem = <ThrowOnError extends boolean = false>(options: Options<
             type: 'apiKey'
         }],
     url: '/api/items/move-item',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Purge
+ *
+ * Permanently remove one item's bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.
+ */
+export const purgeItem = <ThrowOnError extends boolean = false>(options: Options<PurgeItemData, ThrowOnError>): RequestResult<PurgeItemResponses, PurgeItemErrors, ThrowOnError> => (options.client ?? client).post<PurgeItemResponses, PurgeItemErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/items/purge-item',
     ...options,
     headers: {
         'Content-Type': 'application/json',
@@ -769,7 +860,7 @@ export const listProposals = <ThrowOnError extends boolean = false>(options: Opt
 /**
  * Propose
  *
- * Create a suggested change set without merging or marking anything reviewed.
+ * Create a suggested change set without merging or marking anything reviewed. A `supply_extraction` change proposes the complete text of an unprocessed source file; it is applied only when a person accepts it and is labelled as supplied by an agent.
  */
 export const openProposal = <ThrowOnError extends boolean = false>(options: Options<OpenProposalData, ThrowOnError>): RequestResult<OpenProposalResponses, OpenProposalErrors, ThrowOnError> => (options.client ?? client).post<OpenProposalResponses, OpenProposalErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }, {
@@ -974,7 +1065,7 @@ export const getLinks = <ThrowOnError extends boolean = false>(options: Options<
 /**
  * Search
  *
- * Search authorized content and return cited snippets, not whole-document dumps.
+ * Search authorized content and return cited snippets, not whole-document dumps. The query may be empty only with a filter; extraction = "unprocessed" lists every source file whose text the converter could not fully extract.
  */
 export const searchItems = <ThrowOnError extends boolean = false>(options: Options<SearchItemsData, ThrowOnError>): RequestResult<SearchItemsResponses, SearchItemsErrors, ThrowOnError> => (options.client ?? client).post<SearchItemsResponses, SearchItemsErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }, {
@@ -1219,9 +1310,28 @@ export const archiveWorkspace = <ThrowOnError extends boolean = false>(options: 
 });
 
 /**
+ * Back up installation
+ *
+ * Back up the installation's identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only.
+ */
+export const backupInstallation = <ThrowOnError extends boolean = false>(options: Options<BackupInstallationData, ThrowOnError>): RequestResult<BackupInstallationResponses, BackupInstallationErrors, ThrowOnError> => (options.client ?? client).post<BackupInstallationResponses, BackupInstallationErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/workspaces/backup-installation',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * Backup
  *
- * Back up content and durable application records.
+ * Back up the workspace's history, retained objects and application records, drafts included, into one self-contained archive. Human administrator session only.
  */
 export const backupWorkspace = <ThrowOnError extends boolean = false>(options: Options<BackupWorkspaceData, ThrowOnError>): RequestResult<BackupWorkspaceResponses, BackupWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<BackupWorkspaceResponses, BackupWorkspaceErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }, {
@@ -1259,7 +1369,7 @@ export const createWorkspace = <ThrowOnError extends boolean = false>(options: O
 /**
  * Export
  *
- * Build a portable export with resolvable referenced assets.
+ * Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.
  */
 export const exportWorkspace = <ThrowOnError extends boolean = false>(options: Options<ExportWorkspaceData, ThrowOnError>): RequestResult<ExportWorkspaceResponses, ExportWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<ExportWorkspaceResponses, ExportWorkspaceErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }, {
@@ -1268,6 +1378,25 @@ export const exportWorkspace = <ThrowOnError extends boolean = false>(options: O
             type: 'apiKey'
         }],
     url: '/api/workspaces/export-workspace',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Purge status
+ *
+ * Read a purge's progress and counts; available after the workspace is gone.
+ */
+export const getPurge = <ThrowOnError extends boolean = false>(options: Options<GetPurgeData, ThrowOnError>): RequestResult<GetPurgeResponses, GetPurgeErrors, ThrowOnError> => (options.client ?? client).post<GetPurgeResponses, GetPurgeErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/workspaces/get-purge',
     ...options,
     headers: {
         'Content-Type': 'application/json',
@@ -1314,9 +1443,28 @@ export const openWorkspace = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 /**
+ * Purge
+ *
+ * Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.
+ */
+export const purgeWorkspace = <ThrowOnError extends boolean = false>(options: Options<PurgeWorkspaceData, ThrowOnError>): RequestResult<PurgeWorkspaceResponses, PurgeWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<PurgeWorkspaceResponses, PurgeWorkspaceErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/workspaces/purge-workspace',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * Restore
  *
- * Restore content and durable application records from a retained backup artifact.
+ * Fill a blank workspace from an uploaded workspace archive, keeping item identities; drafts of editors unknown here stay in the archive and are counted. Human administrator session only.
  */
 export const restoreWorkspace = <ThrowOnError extends boolean = false>(options: Options<RestoreWorkspaceData, ThrowOnError>): RequestResult<RestoreWorkspaceResponses, RestoreWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<RestoreWorkspaceResponses, RestoreWorkspaceErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }, {
@@ -1325,6 +1473,25 @@ export const restoreWorkspace = <ThrowOnError extends boolean = false>(options: 
             type: 'apiKey'
         }],
     url: '/api/workspaces/restore-workspace',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Unarchive
+ *
+ * Return an archived workspace to ordinary listings; its history and records were kept.
+ */
+export const unarchiveWorkspace = <ThrowOnError extends boolean = false>(options: Options<UnarchiveWorkspaceData, ThrowOnError>): RequestResult<UnarchiveWorkspaceResponses, UnarchiveWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<UnarchiveWorkspaceResponses, UnarchiveWorkspaceErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }, {
+            in: 'cookie',
+            name: 'okf-session',
+            type: 'apiKey'
+        }],
+    url: '/api/workspaces/unarchive-workspace',
     ...options,
     headers: {
         'Content-Type': 'application/json',
@@ -1354,7 +1521,7 @@ export const updateWorkspace = <ThrowOnError extends boolean = false>(options: O
 /**
  * download_artifact
  *
- * Download a completed authorized export or backup.
+ * Download a completed workspace export, View export or workspace archive. The artifact kind decides the permission and the routes (ArtifactKind::download_permission and download_routes); an archive is served only to a workspace administrator in a human browser session.
  */
 export const downloadArtifact = <ThrowOnError extends boolean = false>(options: Options<DownloadArtifactData, ThrowOnError>): RequestResult<DownloadArtifactResponses, unknown, ThrowOnError> => (options.client ?? client).get<DownloadArtifactResponses, unknown, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }, {
@@ -1384,7 +1551,7 @@ export const streamEvents = <ThrowOnError extends boolean = false>(options: Opti
 /**
  * download_object
  *
- * Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission.
+ * Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission. Never serves a backup artifact's object.
  */
 export const downloadObject = <ThrowOnError extends boolean = false>(options: Options<DownloadObjectData, ThrowOnError>): RequestResult<DownloadObjectResponses, unknown, ThrowOnError> => (options.client ?? client).get<DownloadObjectResponses, unknown, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }, {

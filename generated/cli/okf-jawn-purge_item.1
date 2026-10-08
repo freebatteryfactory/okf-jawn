@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-purge_item 1  "purge_item " 
+.SH NAME
+okf\-jawn\-purge_item \- Permanently remove one item\*(Aqs bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.
+.SH SYNOPSIS
+\fBokf\-jawn purge_item\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Permanently remove one item\*(Aqs bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

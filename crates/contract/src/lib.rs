@@ -13,6 +13,8 @@ pub mod conventions;
 pub mod error;
 /// Durable retrieval records and live notifications have separate meanings.
 pub mod events;
+/// Conversion outcome, converter identity, settings and supplied text of a source.
+pub mod extraction;
 /// Liveness and dependency readiness do not claim product qualification.
 pub mod health;
 /// Git-backed snapshots, comparisons, attribution, and restore operations.
@@ -29,6 +31,8 @@ pub mod metadata;
 pub mod operations;
 /// Suggested changes are separate from both review and acceptance.
 pub mod proposal;
+/// Archive is reversible; purge is explicit, destructive and recorded.
+pub mod purge;
 /// Revision-bound progressive reading for people and multimodal agents.
 pub mod read;
 /// Review evidence covers exact content, never all future edits.

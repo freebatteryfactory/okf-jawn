@@ -1,0 +1,996 @@
+{
+  "$defs": {
+    "ApiError": {
+      "additionalProperties": false,
+      "description": "A safe error response, not an internal backtrace.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode",
+          "description": "Stable code for programmatic handling."
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Typed context for conflict, replay, and in-progress outcomes."
+        },
+        "field": {
+          "description": "Input field needing correction.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Safe explanation for the caller.",
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Correlation identifier, not a secret.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ConnectorId": {
+      "description": "Identity of one local MCP connector credential, never the owner's browser session.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DraftConflictItem": {
+      "additionalProperties": false,
+      "description": "One snapshotted item whose committed content moved after its draft's base.\n\nThe editor resolves it per item, with `changes` as the diff: keep mine is `save_draft` with\n`base_revision` = `current_revision`, then `commit_items`; take theirs is `discard_draft`.",
+      "properties": {
+        "changes": {
+          "description": "The item's committed changes from `draft_base` to `current_revision`.",
+          "items": {
+            "$ref": "#/$defs/FileChange"
+          },
+          "type": "array"
+        },
+        "current_revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "Head revision at which the item was found changed or deleted."
+        },
+        "deleted": {
+          "description": "The item no longer exists at `current_revision`.",
+          "type": "boolean"
+        },
+        "draft_base": {
+          "$ref": "#/$defs/Revision",
+          "description": "Revision the draft was based on."
+        },
+        "item_id": {
+          "$ref": "#/$defs/ItemId",
+          "description": "Item whose draft no longer applies cleanly."
+        }
+      },
+      "required": [
+        "item_id",
+        "draft_base",
+        "current_revision",
+        "deleted",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "description": "Stable failure classifications; HTTP and MCP adapters preserve these.",
+      "oneOf": [
+        {
+          "const": "invalid_input",
+          "description": "Input violates the declared contract.",
+          "type": "string"
+        },
+        {
+          "const": "unauthenticated",
+          "description": "No acceptable identity was established.",
+          "type": "string"
+        },
+        {
+          "const": "forbidden",
+          "description": "The principal lacks the required capability.",
+          "type": "string"
+        },
+        {
+          "const": "not_found",
+          "description": "The resource is absent or not visible to this principal.",
+          "type": "string"
+        },
+        {
+          "const": "conflict",
+          "description": "A precondition, revision, draft-base, or idempotency-key conflict occurred.",
+          "type": "string"
+        },
+        {
+          "const": "already_issued",
+          "description": "A secret-bearing write already completed; replaying it never returns the secret again.",
+          "type": "string"
+        },
+        {
+          "const": "in_progress",
+          "description": "Another attempt with the same idempotency key holds a live lease; retry later.",
+          "type": "string"
+        },
+        {
+          "const": "too_large",
+          "description": "A configured resource limit was exceeded.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported",
+          "description": "The requested representation or format is unsupported.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "A configured integration is unavailable.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "The operation was cancelled.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "An unexpected server failure occurred without exposing secrets.",
+          "type": "string"
+        },
+        {
+          "const": "not_implemented",
+          "description": "The operation is declared but this build does not implement it; never a success.",
+          "type": "string"
+        }
+      ]
+    },
+    "ErrorDetail": {
+      "description": "Typed failure context the UI and agents can act on without parsing messages.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The connector was already issued under this idempotency key; its secret is not replayed.",
+          "properties": {
+            "connector_id": {
+              "$ref": "#/$defs/ConnectorId",
+              "description": "Connector created by the original request."
+            },
+            "kind": {
+              "const": "already_issued",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "connector_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An identical request is executing under a live lease.",
+          "properties": {
+            "kind": {
+              "const": "in_progress",
+              "type": "string"
+            },
+            "mutation_id": {
+              "$ref": "#/$defs/MutationId",
+              "description": "Mutation holding the lease."
+            },
+            "retry_after": {
+              "description": "Whole seconds the caller should wait before retrying the same request.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "mutation_id",
+            "retry_after"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One or more snapshotted items changed or were deleted after their drafts' bases.",
+          "properties": {
+            "items": {
+              "description": "Every conflicting item, never only the first.",
+              "items": {
+                "$ref": "#/$defs/DraftConflictItem"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "kind": {
+              "const": "draft_conflict",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The idempotency key was reused with a different request body.",
+          "properties": {
+            "kind": {
+              "const": "idempotency_conflict",
+              "type": "string"
+            },
+            "operation": {
+              "$ref": "#/$defs/OperationName",
+              "description": "Operation that first used the key."
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The named revision was removed or rewritten by a purge; the code is `not_found`.",
+          "properties": {
+            "kind": {
+              "const": "invalidated",
+              "type": "string"
+            },
+            "purge_id": {
+              "$ref": "#/$defs/PurgeId",
+              "description": "The purge that removed or rewrote it."
+            },
+            "replacement": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Revision"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "After an item purge, the rewritten revision to re-pin to; absent after a\nworkspace purge."
+            }
+          },
+          "required": [
+            "kind",
+            "purge_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FileChange": {
+      "additionalProperties": false,
+      "description": "A changed file with before and after locators.",
+      "properties": {
+        "binary": {
+          "description": "The underlying bytes are binary.",
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/FileChangeKind",
+          "description": "Added, modified, moved, or removed."
+        },
+        "new_path": {
+          "description": "New path; absent for deletions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old_path": {
+          "description": "Previous path; absent for additions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "patch": {
+          "description": "Unified text diff when applicable.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "patch",
+        "binary",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "FileChangeKind": {
+      "description": "How one file differs between two revisions.",
+      "oneOf": [
+        {
+          "const": "added",
+          "description": "Present only in the compared revision.",
+          "type": "string"
+        },
+        {
+          "const": "modified",
+          "description": "Same path, different content.",
+          "type": "string"
+        },
+        {
+          "const": "moved",
+          "description": "Different path for the same item.",
+          "type": "string"
+        },
+        {
+          "const": "removed",
+          "description": "Present only in the base revision.",
+          "type": "string"
+        }
+      ]
+    },
+    "ItemId": {
+      "description": "Stable item identity independent of its current relative path.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "JobId": {
+      "description": "Durable background work identity retained across retries.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "MutationId": {
+      "description": "Durable server-assigned identity of one write; every store that creates a row enforces it as unique.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "OperationName": {
+      "description": "Closed set of canonical operation identifiers, serialized as the `snake_case` id.",
+      "oneOf": [
+        {
+          "const": "list_workspaces",
+          "description": "The `list_workspaces` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_workspace",
+          "description": "The `create_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "open_workspace",
+          "description": "The `open_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "update_workspace",
+          "description": "The `update_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "archive_workspace",
+          "description": "The `archive_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "unarchive_workspace",
+          "description": "The `unarchive_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "purge_workspace",
+          "description": "The `purge_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_purge",
+          "description": "The `get_purge` operation.",
+          "type": "string"
+        },
+        {
+          "const": "export_workspace",
+          "description": "The `export_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "backup_workspace",
+          "description": "The `backup_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "restore_workspace",
+          "description": "The `restore_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "backup_installation",
+          "description": "The `backup_installation` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_items",
+          "description": "The `list_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_item",
+          "description": "The `get_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_item",
+          "description": "The `create_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "save_draft",
+          "description": "The `save_draft` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_drafts",
+          "description": "The `list_drafts` operation.",
+          "type": "string"
+        },
+        {
+          "const": "discard_draft",
+          "description": "The `discard_draft` operation.",
+          "type": "string"
+        },
+        {
+          "const": "move_item",
+          "description": "The `move_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "set_lifecycle",
+          "description": "The `set_lifecycle` operation.",
+          "type": "string"
+        },
+        {
+          "const": "delete_item",
+          "description": "The `delete_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "purge_item",
+          "description": "The `purge_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_folder",
+          "description": "The `create_folder` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_types",
+          "description": "The `list_types` operation.",
+          "type": "string"
+        },
+        {
+          "const": "set_type",
+          "description": "The `set_type` operation.",
+          "type": "string"
+        },
+        {
+          "const": "read_item",
+          "description": "The `read_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_sources",
+          "description": "The `get_sources` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_object",
+          "description": "The `get_object` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_sandbox_capability",
+          "description": "The `create_sandbox_capability` operation.",
+          "type": "string"
+        },
+        {
+          "const": "search_items",
+          "description": "The `search_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_links",
+          "description": "The `get_links` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_graph",
+          "description": "The `get_graph` operation.",
+          "type": "string"
+        },
+        {
+          "const": "log_items",
+          "description": "The `log_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "diff_items",
+          "description": "The `diff_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "commit_items",
+          "description": "The `commit_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "restore_items",
+          "description": "The `restore_items` operation.",
+          "type": "string"
+        },
+        {
+          "const": "blame_item",
+          "description": "The `blame_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "open_proposal",
+          "description": "The `open_proposal` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_proposals",
+          "description": "The `list_proposals` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_proposal",
+          "description": "The `get_proposal` operation.",
+          "type": "string"
+        },
+        {
+          "const": "accept_proposal",
+          "description": "The `accept_proposal` operation.",
+          "type": "string"
+        },
+        {
+          "const": "decline_proposal",
+          "description": "The `decline_proposal` operation.",
+          "type": "string"
+        },
+        {
+          "const": "add_comment",
+          "description": "The `add_comment` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_confirmation",
+          "description": "The `create_confirmation` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_review",
+          "description": "The `create_review` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_reviews",
+          "description": "The `list_reviews` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_upload",
+          "description": "The `create_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "complete_upload",
+          "description": "The `complete_upload` operation.",
+          "type": "string"
+        },
+        {
+          "const": "start_import",
+          "description": "The `start_import` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_job",
+          "description": "The `get_job` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_jobs",
+          "description": "The `list_jobs` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_tenant_job",
+          "description": "The `get_tenant_job` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_tenant_jobs",
+          "description": "The `list_tenant_jobs` operation.",
+          "type": "string"
+        },
+        {
+          "const": "retry_job",
+          "description": "The `retry_job` operation.",
+          "type": "string"
+        },
+        {
+          "const": "cancel_job",
+          "description": "The `cancel_job` operation.",
+          "type": "string"
+        },
+        {
+          "const": "redigest_item",
+          "description": "The `redigest_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "correct_digest",
+          "description": "The `correct_digest` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_rules",
+          "description": "The `get_rules` operation.",
+          "type": "string"
+        },
+        {
+          "const": "set_rules",
+          "description": "The `set_rules` operation.",
+          "type": "string"
+        },
+        {
+          "const": "preview_names",
+          "description": "The `preview_names` operation.",
+          "type": "string"
+        },
+        {
+          "const": "apply_names",
+          "description": "The `apply_names` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_attention",
+          "description": "The `get_attention` operation.",
+          "type": "string"
+        },
+        {
+          "const": "rebuild_index",
+          "description": "The `rebuild_index` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_view",
+          "description": "The `get_view` operation.",
+          "type": "string"
+        },
+        {
+          "const": "present_view",
+          "description": "The `present_view` operation.",
+          "type": "string"
+        },
+        {
+          "const": "resolve_view",
+          "description": "The `resolve_view` operation.",
+          "type": "string"
+        },
+        {
+          "const": "export_view",
+          "description": "The `export_view` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_catalog",
+          "description": "The `get_catalog` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_receipt",
+          "description": "The `get_receipt` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_events",
+          "description": "The `list_events` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_tenant_events",
+          "description": "The `list_tenant_events` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_session",
+          "description": "The `get_session` operation.",
+          "type": "string"
+        },
+        {
+          "const": "create_connector",
+          "description": "The `create_connector` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_connectors",
+          "description": "The `list_connectors` operation.",
+          "type": "string"
+        },
+        {
+          "const": "revoke_connector",
+          "description": "The `revoke_connector` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_health",
+          "description": "The `get_health` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_readiness",
+          "description": "The `get_readiness` operation.",
+          "type": "string"
+        }
+      ]
+    },
+    "PurgeId": {
+      "description": "Identity of one purge; its record outlives what it removed.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "PurgeReport": {
+      "additionalProperties": false,
+      "description": "What a completed purge did; counts only.",
+      "properties": {
+        "backups_removed": {
+          "description": "Managed backups deleted (workspace archives, and their copies in pre-migration backups).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "backups_rewritten": {
+          "description": "Managed backups rewritten without the target.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "citations_invalidated": {
+          "description": "Stored citations (reviews, receipts, comments, View bindings) of the target invalidated.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "citations_remapped": {
+          "description": "Stored citations of other items remapped to a rewritten revision.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "drafts_removed": {
+          "description": "Drafts deleted.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exports_removed": {
+          "description": "Retained export and View export artifacts deleted.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "objects_kept_shared": {
+          "description": "Objects kept because a surviving item still references them, as a decimal string.",
+          "type": "string"
+        },
+        "objects_removed": {
+          "description": "Stored objects deleted, as a decimal string.",
+          "type": "string"
+        },
+        "proposals_removed": {
+          "description": "Proposals deleted with their candidate references and comments.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revisions_invalidated": {
+          "description": "Revisions that no longer exist or were rewritten.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "views_invalidated": {
+          "description": "Saved Views with an invalidated binding.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objects_removed",
+        "objects_kept_shared",
+        "backups_removed",
+        "backups_rewritten",
+        "exports_removed",
+        "proposals_removed",
+        "drafts_removed",
+        "revisions_invalidated",
+        "citations_remapped",
+        "citations_invalidated",
+        "views_invalidated"
+      ],
+      "type": "object"
+    },
+    "PurgeState": {
+      "description": "Progress of a purge.",
+      "oneOf": [
+        {
+          "const": "requested",
+          "description": "Accepted; nothing removed yet.",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "description": "Removing.",
+          "type": "string"
+        },
+        {
+          "const": "completed",
+          "description": "Every application-managed copy is removed or rewritten; no affected backup is restorable.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "Stopped; repeating the request resumes it.",
+          "type": "string"
+        }
+      ]
+    },
+    "PurgeTarget": {
+      "description": "What a purge removes; identities only, never a name or a path.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A whole workspace.",
+          "properties": {
+            "kind": {
+              "const": "workspace",
+              "type": "string"
+            },
+            "workspace_id": {
+              "$ref": "#/$defs/WorkspaceId",
+              "description": "Removed workspace."
+            }
+          },
+          "required": [
+            "kind",
+            "workspace_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One item.",
+          "properties": {
+            "item_id": {
+              "$ref": "#/$defs/ItemId",
+              "description": "Removed item."
+            },
+            "kind": {
+              "const": "item",
+              "type": "string"
+            },
+            "workspace_id": {
+              "$ref": "#/$defs/WorkspaceId",
+              "description": "Its workspace."
+            }
+          },
+          "required": [
+            "kind",
+            "workspace_id",
+            "item_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Revision": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+      "type": "string"
+    },
+    "WorkspaceId": {
+      "description": "Stable application identity for one user-organized workspace.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A durable, tenant-level purge record; it holds no content of the target.",
+  "properties": {
+    "completed_at": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "When it completed."
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ApiError"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Last failure."
+    },
+    "id": {
+      "$ref": "#/$defs/PurgeId",
+      "description": "Identity."
+    },
+    "job_id": {
+      "$ref": "#/$defs/JobId",
+      "description": "The tenant job doing the work."
+    },
+    "report": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PurgeReport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Present exactly when completed."
+    },
+    "requested_at": {
+      "$ref": "#/$defs/Timestamp",
+      "description": "When it was accepted."
+    },
+    "requested_by": {
+      "description": "Administrator subject.",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/PurgeState",
+      "description": "Progress."
+    },
+    "target": {
+      "$ref": "#/$defs/PurgeTarget",
+      "description": "What is removed."
+    }
+  },
+  "required": [
+    "id",
+    "target",
+    "state",
+    "job_id",
+    "requested_by",
+    "requested_at"
+  ],
+  "title": "Purge",
+  "type": "object"
+}

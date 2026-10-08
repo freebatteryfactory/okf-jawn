@@ -17,12 +17,19 @@ pub enum AttentionKind {
     Duplicate,
     /// Navigation summary is absent.
     MissingDescription,
-    /// Extraction has warnings or failed.
-    Extraction,
+    /// A source whose conversion is partial, failed or unsupported; action `redigest_item`.
+    Unprocessed,
+    /// A completed source whose conversion recorded warnings; action `read_item`.
+    ExtractionWarnings,
     /// A pinned View has newer source data available.
     NewerSource,
     /// Possible instruction-like source text; advisory only.
     InstructionLike,
+    /// A saved View or a citation refers to purged content; action `get_view`.
+    Invalidated,
+    /// An imported file's header does not parse; its bytes are kept and nothing is blocked.
+    /// Action `get_item`.
+    UnparseableHeader,
 }
 
 /// An observation with a useful next action.

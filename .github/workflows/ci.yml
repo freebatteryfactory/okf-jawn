@@ -55,7 +55,8 @@ jobs:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('.bun-version', 'bun.lock') }}
       - run: bun scripts/dev.mjs bootstrap
-      # bootstrap has just replaced api/, generated/cli/ and ui/src/api/generated/ with what the
+      # bootstrap has just replaced api/, generated/cli/, generated/converter/ and
+      # ui/src/api/generated/ with what the
       # pinned generators write, so the gen-check step below compares a new pass with bootstrap's
       # output, not with the commit. This step is the comparison with the commit: a tracked file
       # that changed, or a new file git does not ignore, means the committed generated output is
@@ -103,6 +104,7 @@ jobs:
             bun.lock
             api/
             generated/cli/
+            generated/converter/
             ui/src/api/generated/
             ui/dist/
             ui/dist-apps/

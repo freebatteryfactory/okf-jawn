@@ -49,7 +49,7 @@ test('the job that runs the real generators fails when generation changed the ch
  for(const earlier of steps.slice(0,clean))assert.doesNotMatch(earlier.run??'',/git (stash|checkout|restore|reset|clean|add)\b/,earlier.run);
  // The directories it guards are the ones generation replaces, and all of them are tracked.
  const replaced=[...(await read('scripts/lib/generation.mjs')).matchAll(/\['[a-z]+', '([a-z/]+)'\]/g)].map(match=>match[1]);
- assert.deepEqual(replaced,['api','ui/src/api/generated','generated/cli']);
+ assert.deepEqual(replaced,['api','ui/src/api/generated','generated/cli','generated/converter']);
  const ignore=(await read('.gitignore')).split(/\r?\n/);
  for(const directory of replaced)assert.ok(!ignore.some(line=>line.replace(/^\//,'').replace(/\/$/,'')===directory),`${directory} is ignored, so git status could not see it change`);
 });

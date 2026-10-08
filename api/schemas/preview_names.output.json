@@ -6,7 +6,7 @@
     },
     "DuplicateObservation": {
       "additionalProperties": false,
-      "description": "One path observed as a duplicate during rename preview.",
+      "description": "One path observed as a duplicate during rename preview, including paths that differ only in\ncase or Unicode normalization (`WorkspacePath::collision_key`).",
       "properties": {
         "item_ids": {
           "description": "Item identities that collide on that path.",
@@ -101,7 +101,7 @@
     "WorkspacePath": {
       "maxLength": 4096,
       "minLength": 1,
-      "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
+      "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
       "type": "string"
     }
   },

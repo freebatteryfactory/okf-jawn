@@ -3,8 +3,8 @@
 import { type DefaultError, type InfiniteData, infiniteQueryOptions, queryOptions, type UseMutationOptions } from '@tanstack/react-query';
 
 import { client } from '../client.gen';
-import { acceptProposal, addComment, applyNames, archiveWorkspace, backupWorkspace, beginLocalSession, beginLogin, blameItem, cancelJob, commitItems, completeLogin, completeUpload, correctDigest, createConfirmation, createConnector, createFolder, createItem, createReview, createSandboxCapability, createUpload, createWorkspace, declineProposal, deleteItem, diffItems, discardDraft, downloadArtifact, downloadObject, endSession, exportView, exportWorkspace, getAttention, getCatalog, getFormSchema, getGraph, getHealth, getItem, getJob, getLinks, getObject, getProposal, getReadiness, getReceipt, getResourceMetadata, getRules, getSession, getSources, getView, listConnectors, listDrafts, listEvents, listItems, listJobs, listProposals, listReviews, listTypes, listWorkspaces, liveness, logItems, mcpClose, mcpRequest, moveItem, openProposal, openWorkspace, type Options, presentView, previewNames, readItem, rebuildIndex, redigestItem, resolveView, restoreItems, restoreWorkspace, retryJob, revokeConnector, saveDraft, searchItems, serveSandboxRepresentation, setLifecycle, setRules, setType, startImport, updateWorkspace, uploadContent } from '../sdk.gen';
-import type { AcceptProposalData, AcceptProposalError, AcceptProposalResponse, AddCommentData, AddCommentError, AddCommentResponse, ApplyNamesData, ApplyNamesError, ApplyNamesResponse, ArchiveWorkspaceData, ArchiveWorkspaceError, ArchiveWorkspaceResponse, BackupWorkspaceData, BackupWorkspaceError, BackupWorkspaceResponse, BeginLocalSessionData, BeginLoginData, BlameItemData, BlameItemError, BlameItemResponse, CancelJobData, CancelJobError, CancelJobResponse, CommitItemsData, CommitItemsError, CommitItemsResponse, CompleteLoginData, CompleteUploadData, CompleteUploadError, CompleteUploadResponse, CorrectDigestData, CorrectDigestError, CorrectDigestResponse, CreateConfirmationData, CreateConfirmationError, CreateConfirmationResponse, CreateConnectorData, CreateConnectorError, CreateConnectorResponse, CreateFolderData, CreateFolderError, CreateFolderResponse, CreateItemData, CreateItemError, CreateItemResponse, CreateReviewData, CreateReviewError, CreateReviewResponse, CreateSandboxCapabilityData, CreateSandboxCapabilityError, CreateSandboxCapabilityResponse, CreateUploadData, CreateUploadError, CreateUploadResponse, CreateWorkspaceData, CreateWorkspaceError, CreateWorkspaceResponse, DeclineProposalData, DeclineProposalError, DeclineProposalResponse, DeleteItemData, DeleteItemError, DeleteItemResponse, DiffItemsData, DiffItemsError, DiffItemsResponse, DiscardDraftData, DiscardDraftError, DiscardDraftResponse, DownloadArtifactData, DownloadArtifactResponse, DownloadObjectData, DownloadObjectResponse, EndSessionData, ExportViewData, ExportViewError, ExportViewResponse, ExportWorkspaceData, ExportWorkspaceError, ExportWorkspaceResponse, GetAttentionData, GetAttentionError, GetAttentionResponse2, GetCatalogData, GetCatalogError, GetCatalogResponse, GetFormSchemaData, GetGraphData, GetGraphError, GetGraphResponse2, GetHealthData, GetHealthError, GetHealthResponse, GetItemData, GetItemError, GetItemResponse, GetJobData, GetJobError, GetJobResponse, GetLinksData, GetLinksError, GetLinksResponse2, GetObjectData, GetObjectError, GetObjectResponse2, GetProposalData, GetProposalError, GetProposalResponse, GetReadinessData, GetReadinessError, GetReadinessResponse, GetReceiptData, GetReceiptError, GetReceiptResponse, GetResourceMetadataData, GetResourceMetadataResponse, GetRulesData, GetRulesError, GetRulesResponse, GetSessionData, GetSessionError, GetSessionResponse, GetSourcesData, GetSourcesError, GetSourcesResponse2, GetViewData, GetViewError, GetViewResponse, ListConnectorsData, ListConnectorsError, ListConnectorsResponse2, ListDraftsData, ListDraftsError, ListDraftsResponse2, ListEventsData, ListEventsError, ListEventsResponse2, ListItemsData, ListItemsError, ListItemsResponse2, ListJobsData, ListJobsError, ListJobsResponse2, ListProposalsData, ListProposalsError, ListProposalsResponse2, ListReviewsData, ListReviewsError, ListReviewsResponse2, ListTypesData, ListTypesError, ListTypesResponse2, ListWorkspacesData, ListWorkspacesError, ListWorkspacesResponse2, LivenessData, LivenessResponse, LogItemsData, LogItemsError, LogItemsResponse, McpCloseData, McpRequestData, MoveItemData, MoveItemError, MoveItemResponse, OpenProposalData, OpenProposalError, OpenProposalResponse, OpenWorkspaceData, OpenWorkspaceError, OpenWorkspaceResponse, PresentViewData, PresentViewError, PresentViewResponse, PreviewNamesData, PreviewNamesError, PreviewNamesResponse, ReadItemData, ReadItemError, ReadItemResponse2, RebuildIndexData, RebuildIndexError, RebuildIndexResponse, RedigestItemData, RedigestItemError, RedigestItemResponse, ResolveViewData, ResolveViewError, ResolveViewResponse, RestoreItemsData, RestoreItemsError, RestoreItemsResponse, RestoreWorkspaceData, RestoreWorkspaceError, RestoreWorkspaceResponse, RetryJobData, RetryJobError, RetryJobResponse, RevokeConnectorData, RevokeConnectorError, RevokeConnectorResponse, SaveDraftData, SaveDraftError, SaveDraftResponse, SearchItemsData, SearchItemsError, SearchItemsResponse, ServeSandboxRepresentationData, ServeSandboxRepresentationResponse, SetLifecycleData, SetLifecycleError, SetLifecycleResponse, SetRulesData, SetRulesError, SetRulesResponse, SetTypeData, SetTypeError, SetTypeResponse, StartImportData, StartImportError, StartImportResponse, UpdateWorkspaceData, UpdateWorkspaceError, UpdateWorkspaceResponse, UploadContentData, UploadContentResponse } from '../types.gen';
+import { acceptProposal, addComment, applyNames, archiveWorkspace, backupInstallation, backupWorkspace, beginLocalSession, beginLogin, blameItem, cancelJob, commitItems, completeLogin, completeUpload, correctDigest, createConfirmation, createConnector, createFolder, createItem, createReview, createSandboxCapability, createUpload, createWorkspace, declineProposal, deleteItem, diffItems, discardDraft, downloadArtifact, downloadObject, downloadTenantArtifact, endSession, exportView, exportWorkspace, getAttention, getCatalog, getFormSchema, getGraph, getHealth, getItem, getJob, getLinks, getObject, getProposal, getPurge, getReadiness, getReceipt, getResourceMetadata, getRules, getSession, getSources, getTenantJob, getView, listConnectors, listDrafts, listEvents, listItems, listJobs, listProposals, listReviews, listTenantEvents, listTenantJobs, listTypes, listWorkspaces, liveness, logItems, mcpClose, mcpRequest, moveItem, openProposal, openWorkspace, type Options, presentView, previewNames, purgeItem, purgeWorkspace, readItem, rebuildIndex, redigestItem, resolveView, restoreItems, restoreWorkspace, retryJob, revokeConnector, saveDraft, searchItems, serveSandboxRepresentation, setLifecycle, setRules, setType, startImport, unarchiveWorkspace, updateWorkspace, uploadContent } from '../sdk.gen';
+import type { AcceptProposalData, AcceptProposalError, AcceptProposalResponse, AddCommentData, AddCommentError, AddCommentResponse, ApplyNamesData, ApplyNamesError, ApplyNamesResponse, ArchiveWorkspaceData, ArchiveWorkspaceError, ArchiveWorkspaceResponse, BackupInstallationData, BackupInstallationError, BackupInstallationResponse, BackupWorkspaceData, BackupWorkspaceError, BackupWorkspaceResponse, BeginLocalSessionData, BeginLoginData, BlameItemData, BlameItemError, BlameItemResponse, CancelJobData, CancelJobError, CancelJobResponse, CommitItemsData, CommitItemsError, CommitItemsResponse, CompleteLoginData, CompleteUploadData, CompleteUploadError, CompleteUploadResponse, CorrectDigestData, CorrectDigestError, CorrectDigestResponse, CreateConfirmationData, CreateConfirmationError, CreateConfirmationResponse, CreateConnectorData, CreateConnectorError, CreateConnectorResponse, CreateFolderData, CreateFolderError, CreateFolderResponse, CreateItemData, CreateItemError, CreateItemResponse, CreateReviewData, CreateReviewError, CreateReviewResponse, CreateSandboxCapabilityData, CreateSandboxCapabilityError, CreateSandboxCapabilityResponse, CreateUploadData, CreateUploadError, CreateUploadResponse, CreateWorkspaceData, CreateWorkspaceError, CreateWorkspaceResponse, DeclineProposalData, DeclineProposalError, DeclineProposalResponse, DeleteItemData, DeleteItemError, DeleteItemResponse, DiffItemsData, DiffItemsError, DiffItemsResponse, DiscardDraftData, DiscardDraftError, DiscardDraftResponse, DownloadArtifactData, DownloadArtifactResponse, DownloadObjectData, DownloadObjectResponse, DownloadTenantArtifactData, DownloadTenantArtifactResponse, EndSessionData, ExportViewData, ExportViewError, ExportViewResponse, ExportWorkspaceData, ExportWorkspaceError, ExportWorkspaceResponse, GetAttentionData, GetAttentionError, GetAttentionResponse2, GetCatalogData, GetCatalogError, GetCatalogResponse, GetFormSchemaData, GetGraphData, GetGraphError, GetGraphResponse2, GetHealthData, GetHealthError, GetHealthResponse, GetItemData, GetItemError, GetItemResponse, GetJobData, GetJobError, GetJobResponse, GetLinksData, GetLinksError, GetLinksResponse2, GetObjectData, GetObjectError, GetObjectResponse2, GetProposalData, GetProposalError, GetProposalResponse, GetPurgeData, GetPurgeError, GetPurgeResponse, GetReadinessData, GetReadinessError, GetReadinessResponse, GetReceiptData, GetReceiptError, GetReceiptResponse, GetResourceMetadataData, GetResourceMetadataResponse, GetRulesData, GetRulesError, GetRulesResponse, GetSessionData, GetSessionError, GetSessionResponse, GetSourcesData, GetSourcesError, GetSourcesResponse2, GetTenantJobData, GetTenantJobError, GetTenantJobResponse, GetViewData, GetViewError, GetViewResponse, ListConnectorsData, ListConnectorsError, ListConnectorsResponse2, ListDraftsData, ListDraftsError, ListDraftsResponse2, ListEventsData, ListEventsError, ListEventsResponse2, ListItemsData, ListItemsError, ListItemsResponse2, ListJobsData, ListJobsError, ListJobsResponse2, ListProposalsData, ListProposalsError, ListProposalsResponse2, ListReviewsData, ListReviewsError, ListReviewsResponse2, ListTenantEventsData, ListTenantEventsError, ListTenantEventsResponse, ListTenantJobsData, ListTenantJobsError, ListTenantJobsResponse, ListTypesData, ListTypesError, ListTypesResponse2, ListWorkspacesData, ListWorkspacesError, ListWorkspacesResponse2, LivenessData, LivenessResponse, LogItemsData, LogItemsError, LogItemsResponse, McpCloseData, McpRequestData, MoveItemData, MoveItemError, MoveItemResponse, OpenProposalData, OpenProposalError, OpenProposalResponse, OpenWorkspaceData, OpenWorkspaceError, OpenWorkspaceResponse, PresentViewData, PresentViewError, PresentViewResponse, PreviewNamesData, PreviewNamesError, PreviewNamesResponse, PurgeItemData, PurgeItemError, PurgeItemResponse, PurgeWorkspaceData, PurgeWorkspaceError, PurgeWorkspaceResponse, ReadItemData, ReadItemError, ReadItemResponse2, RebuildIndexData, RebuildIndexError, RebuildIndexResponse, RedigestItemData, RedigestItemError, RedigestItemResponse, ResolveViewData, ResolveViewError, ResolveViewResponse, RestoreItemsData, RestoreItemsError, RestoreItemsResponse, RestoreWorkspaceData, RestoreWorkspaceError, RestoreWorkspaceResponse, RetryJobData, RetryJobError, RetryJobResponse, RevokeConnectorData, RevokeConnectorError, RevokeConnectorResponse, SaveDraftData, SaveDraftError, SaveDraftResponse, SearchItemsData, SearchItemsError, SearchItemsResponse, ServeSandboxRepresentationData, ServeSandboxRepresentationResponse, SetLifecycleData, SetLifecycleError, SetLifecycleResponse, SetRulesData, SetRulesError, SetRulesResponse, SetTypeData, SetTypeError, SetTypeResponse, StartImportData, StartImportError, StartImportResponse, UnarchiveWorkspaceData, UnarchiveWorkspaceError, UnarchiveWorkspaceResponse, UpdateWorkspaceData, UpdateWorkspaceError, UpdateWorkspaceResponse, UploadContentData, UploadContentResponse } from '../types.gen';
 
 export type QueryKey<TOptions extends Options> = [
     Pick<TOptions, 'baseUrl' | 'body' | 'headers' | 'path' | 'query'> & {
@@ -57,6 +57,26 @@ export const getResourceMetadataOptions = (options?: Options<GetResourceMetadata
         return data;
     },
     queryKey: getResourceMetadataQueryKey(options)
+});
+
+export const downloadTenantArtifactQueryKey = (options: Options<DownloadTenantArtifactData>) => createQueryKey('downloadTenantArtifact', options);
+
+/**
+ * download_tenant_artifact
+ *
+ * Download a completed installation archive; only a tenant administrator in a human browser session.
+ */
+export const downloadTenantArtifactOptions = (options: Options<DownloadTenantArtifactData>) => queryOptions<DownloadTenantArtifactResponse, DefaultError, DownloadTenantArtifactResponse, ReturnType<typeof downloadTenantArtifactQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await downloadTenantArtifact({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: downloadTenantArtifactQueryKey(options)
 });
 
 export const getAttentionQueryKey = (options: Options<GetAttentionData>) => createQueryKey('getAttention', options);
@@ -275,6 +295,25 @@ export const listEventsInfiniteOptions = (options: Options<ListEventsData>) => {
         queryKey: listEventsInfiniteQueryKey(options)
     });
     return opts as Omit<typeof opts, 'initialData'>;
+};
+
+/**
+ * Security activity
+ *
+ * Read installation-level notifications: sign-ins, connector issue and revocation, and refusals outside a workspace.
+ */
+export const listTenantEventsMutation = (options?: Partial<Options<ListTenantEventsData>>): UseMutationOptions<ListTenantEventsResponse, ListTenantEventsError, Options<ListTenantEventsData>> => {
+    const mutationOptions: UseMutationOptions<ListTenantEventsResponse, ListTenantEventsError, Options<ListTenantEventsData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await listTenantEvents({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
 };
 
 export const getHealthQueryKey = (options: Options<GetHealthData>) => createQueryKey('getHealth', options);
@@ -511,6 +550,25 @@ export const getJobOptions = (options: Options<GetJobData>) => queryOptions<GetJ
     queryKey: getJobQueryKey(options)
 });
 
+/**
+ * Progress
+ *
+ * Read an installation-level job: an installation backup or a purge.
+ */
+export const getTenantJobMutation = (options?: Partial<Options<GetTenantJobData>>): UseMutationOptions<GetTenantJobResponse, GetTenantJobError, Options<GetTenantJobData>> => {
+    const mutationOptions: UseMutationOptions<GetTenantJobResponse, GetTenantJobError, Options<GetTenantJobData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await getTenantJob({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
 export const listJobsQueryKey = (options: Options<ListJobsData>) => createQueryKey('listJobs', options);
 
 /**
@@ -530,6 +588,25 @@ export const listJobsOptions = (options: Options<ListJobsData>) => queryOptions<
     },
     queryKey: listJobsQueryKey(options)
 });
+
+/**
+ * Installation jobs
+ *
+ * List installation-level jobs, newest first, with their artifacts.
+ */
+export const listTenantJobsMutation = (options?: Partial<Options<ListTenantJobsData>>): UseMutationOptions<ListTenantJobsResponse, ListTenantJobsError, Options<ListTenantJobsData>> => {
+    const mutationOptions: UseMutationOptions<ListTenantJobsResponse, ListTenantJobsError, Options<ListTenantJobsData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await listTenantJobs({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
 
 /**
  * Reconvert
@@ -709,7 +786,7 @@ export const listItemsQueryKey = (options: Options<ListItemsData>) => createQuer
 /**
  * Browse
  *
- * List a folder with one-line descriptions at one resolved revision.
+ * List a folder with one-line descriptions at one resolved revision. With extraction = "unprocessed", list only the source files whose conversion is partial, failed or unsupported.
  */
 export const listItemsOptions = (options: Options<ListItemsData>) => queryOptions<ListItemsResponse2, ListItemsError, ListItemsResponse2, ReturnType<typeof listItemsQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
@@ -733,6 +810,25 @@ export const moveItemMutation = (options?: Partial<Options<MoveItemData>>): UseM
     const mutationOptions: UseMutationOptions<MoveItemResponse, MoveItemError, Options<MoveItemData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await moveItem({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Purge
+ *
+ * Permanently remove one item's bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.
+ */
+export const purgeItemMutation = (options?: Partial<Options<PurgeItemData>>): UseMutationOptions<PurgeItemResponse, PurgeItemError, Options<PurgeItemData>> => {
+    const mutationOptions: UseMutationOptions<PurgeItemResponse, PurgeItemError, Options<PurgeItemData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await purgeItem({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -881,7 +977,7 @@ export const listProposalsOptions = (options: Options<ListProposalsData>) => que
 /**
  * Propose
  *
- * Create a suggested change set without merging or marking anything reviewed.
+ * Create a suggested change set without merging or marking anything reviewed. A `supply_extraction` change proposes the complete text of an unprocessed source file; it is applied only when a person accepts it and is labelled as supplied by an agent.
  */
 export const openProposalMutation = (options?: Partial<Options<OpenProposalData>>): UseMutationOptions<OpenProposalResponse, OpenProposalError, Options<OpenProposalData>> => {
     const mutationOptions: UseMutationOptions<OpenProposalResponse, OpenProposalError, Options<OpenProposalData>> = {
@@ -1163,7 +1259,7 @@ export const searchItemsQueryKey = (options: Options<SearchItemsData>) => create
 /**
  * Search
  *
- * Search authorized content and return cited snippets, not whole-document dumps.
+ * Search authorized content and return cited snippets, not whole-document dumps. The query may be empty only with a filter; extraction = "unprocessed" lists every source file whose text the converter could not fully extract.
  */
 export const searchItemsOptions = (options: Options<SearchItemsData>) => queryOptions<SearchItemsResponse, SearchItemsError, SearchItemsResponse, ReturnType<typeof searchItemsQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
@@ -1413,9 +1509,28 @@ export const archiveWorkspaceMutation = (options?: Partial<Options<ArchiveWorksp
 };
 
 /**
+ * Back up installation
+ *
+ * Back up the installation's identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only.
+ */
+export const backupInstallationMutation = (options?: Partial<Options<BackupInstallationData>>): UseMutationOptions<BackupInstallationResponse, BackupInstallationError, Options<BackupInstallationData>> => {
+    const mutationOptions: UseMutationOptions<BackupInstallationResponse, BackupInstallationError, Options<BackupInstallationData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await backupInstallation({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
  * Backup
  *
- * Back up content and durable application records.
+ * Back up the workspace's history, retained objects and application records, drafts included, into one self-contained archive. Human administrator session only.
  */
 export const backupWorkspaceMutation = (options?: Partial<Options<BackupWorkspaceData>>): UseMutationOptions<BackupWorkspaceResponse, BackupWorkspaceError, Options<BackupWorkspaceData>> => {
     const mutationOptions: UseMutationOptions<BackupWorkspaceResponse, BackupWorkspaceError, Options<BackupWorkspaceData>> = {
@@ -1453,12 +1568,31 @@ export const createWorkspaceMutation = (options?: Partial<Options<CreateWorkspac
 /**
  * Export
  *
- * Build a portable export with resolvable referenced assets.
+ * Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.
  */
 export const exportWorkspaceMutation = (options?: Partial<Options<ExportWorkspaceData>>): UseMutationOptions<ExportWorkspaceResponse, ExportWorkspaceError, Options<ExportWorkspaceData>> => {
     const mutationOptions: UseMutationOptions<ExportWorkspaceResponse, ExportWorkspaceError, Options<ExportWorkspaceData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await exportWorkspace({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Purge status
+ *
+ * Read a purge's progress and counts; available after the workspace is gone.
+ */
+export const getPurgeMutation = (options?: Partial<Options<GetPurgeData>>): UseMutationOptions<GetPurgeResponse, GetPurgeError, Options<GetPurgeData>> => {
+    const mutationOptions: UseMutationOptions<GetPurgeResponse, GetPurgeError, Options<GetPurgeData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await getPurge({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -1510,14 +1644,52 @@ export const openWorkspaceOptions = (options: Options<OpenWorkspaceData>) => que
 });
 
 /**
+ * Purge
+ *
+ * Permanently remove a workspace's originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.
+ */
+export const purgeWorkspaceMutation = (options?: Partial<Options<PurgeWorkspaceData>>): UseMutationOptions<PurgeWorkspaceResponse, PurgeWorkspaceError, Options<PurgeWorkspaceData>> => {
+    const mutationOptions: UseMutationOptions<PurgeWorkspaceResponse, PurgeWorkspaceError, Options<PurgeWorkspaceData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await purgeWorkspace({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
  * Restore
  *
- * Restore content and durable application records from a retained backup artifact.
+ * Fill a blank workspace from an uploaded workspace archive, keeping item identities; drafts of editors unknown here stay in the archive and are counted. Human administrator session only.
  */
 export const restoreWorkspaceMutation = (options?: Partial<Options<RestoreWorkspaceData>>): UseMutationOptions<RestoreWorkspaceResponse, RestoreWorkspaceError, Options<RestoreWorkspaceData>> => {
     const mutationOptions: UseMutationOptions<RestoreWorkspaceResponse, RestoreWorkspaceError, Options<RestoreWorkspaceData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await restoreWorkspace({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Unarchive
+ *
+ * Return an archived workspace to ordinary listings; its history and records were kept.
+ */
+export const unarchiveWorkspaceMutation = (options?: Partial<Options<UnarchiveWorkspaceData>>): UseMutationOptions<UnarchiveWorkspaceResponse, UnarchiveWorkspaceError, Options<UnarchiveWorkspaceData>> => {
+    const mutationOptions: UseMutationOptions<UnarchiveWorkspaceResponse, UnarchiveWorkspaceError, Options<UnarchiveWorkspaceData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await unarchiveWorkspace({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -1552,7 +1724,7 @@ export const downloadArtifactQueryKey = (options: Options<DownloadArtifactData>)
 /**
  * download_artifact
  *
- * Download a completed authorized export or backup.
+ * Download a completed workspace export, View export or workspace archive. The artifact kind decides the permission and the routes (ArtifactKind::download_permission and download_routes); an archive is served only to a workspace administrator in a human browser session.
  */
 export const downloadArtifactOptions = (options: Options<DownloadArtifactData>) => queryOptions<DownloadArtifactResponse, DefaultError, DownloadArtifactResponse, ReturnType<typeof downloadArtifactQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
@@ -1572,7 +1744,7 @@ export const downloadObjectQueryKey = (options: Options<DownloadObjectData>) => 
 /**
  * download_object
  *
- * Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission.
+ * Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission. Never serves a backup artifact's object.
  */
 export const downloadObjectOptions = (options: Options<DownloadObjectData>) => queryOptions<DownloadObjectResponse, DefaultError, DownloadObjectResponse, ReturnType<typeof downloadObjectQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {

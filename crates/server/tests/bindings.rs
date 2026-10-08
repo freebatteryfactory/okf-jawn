@@ -139,7 +139,8 @@ fn item_document() -> Value {
             "type_name": "note",
             "kind": "note",
             "revision": REVISION,
-            "lifecycle": "active"
+            "status": "stable",
+            "archived": false
         },
         "body": "hello",
         "properties": {}

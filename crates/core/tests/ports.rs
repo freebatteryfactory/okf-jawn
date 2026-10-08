@@ -16,11 +16,11 @@ use okf_jawn_contract::common::{PageRequest, TextRange, Warning};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::{Event, EventKind, Receipt};
 use okf_jawn_contract::identity::{
-    ArtifactId, Digest, ItemId, JobId, MutationId, ProposalId, Revision, TenantId, UploadId,
-    WorkspaceId, WorkspacePath,
+    ArtifactId, Digest, ItemId, JobId, MutationId, ProposalId, Revision, TenantId, Timestamp,
+    UploadId, WorkspaceId, WorkspacePath,
 };
 use okf_jawn_contract::import::{Job, JobKind, JobState};
-use okf_jawn_contract::item::{Draft, ItemKind, Lifecycle};
+use okf_jawn_contract::item::{Draft, ItemKind};
 use okf_jawn_contract::proposal::{Change, Comment, Proposal, ProposalStatus};
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::review::{Confirmation, Review};
@@ -29,8 +29,8 @@ use okf_jawn_contract::transport::TRANSPORTS;
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::conversion::{
-    AssetCaption, CaptionOrigin, ConversionInput, ConversionSettings, ConversionStatus,
-    ConvertedAsset, Converter, OcrPolicy, PixelSize,
+    ConversionInput, ConversionSettings, ConversionStatus, ConvertedAsset, Converter, OcrPolicy,
+    PixelSize,
 };
 use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, NewConnector, SessionRecord, secret_hash,
@@ -45,10 +45,11 @@ use okf_jawn_core::proposals::{CommentPage, ProposalFilter, ProposalStore};
 use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolved, token_hash};
 use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
-    BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
-    DiffQuery, LocalSource, LogQuery, NewWorkspace, ObjectInfo, Page, Promotion, Provenance,
-    StorageScope, TreeEdit, VersionStore, WorkspaceArchive, WorkspaceCatalog, WorkspaceUpdate,
-    derive_item_id, derive_proposal_id, workspace_with_permissions,
+    BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, ChangeContext,
+    CommitChanges, Committed, DiffQuery, LocalSource, LogQuery, NewWorkspace, ObjectInfo, Page,
+    Promotion, Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
+    WorkspaceCatalog, WorkspaceUpdate, derive_item_id, derive_proposal_id,
+    workspace_with_permissions,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 use serde_json::json;
@@ -96,6 +97,10 @@ fn digest(fill: char) -> Result<Digest, Box<dyn Error>> {
 
 fn revision(fill: char) -> Result<Revision, Box<dyn Error>> {
     Ok(Revision::try_from(fill.to_string().repeat(40))?)
+}
+
+fn instant(spelling: &str) -> Result<Timestamp, Box<dyn Error>> {
+    Ok(Timestamp::try_from(spelling.to_owned())?)
 }
 
 fn scope() -> Result<StorageScope, Box<dyn Error>> {
@@ -718,6 +723,16 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
     let new_id = ItemId(Uuid::from_u128(10));
     let existing = ItemId(Uuid::from_u128(11));
     let path = WorkspacePath::try_from("notes/plan.md".to_owned())?;
+    let view = ChangeContext {
+        new_item_id: new_id,
+        new_item_kind: ItemKind::View,
+        proposal_id: ProposalId(Uuid::from_u128(12)),
+        proposer: initiator(),
+    };
+    let note = ChangeContext {
+        new_item_kind: ItemKind::Note,
+        ..view.clone()
+    };
     let created = TreeEdit::from_change(
         Change::Create {
             path: path.clone(),
@@ -725,30 +740,24 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
             body: "# Plan\n".to_owned(),
             properties: BTreeMap::new(),
         },
-        new_id,
-        ItemKind::View,
+        &view,
     );
     assert!(matches!(
         created,
         TreeEdit::CreateItem { item_id, kind: ItemKind::View, title: None, path: created_path, .. }
             if item_id == new_id && created_path == path
     ));
-    let archived = TreeEdit::from_change(
-        Change::Archive { item_id: existing },
-        new_id,
-        ItemKind::Note,
-    );
+    let archived = TreeEdit::from_change(Change::Archive { item_id: existing }, &note);
     assert!(matches!(
         archived,
-        TreeEdit::SetLifecycle { item_id, lifecycle: Lifecycle::Archived } if item_id == existing
+        TreeEdit::SetStatus { item_id, status: None, archived: Some(true) } if item_id == existing
     ));
     let moved = TreeEdit::from_change(
         Change::Move {
             item_id: existing,
             destination: path.clone(),
         },
-        new_id,
-        ItemKind::Note,
+        &note,
     );
     assert!(matches!(
         moved,
@@ -760,12 +769,25 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
             body: "new".to_owned(),
             properties: BTreeMap::new(),
         },
-        new_id,
-        ItemKind::Note,
+        &note,
     );
     assert!(matches!(
         edited,
         TreeEdit::EditItem { item_id, body, .. } if item_id == existing && body == "new"
+    ));
+    let supplied = TreeEdit::from_change(
+        Change::SupplyExtraction {
+            item_id: existing,
+            based_on: None,
+            pages: Vec::new(),
+            markdown: "# Supplied".to_owned(),
+        },
+        &note,
+    );
+    assert!(matches!(
+        supplied,
+        TreeEdit::SupplyExtraction { item_id, proposal_id, supplier, .. }
+            if item_id == existing && proposal_id == note.proposal_id && supplier == initiator()
     ));
     Ok(())
 }
@@ -811,7 +833,8 @@ fn the_application_not_the_catalog_fills_permissions() -> TestResult {
         name: "Team".to_owned(),
         description: "Shared notes".to_owned(),
         head: revision('a')?,
-        created_at: "2026-10-05T00:00:00Z".to_owned(),
+        created_at: instant("2026-10-05T00:00:00.000Z")?,
+        archived_at: None,
         permissions: Vec::new(),
     };
     let shown = workspace_with_permissions(bare, vec![Permission::Read]);
@@ -822,12 +845,20 @@ fn the_application_not_the_catalog_fills_permissions() -> TestResult {
 
 #[test]
 fn conversion_settings_are_typed_and_reject_unknown_keys() -> TestResult {
+    // The contract's settings (Stage 1b design section 3): page renders are on at 144 dpi by
+    // default, and every field is required on the wire.
     let defaults = ConversionSettings::default();
     assert_eq!(defaults.ocr, OcrPolicy::Auto);
     assert!(defaults.table_structure);
-    assert!(!defaults.page_images);
-    let parsed: ConversionSettings =
-        serde_json::from_value(json!({"ocr": "force_full_page", "ocr_language": "de"}))?;
+    assert!(defaults.page_images);
+    assert_eq!(defaults.page_image_dpi, 144);
+    let parsed: ConversionSettings = serde_json::from_value(json!({
+        "ocr": "force_full_page",
+        "ocr_language": "de",
+        "table_structure": true,
+        "page_images": true,
+        "page_image_dpi": 144
+    }))?;
     assert_eq!(
         parsed,
         ConversionSettings {
@@ -835,6 +866,9 @@ fn conversion_settings_are_typed_and_reject_unknown_keys() -> TestResult {
             ocr_language: Some("de".to_owned()),
             ..ConversionSettings::default()
         }
+    );
+    assert!(
+        serde_json::from_value::<ConversionSettings>(json!({"ocr": "force_full_page"})).is_err()
     );
     assert!(serde_json::from_value::<ConversionSettings>(json!({"quality": "high"})).is_err());
     assert!(type_checked(&converter_calls));
@@ -889,7 +923,7 @@ fn a_commit_is_built_from_a_claimed_job_alone() -> TestResult {
         },
         job: Job {
             id: job_id,
-            workspace_id: scope.workspace_id,
+            workspace_id: Some(scope.workspace_id),
             kind: spec.kind(),
             state: JobState::Running,
             progress: 0,
@@ -899,6 +933,7 @@ fn a_commit_is_built_from_a_claimed_job_alone() -> TestResult {
             revision: None,
             item_ids: Vec::new(),
             artifact: None,
+            restore: None,
         },
         mutation_id,
         initiator: initiator(),
@@ -1016,13 +1051,14 @@ fn a_search_query_names_exactly_one_revision() -> TestResult {
 }
 
 #[test]
-fn a_page_of_comments_keeps_its_order_and_cursor() {
+fn a_page_of_comments_keeps_its_order_and_cursor() -> TestResult {
     let page = CommentPage {
         items: vec![Comment {
             id: "c1".to_owned(),
             author: "user_1".to_owned(),
             text: "Why this figure?".to_owned(),
-            created_at: "2026-10-05T00:00:00Z".to_owned(),
+            created_at: instant("2026-10-05T00:00:00.000Z")?,
+            invalidated_by: None,
         }],
         next_cursor: Some("after-c1".to_owned()),
     };
@@ -1032,6 +1068,7 @@ fn a_page_of_comments_keeps_its_order_and_cursor() {
     );
     assert_eq!(page.next_cursor.as_deref(), Some("after-c1"));
     assert!(type_checked(&proposal_calls));
+    Ok(())
 }
 
 #[test]
@@ -1039,7 +1076,7 @@ fn an_artifact_record_yields_the_wire_download_for_its_transport() -> TestResult
     let workspace = WorkspaceId(Uuid::from_u128(1));
     let record = ArtifactRecord {
         id: ArtifactId(Uuid::from_u128(12)),
-        kind: ArtifactKind::Backup,
+        kind: ArtifactKind::WorkspaceBackup,
         object: ObjectInfo {
             digest: digest('c')?,
             size: 2048,
@@ -1057,6 +1094,7 @@ fn an_artifact_record_yields_the_wire_download_for_its_transport() -> TestResult
         .replace("{artifact_id}", &record.id.0.to_string());
     let download = record.download(workspace);
     assert_eq!(download.download_path, expected_path);
+    assert_eq!(download.kind, ArtifactKind::WorkspaceBackup);
     assert_eq!(download.artifact_id, record.id);
     assert_eq!(download.sha256, digest('c')?);
     assert_eq!(download.size, "2048");
@@ -1066,7 +1104,7 @@ fn an_artifact_record_yields_the_wire_download_for_its_transport() -> TestResult
 }
 
 #[test]
-fn a_converted_image_carries_its_size_and_caption_origin() {
+fn a_converted_image_carries_its_size_and_its_own_caption() {
     let asset = ConvertedAsset {
         path: PathBuf::from("out/figure-1.png"),
         media_type: "image/png".to_owned(),
@@ -1075,10 +1113,7 @@ fn a_converted_image_carries_its_size_and_caption_origin() {
             width: 640,
             height: 480,
         }),
-        caption: Some(AssetCaption {
-            text: "Revenue by quarter".to_owned(),
-            origin: CaptionOrigin::Source,
-        }),
+        caption: Some("Revenue by quarter".to_owned()),
     };
     assert_eq!(
         asset.pixel_size,
@@ -1087,13 +1122,13 @@ fn a_converted_image_carries_its_size_and_caption_origin() {
             height: 480,
         })
     );
-    assert_eq!(
-        asset
-            .caption
-            .as_ref()
-            .map(|caption| caption.origin.as_str()),
-        Some("source")
-    );
-    assert_eq!(CaptionOrigin::Process.as_str(), "process");
+    // The caption is the document's own text; no generated caption has a producer
+    // (Stage 1b design section 3), so the origin word is gone.
+    assert_eq!(asset.caption.as_deref(), Some("Revenue by quarter"));
+    let uncaptioned = ConvertedAsset {
+        caption: None,
+        ..asset.clone()
+    };
+    assert_eq!(uncaptioned.caption, None);
     assert_eq!(asset.media_type, "image/png");
 }

@@ -4,6 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Search the workspace at one revision with explicit scope and pagination.
+///
+/// `query` may be empty (or only whitespace) only when `extraction` is set: then every
+/// matching source under `folder` is a hit, ordered by path, with its description as snippet
+/// (`check_rules`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchRequest {
@@ -16,8 +20,11 @@ pub struct SearchRequest {
     /// Limit to a relative folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
-    /// Include historical lifecycle items.
+    /// Include archived items; deprecated items are always searchable.
     pub include_archived: bool,
+    /// Only sources that match; with an empty query, every such source is a hit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<crate::extraction::ExtractionFilter>,
     /// Bounded pagination with an opaque cursor.
     pub page: crate::common::PageRequest,
 }
@@ -34,6 +41,9 @@ pub struct SearchHit {
     pub snippet: String,
     /// Ranking signal, never a truth or trust score.
     pub score: f64,
+    /// For a source: whether its text is partial, supplied by an agent or corrected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<crate::extraction::ExtractionSummary>,
 }
 
 /// A paged authorized search result.

@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-get_purge 1  "get_purge " 
+.SH NAME
+okf\-jawn\-get_purge \- Read a purge\*(Aqs progress and counts; available after the workspace is gone.
+.SH SYNOPSIS
+\fBokf\-jawn get_purge\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Read a purge\*(Aqs progress and counts; available after the workspace is gone.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
