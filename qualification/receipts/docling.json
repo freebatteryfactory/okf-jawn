@@ -1,5 +1,5 @@
 {
-  "git_sha": "2f0fe2d9d99611b1d4149cd43ea2409394a5c798",
+  "git_sha": "54401161d922f30fc7bbedcc39c292939e00f9eb",
   "inputs": [
     "qualification/docling",
     "qualification/docling/criteria.json",
@@ -12,7 +12,7 @@
     "rust-toolchain.toml",
     ".cargo/config.toml"
   ],
-  "produced_at": "2026-10-07T04:58:45.723Z",
+  "produced_at": "2026-10-08T19:42:28.845Z",
   "gate": "docling-library-qualification",
   "result": "PASS",
   "harness_error": null,
@@ -577,7 +577,7 @@
     }
   ],
   "component": "docling-library-qualification",
-  "finished_at": "2026-10-07T05:04:56.347Z",
+  "finished_at": "2026-10-08T19:54:22.128Z",
   "finding": null,
   "scope": {
     "mode": "all",
@@ -981,20 +981,20 @@
       "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin"
     ],
     "peak_rss_bytes": {
-      "sample_with_image.docx": 11587584,
-      "sample_sheet.xlsx": 11272192,
-      "born_digital_text.pdf": 370159616,
-      "scanned_image_only.pdf": 446418944,
-      "scanned_text.pdf": 452939776,
-      "table_heavy.pdf": 754044928,
-      "sample_image.png": 415727616,
-      "text_image.png": 384491520,
-      "corpus/word_sample.docx": 13131776,
-      "corpus/xlsx_01.xlsx": 13832192,
-      "corpus/powerpoint_sample.pptx": 12091392,
-      "corpus/redp5110_sampled.pdf": 2232774656,
+      "sample_with_image.docx": 12451840,
+      "sample_sheet.xlsx": 11046912,
+      "born_digital_text.pdf": 355303424,
+      "scanned_image_only.pdf": 439857152,
+      "scanned_text.pdf": 450531328,
+      "table_heavy.pdf": 750288896,
+      "sample_image.png": 416612352,
+      "text_image.png": 384077824,
+      "corpus/word_sample.docx": 13451264,
+      "corpus/xlsx_01.xlsx": 13836288,
+      "corpus/powerpoint_sample.pptx": 12005376,
+      "corpus/redp5110_sampled.pdf": 2286772224,
       "must_fail_truncated.pdf": 9490432,
-      "timeout_probe": 155107328
+      "timeout_probe": 154198016
     }
   },
   "criterion_rules": {
@@ -1198,7 +1198,7 @@
         "page_images": [],
         "text_layer": null
       },
-      "elapsed_ms": 4,
+      "elapsed_ms": 7,
       "errors": [],
       "finding": null,
       "fixture": "sample_with_image.docx",
@@ -1210,12 +1210,12 @@
       "path": "tests/fixtures/documents/sample_with_image.docx",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmpiMiA5S",
+          "artifacts_dir": "<tmp>/.tmpJlAciW",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpiMiA5S\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpJlAciW\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -1236,7 +1236,7 @@
       "role": "docx_with_images",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 11587584,
+        "peak_rss_bytes": 12451840,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -1380,7 +1380,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 11587584
+          "peak_rss_bytes": 12451840
         }
       },
       "structure": {
@@ -1418,7 +1418,7 @@
         "page_images": [],
         "text_layer": null
       },
-      "elapsed_ms": 1,
+      "elapsed_ms": 2,
       "errors": [],
       "finding": null,
       "fixture": "sample_sheet.xlsx",
@@ -1430,12 +1430,12 @@
       "path": "tests/fixtures/documents/sample_sheet.xlsx",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmpFpvcT8",
+          "artifacts_dir": "<tmp>/.tmpKCccLH",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpFpvcT8\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpKCccLH\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -1456,7 +1456,7 @@
       "role": "xlsx",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 11272192,
+        "peak_rss_bytes": 11046912,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -1654,7 +1654,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 11272192
+          "peak_rss_bytes": 11046912
         }
       },
       "structure": {
@@ -1717,7 +1717,7 @@
           "sha256": "1657391cad358e081a2e49d736f200f7a85b86bee7a9a037943f490cef0544e8"
         }
       },
-      "elapsed_ms": 1792,
+      "elapsed_ms": 3024,
       "errors": [],
       "finding": null,
       "fixture": "born_digital_text.pdf",
@@ -1741,12 +1741,12 @@
       "path": "tests/fixtures/documents/born_digital_text.pdf",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmpTLuVAp",
+          "artifacts_dir": "<tmp>/.tmpSnfGxG",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpTLuVAp\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpSnfGxG\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -1773,7 +1773,7 @@
       "role": "born_digital_pdf",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 370159616,
+        "peak_rss_bytes": 355303424,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -1982,7 +1982,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 370159616
+          "peak_rss_bytes": 355303424
         }
       },
       "structure": {
@@ -2040,7 +2040,7 @@
           "sha256": "0d388b019b04a82a688f117452a39ae335eabc6fdf86125be371df107b5af6dd"
         }
       },
-      "elapsed_ms": 2208,
+      "elapsed_ms": 3619,
       "errors": [],
       "finding": null,
       "fixture": "scanned_image_only.pdf",
@@ -2064,12 +2064,12 @@
       "path": "tests/fixtures/documents/scanned_image_only.pdf",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmpYrP4He",
+          "artifacts_dir": "<tmp>/.tmpH76rdX",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpYrP4He\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpH76rdX\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -2096,7 +2096,7 @@
       "role": "image_only_pdf_without_text",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 446418944,
+        "peak_rss_bytes": 439857152,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -2289,7 +2289,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 446418944
+          "peak_rss_bytes": 439857152
         }
       },
       "structure": {
@@ -2349,7 +2349,7 @@
           "sha256": "d65e98c436ba56ebcfeb244bf0589f1ba665904cccc2ca85e459034c75b4426a"
         }
       },
-      "elapsed_ms": 2075,
+      "elapsed_ms": 3321,
       "errors": [],
       "finding": null,
       "fixture": "scanned_text.pdf",
@@ -2373,12 +2373,12 @@
       "path": "tests/fixtures/documents/scanned_text.pdf",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmpk3qLON",
+          "artifacts_dir": "<tmp>/.tmp7qqgS2",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpk3qLON\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmp7qqgS2\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -2405,7 +2405,7 @@
       "role": "scanned_pdf_with_text",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 452939776,
+        "peak_rss_bytes": 450531328,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -2634,7 +2634,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 452939776
+          "peak_rss_bytes": 450531328
         }
       },
       "structure": {
@@ -2692,7 +2692,7 @@
           "sha256": "0b7a66e56b563e626b8bce581bb9971a943998e9372a4f4ecdfa91647bf25ed1"
         }
       },
-      "elapsed_ms": 2788,
+      "elapsed_ms": 6098,
       "errors": [],
       "finding": null,
       "fixture": "table_heavy.pdf",
@@ -2716,12 +2716,12 @@
       "path": "tests/fixtures/documents/table_heavy.pdf",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmpCwnxxe",
+          "artifacts_dir": "<tmp>/.tmpsdvsdM",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpCwnxxe\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpsdvsdM\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -2748,7 +2748,7 @@
       "role": "table_heavy_pdf",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 754044928,
+        "peak_rss_bytes": 750288896,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -3056,7 +3056,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 754044928
+          "peak_rss_bytes": 750288896
         }
       },
       "structure": {
@@ -3110,7 +3110,7 @@
         ],
         "text_layer": null
       },
-      "elapsed_ms": 1790,
+      "elapsed_ms": 3614,
       "errors": [],
       "finding": null,
       "fixture": "sample_image.png",
@@ -3122,12 +3122,12 @@
       "path": "tests/fixtures/documents/sample_image.png",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmp1NkUvi",
+          "artifacts_dir": "<tmp>/.tmpwuGrGd",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmp1NkUvi\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpwuGrGd\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -3148,7 +3148,7 @@
       "role": "image_without_text",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 415727616,
+        "peak_rss_bytes": 416612352,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -3304,7 +3304,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 415727616
+          "peak_rss_bytes": 416612352
         }
       },
       "structure": {
@@ -3360,7 +3360,7 @@
         ],
         "text_layer": null
       },
-      "elapsed_ms": 2092,
+      "elapsed_ms": 3803,
       "errors": [],
       "finding": null,
       "fixture": "text_image.png",
@@ -3372,12 +3372,12 @@
       "path": "tests/fixtures/documents/text_image.png",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmpCseTtp",
+          "artifacts_dir": "<tmp>/.tmpRFC71s",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpCseTtp\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpRFC71s\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -3398,7 +3398,7 @@
       "role": "image_with_text",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 384491520,
+        "peak_rss_bytes": 384077824,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -3600,7 +3600,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 384491520
+          "peak_rss_bytes": 384077824
         }
       },
       "structure": {
@@ -3643,7 +3643,7 @@
         "page_images": [],
         "text_layer": null
       },
-      "elapsed_ms": 6,
+      "elapsed_ms": 14,
       "errors": [],
       "finding": null,
       "fixture": "word_sample.docx",
@@ -3655,12 +3655,12 @@
       "path": "tests/fixtures/documents/corpus/word_sample.docx",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmpLBMlqH",
+          "artifacts_dir": "<tmp>/.tmp92ld4I",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpLBMlqH\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmp92ld4I\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -3681,7 +3681,7 @@
       "role": "corpus_docx",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 13131776,
+        "peak_rss_bytes": 13451264,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -3956,7 +3956,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 13131776
+          "peak_rss_bytes": 13451264
         }
       },
       "structure": {
@@ -3994,7 +3994,7 @@
         "page_images": [],
         "text_layer": null
       },
-      "elapsed_ms": 4,
+      "elapsed_ms": 6,
       "errors": [],
       "finding": null,
       "fixture": "xlsx_01.xlsx",
@@ -4006,12 +4006,12 @@
       "path": "tests/fixtures/documents/corpus/xlsx_01.xlsx",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmpDDFRiq",
+          "artifacts_dir": "<tmp>/.tmpl53Qsk",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpDDFRiq\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpl53Qsk\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -4032,7 +4032,7 @@
       "role": "corpus_xlsx",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 13832192,
+        "peak_rss_bytes": 13836288,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -4290,7 +4290,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 13832192
+          "peak_rss_bytes": 13836288
         }
       },
       "structure": {
@@ -4361,7 +4361,7 @@
         "page_images": [],
         "text_layer": null
       },
-      "elapsed_ms": 3,
+      "elapsed_ms": 4,
       "errors": [],
       "finding": null,
       "fixture": "powerpoint_sample.pptx",
@@ -4373,12 +4373,12 @@
       "path": "tests/fixtures/documents/corpus/powerpoint_sample.pptx",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmpguRsNh",
+          "artifacts_dir": "<tmp>/.tmpWv0sVu",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpguRsNh\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpWv0sVu\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -4399,7 +4399,7 @@
       "role": "corpus_pptx",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 12091392,
+        "peak_rss_bytes": 12005376,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -4658,7 +4658,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 12091392
+          "peak_rss_bytes": 12005376
         }
       },
       "structure": {
@@ -4903,7 +4903,7 @@
           "sha256": "5d37549d3388f1bb7a6c602078c1207034fe6a08b8b2d8cf26fbb2df717c626a"
         }
       },
-      "elapsed_ms": 9523,
+      "elapsed_ms": 15985,
       "errors": [],
       "finding": null,
       "fixture": "redp5110_sampled.pdf",
@@ -4927,12 +4927,12 @@
       "path": "tests/fixtures/documents/corpus/redp5110_sampled.pdf",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmp8gBVKL",
+          "artifacts_dir": "<tmp>/.tmp4EsrKm",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmp8gBVKL\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmp4EsrKm\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -5074,7 +5074,7 @@
       "role": "corpus_pdf",
       "conversion_outcome": "PASS",
       "memory": {
-        "peak_rss_bytes": 2232774656,
+        "peak_rss_bytes": 2286772224,
         "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
         "limit_bytes": null,
         "limit_applied": false
@@ -9287,7 +9287,7 @@
         },
         "memory_measured": {
           "result": "pass",
-          "peak_rss_bytes": 2232774656
+          "peak_rss_bytes": 2286772224
         }
       },
       "structure": {
@@ -9439,7 +9439,7 @@
         "version_source": "environment variable OKF_DOCLING_CRATE_VERSION, which run.mjs sets from the docling entry of Cargo.lock"
       },
       "document": null,
-      "elapsed_ms": 0,
+      "elapsed_ms": 1,
       "errors": [
         {
           "component_type": "converter",
@@ -9460,12 +9460,12 @@
       "path": "tests/fixtures/documents/must_fail_truncated.pdf",
       "settings": {
         "applied": {
-          "artifacts_dir": "<tmp>/.tmp7AI43K",
+          "artifacts_dir": "<tmp>/.tmpBsqqAZ",
           "document_timeout_ms": null,
           "generate_page_images": true,
           "ocr_lang": "en"
         },
-        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmp7AI43K\", document_timeout: None }",
+        "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpBsqqAZ\", document_timeout: None }",
         "environment": {
           "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
           "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -9549,7 +9549,7 @@
         "sha256": "0d388b019b04a82a688f117452a39ae335eabc6fdf86125be371df107b5af6dd"
       }
     },
-    "elapsed_ms": 1031,
+    "elapsed_ms": 2373,
     "errors": [
       {
         "component_type": "document_backend",
@@ -9579,12 +9579,12 @@
     "path": "tests/fixtures/documents/scanned_image_only.pdf",
     "settings": {
       "applied": {
-        "artifacts_dir": "<tmp>/.tmpZ94mcj",
+        "artifacts_dir": "<tmp>/.tmpnFCxqk",
         "document_timeout_ms": 1,
         "generate_page_images": true,
         "ocr_lang": "en"
       },
-      "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpZ94mcj\", document_timeout: Some(1ms) }",
+      "converter_debug": "DocumentConverter { allowed_formats: None, strict: false, fetch_images: false, list_attachments: false, skip_empty_cells: false, compact_tables: false, page_break_placeholder: None, ebcdic_layout: None, no_table_former: false, no_text_panels: false, no_ocr: false, skip_ocr: false, force_full_page_ocr: false, ocr_mode: None, ocr_engine: None, ocr_scale: None, images_scale: None, generate_page_images: true, heading_hierarchy: false, use_web_browser: false, asr_model: None, asr_lang: None, video_frames: None, xbrl_taxonomy: None, enrich: EnrichmentOptions { picture_classification: false, code: false, formula: false }, page_range: None, ocr_lang: Some(\"en\"), encoding: None, artifacts_dir: \"<tmp>/.tmpnFCxqk\", document_timeout: Some(1ms) }",
       "environment": {
         "DOCLING_LAYOUT_ONNX": "~/.cache/okf-jawn/docling/models/layout_heron_int8.onnx",
         "DOCLING_OCR_DET_ONNX": "~/.cache/okf-jawn/docling/models/ocr_det.onnx",
@@ -9611,7 +9611,7 @@
     "role": "timeout_probe",
     "conversion_outcome": "PASS",
     "memory": {
-      "peak_rss_bytes": 155107328,
+      "peak_rss_bytes": 154198016,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "limit_bytes": null,
       "limit_applied": false
@@ -9640,7 +9640,7 @@
       },
       "memory_measured": {
         "result": "pass",
-        "peak_rss_bytes": 155107328
+        "peak_rss_bytes": 154198016
       }
     },
     "failed_criteria": [],
@@ -9653,7 +9653,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 11587584,
+      "peak_rss_bytes": 12451840,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "c5d14d73a937639879f5eccedc47adc018f6ae9efa3e9fcdaa13a1673016926d"
     },
@@ -9663,7 +9663,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 11272192,
+      "peak_rss_bytes": 11046912,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "0252d3ee13c437ea05fe0eeb7845de9282ed48fcd6844096103052cba6909f7c"
     },
@@ -9673,7 +9673,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 370159616,
+      "peak_rss_bytes": 355303424,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "acde81c816b45c5bb0927a5455cd18d40fa87b3cad0013e48246cbb97086d55a"
     },
@@ -9683,7 +9683,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 446418944,
+      "peak_rss_bytes": 439857152,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "fd97c569c96415434522928b768798f3029d55da4491af9eb9fb0c097ad3b156"
     },
@@ -9693,7 +9693,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 452939776,
+      "peak_rss_bytes": 450531328,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "daaa51925d9b5329c3a9beb4f90b82aee12ef673c077ca4d18042c82b6bd772b"
     },
@@ -9703,7 +9703,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 754044928,
+      "peak_rss_bytes": 750288896,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "289b3edcff242a9f09885e42054e5d48e9d4e00aba75e444dc76812e212b5fb0"
     },
@@ -9713,7 +9713,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 415727616,
+      "peak_rss_bytes": 416612352,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "ee58dcd55838fb2a29cb0aa5fda557cab12dbfeb56767ed5c1796bccba714fd9"
     },
@@ -9723,7 +9723,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 384491520,
+      "peak_rss_bytes": 384077824,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "da3fb22e859422707ccb4ffaf22deefa6ba06548613511b7c1a0b847b206b441"
     },
@@ -9733,7 +9733,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 13131776,
+      "peak_rss_bytes": 13451264,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "5cc21d04dece10bef9f3d23890fee66726ec27d03003dded46ebe2f9fcb90bf8"
     },
@@ -9743,7 +9743,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 13832192,
+      "peak_rss_bytes": 13836288,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "efd0df5fffd62f905778c4f1b1f4b67a29874589a623da944718a9f39f1b6c8b"
     },
@@ -9753,7 +9753,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 12091392,
+      "peak_rss_bytes": 12005376,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "4cd088a5c4906569ac0c64afb359585e293ae7ba6c00a744134f4ce716b77685"
     },
@@ -9763,7 +9763,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 2232774656,
+      "peak_rss_bytes": 2286772224,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "8f24d5bcfc421825c816c7734114875a3b05de21d2adf992d7323a43fc1bee8a"
     },
@@ -9783,7 +9783,7 @@
       "signal": null,
       "timed_out": false,
       "done": true,
-      "peak_rss_bytes": 155107328,
+      "peak_rss_bytes": 154198016,
       "peak_rss_note": "PeakWorkingSet64 of the converter process, read once via Get-Process while it waited on stdin",
       "stdout_sha256": "f0ea1934a4fc6aad8485652419b6c98f4f58f60c3d18245579b6b8b011b63d04"
     }
