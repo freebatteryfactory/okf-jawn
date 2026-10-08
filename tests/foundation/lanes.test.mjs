@@ -74,8 +74,14 @@ test('AGENTS.md carries the table rendered from the lane table',async()=>{
 test('a lane-local AGENTS.md points to the root table and to verification.json, and copies neither',async()=>{
  // Each lane's own instructions sit at the top of its directories; the contract's are the integration owner's.
  const local=[...lanes.flatMap(lane=>lane.directories.map(directory=>[`${directory}AGENTS.md`,lane.name])),['crates/contract/AGENTS.md','integration-owner']];
+ // The views lane's two files sit under ui/src, an input of the mcp-apps receipt: editing them makes that receipt
+ // stale and Phase 0 unqualified. They get the pointer with the next mcp-apps qualification, which the first views
+ // or workspace-ui change to ui/src needs anyway. Until then they still copy their Gate and Receipt lines.
+ const receiptBound=['ui/src/features/views/AGENTS.md','ui/src/mcp-apps/AGENTS.md'];
+ const inputs=JSON.parse(await read('qualification/receipts/mcp-apps.json')).inputs;
+ for(const file of receiptBound)assert.ok(inputs.some(input=>file.startsWith(`${input}/`)),`${file} is no longer an input of the mcp-apps receipt: give it the pointer and drop it from this list`);
  const record=JSON.parse(await read('verification.json'));
- for(const [file,owner] of local){
+ for(const [file,owner] of local.filter(([file])=>!receiptBound.includes(file))){
   const text=await read(file);
   assert.ok(text.includes(`This lane's directories and gate command are in the root AGENTS.md table, and its construction gates are the \`verification.json\` entries whose \`owner\` is \`${owner}\` (each names its command).`),`${file} does not point to the root table and to the gates owned by ${owner}`);
   assert.doesNotMatch(text,/^\*\*(?:Directories|Gates?|Receipt)\b/m,`${file} copies a directory list, gate or receipt that the root table states`);

@@ -2,7 +2,11 @@
 
 Read root AGENTS.md and SPEC.md.
 
-This lane's directories and gate command are in the root AGENTS.md table, and its construction gates are the `verification.json` entries whose `owner` is `views` (each names its command). Rendering in a host is the MCP Apps qualification, not this lane's unit results.
+**Directories:** `ui/src/features/views/`
+
+**Gate:** `bun --bun run --cwd ui test` (views specs) and Views export/present paths
+
+**Receipt:** cited saved View render/table/export unit results; host render remains mcp-apps qualification
 
 Own cited saved Views, json-render catalog/renderer, Vega-Lite interpreter/chart/table, source resolution and export. No agent-written source text or retyped authoritative numbers. Pinned views do not silently refresh; live results show resolved revisions. Complete catalog chart bindings and ranges, not just a chart-shaped mock.
 
