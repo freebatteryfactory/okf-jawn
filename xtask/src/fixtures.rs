@@ -35,6 +35,7 @@ pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn std::error::Error
             revision: Revision::try_from("a".repeat(40))?,
         },
         folder: String::new(),
+        extraction: None,
         page: PageRequest {
             cursor: None,
             limit: 50,

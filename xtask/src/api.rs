@@ -14,6 +14,7 @@ use okf_jawn_contract::health::HealthResponse;
 use okf_jawn_contract::import::Upload;
 use okf_jawn_contract::metadata::{OperationInfo, operations};
 use okf_jawn_contract::transport::{TransportAuth, TransportOperation};
+use okf_jawn_contract::views::Dataset;
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde_json::{Map, Value, json};
 
@@ -55,11 +56,15 @@ struct Registered {
 }
 
 /// Types the document refers to outside the operation table.
+///
+/// `Dataset` is in no operation's schema: a View's dataset is fetched as bytes through
+/// `read_object` and parsed with the generated `zDataset`, so it is registered on its own.
 struct SharedTypes {
     api_error: Registered,
     upload: Registered,
     resource_metadata: Registered,
     health: Registered,
+    dataset: Registered,
 }
 
 const COMPONENT_PREFIX: &str = "#/components/schemas/";
@@ -81,6 +86,7 @@ pub(crate) fn generate(directory: &Path) -> Result<(), Box<dyn Error>> {
         upload: register::<Upload>()?,
         resource_metadata: register::<ResourceMetadata>()?,
         health: register::<HealthResponse>()?,
+        dataset: register::<Dataset>()?,
     };
     let document = openapi_document(&typed, &shared)?;
     write_json(&directory.join("openapi.json"), &document)?;
@@ -131,6 +137,7 @@ fn openapi_document(
         &shared.upload,
         &shared.resource_metadata,
         &shared.health,
+        &shared.dataset,
     ];
     let declared = typed
         .iter()
@@ -223,6 +230,10 @@ fn write_forms(directory: &Path) -> Result<(), Box<dyn Error>> {
     write_json(
         &directory.join("type.schema.json"),
         &form_schema::<okf_jawn_contract::item::TypeDefinition>()?,
+    )?;
+    write_json(
+        &directory.join("dataset.schema.json"),
+        &form_schema::<Dataset>()?,
     )?;
     Ok(())
 }
@@ -778,6 +789,40 @@ mod tests {
     }
 
     #[test]
+    fn the_dataset_is_a_component_and_a_form_though_no_operation_names_it() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        super::generate(directory.path())?;
+        let api = read(&directory.path().join("openapi.json"))?;
+        assert!(
+            api.pointer("/components/schemas/Dataset").is_some(),
+            "Hey API generates zDataset only from a component"
+        );
+        let form = read(&directory.path().join("forms").join("dataset.schema.json"))?;
+        assert_eq!(form.get("title"), Some(&json!("Dataset")));
+        let validator = jsonschema::validator_for(&form)?;
+        let dataset = json!({
+            "schema_version": 1,
+            "source": {
+                "workspace_id": "11111111-1111-4111-8111-111111111111",
+                "item_id": "22222222-2222-4222-8222-222222222222",
+                "path": "data/q3.xlsx",
+                "revision": "a".repeat(40),
+                "selection": {"kind": "all"}
+            },
+            "text_origin": "converter",
+            "columns": [{"name": "revenue", "kind": "number"}],
+            "rows": [[1.5], [null]]
+        });
+        assert!(validator.is_valid(&dataset));
+        let mut no_columns = dataset;
+        if let Some(columns) = no_columns.get_mut("columns") {
+            *columns = json!([]);
+        }
+        assert!(!validator.is_valid(&no_columns), "a dataset has a column");
+        Ok(())
+    }
+
+    #[test]
     fn workspace_path_schema_accepts_and_rejects_through_the_generated_schema()
     -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
@@ -808,7 +853,9 @@ mod tests {
                 "{path:?} must be accepted"
             );
         }
-        for path in ["", "/client", "a//b", "a/", "C:/docs", "a\\b", "a\nb"] {
+        for path in [
+            "", "/client", "a//b", "a/", "C:/docs", "a\\b", "a\nb", "a<b", "a|b", "why?",
+        ] {
             assert!(
                 !validator.is_valid(&request(path)),
                 "{path:?} must be rejected"
