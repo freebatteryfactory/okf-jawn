@@ -275,9 +275,11 @@ test('the Docling gate accepts no failure, its PDF crate is the fork the owner d
  const owners=new Set(['integration-owner',...lanes.map(entry=>entry.name)]);
  for(const gate of gates.construction)assert.ok(owners.has(gate.owner),`${gate.id}: owner ${gate.owner} is no lane of scripts/lib/lanes.mjs and not integration-owner`);
  for(const gate of gates.acceptance)assert.ok(gate.owner===undefined||owners.has(gate.owner),`${gate.id}: owner ${gate.owner} is no lane of scripts/lib/lanes.mjs and not integration-owner`);
- // The ingest lane is told: its gate table lists both gates, and its rules name the harness functions as the reference.
+ // The ingest lane is told: its instructions send it to the gates it owns (the two above among them, each with
+ // its command) instead of copying them, and its rules name the harness functions as the reference.
  const lane=await read('crates/ingest/AGENTS.md');
- for(const id of ['ingest-locates-unlocated-items','ingest-flags-undecodable-text'])assert.ok(lane.includes(`| \`${id}\` | \`${construction[id].receipt}\` |`),`crates/ingest/AGENTS.md does not list ${id} with its command`);
+ assert.ok(lane.includes("This lane's directories and gate command are in the root AGENTS.md table, and its construction gates are the `verification.json` entries whose `owner` is `ingest` (each names its command)."),'crates/ingest/AGENTS.md does not point to its gates');
+ for(const id of ['ingest-locates-unlocated-items','ingest-flags-undecodable-text'])assert.match(construction[id].receipt,/^cargo test -p okf-jawn-ingest --features runtime -- [a-z_]+$/,`${id} does not name its command`);
  assert.match(lane,/`locate::locate_items`/);
  assert.match(lane,/`glyphs::undecoded_glyphs`/);
  for(const name of ['locate_items','undecoded_glyphs','placeholder_glyph_tokens'])assert.match(await read(`qualification/docling/src/${name==='locate_items'?'locate':'glyphs'}.rs`),new RegExp(`pub\\(crate\\) fn ${name}\\(`),`${name} is not a function of the harness`);

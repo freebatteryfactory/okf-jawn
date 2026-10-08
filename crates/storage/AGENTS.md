@@ -2,18 +2,7 @@
 
 Read root AGENTS.md and SPEC.md.
 
-**Directories:** `crates/storage/`
-
-**Gates** (construction gates in `verification.json` owned by this lane):
-
-| Gate | Command |
-| --- | --- |
-| `storage-git-cas-sqlite` | `cargo test -p okf-jawn-storage --features runtime` |
-| `mutation-crash-reconcile` | `cargo test -p okf-jawn-storage --features runtime -- mutation_crash_reconcile` |
-| `confirmation-single-use` | `cargo test -p okf-jawn-storage --features runtime -- confirmation_single_use` |
-| `draft-per-editor` | `cargo test -p okf-jawn-storage --features runtime -- draft_per_editor` |
-
-**Receipt:** every port below passes its tests against real Git, SQLite and the local object store; rebuilding search never touches jobs, reviews or receipts.
+This lane's directories and gate command are in the root AGENTS.md table, and its construction gates are the `verification.json` entries whose `owner` is `storage` (each names its command). Every port below is tested against real Git, SQLite and the local object store.
 
 ## Ports to implement
 
