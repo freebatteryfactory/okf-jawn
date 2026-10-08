@@ -4,6 +4,8 @@
 //! touches jobs, reviews, or receipts, which live only in `RecordStore` and cannot be rebuilt.
 //! Every query names exactly one resolved `Revision`; drafts are never indexed.
 
+use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::extraction::ExtractionFilter;
 use okf_jawn_contract::identity::{ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::search::{
     GetGraphResponse, GetLinksResponse, LinkDirection, SearchResponse,
@@ -17,12 +19,16 @@ use crate::storage::{Page, StorageScope};
 pub struct SearchQuery {
     /// Revision to search.
     pub revision: Revision,
-    /// Search expression typed by the caller; never executable SQL.
+    /// Search expression typed by the caller; never executable SQL. Empty only with an
+    /// `extraction` filter, which then lists every matching source (`SearchQuery::check`).
     pub text: String,
     /// Limit results to this folder and the folders beneath it.
     pub folder: Option<WorkspacePath>,
-    /// Include archived and deprecated items.
+    /// Include archived items. Deprecated items are always searchable.
     pub include_archived: bool,
+    /// Only sources whose converter status the filter names; the index stores each source's
+    /// `ExtractionStatus` and each item's archived flag.
+    pub extraction: Option<ExtractionFilter>,
     /// Bounded page.
     pub page: Page,
 }
@@ -82,4 +88,21 @@ pub trait SearchIndex: Send + Sync {
     ) -> PortFuture<'a, GetGraphResponse>;
     /// Discard and recreate this workspace's derived index data from retained content at `head`.
     fn rebuild<'a>(&'a self, scope: &'a StorageScope, head: Revision) -> PortFuture<'a, ()>;
+}
+
+impl SearchQuery {
+    /// Refuse a query with neither text nor a filter: it would list the whole revision.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` on `/text` when the text is blank and there is no filter.
+    pub fn check(&self) -> Result<(), ApiError> {
+        if self.text.trim().is_empty() && self.extraction.is_none() {
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                "a search needs text, or an extraction filter to list matching sources",
+            )
+            .with_field("/text"));
+        }
+        Ok(())
+    }
 }

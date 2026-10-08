@@ -6,11 +6,15 @@ use std::pin::Pin;
 
 use okf_jawn_contract::access::{AccessRoute, DelegationCeiling, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::identity::IdentityError;
+use okf_jawn_contract::import::JobKind;
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::operations::DRAFT_BEARING;
+use okf_jawn_core::access::authorize_job_kind;
 use okf_jawn_core::context::Attempt;
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
+use okf_jawn_core::events::EventScope;
 use okf_jawn_core::mutations::request_digest;
 use okf_jawn_core::storage::StorageScope;
 use serde_json::{Value, json};
@@ -68,6 +72,7 @@ fn dispatch_ports(ports: &FixturePorts) -> DispatchPorts<'_> {
     DispatchPorts {
         access: ports.access.as_ref(),
         mutations: ports.mutations.as_ref(),
+        events: ports.events.as_ref(),
     }
 }
 
@@ -1396,6 +1401,101 @@ async fn an_invalid_input_message_echoes_a_bounded_part_of_the_value() -> TestRe
     let refused = err_of(call(&app, &ports, &alice, "list_items", short).await)?;
     assert!(refused.message.contains("ten"));
     assert!(!refused.message.ends_with('…'));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_grant_refusal_is_recorded_as_permission_denied() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_B, KEY_ONE, "hello");
+    let refused = err_of(call(&app, &ports, &alice, "create_item", body).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    let appended = ports.events.appended()?;
+    let (scope, event) = some(appended.first(), "the refusal event")?;
+    assert_eq!(appended.len(), 1);
+    assert_eq!(
+        scope,
+        &EventScope::Workspace(StorageScope {
+            tenant_id: tenant("tenant-local")?,
+            workspace_id: workspace(WORKSPACE_B)?,
+        })
+    );
+    assert_eq!(event.kind, EventKind::PermissionDenied);
+    assert_eq!(event.operation, Some(OperationName::CreateItem));
+    assert_eq!(
+        event.actor.as_ref().map(|actor| actor.subject.as_str()),
+        Some("alice")
+    );
+    // A request the schema refuses is not an authorization refusal and records nothing.
+    let invalid = err_of(call(&app, &ports, &alice, "create_item", json!({})).await)?;
+    assert_eq!(invalid.code, ErrorCode::InvalidInput);
+    assert_eq!(ports.events.appended()?.len(), 1);
+    Ok(())
+}
+
+/// Bob writes on A without admin; Carol administers A.
+fn ports_writer_and_admin() -> Result<FixturePorts, serde_json::Error> {
+    let mut table = GrantTable::default();
+    table
+        .workspaces
+        .entry("bob".to_owned())
+        .or_default()
+        .insert(
+            workspace(WORKSPACE_A)?,
+            vec![Permission::Read, Permission::Write],
+        );
+    table
+        .workspaces
+        .entry("carol".to_owned())
+        .or_default()
+        .insert(workspace(WORKSPACE_A)?, all_permissions());
+    Ok(FixturePorts::new(table))
+}
+
+#[tokio::test]
+async fn retrying_or_cancelling_a_backup_or_restore_job_needs_a_human_admin() -> TestResult {
+    let ports = ports_writer_and_admin()?;
+    let access = ports.access.as_ref();
+    let a = workspace(WORKSPACE_A)?;
+    let writer = principal("bob", AccessRoute::BrowserSession)?;
+    let admin = principal("carol", AccessRoute::BrowserSession)?;
+    let admin_connector = connector("carol", all_permissions())?;
+    let admin_service = principal("carol", AccessRoute::Service)?;
+    for kind in [JobKind::BackupWorkspace, JobKind::RestoreWorkspace] {
+        // A write-only browser session is refused: the starting operation needs admin.
+        let refused = err_of(authorize_job_kind(access, &writer, a, kind).await)?;
+        assert_eq!(refused.code, ErrorCode::Forbidden, "{kind:?}");
+        // Admin on an agent or service route is refused: the starting operation is human-only.
+        for agent in [&admin_connector, &admin_service] {
+            let refused = err_of(authorize_job_kind(access, agent, a, kind).await)?;
+            assert_eq!(
+                refused.code,
+                ErrorCode::Forbidden,
+                "{kind:?} via {:?}",
+                agent.route
+            );
+        }
+        // Admin in a browser session succeeds.
+        let grant = authorize_job_kind(access, &admin, a, kind).await?;
+        assert!(grant.allows(Permission::Admin));
+    }
+    // An import job still needs only write, on any route that may write.
+    authorize_job_kind(access, &writer, a, JobKind::Import).await?;
+    // A rebuild needs admin, but not a human session.
+    let refused = err_of(authorize_job_kind(access, &writer, a, JobKind::RebuildIndex).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    authorize_job_kind(access, &admin_service, a, JobKind::RebuildIndex).await?;
+    // Tenant jobs are never reached through a workspace's retry or cancel.
+    for kind in [
+        JobKind::BackupInstallation,
+        JobKind::PurgeWorkspace,
+        JobKind::PurgeItem,
+    ] {
+        let hidden = err_of(authorize_job_kind(access, &admin, a, kind).await)?;
+        assert_eq!(hidden.code, ErrorCode::NotFound, "{kind:?}");
+    }
     Ok(())
 }
 

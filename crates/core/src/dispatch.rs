@@ -8,8 +8,10 @@
 //! failure to serialize the response, to build the ledger body, or in `complete` itself also
 //! releases the lease, and the caller receives the first error, never the release's.
 //! A request that declares no target is refused as `Internal` before any grant is looked up,
-//! and so is a draft-bearing operation on a route that is not a human browser session
-//! (`access::check_draft_route`, refused as `Forbidden`). A grant is used only when it is for
+//! and so is a draft-bearing, backup, restore or purge operation on a route that is not a human
+//! session (`access::check_human_route`, refused as `Forbidden`). Every `Forbidden` from
+//! authorization is recorded as a `permission_denied` event, in the log of the first workspace
+//! the request names or else the tenant's, before the refusal is returned. A grant is used only when it is for
 //! the workspace and tenant that were asked for. The ledger never inspects other stores: a
 //! resumed attempt re-runs the handler under the same `MutationId`, and what the ledger
 //! retains is decided by the request's `ReplayPolicy`.
@@ -33,8 +35,10 @@ use uuid::Uuid;
 
 use crate::access::{self, AccessControl};
 use crate::context::{Attempt, OperationContext, TenantGrant, WorkspaceGrant};
+use crate::events::{EventLog, EventScope, NewEvent};
 use crate::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore, request_digest};
 use crate::ports::Application;
+use crate::storage::StorageScope;
 
 macro_rules! dispatch_operations {
     ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
@@ -56,7 +60,15 @@ macro_rules! dispatch_operations {
                     let request: $request = decode_validated(input, &VALIDATOR)?;
                     request.check_rules()?;
                     let mut context =
-                        authorize_targets(ports.access, caller, operation, &request).await?;
+                        match authorize_targets(ports.access, caller, operation, &request).await {
+                            Ok(context) => context,
+                            Err(refused) => {
+                                return Err(
+                                    record_denial(ports.events, caller.principal, operation, &request, refused)
+                                        .await,
+                                );
+                            }
+                        };
                     let replay = <$request as RequestScope>::REPLAY;
                     match prepare_mutation(ports, &mut context, replay, &request).await? {
                         MutationGate::Run(lease) => {
@@ -87,6 +99,8 @@ pub struct DispatchPorts<'a> {
     pub access: &'a dyn AccessControl,
     /// Idempotency ledger.
     pub mutations: &'a dyn MutationStore,
+    /// Where a refusal of an authenticated caller is recorded as `permission_denied`.
+    pub events: &'a dyn EventLog,
 }
 
 enum MutationGate {
@@ -267,8 +281,9 @@ async fn authorize_targets(
             "Request declares no authorization target",
         ));
     }
-    // No grant lets an agent route see a draft, so this runs before any grant is looked up.
-    access::check_draft_route(principal, operation)?;
+    // No grant lets an agent route see a draft or back up, restore or purge, so this runs
+    // before any grant is looked up.
+    access::check_human_route(principal, operation)?;
     for target in targets {
         match target {
             // Any signed-in principal; the handler filters its result by grants.
@@ -300,6 +315,44 @@ async fn authorize_targets(
         mutation: None,
         attempt: Attempt::First,
     })
+}
+
+/// Record a `Forbidden` authorization refusal of an authenticated caller and return the
+/// refusal unchanged.
+///
+/// The event goes to the log of the first workspace the request names, or to the tenant's when
+/// it names none. Other errors are returned without an event. The refusal is the answer: a
+/// failed append does not turn it into another error, so a caller cannot learn whether the log
+/// is writable from the code it receives.
+async fn record_denial(
+    events: &dyn EventLog,
+    principal: &Principal,
+    operation: OperationName,
+    request: &impl RequestScope,
+    refused: ApiError,
+) -> ApiError {
+    if refused.code != ErrorCode::Forbidden {
+        return refused;
+    }
+    let scope = request
+        .targets()
+        .into_iter()
+        .find_map(|target| match target {
+            Target::Workspace(workspace_id, _) => Some(EventScope::Workspace(StorageScope {
+                tenant_id: principal.tenant_id.clone(),
+                workspace_id,
+            })),
+            Target::Authenticated | Target::Deployment(_) => None,
+        })
+        .unwrap_or_else(|| EventScope::Tenant(principal.tenant_id.clone()));
+    let _recorded = events
+        .append(
+            &scope,
+            None,
+            NewEvent::permission_denied(principal, operation),
+        )
+        .await;
+    refused
 }
 
 /// Refuse a workspace grant the adapter returned for a workspace or tenant that was not asked.

@@ -21,6 +21,7 @@ use okf_jawn_contract::identity::{
 };
 use okf_jawn_contract::import::{Job, JobKind, JobState};
 use okf_jawn_contract::item::{Draft, ItemKind};
+use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::proposal::{Change, Comment, Proposal, ProposalStatus};
 use okf_jawn_contract::purge::PurgeTarget;
 use okf_jawn_contract::read::AssetRole;
@@ -38,7 +39,7 @@ use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, NewConnector, SessionRecord, secret_hash,
 };
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
-use okf_jawn_core::events::{EventLog, EventQuery, NewEvent};
+use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
 use okf_jawn_core::jobs::{
     ArtifactKind, ArtifactRecord, ClaimedJob, DerivedObject, JobCompletion, JobHandler, JobLease,
     JobQueue, JobScope, JobSpec, NewArtifact, NewJob, NewPurge, RecordStore,
@@ -648,11 +649,30 @@ async fn event_calls(
         revision: None,
         item_id: None,
         job_id: Some(job_id),
+        connector_id: None,
+        actor: None,
+        operation: None,
     };
-    events.append(scope, None, progress.clone()).await?;
+    let workspace = EventScope::Workspace(scope.clone());
+    events.append(&workspace, None, progress.clone()).await?;
+    let principal = Principal {
+        subject: "user_1".to_owned(),
+        tenant_id: scope.tenant_id.clone(),
+        route: AccessRoute::McpDelegation,
+        client_id: Some("connector".to_owned()),
+        delegation: None,
+    };
+    let tenant = EventScope::Tenant(scope.tenant_id.clone());
+    events
+        .append(
+            &tenant,
+            None,
+            NewEvent::permission_denied(&principal, OperationName::BackupInstallation),
+        )
+        .await?;
     events
         .list(
-            scope,
+            &workspace,
             EventQuery {
                 after: None,
                 page: Page {
@@ -662,7 +682,7 @@ async fn event_calls(
             },
         )
         .await?;
-    events.append(scope, Some(mutation_id), progress).await
+    events.append(&workspace, Some(mutation_id), progress).await
 }
 
 async fn search_index_calls(
@@ -680,6 +700,7 @@ async fn search_index_calls(
                 text: "quarterly revenue".to_owned(),
                 folder: None,
                 include_archived: false,
+                extraction: None,
                 page: Page {
                     cursor: None,
                     limit: 20,
@@ -1146,6 +1167,7 @@ fn a_search_query_names_exactly_one_revision() -> TestResult {
         text: "quarterly revenue".to_owned(),
         folder: Some(WorkspacePath::try_from("finance".to_owned())?),
         include_archived: false,
+        extraction: None,
         page: Page {
             cursor: None,
             limit: 20,
