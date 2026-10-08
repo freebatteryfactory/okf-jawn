@@ -149,7 +149,6 @@ jobs:
           path: .artifacts/lane/
   audit:
     name: Dependency advisories and licences
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:

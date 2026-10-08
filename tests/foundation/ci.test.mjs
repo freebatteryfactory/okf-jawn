@@ -77,13 +77,14 @@ test('superseded runs are cancelled, cargo and bun are cached, and no action run
   }
  }
 });
-test('lane branches run their own gate; audit runs on main and on a schedule, not in the foundation job',()=>{
+test('lane branches run their own gate; audit runs on every push and on the schedule, not in the foundation job',()=>{
  const lane=workflow.jobs.lane;
  assert.match(lane.if,/startsWith\(github\.ref, 'refs\/heads\/build\/'\)/);
  assert.ok(lane.steps.some(step=>step.run?.includes('bun scripts/dev.mjs lane "${GITHUB_REF_NAME#build/}"')));
  assert.equal(checkout('lane').with['fetch-depth'],0,'the scope check compares against origin/main');
  const audit=workflow.jobs.audit;
- assert.match(audit.if,/schedule/);assert.match(audit.if,/refs\/heads\/main/);
+ // No condition: an advisory shows on the push that brings it in, on any branch, and the nightly run catches new ones.
+ assert.equal(audit.if,undefined,'the audit job runs on every push, on dispatch and on the schedule');
  assert.ok(audit.steps.some(step=>step.run==='bun scripts/dev.mjs audit'));
  assert.ok(!workflow.jobs.foundation.steps.some(step=>step.run?.includes('audit')));
  assert.ok(Array.isArray(workflow.on.schedule)&&workflow.on.schedule.length===1);

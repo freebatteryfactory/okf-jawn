@@ -100,7 +100,7 @@
               "tests/foundation/ci.test.mjs"
             ]
           },
-          "covers": "On every push the foundation job runs the pinned generators twice from the committed lockfiles and requires both passes and the checkout to agree byte for byte; it then requires the workspace to format, pass strict Clippy and the source policy, pass every crate's tests with every feature, and the UI to lint, build, type-check and pass its unit tests. It does not prove a library qualification, any behaviour against a running server, or dependency advisories: the audit job runs on main, nightly and on dispatch and is not a required check."
+          "covers": "On every push the foundation job runs the pinned generators twice from the committed lockfiles and requires both passes and the checkout to agree byte for byte; it then requires the workspace to format, pass strict Clippy and the source policy, pass every crate's tests with every feature, and the UI to lint, build, type-check and pass its unit tests. It does not prove a library qualification, any behaviour against a running server, or dependency advisories: the audit job runs on every push, nightly and on dispatch and is not a required check."
         },
         {
           "id": "docling-library-qualification",
