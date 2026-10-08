@@ -28,7 +28,7 @@ use okf_jawn_contract::review::{Confirmation, Review};
 use okf_jawn_contract::search::{GetGraphResponse, LinkDirection};
 use okf_jawn_contract::source::{SourceLocation, SourceLocator};
 use okf_jawn_contract::transport::TRANSPORTS;
-use okf_jawn_contract::workspace::Workspace;
+use okf_jawn_contract::workspace::{RestoreReport, Workspace};
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::conversion::{
     ConversionInput, ConversionSettings, ConversionStatus, ConvertedAsset, Converter,
@@ -47,9 +47,9 @@ use okf_jawn_core::proposals::{CommentPage, ProposalFilter, ProposalStore};
 use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolved, token_hash};
 use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
-    BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, ChangeContext,
+    Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, ChangeContext,
     CommitChanges, Committed, DiffQuery, LocalSource, LogQuery, NewWorkspace, ObjectInfo, Page,
-    Promotion, Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
+    Promotion, Provenance, Purger, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
     WorkspaceCatalog, WorkspaceUpdate, derive_item_id, derive_proposal_id, derive_purge_id,
     workspace_with_permissions,
 };
@@ -272,7 +272,35 @@ async fn catalog_calls(
             },
         )
         .await?;
-    catalog.list(&scope.tenant_id).await
+    catalog.unarchive(scope, mutation_id, initiator()).await?;
+    catalog.list(&scope.tenant_id, true).await
+}
+
+/// What the purge and backup handlers ask of storage.
+async fn purge_and_backup_calls(
+    purger: &dyn Purger,
+    backups: &dyn Backups,
+    scope: &StorageScope,
+    mutation_id: MutationId,
+    item: ItemId,
+) -> Result<RestoreReport, ApiError> {
+    let purge = derive_purge_id(mutation_id);
+    purger.purge_item(scope, mutation_id, purge, item).await?;
+    purger
+        .purge_workspace(&scope.tenant_id, mutation_id, purge, scope.workspace_id)
+        .await?;
+    backups
+        .write_installation_archive(&scope.tenant_id, mutation_id)
+        .await?;
+    let archive = backups.write_workspace_archive(scope, mutation_id).await?;
+    backups
+        .restore_import(
+            scope,
+            archive.digest,
+            mutation_id,
+            vec!["user_1".to_owned()],
+        )
+        .await
 }
 
 async fn converter_calls(
@@ -915,6 +943,7 @@ fn the_application_not_the_catalog_fills_permissions() -> TestResult {
     let shown = workspace_with_permissions(bare, vec![Permission::Read]);
     assert_eq!(shown.permissions, vec![Permission::Read]);
     assert!(type_checked(&catalog_calls));
+    assert!(type_checked(&purge_and_backup_calls));
     Ok(())
 }
 

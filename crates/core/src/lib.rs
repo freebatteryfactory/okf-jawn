@@ -23,6 +23,8 @@ pub mod ports;
 
 /// Bounded conversion worker interface.
 pub mod conversion;
+/// The server-owned application header of item files.
+pub mod items;
 /// Durable job specifications, leases, reviews, receipts and artifact records.
 pub mod jobs;
 /// Durable mutation ledger.
