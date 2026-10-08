@@ -241,11 +241,11 @@ test('the Docling gate accepts no failure, its PDF crate is the fork the owner d
  assert.match(docling.covers,/for the Docling crate Cargo\.lock pins \(docling-pdf, docling-core and docling-onnx from the fork of converter-docling-pdf-font-run-patch\), called directly/);
  // The owner's decision of 2026-10-06, word for word.
  const patch=gates.phase_0.find(gate=>gate.id==='converter-docling-pdf-font-run-patch');
- assert.deepEqual([patch.kind,patch.decision,patch.decided_on,patch.decided_by],['decision','docling-pdf is built from a one-commit fork of docling.rs so that a phrase that changes font is extracted as one run, as docling-parse 7.21 and later do.','2026-10-06','owner']);
+ assert.deepEqual([patch.kind,patch.decision,patch.decided_on,patch.decided_by],['decision','docling-pdf is built from a two-commit fork of docling.rs 2.3.0 so that a phrase that changes font is extracted as one run, as docling-parse 7.21 and later do, and a blank cell is never taken for overpaint on the text-layer path.','2026-10-08','owner']);
  // What it covers: the fork and the commit Cargo.toml patches in (named there, not here: no gate text carries a commit hash), the upstream base, the rule, upstream's change, nothing reported, and when it goes.
  const rev=/^docling-pdf = \{ git = "https:\/\/github\.com\/Heyoub\/docling\.rs", rev = "([0-9a-f]{40})" \}$/m.exec(await read('Cargo.toml'))?.[1];
  assert.ok(rev,'Cargo.toml does not take docling-pdf from the fork by rev');
- for(const part of ['the fork https://github.com/Heyoub/docling.rs','the commit the [patch.crates-io] section of Cargo.toml names by rev','one commit on the upstream docling.rs commit that crates.io publishes as 1.93.6','dp_lines.rs, applicable','#351 (7.21.0)','docling.rs has not ported it','Nothing was reported upstream','when a docling.rs release ports the docling-parse 7.21 or later line contractor'])assert.ok(patch.covers.includes(part),`converter-docling-pdf-font-run-patch does not say ${part}`);
+ for(const part of ['the fork https://github.com/Heyoub/docling.rs','the commit the [patch.crates-io] section of Cargo.toml names by rev','two commits on the upstream docling.rs commit that crates.io publishes as 2.3.0','drop_overpainted_cells','dp_lines.rs, applicable','#351 (7.21.0)','docling.rs has not ported it','Nothing was reported upstream','when a docling.rs release carries both changes'])assert.ok(patch.covers.includes(part),`converter-docling-pdf-font-run-patch does not say ${part}`);
  // The tracker of the removed acceptance is gone, and nothing names it.
  assert.doesNotMatch(await read('verification.json'),/converter-font-run-spacing/);
  // The cures are construction work, each with an owner lane.
