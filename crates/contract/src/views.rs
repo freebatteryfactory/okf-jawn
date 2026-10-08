@@ -68,9 +68,10 @@ pub struct ViewDocument {
 
 /// Render a candidate from already resolved bindings without saving or approving it.
 ///
-/// Every binding must name `workspace_id`; the handler rejects a view for which
-/// `view.bindings_outside(workspace_id)` is not empty. Each binding's source workspace is
-/// still an authorization target, so a foreign binding is refused before the handler runs.
+/// Every binding must name `workspace_id`. Dispatch refuses a view for which
+/// `view.bindings_outside(workspace_id)` is not empty as `invalid_input`, before authorization
+/// and before the handler runs, whatever the caller may read: reading another workspace is not
+/// permission to republish its data here. `workspace_id` is the only authorization target.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PresentRequest {
@@ -173,5 +174,31 @@ impl ViewDocument {
             .iter()
             .filter(|binding| binding.source.workspace_id != workspace)
             .collect()
+    }
+
+    /// Refuse this View when any binding lies outside `workspace` (SPEC section 10).
+    ///
+    /// `pointer` is the JSON Pointer of this View inside its request; the refusal names the
+    /// `bindings` field under it. The refusal does not depend on grants: no permission on the
+    /// other workspace makes the binding valid.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` when `bindings_outside(workspace)` is not empty.
+    pub fn require_own_workspace(
+        &self,
+        workspace: crate::identity::WorkspaceId,
+        pointer: &str,
+    ) -> Result<(), crate::error::ApiError> {
+        let foreign = self.bindings_outside(workspace).len();
+        if foreign == 0 {
+            return Ok(());
+        }
+        Err(crate::error::ApiError::new(
+            crate::error::ErrorCode::InvalidInput,
+            format!(
+                "A View binds only to sources in its own workspace; {foreign} binding(s) name another workspace"
+            ),
+        )
+        .with_field(format!("{pointer}/bindings")))
     }
 }

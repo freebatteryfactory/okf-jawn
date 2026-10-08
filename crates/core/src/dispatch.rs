@@ -1,11 +1,13 @@
 //! Route only declared operations through validation, target authorization, and the mutation ledger.
 //!
-//! Order: validate, decode, `targets()`, authorize every target, build the context,
-//! `MutationStore::begin`, the handler, then `complete` on success or `release` on error.
+//! Order: validate, decode, `check_rules()`, `targets()`, authorize every target, build the
+//! context, `MutationStore::begin`, the handler, then `complete` on success or `release` on
+//! error. `check_rules` refuses what no grant can make valid, such as a View bound to another
+//! workspace, so its refusal is `InvalidInput` whoever asks.
 //! "Error" is anything that fails after `begin` granted the lease, not only the handler: a
 //! failure to serialize the response, to build the ledger body, or in `complete` itself also
 //! releases the lease, and the caller receives the first error, never the release's.
-//! A request that declares no target is refused as `Internal` before anything else runs.
+//! A request that declares no target is refused as `Internal` before any grant is looked up.
 //! A grant is used only when it is for the workspace and tenant that were asked for. The ledger
 //! never inspects other stores: a resumed attempt re-runs the handler under the same
 //! `MutationId`, and what the ledger retains is decided by the request's `ReplayPolicy`.
@@ -50,6 +52,7 @@ macro_rules! dispatch_operations {
                 $(stringify!($id) => {
                     static VALIDATOR: OnceLock<Result<jsonschema::Validator, String>> = OnceLock::new();
                     let request: $request = decode_validated(input, &VALIDATOR)?;
+                    request.check_rules()?;
                     let mut context =
                         authorize_targets(ports.access, caller, operation, &request).await?;
                     let replay = <$request as RequestScope>::REPLAY;

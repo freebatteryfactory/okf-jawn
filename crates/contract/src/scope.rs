@@ -1,4 +1,9 @@
-//! Every request declares its authorization targets and retry identity in its type.
+//! Every request declares in its type its authorization targets, its retry identity and the
+//! rules its wire schema cannot state.
+//!
+//! Dispatch runs `check_rules` after decoding and before authorization, so a request that
+//! breaks one is refused whatever the caller's grants. A request carrying a View document
+//! checks there that the View binds only to its own workspace (SPEC section 10).
 //!
 //! Dispatch authorizes every target before the handler runs; a request that touches several
 //! workspaces names each one, so no workspace is reached without its own grant. The first
@@ -15,6 +20,7 @@ use crate::common::Empty;
 use crate::conventions::{
     ApplyNamesRequest, GetRulesRequest, PreviewNamesRequest, SetRulesRequest,
 };
+use crate::error::ApiError;
 use crate::events::{GetReceiptRequest, ListEventsRequest};
 use crate::health::{HealthRequest, ReadinessRequest};
 use crate::history::{BlameRequest, CommitRequest, DiffRequest, LogRequest, RestoreRequest};
@@ -120,6 +126,17 @@ pub trait RequestScope {
 
     /// Caller-chosen retry identity; present exactly when the request is a mutation.
     fn idempotency_key(&self) -> Option<&IdempotencyKey>;
+
+    /// Refuse a decoded request that breaks a rule its wire schema cannot state.
+    ///
+    /// Dispatch calls this before any grant lookup or handler, so the refusal does not depend
+    /// on who asks. Most requests have no such rule.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` naming the offending field.
+    fn check_rules(&self) -> Result<(), ApiError> {
+        Ok(())
+    }
 }
 
 impl Target {
@@ -225,18 +242,15 @@ impl RequestScope for GetObjectRequest {
 }
 
 impl RequestScope for PresentRequest {
+    /// Only the View's own workspace: `check_rules` has already refused a binding elsewhere.
     fn targets(&self) -> Vec<Target> {
-        let mut targets = vec![Target::Workspace(self.workspace_id, Permission::Read)];
-        targets.extend(
-            self.view
-                .bindings
-                .iter()
-                .map(|binding| Target::Workspace(binding.source.workspace_id, Permission::Read)),
-        );
-        targets
+        vec![Target::Workspace(self.workspace_id, Permission::Read)]
     }
     fn idempotency_key(&self) -> Option<&IdempotencyKey> {
         None
+    }
+    fn check_rules(&self) -> Result<(), ApiError> {
+        self.view.require_own_workspace(self.workspace_id, "/view")
     }
 }
 

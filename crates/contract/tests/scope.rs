@@ -31,6 +31,14 @@ macro_rules! scope_checks {
                 _ => None,
             }
         }
+
+        fn view_carrying_operations() -> Result<Vec<ViewRules>, Box<dyn Error>> {
+            let mut found = Vec::new();
+            $(if let Some(rules) = view_rules::<$request>(stringify!($id))? {
+                found.push(rules);
+            })*
+            Ok(found)
+        }
     };
 }
 
@@ -40,6 +48,15 @@ struct Scoped {
     targets: Vec<Target>,
     keyed: bool,
     replay: ReplayPolicy,
+}
+
+/// `check_rules` of one View-carrying request, as synthesized and with every binding moved to
+/// another workspace.
+struct ViewRules {
+    id: &'static str,
+    own: Result<(), ApiError>,
+    foreign: Result<(), ApiError>,
+    moved: usize,
 }
 
 /// Admin-gated operations that read state and therefore carry no idempotency key.
@@ -76,14 +93,66 @@ fn sample<T: DeserializeOwned + JsonSchema + RequestScope>(
     Ok(scoped(id, permission, &request))
 }
 
-fn synthesize_for<T: JsonSchema>() -> Result<Value, Box<dyn Error>> {
-    let schema = serde_json::to_value(
+fn schema_for<T: JsonSchema>() -> Result<Value, serde_json::Error> {
+    serde_json::to_value(
         SchemaSettings::draft2020_12()
             .into_generator()
             .into_root_schema_for::<T>(),
-    )?;
+    )
+}
+
+fn synthesize_for<T: JsonSchema>() -> Result<Value, Box<dyn Error>> {
+    let schema = schema_for::<T>()?;
     let defs = schema.get("$defs").cloned().unwrap_or_else(|| json!({}));
     synthesize(&schema, &defs, 0)
+}
+
+/// Check the rules of `T` when its wire schema carries a View document; `None` otherwise.
+///
+/// The synthesized request names one UUID everywhere, so its bindings start in its workspace.
+fn view_rules<T: DeserializeOwned + JsonSchema + RequestScope>(
+    id: &'static str,
+) -> Result<Option<ViewRules>, Box<dyn Error>> {
+    let schema = schema_for::<T>()?;
+    let carries_view = schema.pointer("/$defs/ViewDocument").is_some()
+        || schema.get("title") == Some(&json!("ViewDocument"));
+    if !carries_view {
+        return Ok(None);
+    }
+    let own = synthesize_for::<T>()?;
+    let mut foreign = own.clone();
+    let moved = move_bindings(&mut foreign, OTHER_WORKSPACE);
+    let own: T = serde_json::from_value(own)?;
+    let foreign: T = serde_json::from_value(foreign)?;
+    Ok(Some(ViewRules {
+        id,
+        own: own.check_rules(),
+        foreign: foreign.check_rules(),
+        moved,
+    }))
+}
+
+/// Point the source of every View binding anywhere in `value` at `workspace`; return how many.
+fn move_bindings(value: &mut Value, workspace: &str) -> usize {
+    match value {
+        Value::Object(object) => object.iter_mut().fold(0, |moved, (key, child)| {
+            let here = match child {
+                Value::Array(bindings) if key == "bindings" => bindings
+                    .iter_mut()
+                    .filter_map(|binding| binding.pointer_mut("/source/workspace_id"))
+                    .fold(0, |count: usize, slot| {
+                        *slot = json!(workspace);
+                        count.saturating_add(1)
+                    }),
+                _ => move_bindings(child, workspace),
+            };
+            moved.saturating_add(here)
+        }),
+        Value::Array(items) => items.iter_mut().fold(0, |moved, item| {
+            moved.saturating_add(move_bindings(item, workspace))
+        }),
+        _ => 0,
+    }
 }
 
 /// Build a minimal valid instance: required properties only, one element per array.
@@ -327,18 +396,51 @@ fn tenant_level_reads_need_sign_in_only() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn present_view_authorizes_every_binding_workspace() -> Result<(), Box<dyn Error>> {
+fn every_request_carrying_a_view_refuses_a_binding_in_another_workspace()
+-> Result<(), Box<dyn Error>> {
+    let found = view_carrying_operations()?;
+    assert!(
+        found.iter().any(|rules| rules.id == "present_view"),
+        "the schema scan must find present_view"
+    );
+    for rules in found {
+        assert!(rules.moved > 0, "{}: no binding was moved", rules.id);
+        assert!(
+            rules.own.is_ok(),
+            "{}: a View bound to its own workspace is refused: {:?}",
+            rules.id,
+            rules.own
+        );
+        assert!(
+            matches!(
+                &rules.foreign,
+                Err(error) if error.code == ErrorCode::InvalidInput
+                    && error.field.as_deref().is_some_and(|field| field.ends_with("/bindings"))
+            ),
+            "{}: a View bound to another workspace must be invalid input, got {:?}",
+            rules.id,
+            rules.foreign
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn present_view_authorizes_only_its_own_workspace() -> Result<(), Box<dyn Error>> {
     let mut value = synthesize_for::<PresentRequest>()?;
     let binding_workspace = value
         .pointer_mut("/view/bindings/0/source/workspace_id")
         .ok_or("synthesized view has a binding")?;
     *binding_workspace = json!(OTHER_WORKSPACE);
     let request: PresentRequest = serde_json::from_value(value)?;
-    let other = serde_json::from_value(json!(OTHER_WORKSPACE))?;
-    assert!(
-        request
-            .targets()
-            .contains(&Target::Workspace(other, Permission::Read))
+    // A foreign binding is not authorized: `check_rules` refuses it before any target is asked.
+    assert_eq!(
+        request.targets(),
+        vec![Target::Workspace(request.workspace_id, Permission::Read)]
+    );
+    assert_eq!(
+        request.check_rules().map_err(|error| error.code),
+        Err(ErrorCode::InvalidInput)
     );
     Ok(())
 }
