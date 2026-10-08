@@ -179,6 +179,20 @@
       ],
       "construction": [
         {
+          "id": "contract-expresses-extraction-sources-views",
+          "status": "blocked_on_lanes",
+          "owner": "integration-owner",
+          "receipt": "bun scripts/dev.mjs premerge",
+          "meaning": "First work of the next stage, before the storage, ingest and views lanes start: the contract can express every SPEC sentence about extraction, sources and views; the core ports follow in core-ports-carry-extraction-and-views. Missing in the contract today: extraction state on ItemSummary, ItemDocument and SourceAppearance, with a typed failure reason; converter, version, settings and model identity on the wire; page and box locators in Selection, with locator kinds per format; a tabular type for a View's materialized dataset. Owner decisions it carries, 2026-10-05: when a later re-extraction succeeds for a file whose text an agent supplied, the converter's text is shown and indexed by default, the agent's text stays in history and a person may keep it; no chart reads agent-supplied numbers before a person approves them; sending originals to a connected AI is a separate switch, off by default; a damaged PDF is refused clearly and recovery is decided in the ingest lane; unprocessed files (failed, unsupported or partial) are listable by people and by a connected agent, and an agent may propose extracted text as its own proposal kind labelled as supplied by an agent, applied only on approval. 2026-10-06: local mode keeps upload and import and never reorganizes an existing directory in place; a snapshot conflict is resolved per item, keep mine or take theirs, with a diff; status words are OKF's Draft, Stable and Deprecated, with Archived as a separate flag; an app review is written into the file as OKF verified on export, and an imported verified is an unconfirmed claim; the item id is in the file's header; a source card is named from the original name with its extension joined by a hyphen (report.pdf becomes report-pdf.md) and its header carries the original name; an imported file whose header does not parse needs attention and blocks nothing. 2026-10-07: a partly converted file stays readable, names its unconverted pages, is listed as unprocessed, and a retry converts only those pages"
+        },
+        {
+          "id": "core-ports-carry-extraction-and-views",
+          "status": "blocked_on_lanes",
+          "owner": "core-cli",
+          "receipt": "cargo test -p okf-jawn-core",
+          "meaning": "After contract-expresses-extraction-sources-views and before the ingest and views lanes start: the core ports carry what that gate puts on the wire. Missing in core today: a producer for Extraction::Pending; a line-to-page map in ConvertedDocument; an asset role (page render or figure) on ConvertedAsset and import settings on JobSpec::Import; a Converter port that converts in page windows, reports the pages a partial conversion covered, and lets a long conversion renew its lease; a producer of a View's materialized dataset; and a check that a fetched object belongs to the item revision"
+        },
+        {
           "id": "storage-git-cas-sqlite",
           "status": "blocked_on_lanes",
           "owner": "storage",
@@ -218,7 +232,7 @@
           "status": "blocked_on_lanes",
           "owner": "ingest",
           "receipt": "cargo test -p okf-jawn-ingest --features runtime",
-          "meaning": "Production ingest worker hard memory bound; not DOCLING_RS_MAX_MEMORY_MB on DocumentConverter"
+          "meaning": "Production ingest worker hard memory bound; not DOCLING_RS_MAX_MEMORY_MB on DocumentConverter. Conversion runs in a child process with a hard memory cap, in page windows; the cap and the window size are set from a measurement of whole-document against windowed conversion (owner, 2026-10-07)"
         },
         {
           "id": "job-crash-against-record-store",
