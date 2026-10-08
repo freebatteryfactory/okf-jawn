@@ -2414,7 +2414,7 @@
                 "description": "Settings applied."
               },
               "version": {
-                "description": "The docling crate version, such as `1.93.5`.",
+                "description": "The docling crate version, such as `2.3.0`.",
                 "type": "string"
               }
             },

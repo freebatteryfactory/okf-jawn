@@ -2,21 +2,21 @@
   {
     "name": "docling",
     "source": "registry+https://github.com/rust-lang/crates.io-index",
-    "version": "1.93.5"
+    "version": "2.3.0"
   },
   {
     "name": "docling-core",
-    "source": "git+https://github.com/Heyoub/docling.rs?rev=e500c2323bcf5c3c84d3731ed00de65b15d0709a#e500c2323bcf5c3c84d3731ed00de65b15d0709a",
-    "version": "1.93.6"
+    "source": "git+https://github.com/Heyoub/docling.rs?rev=f9094e66edd3b215ad7d43d2ca9be534180a06b4#f9094e66edd3b215ad7d43d2ca9be534180a06b4",
+    "version": "2.3.0"
   },
   {
     "name": "docling-onnx",
-    "source": "git+https://github.com/Heyoub/docling.rs?rev=e500c2323bcf5c3c84d3731ed00de65b15d0709a#e500c2323bcf5c3c84d3731ed00de65b15d0709a",
-    "version": "1.93.6"
+    "source": "git+https://github.com/Heyoub/docling.rs?rev=f9094e66edd3b215ad7d43d2ca9be534180a06b4#f9094e66edd3b215ad7d43d2ca9be534180a06b4",
+    "version": "2.3.0"
   },
   {
     "name": "docling-pdf",
-    "source": "git+https://github.com/Heyoub/docling.rs?rev=e500c2323bcf5c3c84d3731ed00de65b15d0709a#e500c2323bcf5c3c84d3731ed00de65b15d0709a",
-    "version": "1.93.6"
+    "source": "git+https://github.com/Heyoub/docling.rs?rev=f9094e66edd3b215ad7d43d2ca9be534180a06b4#f9094e66edd3b215ad7d43d2ca9be534180a06b4",
+    "version": "2.3.0"
   }
 ]
