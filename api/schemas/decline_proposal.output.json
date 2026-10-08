@@ -1,5 +1,30 @@
 {
   "$defs": {
+    "AccessRoute": {
+      "description": "How authenticated authority reached the application.\n\nLocal and hosted entry paths both resolve to one of these routes and share the same\nauthorization rules; no route is granted authority because the connection is loopback.",
+      "oneOf": [
+        {
+          "const": "browser_session",
+          "description": "Hosted Explorer session established through WorkOS AuthKit.",
+          "type": "string"
+        },
+        {
+          "const": "mcp_delegation",
+          "description": "External agent: a WorkOS Connect token when hosted, a local connector credential when local.",
+          "type": "string"
+        },
+        {
+          "const": "local_owner",
+          "description": "The installation-local owner identity, authenticated through the local browser session.",
+          "type": "string"
+        },
+        {
+          "const": "service",
+          "description": "Configured internal service identity.",
+          "type": "string"
+        }
+      ]
+    },
     "Change": {
       "description": "Permitted proposal mutations; no review or acceptance variants exist.",
       "oneOf": [
@@ -110,6 +135,48 @@
             "item_id"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Propose the complete text of an unprocessed source.",
+          "properties": {
+            "based_on": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Digest"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Digest the agent saw; absent when the source has none. A different current digest is a conflict."
+            },
+            "item_id": {
+              "$ref": "#/$defs/ItemId",
+              "description": "Source item."
+            },
+            "kind": {
+              "const": "supply_extraction",
+              "type": "string"
+            },
+            "markdown": {
+              "description": "The complete proposed text, Markdown.",
+              "type": "string"
+            },
+            "pages": {
+              "description": "Pages the text covers, as the agent claims; empty for the whole.",
+              "items": {
+                "$ref": "#/$defs/PageRange"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "item_id",
+            "markdown"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -122,10 +189,48 @@
       "format": "uuid",
       "type": "string"
     },
+    "PageRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive document page range.",
+      "properties": {
+        "end": {
+          "description": "Last page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
     "ProposalId": {
       "description": "Identity of a suggested change set, not a review.",
       "format": "uuid",
       "type": "string"
+    },
+    "ProposalKind": {
+      "description": "What a proposal does; derived from its changes, never chosen by the proposer.",
+      "oneOf": [
+        {
+          "const": "content",
+          "description": "Content changes: create, edit, move, archive.",
+          "type": "string"
+        },
+        {
+          "const": "supply_extraction",
+          "description": "Agent-supplied extraction text.",
+          "type": "string"
+        }
+      ]
     },
     "ProposalStatus": {
       "description": "Lifecycle of a suggestion, not approval of a fact in it.",
@@ -156,6 +261,11 @@
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
     },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+      "type": "string"
+    },
     "WorkspaceId": {
       "description": "Stable application identity for one user-organized workspace.",
       "format": "uuid",
@@ -164,7 +274,7 @@
     "WorkspacePath": {
       "maxLength": 4096,
       "minLength": 1,
-      "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
+      "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
       "type": "string"
     }
   },
@@ -183,17 +293,28 @@
       },
       "type": "array"
     },
+    "client_id": {
+      "description": "OAuth or connector client it came through, recorded by the server.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "content_digest": {
       "$ref": "#/$defs/Digest",
       "description": "Server-computed digest of the exact displayed change set."
     },
     "created_at": {
-      "description": "RFC 3339 creation time.",
-      "type": "string"
+      "$ref": "#/$defs/Timestamp",
+      "description": "Creation time."
     },
     "created_by": {
       "description": "Server-recorded principal.",
       "type": "string"
+    },
+    "created_via": {
+      "$ref": "#/$defs/AccessRoute",
+      "description": "Route the proposal came by, recorded by the server."
     },
     "description": {
       "description": "Rationale and limitations.",
@@ -202,6 +323,10 @@
     "id": {
       "$ref": "#/$defs/ProposalId",
       "description": "Proposal identity."
+    },
+    "kind": {
+      "$ref": "#/$defs/ProposalKind",
+      "description": "What the proposal does, derived from `changes` by the server."
     },
     "proposal_revision": {
       "$ref": "#/$defs/Revision",
@@ -229,8 +354,10 @@
     "title",
     "description",
     "changes",
+    "kind",
     "status",
     "created_by",
+    "created_via",
     "created_at"
   ],
   "title": "Proposal",

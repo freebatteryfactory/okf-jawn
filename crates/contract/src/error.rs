@@ -66,9 +66,21 @@ pub enum ErrorDetail {
         /// Operation that first used the key.
         operation: crate::metadata::OperationName,
     },
+    /// The named revision was removed or rewritten by a purge; the code is `not_found`.
+    Invalidated {
+        /// The purge that removed or rewrote it.
+        purge_id: crate::identity::PurgeId,
+        /// After an item purge, the rewritten revision to re-pin to; absent after a
+        /// workspace purge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replacement: Option<crate::identity::Revision>,
+    },
 }
 
 /// One snapshotted item whose committed content moved after its draft's base.
+///
+/// The editor resolves it per item, with `changes` as the diff: keep mine is `save_draft` with
+/// `base_revision` = `current_revision`, then `commit_items`; take theirs is `discard_draft`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DraftConflictItem {

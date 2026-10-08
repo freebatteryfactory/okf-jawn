@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { run } from '../../scripts/lib/process.mjs';
 const root=new URL('../../',import.meta.url);
-const generatedRoots=['api/','generated/cli/','ui/src/api/generated'];
+const generatedRoots=['api/','generated/cli/','generated/converter/','ui/src/api/generated'];
 
 async function containsFile(path){
  const info=await stat(new URL(path,root)).catch(()=>null);

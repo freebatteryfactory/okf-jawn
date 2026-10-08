@@ -110,8 +110,54 @@
             "item_id"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Propose the complete text of an unprocessed source.",
+          "properties": {
+            "based_on": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Digest"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Digest the agent saw; absent when the source has none. A different current digest is a conflict."
+            },
+            "item_id": {
+              "$ref": "#/$defs/ItemId",
+              "description": "Source item."
+            },
+            "kind": {
+              "const": "supply_extraction",
+              "type": "string"
+            },
+            "markdown": {
+              "description": "The complete proposed text, Markdown.",
+              "type": "string"
+            },
+            "pages": {
+              "description": "Pages the text covers, as the agent claims; empty for the whole.",
+              "items": {
+                "$ref": "#/$defs/PageRange"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "item_id",
+            "markdown"
+          ],
+          "type": "object"
         }
       ]
+    },
+    "Digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
     },
     "IdempotencyKey": {
       "description": "Caller-chosen retry identity for one write, scoped to tenant, subject and operation.",
@@ -122,6 +168,29 @@
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
       "type": "string"
+    },
+    "PageRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive document page range.",
+      "properties": {
+        "end": {
+          "description": "Last page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
     },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
@@ -135,7 +204,7 @@
     "WorkspacePath": {
       "maxLength": 4096,
       "minLength": 1,
-      "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
+      "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
       "type": "string"
     }
   },

@@ -1,5 +1,59 @@
 {
   "$defs": {
+    "ExtractionStatus": {
+      "description": "The converter's verdict on one source, as a listing and a filter use it.",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Accepted; no conversion has finished.",
+          "type": "string"
+        },
+        {
+          "const": "completed",
+          "description": "Every page, or the whole non-paginated document, was converted.",
+          "type": "string"
+        },
+        {
+          "const": "partial",
+          "description": "A document was produced but part of the source is missing from it.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The converter produced no document; the bytes are retained.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported",
+          "description": "No converter exists for this format; the bytes are retained.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExtractionSummary": {
+      "additionalProperties": false,
+      "description": "What a listing shows about one source.",
+      "properties": {
+        "corrected": {
+          "description": "A human correction is shown over that text.",
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/ExtractionStatus",
+          "description": "The converter's verdict."
+        },
+        "text_origin": {
+          "$ref": "#/$defs/TextOrigin",
+          "description": "Whose text is shown."
+        }
+      },
+      "required": [
+        "status",
+        "text_origin",
+        "corrected"
+      ],
+      "type": "object"
+    },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
@@ -25,13 +79,53 @@
         }
       ]
     },
+    "ItemStatus": {
+      "description": "OKF's `status` word of an item, distinct from business approval and from archiving.\n\nAn absent OKF `status` reads `stable`. `other` is a producer's value outside the three,\nkept exactly as written in the file's `status` property; it cannot be set through\n`set_lifecycle`.",
+      "oneOf": [
+        {
+          "const": "draft",
+          "description": "Work in progress.",
+          "type": "string"
+        },
+        {
+          "const": "stable",
+          "description": "Current and usable content.",
+          "type": "string"
+        },
+        {
+          "const": "deprecated",
+          "description": "Retained, superseded content; still searchable.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "A status word outside the three, preserved in the file.",
+          "type": "string"
+        }
+      ]
+    },
     "ItemSummary": {
       "additionalProperties": false,
       "description": "A navigable item description bound to a resolved workspace revision.",
       "properties": {
+        "archived": {
+          "description": "Hidden from ordinary current listings; reversible and keeps history.",
+          "type": "boolean"
+        },
         "description": {
           "description": "One-line navigation summary.",
           "type": "string"
+        },
+        "extraction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExtractionSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The converter's verdict and whose text is shown; present exactly when `kind` is `source`."
         },
         "id": {
           "$ref": "#/$defs/ItemId",
@@ -40,10 +134,6 @@
         "kind": {
           "$ref": "#/$defs/ItemKind",
           "description": "Built-in rendering role."
-        },
-        "lifecycle": {
-          "$ref": "#/$defs/Lifecycle",
-          "description": "Presentation lifecycle."
         },
         "media_type": {
           "description": "Original MIME type if there is a source object.",
@@ -59,6 +149,10 @@
         "revision": {
           "$ref": "#/$defs/Revision",
           "description": "Resolved revision for this summary."
+        },
+        "status": {
+          "$ref": "#/$defs/ItemStatus",
+          "description": "OKF status word."
         },
         "title": {
           "description": "Human-readable title.",
@@ -77,38 +171,39 @@
         "type_name",
         "kind",
         "revision",
-        "lifecycle"
+        "status",
+        "archived"
       ],
       "type": "object"
-    },
-    "Lifecycle": {
-      "description": "Application lifecycle distinct from business approval.",
-      "oneOf": [
-        {
-          "const": "active",
-          "description": "Current and usable content.",
-          "type": "string"
-        },
-        {
-          "const": "deprecated",
-          "description": "Retained historical content.",
-          "type": "string"
-        },
-        {
-          "const": "archived",
-          "description": "Hidden from ordinary current listings; still retrievable.",
-          "type": "string"
-        }
-      ]
     },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
     },
+    "TextOrigin": {
+      "description": "Whose text a source card shows and search indexes.",
+      "oneOf": [
+        {
+          "const": "converter",
+          "description": "The converter's extraction.",
+          "type": "string"
+        },
+        {
+          "const": "supplied_by_agent",
+          "description": "Text an agent proposed and a person accepted.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No text: pending, failed or unsupported, with nothing supplied.",
+          "type": "string"
+        }
+      ]
+    },
     "WorkspacePath": {
       "maxLength": 4096,
       "minLength": 1,
-      "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
+      "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
       "type": "string"
     }
   },

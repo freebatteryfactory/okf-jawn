@@ -9,8 +9,8 @@
           "description": "Stable connector identity."
         },
         "created_at": {
-          "description": "RFC 3339 issue time.",
-          "type": "string"
+          "$ref": "#/$defs/Timestamp",
+          "description": "Issue time."
         },
         "label": {
           "description": "Owner-chosen name.",
@@ -24,11 +24,15 @@
           "type": "array"
         },
         "revoked_at": {
-          "description": "RFC 3339 revocation time; a revoked connector authenticates nothing.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Revocation time; a revoked connector authenticates nothing."
         },
         "workspace_ids": {
           "description": "Workspaces the connector may access.",
@@ -86,6 +90,11 @@
           "type": "string"
         }
       ]
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+      "type": "string"
     },
     "WorkspaceId": {
       "description": "Stable application identity for one user-organized workspace.",

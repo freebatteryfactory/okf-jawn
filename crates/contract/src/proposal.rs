@@ -39,6 +39,29 @@ pub enum Change {
         #[doc = "Item id."]
         item_id: crate::identity::ItemId,
     },
+    /// Propose the complete text of an unprocessed source.
+    SupplyExtraction {
+        #[doc = "Source item."]
+        item_id: crate::identity::ItemId,
+        #[doc = "Digest the agent saw; absent when the source has none. A different current digest is a conflict."]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        based_on: Option<crate::identity::Digest>,
+        #[doc = "Pages the text covers, as the agent claims; empty for the whole."]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pages: Vec<crate::common::PageRange>,
+        #[doc = "The complete proposed text, Markdown."]
+        markdown: String,
+    },
+}
+
+/// What a proposal does; derived from its changes, never chosen by the proposer.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalKind {
+    /// Content changes: create, edit, move, archive.
+    Content,
+    /// Agent-supplied extraction text.
+    SupplyExtraction,
 }
 
 /// Lifecycle of a suggestion, not approval of a fact in it.
@@ -75,12 +98,19 @@ pub struct Proposal {
     pub description: String,
     /// Proposed mutations.
     pub changes: Vec<Change>,
+    /// What the proposal does, derived from `changes` by the server.
+    pub kind: ProposalKind,
     /// Current suggestion state.
     pub status: ProposalStatus,
     /// Server-recorded principal.
     pub created_by: String,
-    /// RFC 3339 creation time.
-    pub created_at: String,
+    /// Route the proposal came by, recorded by the server.
+    pub created_via: crate::access::AccessRoute,
+    /// OAuth or connector client it came through, recorded by the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Creation time.
+    pub created_at: crate::identity::Timestamp,
 }
 
 /// Suggest changes without changing the accepted workspace.
@@ -194,6 +224,44 @@ pub struct Comment {
     pub author: String,
     /// Discussion text.
     pub text: String,
-    /// RFC 3339 timestamp.
-    pub created_at: String,
+    /// Creation time.
+    pub created_at: crate::identity::Timestamp,
+    /// The purge that invalidated the comment's `source`, whose stored path was scrubbed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalidated_by: Option<crate::identity::PurgeId>,
+}
+
+impl ProposalKind {
+    /// The kind of a proposal with these changes.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` on `/changes` when supply changes are mixed with other changes,
+    /// or when one proposal supplies text for the same item twice.
+    pub fn of(changes: &[Change]) -> Result<Self, crate::error::ApiError> {
+        let mut supplied: Vec<crate::identity::ItemId> = Vec::new();
+        for change in changes {
+            if let Change::SupplyExtraction { item_id, .. } = change {
+                if supplied.contains(item_id) {
+                    return Err(changes_error(
+                        "a proposal supplies the text of one item at most once",
+                    ));
+                }
+                supplied.push(*item_id);
+            }
+        }
+        if supplied.is_empty() {
+            Ok(Self::Content)
+        } else if supplied.len() == changes.len() {
+            Ok(Self::SupplyExtraction)
+        } else {
+            Err(changes_error(
+                "a supply_extraction proposal holds only supply_extraction changes",
+            ))
+        }
+    }
+}
+
+fn changes_error(message: &str) -> crate::error::ApiError {
+    crate::error::ApiError::new(crate::error::ErrorCode::InvalidInput, message)
+        .with_field("/changes")
 }

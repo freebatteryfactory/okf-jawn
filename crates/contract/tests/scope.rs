@@ -6,10 +6,19 @@
 
 use okf_jawn_contract::access::{CreateConnectorRequest, IssuedConnector, Permission};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+use okf_jawn_contract::events::ListTenantEventsRequest;
 use okf_jawn_contract::identity::ConnectorId;
+use okf_jawn_contract::import::{GetTenantJobRequest, ListTenantJobsRequest};
+use okf_jawn_contract::item::SetLifecycleRequest;
 use okf_jawn_contract::metadata::{OperationName, operations};
+use okf_jawn_contract::proposal::OpenProposalRequest;
+use okf_jawn_contract::purge::{GetPurgeRequest, PurgeItemRequest, PurgeWorkspaceRequest};
 use okf_jawn_contract::scope::{ReplayPolicy, RequestScope, Target};
+use okf_jawn_contract::search::SearchRequest;
 use okf_jawn_contract::views::PresentRequest;
+use okf_jawn_contract::workspace::{
+    BackupInstallationRequest, RestoreWorkspaceRequest, UnarchiveWorkspaceRequest,
+};
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -60,7 +69,23 @@ struct ViewRules {
 }
 
 /// Admin-gated operations that read state and therefore carry no idempotency key.
-const PRIVILEGED_READS: &[&str] = &["list_connectors"];
+const PRIVILEGED_READS: &[&str] = &[
+    "get_purge",
+    "get_tenant_job",
+    "list_tenant_jobs",
+    "list_tenant_events",
+    "list_connectors",
+];
+/// Operations authorized at the tenant only: their target is gone, or never was a workspace.
+const TENANT_ONLY: &[&str] = &[
+    "purge_workspace",
+    "get_purge",
+    "backup_installation",
+    "purge_item",
+    "get_tenant_job",
+    "list_tenant_jobs",
+    "list_tenant_events",
+];
 /// Operations whose required permission depends on the request rather than the table column.
 const ACTION_DEPENDENT: &[&str] = &["create_confirmation"];
 /// Operations any signed-in principal may call; their results are filtered by grants.
@@ -232,8 +257,10 @@ fn synthesize(schema: &Value, defs: &Value, depth: u8) -> Result<Value, Box<dyn 
 }
 
 fn sample_string(schema: &Map<String, Value>) -> String {
-    if schema.get("format").and_then(Value::as_str) == Some("uuid") {
-        return "11111111-1111-4111-8111-111111111111".to_owned();
+    match schema.get("format").and_then(Value::as_str) {
+        Some("uuid") => return "11111111-1111-4111-8111-111111111111".to_owned(),
+        Some("date-time") => return "2026-10-08T14:03:07.250Z".to_owned(),
+        _ => {}
     }
     match schema.get("pattern").and_then(Value::as_str) {
         Some(pattern) if pattern.contains("{40}") => "a".repeat(40),
@@ -488,6 +515,189 @@ fn operation_names_match_the_table_in_order() -> Result<(), Box<dyn Error>> {
         assert_eq!(name.as_str(), info.id);
         assert_eq!(serde_json::to_value(name)?, json!(info.id));
     }
+    Ok(())
+}
+
+/// A synthesized request of type `T` with `edit` applied to its JSON before decoding.
+fn edited<T: DeserializeOwned + JsonSchema>(
+    edit: impl FnOnce(&mut Map<String, Value>),
+) -> Result<T, Box<dyn Error>> {
+    let mut value = synthesize_for::<T>()?;
+    edit(value.as_object_mut().ok_or("a request is an object")?);
+    Ok(serde_json::from_value(value)?)
+}
+
+#[test]
+fn an_empty_search_query_needs_a_filter() -> Result<(), Box<dyn Error>> {
+    for query in ["", "   "] {
+        let request: SearchRequest = edited(|request| {
+            request.insert("query".to_owned(), json!(query));
+        })?;
+        let refused = request.check_rules();
+        assert!(
+            matches!(&refused, Err(error) if error.code == ErrorCode::InvalidInput
+                && error.field.as_deref() == Some("/query")),
+            "{query:?}: {refused:?}"
+        );
+        let filtered: SearchRequest = edited(|request| {
+            request.insert("query".to_owned(), json!(query));
+            request.insert("extraction".to_owned(), json!("unprocessed"));
+        })?;
+        assert!(filtered.check_rules().is_ok(), "{query:?} with a filter");
+    }
+    let worded: SearchRequest = edited(|request| {
+        request.insert("query".to_owned(), json!("revenue"));
+    })?;
+    assert!(worded.check_rules().is_ok());
+    Ok(())
+}
+
+#[test]
+fn a_supply_proposal_holds_only_supply_changes() -> Result<(), Box<dyn Error>> {
+    let supply =
+        |item: &str| json!({"kind": "supply_extraction", "item_id": item, "markdown": "# Text"});
+    let archive = json!({"kind": "archive", "item_id": "22222222-2222-4222-8222-222222222222"});
+    let first = "22222222-2222-4222-8222-222222222222";
+    let second = "33333333-3333-4333-8333-333333333333";
+    for (changes, accepted) in [
+        (json!([supply(first)]), true),
+        (json!([supply(first), supply(second)]), true),
+        (json!([archive]), true),
+        (json!([supply(first), archive]), false),
+        (json!([supply(first), supply(first)]), false),
+    ] {
+        let request: OpenProposalRequest = edited(|request| {
+            request.insert("changes".to_owned(), changes.clone());
+        })?;
+        let checked = request.check_rules();
+        if accepted {
+            assert!(checked.is_ok(), "{changes}: {checked:?}");
+        } else {
+            assert!(
+                matches!(&checked, Err(error) if error.code == ErrorCode::InvalidInput
+                    && error.field.as_deref() == Some("/changes")),
+                "{changes}: {checked:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn set_lifecycle_needs_status_or_archived() -> Result<(), Box<dyn Error>> {
+    let neither: SetLifecycleRequest = edited(|request| {
+        request.remove("status");
+        request.remove("archived");
+    })?;
+    assert!(matches!(
+        neither.check_rules(),
+        Err(error) if error.code == ErrorCode::InvalidInput
+    ));
+    for (status, archived) in [
+        (Some("deprecated"), None),
+        (None, Some(true)),
+        (Some("stable"), Some(false)),
+    ] {
+        let request: SetLifecycleRequest = edited(|request| {
+            if let Some(status) = status {
+                request.insert("status".to_owned(), json!(status));
+            }
+            if let Some(archived) = archived {
+                request.insert("archived".to_owned(), json!(archived));
+            }
+        })?;
+        assert!(request.check_rules().is_ok(), "{status:?} {archived:?}");
+    }
+    let other: SetLifecycleRequest = edited(|request| {
+        request.insert("status".to_owned(), json!("other"));
+    })?;
+    assert!(matches!(
+        other.check_rules(),
+        Err(error) if error.field.as_deref() == Some("/status")
+    ));
+    Ok(())
+}
+
+#[test]
+fn purge_authorizes_at_the_tenant_only() -> Result<(), Box<dyn Error>> {
+    for operation in sampled_operations()? {
+        if TENANT_ONLY.contains(&operation.id) {
+            assert_eq!(
+                operation.targets,
+                vec![Target::Deployment(Permission::Admin)],
+                "{} names no workspace target",
+                operation.id
+            );
+        }
+    }
+    let purge: PurgeWorkspaceRequest =
+        serde_json::from_value(synthesize_for::<PurgeWorkspaceRequest>()?)?;
+    assert_eq!(purge.targets(), vec![Target::Deployment(Permission::Admin)]);
+    assert!(purge.idempotency_key().is_some());
+    let item: PurgeItemRequest = serde_json::from_value(synthesize_for::<PurgeItemRequest>()?)?;
+    assert_eq!(item.targets(), vec![Target::Deployment(Permission::Admin)]);
+    assert!(item.idempotency_key().is_some());
+    Ok(())
+}
+
+#[test]
+fn get_purge_needs_only_the_tenant_grant() -> Result<(), Box<dyn Error>> {
+    let request: GetPurgeRequest = serde_json::from_value(synthesize_for::<GetPurgeRequest>()?)?;
+    assert_eq!(
+        request.targets(),
+        vec![Target::Deployment(Permission::Admin)]
+    );
+    assert!(request.idempotency_key().is_none());
+    Ok(())
+}
+
+#[test]
+fn tenant_events_need_the_tenant_admin_grant() -> Result<(), Box<dyn Error>> {
+    let request: ListTenantEventsRequest =
+        serde_json::from_value(synthesize_for::<ListTenantEventsRequest>()?)?;
+    assert_eq!(
+        request.targets(),
+        vec![Target::Deployment(Permission::Admin)]
+    );
+    assert!(request.idempotency_key().is_none());
+    Ok(())
+}
+
+#[test]
+fn backup_installation_and_tenant_jobs_need_the_tenant_admin_grant() -> Result<(), Box<dyn Error>> {
+    let backup: BackupInstallationRequest =
+        serde_json::from_value(synthesize_for::<BackupInstallationRequest>()?)?;
+    assert_eq!(
+        backup.targets(),
+        vec![Target::Deployment(Permission::Admin)]
+    );
+    assert!(backup.idempotency_key().is_some());
+    let job: GetTenantJobRequest =
+        serde_json::from_value(synthesize_for::<GetTenantJobRequest>()?)?;
+    assert_eq!(job.targets(), vec![Target::Deployment(Permission::Admin)]);
+    let jobs: ListTenantJobsRequest =
+        serde_json::from_value(synthesize_for::<ListTenantJobsRequest>()?)?;
+    assert_eq!(jobs.targets(), vec![Target::Deployment(Permission::Admin)]);
+    Ok(())
+}
+
+#[test]
+fn restore_reads_only_its_target_workspace() -> Result<(), Box<dyn Error>> {
+    let request: RestoreWorkspaceRequest = edited(|request| {
+        request.insert("workspace_id".to_owned(), json!(OTHER_WORKSPACE));
+    })?;
+    // The archive arrives as an upload into the target workspace; no other workspace is named.
+    assert_eq!(
+        request.targets(),
+        vec![Target::Workspace(request.workspace_id, Permission::Admin)]
+    );
+    assert!(request.idempotency_key().is_some());
+    let unarchive: UnarchiveWorkspaceRequest =
+        serde_json::from_value(synthesize_for::<UnarchiveWorkspaceRequest>()?)?;
+    assert_eq!(
+        unarchive.targets(),
+        vec![Target::Workspace(unarchive.workspace_id, Permission::Admin)]
+    );
     Ok(())
 }
 

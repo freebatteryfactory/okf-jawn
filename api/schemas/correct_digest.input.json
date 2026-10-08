@@ -14,6 +14,11 @@
       "format": "uuid",
       "type": "string"
     },
+    "ProposalId": {
+      "description": "Identity of a suggested change set, not a review.",
+      "format": "uuid",
+      "type": "string"
+    },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
       "type": "string"
@@ -28,6 +33,17 @@
   "additionalProperties": false,
   "description": "Record human corrections separately from the generated extraction.",
   "properties": {
+    "adopts": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProposalId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Keep the accepted agent-supplied text of this proposal over a later complete\nconversion: `corrected_markdown` must equal that text (compared by digest), and the\nresult records who kept it instead of a correction."
+    },
     "base_revision": {
       "$ref": "#/$defs/Revision",
       "description": "Exact revision on which this change is based; stale writes conflict."

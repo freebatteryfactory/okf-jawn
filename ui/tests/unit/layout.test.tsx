@@ -171,6 +171,8 @@ describe('PresentView', () => {
         spec: validSpec,
       },
       resolved_bindings: [],
+      charts: [],
+      as_of: '2026-10-08T14:03:07.250Z',
       warnings: [],
       receipt_id: 'rcpt_test',
     } satisfies z.infer<typeof zPresentResponse>;
@@ -232,6 +234,13 @@ describe('PresentView', () => {
           materialized: digest,
         },
       ],
+      charts: [
+        {
+          chart: { kind: 'named', name: 'metrics_chart' },
+          status: { status: 'ready', bindings: ['metrics'] },
+        },
+      ],
+      as_of: '2026-10-08T14:03:07.250Z',
       warnings: [],
       receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
     } as z.infer<typeof zPresentResponse>;
@@ -297,6 +306,8 @@ describe('PresentView refused dataset read', () => {
     resolved_bindings: [
       { name: 'metrics', source, units: {}, transforms: [], materialized: digest },
     ],
+    charts: [],
+    as_of: '2026-10-08T14:03:07.250Z',
     warnings: [],
     receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
   } as z.infer<typeof zPresentResponse>;
@@ -454,6 +465,13 @@ describe('PresentView dataset integrity checks', () => {
         },
       },
       resolved_bindings: [{ name: 'metrics', source, units: {}, transforms: [], materialized }],
+      charts: [
+        {
+          chart: { kind: 'named', name: 'metrics_chart' },
+          status: { status: 'ready', bindings: ['metrics'] },
+        },
+      ],
+      as_of: '2026-10-08T14:03:07.250Z',
       warnings: [],
       receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
     } as z.infer<typeof zPresentResponse>;
@@ -622,6 +640,11 @@ describe('PresentView chart specification validation', () => {
       resolved_bindings: [
         { name: 'metrics', source, units: {}, transforms: [], materialized: digest },
       ],
+      charts: Object.keys(charts).map((name) => ({
+        chart: { kind: 'named' as const, name },
+        status: { status: 'ready' as const, bindings: ['metrics'] },
+      })),
+      as_of: '2026-10-08T14:03:07.250Z',
       warnings: [],
       receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
     } as z.infer<typeof zPresentResponse>;

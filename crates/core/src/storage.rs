@@ -12,14 +12,14 @@ use std::sync::Arc;
 
 use okf_jawn_contract::{
     access::{AccessRoute, Permission, Principal},
-    common::{PageRequest, TextRange, Warning},
+    common::{PageRange, PageRequest, TextRange, Warning},
     conventions::NamingRules,
     error::ApiError,
     history::{BlameResponse, DiffResponse, LogResponse},
     identity::{
         Digest, ItemId, MutationId, ProposalId, Revision, TenantId, WorkspaceId, WorkspacePath,
     },
-    item::{ItemDocument, ItemKind, ItemSummary, Lifecycle, TypeDefinition},
+    item::{ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition},
     proposal::Change,
     source::SourceAppearance,
     workspace::Workspace,
@@ -170,12 +170,14 @@ pub enum TreeEdit {
         /// New path.
         destination: WorkspacePath,
     },
-    /// Set an item's lifecycle; archiving is `Lifecycle::Archived`.
-    SetLifecycle {
+    /// Set an item's OKF status word, its archived flag, or both; `None` leaves one unchanged.
+    SetStatus {
         /// Item to change.
         item_id: ItemId,
-        /// New lifecycle.
-        lifecycle: Lifecycle,
+        /// New OKF status word.
+        status: Option<ItemStatus>,
+        /// Archive (`true`) or unarchive (`false`).
+        archived: Option<bool>,
     },
     /// Remove an item from the tree; history and retained objects stay.
     DeleteItem {
@@ -201,6 +203,22 @@ pub enum TreeEdit {
     ///
     /// Corrections recorded with `CorrectDigest` are kept when a card is replaced.
     WriteSourceCard(Box<SourceCard>),
+    /// Write the accepted agent-supplied text of a source beside its card, with the proposal
+    /// and the supplier it came from. The promotion commit's committer is the approver.
+    SupplyExtraction {
+        /// Source item whose text is supplied.
+        item_id: ItemId,
+        /// Digest the agent saw; absent when the source had none.
+        based_on: Option<Digest>,
+        /// Pages the agent claims the text covers; empty for the whole.
+        pages: Vec<PageRange>,
+        /// The complete supplied Markdown.
+        markdown: String,
+        /// Proposal that carried the text.
+        proposal_id: ProposalId,
+        /// Agent that proposed it.
+        supplier: Provenance,
+    },
     /// Record a human correction of one digest, beside the generated extraction.
     CorrectDigest {
         /// Source item whose digest is corrected.
@@ -266,6 +284,19 @@ pub enum Extraction {
         /// Safe explanation shown with the item.
         message: String,
     },
+}
+
+/// What `TreeEdit::from_change` needs beyond the change itself.
+#[derive(Debug, Clone)]
+pub struct ChangeContext {
+    /// Identity for a `Change::Create`, which carries none.
+    pub new_item_id: ItemId,
+    /// Rendering role for a `Change::Create`, which carries none.
+    pub new_item_kind: ItemKind,
+    /// Proposal the change belongs to.
+    pub proposal_id: ProposalId,
+    /// Who proposed it.
+    pub proposer: Provenance,
 }
 
 /// One commit on the accepted head.
@@ -588,10 +619,11 @@ pub trait WorkspaceCatalog: Send + Sync {
 impl TreeEdit {
     /// The tree edit a proposed change stands for.
     ///
-    /// `new_item_id` and `new_item_kind` are used only for `Change::Create`, which carries
-    /// neither an identity nor a rendering role.
+    /// `context.new_item_id` and `context.new_item_kind` are used only for `Change::Create`,
+    /// which carries neither an identity nor a rendering role; the proposal and proposer only
+    /// for `Change::SupplyExtraction`.
     #[must_use]
-    pub fn from_change(change: Change, new_item_id: ItemId, new_item_kind: ItemKind) -> Self {
+    pub fn from_change(change: Change, context: &ChangeContext) -> Self {
         match change {
             Change::Create {
                 path,
@@ -599,11 +631,11 @@ impl TreeEdit {
                 body,
                 properties,
             } => Self::CreateItem {
-                item_id: new_item_id,
+                item_id: context.new_item_id,
                 path,
                 title: None,
                 type_name,
-                kind: new_item_kind,
+                kind: context.new_item_kind.clone(),
                 body,
                 properties,
             },
@@ -623,9 +655,23 @@ impl TreeEdit {
                 item_id,
                 destination,
             },
-            Change::Archive { item_id } => Self::SetLifecycle {
+            Change::Archive { item_id } => Self::SetStatus {
                 item_id,
-                lifecycle: Lifecycle::Archived,
+                status: None,
+                archived: Some(true),
+            },
+            Change::SupplyExtraction {
+                item_id,
+                based_on,
+                pages,
+                markdown,
+            } => Self::SupplyExtraction {
+                item_id,
+                based_on,
+                pages,
+                markdown,
+                proposal_id: context.proposal_id,
+                supplier: context.proposer.clone(),
             },
         }
     }

@@ -49,6 +49,31 @@
       "format": "uuid",
       "type": "string"
     },
+    "ArtifactKind": {
+      "description": "What a retained artifact is.",
+      "oneOf": [
+        {
+          "const": "export",
+          "description": "A portable export of a workspace.",
+          "type": "string"
+        },
+        {
+          "const": "workspace_backup",
+          "description": "A workspace archive.",
+          "type": "string"
+        },
+        {
+          "const": "installation_backup",
+          "description": "An installation archive (hosted: one tenant's).",
+          "type": "string"
+        },
+        {
+          "const": "view_export",
+          "description": "An export of one View.",
+          "type": "string"
+        }
+      ]
+    },
     "ConnectorId": {
       "description": "Identity of one local MCP connector credential, never the owner's browser session.",
       "format": "uuid",
@@ -67,8 +92,12 @@
           "description": "Stable downloadable artifact."
         },
         "download_path": {
-          "description": "Application-relative authorized download path.",
+          "description": "Application-relative authorized download path:\n`/api/workspaces/{workspace_id}/artifacts/{artifact_id}` for a workspace artifact,\n`/api/artifacts/{artifact_id}` for a tenant artifact.",
           "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind",
+          "description": "What the artifact is; it decides the download permission and routes."
         },
         "sha256": {
           "$ref": "#/$defs/Digest",
@@ -81,6 +110,7 @@
       },
       "required": [
         "artifact_id",
+        "kind",
         "sha256",
         "size",
         "download_path"
@@ -89,7 +119,7 @@
     },
     "DraftConflictItem": {
       "additionalProperties": false,
-      "description": "One snapshotted item whose committed content moved after its draft's base.",
+      "description": "One snapshotted item whose committed content moved after its draft's base.\n\nThe editor resolves it per item, with `changes` as the diff: keep mine is `save_draft` with\n`base_revision` = `current_revision`, then `commit_items`; take theirs is `discard_draft`.",
       "properties": {
         "changes": {
           "description": "The item's committed changes from `draft_base` to `current_revision`.",
@@ -283,6 +313,36 @@
             "operation"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The named revision was removed or rewritten by a purge; the code is `not_found`.",
+          "properties": {
+            "kind": {
+              "const": "invalidated",
+              "type": "string"
+            },
+            "purge_id": {
+              "$ref": "#/$defs/PurgeId",
+              "description": "The purge that removed or rewrote it."
+            },
+            "replacement": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Revision"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "After an item purge, the rewritten revision to re-pin to; absent after a\nworkspace purge."
+            }
+          },
+          "required": [
+            "kind",
+            "purge_id"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -396,6 +456,21 @@
           "const": "export_view",
           "description": "Export one View with its sources, data table and rendering.",
           "type": "string"
+        },
+        {
+          "const": "backup_installation",
+          "description": "Write an installation archive (tenant-level).",
+          "type": "string"
+        },
+        {
+          "const": "purge_workspace",
+          "description": "Remove a workspace permanently (tenant-level).",
+          "type": "string"
+        },
+        {
+          "const": "purge_item",
+          "description": "Remove one item permanently (tenant-level).",
+          "type": "string"
         }
       ]
     },
@@ -463,6 +538,21 @@
           "type": "string"
         },
         {
+          "const": "unarchive_workspace",
+          "description": "The `unarchive_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "purge_workspace",
+          "description": "The `purge_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "get_purge",
+          "description": "The `get_purge` operation.",
+          "type": "string"
+        },
+        {
           "const": "export_workspace",
           "description": "The `export_workspace` operation.",
           "type": "string"
@@ -475,6 +565,11 @@
         {
           "const": "restore_workspace",
           "description": "The `restore_workspace` operation.",
+          "type": "string"
+        },
+        {
+          "const": "backup_installation",
+          "description": "The `backup_installation` operation.",
           "type": "string"
         },
         {
@@ -520,6 +615,11 @@
         {
           "const": "delete_item",
           "description": "The `delete_item` operation.",
+          "type": "string"
+        },
+        {
+          "const": "purge_item",
+          "description": "The `purge_item` operation.",
           "type": "string"
         },
         {
@@ -668,6 +768,16 @@
           "type": "string"
         },
         {
+          "const": "get_tenant_job",
+          "description": "The `get_tenant_job` operation.",
+          "type": "string"
+        },
+        {
+          "const": "list_tenant_jobs",
+          "description": "The `list_tenant_jobs` operation.",
+          "type": "string"
+        },
+        {
           "const": "retry_job",
           "description": "The `retry_job` operation.",
           "type": "string"
@@ -753,6 +863,11 @@
           "type": "string"
         },
         {
+          "const": "list_tenant_events",
+          "description": "The `list_tenant_events` operation.",
+          "type": "string"
+        },
+        {
           "const": "get_session",
           "description": "The `get_session` operation.",
           "type": "string"
@@ -783,6 +898,41 @@
           "type": "string"
         }
       ]
+    },
+    "PurgeId": {
+      "description": "Identity of one purge; its record outlives what it removed.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "RestoreReport": {
+      "additionalProperties": false,
+      "description": "What a restore did.",
+      "properties": {
+        "drafts_restored": {
+          "description": "Drafts given back to their editors.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "drafts_unassigned": {
+          "description": "Drafts whose editor is not a validated identity here; kept in the archive.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "description": "Items restored.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "drafts_restored",
+        "drafts_unassigned"
+      ],
+      "type": "object"
     },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
@@ -822,7 +972,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Durable work status; acknowledgement is not a claim of completion.",
+  "description": "Durable work status; acknowledgement is not a claim of completion.\n\n`workspace_id` is present exactly for a workspace job kind and absent exactly for a tenant\njob kind (`JobKind::is_tenant`); `check` enforces it.",
   "properties": {
     "artifact": {
       "anyOf": [
@@ -874,6 +1024,17 @@
       "minimum": 0,
       "type": "integer"
     },
+    "restore": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RestoreReport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What a completed restore did."
+    },
     "revision": {
       "anyOf": [
         {
@@ -897,13 +1058,19 @@
       "type": "array"
     },
     "workspace_id": {
-      "$ref": "#/$defs/WorkspaceId",
-      "description": "Workspace whose permissions and storage scope apply."
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Workspace whose permissions and storage scope apply; absent for a tenant job."
     }
   },
   "required": [
     "id",
-    "workspace_id",
     "kind",
     "state",
     "progress",

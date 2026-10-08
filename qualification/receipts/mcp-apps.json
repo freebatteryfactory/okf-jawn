@@ -1,5 +1,5 @@
 {
-  "git_sha": "d6800ca71b5cf029d76093a436b23a8977674b25",
+  "git_sha": "54401161d922f30fc7bbedcc39c292939e00f9eb",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-08T15:46:26.249Z",
+  "produced_at": "2026-10-08T19:54:26.379Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-08T15:51:59.388Z",
+  "finished_at": "2026-10-08T20:05:36.373Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -284,9 +284,9 @@
     }
   },
   "harness_binary": {
-    "path": "target/release/okf-qualify-mcp-apps.exe",
-    "bytes": 5135360,
-    "sha256": "e6314f29bae040354d4a13e8faf76cc01335c0ad779ceb5bb8bfe55ccf030593",
+    "path": "<abs>/release/okf-qualify-mcp-apps.exe",
+    "bytes": 5292032,
+    "sha256": "2316b494ec6c792f09f564999e72f2088ff228eec814bbd8715a8b50e41aebff",
     "args": [
       "--http",
       "127.0.0.1:18765"
@@ -311,7 +311,7 @@
     ]
   },
   "bundle_sizes": {
-    "app": 1573924
+    "app": 1582914
   },
   "app_bundle": {
     "node_env": "development",
@@ -336,7 +336,7 @@
     "resource_count": 1,
     "resources": [
       {
-        "byteLength": 1573924,
+        "byteLength": 1582914,
         "metaUi": {
           "csp": {
             "connectDomains": [],
@@ -348,7 +348,7 @@
         "name": "app",
         "path": "ui/dist-apps/app.html",
         "readable": true,
-        "sha256": "97c9dfd7c8f21d5143225f71b70947417a607bc2de7e5f520a7c46bbe16dbc99",
+        "sha256": "673484731ead9292b65d9f0c6d6868fd7b4e7797a7217a9e60dfc826c70541b3",
         "uri": "ui://okf-jawn/app.html"
       }
     ],
@@ -432,12 +432,12 @@
             "app"
           ]
         },
-        "input_schema_sha256": "0aabb07eeb7f993b96dc584dddac2acadf5091cd7a8f7c8a51b984caa6676ab6",
+        "input_schema_sha256": "4014c208d1ad4b4879f1b80da6a6491ed52b97625a6f97a908fc03870a6806e3",
         "output_schema_sha256": "86221fcf16d504e6e51dd487e8633a2fb34707f7b22318213d1bd307aaf67c09"
       }
     ],
     "product_read_object": {
-      "input_schema_sha256": "0aabb07eeb7f993b96dc584dddac2acadf5091cd7a8f7c8a51b984caa6676ab6",
+      "input_schema_sha256": "4014c208d1ad4b4879f1b80da6a6491ed52b97625a6f97a908fc03870a6806e3",
       "output_schema_sha256": "86221fcf16d504e6e51dd487e8633a2fb34707f7b22318213d1bd307aaf67c09"
     },
     "resources": [
@@ -451,7 +451,7 @@
       {
         "uri": "ui://okf-jawn/app.html",
         "mime_type": "text/html;profile=mcp-app",
-        "text_sha256": "97c9dfd7c8f21d5143225f71b70947417a607bc2de7e5f520a7c46bbe16dbc99",
+        "text_sha256": "673484731ead9292b65d9f0c6d6868fd7b4e7797a7217a9e60dfc826c70541b3",
         "csp": {
           "connectDomains": [],
           "resourceDomains": []
@@ -540,14 +540,14 @@
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
-      "commit_resolved_at": "2026-10-08T15:50:38.258Z",
+      "commit_resolved_at": "2026-10-08T20:01:02.766Z",
       "files_verified": 14,
       "files_expected": 14,
       "package": {
         "name": "@modelcontextprotocol/ext-apps-basic-host",
         "version": "2.0.3"
       },
-      "lockfile_sha256": "c71ed71954b1c3f1d1023a79d7809994ce3c17840f47192c76151a6f1107466e"
+      "lockfile_sha256": "d997f2a6bf1d4332a02da0ba32e8701633cf59c348319d0f289999d217411ed7"
     },
     "browser": {
       "name": "chromium",
@@ -653,7 +653,7 @@
         "url": "http://127.0.0.1:8080/?server=okf-qualify-mcp-apps&tool=render_timeline&call=true&theme=hide",
         "screenshot": ".artifacts/qualification/mcp-apps/basic-host-render_timeline.png",
         "app_frame_depth": 2,
-        "feature_text": "Timeline\nQualification timeline fixture\n\nokf-qualify-mcp-apps · 2026-10-05T12:00:00Z\n\n89abcdef0123456789abcdef0123456789abcdef",
+        "feature_text": "Timeline\nQualification timeline fixture\n\nokf-qualify-mcp-apps · 2026-10-05T12:00:00.000Z\n\n89abcdef0123456789abcdef0123456789abcdef",
         "alerts": [],
         "expected_alerts": [],
         "axe": {
@@ -842,6 +842,8 @@
   },
   "note": "host_render (claude.ai / ChatGPT) belongs to the acceptance gate mcp-apps-web-hosts and is never invented here.",
   "paths": {
-    "unmapped": []
+    "unmapped": [
+      "<abs>/release/okf-qualify-mcp-apps.exe"
+    ]
   }
 }

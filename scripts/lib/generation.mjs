@@ -36,7 +36,7 @@ export async function generate(root, check = false) {
     await onePass(root, first); await onePass(root, second);
     const delta = differences(await manifest(first), await manifest(second));
     if (delta.length) throw new Error(`Generators are not deterministic:\n${delta.join('\n')}`);
-    for (const [from, to] of [['api', 'api'], ['client', 'ui/src/api/generated'], ['cli', 'generated/cli']]) {
+    for (const [from, to] of [['api', 'api'], ['client', 'ui/src/api/generated'], ['cli', 'generated/cli'], ['converter', 'generated/converter']]) {
       const destination = join(root, to);
       if (check) {
         if (!await exists(destination)) throw new Error(`Generated output missing: ${to}`);

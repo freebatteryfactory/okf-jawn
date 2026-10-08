@@ -31,7 +31,7 @@ export async function exists(path) { try { await lstat(path); return true; } cat
 
 export async function replaceGenerated(source, destination, repo) {
   const base = resolve(repo); const output = resolve(destination);
-  if (!output.startsWith(base + sep) || !['api', join('ui', 'src', 'api', 'generated'), join('generated', 'cli')].includes(relative(base, output))) {
+  if (!output.startsWith(base + sep) || !['api', join('ui', 'src', 'api', 'generated'), join('generated', 'cli'), join('generated', 'converter')].includes(relative(base, output))) {
     throw new Error(`Refusing to replace non-generated destination: ${destination}`);
   }
   let ancestor = base;

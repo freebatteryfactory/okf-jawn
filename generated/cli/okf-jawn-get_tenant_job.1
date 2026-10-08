@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-get_tenant_job 1  "get_tenant_job " 
+.SH NAME
+okf\-jawn\-get_tenant_job \- Read an installation\-level job: an installation backup or a purge.
+.SH SYNOPSIS
+\fBokf\-jawn get_tenant_job\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Read an installation\-level job: an installation backup or a purge.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

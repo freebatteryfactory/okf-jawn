@@ -29,8 +29,8 @@ pub struct Commit {
     pub message: String,
     /// Git author label, not verified human identity.
     pub author: String,
-    /// RFC 3339 commit timestamp.
-    pub committed_at: String,
+    /// Commit time, converted to UTC from the commit's own offset.
+    pub committed_at: crate::identity::Timestamp,
 }
 
 /// List snapshots for an item or workspace.

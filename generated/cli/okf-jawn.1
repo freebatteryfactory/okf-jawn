@@ -37,17 +37,29 @@ Update workspace metadata at the supplied base revision.
 okf\-jawn\-archive_workspace(1)
 Archive without deleting historical content.
 .TP
+okf\-jawn\-unarchive_workspace(1)
+Return an archived workspace to ordinary listings; its history and records were kept.
+.TP
+okf\-jawn\-purge_workspace(1)
+Permanently remove a workspace\*(Aqs originals, derivatives, index entries, history, managed backups and retained exports, and mark what referred to them invalidated. Never claims to erase copies outside the application. Tenant administrator in a human session only; repeating the request resumes an unfinished purge.
+.TP
+okf\-jawn\-get_purge(1)
+Read a purge\*(Aqs progress and counts; available after the workspace is gone.
+.TP
 okf\-jawn\-export_workspace(1)
-Build a portable export with resolvable referenced assets.
+Build a portable export with resolvable referenced assets; current app reviews are written into the files as OKF verified. Drafts, sessions and credentials are never included.
 .TP
 okf\-jawn\-backup_workspace(1)
-Back up content and durable application records.
+Back up the workspace\*(Aqs history, retained objects and application records, drafts included, into one self\-contained archive. Human administrator session only.
 .TP
 okf\-jawn\-restore_workspace(1)
-Restore content and durable application records from a retained backup artifact.
+Fill a blank workspace from an uploaded workspace archive, keeping item identities; drafts of editors unknown here stay in the archive and are counted. Human administrator session only.
+.TP
+okf\-jawn\-backup_installation(1)
+Back up the installation\*(Aqs identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only.
 .TP
 okf\-jawn\-list_items(1)
-List a folder with one\-line descriptions at one resolved revision.
+List a folder with one\-line descriptions at one resolved revision. With extraction = "unprocessed", list only the source files whose conversion is partial, failed or unsupported.
 .TP
 okf\-jawn\-get_item(1)
 Read the editable Markdown and preserved properties of an item.
@@ -73,6 +85,9 @@ Change lifecycle without approving any claim in the document.
 okf\-jawn\-delete_item(1)
 Remove the current reference while retaining historical source objects.
 .TP
+okf\-jawn\-purge_item(1)
+Permanently remove one item\*(Aqs bytes, derivatives, index entries and history, rewrite or delete the managed backups that hold it, and mark what referred to it invalidated. Tenant administrator in a human session only.
+.TP
 okf\-jawn\-create_folder(1)
 Create a user\-selected folder with a maintained index.
 .TP
@@ -95,7 +110,7 @@ okf\-jawn\-create_sandbox_capability(1)
 Mint a short\-lived capability URL on the sandbox origin bound to one workspace, item, revision and representation; Explorer only.
 .TP
 okf\-jawn\-search_items(1)
-Search authorized content and return cited snippets, not whole\-document dumps.
+Search authorized content and return cited snippets, not whole\-document dumps. The query may be empty only with a filter; extraction = "unprocessed" lists every source file whose text the converter could not fully extract.
 .TP
 okf\-jawn\-get_links(1)
 Read incoming or outgoing references at the selected revision.
@@ -119,7 +134,7 @@ okf\-jawn\-blame_item(1)
 Show which commit last changed each selected line, not the origin of each fact.
 .TP
 okf\-jawn\-open_proposal(1)
-Create a suggested change set without merging or marking anything reviewed.
+Create a suggested change set without merging or marking anything reviewed. A `supply_extraction` change proposes the complete text of an unprocessed source file; it is applied only when a person accepts it and is labelled as supplied by an agent.
 .TP
 okf\-jawn\-list_proposals(1)
 List visible suggested changes.
@@ -159,6 +174,12 @@ Read durable job progress; a receipt does not imply completion.
 .TP
 okf\-jawn\-list_jobs(1)
 List conversion, export, and maintenance work.
+.TP
+okf\-jawn\-get_tenant_job(1)
+Read an installation\-level job: an installation backup or a purge.
+.TP
+okf\-jawn\-list_tenant_jobs(1)
+List installation\-level jobs, newest first, with their artifacts.
 .TP
 okf\-jawn\-retry_job(1)
 Retry the same durable work identity without duplicating completed effects.
@@ -210,6 +231,9 @@ Inspect the exact sources returned through this server, not an external model in
 .TP
 okf\-jawn\-list_events(1)
 Read resumable notifications without treating them as authoritative document content.
+.TP
+okf\-jawn\-list_tenant_events(1)
+Read installation\-level notifications: sign\-ins, connector issue and revocation, and refusals outside a workspace.
 .TP
 okf\-jawn\-get_session(1)
 Read the current authenticated principal without exposing credentials.

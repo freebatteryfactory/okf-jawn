@@ -59,11 +59,12 @@ The authored source of operation meaning is `crates/contract/src/operations.rs`,
 | `api/presentation/*` | json-render's actual catalog schema and prompt APIs |
 | `ui/src/api/generated/*` | Hey API Fetch SDK, types, Zod, TanStack Query options |
 | `generated/cli/*` | clap_complete and clap_mangen |
+| `generated/converter/packages.json` | xtask, from the docling crates Cargo.lock pins |
 | `ui/src/routeTree.gen.ts` | TanStack Router build plugin |
 | `ui/dist-apps/*.html` | Actual frontend bundling of shared feature components |
 | `ui/dist/docs/*` | Locally copied swagger-ui-dist assets and the canonical `api/openapi.yaml` |
 
-There are 69 typed JSON application commands and 15 distinct transport declarations. Twelve tools are model-facing: `ls`, `grep`, `show`, `log`, `diff`, `blame`, `sources`, `links`, `propose`, `catalog`, `present` and `workspaces` (which lists the workspaces a connection may see, so an agent can pin its reads to the returned head revision); the scoped binary-read tool is app-only. Human approval, verification and connector management are never model tools. The raw transport declarations are documented schema obligations, not bound handlers yet.
+There are 77 typed JSON application commands and 16 distinct transport declarations. Twelve tools are model-facing: `ls`, `grep`, `show`, `log`, `diff`, `blame`, `sources`, `links`, `propose`, `catalog`, `present` and `workspaces` (which lists the workspaces a connection may see, so an agent can pin its reads to the returned head revision); the scoped binary-read tool is app-only. Human approval, verification and connector management are never model tools. The raw transport declarations are documented schema obligations, not bound handlers yet.
 
 A candidate `present` operation selects or composes approved views. Source components receive source bindings, not model-authored replacement evidence. The frontend includes source excerpts, Changes, Timeline, naming forms, a constrained composition catalog, and chart/table rendering source. The rest of the full UI is assigned in `SPEC.md`, not replaced by demo data.
 

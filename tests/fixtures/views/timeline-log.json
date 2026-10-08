@@ -2,7 +2,7 @@
   "commits": [
     {
       "author": "okf-qualify-mcp-apps",
-      "committed_at": "2026-10-05T12:00:00Z",
+      "committed_at": "2026-10-05T12:00:00.000Z",
       "message": "Qualification timeline fixture",
       "parents": ["0123456789abcdef0123456789abcdef01234567"],
       "revision": "89abcdef0123456789abcdef0123456789abcdef"

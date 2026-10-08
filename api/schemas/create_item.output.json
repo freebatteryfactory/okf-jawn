@@ -1,5 +1,248 @@
 {
   "$defs": {
+    "ConversionOutcome": {
+      "description": "What the converter did; supplied text and corrections never change it.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Accepted; the card was committed before conversion and shows no text.",
+          "properties": {
+            "status": {
+              "const": "pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Docling's `Success`.",
+          "properties": {
+            "status": {
+              "const": "completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Docling's `PartialSuccess`, or a windowed conversion with windows not converted.",
+          "properties": {
+            "coverage": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PageCoverage"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Pages converted and not converted; absent for a format docling converts whole."
+            },
+            "issues": {
+              "description": "Why it is partial, as the converter recorded it.",
+              "items": {
+                "$ref": "#/$defs/ConverterIssue"
+              },
+              "type": "array"
+            },
+            "status": {
+              "const": "partial",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "issues"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "No document was produced.",
+          "properties": {
+            "issues": {
+              "description": "What the converter recorded, when it recorded anything.",
+              "items": {
+                "$ref": "#/$defs/ConverterIssue"
+              },
+              "type": "array"
+            },
+            "reason": {
+              "$ref": "#/$defs/FailureReason",
+              "description": "Typed cause; never the converter's raw text alone."
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "issues"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "No converter handles this format (docling `UnknownFormat` or `UnsupportedFormat`).",
+          "properties": {
+            "status": {
+              "const": "unsupported",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ConversionSettings": {
+      "additionalProperties": false,
+      "description": "Converter settings; part of the identity of the digest they produce.\n\n`Default` is a Rust convenience for a deployment's defaults, never a serde default: every\nfield is required on the wire.",
+      "properties": {
+        "ocr": {
+          "$ref": "#/$defs/OcrPolicy",
+          "description": "When recognition runs."
+        },
+        "ocr_language": {
+          "description": "Docling `ocr_lang`, such as `en` or `ch`; absent uses docling's default (`en`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "page_image_dpi": {
+          "description": "Render resolution; docling `images_scale` = this / 72. At most 144, docling's own render\nresolution: a higher scale only upsamples that render and adds no detail.",
+          "format": "uint16",
+          "maximum": 144,
+          "minimum": 36,
+          "type": "integer"
+        },
+        "page_images": {
+          "description": "Keep a render of every page (docling `generate_page_images`).",
+          "type": "boolean"
+        },
+        "table_structure": {
+          "description": "Reconstruct table structure with the model (docling `no_table_former` off).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ocr",
+        "table_structure",
+        "page_images",
+        "page_image_dpi"
+      ],
+      "type": "object"
+    },
+    "ConverterIdentity": {
+      "additionalProperties": false,
+      "description": "The converter that produced a digest; part of the digest's identity (SPEC section 4).",
+      "properties": {
+        "models": {
+          "description": "Model files the pipeline loads, hashed once when the worker starts; empty for formats\nthat load none.",
+          "items": {
+            "$ref": "#/$defs/ModelIdentity"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "`docling`.",
+          "type": "string"
+        },
+        "packages": {
+          "description": "The converter crates as Cargo.lock resolves them; a patched fork is visible here.\nGenerated from Cargo.lock by xtask into `generated/converter/packages.json`, so\ngen-check holds it to the lock.",
+          "items": {
+            "$ref": "#/$defs/ConverterPackage"
+          },
+          "type": "array"
+        },
+        "page_window": {
+          "description": "Pages per conversion window; absent when the document was converted whole.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "settings": {
+          "$ref": "#/$defs/ConversionSettings",
+          "description": "Settings applied."
+        },
+        "version": {
+          "description": "The docling crate version, such as `1.93.5`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "packages",
+        "settings",
+        "models"
+      ],
+      "type": "object"
+    },
+    "ConverterIssue": {
+      "additionalProperties": false,
+      "description": "Docling's `ErrorItem`, with its own field names.",
+      "properties": {
+        "component_type": {
+          "description": "`document_backend`, `model`, `doc_assembler` or `user_input`.",
+          "type": "string"
+        },
+        "error_message": {
+          "description": "The converter's message, with every worker filesystem path reduced to its file name.",
+          "type": "string"
+        },
+        "module_name": {
+          "description": "Stage that recorded it, such as `pipeline`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "component_type",
+        "module_name",
+        "error_message"
+      ],
+      "type": "object"
+    },
+    "ConverterPackage": {
+      "additionalProperties": false,
+      "description": "One converter crate, as Cargo.lock records it.",
+      "properties": {
+        "name": {
+          "description": "Crate name, such as `docling-pdf`.",
+          "type": "string"
+        },
+        "source": {
+          "description": "Cargo.lock `source`, such as `git+https://github.com/Heyoub/docling.rs?rev=...`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "Crate version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "source"
+      ],
+      "type": "object"
+    },
     "Digest": {
       "pattern": "^[0-9a-f]{64}$",
       "type": "string"
@@ -25,8 +268,8 @@
           "description": "Drafted item."
         },
         "saved_at": {
-          "description": "RFC 3339 time of the latest save.",
-          "type": "string"
+          "$ref": "#/$defs/Timestamp",
+          "description": "Time of the latest save."
         }
       },
       "required": [
@@ -63,6 +306,319 @@
       ],
       "type": "object"
     },
+    "Extraction": {
+      "additionalProperties": false,
+      "description": "Everything recorded about turning one source occurrence's bytes into text.",
+      "properties": {
+        "converter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConverterIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present exactly when a converter ran (not for `pending` or `unsupported`)."
+        },
+        "corrected": {
+          "description": "A human correction is shown over that text.",
+          "type": "boolean"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The retained conversion record; present exactly when a document was produced\n(`completed`, `partial`)."
+        },
+        "outcome": {
+          "$ref": "#/$defs/ConversionOutcome",
+          "description": "What the converter did."
+        },
+        "page_count": {
+          "description": "Pages in the original, for a paginated format.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "supplied": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SuppliedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The latest accepted agent-supplied text, shown or kept in history."
+        },
+        "text_origin": {
+          "$ref": "#/$defs/TextOrigin",
+          "description": "Whose text is shown."
+        },
+        "warnings": {
+          "description": "Findings of the conversion.",
+          "items": {
+            "$ref": "#/$defs/ExtractionWarning"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "outcome",
+        "text_origin",
+        "corrected",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "ExtractionStatus": {
+      "description": "The converter's verdict on one source, as a listing and a filter use it.",
+      "oneOf": [
+        {
+          "const": "pending",
+          "description": "Accepted; no conversion has finished.",
+          "type": "string"
+        },
+        {
+          "const": "completed",
+          "description": "Every page, or the whole non-paginated document, was converted.",
+          "type": "string"
+        },
+        {
+          "const": "partial",
+          "description": "A document was produced but part of the source is missing from it.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The converter produced no document; the bytes are retained.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported",
+          "description": "No converter exists for this format; the bytes are retained.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExtractionSummary": {
+      "additionalProperties": false,
+      "description": "What a listing shows about one source.",
+      "properties": {
+        "corrected": {
+          "description": "A human correction is shown over that text.",
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/ExtractionStatus",
+          "description": "The converter's verdict."
+        },
+        "text_origin": {
+          "$ref": "#/$defs/TextOrigin",
+          "description": "Whose text is shown."
+        }
+      },
+      "required": [
+        "status",
+        "text_origin",
+        "corrected"
+      ],
+      "type": "object"
+    },
+    "ExtractionWarning": {
+      "description": "Findings that leave a document usable but lessen what it says.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Glyphs the PDF's fonts give no Unicode for; detected, not recovered, never indexed as words.",
+          "properties": {
+            "kind": {
+              "const": "undecodable_glyphs",
+              "type": "string"
+            },
+            "pages": {
+              "description": "Pages holding placeholders, ascending.",
+              "items": {
+                "$ref": "#/$defs/PageGlyphs"
+              },
+              "type": "array"
+            },
+            "unlocated_glyphs": {
+              "description": "Placeholders in items that have no page.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "pages",
+            "unlocated_glyphs"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Items located through the page text layer instead of by the converter.",
+          "properties": {
+            "items": {
+              "description": "How many.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "inferred_locations",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Items with no location in the original.",
+          "properties": {
+            "items": {
+              "description": "How many.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "unlocated_items",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A spreadsheet's cells were read as the values the file stores; formulas and number\nformats were not extracted (SPEC section 5 formula/value/format distinction).",
+          "properties": {
+            "kind": {
+              "const": "cell_values_only",
+              "type": "string"
+            },
+            "sheets": {
+              "description": "Sheets read, in workbook order.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "sheets"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FailureReason": {
+      "description": "Why a conversion produced no document.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The converter refused the bytes as unreadable: truncated, corrupt, or not what the\nname says (docling `Parse`, `WithSource`, or `Failure`).",
+          "properties": {
+            "kind": {
+              "const": "damaged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The worker reached its memory cap before any page converted.",
+          "properties": {
+            "kind": {
+              "const": "memory_limit",
+              "type": "string"
+            },
+            "limit_bytes": {
+              "description": "The cap, in bytes, as a decimal string.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "limit_bytes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The worker's hard time bound ended it before any page converted.",
+          "properties": {
+            "kind": {
+              "const": "time_limit",
+              "type": "string"
+            },
+            "limit_seconds": {
+              "description": "The bound, in whole seconds.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "limit_seconds"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The converter process ended abnormally (docling `Panic`, an abort, a signal).",
+          "properties": {
+            "kind": {
+              "const": "converter_crashed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Any other converter error (docling `Io`, `Streaming`, `Browser`).",
+          "properties": {
+            "kind": {
+              "const": "converter_error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ItemId": {
       "description": "Stable item identity independent of its current relative path.",
       "format": "uuid",
@@ -88,13 +644,53 @@
         }
       ]
     },
+    "ItemStatus": {
+      "description": "OKF's `status` word of an item, distinct from business approval and from archiving.\n\nAn absent OKF `status` reads `stable`. `other` is a producer's value outside the three,\nkept exactly as written in the file's `status` property; it cannot be set through\n`set_lifecycle`.",
+      "oneOf": [
+        {
+          "const": "draft",
+          "description": "Work in progress.",
+          "type": "string"
+        },
+        {
+          "const": "stable",
+          "description": "Current and usable content.",
+          "type": "string"
+        },
+        {
+          "const": "deprecated",
+          "description": "Retained, superseded content; still searchable.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "A status word outside the three, preserved in the file.",
+          "type": "string"
+        }
+      ]
+    },
     "ItemSummary": {
       "additionalProperties": false,
       "description": "A navigable item description bound to a resolved workspace revision.",
       "properties": {
+        "archived": {
+          "description": "Hidden from ordinary current listings; reversible and keeps history.",
+          "type": "boolean"
+        },
         "description": {
           "description": "One-line navigation summary.",
           "type": "string"
+        },
+        "extraction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExtractionSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The converter's verdict and whose text is shown; present exactly when `kind` is `source`."
         },
         "id": {
           "$ref": "#/$defs/ItemId",
@@ -103,10 +699,6 @@
         "kind": {
           "$ref": "#/$defs/ItemKind",
           "description": "Built-in rendering role."
-        },
-        "lifecycle": {
-          "$ref": "#/$defs/Lifecycle",
-          "description": "Presentation lifecycle."
         },
         "media_type": {
           "description": "Original MIME type if there is a source object.",
@@ -122,6 +714,10 @@
         "revision": {
           "$ref": "#/$defs/Revision",
           "description": "Resolved revision for this summary."
+        },
+        "status": {
+          "$ref": "#/$defs/ItemStatus",
+          "description": "OKF status word."
         },
         "title": {
           "description": "Human-readable title.",
@@ -140,29 +736,150 @@
         "type_name",
         "kind",
         "revision",
-        "lifecycle"
+        "status",
+        "archived"
       ],
       "type": "object"
     },
-    "Lifecycle": {
-      "description": "Application lifecycle distinct from business approval.",
+    "ModelIdentity": {
+      "additionalProperties": false,
+      "description": "One model file of `docling::model_inventory()`, hashed by the worker at startup.",
+      "properties": {
+        "file": {
+          "description": "File name only; never a filesystem path.",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Digest",
+          "description": "SHA-256 of the file as loaded."
+        },
+        "size": {
+          "description": "Byte count as a decimal string.",
+          "type": "string"
+        },
+        "stage": {
+          "description": "Pipeline stage, such as `layout` or `ocr.rec`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stage",
+        "file",
+        "size",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "OcrPolicy": {
+      "description": "When optical character recognition runs.",
       "oneOf": [
         {
-          "const": "active",
-          "description": "Current and usable content.",
+          "const": "auto",
+          "description": "Recognise only regions with no embedded text layer (docling default).",
           "type": "string"
         },
         {
-          "const": "deprecated",
-          "description": "Retained historical content.",
+          "const": "skip",
+          "description": "Never run recognition; layout and tables are still detected (docling `skip_ocr`).",
           "type": "string"
         },
         {
-          "const": "archived",
-          "description": "Hidden from ordinary current listings; still retrievable.",
+          "const": "force_full_page",
+          "description": "Recognise every page from its render (docling `force_full_page_ocr`).",
           "type": "string"
         }
       ]
+    },
+    "PageCoverage": {
+      "additionalProperties": false,
+      "description": "Page by page coverage of a source converted in page windows (a PDF; an image is one page).\nFormats docling converts whole (Office, HTML) have no coverage.\n\nThe three lists are ascending, disjoint, and together cover exactly `1..=page_count`;\n`check` enforces it.",
+      "properties": {
+        "converted": {
+          "description": "Pages converted with no known loss.",
+          "items": {
+            "$ref": "#/$defs/PageRange"
+          },
+          "type": "array"
+        },
+        "not_converted": {
+          "description": "Pages with no extraction; a retry converts exactly these.",
+          "items": {
+            "$ref": "#/$defs/PageRange"
+          },
+          "type": "array"
+        },
+        "page_count": {
+          "description": "Pages in the original.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "partly_extracted": {
+          "description": "Pages converted whose text is partly undecodable (`ExtractionWarning::UndecodableGlyphs`).",
+          "items": {
+            "$ref": "#/$defs/PageRange"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "page_count",
+        "converted",
+        "partly_extracted",
+        "not_converted"
+      ],
+      "type": "object"
+    },
+    "PageGlyphs": {
+      "additionalProperties": false,
+      "description": "Undecodable glyphs on one page.",
+      "properties": {
+        "glyphs": {
+          "description": "Placeholders the library printed on that page.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "page_no": {
+          "description": "One-based page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "page_no",
+        "glyphs"
+      ],
+      "type": "object"
+    },
+    "PageRange": {
+      "additionalProperties": false,
+      "description": "A one-based inclusive document page range.",
+      "properties": {
+        "end": {
+          "description": "Last page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start": {
+          "description": "First page.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "ProposalId": {
+      "description": "Identity of a suggested change set, not a review.",
+      "format": "uuid",
+      "type": "string"
     },
     "Revision": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
@@ -172,6 +889,10 @@
       "additionalProperties": false,
       "description": "One source occurrence; identical bytes do not imply identical meaning.",
       "properties": {
+        "extraction": {
+          "$ref": "#/$defs/Extraction",
+          "description": "Everything recorded about turning these bytes into text, converter identity included."
+        },
         "media_type": {
           "description": "Sniffed MIME type.",
           "type": "string"
@@ -224,7 +945,8 @@
         "names",
         "media_type",
         "size",
-        "metadata"
+        "metadata",
+        "extraction"
       ],
       "type": "object"
     },
@@ -241,8 +963,8 @@
           "type": "string"
         },
         "observed_at": {
-          "description": "RFC 3339 observation time.",
-          "type": "string"
+          "$ref": "#/$defs/Timestamp",
+          "description": "Observation time."
         },
         "supplied_by": {
           "description": "Server-recorded source identity.",
@@ -257,10 +979,91 @@
       ],
       "type": "object"
     },
+    "SuppliedText": {
+      "additionalProperties": false,
+      "description": "Accepted agent-supplied text of one source.",
+      "properties": {
+        "approved_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "When it was accepted."
+        },
+        "approved_by": {
+          "description": "Subject who accepted the proposal.",
+          "type": "string"
+        },
+        "client_id": {
+          "description": "OAuth or connector client it came through.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "SHA-256 of the supplied Markdown."
+        },
+        "kept_by": {
+          "description": "Who chose this text over a later complete conversion.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pages": {
+          "description": "Pages the agent says the text covers: a claim, never a location; empty for the whole.",
+          "items": {
+            "$ref": "#/$defs/PageRange"
+          },
+          "type": "array"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/ProposalId",
+          "description": "The accepted proposal."
+        },
+        "supplied_by": {
+          "description": "Subject of the agent that proposed it, recorded by the server.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "supplied_by",
+        "approved_by",
+        "approved_at",
+        "content_digest",
+        "pages"
+      ],
+      "type": "object"
+    },
+    "TextOrigin": {
+      "description": "Whose text a source card shows and search indexes.",
+      "oneOf": [
+        {
+          "const": "converter",
+          "description": "The converter's extraction.",
+          "type": "string"
+        },
+        {
+          "const": "supplied_by_agent",
+          "description": "Text an agent proposed and a person accepted.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No text: pending, failed or unsupported, with nothing supplied.",
+          "type": "string"
+        }
+      ]
+    },
+    "Timestamp": {
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+      "type": "string"
+    },
     "WorkspacePath": {
       "maxLength": 4096,
       "minLength": 1,
-      "pattern": "^[^/\\\\:\\x00-\\x1f]+(/[^/\\\\:\\x00-\\x1f]+)*$",
+      "pattern": "^[^/\\\\:<>\"|?*\\x00-\\x1f]+(/[^/\\\\:<>\"|?*\\x00-\\x1f]+)*$",
       "type": "string"
     }
   },
@@ -285,7 +1088,7 @@
     },
     "properties": {
       "additionalProperties": true,
-      "description": "All user and OKF properties; unknown extension values are retained.",
+      "description": "All user and OKF properties; unknown extension values are retained. The server-owned\napplication header appears under `APP_HEADER_KEY`.",
       "type": "object"
     },
     "source": {

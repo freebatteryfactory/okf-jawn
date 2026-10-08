@@ -39,7 +39,7 @@ Implement the complete assigned responsibility using real selected libraries and
 
 ### Generator-input rule
 
-A lane may change its own authored generator inputs, run `bun scripts/dev.mjs gen`, and commit the generated outputs with the lane change. `gen-check` must pass on the lane branch. The integration owner regenerates at merge and owns final agreement of `api/`, `generated/cli/`, and `ui/src/api/generated/`.
+A lane may change its own authored generator inputs, run `bun scripts/dev.mjs gen`, and commit the generated outputs with the lane change. `gen-check` must pass on the lane branch. The integration owner regenerates at merge and owns final agreement of `api/`, `generated/cli/`, `generated/converter/`, and `ui/src/api/generated/`.
 
 Classify a failure before repair: your defect, unfinished neighboring work, or a wrong shared assumption. Fix your defect; do not invent a production substitute for a missing neighbor. Request a shared change rather than layering an adapter around a mistaken contract. Three attempts without a new diagnosis require a handoff, not more speculative edits.
 
@@ -55,7 +55,7 @@ Rust tests use one idiom. Include `tests/support/check.rs` with `#[path]`; a tes
 
 Operating rules. Only the integration owner merges, always `git merge --no-ff`; never rebase, squash, amend a pushed commit or force-push. Work only in the files your brief allows: never change shared contracts, tests you did not write, manifests, lockfiles, lint config or records; stop and report the symbol (file:line), the SPEC sentence, the proposed change and the failing output. Commit at every green step, one concern each: subject `type(scope): what.`, body `Why:`, `What changed:`, `Verified:` (command and result), then `Next:` or `Blocked:`. Take `main` with `git merge main` at task boundaries on a clean tree; on a conflict in a generated directory or a lockfile take `main`'s side, run `gen` and commit, never editing conflict markers there. An attempt is one edit-and-gate cycle on the same failing check. A review finding blocks only if it cites a failing command or a named SPEC or AGENTS sentence; at most two review rounds per task. On Windows run cargo from PowerShell, never Git Bash.
 
-Generated directories are `api/`, `generated/cli/`, `ui/src/api/generated/`, the router-generated tree and frontend build outputs. Change their authored inputs and run the generator. Source-policy AST checks, actual strict Clippy and TypeScript 7 type checking remain separate from dependency-free smoke checks; Bun executing or transpiling TypeScript is not type checking.
+Generated directories are `api/`, `generated/cli/`, `generated/converter/`, `ui/src/api/generated/`, the router-generated tree and frontend build outputs. Change their authored inputs and run the generator. Source-policy AST checks, actual strict Clippy and TypeScript 7 type checking remain separate from dependency-free smoke checks; Bun executing or transpiling TypeScript is not type checking.
 
 ## Handoff
 

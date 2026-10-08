@@ -118,6 +118,10 @@ export type ApplyNamesRequest = {
 
 /**
  * Archive the workspace without deleting retained content.
+ *
+ * While a workspace is archived, an operation that would change its content or open work on
+ * it (a commit, a draft, a proposal, an upload, an import or redigest) is refused as
+ * `conflict`; reads, export, backup, `unarchive_workspace` and purge are allowed.
  */
 export type ArchiveWorkspaceRequest = {
     /**
@@ -138,6 +142,16 @@ export type ArchiveWorkspaceRequest = {
  * Identity of a retained export or backup artifact.
  */
 export type ArtifactId = string;
+
+/**
+ * What a retained artifact is.
+ */
+export type ArtifactKind = 'export' | 'workspace_backup' | 'installation_backup' | 'view_export';
+
+/**
+ * What a retained image is.
+ */
+export type AssetRole = 'page_image' | 'picture';
 
 /**
  * A requested version selector; resolved responses contain a `Revision` instead.
@@ -177,10 +191,21 @@ export type AttentionItem = {
 /**
  * Known maintenance conditions.
  */
-export type AttentionKind = 'broken_link' | 'stale' | 'unreviewed' | 'duplicate' | 'missing_description' | 'extraction' | 'newer_source' | 'instruction_like';
+export type AttentionKind = 'broken_link' | 'stale' | 'unreviewed' | 'duplicate' | 'missing_description' | 'unprocessed' | 'extraction_warnings' | 'newer_source' | 'instruction_like' | 'invalidated' | 'unparseable_header';
 
 /**
- * Back up content plus application records; distinct from portable export.
+ * Start an installation archive: identities, tenant grants, connector records without
+ * secrets, purge records and tenant events; no workspace content.
+ */
+export type BackupInstallationRequest = {
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+};
+
+/**
+ * Back up one workspace into one self-contained archive; distinct from portable export.
  */
 export type BackupWorkspaceRequest = {
     /**
@@ -248,6 +273,32 @@ export type BlameResponse = {
 };
 
 /**
+ * Docling's bounding box, copied as the converter gave it (rounded to two decimals).
+ */
+export type BoundingBox = {
+    /**
+     * Bottom edge.
+     */
+    b: number;
+    /**
+     * Corner `t` and `b` are measured from.
+     */
+    coord_origin: CoordOrigin;
+    /**
+     * Left edge.
+     */
+    l: number;
+    /**
+     * Right edge.
+     */
+    r: number;
+    /**
+     * Top edge.
+     */
+    t: number;
+};
+
+/**
  * Cancel pending or running work without discarding the uploaded original.
  */
 export type CancelJobRequest = {
@@ -306,7 +357,7 @@ export type CatalogResponse = {
 };
 
 /**
- * A one-based rectangular spreadsheet selection.
+ * A one-based inclusive rectangular spreadsheet selection; the XLSX source locator.
  */
 export type CellRange = {
     /**
@@ -314,7 +365,7 @@ export type CellRange = {
      */
     column_end: number;
     /**
-     * First column, inclusive.
+     * First column, inclusive, starting at one.
      */
     column_start: number;
     /**
@@ -322,7 +373,7 @@ export type CellRange = {
      */
     row_end: number;
     /**
-     * First row, inclusive.
+     * First row, inclusive, starting at one.
      */
     row_start: number;
     /**
@@ -386,12 +437,92 @@ export type Change = {
      */
     item_id: ItemId;
     kind: 'archive';
+} | {
+    /**
+     * Digest the agent saw; absent when the source has none. A different current digest is a conflict.
+     */
+    based_on?: Digest | null;
+    /**
+     * Source item.
+     */
+    item_id: ItemId;
+    kind: 'supply_extraction';
+    /**
+     * The complete proposed text, Markdown.
+     */
+    markdown: string;
+    /**
+     * Pages the text covers, as the agent claims; empty for the whole.
+     */
+    pages?: Array<PageRange>;
+};
+
+/**
+ * Why one chart cannot be drawn.
+ */
+export type ChartFailure = 'invalid_spec' | 'unknown_binding' | 'dataset_unavailable' | 'invalidated' | 'too_large';
+
+/**
+ * Which chart of a View a result is about.
+ */
+export type ChartRef = {
+    kind: 'spec';
+} | {
+    kind: 'named';
+    /**
+     * The key in `charts`.
+     */
+    name: string;
+};
+
+/**
+ * One chart and its state.
+ */
+export type ChartResult = {
+    /**
+     * Which chart.
+     */
+    chart: ChartRef;
+    /**
+     * Its state.
+     */
+    status: ChartStatus;
+};
+
+/**
+ * The state of one chart in a present or resolve result.
+ */
+export type ChartStatus = {
+    /**
+     * Binding names it reads.
+     */
+    bindings: Array<string>;
+    status: 'ready';
+} | {
+    /**
+     * The binding at fault, when one is.
+     */
+    binding?: string | null;
+    /**
+     * Safe explanation for the chart's own alert.
+     */
+    message: string;
+    /**
+     * Typed cause.
+     */
+    reason: ChartFailure;
+    status: 'failed';
 };
 
 /**
  * How proposed naming collisions are handled.
  */
 export type CollisionPolicy = 'reject' | 'suffix' | 'keep_existing';
+
+/**
+ * The data kind of one column.
+ */
+export type ColumnKind = 'string' | 'number' | 'integer' | 'boolean' | 'date_time';
 
 /**
  * A server-attributed discussion entry.
@@ -402,13 +533,17 @@ export type Comment = {
      */
     author: string;
     /**
-     * RFC 3339 timestamp.
+     * Creation time.
      */
-    created_at: string;
+    created_at: Timestamp;
     /**
      * Comment identity.
      */
     id: string;
+    /**
+     * The purge that invalidated the comment's `source`, whose stored path was scrubbed.
+     */
+    invalidated_by?: PurgeId | null;
     /**
      * Discussion text.
      */
@@ -424,9 +559,9 @@ export type Commit = {
      */
     author: string;
     /**
-     * RFC 3339 commit timestamp.
+     * Commit time, converted to UTC from the commit's own offset.
      */
-    committed_at: string;
+    committed_at: Timestamp;
     /**
      * Commit message.
      */
@@ -496,9 +631,9 @@ export type CompleteUploadRequest = {
  */
 export type Confirmation = {
     /**
-     * RFC 3339 expiration.
+     * Expiration.
      */
-    expires_at: string;
+    expires_at: Timestamp;
     /**
      * Opaque session-bound challenge.
      */
@@ -545,9 +680,9 @@ export type Connector = {
      */
     connector_id: ConnectorId;
     /**
-     * RFC 3339 issue time.
+     * Issue time.
      */
-    created_at: string;
+    created_at: Timestamp;
     /**
      * Owner-chosen name.
      */
@@ -557,9 +692,9 @@ export type Connector = {
      */
     permissions: Array<Permission>;
     /**
-     * RFC 3339 revocation time; a revoked connector authenticates nothing.
+     * Revocation time; a revoked connector authenticates nothing.
      */
-    revoked_at?: string | null;
+    revoked_at?: Timestamp | null;
     /**
      * Workspaces the connector may access.
      */
@@ -572,9 +707,150 @@ export type Connector = {
 export type ConnectorId = string;
 
 /**
+ * What the converter did; supplied text and corrections never change it.
+ */
+export type ConversionOutcome = {
+    status: 'pending';
+} | {
+    status: 'completed';
+} | {
+    /**
+     * Pages converted and not converted; absent for a format docling converts whole.
+     */
+    coverage?: PageCoverage | null;
+    /**
+     * Why it is partial, as the converter recorded it.
+     */
+    issues: Array<ConverterIssue>;
+    status: 'partial';
+} | {
+    /**
+     * What the converter recorded, when it recorded anything.
+     */
+    issues: Array<ConverterIssue>;
+    /**
+     * Typed cause; never the converter's raw text alone.
+     */
+    reason: FailureReason;
+    status: 'failed';
+} | {
+    status: 'unsupported';
+};
+
+/**
+ * Converter settings; part of the identity of the digest they produce.
+ *
+ * `Default` is a Rust convenience for a deployment's defaults, never a serde default: every
+ * field is required on the wire.
+ */
+export type ConversionSettings = {
+    /**
+     * When recognition runs.
+     */
+    ocr: OcrPolicy;
+    /**
+     * Docling `ocr_lang`, such as `en` or `ch`; absent uses docling's default (`en`).
+     */
+    ocr_language?: string | null;
+    /**
+     * Render resolution; docling `images_scale` = this / 72. At most 144, docling's own render
+     * resolution: a higher scale only upsamples that render and adds no detail.
+     */
+    page_image_dpi: number;
+    /**
+     * Keep a render of every page (docling `generate_page_images`).
+     */
+    page_images: boolean;
+    /**
+     * Reconstruct table structure with the model (docling `no_table_former` off).
+     */
+    table_structure: boolean;
+};
+
+/**
+ * The converter that produced a digest; part of the digest's identity (SPEC section 4).
+ */
+export type ConverterIdentity = {
+    /**
+     * Model files the pipeline loads, hashed once when the worker starts; empty for formats
+     * that load none.
+     */
+    models: Array<ModelIdentity>;
+    /**
+     * `docling`.
+     */
+    name: string;
+    /**
+     * The converter crates as Cargo.lock resolves them; a patched fork is visible here.
+     * Generated from Cargo.lock by xtask into `generated/converter/packages.json`, so
+     * gen-check holds it to the lock.
+     */
+    packages: Array<ConverterPackage>;
+    /**
+     * Pages per conversion window; absent when the document was converted whole.
+     */
+    page_window?: number | null;
+    /**
+     * Settings applied.
+     */
+    settings: ConversionSettings;
+    /**
+     * The docling crate version, such as `1.93.5`.
+     */
+    version: string;
+};
+
+/**
+ * Docling's `ErrorItem`, with its own field names.
+ */
+export type ConverterIssue = {
+    /**
+     * `document_backend`, `model`, `doc_assembler` or `user_input`.
+     */
+    component_type: string;
+    /**
+     * The converter's message, with every worker filesystem path reduced to its file name.
+     */
+    error_message: string;
+    /**
+     * Stage that recorded it, such as `pipeline`.
+     */
+    module_name: string;
+};
+
+/**
+ * One converter crate, as Cargo.lock records it.
+ */
+export type ConverterPackage = {
+    /**
+     * Crate name, such as `docling-pdf`.
+     */
+    name: string;
+    /**
+     * Cargo.lock `source`, such as `git+https://github.com/Heyoub/docling.rs?rev=...`.
+     */
+    source: string;
+    /**
+     * Crate version.
+     */
+    version: string;
+};
+
+/**
+ * Docling's `coord_origin`: which corner `t` and `b` are measured from.
+ */
+export type CoordOrigin = 'top_left' | 'bottom_left';
+
+/**
  * Record human corrections separately from the generated extraction.
  */
 export type CorrectDigestRequest = {
+    /**
+     * Keep the accepted agent-supplied text of this proposal over a later complete
+     * conversion: `corrected_markdown` must equal that text (compared by digest), and the
+     * result records who kept it instead of a correction.
+     */
+    adopts?: ProposalId | null;
     /**
      * Exact revision on which this change is based; stale writes conflict.
      */
@@ -812,6 +1088,62 @@ export type CreateWorkspaceRequest = {
 };
 
 /**
+ * A typed table resolved from cited application data; its canonical JSON bytes are the blob
+ * `ViewBinding::materialized` names.
+ */
+export type Dataset = {
+    /**
+     * Columns, in order.
+     */
+    columns: Array<DatasetColumn>;
+    /**
+     * Rows; each has exactly one value per column.
+     */
+    rows: Array<Array<DatasetValue>>;
+    /**
+     * Format version, currently 1.
+     */
+    schema_version: number;
+    /**
+     * The exact citation the rows were read from.
+     */
+    source: SourceReference;
+    /**
+     * Whose text the values were read from.
+     */
+    text_origin: TextOrigin;
+    /**
+     * Extraction warnings of the source that bear on these values, such as
+     * `cell_values_only` for a dataset read from spreadsheet cells.
+     */
+    warnings?: Array<ExtractionWarning>;
+};
+
+/**
+ * One column of a dataset.
+ */
+export type DatasetColumn = {
+    /**
+     * Data kind.
+     */
+    kind: ColumnKind;
+    /**
+     * Field name a chart encodes.
+     */
+    name: string;
+    /**
+     * Unit, such as `EUR` or `kg`.
+     */
+    unit?: string | null;
+};
+
+/**
+ * One cell: a JSON scalar of its column's kind, or null. Untagged because a tag per cell would
+ * multiply the dataset's size; the only untagged enum on the wire.
+ */
+export type DatasetValue = null | boolean | number | string;
+
+/**
  * Declared date interpretation; ambiguous input is not guessed.
  */
 export type DateOrder = 'ymd' | 'mdy' | 'dmy' | 'reject_ambiguous';
@@ -965,9 +1297,15 @@ export type DownloadArtifact = {
      */
     artifact_id: ArtifactId;
     /**
-     * Application-relative authorized download path.
+     * Application-relative authorized download path:
+     * `/api/workspaces/{workspace_id}/artifacts/{artifact_id}` for a workspace artifact,
+     * `/api/artifacts/{artifact_id}` for a tenant artifact.
      */
     download_path: string;
+    /**
+     * What the artifact is; it decides the download permission and routes.
+     */
+    kind: ArtifactKind;
     /**
      * Digest of the archive.
      */
@@ -999,13 +1337,16 @@ export type Draft = {
      */
     item_id: ItemId;
     /**
-     * RFC 3339 time of the latest save.
+     * Time of the latest save.
      */
-    saved_at: string;
+    saved_at: Timestamp;
 };
 
 /**
  * One snapshotted item whose committed content moved after its draft's base.
+ *
+ * The editor resolves it per item, with `changes` as the diff: keep mine is `save_draft` with
+ * `base_revision` = `current_revision`, then `commit_items`; take theirs is `discard_draft`.
  */
 export type DraftConflictItem = {
     /**
@@ -1051,7 +1392,8 @@ export type DraftContent = {
 };
 
 /**
- * One path observed as a duplicate during rename preview.
+ * One path observed as a duplicate during rename preview, including paths that differ only in
+ * case or Unicode normalization (`WorkspacePath::collision_key`).
  */
 export type DuplicateObservation = {
     /**
@@ -1111,12 +1453,38 @@ export type ErrorDetail = {
      * Operation that first used the key.
      */
     operation: OperationName;
+} | {
+    kind: 'invalidated';
+    /**
+     * The purge that removed or rewrote it.
+     */
+    purge_id: PurgeId;
+    /**
+     * After an item purge, the rewritten revision to re-pin to; absent after a
+     * workspace purge.
+     */
+    replacement?: Revision | null;
 };
 
 /**
- * A resumable workspace change notification, not canonical content.
+ * A resumable change notification, not canonical content.
+ *
+ * A tenant-level event (a sign-in, a connector issued or revoked, a refusal outside a
+ * workspace) has no `workspace_id`. Security events carry their `actor`.
  */
 export type Event = {
+    /**
+     * Who caused it; present on security events.
+     */
+    actor?: EventActor | null;
+    /**
+     * When the store recorded it.
+     */
+    at: Timestamp;
+    /**
+     * Affected connector.
+     */
+    connector_id?: ConnectorId | null;
     /**
      * Opaque monotonic event cursor.
      */
@@ -1134,19 +1502,41 @@ export type Event = {
      */
     kind: EventKind;
     /**
+     * The refused operation of a `permission_denied` event.
+     */
+    operation?: OperationName | null;
+    /**
      * Content revision when applicable.
      */
     revision?: Revision | null;
     /**
-     * Workspace whose permissions and storage scope apply.
+     * Workspace whose permissions and storage scope apply; absent for a tenant-level event.
      */
-    workspace_id: WorkspaceId;
+    workspace_id?: WorkspaceId | null;
+};
+
+/**
+ * Who caused a security event.
+ */
+export type EventActor = {
+    /**
+     * OAuth or connector client.
+     */
+    client_id?: string | null;
+    /**
+     * Route it came by.
+     */
+    route: AccessRoute;
+    /**
+     * Authenticated subject.
+     */
+    subject: string;
 };
 
 /**
  * Kinds of workspace change notification.
  */
-export type EventKind = 'changed' | 'imported' | 'job_updated' | 'reviewed' | 'proposal_updated';
+export type EventKind = 'changed' | 'imported' | 'job_updated' | 'reviewed' | 'proposal_updated' | 'connector_issued' | 'connector_revoked' | 'signed_in' | 'permission_denied';
 
 /**
  * Export the visual specification, sources, data table, and rendering assets.
@@ -1172,6 +1562,10 @@ export type ExportViewRequest = {
 
 /**
  * Export portable OKF content and all selected referenced assets.
+ *
+ * Committed content at one revision with the originals and retained derivatives it
+ * references, and its history when asked. A current app review is written into its item's
+ * header as an OKF `verified` entry. Drafts, sessions and credentials are never included.
  */
 export type ExportWorkspaceRequest = {
     /**
@@ -1196,6 +1590,130 @@ export type ExportWorkspaceRequest = {
  * How filename extensions are handled when applying a naming rule.
  */
 export type ExtensionPolicy = 'preserve' | 'lowercase' | 'strip';
+
+/**
+ * Everything recorded about turning one source occurrence's bytes into text.
+ */
+export type Extraction = {
+    /**
+     * Present exactly when a converter ran (not for `pending` or `unsupported`).
+     */
+    converter?: ConverterIdentity | null;
+    /**
+     * A human correction is shown over that text.
+     */
+    corrected: boolean;
+    /**
+     * The retained conversion record; present exactly when a document was produced
+     * (`completed`, `partial`).
+     */
+    digest?: Digest | null;
+    /**
+     * What the converter did.
+     */
+    outcome: ConversionOutcome;
+    /**
+     * Pages in the original, for a paginated format.
+     */
+    page_count?: number | null;
+    /**
+     * The latest accepted agent-supplied text, shown or kept in history.
+     */
+    supplied?: SuppliedText | null;
+    /**
+     * Whose text is shown.
+     */
+    text_origin: TextOrigin;
+    /**
+     * Findings of the conversion.
+     */
+    warnings: Array<ExtractionWarning>;
+};
+
+/**
+ * Sources whose converter status is `partial`, `failed` or `unsupported`, whether or not
+ * text was supplied for them.
+ */
+export type ExtractionFilter = 'unprocessed';
+
+/**
+ * The converter's verdict on one source, as a listing and a filter use it.
+ */
+export type ExtractionStatus = 'pending' | 'completed' | 'partial' | 'failed' | 'unsupported';
+
+/**
+ * What a listing shows about one source.
+ */
+export type ExtractionSummary = {
+    /**
+     * A human correction is shown over that text.
+     */
+    corrected: boolean;
+    /**
+     * The converter's verdict.
+     */
+    status: ExtractionStatus;
+    /**
+     * Whose text is shown.
+     */
+    text_origin: TextOrigin;
+};
+
+/**
+ * Findings that leave a document usable but lessen what it says.
+ */
+export type ExtractionWarning = {
+    kind: 'undecodable_glyphs';
+    /**
+     * Pages holding placeholders, ascending.
+     */
+    pages: Array<PageGlyphs>;
+    /**
+     * Placeholders in items that have no page.
+     */
+    unlocated_glyphs: number;
+} | {
+    /**
+     * How many.
+     */
+    items: number;
+    kind: 'inferred_locations';
+} | {
+    /**
+     * How many.
+     */
+    items: number;
+    kind: 'unlocated_items';
+} | {
+    kind: 'cell_values_only';
+    /**
+     * Sheets read, in workbook order.
+     */
+    sheets: Array<string>;
+};
+
+/**
+ * Why a conversion produced no document.
+ */
+export type FailureReason = {
+    kind: 'damaged';
+} | {
+    kind: 'memory_limit';
+    /**
+     * The cap, in bytes, as a decimal string.
+     */
+    limit_bytes: string;
+} | {
+    kind: 'time_limit';
+    /**
+     * The bound, in whole seconds.
+     */
+    limit_seconds: number;
+} | {
+    kind: 'converter_crashed';
+} | {
+    kind: 'converter_error';
+};
 
 /**
  * A changed file with before and after locators.
@@ -1458,6 +1976,16 @@ export type GetProposalRequest = {
 };
 
 /**
+ * Read one purge record.
+ */
+export type GetPurgeRequest = {
+    /**
+     * Purge identity.
+     */
+    purge_id: PurgeId;
+};
+
+/**
  * Inspect one durable record within workspace permissions.
  */
 export type GetReceiptRequest = {
@@ -1519,6 +2047,16 @@ export type GetSourcesResponse = {
      * Supporting citations.
      */
     sources: Array<SourceReference>;
+};
+
+/**
+ * Read one installation-level job: an installation backup or a purge.
+ */
+export type GetTenantJobRequest = {
+    /**
+     * Job identity.
+     */
+    job_id: JobId;
 };
 
 /**
@@ -1592,7 +2130,8 @@ export type ItemDocument = {
      */
     draft?: DraftContent | null;
     /**
-     * All user and OKF properties; unknown extension values are retained.
+     * All user and OKF properties; unknown extension values are retained. The server-owned
+     * application header appears under `APP_HEADER_KEY`.
      */
     properties: {
         [key: string]: unknown;
@@ -1618,13 +2157,30 @@ export type ItemId = string;
 export type ItemKind = 'note' | 'source' | 'view';
 
 /**
+ * OKF's `status` word of an item, distinct from business approval and from archiving.
+ *
+ * An absent OKF `status` reads `stable`. `other` is a producer's value outside the three,
+ * kept exactly as written in the file's `status` property; it cannot be set through
+ * `set_lifecycle`.
+ */
+export type ItemStatus = 'draft' | 'stable' | 'deprecated' | 'other';
+
+/**
  * A navigable item description bound to a resolved workspace revision.
  */
 export type ItemSummary = {
     /**
+     * Hidden from ordinary current listings; reversible and keeps history.
+     */
+    archived: boolean;
+    /**
      * One-line navigation summary.
      */
     description: string;
+    /**
+     * The converter's verdict and whose text is shown; present exactly when `kind` is `source`.
+     */
+    extraction?: ExtractionSummary | null;
     /**
      * Stable identity.
      */
@@ -1633,10 +2189,6 @@ export type ItemSummary = {
      * Built-in rendering role.
      */
     kind: ItemKind;
-    /**
-     * Presentation lifecycle.
-     */
-    lifecycle: Lifecycle;
     /**
      * Original MIME type if there is a source object.
      */
@@ -1650,6 +2202,10 @@ export type ItemSummary = {
      */
     revision: Revision;
     /**
+     * OKF status word.
+     */
+    status: ItemStatus;
+    /**
      * Human-readable title.
      */
     title: string;
@@ -1661,6 +2217,9 @@ export type ItemSummary = {
 
 /**
  * Durable work status; acknowledgement is not a claim of completion.
+ *
+ * `workspace_id` is present exactly for a workspace job kind and absent exactly for a tenant
+ * job kind (`JobKind::is_tenant`); `check` enforces it.
  */
 export type Job = {
     /**
@@ -1692,6 +2251,10 @@ export type Job = {
      */
     progress: number;
     /**
+     * What a completed restore did.
+     */
+    restore?: RestoreReport | null;
+    /**
      * Committed result revision.
      */
     revision?: Revision | null;
@@ -1704,9 +2267,9 @@ export type Job = {
      */
     warnings: Array<Warning>;
     /**
-     * Workspace whose permissions and storage scope apply.
+     * Workspace whose permissions and storage scope apply; absent for a tenant job.
      */
-    workspace_id: WorkspaceId;
+    workspace_id?: WorkspaceId | null;
 };
 
 /**
@@ -1717,7 +2280,7 @@ export type JobId = string;
 /**
  * What a durable job does; fixed when the job is accepted.
  */
-export type JobKind = 'import' | 'redigest' | 'export_workspace' | 'backup_workspace' | 'restore_workspace' | 'rebuild_index' | 'export_view';
+export type JobKind = 'import' | 'redigest' | 'export_workspace' | 'backup_workspace' | 'restore_workspace' | 'rebuild_index' | 'export_view' | 'backup_installation' | 'purge_workspace' | 'purge_item';
 
 /**
  * Job progress retained independently of diagnostic traces.
@@ -1728,11 +2291,6 @@ export type JobState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelle
  * Supported case transformations.
  */
 export type LetterCase = 'preserve' | 'lower' | 'upper' | 'title' | 'snake' | 'kebab';
-
-/**
- * Application lifecycle distinct from business approval.
- */
-export type Lifecycle = 'active' | 'deprecated' | 'archived';
 
 /**
  * A source-level relationship between items.
@@ -1853,6 +2411,11 @@ export type ListItemsRequest = {
      * Requested revision selector; latest is resolved once before reading.
      */
     at: At;
+    /**
+     * List only the sources that match among the folder's items; child folders are listed
+     * as before.
+     */
+    extraction?: ExtractionFilter | null;
     /**
      * Empty string for the root; otherwise a validated relative folder.
      */
@@ -1978,6 +2541,30 @@ export type ListReviewsResponse = {
 };
 
 /**
+ * Read installation-level events after an opaque cursor.
+ */
+export type ListTenantEventsRequest = {
+    /**
+     * Last seen event cursor.
+     */
+    after?: string | null;
+    /**
+     * Bounded pagination with an opaque cursor.
+     */
+    page: PageRequest;
+};
+
+/**
+ * List installation-level jobs, newest first.
+ */
+export type ListTenantJobsRequest = {
+    /**
+     * Bounded pagination with an opaque cursor.
+     */
+    page: PageRequest;
+};
+
+/**
  * List type definitions available in a workspace.
  */
 export type ListTypesRequest = {
@@ -2001,6 +2588,11 @@ export type ListTypesResponse = {
  * List only workspaces visible to the authenticated principal.
  */
 export type ListWorkspacesRequest = {
+    /**
+     * Also list archived workspaces; absent means false. Optional, so the `workspaces` model
+     * tool gains no required argument.
+     */
+    include_archived?: boolean | null;
     /**
      * Bounded pagination with an opaque cursor.
      */
@@ -2062,13 +2654,9 @@ export type LogResponse = {
  */
 export type MediaReference = {
     /**
-     * Caption text; caption origin is separate.
+     * The document's own caption or alternative text; absent when the document gives none.
      */
-    caption: string;
-    /**
-     * source, process, human, or agent.
-     */
-    caption_origin: string;
+    caption?: string | null;
     /**
      * Pixel height.
      */
@@ -2082,13 +2670,40 @@ export type MediaReference = {
      */
     object: Digest;
     /**
-     * Original source location.
+     * What the image is.
+     */
+    role: AssetRole;
+    /**
+     * Original source location: a page image's location is `direct` `page`; a picture's is
+     * its region.
      */
     source: SourceReference;
     /**
      * Pixel width.
      */
     width: number;
+};
+
+/**
+ * One model file of `docling::model_inventory()`, hashed by the worker at startup.
+ */
+export type ModelIdentity = {
+    /**
+     * File name only; never a filesystem path.
+     */
+    file: string;
+    /**
+     * SHA-256 of the file as loaded.
+     */
+    sha256: Digest;
+    /**
+     * Byte count as a decimal string.
+     */
+    size: string;
+    /**
+     * Pipeline stage, such as `layout` or `ocr.rec`.
+     */
+    stage: string;
 };
 
 /**
@@ -2213,6 +2828,11 @@ export type NamingRules = {
 };
 
 /**
+ * When optical character recognition runs.
+ */
+export type OcrPolicy = 'auto' | 'skip' | 'force_full_page';
+
+/**
  * Suggest changes without changing the accepted workspace.
  */
 export type OpenProposalRequest = {
@@ -2255,7 +2875,7 @@ export type OpenWorkspaceRequest = {
 /**
  * Closed set of canonical operation identifiers, serialized as the `snake_case` id.
  */
-export type OperationName = 'list_workspaces' | 'create_workspace' | 'open_workspace' | 'update_workspace' | 'archive_workspace' | 'export_workspace' | 'backup_workspace' | 'restore_workspace' | 'list_items' | 'get_item' | 'create_item' | 'save_draft' | 'list_drafts' | 'discard_draft' | 'move_item' | 'set_lifecycle' | 'delete_item' | 'create_folder' | 'list_types' | 'set_type' | 'read_item' | 'get_sources' | 'get_object' | 'create_sandbox_capability' | 'search_items' | 'get_links' | 'get_graph' | 'log_items' | 'diff_items' | 'commit_items' | 'restore_items' | 'blame_item' | 'open_proposal' | 'list_proposals' | 'get_proposal' | 'accept_proposal' | 'decline_proposal' | 'add_comment' | 'create_confirmation' | 'create_review' | 'list_reviews' | 'create_upload' | 'complete_upload' | 'start_import' | 'get_job' | 'list_jobs' | 'retry_job' | 'cancel_job' | 'redigest_item' | 'correct_digest' | 'get_rules' | 'set_rules' | 'preview_names' | 'apply_names' | 'get_attention' | 'rebuild_index' | 'get_view' | 'present_view' | 'resolve_view' | 'export_view' | 'get_catalog' | 'get_receipt' | 'list_events' | 'get_session' | 'create_connector' | 'list_connectors' | 'revoke_connector' | 'get_health' | 'get_readiness';
+export type OperationName = 'list_workspaces' | 'create_workspace' | 'open_workspace' | 'update_workspace' | 'archive_workspace' | 'unarchive_workspace' | 'purge_workspace' | 'get_purge' | 'export_workspace' | 'backup_workspace' | 'restore_workspace' | 'backup_installation' | 'list_items' | 'get_item' | 'create_item' | 'save_draft' | 'list_drafts' | 'discard_draft' | 'move_item' | 'set_lifecycle' | 'delete_item' | 'purge_item' | 'create_folder' | 'list_types' | 'set_type' | 'read_item' | 'get_sources' | 'get_object' | 'create_sandbox_capability' | 'search_items' | 'get_links' | 'get_graph' | 'log_items' | 'diff_items' | 'commit_items' | 'restore_items' | 'blame_item' | 'open_proposal' | 'list_proposals' | 'get_proposal' | 'accept_proposal' | 'decline_proposal' | 'add_comment' | 'create_confirmation' | 'create_review' | 'list_reviews' | 'create_upload' | 'complete_upload' | 'start_import' | 'get_job' | 'list_jobs' | 'get_tenant_job' | 'list_tenant_jobs' | 'retry_job' | 'cancel_job' | 'redigest_item' | 'correct_digest' | 'get_rules' | 'set_rules' | 'preview_names' | 'apply_names' | 'get_attention' | 'rebuild_index' | 'get_view' | 'present_view' | 'resolve_view' | 'export_view' | 'get_catalog' | 'get_receipt' | 'list_events' | 'list_tenant_events' | 'get_session' | 'create_connector' | 'list_connectors' | 'revoke_connector' | 'get_health' | 'get_readiness';
 
 /**
  * A navigable structural element from a document.
@@ -2285,6 +2905,46 @@ export type OutlineEntry = {
 export type OutlineEntryKind = 'heading' | 'table' | 'figure' | 'page' | 'sheet';
 
 /**
+ * Page by page coverage of a source converted in page windows (a PDF; an image is one page).
+ * Formats docling converts whole (Office, HTML) have no coverage.
+ *
+ * The three lists are ascending, disjoint, and together cover exactly `1..=page_count`;
+ * `check` enforces it.
+ */
+export type PageCoverage = {
+    /**
+     * Pages converted with no known loss.
+     */
+    converted: Array<PageRange>;
+    /**
+     * Pages with no extraction; a retry converts exactly these.
+     */
+    not_converted: Array<PageRange>;
+    /**
+     * Pages in the original.
+     */
+    page_count: number;
+    /**
+     * Pages converted whose text is partly undecodable (`ExtractionWarning::UndecodableGlyphs`).
+     */
+    partly_extracted: Array<PageRange>;
+};
+
+/**
+ * Undecodable glyphs on one page.
+ */
+export type PageGlyphs = {
+    /**
+     * Placeholders the library printed on that page.
+     */
+    glyphs: number;
+    /**
+     * One-based page.
+     */
+    page_no: number;
+};
+
+/**
  * A one-based inclusive document page range.
  */
 export type PageRange = {
@@ -2299,6 +2959,24 @@ export type PageRange = {
 };
 
 /**
+ * A box on one page, slide or image of the original.
+ */
+export type PageRegion = {
+    /**
+     * The box.
+     */
+    bbox: BoundingBox;
+    /**
+     * One-based page or slide number.
+     */
+    page_no: number;
+    /**
+     * The page's extent, so the box can be drawn over a page image on its own.
+     */
+    page_size: PageSize;
+};
+
+/**
  * A bounded page request; the cursor is opaque and scoped to the query.
  */
 export type PageRequest = {
@@ -2310,6 +2988,21 @@ export type PageRequest = {
      * Maximum results requested; server may return fewer.
      */
     limit: number;
+};
+
+/**
+ * Extent of the page the box lies on, in the box's own unit (PDF points, image pixels, PPTX
+ * EMU). A reader draws the box over a page image by the ratio of the two, so it needs no unit.
+ */
+export type PageSize = {
+    /**
+     * Page height.
+     */
+    height: number;
+    /**
+     * Page width.
+     */
+    width: number;
 };
 
 /**
@@ -2338,14 +3031,26 @@ export type PresentRequest = {
 
 /**
  * A candidate presentation and the exact sources available to its UI.
+ *
+ * A View-level fault (schema, a binding outside the workspace) refuses the whole request; a
+ * chart-level fault never does and is reported in `charts`.
  */
 export type PresentResponse = {
+    /**
+     * When the bindings were resolved; for a pinned View, when the pinned inputs were read.
+     */
+    as_of: Timestamp;
+    /**
+     * Exactly one per entry of `view.chart_refs()`, in that order.
+     */
+    charts: Array<ChartResult>;
     /**
      * Tool response record.
      */
     receipt_id: ReceiptId;
     /**
-     * Exact data supplied for this render.
+     * Exact data supplied for this render; each binding's `source.revision` is the resolved
+     * revision.
      */
     resolved_bindings: Array<ViewBinding>;
     /**
@@ -2422,17 +3127,25 @@ export type Proposal = {
      */
     changes: Array<Change>;
     /**
+     * OAuth or connector client it came through, recorded by the server.
+     */
+    client_id?: string | null;
+    /**
      * Server-computed digest of the exact displayed change set.
      */
     content_digest: Digest;
     /**
-     * RFC 3339 creation time.
+     * Creation time.
      */
-    created_at: string;
+    created_at: Timestamp;
     /**
      * Server-recorded principal.
      */
     created_by: string;
+    /**
+     * Route the proposal came by, recorded by the server.
+     */
+    created_via: AccessRoute;
     /**
      * Rationale and limitations.
      */
@@ -2441,6 +3154,10 @@ export type Proposal = {
      * Proposal identity.
      */
     id: ProposalId;
+    /**
+     * What the proposal does, derived from `changes` by the server.
+     */
+    kind: ProposalKind;
     /**
      * Exact proposed content.
      */
@@ -2465,9 +3182,177 @@ export type Proposal = {
 export type ProposalId = string;
 
 /**
+ * What a proposal does; derived from its changes, never chosen by the proposer.
+ */
+export type ProposalKind = 'content' | 'supply_extraction';
+
+/**
  * Lifecycle of a suggestion, not approval of a fact in it.
  */
 export type ProposalStatus = 'open' | 'accepted' | 'declined' | 'conflict';
+
+/**
+ * A durable, tenant-level purge record; it holds no content of the target.
+ */
+export type Purge = {
+    /**
+     * When it completed.
+     */
+    completed_at?: Timestamp | null;
+    /**
+     * Last failure.
+     */
+    error?: ApiError | null;
+    /**
+     * Identity.
+     */
+    id: PurgeId;
+    /**
+     * The tenant job doing the work.
+     */
+    job_id: JobId;
+    /**
+     * Present exactly when completed.
+     */
+    report?: PurgeReport | null;
+    /**
+     * When it was accepted.
+     */
+    requested_at: Timestamp;
+    /**
+     * Administrator subject.
+     */
+    requested_by: string;
+    /**
+     * Progress.
+     */
+    state: PurgeState;
+    /**
+     * What is removed.
+     */
+    target: PurgeTarget;
+};
+
+/**
+ * Identity of one purge; its record outlives what it removed.
+ */
+export type PurgeId = string;
+
+/**
+ * Permanently remove one item, its history and its derivatives.
+ */
+export type PurgeItemRequest = {
+    /**
+     * Exact revision on which this purge is based; a moved head conflicts.
+     */
+    base_revision: Revision;
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
+     * Item to remove.
+     */
+    item_id: ItemId;
+    /**
+     * Workspace of the item.
+     */
+    workspace_id: WorkspaceId;
+};
+
+/**
+ * What a completed purge did; counts only.
+ */
+export type PurgeReport = {
+    /**
+     * Managed backups deleted (workspace archives, and their copies in pre-migration backups).
+     */
+    backups_removed: number;
+    /**
+     * Managed backups rewritten without the target.
+     */
+    backups_rewritten: number;
+    /**
+     * Stored citations (reviews, receipts, comments, View bindings) of the target invalidated.
+     */
+    citations_invalidated: number;
+    /**
+     * Stored citations of other items remapped to a rewritten revision.
+     */
+    citations_remapped: number;
+    /**
+     * Drafts deleted.
+     */
+    drafts_removed: number;
+    /**
+     * Retained export and View export artifacts deleted.
+     */
+    exports_removed: number;
+    /**
+     * Objects kept because a surviving item still references them, as a decimal string.
+     */
+    objects_kept_shared: string;
+    /**
+     * Stored objects deleted, as a decimal string.
+     */
+    objects_removed: string;
+    /**
+     * Proposals deleted with their candidate references and comments.
+     */
+    proposals_removed: number;
+    /**
+     * Revisions that no longer exist or were rewritten.
+     */
+    revisions_invalidated: number;
+    /**
+     * Saved Views with an invalidated binding.
+     */
+    views_invalidated: number;
+};
+
+/**
+ * Progress of a purge.
+ */
+export type PurgeState = 'requested' | 'running' | 'completed' | 'failed';
+
+/**
+ * What a purge removes; identities only, never a name or a path.
+ */
+export type PurgeTarget = {
+    kind: 'workspace';
+    /**
+     * Removed workspace.
+     */
+    workspace_id: WorkspaceId;
+} | {
+    /**
+     * Removed item.
+     */
+    item_id: ItemId;
+    kind: 'item';
+    /**
+     * Its workspace.
+     */
+    workspace_id: WorkspaceId;
+};
+
+/**
+ * Permanently remove a workspace.
+ */
+export type PurgeWorkspaceRequest = {
+    /**
+     * Exact revision on which this purge is based; a moved head conflicts.
+     */
+    base_revision: Revision;
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
+     * Workspace to remove.
+     */
+    workspace_id: WorkspaceId;
+};
 
 /**
  * Read an item using an explicit representation and a single revision resolution.
@@ -2511,6 +3396,10 @@ export type ReadItemRequest = {
  * What the tool actually returned, not a claim about the host model context.
  */
 export type ReadItemResponse = {
+    /**
+     * For a source: whether its text is partial, supplied by an agent or corrected.
+     */
+    extraction?: ExtractionSummary | null;
     /**
      * Text within the declared budget.
      */
@@ -2606,6 +3495,10 @@ export type Receipt = {
      */
     id: ReceiptId;
     /**
+     * The purge that invalidated a source this receipt cites; its stored path was scrubbed.
+     */
+    invalidated_by?: PurgeId | null;
+    /**
      * Canonical operation identifier.
      */
     operation_id: OperationName;
@@ -2614,9 +3507,9 @@ export type Receipt = {
      */
     principal_subject: string;
     /**
-     * RFC 3339 response time.
+     * Response time.
      */
-    returned_at: string;
+    returned_at: Timestamp;
     /**
      * Interface route.
      */
@@ -2662,11 +3555,16 @@ export type RedigestRequest = {
      */
     item_id: ItemId;
     /**
-     * Converter options that participate in the digest cache key.
+     * Converter settings; they are part of the new digest's identity. With
+     * `unconverted_only` they must equal the current digest's settings, or the request is
+     * `invalid_input` on `/settings`.
      */
-    settings: {
-        [key: string]: unknown;
-    };
+    settings: ConversionSettings;
+    /**
+     * Convert exactly the `not_converted` pages of the current extraction and merge them into
+     * a new digest, instead of converting the whole source again.
+     */
+    unconverted_only: boolean;
     /**
      * Workspace whose permissions and storage scope apply.
      */
@@ -2771,6 +3669,24 @@ export type ResourceMetadata = {
 };
 
 /**
+ * What a restore did.
+ */
+export type RestoreReport = {
+    /**
+     * Drafts given back to their editors.
+     */
+    drafts_restored: number;
+    /**
+     * Drafts whose editor is not a validated identity here; kept in the archive.
+     */
+    drafts_unassigned: number;
+    /**
+     * Items restored.
+     */
+    items: number;
+};
+
+/**
  * Restore the selected state as a new commit without rewriting history.
  */
 export type RestoreRequest = {
@@ -2801,23 +3717,29 @@ export type RestoreRequest = {
 };
 
 /**
- * Restore a workspace from a retained backup artifact (full restore of content and app records).
+ * Fill a blank workspace of this installation from an uploaded workspace archive.
+ *
+ * The restore keeps item ids, rewrites View bindings to this workspace, gives each draft
+ * whose editor is a validated subject with `write` here back to that editor, and keeps the
+ * others in the archive, unassigned and counted. An archive of this tenant whose workspace
+ * still exists, or has a purge record, is refused: purged content never comes back through
+ * an import. The upload is consumed when the restore completes.
  */
 export type RestoreWorkspaceRequest = {
     /**
-     * Retained backup artifact to restore from.
-     */
-    artifact_id: ArtifactId;
-    /**
-     * Retry identity for the restore job.
+     * Retry identity.
      */
     idempotency_key: IdempotencyKey;
     /**
-     * Optional integrity check against the artifact digest before restore begins.
+     * SHA-256 the archive must have; checked before anything is written.
      */
-    sha256?: Digest | null;
+    sha256: Digest;
     /**
-     * Workspace whose permissions and storage scope apply.
+     * Completed upload of the archive into this workspace.
+     */
+    upload_id: UploadId;
+    /**
+     * Blank target workspace.
      */
     workspace_id: WorkspaceId;
 };
@@ -2857,9 +3779,9 @@ export type Review = {
      */
     id: ReviewId;
     /**
-     * RFC 3339 action time.
+     * Action time.
      */
-    reviewed_at: string;
+    reviewed_at: Timestamp;
     /**
      * Server-established subject; not supplied in request.
      */
@@ -2873,7 +3795,7 @@ export type Review = {
 /**
  * How recorded review evidence relates to current content.
  */
-export type ReviewCoverage = 'current' | 'changed' | 'imported' | 'unreviewed';
+export type ReviewCoverage = 'current' | 'changed' | 'imported' | 'unreviewed' | 'invalidated';
 
 /**
  * Identity of an explicit revision-bound review action.
@@ -2901,9 +3823,9 @@ export type RevokeConnectorRequest = {
  */
 export type SandboxCapability = {
     /**
-     * RFC 3339 expiry after which the capability resolves nothing.
+     * Expiry after which the capability resolves nothing.
      */
-    expires_at: string;
+    expires_at: Timestamp;
     /**
      * Absolute `/sandbox/{capability}` URL on the configured sandbox origin.
      */
@@ -2964,6 +3886,10 @@ export type SaveDraftRequest = {
  */
 export type SearchHit = {
     /**
+     * For a source: whether its text is partial, supplied by an agent or corrected.
+     */
+    extraction?: ExtractionSummary | null;
+    /**
      * Ranking signal, never a truth or trust score.
      */
     score: number;
@@ -2983,6 +3909,10 @@ export type SearchHit = {
 
 /**
  * Search the workspace at one revision with explicit scope and pagination.
+ *
+ * `query` may be empty (or only whitespace) only when `extraction` is set: then every
+ * matching source under `folder` is a hit, ordered by path, with its description as snippet
+ * (`check_rules`).
  */
 export type SearchRequest = {
     /**
@@ -2990,11 +3920,15 @@ export type SearchRequest = {
      */
     at: At;
     /**
+     * Only sources that match; with an empty query, every such source is a hit.
+     */
+    extraction?: ExtractionFilter | null;
+    /**
      * Limit to a relative folder.
      */
     folder?: string | null;
     /**
-     * Include historical lifecycle items.
+     * Include archived items; deprecated items are always searchable.
      */
     include_archived: boolean;
     /**
@@ -3031,6 +3965,8 @@ export type SearchResponse = {
 
 /**
  * Explicit bounded source selection.
+ *
+ * `PartialEq` only: a `region` holds coordinates as `f64`.
  */
 export type Selection = {
     kind: 'all';
@@ -3058,6 +3994,12 @@ export type Selection = {
      */
     heading: string;
     kind: 'section';
+} | {
+    kind: 'region';
+    /**
+     * Region.
+     */
+    region: PageRegion;
 };
 
 /**
@@ -3075,9 +4017,16 @@ export type SessionResponse = {
 };
 
 /**
- * Retire or reactivate an item without claiming a business decision.
+ * Change an item's status word or archive flag without claiming a business decision.
+ *
+ * At least one of `status` and `archived` is present, and `status` is never `other`
+ * (`check_rules`).
  */
 export type SetLifecycleRequest = {
+    /**
+     * Archive (`true`) or unarchive (`false`); absent leaves it unchanged.
+     */
+    archived?: boolean | null;
     /**
      * Exact revision on which this change is based; stale writes conflict.
      */
@@ -3091,9 +4040,9 @@ export type SetLifecycleRequest = {
      */
     item_id: ItemId;
     /**
-     * Requested lifecycle.
+     * New OKF status word; absent leaves it unchanged.
      */
-    lifecycle: Lifecycle;
+    status?: ItemStatus | null;
     /**
      * Workspace whose permissions and storage scope apply.
      */
@@ -3149,6 +4098,10 @@ export type SetTypeRequest = {
  */
 export type SourceAppearance = {
     /**
+     * Everything recorded about turning these bytes into text, converter identity included.
+     */
+    extraction: Extraction;
+    /**
      * Sniffed MIME type.
      */
     media_type: string;
@@ -3181,6 +4134,53 @@ export type SourceAppearance = {
 };
 
 /**
+ * A location and how it was obtained; an inferred location is a different variant from a
+ * direct one, so no consumer can show it as direct by accident.
+ */
+export type SourceLocation = {
+    /**
+     * Where.
+     */
+    locator: SourceLocator;
+    provenance: 'direct';
+} | {
+    /**
+     * Where.
+     */
+    locator: SourceLocator;
+    provenance: 'inferred';
+} | {
+    provenance: 'unresolved';
+    /**
+     * Why.
+     */
+    reason: UnresolvedReason;
+};
+
+/**
+ * Where in the original bytes something is.
+ */
+export type SourceLocator = {
+    kind: 'page';
+    /**
+     * One-based page or slide number.
+     */
+    page_no: number;
+} | {
+    kind: 'region';
+    /**
+     * The box.
+     */
+    region: PageRegion;
+} | {
+    kind: 'cells';
+    /**
+     * Sheet and one-based inclusive cell range.
+     */
+    range: CellRange;
+};
+
+/**
  * An observed source name and location; not an authority assertion.
  */
 export type SourceName = {
@@ -3193,9 +4193,9 @@ export type SourceName = {
      */
     folder: string;
     /**
-     * RFC 3339 observation time.
+     * Observation time.
      */
-    observed_at: string;
+    observed_at: Timestamp;
     /**
      * Server-recorded source identity.
      */
@@ -3215,6 +4215,17 @@ export type SourceReference = {
      */
     item_id: ItemId;
     /**
+     * Where the cited selection of the digest lies in the original, one entry per located
+     * item it covers, in reading order.
+     *
+     * The server computes it from (item, revision, digest, selection). A response always
+     * fills it. In a request an omitted list means "fill it"; a present list must equal what
+     * the server computes, or the request is `invalid_input` on `.../locations`, so a caller
+     * never supplies a location. A saved View file does not keep locations: they are derived,
+     * and the server fills them when it returns the View.
+     */
+    locations?: Array<SourceLocation>;
+    /**
      * Relative path at the resolved source revision.
      */
     path: WorkspacePath;
@@ -3223,7 +4234,7 @@ export type SourceReference = {
      */
     revision: Revision;
     /**
-     * Resolved page, lines, cells, section, or entire source.
+     * Resolved page, lines, cells, region, section, or entire source.
      */
     selection: Selection;
     /**
@@ -3253,6 +4264,11 @@ export type StartImportRequest = {
      */
     idempotency_key: IdempotencyKey;
     /**
+     * Converter settings; absent means the deployment's defaults, resolved into the job at
+     * acceptance so a retry converts with the same settings.
+     */
+    settings?: ConversionSettings | null;
+    /**
      * Completed upload slots.
      */
     upload_ids: Array<UploadId>;
@@ -3262,7 +4278,50 @@ export type StartImportRequest = {
     workspace_id: WorkspaceId;
 };
 
+/**
+ * Accepted agent-supplied text of one source.
+ */
+export type SuppliedText = {
+    /**
+     * When it was accepted.
+     */
+    approved_at: Timestamp;
+    /**
+     * Subject who accepted the proposal.
+     */
+    approved_by: string;
+    /**
+     * OAuth or connector client it came through.
+     */
+    client_id?: string | null;
+    /**
+     * SHA-256 of the supplied Markdown.
+     */
+    content_digest: Digest;
+    /**
+     * Who chose this text over a later complete conversion.
+     */
+    kept_by?: string | null;
+    /**
+     * Pages the agent says the text covers: a claim, never a location; empty for the whole.
+     */
+    pages: Array<PageRange>;
+    /**
+     * The accepted proposal.
+     */
+    proposal_id: ProposalId;
+    /**
+     * Subject of the agent that proposed it, recorded by the server.
+     */
+    supplied_by: string;
+};
+
 export type TenantId = string;
+
+/**
+ * Whose text a source card shows and search indexes.
+ */
+export type TextOrigin = 'converter' | 'supplied_by_agent' | 'none';
 
 /**
  * A one-based inclusive line range.
@@ -3277,6 +4336,8 @@ export type TextRange = {
      */
     start: number;
 };
+
+export type Timestamp = string;
 
 /**
  * A user-defined type schema and UI hints.
@@ -3298,6 +4359,49 @@ export type TypeDefinition = {
      * Presentation hints; never authorization rules.
      */
     ui_schema: unknown;
+};
+
+/**
+ * Return an archived workspace to ordinary listings.
+ */
+export type UnarchiveWorkspaceRequest = {
+    /**
+     * Retry identity.
+     */
+    idempotency_key: IdempotencyKey;
+    /**
+     * Workspace whose permissions and storage scope apply.
+     */
+    workspace_id: WorkspaceId;
+};
+
+/**
+ * Why a location is not known; one variant per reason the producing rule states.
+ */
+export type UnresolvedReason = {
+    kind: 'format_has_no_locator';
+} | {
+    kind: 'not_located_by_converter';
+} | {
+    kind: 'no_text_layer';
+} | {
+    kind: 'no_text_to_match';
+} | {
+    kind: 'no_page_to_search';
+} | {
+    kind: 'no_match';
+} | {
+    kind: 'ambiguous_match';
+    /**
+     * How many.
+     */
+    occurrences: number;
+} | {
+    kind: 'match_not_a_location';
+} | {
+    kind: 'corrected_text';
+} | {
+    kind: 'supplied_text';
 };
 
 /**
@@ -3365,7 +4469,8 @@ export type UploadId = string;
  */
 export type ViewBinding = {
     /**
-     * Retained dataset bytes for reproducibility.
+     * Retained `Dataset` bytes for reproducibility; in a present or resolve result, absent
+     * for a binding whose dataset could not be produced.
      */
     materialized?: Digest | null;
     /**
@@ -3456,9 +4561,13 @@ export type Warning = {
  */
 export type Workspace = {
     /**
-     * RFC 3339 creation time.
+     * When it was archived; absent while it is not archived.
      */
-    created_at: string;
+    archived_at?: Timestamp | null;
+    /**
+     * Creation time.
+     */
+    created_at: Timestamp;
     /**
      * One-line context for people and agents.
      */
@@ -3503,6 +4612,24 @@ export type GetResourceMetadataResponses = {
 };
 
 export type GetResourceMetadataResponse = GetResourceMetadataResponses[keyof GetResourceMetadataResponses];
+
+export type DownloadTenantArtifactData = {
+    body?: never;
+    path: {
+        artifact_id: string;
+    };
+    query?: never;
+    url: '/api/artifacts/{artifact_id}';
+};
+
+export type DownloadTenantArtifactResponses = {
+    /**
+     * Download a completed installation archive; only a tenant administrator in a human browser session.
+     */
+    200: Blob | File;
+};
+
+export type DownloadTenantArtifactResponse = DownloadTenantArtifactResponses[keyof DownloadTenantArtifactResponses];
 
 export type GetAttentionData = {
     body: GetAttentionRequest;
@@ -3991,6 +5118,67 @@ export type ListEventsResponses = {
 };
 
 export type ListEventsResponse2 = ListEventsResponses[keyof ListEventsResponses];
+
+export type ListTenantEventsData = {
+    body: ListTenantEventsRequest;
+    path?: never;
+    query?: never;
+    url: '/api/events/list-tenant-events';
+};
+
+export type ListTenantEventsErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type ListTenantEventsError = ListTenantEventsErrors[keyof ListTenantEventsErrors];
+
+export type ListTenantEventsResponses = {
+    /**
+     * Successful operation result
+     */
+    200: ListEventsResponse;
+};
+
+export type ListTenantEventsResponse = ListTenantEventsResponses[keyof ListTenantEventsResponses];
 
 export type GetHealthData = {
     body: HealthRequest;
@@ -4724,6 +5912,67 @@ export type GetJobResponses = {
 
 export type GetJobResponse = GetJobResponses[keyof GetJobResponses];
 
+export type GetTenantJobData = {
+    body: GetTenantJobRequest;
+    path?: never;
+    query?: never;
+    url: '/api/imports/get-tenant-job';
+};
+
+export type GetTenantJobErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type GetTenantJobError = GetTenantJobErrors[keyof GetTenantJobErrors];
+
+export type GetTenantJobResponses = {
+    /**
+     * Successful operation result
+     */
+    200: Job;
+};
+
+export type GetTenantJobResponse = GetTenantJobResponses[keyof GetTenantJobResponses];
+
 export type ListJobsData = {
     body: ListJobsRequest;
     path?: never;
@@ -4784,6 +6033,67 @@ export type ListJobsResponses = {
 };
 
 export type ListJobsResponse2 = ListJobsResponses[keyof ListJobsResponses];
+
+export type ListTenantJobsData = {
+    body: ListTenantJobsRequest;
+    path?: never;
+    query?: never;
+    url: '/api/imports/list-tenant-jobs';
+};
+
+export type ListTenantJobsErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type ListTenantJobsError = ListTenantJobsErrors[keyof ListTenantJobsErrors];
+
+export type ListTenantJobsResponses = {
+    /**
+     * Successful operation result
+     */
+    200: ListJobsResponse;
+};
+
+export type ListTenantJobsResponse = ListTenantJobsResponses[keyof ListTenantJobsResponses];
 
 export type RedigestItemData = {
     body: RedigestRequest;
@@ -5455,6 +6765,67 @@ export type MoveItemResponses = {
 };
 
 export type MoveItemResponse = MoveItemResponses[keyof MoveItemResponses];
+
+export type PurgeItemData = {
+    body: PurgeItemRequest;
+    path?: never;
+    query?: never;
+    url: '/api/items/purge-item';
+};
+
+export type PurgeItemErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type PurgeItemError = PurgeItemErrors[keyof PurgeItemErrors];
+
+export type PurgeItemResponses = {
+    /**
+     * Successful operation result
+     */
+    202: Purge;
+};
+
+export type PurgeItemResponse = PurgeItemResponses[keyof PurgeItemResponses];
 
 export type SaveDraftData = {
     body: SaveDraftRequest;
@@ -7302,6 +8673,67 @@ export type ArchiveWorkspaceResponses = {
 
 export type ArchiveWorkspaceResponse = ArchiveWorkspaceResponses[keyof ArchiveWorkspaceResponses];
 
+export type BackupInstallationData = {
+    body: BackupInstallationRequest;
+    path?: never;
+    query?: never;
+    url: '/api/workspaces/backup-installation';
+};
+
+export type BackupInstallationErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type BackupInstallationError = BackupInstallationErrors[keyof BackupInstallationErrors];
+
+export type BackupInstallationResponses = {
+    /**
+     * Successful operation result
+     */
+    202: Job;
+};
+
+export type BackupInstallationResponse = BackupInstallationResponses[keyof BackupInstallationResponses];
+
 export type BackupWorkspaceData = {
     body: BackupWorkspaceRequest;
     path?: never;
@@ -7485,6 +8917,67 @@ export type ExportWorkspaceResponses = {
 
 export type ExportWorkspaceResponse = ExportWorkspaceResponses[keyof ExportWorkspaceResponses];
 
+export type GetPurgeData = {
+    body: GetPurgeRequest;
+    path?: never;
+    query?: never;
+    url: '/api/workspaces/get-purge';
+};
+
+export type GetPurgeErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type GetPurgeError = GetPurgeErrors[keyof GetPurgeErrors];
+
+export type GetPurgeResponses = {
+    /**
+     * Successful operation result
+     */
+    200: Purge;
+};
+
+export type GetPurgeResponse = GetPurgeResponses[keyof GetPurgeResponses];
+
 export type ListWorkspacesData = {
     body: ListWorkspacesRequest;
     path?: never;
@@ -7607,6 +9100,67 @@ export type OpenWorkspaceResponses = {
 
 export type OpenWorkspaceResponse = OpenWorkspaceResponses[keyof OpenWorkspaceResponses];
 
+export type PurgeWorkspaceData = {
+    body: PurgeWorkspaceRequest;
+    path?: never;
+    query?: never;
+    url: '/api/workspaces/purge-workspace';
+};
+
+export type PurgeWorkspaceErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type PurgeWorkspaceError = PurgeWorkspaceErrors[keyof PurgeWorkspaceErrors];
+
+export type PurgeWorkspaceResponses = {
+    /**
+     * Successful operation result
+     */
+    202: Purge;
+};
+
+export type PurgeWorkspaceResponse = PurgeWorkspaceResponses[keyof PurgeWorkspaceResponses];
+
 export type RestoreWorkspaceData = {
     body: RestoreWorkspaceRequest;
     path?: never;
@@ -7667,6 +9221,67 @@ export type RestoreWorkspaceResponses = {
 };
 
 export type RestoreWorkspaceResponse = RestoreWorkspaceResponses[keyof RestoreWorkspaceResponses];
+
+export type UnarchiveWorkspaceData = {
+    body: UnarchiveWorkspaceRequest;
+    path?: never;
+    query?: never;
+    url: '/api/workspaces/unarchive-workspace';
+};
+
+export type UnarchiveWorkspaceErrors = {
+    /**
+     * Structured application failure
+     */
+    400: ApiError;
+    /**
+     * Structured application failure
+     */
+    401: ApiError;
+    /**
+     * Structured application failure
+     */
+    403: ApiError;
+    /**
+     * Structured application failure
+     */
+    404: ApiError;
+    /**
+     * Structured application failure
+     */
+    409: ApiError;
+    /**
+     * Structured application failure
+     */
+    413: ApiError;
+    /**
+     * Structured application failure
+     */
+    422: ApiError;
+    /**
+     * Structured application failure
+     */
+    500: ApiError;
+    /**
+     * Structured application failure
+     */
+    501: ApiError;
+    /**
+     * Structured application failure
+     */
+    503: ApiError;
+};
+
+export type UnarchiveWorkspaceError = UnarchiveWorkspaceErrors[keyof UnarchiveWorkspaceErrors];
+
+export type UnarchiveWorkspaceResponses = {
+    /**
+     * Successful operation result
+     */
+    200: MutationResult;
+};
+
+export type UnarchiveWorkspaceResponse = UnarchiveWorkspaceResponses[keyof UnarchiveWorkspaceResponses];
 
 export type UpdateWorkspaceData = {
     body: UpdateWorkspaceRequest;
@@ -7741,7 +9356,7 @@ export type DownloadArtifactData = {
 
 export type DownloadArtifactResponses = {
     /**
-     * Download a completed authorized export or backup.
+     * Download a completed workspace export, View export or workspace archive. The artifact kind decides the permission and the routes (ArtifactKind::download_permission and download_routes); an archive is served only to a workspace administrator in a human browser session.
      */
     200: Blob | File;
 };
@@ -7780,7 +9395,7 @@ export type DownloadObjectData = {
 
 export type DownloadObjectResponses = {
     /**
-     * Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission.
+     * Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission. Never serves a backup artifact's object.
      */
     200: Blob | File;
 };

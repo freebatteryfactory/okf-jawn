@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH okf-jawn-backup_installation 1  "backup_installation " 
+.SH NAME
+okf\-jawn\-backup_installation \- Back up the installation\*(Aqs identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only.
+.SH SYNOPSIS
+\fBokf\-jawn backup_installation\fR [\fB\-\-server\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Back up the installation\*(Aqs identities, tenant grants, connector records without secrets, purge records and tenant events; no workspace content. Tenant administrator in a human session only.
+.SH OPTIONS
+.TP
+\fB\-\-server\fR [default: http://127.0.0.1:7711]
+
+.TP
+\fB\-\-json\fR [default: {}]
+JSON request, @file, or \- for stdin
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
