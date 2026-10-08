@@ -34,6 +34,18 @@ test('recorded Context7 lookups are counted from the entries, never from memory'
   for(const site of generated)assert.ok(generatedRoots.some(g=>site.startsWith(g)),`${v.name} generated site ${site} is not a generated directory`);
  }
 });
+test('a vendor entry types no qualification status: it names the verification.json gates that record one',async()=>{
+ const data=JSON.parse(await readFile(new URL('vendors.json',root),'utf8'));
+ const gates=JSON.parse(await readFile(new URL('verification.json',root),'utf8')).current.gates;
+ const ids=new Set(Object.values(gates).flat().map(gate=>gate.id));
+ for(const v of data.vendors){
+  assert.ok(Array.isArray(v.qualification),`${v.name}.qualification must be a list of verification.json gate ids, not a typed status`);
+  assert.equal(new Set(v.qualification).size,v.qualification.length,`${v.name} names a gate twice`);
+  for(const id of v.qualification)assert.ok(ids.has(id),`${v.name} names ${id}, which is no gate of verification.json`);
+ }
+ // A result is typed in neither field: verification.json derives or states it.
+ for(const v of data.vendors)for(const note of v.offline_notes)assert.doesNotMatch(note,/^(?:PASS|FAIL|incomplete)\b|still need an executed qualification/i,`${v.name}: ${note.slice(0,60)}`);
+});
 test('vendor task returns documented lookup without dependencies installed',async()=>{
  const result=await run(process.execPath,['scripts/dev.mjs','vendor','schemars'],{cwd:root,capture:true});
  assert.ok(JSON.parse(result.stdout).some(v=>v.context7_library_id==='/gresau/schemars'));

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "project": "okf-jawn",
-  "scope": "Offline navigation notes and exact lookup instructions, not a licensed mirror of vendor documentation or a compatibility certification. use_sites exist in the repository now; planned_use_sites are where a lane will integrate the library; generated_sites are written by gen. context7_queries_executed counts the lookups whose library and query are recorded here.",
+  "scope": "Offline navigation notes and exact lookup instructions, not a licensed mirror of vendor documentation or a compatibility certification. use_sites exist in the repository now; planned_use_sites are where a lane will integrate the library; generated_sites are written by gen. context7_queries_executed counts the lookups whose library and query are recorded here. qualification lists the verification.json gates that record what has been proved about the library, and is empty when none does; the status is read there and never restated here.",
   "context7_queries_executed": 5,
   "vendors": [
     {
@@ -33,7 +33,9 @@
         "Foundation-repair 2026-10-05: OpenAPI components.schemas will be built from schemars; Input/Output suffix when serialize and deserialize contracts differ."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Installed at 1.2.2; schemas already feed api/schemas and runtime dispatch. Becoming sole OpenAPI component authority in foundation repair."
+      "qualification": [
+        "deterministic-foundation"
+      ]
     },
     {
       "name": "hey-api",
@@ -68,7 +70,10 @@
         "The zod plugin emits .nullish() where the typescript plugin emits ?: T | null, so parsed values are not assignable to generated types under exactOptionalPropertyTypes."
       ],
       "version_authority": "ui/package.json and bun.lock",
-      "qualification": "Executed locally at 0.99.0: two generation passes are byte-identical and published; the generated runtime passes its declared TS 7 policy. Generated client not yet exercised against a running server."
+      "qualification": [
+        "deterministic-foundation",
+        "hey-api-generated-runtime-probe"
+      ]
     },
     {
       "name": "jsonschema",
@@ -92,7 +97,9 @@
         "Runtime cross-field semantics and workspace authorization remain application responsibilities."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": [
+        "view-server-validation"
+      ]
     },
     {
       "name": "rmcp",
@@ -117,11 +124,13 @@
       "knowledge_source": "Official documentation reference; qualify installed version before use",
       "offline_notes": [
         "Use SDK result constructors; the selected release adds resultType handling.",
-        "The source currently contains tool/result adapters, not a completed MCP server.",
         "Model-facing and app-only tools have separate visibility; server authorization still applies to both."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Harness ServerHandler compiles; the stdio serve path has not been exercised by any MCP client. Product ServerHandler over Application not implemented."
+      "qualification": [
+        "mcp-apps-protocol-qualification",
+        "mcp-server-backed-by-application"
+      ]
     },
     {
       "name": "mcp-apps",
@@ -150,7 +159,10 @@
         "App-only read_object fetches are still workspace scoped; never assume a URI itself grants permission."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "incomplete: prior BOUNDED_UPSTREAM_EXCEPTION host claim and protocol PASS cited a dirty-tree SHA. Requalify protocol+basic-host on a clean SHA; web-host gate moved to acceptance as not_run."
+      "qualification": [
+        "mcp-apps-protocol-qualification",
+        "mcp-apps-web-hosts"
+      ]
     },
     {
       "name": "json-render",
@@ -184,7 +196,9 @@
         "Source components take binding keys, not model-authored quotes or authoritative numeric values."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "PASS: ViewDocument six-component fixture round-trips with Rust serde (deny_unknown_fields) and generated Zod + prepareSpec + render equivalence (ui/tests/unit/view-document-roundtrip.test.tsx; crates/contract/tests/semantic.rs)."
+      "qualification": [
+        "json-render-catalog-round-trip"
+      ]
     },
     {
       "name": "vega",
@@ -211,7 +225,9 @@
         "A saved view pins source revisions and digest identities; optional live mode reports every resolution."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": [
+        "authored-typescript-seams"
+      ]
     },
     {
       "name": "rjsf",
@@ -235,7 +251,9 @@
         "The human form and YAML editor share NamingRules and server validation; neither becomes a second rule engine."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": [
+        "authored-typescript-seams"
+      ]
     },
     {
       "name": "zod",
@@ -263,7 +281,10 @@
         "Foundation-repair: catalog-entry composes per-component prop schemas via z.toJSONSchema(component.props, { target: 'draft-7' }) into catalog.schema.json oneOf."
       ],
       "version_authority": "ui/package.json and bun.lock",
-      "qualification": "Installed at 4.6.5; used by catalog and Hey API generated zod.gen.ts."
+      "qualification": [
+        "authored-typescript-seams",
+        "json-render-catalog-round-trip"
+      ]
     },
     {
       "name": "cargo-deny",
@@ -289,7 +310,7 @@
         "Foundation-repair adopts these settings."
       ],
       "version_authority": "CI pin cargo-deny@0.20.2 via taiki-e/install-action",
-      "qualification": "Configured in deny.toml; CI install migrating from cargo install to taiki-e/install-action."
+      "qualification": []
     },
     {
       "name": "taiki-e-install-action",
@@ -314,7 +335,7 @@
         "actions/checkout pin: v7.0.1 = 3d3c42e5aac5ba805825da76410c181273ba90b1 (node24). v4.2.2 (11bd7190) and actions/upload-artifact v4.6.2 (ea165f8d) declare the deprecated node20 runtime; tests/foundation/ci.test.mjs rejects both."
       ],
       "version_authority": "GitHub Actions workflow pin",
-      "qualification": "Manifest at v2 lists cargo-deny 0.20.2 and cargo-audit 0.22.2."
+      "qualification": []
     },
     {
       "name": "vite-react",
@@ -342,7 +363,9 @@
         "Bun is the JavaScript package manager and build-tool runtime, not an application server runtime."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": [
+        "deterministic-foundation"
+      ]
     },
     {
       "name": "bun",
@@ -385,7 +408,10 @@
         "Run installed CLIs with bun --bun run so Node-shebang entrypoints execute under Bun and nothing is downloaded. Bun transpiling TypeScript is not type checking; tsc remains separate."
       ],
       "version_authority": "package.json packageManager and .bun-version; bun.lock for resolved packages",
-      "qualification": "Installed and exercised locally at 1.4.2 (install, lockfile, bun test, audit); CI uses oven-sh/setup-bun with bun-version-file; container image pin remains a deployment concern"
+      "qualification": [
+        "github-actions-ci-receipt",
+        "clean-checkout-rerun"
+      ]
     },
     {
       "name": "happy-dom",
@@ -410,7 +436,9 @@
         "Prefer happy-dom over jsdom for Vitest unit tests when the UI lane selects it; do not invent a second DOM environment."
       ],
       "version_authority": "ui/package.json and bun.lock",
-      "qualification": "PASS under Bun 1.4.2: Vitest 5.0.3 environment happy-dom 20.8.9; ui `bun --bun run test` green. Node jsdom special-case removed."
+      "qualification": [
+        "authored-typescript-seams"
+      ]
     },
     {
       "name": "tanstack",
@@ -441,7 +469,7 @@
         "The route tree is generator output; feature routes remain authored."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": []
     },
     {
       "name": "clap",
@@ -468,7 +496,9 @@
         "The CLI is an HTTP client, not an independent mutable repository opener."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": [
+        "deterministic-foundation"
+      ]
     },
     {
       "name": "rust-clippy",
@@ -496,7 +526,9 @@
         "Do not change lints to make this uncompiled foundation green; fix actual diagnostics or seek a policy decision."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": [
+        "deterministic-foundation"
+      ]
     },
     {
       "name": "axum",
@@ -522,7 +554,10 @@
         "Raw uploads, downloads, SSE, OAuth routes and MCP require the explicit transport bindings in the contract."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": [
+        "server-binary-and-startup",
+        "http-fallback-errors"
+      ]
     },
     {
       "name": "workos",
@@ -559,7 +594,11 @@
         "Browser sessions and delegated MCP credentials are distinct integrations; no Cloudflare fallback is part of this build."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment; API surface confirmed for foundation-repair AccessControl design."
+      "qualification": [
+        "server-binary-and-startup",
+        "grant-cache-ttl",
+        "workos-end-to-end"
+      ]
     },
     {
       "name": "okf",
@@ -597,7 +636,7 @@
         "Preserve unknown frontmatter fields. Do not turn format conformance into factual approval."
       ],
       "version_authority": "Cargo.toml and Cargo.lock",
-      "qualification": "Resolved at 0.2.7 with feature-sliced crates; runtime feature graph compiles. Application validation flow not yet implemented."
+      "qualification": []
     },
     {
       "name": "docling",
@@ -625,10 +664,16 @@
         "docling-pdf, docling-core and docling-onnx 1.93.6 are built from the fork https://github.com/Heyoub/docling.rs at e500c2323bcf5c3c84d3731ed00de65b15d0709a through [patch.crates-io] in Cargo.toml (verification.json gate converter-docling-pdf-font-run-patch); docling 1.93.5 still comes from crates.io. On a docling bump, re-check that the patch still applies or remove it.",
         "resvg 0.47 (rustybuzz, ttf-parser unmaintained advisories) is pinned upstream for Docling MSRV 1.88; ignored exactly in .cargo/audit.toml until Docling moves to resvg 0.48+.",
         "paste is pulled via docling → image → pulp/rav1e/tokenizers; ignored exactly with the same policy.",
-        "Converter API and native/model assets still need an executed qualification. Retain originals; record converter version/settings."
+        "Retain originals; record converter version/settings."
       ],
       "version_authority": "Cargo.toml and Cargo.lock",
-      "qualification": "incomplete: prior PASS on 32a10ba cited dirty-tree SHA, cargo.pid peak memory, and must_fail_corrupt.bin failing before the converter. Requalify on a clean SHA with per-fixture peak memory and must_fail_truncated.pdf."
+      "qualification": [
+        "docling-library-qualification",
+        "converter-docling-pdf-font-run-patch",
+        "converter-worker-memory-ceiling",
+        "ingest-locates-unlocated-items",
+        "ingest-flags-undecodable-text"
+      ]
     },
     {
       "name": "git2",
@@ -657,7 +702,10 @@
         "Handle conflicts and repository cleanup explicitly; do not expose raw conflict markers as finished content."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": [
+        "storage-git-cas-sqlite",
+        "mutation-crash-reconcile"
+      ]
     },
     {
       "name": "sqlite",
@@ -684,7 +732,10 @@
         "Use idempotent import records and recovery reconciliation, not telemetry as a job ledger."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": [
+        "storage-git-cas-sqlite",
+        "index-rebuild"
+      ]
     },
     {
       "name": "object_store",
@@ -710,7 +761,9 @@
         "Retained history references protect bytes from premature cleanup."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": [
+        "storage-git-cas-sqlite"
+      ]
     },
     {
       "name": "pdfjs",
@@ -737,7 +790,7 @@
         "Release documents/page resources on cancellation or tab close."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": []
     },
     {
       "name": "codemirror",
@@ -761,7 +814,7 @@
         "Reuse editor and merge behavior. Persisted changes still go through operations and revision preconditions."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": []
     },
     {
       "name": "cytoscape",
@@ -785,7 +838,7 @@
         "Graph projects the same links as the tree/backlinks API. It is not a second knowledge store."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": []
     },
     {
       "name": "uppy",
@@ -809,7 +862,7 @@
         "XHR alone does not promise resumable browser-restart uploads."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": []
     },
     {
       "name": "webmcp",
@@ -834,7 +887,7 @@
         "Pin selection and revision at invocation; current page state must not silently change the requested source."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": []
     },
     {
       "name": "telemetry",
@@ -859,7 +912,7 @@
         "Returned source receipts are application records; trace IDs link performance observations."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": []
     },
     {
       "name": "agent-instructions",
@@ -883,7 +936,7 @@
         "CODEOWNERS only requests review when repository rules and owners are configured; it is not filesystem write protection."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
-      "qualification": "Not compiled or integrated in this environment"
+      "qualification": []
     },
     {
       "name": "swagger-ui-dist",
@@ -910,7 +963,7 @@
         "No CDN, no external validator (validatorUrl: null)."
       ],
       "version_authority": "ui/package.json and bun.lock",
-      "qualification": "Installed at 5.33.1; docs bundle rewritten. Browser integration against a running server not executed."
+      "qualification": []
     },
     {
       "name": "mcp-typescript-sdk",
@@ -937,7 +990,10 @@
         "MCP client declarations reference Buffer; with skipLibCheck covering third-party .d.ts, no Node ambient island was required for authored code."
       ],
       "version_authority": "ui/package.json and bun.lock",
-      "qualification": "Pinned and installed; Apps bridge import resolves. Host qualification remains separate."
+      "qualification": [
+        "authored-typescript-seams",
+        "mcp-apps-protocol-qualification"
+      ]
     }
   ]
 }
