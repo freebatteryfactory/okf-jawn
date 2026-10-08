@@ -7,10 +7,12 @@
 //! "Error" is anything that fails after `begin` granted the lease, not only the handler: a
 //! failure to serialize the response, to build the ledger body, or in `complete` itself also
 //! releases the lease, and the caller receives the first error, never the release's.
-//! A request that declares no target is refused as `Internal` before any grant is looked up.
-//! A grant is used only when it is for the workspace and tenant that were asked for. The ledger
-//! never inspects other stores: a resumed attempt re-runs the handler under the same
-//! `MutationId`, and what the ledger retains is decided by the request's `ReplayPolicy`.
+//! A request that declares no target is refused as `Internal` before any grant is looked up,
+//! and so is a draft-bearing operation on a route that is not a human browser session
+//! (`access::check_draft_route`, refused as `Forbidden`). A grant is used only when it is for
+//! the workspace and tenant that were asked for. The ledger never inspects other stores: a
+//! resumed attempt re-runs the handler under the same `MutationId`, and what the ledger
+//! retains is decided by the request's `ReplayPolicy`.
 //!
 //! Handlers see the `MutationId`; dispatch keeps the `MutationLease` it was granted and closes
 //! the row with it, so an attempt whose lease was taken over cannot complete or release the
@@ -265,6 +267,8 @@ async fn authorize_targets(
             "Request declares no authorization target",
         ));
     }
+    // No grant lets an agent route see a draft, so this runs before any grant is looked up.
+    access::check_draft_route(principal, operation)?;
     for target in targets {
         match target {
             // Any signed-in principal; the handler filters its result by grants.

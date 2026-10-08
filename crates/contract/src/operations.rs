@@ -8,6 +8,10 @@
 //! `app` or empty), minimum permission, MCP App presentation key, HTTP success status,
 //! destructive hint, description. The `permission` column is the minimum capability;
 //! `create_confirmation` requires a stronger, action-specific one through its `targets()`.
+//! [`DRAFT_BEARING`], after the table, names the operations that carry or reveal a draft; it
+//! is the one list the contract test and core dispatch both read.
+
+use crate::metadata::OperationName;
 
 /// Expand the complete typed operation table into an adapter-specific consumer.
 #[macro_export]
@@ -86,3 +90,16 @@ macro_rules! for_each_operation {
         }
     };
 }
+
+/// Operations that carry or reveal a draft, in table order.
+///
+/// SPEC section 8: `read_item`, search, export, MCP tools and agent routes never see drafts.
+/// None of these is an MCP tool, and dispatch refuses each one on every route that is not a
+/// human browser session, whatever the caller's grants.
+pub const DRAFT_BEARING: &[OperationName] = &[
+    OperationName::GetItem,
+    OperationName::SaveDraft,
+    OperationName::ListDrafts,
+    OperationName::DiscardDraft,
+    OperationName::CommitItems,
+];

@@ -4,16 +4,9 @@ use std::collections::BTreeSet;
 use std::error::Error;
 
 use okf_jawn_contract::access::Permission;
-use okf_jawn_contract::metadata::{OperationInfo, operations};
+use okf_jawn_contract::metadata::{OperationInfo, OperationName, operations};
+use okf_jawn_contract::operations::DRAFT_BEARING;
 
-/// Operations that carry or reveal a draft; agents never see drafts (SPEC section 8).
-const DRAFT_BEARING: &[&str] = &[
-    "save_draft",
-    "list_drafts",
-    "discard_draft",
-    "commit_items",
-    "get_item",
-];
 /// Operations that destroy or overwrite user state, in table order.
 const DESTRUCTIVE: &[&str] = &[
     "archive_workspace",
@@ -113,7 +106,17 @@ fn only_read_and_propose_operations_are_visible_to_agents() {
 #[test]
 fn draft_bearing_operations_are_never_agent_tools() -> Result<(), Box<dyn Error>> {
     // `alias` and `visibility` are the agent surface; `operator_alias` is CLI vocabulary.
-    for id in DRAFT_BEARING {
+    // SPEC section 8 names `get_item` as the operation that returns the caller's own draft.
+    assert!(DRAFT_BEARING.contains(&OperationName::GetItem));
+    let positions: Vec<usize> = DRAFT_BEARING
+        .iter()
+        .filter_map(|name| OperationName::ALL.iter().position(|each| each == name))
+        .collect();
+    let distinct: BTreeSet<usize> = positions.iter().copied().collect();
+    assert_eq!(distinct.len(), DRAFT_BEARING.len(), "listed once each");
+    assert!(positions.is_sorted(), "listed in table order");
+    for name in DRAFT_BEARING {
+        let id = name.as_str();
         let operation = declared(id)?;
         assert!(
             operation.alias.is_empty(),
