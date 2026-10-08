@@ -226,7 +226,9 @@ fn workspace_path_schema_states_the_expressible_part_of_its_rule() -> Result<(),
     )?;
     assert_eq!(
         schema.get("pattern"),
-        Some(&json!(r"^[^/\\:\x00-\x1f]+(/[^/\\:\x00-\x1f]+)*$"))
+        Some(&json!(
+            r#"^[^/\\:<>"|?*\x00-\x1f]+(/[^/\\:<>"|?*\x00-\x1f]+)*$"#
+        ))
     );
     assert_eq!(schema.get("minLength"), Some(&json!(1)));
     assert_eq!(schema.get("maxLength"), Some(&json!(4096)));
