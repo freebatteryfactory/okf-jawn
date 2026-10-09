@@ -185,6 +185,82 @@ async fn one_transfer_writes_an_upload_at_a_time() -> TestResult {
 }
 
 #[tokio::test]
+async fn an_upload_is_not_completed_while_a_transfer_holds_it() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let slot = uploads.create(&local, uuid!(5)?, announced(4)).await?;
+    uploads
+        .put_content(&local, slot.id, body(b"abcd"), 1024)
+        .await?;
+    // Every byte is received; a second transfer now holds the upload.
+    let (sender, receiver) = tokio::io::duplex(64);
+    let holding = {
+        let uploads = storage.uploads();
+        let local = local.clone();
+        tokio::spawn(async move {
+            uploads
+                .put_content(&local, slot.id, Box::pin(receiver), 1024)
+                .await
+        })
+    };
+    let incoming = directory
+        .path()
+        .join("uploads")
+        .join(format!("{}.incoming", slot.id.0));
+    let mut waited = 0_u32;
+    while !incoming.exists() {
+        assert!(waited < 500, "the holding transfer never started");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        waited = waited.saturating_add(1);
+    }
+    let refused = err_of(uploads.complete(&local, slot.id, sha256(b"abcd")?).await)?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    assert!(
+        refused.message.contains("another transfer"),
+        "refused for the transfer in progress: {}",
+        refused.message
+    );
+    drop(sender);
+    assert_eq!(holding.await??.received_bytes, 4);
+    let complete = uploads.complete(&local, slot.id, sha256(b"abcd")?).await?;
+    assert_eq!(some(complete.object, "the retained object")?.size, 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_resumed_transfer_counts_the_part_file_without_a_read_first() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let slot = uploads.create(&local, uuid!(5)?, announced(9)).await?;
+    uploads
+        .put_content(&local, slot.id, body(b"abc"), 1024)
+        .await?;
+    let part = directory
+        .path()
+        .join("uploads")
+        .join(format!("{}.part", slot.id.0));
+    let mut file = std::fs::OpenOptions::new().append(true).open(&part)?;
+    std::io::Write::write_all(&mut file, b"def")?;
+    drop(file);
+    // No `get` first: the transfer itself counts the six bytes, so four more pass the size.
+    let over = err_of(
+        uploads
+            .put_content(&local, slot.id, body(b"ghij"), 1024)
+            .await,
+    )?;
+    assert_eq!(over.code, ErrorCode::TooLarge, "{}", over.message);
+    let resumed = uploads
+        .put_content(&local, slot.id, body(b"ghi"), 1024)
+        .await?;
+    assert_eq!(resumed.received_bytes, 9);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_resumed_upload_counts_the_bytes_its_part_file_holds() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
