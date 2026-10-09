@@ -1075,6 +1075,10 @@
       "description": "Markdown body, preserving source locators.",
       "type": "string"
     },
+    "content_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "SHA-256 of the item's body and properties without the server-owned header, keys sorted.\nIt is the value a confirmation and a review cite, so a client never computes it; the\nserver computes it with `okf_jawn_core::portable::item_content_digest`."
+    },
     "draft": {
       "anyOf": [
         {
@@ -1110,7 +1114,8 @@
   "required": [
     "summary",
     "body",
-    "properties"
+    "properties",
+    "content_digest"
   ],
   "title": "ItemDocument",
   "type": "object"

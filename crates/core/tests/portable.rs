@@ -15,10 +15,10 @@ use okf_jawn_contract::identity::{
 };
 use okf_jawn_contract::item::{APP_HEADER_KEY, ItemDocument, ItemKind, ItemStatus, ItemSummary};
 use okf_jawn_contract::read::Selection;
-use okf_jawn_contract::review::{Review, ReviewCoverage};
+use okf_jawn_contract::review::{ImportedClaim, Review, ReviewCoverage};
 use okf_jawn_contract::source::SourceReference;
 use okf_jawn_core::portable::{
-    ImportCheck, ImportedVerification, VERIFIED_KEY, coverage_at, exported_verified,
+    ImportCheck, VERIFIED_KEY, claim_coverage, coverage_at, exported_verified,
     imported_verification, item_content_digest, lint_imported,
 };
 use okf_jawn_core::storage::CandidateCheck;
@@ -68,7 +68,7 @@ fn instant(spelling: &str) -> Result<Timestamp, Box<dyn Error>> {
 }
 
 fn document(body: &str, properties: Value) -> Result<ItemDocument, Box<dyn Error>> {
-    Ok(ItemDocument {
+    let mut document = ItemDocument {
         summary: ItemSummary {
             id: ItemId(Uuid::from_u128(10)),
             path: WorkspacePath::try_from("notes/plan.md".to_owned())?,
@@ -84,9 +84,13 @@ fn document(body: &str, properties: Value) -> Result<ItemDocument, Box<dyn Error
         },
         body: body.to_owned(),
         properties: serde_json::from_value(properties)?,
+        content_digest: digest('0')?,
         source: None,
         draft: None,
-    })
+    };
+    // The digest is derived from the content, never typed.
+    document.content_digest = item_content_digest(&document)?;
+    Ok(document)
 }
 
 fn review(
@@ -364,11 +368,11 @@ fn an_imported_verified_is_an_unconfirmed_claim() -> TestResult {
     assert_eq!(
         claims,
         vec![
-            ImportedVerification {
+            ImportedClaim {
                 by: Some("human:walter".to_owned()),
                 at: Some("2026-06-25T09:00:00Z".to_owned()),
             },
-            ImportedVerification {
+            ImportedClaim {
                 by: Some("process:nightly".to_owned()),
                 at: Some("2026-06-26T02:00:00Z".to_owned()),
             },
@@ -378,20 +382,20 @@ fn an_imported_verified_is_an_unconfirmed_claim() -> TestResult {
     assert!(
         claims
             .iter()
-            .all(|claim| claim.coverage() == ReviewCoverage::Imported)
+            .all(|claim| claim_coverage(claim) == ReviewCoverage::Imported)
     );
 
     // OKF's rule: a bare mapping is a one-element list; any other shape claims nothing.
     let bare = properties(json!({ VERIFIED_KEY: { "by": "human:walter" } }))?;
     assert_eq!(
         imported_verification(&bare),
-        vec![ImportedVerification {
+        vec![ImportedClaim {
             by: Some("human:walter".to_owned()),
             at: None,
         }]
     );
     let scalar = properties(json!({ VERIFIED_KEY: "yes" }))?;
-    let nothing: Vec<ImportedVerification> = Vec::new();
+    let nothing: Vec<ImportedClaim> = Vec::new();
     assert_eq!(imported_verification(&scalar), nothing);
     assert_eq!(
         imported_verification(&properties(json!({ "type": "Note" }))?),
