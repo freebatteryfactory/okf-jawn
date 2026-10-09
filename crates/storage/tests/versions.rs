@@ -1007,7 +1007,13 @@ fn clone_bundle(bundle: &Path, into: &Path) -> Fallible<git2::Repository> {
         .arg("--quiet")
         .arg(bundle)
         .arg(into)
-        .output()?;
+        .output()
+        .map_err(|error| {
+            format!(
+                "this test runs stock `git` to clone the history bundle, so `git` must be on \
+                 PATH; starting it failed: {error}"
+            )
+        })?;
     assert!(
         output.status.success(),
         "stock git did not clone the bundle: {}",
