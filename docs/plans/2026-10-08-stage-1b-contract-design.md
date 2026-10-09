@@ -2030,8 +2030,10 @@ A type schema (`set_type`) is checked against the header at every schema positio
 a `required` entry or a conditional requirement named `okf_jawn`), and its references are
 limited: a `$ref`, `$dynamicRef` or `$recursiveRef` is allowed only as `#`, `#/$defs/<token>` or
 `#/definitions/<token>` with one RFC 6901 reference token, otherwise `invalid_input` on
-`{at}/$ref` (the keyword used). Every `$defs` and `definitions` entry is scanned, so every
-subschema a reference reaches has been scanned. A type is evaluated against an item's properties
+`{at}/$ref` (the keyword used). The check applies to the reference after the resolver's
+percent-decoding of the fragment (a malformed `%` sequence or non-UTF-8 result is refused), so
+`#/$defs/a%2Fx` is refused and `#/%24defs/a` is `#/$defs/a`. Every `$defs` and `definitions`
+entry is scanned, so every subschema such a reference reaches has been scanned. A type is evaluated against an item's properties
 without the header, so no type constrains its value; a schema that demands it by other means
 (for example `not` over `propertyNames`) is satisfied by no item, like the schema `false`.
 

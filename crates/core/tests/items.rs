@@ -286,6 +286,10 @@ fn a_type_cannot_reference_anything_but_its_own_definitions() -> TestResult {
         "#/$defs/",
         "#/$defs/a~2",
         "#/definitions/a/b",
+        "#/$defs/a%2",
+        "#/$defs/%FF",
+        "#/$defs/a%2Fx",
+        "#/$defs/a%2Fexamples%2F0",
     ] {
         let refused = err_of(refuse_header_in_type(&typed(json!({ "$ref": reference }))))?;
         assert_eq!(
@@ -339,6 +343,40 @@ fn a_type_cannot_reference_anything_but_its_own_definitions() -> TestResult {
         refused.field.as_deref(),
         Some("/definition/properties_schema/$defs/a/required/okf_jawn")
     );
+    Ok(())
+}
+
+#[test]
+fn a_reference_is_judged_after_percent_decoding() -> TestResult {
+    let typed = |schema: serde_json::Value| TypeDefinition {
+        name: "note".to_owned(),
+        schema_version: 1,
+        properties_schema: schema,
+        ui_schema: json!({}),
+    };
+    // The fragment is judged after percent-decoding, as the resolver reads it.
+    refuse_header_in_type(&typed(json!({
+        "$ref": "#/%24defs/a",
+        "$defs": { "a": { "type": "object" } }
+    })))?;
+    refuse_header_in_type(&typed(json!({
+        "$ref": "#/$defs/a~1x",
+        "$defs": { "a/x": { "type": "object" } }
+    })))?;
+    // A percent-encoded `/` would make these several tokens reaching outside `$defs` entries.
+    for schema in [
+        json!({
+            "$ref": "#/$defs/a%2Fexamples%2F0",
+            "$defs": { "a": { "examples": [{ "required": ["okf_jawn"] }] } }
+        }),
+        json!({ "$ref": "#/$defs/a%2Fx", "$defs": { "a": { "x": { "required": ["okf_jawn"] } } } }),
+    ] {
+        let refused = err_of(refuse_header_in_type(&typed(schema)))?;
+        assert_eq!(
+            refused.field.as_deref(),
+            Some("/definition/properties_schema/$ref")
+        );
+    }
     Ok(())
 }
 

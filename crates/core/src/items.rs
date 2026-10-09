@@ -19,8 +19,9 @@
 //!    the header's value.
 //! 2. `set_type` refuses a schema that names the header as a property, as a `required` entry or
 //!    as a conditional requirement at any schema position, and refuses a reference other than
-//!    to its own `$defs` or `definitions` entries. Every entry there is scanned, so every
-//!    subschema a reference can reach has been scanned.
+//!    to its own `$defs` or `definitions` entries, judged on the reference after the resolver's
+//!    percent-decoding. Every entry there is scanned, so every subschema such a reference can
+//!    reach has been scanned.
 //! 3. A schema that demands the header by any other means (for example `not` over
 //!    `propertyNames`) can be satisfied by no item, exactly like the schema `false`, because
 //!    the header is never shown to a type.
@@ -236,19 +237,25 @@ pub fn without_header(
         .collect()
 }
 
-/// Whether a reference value stays inside the schema's own `$defs` or `definitions` entries:
-/// exactly `#`, or `#/$defs/<token>` or `#/definitions/<token>` with one non-empty RFC 6901
-/// reference token (no further `/`, and `~` only as `~0` or `~1`).
+/// Whether a reference value stays inside the schema's own `$defs` or `definitions` entries.
+///
+/// The resolver percent-decodes the fragment before it splits it on `/`, so the rule applies to
+/// the decoded fragment: empty (the schema itself), or `/$defs/<token>` or `/definitions/<token>`
+/// with one non-empty RFC 6901 reference token (no further `/`, and `~` only as `~0` or `~1`).
+/// A malformed `%` sequence or a decoded fragment that is not UTF-8 is refused.
 fn is_own_reference(value: &serde_json::Value) -> bool {
-    let Some(reference) = value.as_str() else {
+    let Some(fragment) = value.as_str().and_then(|text| text.strip_prefix('#')) else {
         return false;
     };
-    if reference == "#" {
+    let Some(decoded) = percent_decode(fragment) else {
+        return false;
+    };
+    if decoded.is_empty() {
         return true;
     }
-    ["#/$defs/", "#/definitions/"]
+    ["/$defs/", "/definitions/"]
         .iter()
-        .filter_map(|prefix| reference.strip_prefix(prefix))
+        .filter_map(|prefix| decoded.strip_prefix(prefix))
         .any(|token| {
             !token.is_empty()
                 && !token.contains('/')
@@ -259,13 +266,33 @@ fn is_own_reference(value: &serde_json::Value) -> bool {
         })
 }
 
+/// `text` with each `%XX` (two hex digits) replaced by that byte, as UTF-8; `None` for a
+/// malformed sequence or a result that is not UTF-8.
+fn percent_decode(text: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut rest = text.as_bytes().iter();
+    while let Some(&byte) = rest.next() {
+        if byte == b'%' {
+            let pair = [*rest.next()?, *rest.next()?];
+            if !pair.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            bytes.push(u8::from_str_radix(std::str::from_utf8(&pair).ok()?, 16).ok()?);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
 /// Where `schema` names the header or reaches outside itself, at any depth of its subschemas
 /// (inside `allOf`, `$defs`, `items` and every other applicator): a key of a `properties` map,
 /// an entry of a `required` list, a conditional requirement, or a reference that is not to the
 /// schema itself or one of its own `$defs` or `definitions` entries. Only keywords whose values
 /// are schemas are descended; annotations and instance values (`examples`, `default`, `const`,
 /// `enum`) are data, so a header-shaped value there declares nothing, and a reference cannot
-/// make it count because a reference may not leave the schema's own definitions.
+/// make it count because, once percent-decoded, a reference may not leave the schema's own
+/// definitions.
 fn header_declaration(schema: &serde_json::Value, at: &str) -> Option<TypeFault> {
     let object = schema.as_object()?;
     for keyword in REFERENCE_KEYWORDS {
