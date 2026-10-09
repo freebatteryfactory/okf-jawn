@@ -10,8 +10,9 @@
 //! A request that declares no target is refused as `Internal` before any grant is looked up,
 //! and so is a draft-bearing, backup, restore or purge operation on a route that is not a human
 //! session (`access::check_human_route`, refused as `Forbidden`). Every `Forbidden` from
-//! authorization is recorded as a `permission_denied` event, in the log of the first workspace
-//! the request names or else the tenant's, before the refusal is returned. A grant is used only when it is for
+//! authorization, dispatch's or a handler's own (such as `access::authorize_job_kind`), is
+//! recorded as a `permission_denied` event, in the log of the refusing workspace, else the
+//! first workspace the request names, else the tenant's, before the refusal is returned. A grant is used only when it is for
 //! the workspace and tenant that were asked for. The ledger never inspects other stores: a
 //! resumed attempt re-runs the handler under the same `MutationId`, and what the ledger
 //! retains is decided by the request's `ReplayPolicy`.
@@ -72,7 +73,16 @@ macro_rules! dispatch_operations {
                     let replay = <$request as RequestScope>::REPLAY;
                     match prepare_mutation(ports, &mut context, replay, &request).await? {
                         MutationGate::Run(lease) => {
-                            let outcome = service.$id(&context, request).await;
+                            // A handler's own authorization (the job-kind rule) is recorded
+                            // like dispatch's, in the log of the request's first workspace.
+                            let scope = denial_scope(caller.principal, None, &request);
+                            let outcome = match service.$id(&context, request).await {
+                                Err(error) if error.code == ErrorCode::Forbidden => Err(
+                                    record_denied(ports.events, caller.principal, operation, &scope, error)
+                                        .await,
+                                ),
+                                outcome => outcome,
+                            };
                             finish(ports.mutations, lease, replay, outcome).await
                         }
                         MutationGate::ShortCircuit(value) => Ok(value),
@@ -365,7 +375,37 @@ async fn record_denial(
     if refusal.error.code != ErrorCode::Forbidden {
         return refusal.error;
     }
-    let workspace = match refusal.target {
+    let scope = denial_scope(principal, refusal.target, request);
+    record_denied(events, principal, operation, &scope, refusal.error).await
+}
+
+/// Append `permission_denied` for `error` to the log of `scope` and return `error`
+/// unchanged, whether or not the append succeeded.
+async fn record_denied(
+    events: &dyn EventLog,
+    principal: &Principal,
+    operation: OperationName,
+    scope: &EventScope,
+    error: ApiError,
+) -> ApiError {
+    let _recorded = events
+        .append(
+            scope,
+            None,
+            NewEvent::permission_denied(principal, operation),
+        )
+        .await;
+    error
+}
+
+/// The log a refusal is recorded in: the refusing workspace target's, else the first workspace
+/// the request names, else the tenant's.
+fn denial_scope(
+    principal: &Principal,
+    target: Option<Target>,
+    request: &impl RequestScope,
+) -> EventScope {
+    let workspace = match target {
         Some(Target::Workspace(workspace_id, _)) => Some(workspace_id),
         Some(Target::Authenticated | Target::Deployment(_)) => None,
         None => request
@@ -376,7 +416,7 @@ async fn record_denial(
                 Target::Authenticated | Target::Deployment(_) => None,
             }),
     };
-    let scope = workspace.map_or_else(
+    workspace.map_or_else(
         || EventScope::Tenant(principal.tenant_id.clone()),
         |workspace_id| {
             EventScope::Workspace(StorageScope {
@@ -384,15 +424,7 @@ async fn record_denial(
                 workspace_id,
             })
         },
-    );
-    let _recorded = events
-        .append(
-            &scope,
-            None,
-            NewEvent::permission_denied(principal, operation),
-        )
-        .await;
-    refusal.error
+    )
 }
 
 /// Refuse a workspace grant the adapter returned for a workspace or tenant that was not asked.

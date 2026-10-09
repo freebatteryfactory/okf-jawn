@@ -1436,6 +1436,42 @@ async fn a_grant_refusal_is_recorded_as_permission_denied() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_refusal_returned_by_the_handler_is_recorded_as_permission_denied() -> TestResult {
+    // retry_job passes dispatch on write; the job-kind rule then refuses inside the handler.
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.fail_once(
+        "retry_job",
+        ApiError::new(ErrorCode::Forbidden, "a backup job needs admin"),
+    )?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let refused = err_of(call(&app, &ports, &alice, "retry_job", job_request_body(KEY_ONE)).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    assert_eq!(refused.message, "a backup job needs admin");
+    let appended = ports.events.appended()?;
+    let (scope, event) = some(appended.first(), "the refusal event")?;
+    assert_eq!(appended.len(), 1);
+    assert_eq!(
+        scope,
+        &EventScope::Workspace(StorageScope {
+            tenant_id: tenant("tenant-local")?,
+            workspace_id: workspace(WORKSPACE_A)?,
+        })
+    );
+    assert_eq!(event.kind, EventKind::PermissionDenied);
+    assert_eq!(event.operation, Some(OperationName::RetryJob));
+    // Any other handler error records nothing.
+    app.fail_once(
+        "retry_job",
+        ApiError::new(ErrorCode::Unavailable, "store offline"),
+    )?;
+    let failed = err_of(call(&app, &ports, &alice, "retry_job", job_request_body(KEY_TWO)).await)?;
+    assert_eq!(failed.code, ErrorCode::Unavailable);
+    assert_eq!(ports.events.appended()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_tenant_refusal_is_a_tenant_event_even_when_workspaces_follow() -> TestResult {
     // create_connector authorizes the tenant first and its workspaces after. Bob holds every
     // grant on A but no tenant grant, so the tenant target refuses him, and the event belongs to
