@@ -355,6 +355,11 @@ pub trait RecordStore: Send + Sync {
     /// Read one purge; it outlives the workspace it removed.
     fn get_purge<'a>(&'a self, tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge>;
     /// Store the progress, report or failure of a purge and return it as stored.
+    ///
+    /// The store stamps `Purge::completed_at` from its own clock in the write that first
+    /// records `PurgeState::Completed`, because the handler has no clock: the caller passes
+    /// `completed_at` as `None` and reads the stamp from the returned purge. Recording the
+    /// completion again keeps the first stamp; a purge in any other state has none.
     fn update_purge<'a>(&'a self, tenant: &'a TenantId, purge: Purge) -> PortFuture<'a, Purge>;
     /// What became of a revision a purge rewrote or removed; `None` when no purge touched it.
     /// Written by `Purger`.

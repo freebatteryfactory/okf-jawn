@@ -23,7 +23,7 @@ use okf_jawn_contract::import::{Job, JobKind, JobState};
 use okf_jawn_contract::item::{Draft, ItemKind};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::proposal::{Change, Comment, Proposal, ProposalStatus};
-use okf_jawn_contract::purge::PurgeTarget;
+use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState, PurgeTarget};
 use okf_jawn_contract::read::AssetRole;
 use okf_jawn_contract::review::{Confirmation, ConfirmationAction, ConfirmationTarget, Review};
 use okf_jawn_contract::search::{GetGraphResponse, LinkDirection};
@@ -484,6 +484,29 @@ async fn purge_and_derived_calls(
             &recorded.digest,
         )
         .await
+}
+
+/// How a purge handler records completion: it has no clock, so it passes `completed_at` as
+/// `None` and reads the store's stamp back from the purge `update_purge` returns.
+async fn purge_completion(
+    records: &dyn RecordStore,
+    tenant: &TenantId,
+    purge: Purge,
+    report: PurgeReport,
+) -> Result<Option<Timestamp>, ApiError> {
+    let stored = records
+        .update_purge(
+            tenant,
+            Purge {
+                state: PurgeState::Completed,
+                completed_at: None,
+                report: Some(report),
+                error: None,
+                ..purge
+            },
+        )
+        .await?;
+    Ok(stored.completed_at)
 }
 
 async fn job_runtime_calls(
@@ -1106,6 +1129,7 @@ fn a_commit_is_built_from_a_claimed_job_alone() -> TestResult {
     assert!(type_checked(&record_store_calls));
     assert!(type_checked(&job_runtime_calls));
     assert!(type_checked(&purge_and_derived_calls));
+    assert!(type_checked(&purge_completion));
     Ok(())
 }
 
