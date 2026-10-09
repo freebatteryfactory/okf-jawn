@@ -184,6 +184,25 @@ fn migrations_back_up_then_upgrade_then_verify() -> TestResult {
 }
 
 #[test]
+fn migrations_refuse_a_newer_database_without_writing_it() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("records.sqlite");
+    let backups = directory.path().join("backups");
+    let two = steps(&["CREATE TABLE a (x TEXT);", "CREATE TABLE b (x TEXT);"]);
+    drop(migrate_database(&database, &two, &backups)?);
+    let before = std::fs::read(&database)?;
+    let error = err_of(migrate_database(
+        &database,
+        &steps(&["CREATE TABLE a (x TEXT);"]),
+        &backups,
+    ))?;
+    assert_eq!(error.code, ErrorCode::Unsupported, "{}", error.message);
+    assert_eq!(std::fs::read(&database)?, before);
+    assert!(!backups.exists(), "a refused database is not backed up");
+    Ok(())
+}
+
+#[test]
 fn migrations_roll_back_a_failing_step_and_keep_the_backup() -> TestResult {
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("records.sqlite");
