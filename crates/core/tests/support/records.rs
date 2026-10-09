@@ -108,6 +108,7 @@ pub fn record() -> Built<ConversionRecord> {
         structured: vec![WindowExport {
             window: Some(PageRange { start: 1, end: 2 }),
             digest: digest('c')?,
+            lines: None,
         }],
         markdown: digest('e')?,
         locations: vec![
