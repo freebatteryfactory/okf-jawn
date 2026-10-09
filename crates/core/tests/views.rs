@@ -346,6 +346,49 @@ fn a_header_spanning_two_rows_leaves_no_empty_body_row() -> TestResult {
 }
 
 #[test]
+fn a_header_spanning_columns_names_each_column_it_covers() -> TestResult {
+    let header = |column, column_span, text: &str, row| ConvertedCell {
+        row,
+        column,
+        row_span: 1,
+        column_span,
+        text: text.to_owned(),
+        column_header: true,
+        row_header: false,
+    };
+    let mut record = record()?;
+    let table = record.tables.first_mut().ok_or("the fixture has a table")?;
+    table.num_cols = 4;
+    table.cells = vec![
+        header(0, 2, "2024", 0),
+        header(2, 2, "2025", 0),
+        header(0, 1, "Q1", 1),
+        header(1, 1, "Q2", 1),
+        header(2, 1, "Q1", 1),
+        header(3, 1, "Q2", 1),
+    ];
+    table.cells.extend((0..4).map(|column| ConvertedCell {
+        column_header: false,
+        ..header(column, 1, "10", 2)
+    }));
+    let dataset = materialize(
+        &binding(Selection::All)?,
+        &record,
+        TextOrigin::Converter,
+        &[],
+    )
+    .map_err(|failure| failure.message)?;
+    let names: Vec<&str> = dataset
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect();
+    assert_eq!(names, ["2024 Q1", "2024 Q2", "2025 Q1", "2025 Q2"]);
+    assert_eq!(dataset.rows.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn every_column_name_is_distinct_even_against_generated_ones() -> TestResult {
     let dataset = read_with(|cells| {
         for (column, header) in [(0, "A"), (1, "A"), (2, "A (2)")] {

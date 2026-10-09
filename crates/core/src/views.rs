@@ -54,6 +54,9 @@ struct Grid<'a> {
     cells: Vec<Vec<Option<GridCell<'a>>>>,
     /// Read rows a column-header cell covers, at its origin or by its row span.
     header_rows: BTreeSet<u32>,
+    /// Every read position a cell covers, with that cell's index and text: a header spanning
+    /// columns names each of them, and one spanning rows is named once.
+    labels: BTreeMap<(u32, u32), (usize, &'a str)>,
 }
 
 /// Zero-based rows and columns of a table that a cell range selects.
@@ -127,12 +130,14 @@ pub fn materialize(
     }
     // The header is the leading rows a column-header cell covers, so a header spanning two
     // rows leaves no empty row in the body.
-    let grid = grid_of(table, rows.clone(), columns)?;
+    let grid = grid_of(table, rows.clone(), columns.clone())?;
     let header_rows = rows
+        .clone()
         .take_while(|row| grid.header_rows.contains(row))
         .count();
-    let (headers, body) = grid.cells.split_at(header_rows);
-    let names = column_names(headers, width);
+    let first_body_row = rows.clone().nth(header_rows).unwrap_or(rows.end);
+    let body = grid.cells.get(header_rows..).unwrap_or_default();
+    let names = column_names(&grid.labels, rows.start..first_body_row, columns);
     let kinds: Vec<ColumnKind> = (0..width).map(|column| column_kind(body, column)).collect();
     let columns = names
         .into_iter()
@@ -333,11 +338,12 @@ fn grid_of<'a>(
     columns: Range<u32>,
 ) -> Result<Grid<'a>, BindingFailure> {
     let mut header_rows: BTreeSet<u32> = BTreeSet::new();
+    let mut labels: BTreeMap<(u32, u32), (usize, &'a str)> = BTreeMap::new();
     let mut by_position: BTreeMap<(u32, u32), GridCell<'a>> = BTreeMap::new();
     // Every position of the read area a cell's span covers; two spans meeting there overlap.
     // Only the read area is marked, which the cell bound keeps small.
     let mut occupied: BTreeSet<(u32, u32)> = BTreeSet::new();
-    for cell in &table.cells {
+    for (index, cell) in table.cells.iter().enumerate() {
         let row_end = cell.row.checked_add(cell.row_span);
         let column_end = cell.column.checked_add(cell.column_span);
         let inside = cell.row_span > 0
@@ -364,6 +370,7 @@ fn grid_of<'a>(
                 header_rows.insert(row);
             }
             for column in spanned_columns.clone() {
+                labels.insert((row, column), (index, cell.text.as_str()));
                 if !occupied.insert((row, column)) {
                     return Err(unavailable(&format!(
                         "the conversion record places two cells over row {row}, column {column}"
@@ -392,23 +399,37 @@ fn grid_of<'a>(
                 .collect()
         })
         .collect();
-    Ok(Grid { cells, header_rows })
+    Ok(Grid {
+        cells,
+        header_rows,
+        labels,
+    })
 }
 
-/// Column names from the header rows, joined top to bottom; `column_<n>` where there is none.
-/// A repeated name gets its column number appended, so every name is distinct.
-fn column_names(headers: &[Vec<Option<GridCell<'_>>>], width: usize) -> Vec<String> {
+/// Column names from the header rows, the texts of the cells covering each column joined top
+/// to bottom, each cell once; `column_<n>` where there is none. A repeated name gets its
+/// column number appended, so every name is distinct.
+fn column_names(
+    labels: &BTreeMap<(u32, u32), (usize, &str)>,
+    header_rows: Range<u32>,
+    columns: Range<u32>,
+) -> Vec<String> {
     let mut emitted: BTreeSet<String> = BTreeSet::new();
-    (0..width)
-        .map(|column| {
-            let joined = headers
-                .iter()
-                .filter_map(|row| row.get(column).copied().flatten())
-                .map(|cell| cell.text.trim())
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let number = column.saturating_add(1);
+    columns
+        .enumerate()
+        .map(|(offset, column)| {
+            let mut parts: Vec<&str> = Vec::new();
+            let mut previous: Option<usize> = None;
+            for row in header_rows.clone() {
+                if let Some(&(index, text)) = labels.get(&(row, column)) {
+                    if previous != Some(index) && !text.trim().is_empty() {
+                        parts.push(text.trim());
+                    }
+                    previous = Some(index);
+                }
+            }
+            let joined = parts.join(" ");
+            let number = offset.saturating_add(1);
             let base = if joined.is_empty() {
                 format!("column_{number}")
             } else {
