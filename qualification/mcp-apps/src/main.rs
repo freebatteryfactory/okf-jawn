@@ -177,62 +177,6 @@ impl Dataset {
     }
 }
 
-/// The records a chart and a table draw from `bytes`, one per row keyed by column name.
-///
-/// Judged as strictly as `ui/src/features/views/PresentView.tsx` `parseDataset`: the bytes must be
-/// a Dataset object (not bare records) with at least one column, `text_origin` `converter` (SPEC
-/// R5, decision O2), distinct column names, and every row exactly as wide as the columns.
-fn dataset_records(bytes: &[u8]) -> Result<Vec<BTreeMap<String, Value>>, String> {
-    let dataset: Value =
-        serde_json::from_slice(bytes).map_err(|error| format!("not JSON: {error}"))?;
-    let origin = dataset.get("text_origin").and_then(Value::as_str);
-    if origin != Some("converter") {
-        return Err(format!(
-            "text_origin is {origin:?}, not the converter's; no chart is drawn from it"
-        ));
-    }
-    let columns = dataset
-        .get("columns")
-        .and_then(Value::as_array)
-        .filter(|columns| !columns.is_empty())
-        .ok_or("a Dataset has a non-empty columns array")?;
-    let mut names: Vec<&str> = Vec::new();
-    for column in columns {
-        let name = column
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or("a column has no name")?;
-        if names.contains(&name) {
-            return Err(format!("two columns are named {name:?}"));
-        }
-        names.push(name);
-    }
-    let rows = dataset
-        .get("rows")
-        .and_then(Value::as_array)
-        .ok_or("a Dataset has a rows array")?;
-    rows.iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let cells = row
-                .as_array()
-                .ok_or_else(|| format!("row {index} is not an array of cells"))?;
-            if cells.len() != names.len() {
-                return Err(format!(
-                    "row {index} has {} values for {} columns",
-                    cells.len(),
-                    names.len()
-                ));
-            }
-            Ok(names
-                .iter()
-                .map(|name| (*name).to_owned())
-                .zip(cells.iter().cloned())
-                .collect())
-        })
-        .collect()
-}
-
 impl ProductDeclaration {
     /// The product's declaration of `name` in the generated tool catalog `catalog`.
     fn of(catalog: &str, name: &str) -> Result<Self, String> {
@@ -589,6 +533,62 @@ impl ServerHandler for QualifyAppsServer {
         let _ = writeln!(io::stderr(), "{TOOL_CALL_LOG_PREFIX}{record}");
         std::future::ready(result.map(Into::into))
     }
+}
+
+/// The records a chart and a table draw from `bytes`, one per row keyed by column name.
+///
+/// Judged as strictly as `ui/src/features/views/PresentView.tsx` `parseDataset`: the bytes must be
+/// a Dataset object (not bare records) with at least one column, `text_origin` `converter` (SPEC
+/// R5, decision O2), distinct column names, and every row exactly as wide as the columns.
+fn dataset_records(bytes: &[u8]) -> Result<Vec<BTreeMap<String, Value>>, String> {
+    let dataset: Value =
+        serde_json::from_slice(bytes).map_err(|error| format!("not JSON: {error}"))?;
+    let origin = dataset.get("text_origin").and_then(Value::as_str);
+    if origin != Some("converter") {
+        return Err(format!(
+            "text_origin is {origin:?}, not the converter's; no chart is drawn from it"
+        ));
+    }
+    let columns = dataset
+        .get("columns")
+        .and_then(Value::as_array)
+        .filter(|columns| !columns.is_empty())
+        .ok_or("a Dataset has a non-empty columns array")?;
+    let mut names: Vec<&str> = Vec::new();
+    for column in columns {
+        let name = column
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("a column has no name")?;
+        if names.contains(&name) {
+            return Err(format!("two columns are named {name:?}"));
+        }
+        names.push(name);
+    }
+    let rows = dataset
+        .get("rows")
+        .and_then(Value::as_array)
+        .ok_or("a Dataset has a rows array")?;
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let cells = row
+                .as_array()
+                .ok_or_else(|| format!("row {index} is not an array of cells"))?;
+            if cells.len() != names.len() {
+                return Err(format!(
+                    "row {index} has {} values for {} columns",
+                    cells.len(),
+                    names.len()
+                ));
+            }
+            Ok(names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .zip(cells.iter().cloned())
+                .collect())
+        })
+        .collect()
 }
 
 fn empty_object_schema() -> Arc<JsonObject> {
