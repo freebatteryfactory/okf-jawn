@@ -663,5 +663,106 @@ async fn readiness_reports_each_store() -> TestResult {
     Ok(())
 }
 
+/// Refuse new files in `directory` through its access-control list, leaving its permission
+/// bits (the read-only attribute) showing it writable.
+#[cfg(windows)]
+fn refuse_writes(directory: &Path) -> TestResult {
+    let status = std::process::Command::new("icacls")
+        .arg(directory)
+        .args(["/deny", "*S-1-1-0:(W)"])
+        .output()?
+        .status;
+    assert!(status.success(), "icacls could not deny writes");
+    assert!(
+        !std::fs::metadata(directory)?.permissions().readonly(),
+        "the permission bits still show the directory writable"
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+fn allow_writes(directory: &Path) -> TestResult {
+    let status = std::process::Command::new("icacls")
+        .arg(directory)
+        .args(["/remove:d", "*S-1-1-0"])
+        .output()?
+        .status;
+    assert!(status.success(), "icacls could not lift the denial");
+    Ok(())
+}
+
+/// Refuse new files in `directory` through its mode (the test runs as an unprivileged user).
+#[cfg(unix)]
+fn refuse_writes(directory: &Path) -> TestResult {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o555))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn allow_writes(directory: &Path) -> TestResult {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+/// Probe files left in `directory`.
+fn probe_files(directory: &Path) -> Fallible<usize> {
+    let mut found = 0_usize;
+    for entry in std::fs::read_dir(directory)? {
+        if entry?
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".okf-jawn-ready")
+        {
+            found = found.saturating_add(1);
+        }
+    }
+    Ok(found)
+}
+
+#[tokio::test]
+async fn readiness_reports_a_directory_it_cannot_write_as_not_ready() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let objects = storage.data().objects_path();
+    let repositories = storage.data().repositories_path();
+    refuse_writes(&objects)?;
+    let refused = storage.readiness().probe().await;
+    allow_writes(&objects)?;
+    let refused = refused?;
+    assert!(!refused.ready, "an unwritable blob directory is not ready");
+    let blob = some(
+        refused
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.name == "objects"),
+        "the objects status",
+    )?;
+    assert!(!blob.ready, "{}", blob.message);
+    let git = some(
+        refused
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.name == "repositories"),
+        "the repositories status",
+    )?;
+    assert!(git.ready, "{}", git.message);
+    assert_eq!(
+        (probe_files(&objects)?, probe_files(&repositories)?),
+        (0, 0),
+        "no probe file is left behind"
+    );
+    assert!(
+        storage.readiness().probe().await?.ready,
+        "writable again, so ready again"
+    );
+    assert_eq!(
+        (probe_files(&objects)?, probe_files(&repositories)?),
+        (0, 0)
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
