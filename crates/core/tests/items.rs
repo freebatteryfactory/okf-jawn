@@ -200,6 +200,21 @@ fn a_type_cannot_reach_the_header_at_any_depth() -> TestResult {
     );
     let required = typed(json!({ "type": "object", "required": ["okf_jawn"] }));
     err_of(refuse_header_in_type(&required))?;
+    // Required only when another property is present: refused in both spellings, nested too.
+    for keyword in ["dependentRequired", "dependencies"] {
+        let conditional = typed(json!({
+            "allOf": [{ keyword: { "status": ["title", "okf_jawn"] } }]
+        }));
+        let refused = err_of(refuse_header_in_type(&conditional))?;
+        assert_eq!(
+            refused.field.as_deref(),
+            Some(
+                format!("/definition/properties_schema/allOf/0/{keyword}/status/okf_jawn").as_str()
+            )
+        );
+    }
+    let unrelated = typed(json!({ "dependentRequired": { "status": ["title"] } }));
+    refuse_header_in_type(&unrelated)?;
     let listed = typed(json!({ "items": [{ "required": ["okf_jawn"] }] }));
     let refused = err_of(refuse_header_in_type(&listed))?;
     assert_eq!(

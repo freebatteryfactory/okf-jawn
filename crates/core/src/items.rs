@@ -219,6 +219,24 @@ fn header_declaration(schema: &serde_json::Value, at: &str) -> Option<String> {
     if requires {
         return Some(format!("{at}/required"));
     }
+    // A conditional requirement: `dependentRequired`, or the list form of Draft 4 to 7
+    // `dependencies` (its schema form is descended below).
+    for keyword in ["dependentRequired", "dependencies"] {
+        let conditional = object
+            .get(keyword)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|map| {
+                map.iter().find_map(|(name, value)| {
+                    value
+                        .as_array()
+                        .is_some_and(|list| list.iter().any(|entry| entry == APP_HEADER_KEY))
+                        .then(|| format!("{at}/{keyword}/{}", pointer_token(name)))
+                })
+            });
+        if conditional.is_some() {
+            return conditional;
+        }
+    }
     object.iter().find_map(|(key, value)| {
         let below = format!("{at}/{}", pointer_token(key));
         if SCHEMA_KEYWORDS.contains(&key.as_str()) {
