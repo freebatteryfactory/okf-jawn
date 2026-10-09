@@ -45,6 +45,10 @@ struct Counting {
 /// A check that refuses every candidate.
 struct Refusing;
 
+/// A check that refuses a candidate naming the file by its full staged path, as a conformance
+/// check reporting where it found a fault would.
+struct NamingStagedFile;
+
 /// A check that, while the commit is staged, moves the workspace head as a concurrent writer
 /// would (another handle on the same repository), and records where it moved it.
 struct Interloper {
@@ -63,6 +67,15 @@ impl CandidateCheck for Counting {
 impl CandidateCheck for Refusing {
     fn check(&self, _root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
         Err(ApiError::new(ErrorCode::InvalidInput, "not conformant"))
+    }
+}
+
+impl CandidateCheck for NamingStagedFile {
+    fn check(&self, root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
+        Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            format!("{}/notes/x.md is not conformant", root.display()),
+        ))
     }
 }
 
@@ -588,6 +601,25 @@ async fn a_reserved_name_in_any_letter_case_is_refused_naming_the_path() -> Test
             "{at}: nothing committed"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refusal_never_names_the_server_staging_directory() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let error = err_of(
+        storage
+            .versions()
+            .commit(
+                &scope,
+                changes(20, &initial, vec![note(uuid!(10)?, "notes/x.md", "X.")?])?,
+                Arc::new(NamingStagedFile),
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.message, "notes/x.md is not conformant");
     Ok(())
 }
 
