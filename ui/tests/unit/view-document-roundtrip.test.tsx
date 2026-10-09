@@ -7,20 +7,22 @@
  * real render of that data produces: a row's cells, a chart mark per row, the source's words.
  */
 
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import type { TopLevelSpec } from 'vega-lite';
 import { describe, expect, it } from 'vitest';
-import metricsDatasetFixture from '../../../tests/fixtures/views/present-metrics-dataset.json';
+import metricsDatasetFixture from '../../../tests/fixtures/views/present-metrics.dataset.json';
 import presentResponseFixture from '../../../tests/fixtures/views/present-response.json';
 import sourceReadItemFixture from '../../../tests/fixtures/views/source-read-item.json';
 import viewDocumentFixture from '../../../tests/fixtures/views/view-document-six-component.json';
 import {
+  zDataset,
   zPresentResponse,
   zReadItemResponse,
   zViewDocument,
 } from '../../src/api/generated/zod.gen';
 import { BindingsContext, type ResolvedPresentation } from '../../src/features/views/Bindings';
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
+import { datasetRecords, PresentView } from '../../src/features/views/PresentView';
 
 const emptyBindings: ResolvedPresentation = {
   charts: new Map(),
@@ -123,10 +125,12 @@ describe('ViewDocument json-render round-trip', { timeout: TEST_TIMEOUT_MS }, ()
     const document = zViewDocument.parse(viewDocumentFixture);
     const source = zReadItemResponse.parse(sourceReadItemFixture);
     const resolved = zPresentResponse.parse(presentResponseFixture).resolved_bindings;
-    const rows = metricsDatasetFixture;
+    const dataset = zDataset.parse(metricsDatasetFixture);
+    const rows = datasetRecords(dataset);
     // The fixtures are the ones the view names: its two bindings, its chart, and the dataset behind both.
     expect(resolved.map((binding) => binding.name)).toEqual(['venue', 'metrics']);
     expect(Object.keys(document.charts ?? {})).toEqual(['metrics_chart']);
+    expect(dataset.rows).toHaveLength(5);
     expect(rows).toHaveLength(5);
     const presentation: ResolvedPresentation = {
       charts: new Map([['metrics_chart', document.charts?.metrics_chart as TopLevelSpec]]),
@@ -197,5 +201,50 @@ describe('ViewDocument json-render round-trip', { timeout: TEST_TIMEOUT_MS }, ()
     // Nothing is unavailable and nothing is unresolved: every one of the six drew its data.
     expect(screen.queryByRole('alert')).toBeNull();
     expect(container.textContent).not.toMatch(/unavailable|Unresolved/);
+  });
+});
+
+describe('the Dataset the views read', () => {
+  it("is the converter's typed table, never a bare array of records", () => {
+    expect(zDataset.safeParse(metricsDatasetFixture).success).toBe(true);
+    const bare = [{ category: 'Ingested', value: 412 }];
+    expect(zDataset.safeParse(bare).success).toBe(false);
+  });
+
+  it('turns rows into records by column name and refuses a row of the wrong width', () => {
+    const dataset = zDataset.parse(metricsDatasetFixture);
+    expect(datasetRecords(dataset).at(0)).toEqual({ category: 'Ingested', value: 412 });
+    const ragged = { ...dataset, rows: [['Ingested']] };
+    expect(() => datasetRecords(ragged)).toThrow(/row 0 has 1 values for 2 columns/);
+  });
+
+  it("shows the chart's own alert when its binding has no dataset", async () => {
+    const response = zPresentResponse.parse(presentResponseFixture);
+    const binding = response.resolved_bindings.find((entry) => entry.name === 'metrics');
+    expect(binding).toBeTruthy();
+    const { materialized: _dropped, ...unmaterialized } = binding as NonNullable<typeof binding>;
+    const document = zViewDocument.parse(viewDocumentFixture);
+    const message = "The source's shown text is not the converter's, so no dataset can be read.";
+    const refused = zPresentResponse.parse({
+      ...presentResponseFixture,
+      resolved_bindings: [unmaterialized],
+      view: { ...document, grammar: 'vega_lite', spec: document.charts?.metrics_chart },
+      charts: [
+        {
+          chart: { kind: 'spec' },
+          status: {
+            status: 'failed',
+            reason: 'dataset_unavailable',
+            binding: 'metrics',
+            message,
+          },
+        },
+      ],
+    });
+    const callTool = async () => ({
+      structuredContent: zReadItemResponse.parse(sourceReadItemFixture),
+    });
+    render(<PresentView response={refused} callTool={callTool} />);
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(message));
   });
 });
