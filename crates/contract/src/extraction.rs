@@ -114,7 +114,7 @@ pub struct ConverterIssue {
 pub struct ConverterIdentity {
     /// `docling`.
     pub name: String,
-    /// The docling crate version, such as `1.93.5`.
+    /// The docling crate version, such as `2.3.0`.
     pub version: String,
     /// The converter crates as Cargo.lock resolves them; a patched fork is visible here.
     /// Generated from Cargo.lock by xtask into `generated/converter/packages.json`, so

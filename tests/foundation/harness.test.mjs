@@ -349,8 +349,8 @@ test('doclingPackages names every docling crate of Cargo.lock with the source it
   const rev = /^docling-pdf = \{ git = "https:\/\/github\.com\/Heyoub\/docling\.rs", rev = "([0-9a-f]{40})" \}$/m.exec(await readFile(join(root, 'Cargo.toml'), 'utf8'))?.[1];
   assert.ok(rev, 'Cargo.toml [patch.crates-io] does not take docling-pdf from the fork by rev');
   assert.deepEqual(doclingPackages(await readFile(join(root, 'Cargo.lock'), 'utf8')).map(({ name, version, source }) => [name, version, source]), [
-    ['docling', '1.93.5', 'registry+https://github.com/rust-lang/crates.io-index'],
-    ...['docling-core', 'docling-onnx', 'docling-pdf'].map((name) => [name, '1.93.6', `git+https://github.com/Heyoub/docling.rs?rev=${rev}#${rev}`]),
+    ['docling', '2.3.0', 'registry+https://github.com/rust-lang/crates.io-index'],
+    ...['docling-core', 'docling-onnx', 'docling-pdf'].map((name) => [name, '2.3.0', `git+https://github.com/Heyoub/docling.rs?rev=${rev}#${rev}`]),
   ]);
 });
 

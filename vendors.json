@@ -650,7 +650,7 @@
       ],
       "official_sources": [
         "https://github.com/docling-project/docling.rs",
-        "https://docs.rs/docling/1.93.5/docling/"
+        "https://docs.rs/docling/2.3.0/docling/"
       ],
       "symbols": [
         "DocumentConverter",
@@ -662,10 +662,10 @@
       "context7_query": null,
       "knowledge_source": "Installed crate features and official workspace docs",
       "offline_notes": [
-        "Pinned =1.93.5 with default-features = false and features = [\"pdf\"]. Do not enable asr, fetch-images or vlm without a shared change.",
-        "Do not direct-depend on docling-core; docling owns the matching core version (currently resolves docling-core 1.93.6).",
-        "docling-pdf, docling-core and docling-onnx 1.93.6 are built from the fork https://github.com/Heyoub/docling.rs at e500c2323bcf5c3c84d3731ed00de65b15d0709a through [patch.crates-io] in Cargo.toml (verification.json gate converter-docling-pdf-font-run-patch); docling 1.93.5 still comes from crates.io. On a docling bump, re-check that the patch still applies or remove it.",
-        "resvg 0.47 (rustybuzz, ttf-parser unmaintained advisories) is pinned upstream for Docling MSRV 1.88; ignored exactly in .cargo/audit.toml until Docling moves to resvg 0.48+.",
+        "Pinned =2.3.0 with default-features = false and features = [\"pdf\"]. Do not enable asr, fetch-images or vlm without a shared change.",
+        "Do not direct-depend on docling-core; docling owns the matching core version (currently resolves docling-core 2.3.0).",
+        "docling-pdf, docling-core and docling-onnx 2.3.0 are built from the fork https://github.com/Heyoub/docling.rs at f9094e66edd3b215ad7d43d2ca9be534180a06b4 through [patch.crates-io] in Cargo.toml (verification.json gate converter-docling-pdf-font-run-patch); docling 2.3.0 comes from crates.io. On a docling bump, re-check that the patch still applies or remove it.",
+        "ttf-parser (unmaintained advisory) is a declared dependency of docling-pdf 2.3.0; ignored exactly in .cargo/audit.toml and deny.toml until docling-pdf drops it. rustybuzz left with resvg 0.48 in Docling 2.3.0.",
         "paste is pulled via docling → image → pulp/rav1e/tokenizers; ignored exactly with the same policy.",
         "Retain originals; record converter version/settings."
       ],
