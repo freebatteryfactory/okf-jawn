@@ -10,6 +10,7 @@ use okf_jawn_contract::item::{APP_HEADER_KEY, TypeDefinition};
 use okf_jawn_contract::source::{SourceAppearance, SourceName};
 use okf_jawn_core::items::{
     ApplicationHeader, refuse_header_change, refuse_header_in_type, refuse_supplied_header,
+    without_header,
 };
 use okf_jawn_core::storage::SourceCard;
 use serde_json::json;
@@ -169,6 +170,48 @@ fn an_unparseable_header_is_reported_on_its_field() -> TestResult {
     let refused = err_of(ApplicationHeader::from_properties(&properties))?;
     assert_eq!(refused.code, ErrorCode::InvalidInput);
     assert_eq!(refused.field.as_deref(), Some("/properties/okf_jawn"));
+    Ok(())
+}
+
+#[test]
+fn a_type_cannot_reach_the_header_at_any_depth() -> TestResult {
+    let typed = |schema: serde_json::Value| TypeDefinition {
+        name: "note".to_owned(),
+        schema_version: 1,
+        properties_schema: schema,
+        ui_schema: json!({}),
+    };
+    let nested = typed(json!({
+        "allOf": [{ "properties": { "okf_jawn": { "const": 1 } } }]
+    }));
+    let refused = err_of(refuse_header_in_type(&nested))?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        refused.field.as_deref(),
+        Some("/definition/properties_schema/allOf/0/properties/okf_jawn")
+    );
+    let defined = typed(json!({
+        "$defs": { "a~b/c": { "properties": { "okf_jawn": {} } } }
+    }));
+    let refused = err_of(refuse_header_in_type(&defined))?;
+    assert_eq!(
+        refused.field.as_deref(),
+        Some("/definition/properties_schema/$defs/a~0b~1c/properties/okf_jawn")
+    );
+    let required = typed(json!({ "type": "object", "required": ["okf_jawn"] }));
+    err_of(refuse_header_in_type(&required))?;
+    // A strict type that does not name the header is accepted; the header is left out of what
+    // it is evaluated against.
+    let strict = typed(json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "status": { "type": "string" } }
+    }));
+    refuse_header_in_type(&strict)?;
+    let stored = stored_properties()?;
+    let evaluated = without_header(&stored);
+    assert!(!evaluated.contains_key(APP_HEADER_KEY));
+    assert_eq!(evaluated.get("status"), Some(&json!("stable")));
     Ok(())
 }
 

@@ -10,7 +10,9 @@
 //! - `create_item` and `Change::Create` may not supply it at all; the server assigns it.
 //! - `save_draft` and `Change::Edit` may leave it out (the stored header is kept) or echo it
 //!   unchanged, as `get_item` returned it; any other value is refused.
-//! - `set_type` may not declare a property of that name.
+//! - `set_type` may not declare or require a property of that name at any depth of its schema,
+//!   and a type schema is evaluated against an item's properties without the header
+//!   (`without_header`), so no type can constrain or refuse it.
 //!
 //! `VersionStore` applies the same rule to the edits it is handed, so a handler that skipped
 //! the check still cannot write a changed header.
@@ -142,18 +144,70 @@ pub fn refuse_header_change(
 /// # Errors
 /// Returns `InvalidInput` on `/definition/properties_schema/properties/okf_jawn`.
 pub fn refuse_header_in_type(definition: &TypeDefinition) -> Result<(), ApiError> {
-    let declares = definition
-        .properties_schema
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|properties| properties.contains_key(APP_HEADER_KEY));
-    if declares {
-        return Err(header_error(
-            "a type cannot define the server-owned application header",
-            "/definition/properties_schema/properties",
-        ));
+    match header_declaration(
+        &definition.properties_schema,
+        "/definition/properties_schema",
+    ) {
+        Some(at) => Err(header_error(
+            "a type cannot define or require the server-owned application header",
+            &at,
+        )),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// An item's properties without its application header: what a type schema is evaluated
+/// against, so no type, whatever its schema (`additionalProperties: false` included), can
+/// constrain or refuse the header the server writes.
+#[must_use]
+pub fn without_header(
+    properties: &BTreeMap<String, serde_json::Value>,
+) -> BTreeMap<String, serde_json::Value> {
+    properties
+        .iter()
+        .filter(|(key, _)| key.as_str() != APP_HEADER_KEY)
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+/// Where `schema` names the header, at any depth (inside `allOf`, `$defs`, `items` and every
+/// other applicator): as a key of a `properties` map, or in a `required` list. The result is
+/// the JSON Pointer of the map or list, below `at`.
+fn header_declaration(schema: &serde_json::Value, at: &str) -> Option<String> {
+    match schema {
+        serde_json::Value::Object(object) => {
+            let declares = object
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|properties| properties.contains_key(APP_HEADER_KEY));
+            if declares {
+                return Some(format!("{at}/properties"));
+            }
+            let requires = object
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|required| required.iter().any(|name| name == APP_HEADER_KEY));
+            if requires {
+                return Some(format!("{at}/required"));
+            }
+            object.iter().find_map(|(key, value)| {
+                header_declaration(value, &format!("{at}/{}", pointer_token(key)))
+            })
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(index, value)| header_declaration(value, &format!("{at}/{index}"))),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => None,
+    }
+}
+
+/// A key escaped as one JSON Pointer reference token (RFC 6901).
+fn pointer_token(key: &str) -> String {
+    key.replace('~', "~0").replace('/', "~1")
 }
 
 fn header_error(message: &str, at: &str) -> ApiError {

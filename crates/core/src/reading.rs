@@ -15,6 +15,7 @@
 use tokio::io::AsyncReadExt as _;
 
 use okf_jawn_contract::{
+    common::TextRange,
     error::{ApiError, ErrorCode, ErrorDetail},
     extraction::{Extraction, TextOrigin},
     identity::{Digest, ItemId, Revision},
@@ -228,7 +229,9 @@ pub fn invalidated(mapping: &RevisionMapping) -> ApiError {
 /// Converter text is located from the record's line map: a line selection takes the entries
 /// whose lines overlap it, a page selection the entries on those pages, the whole source every
 /// entry. A cell or region selection is its own direct location. A correction or supplied text
-/// has no place in the original and is one unresolved entry saying which.
+/// has no place in the original and is one unresolved entry saying which. A section selection
+/// is resolved to its lines first (`section_lines`) and located as those lines; passed here
+/// unresolved it has no entry.
 #[must_use]
 pub fn cited_locations(
     extraction: &Extraction,
@@ -331,6 +334,87 @@ pub(crate) const fn location_page(location: &SourceLocation) -> Option<u32> {
         }
         SourceLocation::Unresolved { .. } => None,
     }
+}
+
+/// The lines of the section a heading opens in `markdown`: from the heading line to the line
+/// before the next heading of the same or a higher level, or to the end. Headings are ATX
+/// headings (`#` to `######`); lines inside fenced code blocks are not headings.
+///
+/// # Errors
+/// Returns `NotFound` on `/selection/heading` when no heading has exactly this text, and
+/// `InvalidInput` there when several do, since the citation would not say which.
+pub fn section_lines(markdown: &str, heading: &str) -> Result<TextRange, ApiError> {
+    let mut fence: Option<&str> = None;
+    let mut headings: Vec<(u32, usize, &str)> = Vec::new();
+    let mut last = 0_u32;
+    for (index, line) in markdown.lines().enumerate() {
+        let number = u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1);
+        last = number;
+        let trimmed = line.trim_start();
+        if let Some(open) = fence {
+            if trimmed.starts_with(open) {
+                fence = None;
+            }
+            continue;
+        }
+        if trimmed.starts_with("```") {
+            fence = Some("```");
+            continue;
+        }
+        if trimmed.starts_with("~~~") {
+            fence = Some("~~~");
+            continue;
+        }
+        if let Some((level, text)) = atx_heading(trimmed) {
+            headings.push((number, level, text));
+        }
+    }
+    let matching: Vec<usize> = headings
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, _, text))| *text == heading.trim())
+        .map(|(position, _)| position)
+        .collect();
+    let position = match matching.as_slice() {
+        [one] => *one,
+        [] => {
+            return Err(
+                ApiError::new(ErrorCode::NotFound, "No heading has exactly this text")
+                    .with_field("/selection/heading"),
+            );
+        }
+        several => {
+            return Err(ApiError::new(
+                ErrorCode::InvalidInput,
+                format!(
+                    "{} headings have exactly this text; cite lines instead",
+                    several.len()
+                ),
+            )
+            .with_field("/selection/heading"));
+        }
+    };
+    let (start, level, _) = headings.get(position).copied().ok_or_else(not_found)?;
+    let end = headings
+        .iter()
+        .skip(position.saturating_add(1))
+        .find(|(_, next_level, _)| *next_level <= level)
+        .map_or(last, |(next, _, _)| next.saturating_sub(1));
+    Ok(TextRange { start, end })
+}
+
+/// The level and text of an ATX heading line, without its closing `#` run.
+fn atx_heading(line: &str) -> Option<(usize, &str)> {
+    let level = line.bytes().take_while(|byte| *byte == b'#').count();
+    if level == 0 || level > 6 {
+        return None;
+    }
+    let rest = line.get(level..)?;
+    if !(rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t')) {
+        return None;
+    }
+    let text = rest.trim().trim_end_matches('#').trim_end();
+    Some((level, text))
 }
 
 fn not_found() -> ApiError {

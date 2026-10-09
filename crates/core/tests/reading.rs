@@ -11,7 +11,7 @@ use okf_jawn_core::conversion::ConversionRecord;
 use okf_jawn_core::jobs::{ArtifactKind, ArtifactRecord, JobScope, RevisionMapping};
 use okf_jawn_core::reading::{
     ObjectRole, RevisionObjects, cited_locations, decode_conversion_record, fill_locations,
-    invalidated, object_role,
+    invalidated, object_role, section_lines,
 };
 use okf_jawn_core::storage::{ObjectInfo, StorageScope};
 use serde_json::json;
@@ -206,6 +206,46 @@ fn a_stored_outcome_with_a_field_beside_its_tag_is_refused() -> TestResult {
     let refused = err_of(decode_conversion_record(&bytes))?;
     assert_eq!(refused.code, ErrorCode::Internal);
     assert_eq!(refused.field.as_deref(), Some("/outcome"));
+    Ok(())
+}
+
+#[test]
+fn a_section_is_located_as_the_lines_its_heading_opens() -> TestResult {
+    let markdown = [
+        "# Report",
+        "intro",
+        "",
+        "## Revenue",
+        "Q1 was up",
+        "~~~",
+        "# not a heading",
+        "~~~",
+        "## Costs",
+        "flat",
+    ]
+    .join("\n");
+    let revenue = section_lines(&markdown, "Revenue")?;
+    assert_eq!(revenue, TextRange { start: 4, end: 8 });
+    let report = section_lines(&markdown, "Report")?;
+    assert_eq!(report, TextRange { start: 1, end: 10 });
+    let record = record()?;
+    let located = cited_locations(
+        &converted()?,
+        Some(&record),
+        &Selection::Lines { range: revenue },
+    );
+    assert_eq!(
+        located,
+        vec![SourceLocation::Direct {
+            locator: SourceLocator::Page { page_no: 2 }
+        }]
+    );
+    // A heading inside a fenced block is text, not a heading.
+    let fenced = err_of(section_lines(&markdown, "not a heading"))?;
+    assert_eq!(fenced.code, ErrorCode::NotFound);
+    assert_eq!(fenced.field.as_deref(), Some("/selection/heading"));
+    let twice = err_of(section_lines("## A\nx\n## A\ny", "A"))?;
+    assert_eq!(twice.code, ErrorCode::InvalidInput);
     Ok(())
 }
 

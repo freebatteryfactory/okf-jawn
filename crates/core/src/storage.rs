@@ -391,7 +391,9 @@ pub struct BlameQuery {
 ///
 /// The implementation lives in core and decides OKF conformance; storage calls it and never
 /// decides. It is synchronous because it reads a directory, and storage calls it from the
-/// blocking task that owns that directory.
+/// blocking task that owns that directory. It evaluates an item's properties against its type
+/// schema without the application header (`items::without_header`): the header is the
+/// server's, and no type may constrain or refuse it.
 pub trait CandidateCheck: Send + Sync {
     /// Inspect the complete candidate bundle rooted at `root`.
     ///
