@@ -246,8 +246,8 @@
           "id": "converter-worker-memory-ceiling",
           "status": "blocked_on_lanes",
           "owner": "ingest",
-          "receipt": "cargo test -p okf-jawn-ingest --features runtime",
-          "meaning": "Production ingest worker hard memory bound; not DOCLING_RS_MAX_MEMORY_MB on DocumentConverter. Conversion runs in a child process with a hard memory cap, in page windows; the cap and the window size are set from a measurement of whole-document against windowed conversion (owner, 2026-10-07)"
+          "receipt": "cargo test -p okf-jawn-ingest --features runtime (the cap mechanism); bun qualification/docling/run.mjs, recorded in qualification/receipts/docling.json (the window size and cap values)",
+          "meaning": "Production ingest worker hard memory bound; not DOCLING_RS_MAX_MEMORY_MB on DocumentConverter. Conversion runs in a child process with a memory cap, in page windows of 4 pages (owner, 2026-10-07), enforced with the strongest facility each platform has: a job-object memory limit on Windows, RLIMIT_DATA or RLIMIT_AS on Linux as the measurement supports (ONNX Runtime reserves address space), and on macOS a supervisor watchdog that kills the child at the cap (the owner to confirm it counts as the hard cap there). Conversion is never refused on a platform. Two parts: (a) the cap mechanism, proven by the ingest tests with a small test child that allocates past the cap and must be killed and reported as Failure(MemoryLimit) with its pages not converted; it needs no models, so CI runs it; (b) the window size and the cap, set from a measurement of whole-document against windowed conversion, including a PDF whose tables cross pages and recording what each cap limits (virtual, private or committed memory), recorded as criteria of the Docling qualification; until then window_pages = 4"
         },
         {
           "id": "job-crash-against-record-store",
@@ -274,8 +274,8 @@
           "id": "application-operations",
           "status": "blocked_on_lanes",
           "owner": "core-cli",
-          "receipt": "cargo test -p okf-jawn-core -p okf-jawn-cli",
-          "meaning": "ApplicationService implements all 77 operations over OperationContext; CLI against a running server. The handlers call the checks core-ports-carry-extraction-and-views provides: retry_job and cancel_job apply access::authorize_job_kind after loading the job; get_object serves only what reading::authorize_object allows; a request naming a revision is checked with reading::check_revision first, and stored citations (reviews, receipts, comments, View bindings) are remapped to the replacement or invalidated when read; citations are filled and compared with reading::cited_locations and fill_locations, and a saved View is stripped of locations; a section selection is resolved to its lines with reading::section_lines against the outline the outline view serves for that text, made by the converter or by the selected Markdown parser (an integration-owner dependency), never by a scan in core; present_view and resolve_view materialize and record each binding's dataset with views::materialize and retain_dataset; create_item, save_draft, set_type and proposal changes apply the items header refusals; export writes verified for current reviews and import reads an incoming verified as imported coverage"
+          "receipt": "cargo test -p okf-jawn-core -p okf-jawn-cli; the tests/integration/ harness for the CLI against a running server (Wave 3; its command is recorded here when it is written)",
+          "meaning": "ApplicationService implements all 77 operations over OperationContext; CLI against a running server, proven by a tests/integration/ harness against the built binaries (the CLI is an API client with no crate dependency on the server). The handlers call the checks core-ports-carry-extraction-and-views provides: retry_job and cancel_job apply access::authorize_job_kind after loading the job; get_object serves only what reading::authorize_object allows; a request naming a revision is checked with reading::check_revision first, and stored citations (reviews, receipts, comments, View bindings) are remapped to the replacement or invalidated when read; citations are filled and compared with reading::cited_locations and fill_locations, and a saved View is stripped of locations; a section selection is resolved to its lines with reading::section_lines against the outline the outline view serves for that text, made by the converter or by the selected Markdown parser (an integration-owner dependency), never by a scan in core; present_view and resolve_view materialize and record each binding's dataset with views::materialize and retain_dataset; create_item, save_draft, set_type and proposal changes apply the items header refusals; export writes verified for current reviews and import reads an incoming verified as imported coverage"
         },
         {
           "id": "view-server-validation",
@@ -302,8 +302,8 @@
           "id": "cli-mcp-stdio-relay",
           "status": "blocked_on_lanes",
           "owner": "core-cli",
-          "receipt": "cargo test -p okf-jawn-cli -- mcp_stdio",
-          "meaning": "SPEC §11: the CLI's `mcp --stdio` command is a relay. It forwards each MCP message to the running local service with a connector credential and holds no store of its own; it starts the service when none is running and otherwise connects to the running one, so the service remains the only writer"
+          "receipt": "cargo test -p okf-jawn-cli -- mcp_stdio; the tests/integration/ relay harness against the built binaries (Wave 3; its command is recorded here when it is written)",
+          "meaning": "SPEC §11: the CLI's `mcp --stdio` command is a relay. It forwards each MCP message to the running local service with a connector credential and holds no store of its own; it starts the service when none is running and otherwise connects to the running one, so the service remains the only writer. The relay starts the service by launching the server executable shipped beside the CLI (the path is configurable). The cargo tests cover framing, the connector credential, the start-or-connect decision and the error paths with the launcher and transport injected; starting the service when none is running and relaying to a running one are proven by the tests/integration/ harness against the built binaries"
         },
         {
           "id": "server-binary-and-startup",
@@ -376,6 +376,11 @@
           "id": "index-rebuild",
           "status": "blocked_on_product",
           "meaning": "Rebuild without losing records"
+        },
+        {
+          "id": "backup-restore-journey",
+          "status": "blocked_on_product",
+          "meaning": "SPEC §12 and §13 (portable export and full restore): a full backup, one archive per workspace and one installation archive, is restored after the original data directory is deleted, with no service on it, the installation archive first and then every workspace archive, and the same identities, items, history, retained objects, application records and drafts come back; importing a workspace archive into another installation fills a blank workspace, gives each draft to its editor when that editor is a validated identity there and reports the count of the others; a portable export opens independently of the application. Proven in Wave 3 by a tests/integration/ harness against the composed server and the offline command; its command is recorded here when it is written"
         },
         {
           "id": "explorer-playwright-journeys",
