@@ -231,8 +231,10 @@ pub struct GetSourcesResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DeclaredSource {
-    /// The entry exactly as written in the file.
-    pub entry: std::collections::BTreeMap<String, serde_json::Value>,
+    /// The entry exactly as written in the file, of whatever shape: OKF gives a mapping, and an
+    /// entry that is not one (a bare string, a number) is kept as written with the outcome
+    /// `uncited` / `malformed`. A `sources` value that is not a list is one such entry.
+    pub entry: serde_json::Value,
     /// Whether it is a citation of an item at the resolved revision.
     pub outcome: DeclaredOutcome,
 }
@@ -263,7 +265,7 @@ pub enum UncitedReason {
     Scope,
     /// A workspace path that names no item at the resolved revision.
     NotFound,
-    /// An entry with no `resource`.
+    /// An entry that is not a mapping, or a mapping with no `resource`.
     Malformed,
 }
 

@@ -1398,7 +1398,7 @@ export const zDeclaredOutcome = z.union([
  * One entry of an item's OKF `sources` and what it resolved to.
  */
 export const zDeclaredSource = z.object({
-    entry: z.record(z.string(), z.unknown()),
+    entry: z.unknown(),
     outcome: zDeclaredOutcome
 });
 

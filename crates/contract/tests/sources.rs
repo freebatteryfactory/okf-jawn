@@ -40,6 +40,7 @@ fn a_declared_entry_keeps_every_field_as_written_and_its_outcome() -> TestResult
             },
             { "entry": { "id": "s3" }, "outcome": { "kind": "uncited", "reason": "malformed" } },
             { "entry": { "resource": "notes/" }, "outcome": { "kind": "uncited", "reason": "scope" } },
+            { "entry": "https://example.org/bare", "outcome": { "kind": "uncited", "reason": "malformed" } },
             {
                 "entry": { "resource": "notes/missing.md" },
                 "outcome": { "kind": "uncited", "reason": "not_found" },
@@ -50,7 +51,13 @@ fn a_declared_entry_keeps_every_field_as_written_and_its_outcome() -> TestResult
     // The footnote key and every credibility field survive.
     assert_eq!(first.entry.get("id"), Some(&json!("s1")));
     assert_eq!(first.entry.get("usage_count"), Some(&json!(3)));
-    assert_eq!(first.entry.len(), 6);
+    assert_eq!(
+        some(first.entry.as_object(), "the first entry as a mapping")?.len(),
+        6
+    );
+    // An entry that is not a mapping is kept exactly as written.
+    let bare = some(response.declared.get(4), "the bare entry")?;
+    assert_eq!(bare.entry, json!("https://example.org/bare"));
     let outcomes: Vec<&DeclaredOutcome> = response
         .declared
         .iter()
@@ -68,6 +75,9 @@ fn a_declared_entry_keeps_every_field_as_written_and_its_outcome() -> TestResult
             },
             &DeclaredOutcome::Uncited {
                 reason: UncitedReason::Scope
+            },
+            &DeclaredOutcome::Uncited {
+                reason: UncitedReason::Malformed
             },
             &DeclaredOutcome::Uncited {
                 reason: UncitedReason::NotFound

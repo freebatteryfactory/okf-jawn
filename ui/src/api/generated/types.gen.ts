@@ -1170,11 +1170,11 @@ export type DeclaredOutcome = {
  */
 export type DeclaredSource = {
     /**
-     * The entry exactly as written in the file.
+     * The entry exactly as written in the file, of whatever shape: OKF gives a mapping, and an
+     * entry that is not one (a bare string, a number) is kept as written with the outcome
+     * `uncited` / `malformed`. A `sources` value that is not a list is one such entry.
      */
-    entry: {
-        [key: string]: unknown;
-    };
+    entry: unknown;
     /**
      * Whether it is a citation of an item at the resolved revision.
      */

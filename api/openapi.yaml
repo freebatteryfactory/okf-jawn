@@ -1490,9 +1490,10 @@ components:
       description: One entry of an item's OKF `sources` and what it resolved to.
       properties:
         entry:
-          additionalProperties: true
-          description: The entry exactly as written in the file.
-          type: object
+          description: |-
+            The entry exactly as written in the file, of whatever shape: OKF gives a mapping, and an
+            entry that is not one (a bare string, a number) is kept as written with the outcome
+            `uncited` / `malformed`. A `sources` value that is not a list is one such entry.
         outcome:
           $ref: '#/components/schemas/DeclaredOutcome'
           description: Whether it is a citation of an item at the resolved revision.
@@ -5769,7 +5770,7 @@ components:
         description: A workspace path that names no item at the resolved revision.
         type: string
       - const: malformed
-        description: An entry with no `resource`.
+        description: An entry that is not a mapping, or a mapping with no `resource`.
         type: string
     UnresolvedReason:
       description: Why a location is not known; one variant per reason the producing rule states.
