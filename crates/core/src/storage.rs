@@ -605,6 +605,8 @@ pub trait WorkspaceCatalog: Send + Sync {
     /// Create a blank workspace: its repository and an initial commit, with no sample content.
     ///
     /// Unique on `mutation_id`: a repeated id creates nothing and returns the prior workspace.
+    /// The workspace identity is `derive_workspace_id(mutation_id)`, so a creation interrupted
+    /// between writing the repository and committing the record completes on retry.
     fn create<'a>(
         &'a self,
         tenant: &'a TenantId,
@@ -866,6 +868,16 @@ pub fn derive_item_id(mutation_id: MutationId, ordinal: u32) -> ItemId {
 #[must_use]
 pub fn derive_commit_mutation_id(mutation_id: MutationId, ordinal: u32) -> MutationId {
     MutationId(derived_uuid(b"commit", mutation_id, ordinal))
+}
+
+/// The identity of the workspace created under one mutation.
+///
+/// Derived, not allocated, so a creation that crashed after its repository was written and
+/// before its record was committed is retried under the same identity, finds that repository and
+/// completes it instead of leaving it unreachable.
+#[must_use]
+pub fn derive_workspace_id(mutation_id: MutationId) -> WorkspaceId {
+    WorkspaceId(derived_uuid(b"workspace", mutation_id, 0))
 }
 
 /// The identity of the proposal opened under one mutation.

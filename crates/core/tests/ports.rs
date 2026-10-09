@@ -52,7 +52,7 @@ use okf_jawn_core::storage::{
     CommitChanges, Committed, DiffQuery, LocalSource, LogQuery, NewWorkspace, ObjectInfo, Page,
     Promotion, Provenance, Purger, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
     WorkspaceCatalog, WorkspaceUpdate, derive_commit_mutation_id, derive_item_id,
-    derive_proposal_id, derive_purge_id, workspace_with_permissions,
+    derive_proposal_id, derive_purge_id, derive_workspace_id, workspace_with_permissions,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 use serde_json::json;
@@ -879,6 +879,10 @@ fn derived_identities_are_stable_per_mutation() {
         derive_commit_mutation_id(first, 0).0,
         derive_item_id(first, 0).0
     );
+    // A retried creation finds the workspace its first attempt wrote.
+    assert_eq!(derive_workspace_id(first), derive_workspace_id(first));
+    assert_ne!(derive_workspace_id(first), derive_workspace_id(second));
+    assert_ne!(derive_workspace_id(first).0, derive_item_id(first, 0).0);
 }
 
 #[test]
