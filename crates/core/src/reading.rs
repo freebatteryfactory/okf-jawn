@@ -19,7 +19,7 @@ use okf_jawn_contract::{
     error::{ApiError, ErrorCode, ErrorDetail},
     extraction::{Extraction, TextOrigin},
     identity::{Digest, ItemId, Revision},
-    read::{AssetRole, Selection},
+    read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection},
     source::{SourceAppearance, SourceLocation, SourceLocator, SourceReference, UnresolvedReason},
     views::ViewDocument,
 };
@@ -230,8 +230,8 @@ pub fn invalidated(mapping: &RevisionMapping) -> ApiError {
 /// whose lines overlap it, a page selection the entries on those pages, the whole source every
 /// entry. A cell or region selection is its own direct location. A correction or supplied text
 /// has no place in the original and is one unresolved entry saying which. A section selection
-/// is resolved to its lines first (`section_lines`) and located as those lines; passed here
-/// unresolved it has no entry.
+/// is resolved to its lines from the outline first (`section_lines`) and located as those
+/// lines; passed here unresolved it has no entry.
 #[must_use]
 pub fn cited_locations(
     extraction: &Extraction,
@@ -336,111 +336,51 @@ pub(crate) const fn location_page(location: &SourceLocation) -> Option<u32> {
     }
 }
 
-/// The lines of the section a heading opens in `markdown`: from the heading line to the line
-/// before the next heading of the same or a higher level, or to the end. Headings are ATX
-/// headings (`#` to `######`) indented by at most three spaces; lines inside fenced code blocks
-/// (closed by the `CommonMark` rule) and indented code are not headings.
+/// The lines of the section a heading opens, read from the outline of the shown Markdown: the
+/// `Lines` selection of the one heading entry whose label is exactly `heading`.
+///
+/// Core parses no Markdown. The outline is what a Markdown parser made of the text the read
+/// serves, the same outline the `outline` view returns: the converter's for converted text and
+/// the selected parser's for an item's own Markdown (`application-operations`), so ATX and
+/// Setext headings, fences and indented code are that parser's call. A heading entry selects
+/// its section: the heading line to the line before the next heading of the same or a higher
+/// level, or to the end.
 ///
 /// # Errors
-/// Returns `NotFound` on `/selection/heading` when no heading has exactly this text, and
-/// `InvalidInput` there when several do, since the citation would not say which.
-pub fn section_lines(markdown: &str, heading: &str) -> Result<TextRange, ApiError> {
-    // The open fence's character and run length (`CommonMark` 4.5): only a run of the same
-    // character at least as long, with nothing after it, closes it.
-    let mut fence: Option<(u8, usize)> = None;
-    let mut headings: Vec<(u32, usize, &str)> = Vec::new();
-    let mut last = 0_u32;
-    for (index, line) in markdown.lines().enumerate() {
-        let number = u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1);
-        last = number;
-        let content = line.trim_start_matches(' ');
-        // Four columns of indentation (a tab after at most three spaces reaches them) make the
-        // line indented code or fence content: never a fence marker or a heading.
-        if line.len().saturating_sub(content.len()) > 3 || content.starts_with('\t') {
-            continue;
-        }
-        let run = fence_run(content);
-        if let Some((open_char, open_len)) = fence {
-            let closes = run.is_some_and(|(mark, len)| {
-                mark == open_char
-                    && len >= open_len
-                    && content
-                        .get(len..)
-                        .is_some_and(|rest| rest.trim().is_empty())
-            });
-            if closes {
-                fence = None;
-            }
-            continue;
-        }
-        if let Some((mark, len)) = run {
-            let info = content.get(len..).unwrap_or_default();
-            if mark == b'~' || !info.contains('`') {
-                fence = run;
-                continue;
-            }
-        }
-        if let Some((level, text)) = atx_heading(content) {
-            headings.push((number, level, text));
-        }
-    }
-    let matching: Vec<usize> = headings
+/// Returns `NotFound` on `/selection/heading` when no heading entry has exactly this label,
+/// `InvalidInput` there when several do, since the citation would not say which, and
+/// `Internal` when the matching entry selects anything but lines.
+pub fn section_lines(outline: &[OutlineEntry], heading: &str) -> Result<TextRange, ApiError> {
+    let wanted = heading.trim();
+    let matching: Vec<&OutlineEntry> = outline
         .iter()
-        .enumerate()
-        .filter(|(_, (_, _, text))| *text == heading.trim())
-        .map(|(position, _)| position)
+        .filter(|entry| entry.kind == OutlineEntryKind::Heading && entry.label.trim() == wanted)
         .collect();
-    let position = match matching.as_slice() {
-        [one] => *one,
-        [] => {
-            return Err(
-                ApiError::new(ErrorCode::NotFound, "No heading has exactly this text")
-                    .with_field("/selection/heading"),
-            );
-        }
-        several => {
-            return Err(ApiError::new(
-                ErrorCode::InvalidInput,
-                format!(
-                    "{} headings have exactly this text; cite lines instead",
-                    several.len()
-                ),
-            )
-            .with_field("/selection/heading"));
-        }
-    };
-    let (start, level, _) = headings.get(position).copied().ok_or_else(not_found)?;
-    let end = headings
-        .iter()
-        .skip(position.saturating_add(1))
-        .find(|(_, next_level, _)| *next_level <= level)
-        .map_or(last, |(next, _, _)| next.saturating_sub(1));
-    Ok(TextRange { start, end })
-}
-
-/// The level and text of an ATX heading line, without its closing `#` run.
-fn atx_heading(line: &str) -> Option<(usize, &str)> {
-    let level = line.bytes().take_while(|byte| *byte == b'#').count();
-    if level == 0 || level > 6 {
-        return None;
+    match matching.as_slice() {
+        [entry] => match &entry.selection {
+            Selection::Lines { range } => Ok(range.clone()),
+            Selection::All
+            | Selection::Pages { .. }
+            | Selection::Cells { .. }
+            | Selection::Section { .. }
+            | Selection::Region { .. } => Err(ApiError::new(
+                ErrorCode::Internal,
+                "The outline entry of this heading selects no lines",
+            )),
+        },
+        [] => Err(
+            ApiError::new(ErrorCode::NotFound, "No heading has exactly this text")
+                .with_field("/selection/heading"),
+        ),
+        several => Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            format!(
+                "{} headings have exactly this text; cite lines instead",
+                several.len()
+            ),
+        )
+        .with_field("/selection/heading")),
     }
-    let rest = line.get(level..)?;
-    if !(rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t')) {
-        return None;
-    }
-    let text = rest.trim().trim_end_matches('#').trim_end();
-    Some((level, text))
-}
-
-/// The character and length of the fence run a line opens with: three or more backticks or
-/// tildes.
-fn fence_run(content: &str) -> Option<(u8, usize)> {
-    let first = *content.as_bytes().first()?;
-    if first != b'`' && first != b'~' {
-        return None;
-    }
-    let len = content.bytes().take_while(|byte| *byte == first).count();
-    (len >= 3).then_some((first, len))
 }
 
 fn not_found() -> ApiError {

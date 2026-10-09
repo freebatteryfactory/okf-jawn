@@ -5,7 +5,7 @@ use okf_jawn_contract::common::{CellRange, PageRange, TextRange};
 use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::TextOrigin;
 use okf_jawn_contract::identity::{ArtifactId, ItemId, JobId, PurgeId, TenantId, WorkspaceId};
-use okf_jawn_contract::read::{AssetRole, Selection};
+use okf_jawn_contract::read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection};
 use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
 use okf_jawn_core::conversion::ConversionRecord;
 use okf_jawn_core::jobs::{ArtifactKind, ArtifactRecord, JobScope, RevisionMapping};
@@ -209,25 +209,49 @@ fn a_stored_outcome_with_a_field_beside_its_tag_is_refused() -> TestResult {
     Ok(())
 }
 
+fn entry(label: &str, level: u16, kind: OutlineEntryKind, selection: Selection) -> OutlineEntry {
+    OutlineEntry {
+        label: label.to_owned(),
+        level,
+        selection,
+        kind,
+    }
+}
+
+fn heading(label: &str, level: u16, start: u32, end: u32) -> OutlineEntry {
+    entry(
+        label,
+        level,
+        OutlineEntryKind::Heading,
+        Selection::Lines {
+            range: TextRange { start, end },
+        },
+    )
+}
+
 #[test]
 fn a_section_is_located_as_the_lines_its_heading_opens() -> TestResult {
-    let markdown = [
-        "# Report",
-        "intro",
-        "",
-        "## Revenue",
-        "Q1 was up",
-        "~~~",
-        "# not a heading",
-        "~~~",
-        "## Costs",
-        "flat",
-    ]
-    .join("\n");
-    let revenue = section_lines(&markdown, "Revenue")?;
+    // The outline a Markdown parser made of the shown text; a table captioned like a heading
+    // is not a heading.
+    let outline = vec![
+        heading("Report", 1, 1, 10),
+        heading("Revenue", 2, 4, 8),
+        entry(
+            "Costs",
+            0,
+            OutlineEntryKind::Table,
+            Selection::Lines {
+                range: TextRange { start: 6, end: 7 },
+            },
+        ),
+        heading("Costs", 2, 9, 10),
+    ];
+    let revenue = section_lines(&outline, "Revenue")?;
     assert_eq!(revenue, TextRange { start: 4, end: 8 });
-    let report = section_lines(&markdown, "Report")?;
-    assert_eq!(report, TextRange { start: 1, end: 10 });
+    assert_eq!(
+        section_lines(&outline, " Costs ")?,
+        TextRange { start: 9, end: 10 }
+    );
     let record = record()?;
     let located = cited_locations(
         &converted()?,
@@ -240,60 +264,25 @@ fn a_section_is_located_as_the_lines_its_heading_opens() -> TestResult {
             locator: SourceLocator::Page { page_no: 2 }
         }]
     );
-    // A heading inside a fenced block is text, not a heading.
-    let fenced = err_of(section_lines(&markdown, "not a heading"))?;
-    assert_eq!(fenced.code, ErrorCode::NotFound);
-    assert_eq!(fenced.field.as_deref(), Some("/selection/heading"));
-    let twice = err_of(section_lines("## A\nx\n## A\ny", "A"))?;
-    assert_eq!(twice.code, ErrorCode::InvalidInput);
-    Ok(())
-}
-
-#[test]
-fn only_a_matching_fence_run_closes_a_code_block() -> TestResult {
-    let fence = "`".repeat(3);
-    let long = "`".repeat(4);
-    let markdown = [
-        "# Guide".to_owned(),
-        long.clone(),
-        fence.clone(),
-        "# inside the longer fence".to_owned(),
-        fence.clone(),
-        "~~~".to_owned(),
-        format!("{long} trailing text does not close"),
-        "# still inside".to_owned(),
-        format!("   {long}  "),
-        "## After".to_owned(),
-        "    # indented code".to_owned(),
-        format!("{fence} info with ` is not a fence"),
-        "## Last".to_owned(),
-    ]
-    .join("\n");
-    // A shorter run, the other character, or text after the run leaves the fence open.
-    for inside in ["inside the longer fence", "still inside"] {
-        assert_eq!(
-            err_of(section_lines(&markdown, inside))?.code,
-            ErrorCode::NotFound
-        );
-    }
-    // A longer run indented by three spaces with trailing blanks closes it.
+    let missing = err_of(section_lines(&outline, "not a heading"))?;
+    assert_eq!(missing.code, ErrorCode::NotFound);
+    assert_eq!(missing.field.as_deref(), Some("/selection/heading"));
+    let twice = [heading("A", 2, 1, 2), heading("A", 2, 3, 4)];
+    let ambiguous = err_of(section_lines(&twice, "A"))?;
+    assert_eq!(ambiguous.code, ErrorCode::InvalidInput);
+    assert_eq!(ambiguous.field.as_deref(), Some("/selection/heading"));
+    // An entry that selects no lines is the outline producer's fault, not the caller's.
+    let unlined = [entry(
+        "A",
+        2,
+        OutlineEntryKind::Heading,
+        Selection::Section {
+            heading: "A".to_owned(),
+        },
+    )];
     assert_eq!(
-        section_lines(&markdown, "After")?,
-        TextRange { start: 10, end: 12 }
-    );
-    // Four spaces of indentation make indented code, not a heading.
-    assert_eq!(
-        err_of(section_lines(&markdown, "indented code"))?.code,
-        ErrorCode::NotFound
-    );
-    // A backtick run whose info string has a backtick opens no fence.
-    assert_eq!(
-        section_lines(&markdown, "Last")?,
-        TextRange { start: 13, end: 13 }
-    );
-    assert_eq!(
-        section_lines(&markdown, "Guide")?,
-        TextRange { start: 1, end: 13 }
+        err_of(section_lines(&unlined, "A"))?.code,
+        ErrorCode::Internal
     );
     Ok(())
 }
