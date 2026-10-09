@@ -226,89 +226,110 @@ async function dataset(
   return new TextDecoder('utf-8', { fatal: true }).decode(merged);
 }
 
-function chartsFromView(view: z.infer<typeof zPresentResponse>['view']): {
-  charts: Map<string, TopLevelSpec>;
-  chartError: string | null;
-} {
+const failureLabel = {
+  invalid_spec: 'Invalid specification',
+  unknown_binding: 'Unknown binding',
+  dataset_unavailable: 'Dataset unavailable',
+  invalidated: 'Invalidated',
+  too_large: 'Dataset too large',
+} as const;
+
+/**
+ * Each named chart's specification, or why it is refused. One chart that compile rejects, or that
+ * the server reports failed, is that chart's error and nothing else's (SPEC §10). The server's
+ * diagnostic is the source of truth for its own failure; a chart it calls ready is still judged
+ * here, because renderer specs need runtime validation as well as the wire schema.
+ */
+function chartsFromView(
+  view: z.infer<typeof zPresentResponse>['view'],
+  statuses: z.infer<typeof zPresentResponse>['charts'],
+): { charts: Map<string, TopLevelSpec>; errors: Map<string, string> } {
   const charts = new Map<string, TopLevelSpec>();
+  const errors = new Map<string, string>();
   for (const [name, value] of Object.entries(view.charts ?? {})) {
     try {
       charts.set(name, parseVegaLiteSpec(value));
     } catch (cause) {
-      return {
-        charts: new Map(),
-        chartError:
-          cause instanceof Error
-            ? `Chart "${name}" failed validation: ${cause.message}`
-            : `Chart "${name}" failed validation`,
-      };
+      errors.set(
+        name,
+        cause instanceof Error
+          ? `Chart "${name}" failed validation: ${cause.message}`
+          : `Chart "${name}" failed validation`,
+      );
     }
   }
-  return { charts, chartError: null };
+  for (const { chart, status } of statuses) {
+    if (status.status !== 'failed') continue;
+    const name = chart.kind === 'named' ? chart.name : '';
+    errors.set(name, `${failureLabel[status.reason]}: ${status.message}`);
+  }
+  return { charts, errors };
+}
+
+function reason(cause: unknown, fallback: string): string {
+  return cause instanceof Error ? cause.message : fallback;
 }
 
 export function PresentView({ response, callTool }: PresentViewProps) {
   const [bindings, setBindings] = useState<ResolvedPresentation | null>(null);
-  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
     const load = async () => {
-      const { charts, chartError } = chartsFromView(response.view);
-      if (chartError) throw new Error(chartError);
-      const resolved: ResolvedPresentation = {
-        sources: new Map(),
-        bindings: new Map(),
-        tables: new Map(),
-        charts,
-      };
-      const sources = new Map(resolved.sources);
-      const definitions = new Map(resolved.bindings);
-      const tables = new Map(resolved.tables);
+      const { charts, errors: chartErrors } = chartsFromView(response.view, response.charts);
+      const sources = new Map<string, z.infer<typeof zReadItemResponse>>();
+      const definitions = new Map<string, z.infer<typeof zViewBinding>>();
+      const tables = new Map<string, ReadonlyArray<Row>>();
       const datasetErrors = new Map<string, string>();
+      const sourceErrors = new Map<string, string>();
+      // A binding that cannot be read costs only what cites it: its source excerpt, its table and
+      // its charts show why. The View's text and every other binding still render (SPEC §10).
       for (const binding of response.resolved_bindings) {
         definitions.set(binding.name, binding);
-        const output = await callChecked(
-          callTool,
-          'show',
-          {
-            workspace_id: binding.source.workspace_id,
-            item_id: binding.source.item_id,
-            at: { kind: 'revision', revision: binding.source.revision },
-            view: 'text',
-            selection: binding.source.selection,
-            max_bytes: 65536,
-            max_images: 0,
-          },
-          'The host refused to read the source.',
-        );
-        const source = zReadItemResponse.parse(output.structuredContent);
-        if (source.source.revision !== binding.source.revision)
-          throw new Error('Returned source revision differs from the binding');
-        sources.set(binding.name, source);
-        const text = await dataset(binding, callTool);
-        if (text !== undefined) {
-          // The bytes are verified; a dataset the contract refuses is that binding's alert alone.
-          try {
-            tables.set(binding.name, parseDataset(text, binding.source));
-          } catch (cause) {
-            datasetErrors.set(
-              binding.name,
-              cause instanceof Error ? cause.message : 'The dataset could not be read',
-            );
-          }
+        try {
+          const output = await callChecked(
+            callTool,
+            'show',
+            {
+              workspace_id: binding.source.workspace_id,
+              item_id: binding.source.item_id,
+              at: { kind: 'revision', revision: binding.source.revision },
+              view: 'text',
+              selection: binding.source.selection,
+              max_bytes: 65536,
+              max_images: 0,
+            },
+            'The host refused to read the source.',
+          );
+          const source = zReadItemResponse.parse(output.structuredContent);
+          if (source.source.revision !== binding.source.revision)
+            throw new Error('Returned source revision differs from the binding');
+          sources.set(binding.name, source);
+        } catch (cause) {
+          sourceErrors.set(binding.name, reason(cause, 'The source could not be read'));
+        }
+        try {
+          const text = await dataset(binding, callTool);
+          if (text !== undefined) tables.set(binding.name, parseDataset(text, binding.source));
+        } catch (cause) {
+          datasetErrors.set(binding.name, reason(cause, 'The dataset could not be read'));
         }
       }
       if (active)
-        setBindings({ ...resolved, sources, bindings: definitions, tables, charts, datasetErrors });
+        setBindings({
+          sources,
+          bindings: definitions,
+          tables,
+          charts,
+          datasetErrors,
+          sourceErrors,
+          chartErrors,
+        });
     };
-    load().catch((cause) => {
-      if (active) setError(cause instanceof Error ? cause.message : 'Source resolution failed');
-    });
+    void load();
     return () => {
       active = false;
     };
   }, [response, callTool]);
-  if (error) return <p role="alert">{error}</p>;
   if (!bindings) return <p role="status">Resolving the presentation's exact source references…</p>;
   const view = response.view;
   if (view.grammar === 'json_render') {
@@ -318,40 +339,62 @@ export function PresentView({ response, callTool }: PresentViewProps) {
       </BindingsContext.Provider>
     );
   }
-  const first = response.resolved_bindings.at(0);
-  const rows = first ? bindings.tables.get(first.name) : undefined;
-  if (!first || !rows) {
-    const refused = first ? bindings.datasetErrors?.get(first.name) : undefined;
-    const failed = response.charts.find((result) => result.status.status === 'failed')?.status;
-    return (
-      <p role="alert">
-        {refused ??
-          (failed && failed.status === 'failed'
-            ? failed.message
-            : 'A chart requires a retained materialized dataset. No model-provided data was substituted.')}
-      </p>
-    );
-  }
-  let chartSpec: TopLevelSpec;
-  try {
-    chartSpec = parseVegaLiteSpec(view.spec);
-  } catch (cause) {
-    return (
-      <p role="alert">
-        {cause instanceof Error
-          ? cause.message
-          : 'Vega-Lite specification failed runtime validation'}
-      </p>
-    );
-  }
   return (
     <section>
       <h2>{view.title}</h2>
       <p>{view.description}</p>
+      <VegaLiteChart view={view} resolved={bindings} response={response} />
+    </section>
+  );
+}
+
+/** The one chart of a `vega_lite` View: its own alert when it cannot be drawn, never the View's. */
+function VegaLiteChart({
+  view,
+  resolved,
+  response,
+}: {
+  view: z.infer<typeof zPresentResponse>['view'];
+  resolved: ResolvedPresentation;
+  response: z.infer<typeof zPresentResponse>;
+}) {
+  const failed = resolved.chartErrors?.get('');
+  if (failed !== undefined) return <p role="alert">{failed}</p>;
+  let chartSpec: TopLevelSpec;
+  try {
+    chartSpec = parseVegaLiteSpec(view.spec);
+  } catch (cause) {
+    return <p role="alert">{reason(cause, 'Vega-Lite specification failed runtime validation')}</p>;
+  }
+  const wanted =
+    'data' in chartSpec && chartSpec.data && 'name' in chartSpec.data
+      ? chartSpec.data.name
+      : undefined;
+  const first = wanted
+    ? response.resolved_bindings.find((binding) => binding.name === wanted)
+    : response.resolved_bindings.at(0);
+  if (!first)
+    return (
+      <p role="alert">
+        {wanted
+          ? `Unknown binding "${wanted}": the chart names a binding this View does not resolve.`
+          : 'A chart requires a retained materialized dataset. No model-provided data was substituted.'}
+      </p>
+    );
+  const rows = resolved.tables.get(first.name);
+  if (!rows)
+    return (
+      <p role="alert">
+        {resolved.datasetErrors?.get(first.name) ??
+          'A chart requires a retained materialized dataset. No model-provided data was substituted.'}
+      </p>
+    );
+  return (
+    <>
       <Chart spec={chartSpec} rows={rows} bindingName={first.name} />
       <p>
         {first.source.path} @ <code>{first.source.revision}</code>
       </p>
-    </section>
+    </>
   );
 }

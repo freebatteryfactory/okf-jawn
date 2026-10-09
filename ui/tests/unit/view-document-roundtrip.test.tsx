@@ -248,7 +248,11 @@ describe('the Dataset the views read', () => {
       structuredContent: zReadItemResponse.parse(sourceReadItemFixture),
     });
     render(<PresentView response={refused} callTool={callTool} />);
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(message));
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toBe(`Dataset unavailable: ${message}`),
+    );
+    // The View's own title and description stay: only the chart is refused.
+    expect(screen.getByRole('heading', { name: refused.view.title })).toBeTruthy();
   });
 });
 
