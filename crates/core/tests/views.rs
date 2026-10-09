@@ -13,7 +13,7 @@ use okf_jawn_contract::views::{ChartFailure, ColumnKind, Dataset, DatasetValue, 
 use okf_jawn_core::conversion::{ConversionRecord, ConvertedCell};
 use okf_jawn_core::jobs::DerivedKind;
 use okf_jawn_core::reading::{ObjectRole, RevisionObjects, object_role};
-use okf_jawn_core::views::{dataset_bytes, dataset_object, materialize};
+use okf_jawn_core::views::{MAX_DATASET_HEADER_BYTES, dataset_bytes, dataset_object, materialize};
 use uuid::Uuid;
 
 use check::{TestResult, err_of};
@@ -385,6 +385,46 @@ fn a_header_spanning_columns_names_each_column_it_covers() -> TestResult {
         .collect();
     assert_eq!(names, ["2024 Q1", "2024 Q2", "2025 Q1", "2025 Q2"]);
     assert_eq!(dataset.rows.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_long_header_spanning_many_columns_is_too_large_before_names_are_built() -> TestResult {
+    // One header cell whose text, repeated in each of the 1,024 column names it covers, would
+    // hold twice the header budget.
+    let mut record = record()?;
+    let table = record.tables.first_mut().ok_or("the fixture has a table")?;
+    table.num_rows = 2;
+    table.num_cols = 1024;
+    table.cells = vec![
+        ConvertedCell {
+            row: 0,
+            column: 0,
+            row_span: 1,
+            column_span: 1024,
+            text: "h".repeat(MAX_DATASET_HEADER_BYTES / 512),
+            column_header: true,
+            row_header: false,
+        },
+        ConvertedCell {
+            row: 1,
+            column: 0,
+            row_span: 1,
+            column_span: 1,
+            text: "1".to_owned(),
+            column_header: false,
+            row_header: false,
+        },
+    ];
+    let refused = materialize(
+        &binding(Selection::All)?,
+        &record,
+        TextOrigin::Converter,
+        &[],
+    )
+    .map(|_| ())
+    .map_err(|failure| failure.reason);
+    assert_eq!(err_of(refused)?, ChartFailure::TooLarge);
     Ok(())
 }
 

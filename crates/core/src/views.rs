@@ -89,6 +89,9 @@ pub const MAX_DATASET_COLUMNS: usize = 1024;
 /// about 102 million; the grid is laid out in memory before values are read, so the product is
 /// bounded too.
 pub const MAX_DATASET_CELLS: usize = 1_000_000;
+/// Most bytes all column names of a dataset may hold together. A header spanning columns names
+/// each of them, so its text is repeated per column; this bounds that before any name is built.
+pub const MAX_DATASET_HEADER_BYTES: usize = 1 << 20;
 /// Largest integer magnitude a JSON reader holds exactly (2^53).
 const MAX_EXACT_INTEGER: u64 = 1 << 53;
 /// Most significant digits of a decimal a double holds exactly as written.
@@ -101,7 +104,7 @@ const MAX_EXACT_DECIMAL_DIGITS: usize = 15;
 ///
 /// # Errors
 /// Returns `DatasetUnavailable` when the selection covers no table or several, or a kind the
-/// record cannot answer; `TooLarge` past the row, column or cell bound.
+/// record cannot answer; `TooLarge` past the row, column, cell or header-byte bound.
 pub fn materialize(
     binding: &ViewBinding,
     record: &ConversionRecord,
@@ -137,7 +140,7 @@ pub fn materialize(
         .count();
     let first_body_row = rows.clone().nth(header_rows).unwrap_or(rows.end);
     let body = grid.cells.get(header_rows..).unwrap_or_default();
-    let names = column_names(&grid.labels, rows.start..first_body_row, columns);
+    let names = column_names(&grid.labels, rows.start..first_body_row, columns)?;
     let kinds: Vec<ColumnKind> = (0..width).map(|column| column_kind(body, column)).collect();
     let columns = names
         .into_iter()
@@ -409,12 +412,17 @@ fn grid_of<'a>(
 /// Column names from the header rows, the texts of the cells covering each column joined top
 /// to bottom, each cell once; `column_<n>` where there is none. A repeated name gets its
 /// column number appended, so every name is distinct.
+///
+/// # Errors
+/// Returns `TooLarge` when the names would hold more than `MAX_DATASET_HEADER_BYTES`, checked
+/// from the lengths of their parts before each name is built.
 fn column_names(
     labels: &BTreeMap<(u32, u32), (usize, &str)>,
     header_rows: Range<u32>,
     columns: Range<u32>,
-) -> Vec<String> {
+) -> Result<Vec<String>, BindingFailure> {
     let mut emitted: BTreeSet<String> = BTreeSet::new();
+    let mut total = 0_usize;
     columns
         .enumerate()
         .map(|(offset, column)| {
@@ -427,6 +435,19 @@ fn column_names(
                     }
                     previous = Some(index);
                 }
+            }
+            let length = parts
+                .iter()
+                .fold(parts.len(), |sum, part| sum.saturating_add(part.len()));
+            total = total.saturating_add(length);
+            if total > MAX_DATASET_HEADER_BYTES {
+                return Err(BindingFailure {
+                    reason: ChartFailure::TooLarge,
+                    message: format!(
+                        "the selected table's column names hold more than \
+                         {MAX_DATASET_HEADER_BYTES} bytes"
+                    ),
+                });
             }
             let joined = parts.join(" ");
             let number = offset.saturating_add(1);
@@ -448,7 +469,7 @@ fn column_names(
                 attempt = attempt.saturating_add(1);
             }
             emitted.insert(name.clone());
-            name
+            Ok(name)
         })
         .collect()
 }
