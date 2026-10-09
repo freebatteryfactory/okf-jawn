@@ -29,7 +29,8 @@ mod job_handler {
     use okf_jawn_core::conversion::{ConversionRecord, ConverterLimits};
     use okf_jawn_core::jobs::{JobHandler, JobScope, JobSpec, NewJob, RecordStore};
     use okf_jawn_core::storage::{
-        ObjectInfo, Provenance, SourceCard, StorageScope, TreeEdit, derive_item_id,
+        ObjectInfo, Provenance, SourceCard, StorageScope, TreeEdit, derive_commit_mutation_id,
+        derive_item_id,
     };
     use okf_jawn_core::uploads::UploadRecord;
     use okf_jawn_ingest::handler::{
@@ -416,14 +417,16 @@ mod job_handler {
         assert_eq!(world.uploads.consumed()?, [(report, id), (notes, id)]);
 
         // One commit of both pending cards, then one per converted card, each expecting the
-        // revision before it.
+        // revision before it, and each under its own identity derived from the job's.
         let commits = world.versions.written()?;
         assert_eq!(commits.len(), 3);
         let mutation = entry.created.mutation_id;
-        assert!(
+        assert_eq!(
             commits
                 .iter()
-                .all(|(changes, _)| changes.mutation_id == mutation)
+                .map(|(changes, _)| changes.mutation_id)
+                .collect::<Vec<_>>(),
+            [0, 1, 2].map(|ordinal| derive_commit_mutation_id(mutation, ordinal))
         );
         let first = some(commits.first(), "the pending commit")?;
         assert_eq!(first.0.expected_head, base()?);
@@ -516,6 +519,76 @@ mod job_handler {
         assert_eq!(
             some(again.completions.first(), "the completion")?.item_ids,
             some(entry.completions.first(), "the first completion")?.item_ids
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_import_that_died_after_its_second_of_three_commits_completes_without_a_duplicate()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, 91, "first.pdf", b"%PDF first")?;
+        let second = upload(&world, 92, "second.pdf", b"%PDF second")?;
+        let id = job(
+            &world,
+            13,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        // The pending cards and the first card are written; the process dies with the second.
+        world.versions.die_after(2)?;
+        assert!(run(&world, id).await?);
+        let died = world.records.entry(id)?;
+        assert_eq!(died.job.state, JobState::Failed);
+        assert_eq!(world.versions.written()?.len(), 2);
+        // The next attempt replays the two written commits and writes only the third.
+        world
+            .records
+            .insert(id, died.scope.clone(), died.created.clone())?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let mutation = entry.created.mutation_id;
+        let commits = world.versions.written()?;
+        assert_eq!(
+            commits
+                .iter()
+                .map(|(changes, _)| changes.mutation_id)
+                .collect::<Vec<_>>(),
+            [0, 1, 2].map(|ordinal| derive_commit_mutation_id(mutation, ordinal))
+        );
+        let written: Vec<(String, ConversionOutcome)> = cards(&world)?
+            .into_iter()
+            .map(|card| {
+                (
+                    card.path.as_str().to_owned(),
+                    card.appearance.extraction.outcome,
+                )
+            })
+            .collect();
+        assert_eq!(
+            written,
+            [
+                ("inbox/first-pdf.md".to_owned(), ConversionOutcome::Pending),
+                ("inbox/second-pdf.md".to_owned(), ConversionOutcome::Pending),
+                (
+                    "inbox/first-pdf.md".to_owned(),
+                    ConversionOutcome::Completed
+                ),
+                (
+                    "inbox/second-pdf.md".to_owned(),
+                    ConversionOutcome::Completed
+                ),
+            ]
+        );
+        let completion = some(entry.completions.first(), "the completion")?;
+        assert_eq!(
+            completion.revision.as_ref(),
+            commits.last().map(|(_, revision)| revision)
+        );
+        assert_eq!(
+            completion.item_ids,
+            [derive_item_id(mutation, 0), derive_item_id(mutation, 1)]
         );
         Ok(())
     }

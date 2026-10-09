@@ -13,12 +13,15 @@
 //!    (`record::assemble`), the record is retained, and the card is replaced with the
 //!    converter's text and the contract `Extraction`, in every outcome.
 //!
-//! Every commit carries the claim's `MutationId`. The first expects the job's base revision and
-//! each later one the revision before it, so on a repeated run each finds the commit its first
-//! run wrote after its expected head (`replayed`) and writes nothing again; new cards are named
-//! with `derive_item_id`. While a window converts, `update_progress` is called every
-//! `HandlerLimits::heartbeat`; a job found cancelled stops, and dropping the conversion kills
-//! its child.
+//! A mutation identity names at most one commit. The `n`-th commit of an import (0 for the
+//! pending cards, `i + 1` for card `i`, counted the same way on every attempt) carries
+//! `derive_commit_mutation_id(job, n)`, and new cards are named with `derive_item_id`. The first
+//! commit expects the job's base revision and each later one the revision before it, so on a
+//! repeated run each commit replays on its own identity, whatever order the store searches in,
+//! and nothing is written again.
+//!
+//! While a window converts, `update_progress` is called every `HandlerLimits::heartbeat`; a job
+//! found cancelled stops, and dropping the conversion kills its child.
 //!
 //! Construction limitations, stated rather than hidden:
 //! - `apply_naming_rules: true` fails as `NotImplemented`: core has no function that names a
@@ -47,7 +50,7 @@ use okf_jawn_core::jobs::ClaimedJob;
 use okf_jawn_core::portable::ImportCheck;
 use okf_jawn_core::storage::{
     CandidateCheck, CommitChanges, Committed, LocalSource, Page, SourceCard, StorageScope,
-    TreeEdit, derive_item_id,
+    TreeEdit, derive_commit_mutation_id, derive_item_id,
 };
 
 use crate::handler::{Done, HandlerPorts};
@@ -112,11 +115,11 @@ pub(crate) async fn import(
         Arc::clone(&ports.check),
         cards.iter().map(|(card, _)| card.path.clone()).collect(),
     ));
-    let pending = commit(
+    let pending = commit_on(
         ports,
         claimed,
         scope,
-        request.base_revision.clone(),
+        (request.base_revision.clone(), 0),
         format!("Import {} sources, pending conversion", cards.len()),
         cards
             .iter()
@@ -126,11 +129,11 @@ pub(crate) async fn import(
     )
     .await?;
     let mut done = Done {
-        revision: Some(pending.revision.clone()),
+        revision: Some(pending.revision),
         warnings: pending.warnings,
         ..Done::default()
     };
-    for (mut card, local) in cards {
+    for ((mut card, local), ordinal) in cards.into_iter().zip(1_u32..) {
         let file_name = card
             .appearance
             .names
@@ -145,16 +148,16 @@ pub(crate) async fn import(
         };
         card.body.clone_from(&converted.assembled.markdown);
         card.appearance.extraction = extraction_of(&converted, None);
+        let message = format!("Import {}: {}", card.title, outcome_word(&converted));
         let expected = done
             .revision
             .clone()
             .ok_or_else(|| fault("the pending cards have a revision"))?;
-        let message = format!("Import {}: {}", card.title, outcome_word(&converted));
-        let committed = commit(
+        let committed = commit_on(
             ports,
             claimed,
             scope,
-            expected,
+            (expected, ordinal),
             message,
             vec![TreeEdit::WriteSourceCard(Box::new(card.clone()))],
             Arc::clone(&check),
@@ -277,11 +280,11 @@ pub(crate) async fn redigest(
             ..appearance
         },
     };
-    let committed = commit(
+    let committed = commit_on(
         ports,
         claimed,
         scope,
-        base_revision.clone(),
+        (base_revision.clone(), 0),
         format!("Redigest {}: {}", card.title, outcome_word(&converted)),
         vec![TreeEdit::WriteSourceCard(Box::new(card))],
         Arc::clone(&ports.check),
@@ -473,12 +476,12 @@ async fn retain(
     Ok(object.digest)
 }
 
-/// One commit under the claim's mutation.
-async fn commit(
+/// The `ordinal`-th commit of the job, expecting `expected_head`, under its derived identity.
+async fn commit_on(
     ports: &HandlerPorts,
     claimed: &ClaimedJob,
     scope: &StorageScope,
-    expected_head: Revision,
+    (expected_head, ordinal): (Revision, u32),
     message: String,
     edits: Vec<TreeEdit>,
     check: Arc<dyn CandidateCheck>,
@@ -488,7 +491,7 @@ async fn commit(
         .commit(
             scope,
             CommitChanges {
-                mutation_id: claimed.mutation_id,
+                mutation_id: derive_commit_mutation_id(claimed.mutation_id, ordinal),
                 expected_head,
                 author: claimed.initiator.clone(),
                 message,

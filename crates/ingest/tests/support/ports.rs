@@ -41,12 +41,18 @@ use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 /// A `VersionStore` that keeps a line of commits and nothing of their trees.
 ///
 /// `commit` encodes the port doc: a commit carrying the same mutation after the expected head
-/// is returned as `replayed`; otherwise a head that moved is `Conflict`. Folders list empty.
+/// is returned as `replayed`; otherwise a head that moved is `Conflict`. It searches the line
+/// from the tip, newest first, as the storage lane's `find_trailer` walk does, so a handler
+/// that wrote two commits under one identity is caught replaying the wrong one. Folders list
+/// empty.
 pub struct FakeVersions {
     /// The head before any commit.
     pub head: Revision,
     /// Commits written, in order, with the revision each made.
     pub commits: Mutex<Vec<(CommitChanges, Revision)>>,
+    /// After this many commits are written, the write that reaches it is kept and then the call
+    /// fails, as a process that died right after the commit would (once; the count is cleared).
+    pub die_after: Mutex<Option<usize>>,
 }
 
 /// An `UploadStore` holding complete uploads and recording which job consumed each.
@@ -127,7 +133,17 @@ impl FakeVersions {
         Self {
             head,
             commits: Mutex::new(Vec::new()),
+            die_after: Mutex::new(None),
         }
+    }
+
+    /// Die right after the `count`-th commit is written.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn die_after(&self, count: usize) -> Result<(), ApiError> {
+        *self.die_after.lock().map_err(|_| poisoned())? = Some(count);
+        Ok(())
     }
 
     /// The commits written so far.
@@ -159,6 +175,7 @@ impl FakeVersions {
         };
         if let Some((_, revision)) = after
             .iter()
+            .rev()
             .find(|(earlier, _)| earlier.mutation_id == changes.mutation_id)
         {
             return Ok(Committed {
@@ -173,6 +190,14 @@ impl FakeVersions {
         let revision = Revision::try_from(format!("{:040x}", commits.len().saturating_add(1)))
             .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
         commits.push((changes, revision.clone()));
+        let mut die_after = self.die_after.lock().map_err(|_| poisoned())?;
+        if *die_after == Some(commits.len()) {
+            *die_after = None;
+            return Err(ApiError::new(
+                ErrorCode::Unavailable,
+                "the process died after the commit was written",
+            ));
+        }
         Ok(Committed {
             revision,
             replayed: false,
