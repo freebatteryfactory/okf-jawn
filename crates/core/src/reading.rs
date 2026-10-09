@@ -66,44 +66,40 @@ pub struct RevisionObjects<'a> {
 
 /// Why an OKF `sources` entry of a note cites no item of the workspace.
 ///
-/// The shape of the contract's `UncitedReason` the integration owner is adding to
-/// `GetSourcesResponse`; core switches to that type once it is on `main`.
+/// The variants of the contract's `DeclaredOutcome::Uncited` reason (PR #14); core switches to
+/// that type once it is on `main`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UncitedReason {
     /// The resource is a URL (okf-core `ResourceKind::Url`).
     External,
     /// The resource describes a population or scope (okf-core `ResourceKind::Scope`).
     Scope,
-    /// The resource is a path, or is missing, and names no item at the read revision.
+    /// The resource is a path that names no item at the read revision.
     NotFound,
+    /// The entry has no `resource`, or is not a mapping at all.
+    Malformed,
 }
 
-/// One OKF `sources` entry of a note that is not a citation, with its resource as written
-/// (empty when the entry has none).
+/// Where one OKF `sources` entry of a note may point.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UncitedSource {
-    /// The entry's `resource`, trimmed.
-    pub resource: String,
-    /// Why it cites nothing.
-    pub reason: UncitedReason,
-}
-
-/// One OKF `sources` entry of a note, in the order the note lists them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NoteSource {
+pub enum SourceTarget {
     /// A path resource: the workspace paths it may name, in the order okf-core tries them
     /// (relative to the note, then from the workspace root), each with the `.md` an OKF concept
     /// path implies. The first that names an item at the read revision is the citation.
-    Candidates {
-        /// The entry's `resource`, trimmed.
-        resource: String,
-        /// Where the item may lie.
-        paths: Vec<WorkspacePath>,
-    },
+    Candidates(Vec<WorkspacePath>),
     /// An entry that names no item, and why.
-    Uncited(UncitedSource),
+    Uncited(UncitedReason),
 }
 
+/// One OKF `sources` entry of a note, exactly as written, and where it may point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteSource {
+    /// The entry as the note's frontmatter holds it: every field kept (`id`, the footnote
+    /// attribution key, `title`, `author`, `last_modified`, `usage_count`, extensions).
+    pub entry: serde_json::Value,
+    /// Where it may point.
+    pub target: SourceTarget,
+}
 /// Where each line of a text starts: lines are one-based and end at `\n`, and a final `\n`
 /// opens no further line, the counting a `Lines` selection uses.
 #[derive(Debug, Clone)]
@@ -548,75 +544,79 @@ pub fn markdown_outline(text: &str) -> Vec<OutlineEntry> {
         .collect()
 }
 
-/// The OKF `sources` entries of the note at `note`, read with okf-core's own rules, in order.
+/// The OKF `sources` entries of the note at `note`, in order, each exactly as written.
 ///
-/// okf-core classifies each `resource`: a URL is `External`, prose is a `Scope`, a missing
-/// resource names nothing (`NotFound`), and a path gives the candidates okf-core's
-/// `field_path_candidates` gives (relative to the note, then from the root), each with `.md`
-/// appended when it lacks it, kept when it is a valid workspace path. A path with no valid
-/// candidate is `NotFound`. Nothing is dropped: every entry is either a candidate list or an
-/// uncited source.
+/// The list is read as OKF reads it: a sequence of entries, or a bare mapping as a one-element
+/// list. Every element is kept, a malformed one included, so nothing the file declares is
+/// dropped. A mapping is classified by okf-core (`Source::resource_kind`): a URL is `External`,
+/// prose is a `Scope`, a missing resource is `Malformed`, and a path gives the candidates
+/// okf-core's `field_path_candidates` gives (relative to the note, then from the root), each
+/// with `.md` appended when it lacks it, kept when it is a valid workspace path; a path with no
+/// valid candidate is `NotFound`. An element that is not a mapping, and a `sources` value that
+/// is neither a list nor a mapping, is `Malformed`.
 #[must_use]
 pub fn note_sources(
     properties: &BTreeMap<String, serde_json::Value>,
     note: &WorkspacePath,
 ) -> Vec<NoteSource> {
-    let Some(value) = properties.get("sources") else {
-        return Vec::new();
+    let entries: Vec<&serde_json::Value> = match properties.get("sources") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(entries)) => entries.iter().collect(),
+        Some(other) => vec![other],
     };
     let from = okf_core::links::concept_id_for_path(note.as_str());
-    okf_core::Source::list_from_value(&yaml_value(value))
+    entries
         .into_iter()
-        .map(|source| {
-            let resource = source
-                .resource
-                .as_deref()
-                .map_or_else(String::new, |resource| resource.trim().to_owned());
-            let uncited = |reason| {
-                NoteSource::Uncited(UncitedSource {
-                    resource: resource.clone(),
-                    reason,
-                })
-            };
-            match source.resource_kind() {
-                ResourceKind::Url => uncited(UncitedReason::External),
-                ResourceKind::Scope => uncited(UncitedReason::Scope),
-                ResourceKind::Missing => uncited(UncitedReason::NotFound),
-                ResourceKind::Path => {
-                    let raw = match &from {
-                        Some(from) => okf_core::field_path_candidates(&resource, from),
-                        None => vec![resource.clone()],
-                    };
-                    let mut paths: Vec<WorkspacePath> = Vec::new();
-                    for candidate in raw {
-                        let file = if std::path::Path::new(&candidate)
-                            .extension()
-                            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-                        {
-                            candidate
-                        } else {
-                            format!("{candidate}.md")
-                        };
-                        if let Ok(path) = WorkspacePath::try_from(file)
-                            && !paths.contains(&path)
-                        {
-                            paths.push(path);
-                        }
-                    }
-                    if paths.is_empty() {
-                        uncited(UncitedReason::NotFound)
-                    } else {
-                        NoteSource::Candidates {
-                            resource: resource.clone(),
-                            paths,
-                        }
-                    }
-                }
-            }
+        .map(|entry| NoteSource {
+            entry: entry.clone(),
+            target: entry_target(entry, from.as_ref()),
         })
         .collect()
 }
 
+/// Where one `sources` element may point.
+fn entry_target(entry: &serde_json::Value, from: Option<&okf_core::ConceptId>) -> SourceTarget {
+    let Some(source) = entry
+        .is_object()
+        .then(|| okf_core::Source::from_value(&yaml_value(entry)))
+        .flatten()
+    else {
+        return SourceTarget::Uncited(UncitedReason::Malformed);
+    };
+    match source.resource_kind() {
+        ResourceKind::Url => SourceTarget::Uncited(UncitedReason::External),
+        ResourceKind::Scope => SourceTarget::Uncited(UncitedReason::Scope),
+        ResourceKind::Missing => SourceTarget::Uncited(UncitedReason::Malformed),
+        ResourceKind::Path => {
+            let resource = source.resource.as_deref().unwrap_or_default().trim();
+            let raw = match from {
+                Some(from) => okf_core::field_path_candidates(resource, from),
+                None => vec![resource.to_owned()],
+            };
+            let mut paths: Vec<WorkspacePath> = Vec::new();
+            for candidate in raw {
+                let file = if std::path::Path::new(&candidate)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                {
+                    candidate
+                } else {
+                    format!("{candidate}.md")
+                };
+                if let Ok(path) = WorkspacePath::try_from(file)
+                    && !paths.contains(&path)
+                {
+                    paths.push(path);
+                }
+            }
+            if paths.is_empty() {
+                SourceTarget::Uncited(UncitedReason::NotFound)
+            } else {
+                SourceTarget::Candidates(paths)
+            }
+        }
+    }
+}
 /// The depth of a heading: 1 for `#` to 6 for `######`.
 const fn heading_level(level: HeadingLevel) -> u16 {
     match level {

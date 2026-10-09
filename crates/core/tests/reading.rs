@@ -12,7 +12,7 @@ use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason}
 use okf_jawn_core::conversion::ConversionRecord;
 use okf_jawn_core::jobs::{ArtifactKind, ArtifactRecord, JobScope, RevisionMapping};
 use okf_jawn_core::reading::{
-    NoteSource, ObjectRole, RevisionObjects, UncitedReason, UncitedSource, cited_locations,
+    ObjectRole, RevisionObjects, SourceTarget, UncitedReason, cited_locations,
     decode_conversion_record, fill_locations, invalidated, markdown_outline, note_sources,
     object_role, section_lines,
 };
@@ -335,40 +335,34 @@ fn section_lines_agrees_for_the_converter_outline_and_an_item_outline() -> TestR
 
 #[test]
 fn a_notes_okf_sources_are_classified_in_order_and_none_is_dropped() -> TestResult {
-    let properties = serde_json::from_value(json!({
-        "sources": [
-            { "id": "web", "resource": "https://example.test/report" },
-            { "id": "card", "resource": "card" },
-            { "id": "scope", "resource": "all queries in project X" },
-            { "id": "bare" },
-            { "id": "up", "resource": "../sources/report-pdf.md" }
-        ]
-    }))?;
+    let entries = json!([
+        { "id": "web", "resource": "https://example.test/report", "title": "Report" },
+        { "id": "card", "resource": "card", "usage_count": 3 },
+        { "id": "scope", "resource": "all queries in project X" },
+        { "id": "bare" },
+        { "id": "up", "resource": "../sources/report-pdf.md", "x_extension": true },
+        "just a string"
+    ]);
+    let properties = serde_json::from_value(json!({ "sources": entries.clone() }))?;
     let note = WorkspacePath::try_from("notes/plan.md".to_owned())?;
     let path = |text: &str| WorkspacePath::try_from(text.to_owned());
+    let declared = note_sources(&properties, &note);
+    let written: Vec<&serde_json::Value> = declared.iter().map(|source| &source.entry).collect();
+    let expected: Vec<&serde_json::Value> = entries
+        .as_array()
+        .map(|list| list.iter().collect())
+        .unwrap_or_default();
+    assert_eq!(written, expected, "every entry is kept exactly as written");
+    let targets: Vec<SourceTarget> = declared.into_iter().map(|source| source.target).collect();
     assert_eq!(
-        note_sources(&properties, &note),
+        targets,
         vec![
-            NoteSource::Uncited(UncitedSource {
-                resource: "https://example.test/report".to_owned(),
-                reason: UncitedReason::External,
-            }),
-            NoteSource::Candidates {
-                resource: "card".to_owned(),
-                paths: vec![path("notes/card.md")?, path("card.md")?],
-            },
-            NoteSource::Uncited(UncitedSource {
-                resource: "all queries in project X".to_owned(),
-                reason: UncitedReason::Scope,
-            }),
-            NoteSource::Uncited(UncitedSource {
-                resource: String::new(),
-                reason: UncitedReason::NotFound,
-            }),
-            NoteSource::Candidates {
-                resource: "../sources/report-pdf.md".to_owned(),
-                paths: vec![path("sources/report-pdf.md")?],
-            },
+            SourceTarget::Uncited(UncitedReason::External),
+            SourceTarget::Candidates(vec![path("notes/card.md")?, path("card.md")?]),
+            SourceTarget::Uncited(UncitedReason::Scope),
+            SourceTarget::Uncited(UncitedReason::Malformed),
+            SourceTarget::Candidates(vec![path("sources/report-pdf.md")?]),
+            SourceTarget::Uncited(UncitedReason::Malformed),
         ]
     );
     let bare = serde_json::from_value(json!({ "sources": { "resource": "card" } }))?;
@@ -379,7 +373,6 @@ fn a_notes_okf_sources_are_classified_in_order_and_none_is_dropped() -> TestResu
     );
     Ok(())
 }
-
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "support/records.rs"]

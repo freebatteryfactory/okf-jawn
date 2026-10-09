@@ -25,7 +25,7 @@ use super::shared::{check_named, invalid, resolve, workspace_scope};
 use crate::context::OperationContext;
 use crate::conversion::ConversionRecord;
 use crate::reading::{
-    NoteSource, ObjectRole, UncitedReason, UncitedSource, authorize_object, cited_locations,
+    NoteSource, ObjectRole, SourceTarget, UncitedReason, authorize_object, cited_locations,
     note_sources, read_conversion_record,
 };
 use crate::storage::{Page, StorageScope};
@@ -38,7 +38,7 @@ use crate::storage::{Page, StorageScope};
 /// lane does not merge before it is.
 struct ItemSources {
     response: GetSourcesResponse,
-    uncited: Vec<UncitedSource>,
+    uncited: Vec<(serde_json::Value, UncitedReason)>,
 }
 
 /// Most bytes one `get_object` block returns; larger objects take the streaming route.
@@ -268,22 +268,26 @@ async fn item_sources(
             uncited: Vec::new(),
         });
     }
-    let mut sources = Vec::new();
+    let mut sources: Vec<SourceReference> = Vec::new();
     let mut uncited = Vec::new();
-    for entry in note_sources(&document.properties, &document.summary.path) {
-        match entry {
-            NoteSource::Uncited(entry) => uncited.push(entry),
-            NoteSource::Candidates { resource, paths } => {
+    for NoteSource { entry, target } in note_sources(&document.properties, &document.summary.path) {
+        match target {
+            SourceTarget::Uncited(reason) => uncited.push((entry, reason)),
+            SourceTarget::Candidates(paths) => {
                 match first_item(service, &scope, &revision, &paths, request.item_id).await? {
                     Some(item) => {
-                        let cited = ports.versions.show(&scope, &revision, item).await?;
-                        let record = record_of(service, &scope, cited.source.as_ref()).await?;
-                        sources.push(whole_citation(&scope, &revision, &cited, record.as_ref()));
+                        if !sources.iter().any(|cited| cited.item_id == item) {
+                            let cited = ports.versions.show(&scope, &revision, item).await?;
+                            let record = record_of(service, &scope, cited.source.as_ref()).await?;
+                            sources.push(whole_citation(
+                                &scope,
+                                &revision,
+                                &cited,
+                                record.as_ref(),
+                            ));
+                        }
                     }
-                    None => uncited.push(UncitedSource {
-                        resource,
-                        reason: UncitedReason::NotFound,
-                    }),
+                    None => uncited.push((entry, UncitedReason::NotFound)),
                 }
             }
         }
@@ -297,7 +301,6 @@ async fn item_sources(
         uncited,
     })
 }
-
 /// The first of `paths` that names an item at `revision` other than the citing note itself.
 async fn first_item(
     service: &ApplicationService,
