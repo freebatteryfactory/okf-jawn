@@ -220,20 +220,37 @@ pub struct GetSourcesResponse {
     /// Occurrence metadata if the item is a source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appearance: Option<SourceAppearance>,
-    /// Entries of the item's OKF `sources` that are not citations of an item in this workspace
-    /// at this revision, in the file's order; kept so no declared source is silently dropped.
+    /// Every entry of the item's OKF `sources`, in the file's order, each exactly as written
+    /// (its `id`, the key a footnote cites, and every other field kept) with what it resolved to;
+    /// so no declared source, and none of its fields, is silently dropped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub uncited: Vec<UncitedSource>,
+    pub declared: Vec<DeclaredSource>,
 }
 
-/// One OKF `sources` entry that is not a citation of an item at the resolved revision.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+/// One entry of an item's OKF `sources` and what it resolved to.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct UncitedSource {
-    /// The entry's `resource`, exactly as written in the file.
-    pub resource: String,
-    /// Why it is not a citation.
-    pub reason: UncitedReason,
+pub struct DeclaredSource {
+    /// The entry exactly as written in the file.
+    pub entry: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Whether it is a citation of an item at the resolved revision.
+    pub outcome: DeclaredOutcome,
+}
+
+/// What an OKF `sources` entry resolved to.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeclaredOutcome {
+    /// A citation of an item in this workspace at the resolved revision.
+    Cited {
+        /// Its position in `sources`.
+        index: u32,
+    },
+    /// Not a citation.
+    Uncited {
+        /// Why not.
+        reason: UncitedReason,
+    },
 }
 
 /// Why an OKF `sources` entry is not a citation.
@@ -246,7 +263,7 @@ pub enum UncitedReason {
     Scope,
     /// A workspace path that names no item at the resolved revision.
     NotFound,
-    /// An entry with no `resource` (its `resource` here is empty).
+    /// An entry with no `resource`.
     Malformed,
 }
 

@@ -1,50 +1,76 @@
-//! An OKF `sources` entry that is not a citation is kept on the wire, never dropped.
+//! Every OKF `sources` entry reaches the wire whole, with what it resolved to; none is dropped.
 
-use okf_jawn_contract::source::{GetSourcesResponse, UncitedReason, UncitedSource};
+use okf_jawn_contract::source::{
+    DeclaredOutcome, DeclaredSource, GetSourcesResponse, UncitedReason,
+};
 use serde_json::json;
 
-use check::{TestResult, err_of};
+use check::{TestResult, err_of, some};
 
 #[test]
-fn a_response_without_uncited_entries_reads_as_none_and_writes_none() -> TestResult {
+fn a_response_without_declared_entries_reads_as_none_and_writes_none() -> TestResult {
     let response: GetSourcesResponse =
         serde_json::from_value(json!({ "revision": "a".repeat(40), "sources": [] }))?;
-    assert_eq!(response.uncited, Vec::new());
+    assert_eq!(response.declared, Vec::new());
     let written = serde_json::to_value(&response)?;
-    assert_eq!(written.get("uncited"), None);
+    assert_eq!(written.get("declared"), None);
     Ok(())
 }
 
 #[test]
-fn uncited_entries_keep_their_resource_reason_and_order() -> TestResult {
+fn a_declared_entry_keeps_every_field_as_written_and_its_outcome() -> TestResult {
     let response: GetSourcesResponse = serde_json::from_value(json!({
         "revision": "a".repeat(40),
         "sources": [],
-        "uncited": [
-            { "resource": "https://example.org/report", "reason": "external" },
-            { "resource": "notes/", "reason": "scope" },
-            { "resource": "notes/missing.md", "reason": "not_found" },
-            { "resource": "", "reason": "malformed" },
+        "declared": [
+            {
+                "entry": {
+                    "id": "s1",
+                    "resource": "https://example.org/report",
+                    "title": "Report",
+                    "author": "A. Writer",
+                    "last_modified": "2026-01-02",
+                    "usage_count": 3,
+                },
+                "outcome": { "kind": "uncited", "reason": "external" },
+            },
+            {
+                "entry": { "id": "s2", "resource": "notes/plan.md" },
+                "outcome": { "kind": "cited", "index": 0 },
+            },
+            { "entry": { "id": "s3" }, "outcome": { "kind": "uncited", "reason": "malformed" } },
+            { "entry": { "resource": "notes/" }, "outcome": { "kind": "uncited", "reason": "scope" } },
+            {
+                "entry": { "resource": "notes/missing.md" },
+                "outcome": { "kind": "uncited", "reason": "not_found" },
+            },
         ],
     }))?;
+    let first = some(response.declared.first(), "the first declared entry")?;
+    // The footnote key and every credibility field survive.
+    assert_eq!(first.entry.get("id"), Some(&json!("s1")));
+    assert_eq!(first.entry.get("usage_count"), Some(&json!(3)));
+    assert_eq!(first.entry.len(), 6);
+    let outcomes: Vec<&DeclaredOutcome> = response
+        .declared
+        .iter()
+        .map(|declared| &declared.outcome)
+        .collect();
     assert_eq!(
-        response.uncited,
+        outcomes,
         vec![
-            UncitedSource {
-                resource: "https://example.org/report".to_owned(),
-                reason: UncitedReason::External,
+            &DeclaredOutcome::Uncited {
+                reason: UncitedReason::External
             },
-            UncitedSource {
-                resource: "notes/".to_owned(),
-                reason: UncitedReason::Scope,
+            &DeclaredOutcome::Cited { index: 0 },
+            &DeclaredOutcome::Uncited {
+                reason: UncitedReason::Malformed
             },
-            UncitedSource {
-                resource: "notes/missing.md".to_owned(),
-                reason: UncitedReason::NotFound,
+            &DeclaredOutcome::Uncited {
+                reason: UncitedReason::Scope
             },
-            UncitedSource {
-                resource: String::new(),
-                reason: UncitedReason::Malformed,
+            &DeclaredOutcome::Uncited {
+                reason: UncitedReason::NotFound
             },
         ]
     );
@@ -52,13 +78,20 @@ fn uncited_entries_keep_their_resource_reason_and_order() -> TestResult {
 }
 
 #[test]
-fn an_uncited_entry_refuses_unknown_fields_and_reasons() -> TestResult {
-    err_of(serde_json::from_value::<UncitedSource>(
-        json!({ "resource": "x", "reason": "external", "guess": true }),
-    ))?;
-    err_of(serde_json::from_value::<UncitedSource>(
-        json!({ "resource": "x", "reason": "web" }),
-    ))?;
+fn a_declared_entry_refuses_unknown_fields_and_outcomes() -> TestResult {
+    err_of(serde_json::from_value::<DeclaredSource>(json!({
+        "entry": {},
+        "outcome": { "kind": "cited", "index": 0 },
+        "guess": true,
+    })))?;
+    err_of(serde_json::from_value::<DeclaredSource>(json!({
+        "entry": {},
+        "outcome": { "kind": "uncited", "reason": "web" },
+    })))?;
+    err_of(serde_json::from_value::<DeclaredSource>(json!({
+        "entry": {},
+        "outcome": { "kind": "probably" },
+    })))?;
     Ok(())
 }
 

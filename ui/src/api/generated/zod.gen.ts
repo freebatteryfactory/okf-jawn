@@ -1381,11 +1381,25 @@ export const zUncitedReason = z.union([
 ]);
 
 /**
- * One OKF `sources` entry that is not a citation of an item at the resolved revision.
+ * What an OKF `sources` entry resolved to.
  */
-export const zUncitedSource = z.object({
-    reason: zUncitedReason,
-    resource: z.string()
+export const zDeclaredOutcome = z.union([
+    z.object({
+        index: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+        kind: z.literal('cited')
+    }),
+    z.object({
+        kind: z.literal('uncited'),
+        reason: zUncitedReason
+    })
+]);
+
+/**
+ * One entry of an item's OKF `sources` and what it resolved to.
+ */
+export const zDeclaredSource = z.object({
+    entry: z.record(z.string(), z.unknown()),
+    outcome: zDeclaredOutcome
 });
 
 /**
@@ -2512,9 +2526,9 @@ export const zGetObjectRequest = z.object({
  */
 export const zGetSourcesResponse = z.object({
     appearance: zSourceAppearance.nullish(),
+    declared: z.array(zDeclaredSource).optional(),
     revision: zRevision,
-    sources: z.array(zSourceReference),
-    uncited: z.array(zUncitedSource).optional()
+    sources: z.array(zSourceReference)
 });
 
 /**

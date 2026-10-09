@@ -56,6 +56,8 @@ const DECLARED_MAPS: &[&str] = &[
     "Change/oneOf/0/properties/properties",
     "Change/oneOf/1/properties/properties",
     "CreateItemRequest/properties/properties",
+    // An OKF sources entry exactly as written: OKF defines its fields, and none is dropped.
+    "DeclaredSource/properties/entry",
     "DraftContent/properties/properties",
     "ItemDocument/properties/properties",
     "SaveDraftRequest/properties/properties",

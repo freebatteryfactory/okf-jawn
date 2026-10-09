@@ -1454,6 +1454,52 @@ components:
       - const: reject_ambiguous
         description: Require unambiguous dates or a human choice.
         type: string
+    DeclaredOutcome:
+      description: What an OKF `sources` entry resolved to.
+      oneOf:
+      - additionalProperties: false
+        description: A citation of an item in this workspace at the resolved revision.
+        properties:
+          index:
+            description: Its position in `sources`.
+            format: uint32
+            minimum: 0
+            type: integer
+          kind:
+            const: cited
+            type: string
+        required:
+        - kind
+        - index
+        type: object
+      - additionalProperties: false
+        description: Not a citation.
+        properties:
+          kind:
+            const: uncited
+            type: string
+          reason:
+            $ref: '#/components/schemas/UncitedReason'
+            description: Why not.
+        required:
+        - kind
+        - reason
+        type: object
+    DeclaredSource:
+      additionalProperties: false
+      description: One entry of an item's OKF `sources` and what it resolved to.
+      properties:
+        entry:
+          additionalProperties: true
+          description: The entry exactly as written in the file.
+          type: object
+        outcome:
+          $ref: '#/components/schemas/DeclaredOutcome'
+          description: Whether it is a citation of an item at the resolved revision.
+      required:
+      - entry
+      - outcome
+      type: object
     DeclineProposalRequest:
       additionalProperties: false
       description: Close a proposal without changing accepted content.
@@ -2608,6 +2654,14 @@ components:
           - $ref: '#/components/schemas/SourceAppearance'
           - type: 'null'
           description: Occurrence metadata if the item is a source.
+        declared:
+          description: |-
+            Every entry of the item's OKF `sources`, in the file's order, each exactly as written
+            (its `id`, the key a footnote cites, and every other field kept) with what it resolved to;
+            so no declared source, and none of its fields, is silently dropped.
+          items:
+            $ref: '#/components/schemas/DeclaredSource'
+          type: array
         revision:
           $ref: '#/components/schemas/Revision'
           description: Resolved version.
@@ -2615,13 +2669,6 @@ components:
           description: Supporting citations.
           items:
             $ref: '#/components/schemas/SourceReference'
-          type: array
-        uncited:
-          description: |-
-            Entries of the item's OKF `sources` that are not citations of an item in this workspace
-            at this revision, in the file's order; kept so no declared source is silently dropped.
-          items:
-            $ref: '#/components/schemas/UncitedSource'
           type: array
       required:
       - revision
@@ -5722,22 +5769,8 @@ components:
         description: A workspace path that names no item at the resolved revision.
         type: string
       - const: malformed
-        description: An entry with no `resource` (its `resource` here is empty).
+        description: An entry with no `resource`.
         type: string
-    UncitedSource:
-      additionalProperties: false
-      description: One OKF `sources` entry that is not a citation of an item at the resolved revision.
-      properties:
-        reason:
-          $ref: '#/components/schemas/UncitedReason'
-          description: Why it is not a citation.
-        resource:
-          description: The entry's `resource`, exactly as written in the file.
-          type: string
-      required:
-      - resource
-      - reason
-      type: object
     UnresolvedReason:
       description: Why a location is not known; one variant per reason the producing rule states.
       oneOf:

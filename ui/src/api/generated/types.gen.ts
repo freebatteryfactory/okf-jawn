@@ -1149,6 +1149,39 @@ export type DatasetValue = null | boolean | number | string;
 export type DateOrder = 'ymd' | 'mdy' | 'dmy' | 'reject_ambiguous';
 
 /**
+ * What an OKF `sources` entry resolved to.
+ */
+export type DeclaredOutcome = {
+    /**
+     * Its position in `sources`.
+     */
+    index: number;
+    kind: 'cited';
+} | {
+    kind: 'uncited';
+    /**
+     * Why not.
+     */
+    reason: UncitedReason;
+};
+
+/**
+ * One entry of an item's OKF `sources` and what it resolved to.
+ */
+export type DeclaredSource = {
+    /**
+     * The entry exactly as written in the file.
+     */
+    entry: {
+        [key: string]: unknown;
+    };
+    /**
+     * Whether it is a citation of an item at the resolved revision.
+     */
+    outcome: DeclaredOutcome;
+};
+
+/**
  * Close a proposal without changing accepted content.
  */
 export type DeclineProposalRequest = {
@@ -2040,6 +2073,12 @@ export type GetSourcesResponse = {
      */
     appearance?: SourceAppearance | null;
     /**
+     * Every entry of the item's OKF `sources`, in the file's order, each exactly as written
+     * (its `id`, the key a footnote cites, and every other field kept) with what it resolved to;
+     * so no declared source, and none of its fields, is silently dropped.
+     */
+    declared?: Array<DeclaredSource>;
+    /**
      * Resolved version.
      */
     revision: Revision;
@@ -2047,11 +2086,6 @@ export type GetSourcesResponse = {
      * Supporting citations.
      */
     sources: Array<SourceReference>;
-    /**
-     * Entries of the item's OKF `sources` that are not citations of an item in this workspace
-     * at this revision, in the file's order; kept so no declared source is silently dropped.
-     */
-    uncited?: Array<UncitedSource>;
 };
 
 /**
@@ -4414,20 +4448,6 @@ export type UnarchiveWorkspaceRequest = {
  * Why an OKF `sources` entry is not a citation.
  */
 export type UncitedReason = 'external' | 'scope' | 'not_found' | 'malformed';
-
-/**
- * One OKF `sources` entry that is not a citation of an item at the resolved revision.
- */
-export type UncitedSource = {
-    /**
-     * Why it is not a citation.
-     */
-    reason: UncitedReason;
-    /**
-     * The entry's `resource`, exactly as written in the file.
-     */
-    resource: string;
-};
 
 /**
  * Why a location is not known; one variant per reason the producing rule states.
