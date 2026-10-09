@@ -3,7 +3,7 @@
 //! A retry of the same `MutationId` after a crash may consume again successfully; a different
 //! `MutationId` still fails as already used.
 
-use okf_jawn_contract::identity::{ConfirmationId, Digest, MutationId, Revision};
+use okf_jawn_contract::identity::{ConfirmationId, Digest, MutationId, Revision, Timestamp};
 use okf_jawn_contract::review::{Confirmation, ConfirmationAction, ConfirmationTarget};
 
 use crate::ports::PortFuture;
@@ -24,8 +24,9 @@ pub struct ConfirmationCreate {
     pub session_id: String,
     /// Subject that may consume the confirmation.
     pub subject: String,
-    /// RFC 3339 expiry.
-    pub expires_at: String,
+    /// When the challenge expires, in the canonical UTC spelling; `consume` refuses it from
+    /// that instant on.
+    pub expires_at: Timestamp,
 }
 
 /// Atomic consume checks; success records `mutation_id` as the consumer.

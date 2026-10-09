@@ -6,7 +6,7 @@
  * Expected strings come from tests/fixtures/views/*.json as rendered by
  * ui/src/features/{documents/SourceExcerpt,history/Changes,history/Timeline,views/Layout}.tsx.
  * No view tolerates an alert. The present fixture retains a dataset
- * (tests/fixtures/views/present-metrics-dataset.json), so its DataTable and Chart must be
+ * (tests/fixtures/views/present-metrics.dataset.json), so its DataTable and Chart must be
  * drawn from it: the "unavailable" text they show without one is refused by name, and
  * judgePresentDataset decides from the observed chart, tables and tool calls.
  *
@@ -22,7 +22,7 @@ export const TOOL_CALL_LOG_PREFIX = 'okf-qualify-mcp-apps tool-call ';
 /** Where the present view's retained dataset lives, which binding names it and which fixture draws it. */
 export const PRESENT_DATASET = {
   binding: 'metrics',
-  fixture: 'tests/fixtures/views/present-metrics-dataset.json',
+  fixture: 'tests/fixtures/views/present-metrics.dataset.json',
   present: 'tests/fixtures/views/present-response.json',
 };
 /**
@@ -209,15 +209,46 @@ export function expectedChartMarks(spec, rows) {
 }
 
 /**
- * What the dataset must look like once rendered: DataTable's own projection of the rows
- * (ui/src/features/views/DataTable.tsx: columns in first-seen order, String(value ?? '')),
- * and the number of marks its chart draws. `rows` is the parsed fixture, `digest` the
+ * The records a chart and a table draw from a typed Dataset, one per row keyed by column name.
+ *
+ * Judged as strictly as ui/src/features/views/PresentView.tsx `parseDataset`: the Dataset must be
+ * an object with a non-empty `columns` array, `text_origin` "converter" (SPEC R5, decision O2),
+ * distinct column names, and every row exactly as wide as the columns. Nothing is padded or cut.
+ */
+export function datasetRecords(dataset) {
+  if (dataset === null || typeof dataset !== 'object' || Array.isArray(dataset)) {
+    throw new Error('the dataset must be a Dataset object with columns and rows, not bare records');
+  }
+  if (dataset.text_origin !== 'converter') {
+    throw new Error(`the dataset text is not the converter's (text_origin is ${JSON.stringify(dataset.text_origin)}); no chart is drawn from it`);
+  }
+  if (!Array.isArray(dataset.columns) || dataset.columns.length === 0) throw new Error('the dataset must have a non-empty columns array');
+  if (!Array.isArray(dataset.rows)) throw new Error('the dataset must have a rows array');
+  const names = new Set();
+  for (const column of dataset.columns) {
+    if (typeof column?.name !== 'string') throw new Error('every dataset column must have a name');
+    if (names.has(column.name)) throw new Error(`the dataset has two columns named "${column.name}"`);
+    names.add(column.name);
+  }
+  return dataset.rows.map((cells, index) => {
+    if (!Array.isArray(cells) || cells.length !== dataset.columns.length) {
+      throw new Error(`dataset row ${index} has ${Array.isArray(cells) ? cells.length : 'no'} values for ${dataset.columns.length} columns`);
+    }
+    return Object.fromEntries(dataset.columns.map((column, at) => [column.name, cells[at] ?? null]));
+  });
+}
+
+/**
+ * What the dataset must look like once rendered: DataTable's own projection of the records
+ * (ui/src/features/views/DataTable.tsx: columns in dataset order, String(value ?? '')), and the
+ * number of marks its chart draws. `dataset` is the parsed typed Dataset fixture, `digest` the
  * SHA-256 of its exact bytes, `bytes` their count and `chart` the specification that draws it.
  */
-export function datasetExpectation({ binding, digest, rows, bytes, chart }) {
-  if (!Array.isArray(rows) || rows.length === 0) throw new Error('the dataset must be a non-empty JSON array of rows');
+export function datasetExpectation({ binding, digest, dataset, bytes, chart }) {
+  const rows = datasetRecords(dataset);
+  if (rows.length === 0) throw new Error('the dataset must have a non-empty rows array');
   if (!Number.isInteger(bytes) || bytes <= 0) throw new Error('the dataset byte length must be a positive integer');
-  const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))];
+  const columns = dataset.columns.map((column) => column.name);
   return {
     binding,
     digest,

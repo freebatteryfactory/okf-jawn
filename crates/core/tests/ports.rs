@@ -23,9 +23,9 @@ use okf_jawn_contract::import::{Job, JobKind, JobState};
 use okf_jawn_contract::item::{Draft, ItemKind};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::proposal::{Change, Comment, Proposal, ProposalStatus};
-use okf_jawn_contract::purge::PurgeTarget;
+use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState, PurgeTarget};
 use okf_jawn_contract::read::AssetRole;
-use okf_jawn_contract::review::{Confirmation, Review};
+use okf_jawn_contract::review::{Confirmation, ConfirmationAction, ConfirmationTarget, Review};
 use okf_jawn_contract::search::{GetGraphResponse, LinkDirection};
 use okf_jawn_contract::source::{SourceLocation, SourceLocator};
 use okf_jawn_contract::transport::TRANSPORTS;
@@ -36,7 +36,7 @@ use okf_jawn_core::conversion::{
     ConverterLimits, OcrPolicy, PixelSize, RetainedAsset,
 };
 use okf_jawn_core::credentials::{
-    ConnectorIssue, CredentialStore, NewConnector, SessionRecord, secret_hash,
+    ConnectorIssue, CredentialStore, InstallationIdentity, NewConnector, SessionRecord, secret_hash,
 };
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
@@ -223,6 +223,17 @@ async fn version_writes(
         .await
 }
 
+/// What the export handler does when `include_history` is set: write the history up to the
+/// exported revision once, under the job's mutation id.
+async fn version_history(
+    versions: &dyn VersionStore,
+    scope: &StorageScope,
+    revision: &Revision,
+    mutation_id: MutationId,
+) -> Result<ObjectInfo, ApiError> {
+    versions.write_history(scope, revision, mutation_id).await
+}
+
 async fn blob_store_calls(
     blobs: &dyn BlobStore,
     scope: &StorageScope,
@@ -351,6 +362,7 @@ fn job_specs() -> Result<Vec<JobSpec>, Box<dyn Error>> {
         JobSpec::RestoreWorkspace {
             upload_id: UploadId(Uuid::from_u128(12)),
             archive: digest('c')?,
+            editors: vec!["user_1".to_owned()],
         },
         JobSpec::RebuildIndex,
         JobSpec::ExportView {
@@ -472,6 +484,29 @@ async fn purge_and_derived_calls(
             &recorded.digest,
         )
         .await
+}
+
+/// How a purge handler records completion: it has no clock, so it passes `completed_at` as
+/// `None` and reads the store's stamp back from the purge `update_purge` returns.
+async fn purge_completion(
+    records: &dyn RecordStore,
+    tenant: &TenantId,
+    purge: Purge,
+    report: PurgeReport,
+) -> Result<Option<Timestamp>, ApiError> {
+    let stored = records
+        .update_purge(
+            tenant,
+            Purge {
+                state: PurgeState::Completed,
+                completed_at: None,
+                report: Some(report),
+                error: None,
+                ..purge
+            },
+        )
+        .await?;
+    Ok(stored.completed_at)
 }
 
 async fn job_runtime_calls(
@@ -848,6 +883,7 @@ fn object_info_is_digest_and_size_only() -> TestResult {
 fn version_store_calls_type_check() {
     assert!(type_checked(&version_reads));
     assert!(type_checked(&version_writes));
+    assert!(type_checked(&version_history));
 }
 
 #[test]
@@ -1093,6 +1129,7 @@ fn a_commit_is_built_from_a_claimed_job_alone() -> TestResult {
     assert!(type_checked(&record_store_calls));
     assert!(type_checked(&job_runtime_calls));
     assert!(type_checked(&purge_and_derived_calls));
+    assert!(type_checked(&purge_completion));
     Ok(())
 }
 
@@ -1120,10 +1157,85 @@ fn sandbox_tokens_are_hashed_before_they_reach_the_store() -> TestResult {
         revision: revision('a')?,
         object: digest('b')?,
         media_type: "text/html".to_owned(),
-        expires_at: "2026-10-05T00:05:00Z".to_owned(),
+        expires_at: instant("2026-10-05T00:05:00.000Z")?,
     };
     assert_eq!(mint.media_type, "text/html");
     assert!(type_checked(&sandbox_calls));
+    Ok(())
+}
+
+#[test]
+fn every_instant_a_core_port_carries_is_a_timestamp() -> TestResult {
+    // Design section 7: core expiry and creation fields are `Timestamp`, so a store never
+    // receives or returns another spelling of an instant, and comparing two compares instants.
+    let opened = instant("2026-10-05T00:00:00.000Z")?;
+    let expires = instant("2026-10-05T00:05:00.000Z")?;
+    assert!(opened < expires);
+    // The spelling these fields once held as free text is refused.
+    err_of(Timestamp::try_from("2026-10-05T00:05:00Z".to_owned()))?;
+
+    let confirmation = ConfirmationCreate {
+        action: ConfirmationAction::Review,
+        target: ConfirmationTarget::Item {
+            item_id: ItemId(Uuid::from_u128(10)),
+        },
+        revision: revision('a')?,
+        content_digest: digest('d')?,
+        session_id: "session_1".to_owned(),
+        subject: "user_1".to_owned(),
+        expires_at: expires.clone(),
+    };
+    let session = SessionRecord {
+        session_id: "session_1".to_owned(),
+        principal: Principal {
+            subject: "user_1".to_owned(),
+            tenant_id: TenantId::try_from("local".to_owned())?,
+            route: AccessRoute::LocalOwner,
+            client_id: None,
+            delegation: None,
+        },
+        expires_at: expires.clone(),
+    };
+    let identity = InstallationIdentity {
+        subject: "owner".to_owned(),
+        created_at: opened.clone(),
+    };
+    let mint = SandboxMint {
+        item_id: ItemId(Uuid::from_u128(10)),
+        revision: revision('a')?,
+        object: digest('b')?,
+        media_type: "text/html".to_owned(),
+        expires_at: expires.clone(),
+    };
+    let upload = UploadRecord {
+        id: UploadId(Uuid::from_u128(9)),
+        filename: "report.pdf".to_owned(),
+        relative_path: String::new(),
+        expected_size: 10,
+        expected_sha256: None,
+        supplied_by: initiator(),
+        created_at: opened.clone(),
+        received_bytes: 0,
+        object: None,
+        consumed_by: None,
+    };
+    let instants: [&Timestamp; 5] = [
+        &confirmation.expires_at,
+        &session.expires_at,
+        &identity.created_at,
+        &mint.expires_at,
+        &upload.created_at,
+    ];
+    assert_eq!(
+        instants.map(Timestamp::as_str),
+        [
+            expires.as_str(),
+            expires.as_str(),
+            opened.as_str(),
+            expires.as_str(),
+            opened.as_str()
+        ]
+    );
     Ok(())
 }
 
