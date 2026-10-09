@@ -430,6 +430,17 @@ export const zCreateWorkspaceRequest = z.object({
 });
 
 /**
+ * An unconfirmed claim carried in an imported file's OKF `verified` value; never an app review.
+ *
+ * It has no review identity, no authenticated reviewer and no confirmed content, and its
+ * coverage is always `ReviewCoverage::Imported`.
+ */
+export const zImportedClaim = z.object({
+    at: z.string().nullish(),
+    by: z.string().nullish()
+});
+
+/**
  * Stable item identity independent of its current relative path.
  */
 export const zItemId = z.uuid();
@@ -1357,6 +1368,38 @@ export const zTypeDefinition = z.object({
  */
 export const zListTypesResponse = z.object({
     items: z.array(zTypeDefinition)
+});
+
+/**
+ * Why an OKF `sources` entry is not a citation.
+ */
+export const zUncitedReason = z.union([
+    z.literal('external'),
+    z.literal('scope'),
+    z.literal('not_found'),
+    z.literal('malformed')
+]);
+
+/**
+ * What an OKF `sources` entry resolved to.
+ */
+export const zDeclaredOutcome = z.union([
+    z.object({
+        index: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+        kind: z.literal('cited')
+    }),
+    z.object({
+        kind: z.literal('uncited'),
+        reason: zUncitedReason
+    })
+]);
+
+/**
+ * One entry of an item's OKF `sources` and what it resolved to.
+ */
+export const zDeclaredSource = z.object({
+    entry: z.unknown(),
+    outcome: zDeclaredOutcome
 });
 
 /**
@@ -2314,6 +2357,7 @@ export const zGetGraphResponse = z.object({
  */
 export const zItemDocument = z.object({
     body: z.string(),
+    content_digest: zDigest,
     draft: zDraftContent.nullish(),
     properties: z.record(z.string(), z.unknown()),
     source: zSourceAppearance.nullish(),
@@ -2482,6 +2526,7 @@ export const zGetObjectRequest = z.object({
  */
 export const zGetSourcesResponse = z.object({
     appearance: zSourceAppearance.nullish(),
+    declared: z.array(zDeclaredSource).optional(),
     revision: zRevision,
     sources: z.array(zSourceReference)
 });
@@ -2547,6 +2592,7 @@ export const zReview = z.object({
  * Recorded reviews and current coverage.
  */
 export const zListReviewsResponse = z.object({
+    imported: z.array(zImportedClaim).optional(),
     items: z.array(zReview)
 });
 

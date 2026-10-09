@@ -110,7 +110,7 @@ describe('json-render catalog round-trip', () => {
     );
     expect(
       alerts.some((node) =>
-        /Resolved chart data or specification unavailable/.test(node.textContent ?? ''),
+        /Chart "metrics_chart" has no specification in this View/.test(node.textContent ?? ''),
       ),
     ).toBe(true);
 

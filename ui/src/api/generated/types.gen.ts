@@ -1149,6 +1149,39 @@ export type DatasetValue = null | boolean | number | string;
 export type DateOrder = 'ymd' | 'mdy' | 'dmy' | 'reject_ambiguous';
 
 /**
+ * What an OKF `sources` entry resolved to.
+ */
+export type DeclaredOutcome = {
+    /**
+     * Its position in `sources`.
+     */
+    index: number;
+    kind: 'cited';
+} | {
+    kind: 'uncited';
+    /**
+     * Why not.
+     */
+    reason: UncitedReason;
+};
+
+/**
+ * One entry of an item's OKF `sources` and what it resolved to.
+ */
+export type DeclaredSource = {
+    /**
+     * The entry exactly as written in the file, of whatever shape: OKF gives a mapping, and an
+     * entry that is not one (a bare string, a number) is kept as written with the outcome
+     * `uncited` / `malformed`. A `sources` value that is not a list is one such entry.
+     */
+    entry: unknown;
+    /**
+     * Whether it is a citation of an item at the resolved revision.
+     */
+    outcome: DeclaredOutcome;
+};
+
+/**
  * Close a proposal without changing accepted content.
  */
 export type DeclineProposalRequest = {
@@ -2040,6 +2073,12 @@ export type GetSourcesResponse = {
      */
     appearance?: SourceAppearance | null;
     /**
+     * Every entry of the item's OKF `sources`, in the file's order, each exactly as written
+     * (its `id`, the key a footnote cites, and every other field kept) with what it resolved to;
+     * so no declared source, and none of its fields, is silently dropped.
+     */
+    declared?: Array<DeclaredSource>;
+    /**
      * Resolved version.
      */
     revision: Revision;
@@ -2104,6 +2143,24 @@ export type HealthResponse = {
 export type IdempotencyKey = string;
 
 /**
+ * An unconfirmed claim carried in an imported file's OKF `verified` value; never an app review.
+ *
+ * It has no review identity, no authenticated reviewer and no confirmed content, and its
+ * coverage is always `ReviewCoverage::Imported`.
+ */
+export type ImportedClaim = {
+    /**
+     * The claimed instant as written in the file, not normalized: it is the file's claim and
+     * not a server instant.
+     */
+    at?: string | null;
+    /**
+     * The claimed verifier as written in the file.
+     */
+    by?: string | null;
+};
+
+/**
  * A newly issued connector and its secret, which is returned exactly once and never stored in plain text.
  */
 export type IssuedConnector = {
@@ -2125,6 +2182,12 @@ export type ItemDocument = {
      * Markdown body, preserving source locators.
      */
     body: string;
+    /**
+     * SHA-256 of the item's body and properties without the server-owned header, keys sorted.
+     * It is the value a confirmation and a review cite, so a client never computes it; the
+     * server computes it with `okf_jawn_core::portable::item_content_digest`.
+     */
+    content_digest: Digest;
     /**
      * The caller's own uncommitted draft; never another editor's, and never on agent routes.
      */
@@ -2534,6 +2597,10 @@ export type ListReviewsRequest = {
  * Recorded reviews and current coverage.
  */
 export type ListReviewsResponse = {
+    /**
+     * The item's imported claims at the resolved revision; empty when the file carries none.
+     */
+    imported?: Array<ImportedClaim>;
     /**
      * Reviews, including non-current ones.
      */
@@ -4376,6 +4443,11 @@ export type UnarchiveWorkspaceRequest = {
      */
     workspace_id: WorkspaceId;
 };
+
+/**
+ * Why an OKF `sources` entry is not a citation.
+ */
+export type UncitedReason = 'external' | 'scope' | 'not_found' | 'malformed';
 
 /**
  * Why a location is not known; one variant per reason the producing rule states.

@@ -4,7 +4,7 @@
  * validates every request against the generated contract. Running this file binds it to fetch.
  */
 import assert from 'node:assert/strict';
-import { randomUUID,createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { readResolvedRevision,reviewCoversRevision } from '../support/assertions.mjs';
 
 export async function runJourney(call){
@@ -14,7 +14,8 @@ export async function runJourney(call){
  const item_id=item.summary.id;const revision=item.summary.revision;
  const read=await call('reads','read_item',{workspace_id,item_id,at:{kind:'revision',revision},view:'text',selection:{kind:'all'},max_bytes:65536,max_images:0},true);
  readResolvedRevision(read,revision);assert.match(read.markdown,/not approved/);
- const content_digest=createHash('sha256').update(read.markdown).digest('hex');
+ // The digest a confirmation and a review cite is the server's (ItemDocument.content_digest); a client never computes it.
+ const content_digest=item.content_digest;assert.match(content_digest,/^[0-9a-f]{64}$/);
  await call('reviews','create_review',{source:read.source,content_digest,confirmation_id:randomUUID(),idempotency_key:randomUUID()},true,403);
  const confirm=await call('reviews','create_confirmation',{workspace_id,action:'review',target:{kind:'item',item_id},revision,content_digest,idempotency_key:randomUUID()});
  const review=await call('reviews','create_review',{source:read.source,content_digest,confirmation_id:confirm.id,idempotency_key:randomUUID()});reviewCoversRevision(review,revision);

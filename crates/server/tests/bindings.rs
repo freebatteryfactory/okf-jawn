@@ -12,6 +12,8 @@ use axum::{Extension, Router};
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::IdentityError;
+use okf_jawn_contract::item::ItemDocument;
+use okf_jawn_core::portable::item_content_digest;
 use okf_jawn_core::ports::Application;
 use okf_jawn_server::{BoundApplication, SessionId, router};
 use serde_json::{Value, json};
@@ -130,8 +132,9 @@ fn create_item_body() -> Value {
     })
 }
 
-fn item_document() -> Value {
-    json!({
+/// A committed item as the application returns it; its digest is the core function's, never typed.
+fn item_document() -> Result<Value, ApiError> {
+    let mut document = json!({
         "summary": {
             "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "path": "notes/a.md",
@@ -144,8 +147,16 @@ fn item_document() -> Value {
             "archived": false
         },
         "body": "hello",
-        "properties": {}
-    })
+        "properties": {},
+        "content_digest": "0".repeat(64)
+    });
+    let typed: ItemDocument = serde_json::from_value(document.clone())
+        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+    let digest = item_content_digest(&typed)?;
+    if let Some(object) = document.as_object_mut() {
+        object.insert("content_digest".to_owned(), json!(digest.as_str()));
+    }
+    Ok(document)
 }
 
 #[tokio::test]
@@ -279,7 +290,7 @@ async fn a_body_over_the_limit_is_413_too_large() -> TestResult {
 async fn in_progress_is_409_with_retry_after_from_the_detail() -> TestResult {
     let ports = ports()?;
     let counting = Arc::new(CountingApplication::new());
-    counting.set_response("create_item", item_document())?;
+    counting.set_response("create_item", item_document()?)?;
     counting.park_next("create_item")?;
     let app = signed_in(counting.clone(), &ports)?;
 

@@ -2066,3 +2066,19 @@ recorded with what changes if a ruling is wrong:
    rewriting receipts, feeding `ErrorDetail::Invalidated::replacement`; an emptied commit maps to
    its parent's rewrite; commit messages and the `path` of invalidated citations are scrubbed.
    If wrong: only item purge changes, and it is built after workspace purge.
+
+## 15. Addendum: imported review claims and the item content digest
+
+Found by the core-cli M0 review; both close gaps core-cli M1 needs.
+
+- Reviews (`review.rs`). `ImportedClaim { by, at }` is the one wire type for a claim an imported
+  file carries in its OKF `verified` value, both fields as written and `at` not normalized
+  (it is the file's claim, not a server instant). `ListReviewsResponse.imported` lists the
+  item's claims at the resolved revision and is omitted when empty. `ReviewCoverage::Imported`
+  now describes a file claim; it never appears on a `Review` created by `create_review`.
+  `okf_jawn_core::portable` uses the contract type (`imported_verification` returns it;
+  `claim_coverage` gives its coverage).
+- Items (`item.rs`). `ItemDocument.content_digest` is required: the SHA-256 of the body and the
+  properties without the server-owned header, keys sorted. The server computes it with
+  `portable::item_content_digest`, and a confirmation and a review cite it, so a client never
+  computes it.

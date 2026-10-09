@@ -224,7 +224,7 @@ test('every Phase 0 gate has exactly one kind and only the fields of that kind',
  const seams=gates.find(gate=>gate.id==='authored-typescript-seams');
  assert.equal(seams.kind,'ci');
  for(const file of ['layout','wire','rules-form','mcp-apps-mime','mcp-apps-dispatch'])assert.ok(seams.enforced_by.evidence.some(entry=>entry.startsWith(`ui/tests/unit/${file}.test.`)),`authored-typescript-seams does not name ${file}`);
- assert.match(await read('ui/tests/unit/layout.test.tsx'),/refuses a chart specification that compile rejects/);
+ assert.match(await read('ui/tests/unit/layout.test.tsx'),/isolates a chart specification that compile rejects/);
  assert.match(await read('ui/tests/unit/mcp-apps-dispatch.test.tsx'),/describe\('MCP App wire boundary'/);
  assert.match(await read('ui/package.json'),/"typecheck": "tsc -b && tsc -p tsconfig\.tests\.json --noEmit"/,'the typecheck step no longer covers ui/tests');
  // The record says how ui/tests is type-checked as it is: by the script, not by a project reference.
