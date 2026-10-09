@@ -197,7 +197,8 @@ same wave. So:
      command and the Wave 3 `tests/integration/` harness command (I5).
    - `tests/foundation/records.test.mjs` pins none of these three receipts today (checked by grep
      on `de3b5ec`). If a later version does, the same change updates it.
-4. Record decisions I1, I3, I4 and I5 (section 6), so the lanes start from them.
+4. Record decisions I1, I3, I4 and I5 (section 6), so the lanes start from them, and add the
+   acceptance gate `backup-restore-journey` (SPEC sections 12 and 13; Wave 3).
 5. Run `bun scripts/dev.mjs lanes storage ingest core-cli views`.
 
 ### Wave 1: storage, ingest, core-cli, views (three Rust lanes, one UI lane)
@@ -235,6 +236,15 @@ and the models:
 - the `tests/integration/` harness for the CLI against a running server and for the relay
   starting the service when none is running (core-cli, I5);
 - the SPEC section 12 crash/restart check (ingest, I1);
+- the backup and restore journey (acceptance gate `backup-restore-journey`, added in Wave 0):
+  SPEC section 12 "Restore must be exercised, including after the original data directory is
+  deleted", and section 13 "portable export and full restore". A `tests/integration/` harness,
+  written by the integration owner, backs up through a human admin session, deletes the data
+  directory, restores with the offline command (installation archive first, then every workspace
+  archive), and compares identities, items, history, retained objects, records and drafts; it
+  also imports a workspace archive into another installation and checks the unassigned-draft
+  count. `tests/integration/acceptance.mjs` reports restoration as `not_covered` today. storage
+  owns its failures;
 - core's tests run against the real storage adapter (risk table, section 7);
 - then the acceptance gates (section 5).
 
@@ -713,6 +723,7 @@ from the lanes or the composed server.
 | `release-model-inventory` | `blocked_on_product` | stays a pre-installer gate: required before any installer or image ships models. CI does not wait on it, because CI never needs the models (1.1) | where the pinned model bytes the project holds are published (the models-v1 tag was re-published, and the owner's local copy is the reference) |
 | `qualify-application` | `blocked_on_product` | Wave 3: `bun scripts/dev.mjs qualify application` against a real disposable deployment | no |
 | `index-rebuild` | `blocked_on_product` | Wave 3 | no |
+| `backup-restore-journey` (added in Wave 0) | `blocked_on_product` | Wave 3: the `tests/integration/` restore harness against the composed server and the offline command, after storage M2 | no |
 | `saved-view-persist-reopen` | `blocked_on_product` | Wave 3 (views, core-cli, storage, server) | no |
 | `explorer-playwright-journeys` | `blocked_on_product` | Wave 3 and the last workspace-ui merge; Chromium and WebKit as two projects of one Playwright config | no |
 | `docker-volume-persistence` | `blocked_on_product` | Wave 3 and the integration owner's `deploy/` update | no |
