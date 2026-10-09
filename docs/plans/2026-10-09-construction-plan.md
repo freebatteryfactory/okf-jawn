@@ -261,7 +261,7 @@ is followed by the requalification named on that line before the next merge (1.5
 
 | Merge | Prerequisite on `main` | Integration-owner edits in the same PR (separate commits after the merge) | Requalify |
 | --- | --- | --- | --- |
-| core-cli M0: any port-trait change the wave needs; the export and import rules as core functions with tests (export writes `verified` for current reviews; import reads an incoming `verified` as imported coverage; lint at import) | Wave 0 | - | none |
+| core-cli M0: any port-trait change the wave needs; the export and import rules as core functions with tests (export writes `verified` for current reviews; import reads an incoming `verified` as imported coverage; lint at import); `JobSpec::RestoreWorkspace` carries `editors`, the subjects with `write` on the target, computed by core from `AccessControl` when the request is accepted (a job handler holds only its `ClaimedJob`, and `Backups::restore_import` takes `editors`) | Wave 0 | - | none |
 | views M1: PresentView reads `Dataset` | Wave 0 | the rows file `present-metrics-dataset.json` is deleted; the Wave 0 `Dataset` file stays as the permanent fixture (see the list after this table) | MCP Apps |
 | Batch A (`lock`): ingest's memory-cap crate(s) and conversion bin target (I4), core-cli's pulldown-cmark, any storage request; plus the measurement criteria of `converter-worker-memory-ceiling` (b) in `qualification/docling` | requests in hand, ideally by the first task boundary of each lane | the `vendors.json` entries, manifests, `Cargo.lock`, `gen`, the new Docling criteria | Docling (which runs the measurement) and MCP Apps. Criteria not ready with the dependencies get a Docling-only requalification of their own; until then `window_pages = 4` |
 | storage M1: format, migrations, lock, all stores, index | core-cli M0; Batch A only if storage requested a dependency | - | none (no dependency carried) |
@@ -412,7 +412,8 @@ expected to need; (5) its own obligations and task order.
    imports (I3); `core::storage::derive_item_id`; the `CandidateCheck` that composition injects
    (core-cli's production check); `generated/converter/packages.json` through `include_str!`.
    It also calls core-cli M0's export and import functions, plus `views::materialize` for
-   `ExportView`. ingest adds them to the "Ports to call" list in its own `crates/ingest/AGENTS.md`.
+   `ExportView`. The restore handler passes `JobSpec::RestoreWorkspace`'s `editors` to
+   `Backups::restore_import` and never consults `AccessControl` itself. ingest adds them to the "Ports to call" list in its own `crates/ingest/AGENTS.md`.
    It reimplements the rules of `qualification/docling/src/locate.rs` and `glyphs.rs` in the
    crate. [inferred: depending on the qualification crate would be a manifest change]
    Must not: depend on the storage crate in production code (only through core's ports); build an
