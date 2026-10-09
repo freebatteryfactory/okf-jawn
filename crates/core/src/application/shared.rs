@@ -2,8 +2,9 @@
 //! the purge check, the commit path of a content write, and receipts.
 //!
 //! A content write is one path: the request's base revision is checked against the revision
-//! map first (`reading::check_revision`), the edits are committed on top of it with this
-//! service's conformance check, the new revision is indexed, a `changed` event is appended,
+//! map first (`reading::check_revision`), the edits are committed on top of it with the edit
+//! check (`conformance::EditCheck`: OKF conformance refuses, OKF lint of the files the write
+//! touched comes back as warnings), the new revision is indexed, a `changed` event is appended,
 //! and, for a `MutationResult`, a receipt is recorded. Every step after the commit is
 //! idempotent on the mutation identity (the commit replays, indexing a revision again is a
 //! no-op, the event and the receipt are unique on the mutation), so a failure at any step
@@ -16,7 +17,9 @@ use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::common::MutationResult;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::{EventKind, Receipt, ReceiptAudience};
-use okf_jawn_contract::identity::{At, ItemId, MutationId, ReceiptId, Revision, Timestamp};
+use okf_jawn_contract::identity::{
+    At, ItemId, MutationId, ReceiptId, Revision, Timestamp, WorkspacePath,
+};
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::source::SourceReference;
 use time::OffsetDateTime;
@@ -24,13 +27,12 @@ use uuid::Uuid;
 
 use super::ApplicationService;
 use crate::access::is_human_session;
+use crate::conformance::EditCheck;
 use crate::context::OperationContext;
 use crate::events::{EventScope, NewEvent};
 use crate::portable::item_content_digest;
 use crate::reading::check_revision;
-use crate::storage::{
-    CandidateCheck, CommitChanges, Committed, Provenance, StorageScope, TreeEdit,
-};
+use crate::storage::{CommitChanges, Committed, Provenance, StorageScope, TreeEdit};
 
 /// One content write of a handler.
 pub(super) struct Write {
@@ -42,8 +44,19 @@ pub(super) struct Write {
     pub(super) edits: Vec<TreeEdit>,
     /// The item the write changes, for the `changed` event.
     pub(super) item: Option<ItemId>,
-    /// The check the candidate runs: this service's edit check, possibly wrapped.
-    pub(super) check: Arc<dyn CandidateCheck>,
+    /// The files the write touches, whose lint findings it reports.
+    pub(super) touched: Touched,
+}
+
+/// The files one write touches, for the lint it reports (`conformance::EditCheck`).
+#[derive(Default)]
+pub(super) struct Touched {
+    /// Paths it writes or creates.
+    pub(super) paths: Vec<WorkspacePath>,
+    /// Items whose path at the base it moves, changes or deletes; read after the purge check.
+    pub(super) items: Vec<ItemId>,
+    /// The type a type change redefines; its concepts count as touched.
+    pub(super) of_type: Option<String>,
 }
 
 /// The storage scope of the operation's one authorized workspace.
@@ -124,6 +137,18 @@ pub(super) async fn commit(
     let mutation_id = mutation_id(context)?;
     check_named(service, &scope, &write.base).await?;
     let ports = service.ports();
+    let mut touched = write.touched.paths;
+    for item in write.touched.items {
+        touched.push(
+            ports
+                .versions
+                .show(&scope, &write.base, item)
+                .await?
+                .summary
+                .path,
+        );
+    }
+    let check = Arc::new(EditCheck::new(&touched, write.touched.of_type));
     let committed = ports
         .versions
         .commit(
@@ -135,7 +160,7 @@ pub(super) async fn commit(
                 message: write.message,
                 edits: write.edits,
             },
-            write.check,
+            check,
         )
         .await?;
     ports

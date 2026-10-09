@@ -80,6 +80,24 @@ fn move_request() -> Built<MoveItemRequest> {
     })
 }
 
+/// Put the fixture note at `notes/plan.md` at each revision named by `fills`, as an edit of it
+/// reads its path at the base.
+fn note_at(world: &World, fills: &[char]) -> Built<()> {
+    for fill in fills {
+        let at = revision(*fill)?;
+        world.versions.put_document(
+            &at,
+            note(
+                NOTE,
+                &at,
+                "notes/plan.md",
+                "# Plan\n",
+                json!({ "type": "Note" }),
+            )?,
+        )?;
+    }
+    Ok(())
+}
 #[tokio::test]
 async fn list_items_lists_one_folder_at_the_head_resolved_once() -> TestResult {
     let world = World::new()?;
@@ -398,6 +416,7 @@ async fn create_item_refuses_a_source_a_view_and_a_supplied_header_before_any_co
 #[tokio::test]
 async fn a_write_is_judged_by_the_conformance_check_and_a_refusal_commits_nothing() -> TestResult {
     let world = World::new()?;
+    note_at(&world, &['a'])?;
     world.versions.queue_revision(revision('b')?)?;
     world
         .versions
@@ -426,13 +445,25 @@ async fn a_write_is_judged_by_the_conformance_check_and_a_refusal_commits_nothin
 }
 
 #[tokio::test]
-async fn an_edit_returns_okf_lint_findings_as_warnings() -> TestResult {
+async fn an_edit_reports_lint_only_for_the_files_it_touched() -> TestResult {
     let world = World::new()?;
+    let at = revision('a')?;
+    // The moved item lives at `notes/bare.md`; `notes/other.md` is untouched. Both lack a
+    // heading, which okf-validator's lint flags.
+    world.versions.put_document(
+        &at,
+        note(
+            NOTE,
+            &at,
+            "notes/bare.md",
+            "No heading.\n",
+            json!({ "type": "Note" }),
+        )?,
+    )?;
     world.versions.queue_revision(revision('b')?)?;
-    world
-        .versions
-        .stage()
-        .write("notes/bare.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
+    let stage = world.versions.stage();
+    stage.write("notes/bare.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
+    stage.write("notes/other.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
     let moved = world
         .service
         .move_item(
@@ -440,22 +471,30 @@ async fn an_edit_returns_okf_lint_findings_as_warnings() -> TestResult {
             move_request()?,
         )
         .await?;
+    let lint: Vec<_> = moved
+        .warnings
+        .iter()
+        .filter(|warning| warning.code.starts_with("okf_lint"))
+        .collect();
     assert!(
-        moved
-            .warnings
-            .iter()
-            .any(|warning| warning.code == "okf_lint_l1"
-                && warning.location.as_deref() == Some("notes/bare.md")),
-        "{:?}",
-        moved.warnings
+        lint.iter()
+            .any(|warning| warning.location.as_deref() == Some("notes/bare.md")),
+        "{lint:?}"
+    );
+    assert!(
+        lint.iter().all(|warning| matches!(
+            warning.location.as_deref(),
+            Some("notes/bare.md" | "archive/plan.md")
+        )),
+        "{lint:?}"
     );
     assert_eq!(world.versions.commits()?.len(), 1);
     Ok(())
 }
-
 #[tokio::test]
 async fn a_write_on_a_moved_head_conflicts_and_one_on_a_purged_base_is_refused() -> TestResult {
     let world = World::new()?;
+    note_at(&world, &['a'])?;
     world.versions.queue_revision(revision('b')?)?;
     world.versions.set_head(revision('c')?)?;
     let conflict = err_of(
@@ -493,6 +532,7 @@ async fn a_write_on_a_moved_head_conflicts_and_one_on_a_purged_base_is_refused()
 #[tokio::test]
 async fn item_writes_commit_their_edit_and_record_a_receipt() -> TestResult {
     let world = World::new()?;
+    note_at(&world, &['a', 'b', 'c'])?;
     let workspace_id = scope()?.workspace_id;
     let item_id = ItemId(Uuid::from_u128(NOTE));
     for fill in ['b', 'c', 'd', 'e'] {
@@ -586,6 +626,7 @@ async fn item_writes_commit_their_edit_and_record_a_receipt() -> TestResult {
 #[tokio::test]
 async fn a_resumed_write_answers_the_first_attempts_revision_and_receipt() -> TestResult {
     let world = World::new()?;
+    note_at(&world, &['a'])?;
     world.versions.queue_revision(revision('b')?)?;
     let caller = alice(OperationName::MoveItem, Some(mutation(1)))?;
     let first = world.service.move_item(&caller, move_request()?).await?;

@@ -22,8 +22,8 @@ use okf_jawn_contract::item::{
 
 use super::ApplicationService;
 use super::shared::{
-    Write, commit, commit_with_receipt, invalid, mutation_id, resolve, with_content_digest,
-    workspace_scope,
+    Touched, Write, commit, commit_with_receipt, invalid, mutation_id, resolve,
+    with_content_digest, workspace_scope,
 };
 use crate::context::OperationContext;
 use crate::echo::bounded;
@@ -131,6 +131,7 @@ pub(super) async fn create_item(
     }
     refuse_supplied_header(&request.properties, "/properties")?;
     let item_id = derive_item_id(mutation_id(context)?, 0);
+    let created = request.path.clone();
     let committed = commit(
         service,
         context,
@@ -147,7 +148,10 @@ pub(super) async fn create_item(
                 properties: request.properties,
             }],
             item: Some(item_id),
-            check: service.edit_check(),
+            touched: Touched {
+                paths: vec![created],
+                ..Touched::default()
+            },
         },
     )
     .await?;
@@ -176,12 +180,16 @@ pub(super) async fn move_item(
         Write {
             base: request.base_revision,
             message: format!("Move to {}", request.destination.as_str()),
+            touched: Touched {
+                paths: vec![request.destination.clone()],
+                items: vec![request.item_id],
+                of_type: None,
+            },
             edits: vec![TreeEdit::MoveItem {
                 item_id: request.item_id,
                 destination: request.destination,
             }],
             item: Some(request.item_id),
-            check: service.edit_check(),
         },
     )
     .await
@@ -214,7 +222,10 @@ pub(super) async fn set_lifecycle(
                 archived: request.archived,
             }],
             item: Some(request.item_id),
-            check: service.edit_check(),
+            touched: Touched {
+                items: vec![request.item_id],
+                ..Touched::default()
+            },
         },
     )
     .await
@@ -239,7 +250,10 @@ pub(super) async fn delete_item(
                 item_id: request.item_id,
             }],
             item: Some(request.item_id),
-            check: service.edit_check(),
+            touched: Touched {
+                items: vec![request.item_id],
+                ..Touched::default()
+            },
         },
     )
     .await
@@ -260,11 +274,14 @@ pub(super) async fn create_folder(
         Write {
             base: request.base_revision,
             message: format!("New folder {}", request.folder.as_str()),
+            touched: Touched {
+                paths: vec![folder_index(&request.folder)?],
+                ..Touched::default()
+            },
             edits: vec![TreeEdit::CreateFolder {
                 folder: request.folder,
             }],
             item: None,
-            check: service.edit_check(),
         },
     )
     .await
@@ -315,14 +332,23 @@ pub(super) async fn set_type(
         Write {
             base: request.base_revision,
             message: format!("Save type {}", request.definition.name),
+            touched: Touched {
+                of_type: Some(request.definition.name.clone()),
+                ..Touched::default()
+            },
             edits: vec![TreeEdit::SetType {
                 definition: request.definition,
             }],
             item: None,
-            check: service.edit_check(),
         },
     )
     .await
+}
+
+/// The maintained `index.md` of a folder, which creating the folder writes.
+fn folder_index(folder: &WorkspacePath) -> Result<WorkspacePath, ApiError> {
+    WorkspacePath::try_from(format!("{}/index.md", folder.as_str()))
+        .map_err(|error| invalid(error.0, "/folder"))
 }
 
 /// Whether a listed item is a source whose conversion left part or all of it unextracted.

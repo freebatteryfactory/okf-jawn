@@ -5,7 +5,9 @@
 use std::error::Error;
 use std::path::PathBuf;
 
+use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::ErrorCode;
+use okf_jawn_contract::identity::WorkspacePath;
 use okf_jawn_core::conformance::{EditCheck, OkfConformance};
 use okf_jawn_core::storage::CandidateCheck;
 use uuid::Uuid;
@@ -108,27 +110,47 @@ fn candidate_check_refuses_a_candidate_it_cannot_read_as_internal() -> TestResul
 }
 
 #[test]
-fn candidate_check_of_an_edit_adds_lint_as_warnings_and_never_refuses_for_it() -> TestResult {
+fn candidate_check_of_an_edit_reports_lint_only_for_the_files_it_touched() -> TestResult {
     let staged = Staged::new()?;
     staged.write("notes/plan.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
-    let edit = EditCheck.check(&staged.0)?;
+    staged.write("notes/other.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
+    staged.write(
+        "notes/meeting.md",
+        "---\ntype: Meeting\n---\n\nNo heading.\n",
+    )?;
+    let located = |warnings: &[Warning]| -> Vec<String> {
+        let mut located: Vec<String> = warnings
+            .iter()
+            .filter(|warning| warning.code.starts_with("okf_lint"))
+            .filter_map(|warning| warning.location.clone())
+            .collect();
+        located.sort();
+        located.dedup();
+        located
+    };
+    let plan = EditCheck::new(
+        &[WorkspacePath::try_from("notes/plan.md".to_owned())?],
+        None,
+    );
+    let edit = plan.check(&staged.0)?;
     assert!(
-        edit.iter().any(|warning| warning.code == "okf_lint_l1"
-            && warning.location.as_deref() == Some("notes/plan.md")),
+        edit.iter().any(|warning| warning.code == "okf_lint_l1"),
         "{edit:?}"
     );
-    let plain = OkfConformance.check(&staged.0)?;
-    assert!(
-        plain
-            .iter()
-            .all(|warning| !warning.code.starts_with("okf_lint")),
-        "{plain:?}"
+    assert_eq!(located(&edit), vec!["notes/plan.md".to_owned()]);
+    let type_change = EditCheck::new(&[], Some("Meeting".to_owned()));
+    assert_eq!(
+        located(&type_change.check(&staged.0)?),
+        vec!["notes/meeting.md".to_owned()]
     );
+    // The conformance check alone reports no lint.
+    let conformance_only = OkfConformance.check(&staged.0)?;
+    assert_eq!(located(&conformance_only), Vec::<String>::new());
+    // Lint never refuses; a conformance violation still does.
     staged.write("notes/untyped.md", "---\ntitle: No type\n---\nBody\n")?;
-    let refused = err_of(EditCheck.check(&staged.0))?;
+    let refused = err_of(plan.check(&staged.0))?;
     assert_eq!(refused.code, ErrorCode::InvalidInput);
     Ok(())
 }
-
 #[path = "../../../tests/support/check.rs"]
 mod check;

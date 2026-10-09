@@ -11,16 +11,18 @@
 //!   workspace-relative path when the diagnostic names a file.
 //!
 //! Lint is not conformance and never refuses: an edit's check (`EditCheck`) adds okf-validator's
-//! lint findings of the candidate as warnings, and an import's (`portable::ImportCheck`) adds
-//! those of the imported files.
+//! lint findings about the files the edit touched as warnings, and an import's
+//! (`portable::ImportCheck`) adds those of the imported files.
 //!
 //! Startup hands this same check to ingest's handler, so every commit of the application is
 //! judged by one policy.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::WorkspacePath;
 use okf_validator::Severity;
 
 use crate::echo::bounded;
@@ -32,13 +34,21 @@ use crate::storage::CandidateCheck;
 pub struct OkfConformance;
 
 /// The check of an edit (a create, move, status change, delete, folder or type): conformance
-/// first, whose refusal stands, then okf-validator's lint of the candidate, whose findings come
-/// back as warnings and never refuse (SPEC: validation and lint apply at edit).
+/// first, whose refusal stands, then okf-validator's lint, whose findings come back as warnings
+/// and never refuse (SPEC: validation and lint apply at edit).
 ///
-/// Lint covers the whole candidate bundle, as `okf_validator::lint_bundle` judges it: a
-/// finding about a file the edit did not touch is reported too, located at its path.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct EditCheck;
+/// The whole candidate is loaded and linted, because a lint rule can read across files, but
+/// only the findings about files the edit touched are reported, as `portable::ImportCheck`
+/// reports only the imported files': the paths it wrote, moved (old and new) or deleted, and for
+/// a type change the concepts of that type in the candidate. An edit never surfaces a warning
+/// about a file it did not touch, and a finding that names no file is not reported.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EditCheck {
+    /// Workspace-relative paths the edit wrote, moved from or to, or deleted.
+    touched: BTreeSet<String>,
+    /// The type a type change redefined; its concepts count as touched.
+    of_type: Option<String>,
+}
 
 /// The prefix of the `Warning::code` of a validator diagnostic; the severity follows.
 const VALIDATOR_CODE: &str = "okf_validator";
@@ -49,24 +59,48 @@ impl CandidateCheck for OkfConformance {
     }
 }
 
+impl EditCheck {
+    /// The check of an edit that touched `touched` and, for a type change, redefined `of_type`.
+    #[must_use]
+    pub fn new(touched: &[WorkspacePath], of_type: Option<String>) -> Self {
+        Self {
+            touched: touched
+                .iter()
+                .map(|path| path.as_str().to_owned())
+                .collect(),
+            of_type,
+        }
+    }
+}
+
 impl CandidateCheck for EditCheck {
     fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
         let bundle = load(root)?;
         let mut warnings = conformance(root, &bundle)?;
+        let mut reported = self.touched.clone();
+        if let Some(type_name) = self.of_type.as_deref() {
+            reported.extend(
+                bundle
+                    .concepts_of_type(type_name)
+                    .filter_map(|concept| relative_path(root, &concept.path)),
+            );
+        }
         warnings.extend(
             okf_validator::lint_bundle(&bundle)
                 .diagnostics
                 .into_iter()
-                .map(|diagnostic| {
+                .filter_map(|diagnostic| {
+                    let location = diagnostic
+                        .path
+                        .as_deref()
+                        .and_then(|path| relative_path(root, path))
+                        .filter(|location| reported.contains(location))?;
                     let (code, message) = lint_code(&diagnostic.message);
-                    Warning {
+                    Some(Warning {
                         code,
                         message,
-                        location: diagnostic
-                            .path
-                            .as_deref()
-                            .and_then(|path| relative_path(root, path)),
-                    }
+                        location: Some(location),
+                    })
                 }),
         );
         Ok(warnings)
