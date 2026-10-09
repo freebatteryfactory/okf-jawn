@@ -62,9 +62,9 @@ macro_rules! dispatch_operations {
                     let mut context =
                         match authorize_targets(ports.access, caller, operation, &request).await {
                             Ok(context) => context,
-                            Err(refused) => {
+                            Err(refusal) => {
                                 return Err(
-                                    record_denial(ports.events, caller.principal, operation, &request, refused)
+                                    record_denial(ports.events, caller.principal, operation, &request, refusal)
                                         .await,
                                 );
                             }
@@ -110,8 +110,26 @@ enum MutationGate {
     ShortCircuit(Value),
 }
 
+/// An authorization refusal and the target that refused, when one had been reached.
+struct Refusal {
+    error: ApiError,
+    /// `None` when the request was refused before any target was evaluated (its route, or a
+    /// request with no target).
+    target: Option<Target>,
+}
+
 /// Most bytes of validator or decoder text an `InvalidInput` message carries.
 const INVALID_INPUT_ECHO_LIMIT: usize = 512;
+
+impl Refusal {
+    /// A refusal before any target was evaluated.
+    const fn before_targets(error: ApiError) -> Self {
+        Self {
+            error,
+            target: None,
+        }
+    }
+}
 
 /// Dispatch one declared JSON operation into its typed implementation.
 ///
@@ -267,7 +285,7 @@ async fn authorize_targets(
     caller: &Caller<'_>,
     operation: OperationName,
     request: &impl RequestScope,
-) -> Result<OperationContext, ApiError> {
+) -> Result<OperationContext, Refusal> {
     let principal = caller.principal;
     let mut grants: Vec<WorkspaceGrant> = Vec::new();
     let mut tenant: Option<TenantGrant> = None;
@@ -276,27 +294,37 @@ async fn authorize_targets(
         // Every operation authorizes something, if only sign-in (`Target::Authenticated`). An
         // empty list is a defect in the request's `RequestScope`; running the handler on it
         // would run it with no authorization at all.
-        return Err(ApiError::new(
+        return Err(Refusal::before_targets(ApiError::new(
             ErrorCode::Internal,
             "Request declares no authorization target",
-        ));
+        )));
     }
     // No grant lets an agent route see a draft or back up, restore or purge, so this runs
     // before any grant is looked up.
-    access::check_human_route(principal, operation)?;
+    access::check_human_route(principal, operation).map_err(Refusal::before_targets)?;
     for target in targets {
+        let at = |error| Refusal {
+            error,
+            target: Some(target),
+        };
         match target {
             // Any signed-in principal; the handler filters its result by grants.
             Target::Authenticated => {}
             Target::Deployment(permission) => {
-                let raw = access.authorize_tenant(principal, permission).await?;
-                require_tenant_scope(principal, &raw)?;
-                tenant = Some(access::authorize_tenant(principal, raw, permission)?);
+                let raw = access
+                    .authorize_tenant(principal, permission)
+                    .await
+                    .map_err(at)?;
+                require_tenant_scope(principal, &raw).map_err(at)?;
+                tenant = Some(access::authorize_tenant(principal, raw, permission).map_err(at)?);
             }
             Target::Workspace(workspace, permission) => {
-                let raw = access.authorize(principal, workspace, permission).await?;
-                require_workspace_scope(principal, workspace, &raw)?;
-                let grant = access::authorize_workspace(principal, raw, permission)?;
+                let raw = access
+                    .authorize(principal, workspace, permission)
+                    .await
+                    .map_err(at)?;
+                require_workspace_scope(principal, workspace, &raw).map_err(at)?;
+                let grant = access::authorize_workspace(principal, raw, permission).map_err(at)?;
                 if !grants
                     .iter()
                     .any(|existing| existing.workspace_id() == workspace)
@@ -318,33 +346,45 @@ async fn authorize_targets(
 }
 
 /// Record a `Forbidden` authorization refusal of an authenticated caller and return the
-/// refusal unchanged.
+/// refusal's error unchanged.
 ///
-/// The event goes to the log of the first workspace the request names, or to the tenant's when
-/// it names none. Other errors are returned without an event. The refusal is the answer: a
-/// failed append does not turn it into another error, so a caller cannot learn whether the log
-/// is writable from the code it receives.
+/// The event goes to the log of the workspace whose target refused, and to the tenant's when a
+/// tenant or sign-in target refused (Stage 1b design section 7: "in the workspace's log for a
+/// workspace target, tenant-level otherwise"). A refusal by route comes before any target is
+/// evaluated; it goes to the log of the first workspace the request names, or the tenant's.
+/// Other errors are returned without an event. The refusal is the answer: a failed append does
+/// not turn it into another error, so a caller cannot learn whether the log is writable from
+/// the code it receives.
 async fn record_denial(
     events: &dyn EventLog,
     principal: &Principal,
     operation: OperationName,
     request: &impl RequestScope,
-    refused: ApiError,
+    refusal: Refusal,
 ) -> ApiError {
-    if refused.code != ErrorCode::Forbidden {
-        return refused;
+    if refusal.error.code != ErrorCode::Forbidden {
+        return refusal.error;
     }
-    let scope = request
-        .targets()
-        .into_iter()
-        .find_map(|target| match target {
-            Target::Workspace(workspace_id, _) => Some(EventScope::Workspace(StorageScope {
+    let workspace = match refusal.target {
+        Some(Target::Workspace(workspace_id, _)) => Some(workspace_id),
+        Some(Target::Authenticated | Target::Deployment(_)) => None,
+        None => request
+            .targets()
+            .into_iter()
+            .find_map(|target| match target {
+                Target::Workspace(workspace_id, _) => Some(workspace_id),
+                Target::Authenticated | Target::Deployment(_) => None,
+            }),
+    };
+    let scope = workspace.map_or_else(
+        || EventScope::Tenant(principal.tenant_id.clone()),
+        |workspace_id| {
+            EventScope::Workspace(StorageScope {
                 tenant_id: principal.tenant_id.clone(),
                 workspace_id,
-            })),
-            Target::Authenticated | Target::Deployment(_) => None,
-        })
-        .unwrap_or_else(|| EventScope::Tenant(principal.tenant_id.clone()));
+            })
+        },
+    );
     let _recorded = events
         .append(
             &scope,
@@ -352,7 +392,7 @@ async fn record_denial(
             NewEvent::permission_denied(principal, operation),
         )
         .await;
-    refused
+    refusal.error
 }
 
 /// Refuse a workspace grant the adapter returned for a workspace or tenant that was not asked.
@@ -631,7 +671,7 @@ mod tests {
         };
         let refused =
             authorize_targets(&access, &caller, OperationName::GetHealth, &Untargeted).await;
-        assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
+        assert!(matches!(refused, Err(refusal) if refusal.error.code == ErrorCode::Internal));
         assert_eq!(access.lookups.load(Ordering::SeqCst), 0);
         Ok(())
     }

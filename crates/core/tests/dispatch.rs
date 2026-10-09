@@ -1435,6 +1435,38 @@ async fn a_grant_refusal_is_recorded_as_permission_denied() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_tenant_refusal_is_a_tenant_event_even_when_workspaces_follow() -> TestResult {
+    // create_connector authorizes the tenant first and its workspaces after. Bob holds every
+    // grant on A but no tenant grant, so the tenant target refuses him, and the event belongs to
+    // the tenant log, not to A's.
+    let mut table = GrantTable::default();
+    table
+        .workspaces
+        .entry("bob".to_owned())
+        .or_default()
+        .insert(workspace(WORKSPACE_A)?, all_permissions());
+    let ports = FixturePorts::new(table);
+    let app = CountingApplication::new();
+    let bob = principal("bob", AccessRoute::LocalOwner)?;
+    let refused = err_of(
+        call(
+            &app,
+            &ports,
+            &bob,
+            "create_connector",
+            create_connector_body(KEY_ONE),
+        )
+        .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    let appended = ports.events.appended()?;
+    let (scope, event) = some(appended.first(), "the refusal event")?;
+    assert_eq!(scope, &EventScope::Tenant(tenant("tenant-local")?));
+    assert_eq!(event.operation, Some(OperationName::CreateConnector));
+    Ok(())
+}
+
 /// Bob writes on A without admin; Carol administers A.
 fn ports_writer_and_admin() -> Result<FixturePorts, serde_json::Error> {
     let mut table = GrantTable::default();

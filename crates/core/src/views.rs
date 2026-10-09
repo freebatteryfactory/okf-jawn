@@ -14,6 +14,7 @@
 //! refusal of the View.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use sha2::{Digest as _, Sha256};
 
@@ -23,7 +24,7 @@ use okf_jawn_contract::{
     extraction::{ExtractionWarning, TextOrigin},
     identity::Digest,
     read::Selection,
-    source::{SourceLocation, SourceLocator},
+    source::{SourceLocation, SourceLocator, SourceReference},
     views::{ChartFailure, ColumnKind, Dataset, DatasetColumn, DatasetValue, ViewBinding},
 };
 
@@ -57,6 +58,15 @@ struct CellWindow {
     last_column: u32,
 }
 
+/// A number a dataset keeps exactly.
+#[derive(Debug, Clone, Copy)]
+enum ExactNumber {
+    /// An integer within ±2^53.
+    Integer(i64),
+    /// A decimal of at most 15 significant digits.
+    Decimal(f64),
+}
+
 /// Media type a dataset is retained and served with.
 pub const DATASET_MEDIA_TYPE: &str = "application/json";
 /// Format version of the datasets this module produces.
@@ -65,6 +75,10 @@ pub const DATASET_SCHEMA_VERSION: u32 = 1;
 pub const MAX_DATASET_ROWS: usize = 100_000;
 /// Most columns a dataset may hold (the contract schema's bound).
 pub const MAX_DATASET_COLUMNS: usize = 1024;
+/// Largest integer magnitude a JSON reader holds exactly (2^53).
+const MAX_EXACT_INTEGER: u64 = 1 << 53;
+/// Most significant digits of a decimal a double holds exactly as written.
+const MAX_EXACT_DECIMAL_DIGITS: usize = 15;
 
 /// Build the dataset of `binding` from the conversion record of the digest it cites.
 ///
@@ -81,26 +95,27 @@ pub fn materialize(
     warnings: &[ExtractionWarning],
 ) -> Result<Dataset, BindingFailure> {
     let (table, cells) = covered_table(record, &binding.source.selection)?;
-    let grid = grid_of(table, cells.as_ref());
+    let (rows, columns) = extent(table, cells.as_ref());
+    // Bound the layout before allocating it: a record's counts are not trusted to be small.
+    let (height, width) = (rows.len(), columns.len());
+    if width > MAX_DATASET_COLUMNS || height > MAX_DATASET_ROWS {
+        return Err(BindingFailure {
+            reason: ChartFailure::TooLarge,
+            message: format!(
+                "the selected table has {height} rows and {width} columns; a dataset holds at \
+                 most {MAX_DATASET_ROWS} rows and {MAX_DATASET_COLUMNS} columns"
+            ),
+        });
+    }
+    if width == 0 {
+        return Err(unavailable("the selected table has no columns"));
+    }
+    let grid = grid_of(table, rows, columns)?;
     let header_rows = grid
         .iter()
         .take_while(|row| row.iter().any(|cell| cell.is_some_and(|cell| cell.header)))
         .count();
     let (headers, body) = grid.split_at(header_rows);
-    let width = grid.first().map_or(0, Vec::len);
-    if width == 0 {
-        return Err(unavailable("the selected table has no columns"));
-    }
-    if width > MAX_DATASET_COLUMNS || body.len() > MAX_DATASET_ROWS {
-        return Err(BindingFailure {
-            reason: ChartFailure::TooLarge,
-            message: format!(
-                "the selected table has {} rows and {width} columns; a dataset holds at most \
-                 {MAX_DATASET_ROWS} rows and {MAX_DATASET_COLUMNS} columns",
-                body.len()
-            ),
-        });
-    }
     let names = column_names(headers, width);
     let kinds: Vec<ColumnKind> = (0..width).map(|column| column_kind(body, column)).collect();
     let columns = names
@@ -123,7 +138,12 @@ pub fn materialize(
         .collect();
     let dataset = Dataset {
         schema_version: DATASET_SCHEMA_VERSION,
-        source: binding.source.clone(),
+        // Locations are derived and filled on return; leaving them out keeps the bytes, and so
+        // the digest, the same whether or not they were filled first.
+        source: SourceReference {
+            locations: Vec::new(),
+            ..binding.source.clone()
+        },
         text_origin,
         columns,
         rows,
@@ -269,35 +289,56 @@ fn cell_window(table: &ConvertedTable, range: &CellRange) -> Option<CellWindow> 
     })
 }
 
-/// The table laid out row by row; a spanning cell fills its first position, the rest of its
-/// span stays empty. `window` keeps only the selected part.
-fn grid_of<'a>(
-    table: &'a ConvertedTable,
-    window: Option<&CellWindow>,
-) -> Vec<Vec<Option<GridCell<'a>>>> {
-    let (rows, columns) = window.map_or((0..table.num_rows, 0..table.num_cols), |window| {
+/// The rows and columns of `table` to read: all of it, or the selected window.
+fn extent(table: &ConvertedTable, window: Option<&CellWindow>) -> (Range<u32>, Range<u32>) {
+    window.map_or((0..table.num_rows, 0..table.num_cols), |window| {
         (
             window.first_row..window.last_row.saturating_add(1),
             window.first_column..window.last_column.saturating_add(1),
         )
-    });
+    })
+}
+
+/// The table laid out row by row over `rows` and `columns`; a spanning cell fills its first
+/// position, the rest of its span stays empty.
+///
+/// A cell outside the table's own grid, or two cells at one position, is a fault of the record:
+/// the chart fails rather than reading a table with a cell silently dropped.
+fn grid_of<'a>(
+    table: &'a ConvertedTable,
+    rows: Range<u32>,
+    columns: Range<u32>,
+) -> Result<Vec<Vec<Option<GridCell<'a>>>>, BindingFailure> {
     let mut by_position: BTreeMap<(u32, u32), GridCell<'a>> = BTreeMap::new();
     for cell in &table.cells {
-        by_position.insert(
-            (cell.row, cell.column),
-            GridCell {
-                text: cell.text.as_str(),
-                header: cell.column_header,
-            },
-        );
+        if cell.row >= table.num_rows || cell.column >= table.num_cols {
+            return Err(unavailable(&format!(
+                "the conversion record places a cell at row {}, column {} of a {} by {} table",
+                cell.row, cell.column, table.num_rows, table.num_cols
+            )));
+        }
+        let placed = GridCell {
+            text: cell.text.as_str(),
+            header: cell.column_header,
+        };
+        if by_position
+            .insert((cell.row, cell.column), placed)
+            .is_some()
+        {
+            return Err(unavailable(&format!(
+                "the conversion record places two cells at row {}, column {}",
+                cell.row, cell.column
+            )));
+        }
     }
-    rows.map(|row| {
-        columns
-            .clone()
-            .map(|column| by_position.get(&(row, column)).copied())
-            .collect()
-    })
-    .collect()
+    Ok(rows
+        .map(|row| {
+            columns
+                .clone()
+                .map(|column| by_position.get(&(row, column)).copied())
+                .collect()
+        })
+        .collect())
 }
 
 /// Column names from the header rows, joined top to bottom; `column_<n>` where there is none.
@@ -340,9 +381,12 @@ fn column_kind(body: &[Vec<Option<GridCell<'_>>>], column: usize) -> ColumnKind 
         .collect();
     if values.is_empty() {
         ColumnKind::String
-    } else if values.iter().all(|text| text.parse::<i64>().is_ok()) {
+    } else if values
+        .iter()
+        .all(|text| matches!(exact_number(text), Some(ExactNumber::Integer(_))))
+    {
         ColumnKind::Integer
-    } else if values.iter().all(|text| finite_number(text).is_some()) {
+    } else if values.iter().all(|text| exact_number(text).is_some()) {
         ColumnKind::Number
     } else if values.iter().all(|text| boolean(text).is_some()) {
         ColumnKind::Boolean
@@ -357,22 +401,52 @@ fn value_of(text: Option<&str>, kind: ColumnKind) -> DatasetValue {
         return DatasetValue::Null;
     };
     let typed = match kind {
-        ColumnKind::Integer => text
-            .parse::<i64>()
-            .ok()
-            .map(|value| DatasetValue::Number(value.into())),
-        ColumnKind::Number => finite_number(text).map(DatasetValue::Number),
+        ColumnKind::Integer | ColumnKind::Number => {
+            exact_number(text).and_then(|number| match number {
+                ExactNumber::Integer(value) => Some(DatasetValue::Number(value.into())),
+                ExactNumber::Decimal(value) => {
+                    serde_json::Number::from_f64(value).map(DatasetValue::Number)
+                }
+            })
+        }
         ColumnKind::Boolean => boolean(text).map(DatasetValue::Boolean),
         ColumnKind::String | ColumnKind::DateTime => None,
     };
     typed.unwrap_or_else(|| DatasetValue::Text(text.to_owned()))
 }
 
-fn finite_number(text: &str) -> Option<serde_json::Number> {
-    text.parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite())
-        .and_then(serde_json::Number::from_f64)
+/// The value of `text` when it is a number that a dataset keeps exactly: the JSON number
+/// grammar without an exponent (no leading `+`, no leading zero before other digits, so an
+/// identifier such as `02134` stays text), an integer within ±2^53, or a decimal of at most 15
+/// significant digits, which a double holds exactly as written. Anything else is text.
+fn exact_number(text: &str) -> Option<ExactNumber> {
+    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (unsigned, None),
+    };
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    if !digits(whole) || (whole.len() > 1 && whole.starts_with('0')) {
+        return None;
+    }
+    match fraction {
+        None => text
+            .parse::<i64>()
+            .ok()
+            .filter(|value| value.unsigned_abs() <= MAX_EXACT_INTEGER)
+            .map(ExactNumber::Integer),
+        Some(fraction) if digits(fraction) => {
+            let joined = format!("{whole}{fraction}");
+            if joined.trim_start_matches('0').len() > MAX_EXACT_DECIMAL_DIGITS {
+                return None;
+            }
+            text.parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .map(ExactNumber::Decimal)
+        }
+        Some(_) => None,
+    }
 }
 
 fn boolean(text: &str) -> Option<bool> {

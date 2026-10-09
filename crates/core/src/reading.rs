@@ -126,18 +126,26 @@ pub async fn authorize_object(
     if let Ok(role) = object_role(&direct, digest) {
         return Ok(role);
     }
+    // A recorded derived object is decided before the conversion record is read, so a missing,
+    // oversized or faulty record cannot hide a dataset of the revision.
+    let derived = records
+        .derived_object(scope, item, revision, digest)
+        .await?;
+    let with_derived = RevisionObjects {
+        derived: derived.as_ref(),
+        ..direct
+    };
+    if let Ok(role) = object_role(&with_derived, digest) {
+        return Ok(role);
+    }
     let record = match source.and_then(|source| source.extraction.digest.as_ref()) {
         Some(record_digest) => Some(read_conversion_record(blobs, scope, record_digest).await?),
         None => None,
     };
-    let derived = records
-        .derived_object(scope, item, revision, digest)
-        .await?;
     object_role(
         &RevisionObjects {
             record: record.as_ref(),
-            derived: derived.as_ref(),
-            ..direct
+            ..with_derived
         },
         digest,
     )
