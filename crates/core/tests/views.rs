@@ -266,6 +266,63 @@ fn a_cell_outside_its_table_fails_the_chart() -> TestResult {
     Ok(())
 }
 
+/// Read the fixture record after `change` edits its table's cells.
+fn read_with(change: impl FnOnce(&mut Vec<ConvertedCell>)) -> Built<Result<Dataset, ChartFailure>> {
+    let mut record = record()?;
+    let table = record.tables.first_mut().ok_or("the fixture has a table")?;
+    change(&mut table.cells);
+    Ok(materialize(
+        &binding(Selection::All)?,
+        &record,
+        TextOrigin::Converter,
+        &[],
+    )
+    .map_err(|failure| failure.reason))
+}
+
+/// The fixture cell at (`row`, `column`).
+fn cell_at(cells: &mut [ConvertedCell], row: u32, column: u32) -> Option<&mut ConvertedCell> {
+    cells
+        .iter_mut()
+        .find(|cell| cell.row == row && cell.column == column)
+}
+
+#[test]
+fn an_empty_out_of_table_or_overlapping_span_fails_the_chart() -> TestResult {
+    // An empty span.
+    let empty = read_with(|cells| {
+        if let Some(cell) = cell_at(cells, 1, 0) {
+            cell.row_span = 0;
+        }
+    })?;
+    assert_eq!(err_of(empty)?, ChartFailure::DatasetUnavailable);
+    // A span past the last column.
+    let past = read_with(|cells| {
+        if let Some(cell) = cell_at(cells, 0, 2) {
+            cell.column_span = 2;
+        }
+    })?;
+    assert_eq!(err_of(past)?, ChartFailure::DatasetUnavailable);
+    // A span over the next cell of its row.
+    let overlap = read_with(|cells| {
+        if let Some(cell) = cell_at(cells, 0, 0) {
+            cell.column_span = 2;
+        }
+    })?;
+    assert_eq!(err_of(overlap)?, ChartFailure::DatasetUnavailable);
+    // A valid span: Q1's revenue covers two rows, and the position it covers reads as empty.
+    let spanned = read_with(|cells| {
+        cells.retain(|cell| !(cell.row == 2 && cell.column == 1));
+        if let Some(cell) = cell_at(cells, 1, 1) {
+            cell.row_span = 2;
+        }
+    })?
+    .map_err(|reason| format!("{reason:?}"))?;
+    let second = spanned.rows.get(1).ok_or("a second row")?;
+    assert_eq!(second.get(1), Some(&DatasetValue::Null));
+    Ok(())
+}
+
 #[test]
 fn a_dataset_digest_does_not_depend_on_filled_locations() -> TestResult {
     let record = record()?;

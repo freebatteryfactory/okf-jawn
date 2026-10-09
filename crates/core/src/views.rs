@@ -13,7 +13,7 @@
 //! A binding that cannot be materialized is a chart-level fault (`BindingFailure`), never a
 //! refusal of the View.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use sha2::{Digest as _, Sha256};
@@ -310,20 +310,48 @@ fn extent(table: &ConvertedTable, window: Option<&CellWindow>) -> (Range<u32>, R
 /// The table laid out row by row over `rows` and `columns`; a spanning cell fills its first
 /// position, the rest of its span stays empty.
 ///
-/// A cell outside the table's own grid, or two cells at one position, is a fault of the record:
-/// the chart fails rather than reading a table with a cell silently dropped.
+/// A cell or span outside the table's own grid, an empty span, or two spans over one position is
+/// a fault of the record: the chart fails rather than reading a table with a cell silently
+/// dropped or misplaced.
 fn grid_of<'a>(
     table: &'a ConvertedTable,
     rows: Range<u32>,
     columns: Range<u32>,
 ) -> Result<Vec<Vec<Option<GridCell<'a>>>>, BindingFailure> {
     let mut by_position: BTreeMap<(u32, u32), GridCell<'a>> = BTreeMap::new();
+    // Every position of the read area a cell's span covers; two spans meeting there overlap.
+    // Only the read area is marked, which the cell bound keeps small.
+    let mut occupied: BTreeSet<(u32, u32)> = BTreeSet::new();
     for cell in &table.cells {
-        if cell.row >= table.num_rows || cell.column >= table.num_cols {
+        let row_end = cell.row.checked_add(cell.row_span);
+        let column_end = cell.column.checked_add(cell.column_span);
+        let inside = cell.row_span > 0
+            && cell.column_span > 0
+            && row_end.is_some_and(|end| end <= table.num_rows)
+            && column_end.is_some_and(|end| end <= table.num_cols);
+        if !inside {
             return Err(unavailable(&format!(
-                "the conversion record places a cell at row {}, column {} of a {} by {} table",
-                cell.row, cell.column, table.num_rows, table.num_cols
+                "the conversion record places a cell spanning {} rows and {} columns at row {}, \
+                 column {} of a {} by {} table",
+                cell.row_span,
+                cell.column_span,
+                cell.row,
+                cell.column,
+                table.num_rows,
+                table.num_cols
             )));
+        }
+        let spanned_rows = cell.row.max(rows.start)..row_end.unwrap_or(cell.row).min(rows.end);
+        let spanned_columns =
+            cell.column.max(columns.start)..column_end.unwrap_or(cell.column).min(columns.end);
+        for row in spanned_rows {
+            for column in spanned_columns.clone() {
+                if !occupied.insert((row, column)) {
+                    return Err(unavailable(&format!(
+                        "the conversion record places two cells over row {row}, column {column}"
+                    )));
+                }
+            }
         }
         let placed = GridCell {
             text: cell.text.as_str(),
