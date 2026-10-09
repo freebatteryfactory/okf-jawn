@@ -430,6 +430,17 @@ export const zCreateWorkspaceRequest = z.object({
 });
 
 /**
+ * An unconfirmed claim carried in an imported file's OKF `verified` value; never an app review.
+ *
+ * It has no review identity, no authenticated reviewer and no confirmed content, and its
+ * coverage is always `ReviewCoverage::Imported`.
+ */
+export const zImportedClaim = z.object({
+    at: z.string().nullish(),
+    by: z.string().nullish()
+});
+
+/**
  * Stable item identity independent of its current relative path.
  */
 export const zItemId = z.uuid();
@@ -2314,6 +2325,7 @@ export const zGetGraphResponse = z.object({
  */
 export const zItemDocument = z.object({
     body: z.string(),
+    content_digest: zDigest,
     draft: zDraftContent.nullish(),
     properties: z.record(z.string(), z.unknown()),
     source: zSourceAppearance.nullish(),
@@ -2547,6 +2559,7 @@ export const zReview = z.object({
  * Recorded reviews and current coverage.
  */
 export const zListReviewsResponse = z.object({
+    imported: z.array(zImportedClaim).optional(),
     items: z.array(zReview)
 });
 
