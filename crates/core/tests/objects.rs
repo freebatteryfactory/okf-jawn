@@ -133,8 +133,16 @@ async fn an_asset_listed_in_the_record_is_that_asset() -> TestResult {
 async fn a_recorded_dataset_is_decided_before_the_record_is_read() -> TestResult {
     let versions = card()?;
     let recorded = vec![dataset_object(revision('1')?, item(), 'f')?];
-    // The record cannot be read: the store fails, or reports a record past what core reads.
-    for open in [Open::Fail, Open::Oversized(MAX_CONVERSION_RECORD_BYTES + 1)] {
+    // The record cannot be read: the store fails, or reports a well-formed record past what core
+    // reads (so only the size bound refuses it).
+    let oversized = Open::Oversized {
+        size: MAX_CONVERSION_RECORD_BYTES + 1,
+        body: serde_json::to_vec(&record()?)?,
+    };
+    for (open, refusal) in [
+        (Open::Fail, ErrorCode::Internal),
+        (oversized, ErrorCode::TooLarge),
+    ] {
         let blobs = FakeBlobs::new(open);
         let records = FakeRecords::new(recorded.clone(), None);
         assert_eq!(
@@ -144,7 +152,7 @@ async fn a_recorded_dataset_is_decided_before_the_record_is_read() -> TestResult
         assert_eq!(blobs.opens(), 0);
         // The same unreadable record is an error for a digest the record would have to decide.
         let unknown = err_of(role_of(&versions, &blobs, &records, &digest('9')?).await)?;
-        assert_ne!(unknown.code, ErrorCode::NotFound);
+        assert_eq!(unknown.code, refusal);
     }
     Ok(())
 }

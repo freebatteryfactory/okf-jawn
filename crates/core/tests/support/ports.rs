@@ -47,8 +47,14 @@ pub enum Open {
     Serve(Vec<u8>),
     /// The store fails.
     Fail,
-    /// The store reports an object past what core reads, with an empty body.
-    Oversized(u64),
+    /// The store reports an object past what core reads while serving these (well-formed)
+    /// bytes, so only the size bound can refuse it.
+    Oversized {
+        /// The size the store reports.
+        size: u64,
+        /// The bytes it serves.
+        body: Vec<u8>,
+    },
 }
 
 /// One `BlobStore::put` as the fake saw it.
@@ -262,14 +268,14 @@ impl BlobStore for FakeBlobs {
                     ErrorCode::Internal,
                     "the blob store is unreadable",
                 )),
-                Open::Oversized(size) => Ok(ObjectRead {
+                Open::Oversized { size, body } => Ok(ObjectRead {
                     object: ObjectInfo {
                         digest: digest.clone(),
                         size: *size,
                     },
                     offset,
                     length,
-                    body: Box::pin(std::io::Cursor::new(Vec::new())),
+                    body: Box::pin(std::io::Cursor::new(body.clone())),
                 }),
             }
         })

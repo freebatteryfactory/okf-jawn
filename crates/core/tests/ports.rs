@@ -58,7 +58,7 @@ use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 use serde_json::json;
 use uuid::Uuid;
 
-type TestResult = Result<(), Box<dyn Error>>;
+use check::{TestResult, err_of, some};
 
 /// The application-side check: load the candidate with okf-core and judge it with okf-validator.
 struct OkfConformance;
@@ -927,10 +927,7 @@ fn a_proposed_change_becomes_the_matching_tree_edit() -> TestResult {
 #[test]
 fn a_candidate_check_rejects_a_tree_it_cannot_load() -> TestResult {
     let check: Arc<dyn CandidateCheck> = Arc::new(OkfConformance);
-    let error = check
-        .check(Path::new("no-such-okf-jawn-candidate-directory"))
-        .err()
-        .ok_or("a missing candidate directory must be rejected")?;
+    let error = err_of(check.check(Path::new("no-such-okf-jawn-candidate-directory")))?;
     assert_eq!(error.code, ErrorCode::InvalidInput);
     Ok(())
 }
@@ -1000,10 +997,12 @@ fn conversion_settings_are_typed_and_reject_unknown_keys() -> TestResult {
             ..ConversionSettings::default()
         }
     );
-    assert!(
-        serde_json::from_value::<ConversionSettings>(json!({"ocr": "force_full_page"})).is_err()
-    );
-    assert!(serde_json::from_value::<ConversionSettings>(json!({"quality": "high"})).is_err());
+    err_of(serde_json::from_value::<ConversionSettings>(
+        json!({"ocr": "force_full_page"}),
+    ))?;
+    err_of(serde_json::from_value::<ConversionSettings>(
+        json!({"quality": "high"}),
+    ))?;
     assert!(type_checked(&converter_calls));
     Ok(())
 }
@@ -1078,8 +1077,10 @@ fn a_commit_is_built_from_a_claimed_job_alone() -> TestResult {
         spec,
     };
     let folder = WorkspacePath::try_from("inbox".to_owned())?;
-    let commit = commit_for(&claimed, vec![TreeEdit::CreateFolder { folder }])
-        .ok_or("an import job must yield a commit")?;
+    let commit = some(
+        commit_for(&claimed, vec![TreeEdit::CreateFolder { folder }]),
+        "an import job's commit",
+    )?;
     assert_eq!(commit.mutation_id, mutation_id);
     assert_eq!(commit.expected_head, revision('a')?);
     assert_eq!(commit.author, initiator());
@@ -1228,10 +1229,12 @@ fn an_artifact_record_yields_the_wire_download_for_its_transport() -> TestResult
         media_type: "application/zip".to_owned(),
         created_by_job: JobId(Uuid::from_u128(7)),
     };
-    let transport = TRANSPORTS
-        .iter()
-        .find(|transport| transport.id == "download_artifact")
-        .ok_or("the download_artifact transport is not declared")?;
+    let transport = some(
+        TRANSPORTS
+            .iter()
+            .find(|transport| transport.id == "download_artifact"),
+        "the declared download_artifact transport",
+    )?;
     let expected_path = transport
         .path
         .replace("{workspace_id}", &workspace.0.to_string())
@@ -1296,11 +1299,11 @@ fn a_converted_image_carries_its_size_and_its_own_caption() -> TestResult {
     // design section 3), so a stored image with a field beside them, such as the old origin
     // word, is refused rather than read.
     let mut with_origin = stored;
-    with_origin
-        .as_object_mut()
-        .ok_or("a retained asset serializes as an object")?
+    some(with_origin.as_object_mut(), "a retained asset JSON object")?
         .insert("caption_origin".to_owned(), json!("generated"));
-    let refused = serde_json::from_value::<RetainedAsset>(with_origin);
-    assert!(refused.is_err(), "{refused:?}");
+    err_of(serde_json::from_value::<RetainedAsset>(with_origin))?;
     Ok(())
 }
+
+#[path = "../../../tests/support/check.rs"]
+mod check;
