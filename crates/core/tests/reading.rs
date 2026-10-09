@@ -249,6 +249,55 @@ fn a_section_is_located_as_the_lines_its_heading_opens() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn only_a_matching_fence_run_closes_a_code_block() -> TestResult {
+    let fence = "`".repeat(3);
+    let long = "`".repeat(4);
+    let markdown = [
+        "# Guide".to_owned(),
+        long.clone(),
+        fence.clone(),
+        "# inside the longer fence".to_owned(),
+        fence.clone(),
+        "~~~".to_owned(),
+        format!("{long} trailing text does not close"),
+        "# still inside".to_owned(),
+        format!("   {long}  "),
+        "## After".to_owned(),
+        "    # indented code".to_owned(),
+        format!("{fence} info with ` is not a fence"),
+        "## Last".to_owned(),
+    ]
+    .join("\n");
+    // A shorter run, the other character, or text after the run leaves the fence open.
+    for inside in ["inside the longer fence", "still inside"] {
+        assert_eq!(
+            err_of(section_lines(&markdown, inside))?.code,
+            ErrorCode::NotFound
+        );
+    }
+    // A longer run indented by three spaces with trailing blanks closes it.
+    assert_eq!(
+        section_lines(&markdown, "After")?,
+        TextRange { start: 10, end: 12 }
+    );
+    // Four spaces of indentation make indented code, not a heading.
+    assert_eq!(
+        err_of(section_lines(&markdown, "indented code"))?.code,
+        ErrorCode::NotFound
+    );
+    // A backtick run whose info string has a backtick opens no fence.
+    assert_eq!(
+        section_lines(&markdown, "Last")?,
+        TextRange { start: 13, end: 13 }
+    );
+    assert_eq!(
+        section_lines(&markdown, "Guide")?,
+        TextRange { start: 1, end: 13 }
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "support/records.rs"]

@@ -338,34 +338,49 @@ pub(crate) const fn location_page(location: &SourceLocation) -> Option<u32> {
 
 /// The lines of the section a heading opens in `markdown`: from the heading line to the line
 /// before the next heading of the same or a higher level, or to the end. Headings are ATX
-/// headings (`#` to `######`); lines inside fenced code blocks are not headings.
+/// headings (`#` to `######`) indented by at most three spaces; lines inside fenced code blocks
+/// (closed by the `CommonMark` rule) and indented code are not headings.
 ///
 /// # Errors
 /// Returns `NotFound` on `/selection/heading` when no heading has exactly this text, and
 /// `InvalidInput` there when several do, since the citation would not say which.
 pub fn section_lines(markdown: &str, heading: &str) -> Result<TextRange, ApiError> {
-    let mut fence: Option<&str> = None;
+    // The open fence's character and run length (`CommonMark` 4.5): only a run of the same
+    // character at least as long, with nothing after it, closes it.
+    let mut fence: Option<(u8, usize)> = None;
     let mut headings: Vec<(u32, usize, &str)> = Vec::new();
     let mut last = 0_u32;
     for (index, line) in markdown.lines().enumerate() {
         let number = u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1);
         last = number;
-        let trimmed = line.trim_start();
-        if let Some(open) = fence {
-            if trimmed.starts_with(open) {
+        let content = line.trim_start_matches(' ');
+        // Four columns of indentation (a tab after at most three spaces reaches them) make the
+        // line indented code or fence content: never a fence marker or a heading.
+        if line.len().saturating_sub(content.len()) > 3 || content.starts_with('\t') {
+            continue;
+        }
+        let run = fence_run(content);
+        if let Some((open_char, open_len)) = fence {
+            let closes = run.is_some_and(|(mark, len)| {
+                mark == open_char
+                    && len >= open_len
+                    && content
+                        .get(len..)
+                        .is_some_and(|rest| rest.trim().is_empty())
+            });
+            if closes {
                 fence = None;
             }
             continue;
         }
-        if trimmed.starts_with("```") {
-            fence = Some("```");
-            continue;
+        if let Some((mark, len)) = run {
+            let info = content.get(len..).unwrap_or_default();
+            if mark == b'~' || !info.contains('`') {
+                fence = run;
+                continue;
+            }
         }
-        if trimmed.starts_with("~~~") {
-            fence = Some("~~~");
-            continue;
-        }
-        if let Some((level, text)) = atx_heading(trimmed) {
+        if let Some((level, text)) = atx_heading(content) {
             headings.push((number, level, text));
         }
     }
@@ -415,6 +430,17 @@ fn atx_heading(line: &str) -> Option<(usize, &str)> {
     }
     let text = rest.trim().trim_end_matches('#').trim_end();
     Some((level, text))
+}
+
+/// The character and length of the fence run a line opens with: three or more backticks or
+/// tildes.
+fn fence_run(content: &str) -> Option<(u8, usize)> {
+    let first = *content.as_bytes().first()?;
+    if first != b'`' && first != b'~' {
+        return None;
+    }
+    let len = content.bytes().take_while(|byte| *byte == first).count();
+    (len >= 3).then_some((first, len))
 }
 
 fn not_found() -> ApiError {
