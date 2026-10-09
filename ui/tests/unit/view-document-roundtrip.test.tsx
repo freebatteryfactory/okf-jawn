@@ -596,3 +596,86 @@ describe('a saved View reopens with the server as the source of truth', () => {
     );
   });
 });
+
+describe('a saved View follows the ids it was asked for', () => {
+  const saved = zPresentResponse.parse(presentResponseFixture);
+  const noTools = async () => ({ isError: true, content: [{ type: 'text', text: 'no host' }] });
+  const first = {
+    workspaceId: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
+    itemId: '11111111-2222-4333-8444-555555555555',
+  };
+  const second = { ...first, itemId: '99999999-2222-4333-8444-555555555555' };
+
+  /** A client whose answer for each item is released by the test, so a request can stay pending. */
+  function gated() {
+    const release = new Map<string, (title: string) => void>();
+    const client = createClient({
+      baseUrl: 'http://okf.test',
+      fetch: Object.assign(
+        async (input: URL | RequestInfo, init?: RequestInit) => {
+          const asked = (await new Request(input, init).json()) as { item_id: string };
+          const title = await new Promise<string>((done) => release.set(asked.item_id, done));
+          const spec = {
+            root: 'root',
+            elements: { root: { type: 'Stack', props: { title }, children: [] } },
+          };
+          const view = { ...saved.view, title, spec };
+          return new Response(JSON.stringify({ ...saved, view, resolved_bindings: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        },
+        { preconnect: () => {} },
+      ),
+    });
+    return { client, release };
+  }
+  async function released(release: Map<string, (title: string) => void>, item: string) {
+    await waitFor(() => expect(release.has(item)).toBe(true));
+    return release.get(item) as (title: string) => void;
+  }
+
+  it('stops showing the previous View at once when the ids change, while the new one is pending', async () => {
+    const { client, release } = gated();
+    const view = render(<SavedView {...first} callTool={noTools} client={client} />);
+    (await released(release, first.itemId))('Board of the first');
+    expect(await screen.findByRole('heading', { name: 'Board of the first' })).toBeTruthy();
+    view.rerender(<SavedView {...second} callTool={noTools} client={client} />);
+    expect(screen.queryByRole('heading', { name: 'Board of the first' })).toBeNull();
+    expect(screen.getByRole('status').textContent).toMatch(/Reopening/);
+  });
+
+  it('never renders a late answer for ids that are no longer asked for', async () => {
+    const { client, release } = gated();
+    const view = render(<SavedView {...first} callTool={noTools} client={client} />);
+    const lateFirst = await released(release, first.itemId);
+    view.rerender(<SavedView {...second} callTool={noTools} client={client} />);
+    (await released(release, second.itemId))('Board of the second');
+    expect(await screen.findByRole('heading', { name: 'Board of the second' })).toBeTruthy();
+    lateFirst('Board of the first');
+    await new Promise((done) => setTimeout(done, 50));
+    expect(screen.queryByRole('heading', { name: 'Board of the first' })).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Board of the second' })).toBeTruthy();
+  });
+
+  it('shows a fixed sentence when the refusal has no message', async () => {
+    for (const body of [{ code: 'not_found' }, { code: 'not_found', message: '  ' }]) {
+      const client = createClient({
+        baseUrl: 'http://okf.test',
+        fetch: Object.assign(
+          async () =>
+            new Response(JSON.stringify(body), {
+              status: 404,
+              headers: { 'Content-Type': 'application/json' },
+            }),
+          { preconnect: () => {} },
+        ),
+      });
+      const view = render(<SavedView {...first} callTool={noTools} client={client} />);
+      expect((await screen.findByRole('alert')).textContent).toBe(
+        'The server refused to open the View.',
+      );
+      view.unmount();
+    }
+  });
+});

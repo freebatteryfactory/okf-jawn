@@ -272,6 +272,7 @@ function reason(cause: unknown, fallback: string): string {
 
 export function PresentView({ response, callTool }: PresentViewProps) {
   const [bindings, setBindings] = useState<ResolvedPresentation | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
     const load = async () => {
@@ -325,11 +326,17 @@ export function PresentView({ response, callTool }: PresentViewProps) {
           chartErrors,
         });
     };
-    void load();
+    // Each binding and chart is caught on its own; this is for what nobody foresaw, so that the
+    // View never waits on "Resolving…" forever.
+    load().catch((cause) => {
+      if (active) setFailure(reason(cause, 'The presentation could not be resolved.'));
+    });
     return () => {
       active = false;
     };
   }, [response, callTool]);
+  if (failure !== null) return <p role="alert">{failure}</p>;
+  if (failure !== null) return <p role="alert">{failure}</p>;
   if (!bindings) return <p role="status">Resolving the presentation's exact source references…</p>;
   const view = response.view;
   if (view.grammar === 'json_render') {

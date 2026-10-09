@@ -917,3 +917,29 @@ describe('PresentView chart specification validation', () => {
     expect(called).toEqual(['show', 'read_object']);
   });
 });
+
+describe('PresentView unexpected failure', () => {
+  it('shows an alert instead of resolving forever when something outside a binding throws', async () => {
+    const response = {
+      view: {
+        schema_version: 1,
+        title: 'Board',
+        description: 'd',
+        mode: 'pinned',
+        grammar: 'json_render',
+        bindings: [],
+        spec: { root: 'root', elements: { root: { type: 'Stack', props: {}, children: [] } } },
+      },
+      get resolved_bindings(): never {
+        throw new Error('the response could not be walked');
+      },
+      charts: [],
+      as_of: '2026-10-08T14:03:07.250Z',
+      warnings: [],
+      receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    } as unknown as z.infer<typeof zPresentResponse>;
+    render(<PresentView response={response} callTool={async () => ({})} />);
+    expect((await screen.findByRole('alert')).textContent).toBe('the response could not be walked');
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+});
