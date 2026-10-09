@@ -7,20 +7,22 @@
  * real render of that data produces: a row's cells, a chart mark per row, the source's words.
  */
 
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import type { TopLevelSpec } from 'vega-lite';
 import { describe, expect, it } from 'vitest';
-import metricsDatasetFixture from '../../../tests/fixtures/views/present-metrics-dataset.json';
+import metricsDatasetFixture from '../../../tests/fixtures/views/present-metrics.dataset.json';
 import presentResponseFixture from '../../../tests/fixtures/views/present-response.json';
 import sourceReadItemFixture from '../../../tests/fixtures/views/source-read-item.json';
 import viewDocumentFixture from '../../../tests/fixtures/views/view-document-six-component.json';
 import {
+  zDataset,
   zPresentResponse,
   zReadItemResponse,
   zViewDocument,
 } from '../../src/api/generated/zod.gen';
 import { BindingsContext, type ResolvedPresentation } from '../../src/features/views/Bindings';
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
+import { datasetRecords, PresentView, parseDataset } from '../../src/features/views/PresentView';
 
 const emptyBindings: ResolvedPresentation = {
   charts: new Map(),
@@ -123,10 +125,12 @@ describe('ViewDocument json-render round-trip', { timeout: TEST_TIMEOUT_MS }, ()
     const document = zViewDocument.parse(viewDocumentFixture);
     const source = zReadItemResponse.parse(sourceReadItemFixture);
     const resolved = zPresentResponse.parse(presentResponseFixture).resolved_bindings;
-    const rows = metricsDatasetFixture;
+    const dataset = zDataset.parse(metricsDatasetFixture);
+    const rows = datasetRecords(dataset);
     // The fixtures are the ones the view names: its two bindings, its chart, and the dataset behind both.
     expect(resolved.map((binding) => binding.name)).toEqual(['venue', 'metrics']);
     expect(Object.keys(document.charts ?? {})).toEqual(['metrics_chart']);
+    expect(dataset.rows).toHaveLength(5);
     expect(rows).toHaveLength(5);
     const presentation: ResolvedPresentation = {
       charts: new Map([['metrics_chart', document.charts?.metrics_chart as TopLevelSpec]]),
@@ -197,5 +201,150 @@ describe('ViewDocument json-render round-trip', { timeout: TEST_TIMEOUT_MS }, ()
     // Nothing is unavailable and nothing is unresolved: every one of the six drew its data.
     expect(screen.queryByRole('alert')).toBeNull();
     expect(container.textContent).not.toMatch(/unavailable|Unresolved/);
+  });
+});
+
+describe('the Dataset the views read', () => {
+  it("is the converter's typed table, never a bare array of records", () => {
+    expect(zDataset.safeParse(metricsDatasetFixture).success).toBe(true);
+    const bare = [{ category: 'Ingested', value: 412 }];
+    expect(zDataset.safeParse(bare).success).toBe(false);
+  });
+
+  it('turns rows into records by column name and refuses a row of the wrong width', () => {
+    const dataset = zDataset.parse(metricsDatasetFixture);
+    expect(datasetRecords(dataset).at(0)).toEqual({ category: 'Ingested', value: 412 });
+    const ragged = { ...dataset, rows: [['Ingested']] };
+    expect(() => datasetRecords(ragged)).toThrow(/row 0 has 1 values for 2 columns/);
+  });
+
+  it("shows the chart's own alert when its binding has no dataset", async () => {
+    const response = zPresentResponse.parse(presentResponseFixture);
+    const binding = response.resolved_bindings.find((entry) => entry.name === 'metrics');
+    expect(binding).toBeTruthy();
+    const { materialized: _dropped, ...unmaterialized } = binding as NonNullable<typeof binding>;
+    const document = zViewDocument.parse(viewDocumentFixture);
+    const message = "The source's shown text is not the converter's, so no dataset can be read.";
+    const refused = zPresentResponse.parse({
+      ...presentResponseFixture,
+      resolved_bindings: [unmaterialized],
+      view: { ...document, grammar: 'vega_lite', spec: document.charts?.metrics_chart },
+      charts: [
+        {
+          chart: { kind: 'spec' },
+          status: {
+            status: 'failed',
+            reason: 'dataset_unavailable',
+            binding: 'metrics',
+            message,
+          },
+        },
+      ],
+    });
+    const callTool = async () => ({
+      structuredContent: zReadItemResponse.parse(sourceReadItemFixture),
+    });
+    render(<PresentView response={refused} callTool={callTool} />);
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(message));
+  });
+});
+
+/** PresentView resolving one dataset whose bytes are exactly `payload`, as the host serves them. */
+async function presentServing(payload: unknown) {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+  const fixture = zPresentResponse.parse(presentResponseFixture);
+  const metrics = fixture.resolved_bindings.find((entry) => entry.name === 'metrics');
+  const response = zPresentResponse.parse({
+    ...presentResponseFixture,
+    resolved_bindings: [{ ...metrics, materialized: digest }],
+  });
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const callTool = async (name: string) =>
+    name === 'show'
+      ? { structuredContent: zReadItemResponse.parse(sourceReadItemFixture) }
+      : {
+          structuredContent: {
+            data_base64: btoa(binary),
+            has_more: false,
+            media_type: 'application/json',
+            offset: '0',
+            sha256: digest,
+            total_size: String(bytes.byteLength),
+          },
+        };
+  return render(<PresentView response={response} callTool={callTool} />);
+}
+
+describe("PresentView refuses a dataset that is not the converter's typed table", () => {
+  const good = JSON.parse(JSON.stringify(metricsDatasetFixture)) as Record<string, unknown> & {
+    columns: unknown[];
+    rows: unknown[][];
+  };
+  const refusals: Array<[string, unknown, RegExp]> = [
+    ['a missing columns', { ...good, columns: undefined }, /malformed at columns/],
+    [
+      'a wrong column kind',
+      { ...good, columns: [{ name: 'category', kind: 'text' }, good.columns[1]] },
+      /malformed at columns.0.kind/,
+    ],
+    ['a row of the wrong width', { ...good, rows: [['Ingested']] }, /row 0 has 1 values for 2/],
+    ['a bare records array', [{ category: 'Ingested', value: 412 }], /malformed/],
+    [
+      'text supplied by an agent',
+      { ...good, text_origin: 'supplied_by_agent' },
+      /not the converter's .text_origin is supplied_by_agent./,
+    ],
+    [
+      'text with no origin',
+      { ...good, text_origin: 'none' },
+      /not the converter's .text_origin is none./,
+    ],
+    [
+      'two columns of one name',
+      { ...good, columns: [good.columns[0], good.columns[0]], rows: [['a', 'b']] },
+      /two columns named "category"/,
+    ],
+  ];
+  for (const [name, payload, message] of refusals) {
+    it(`shows the chart's own alert for ${name}`, async () => {
+      await presentServing(payload);
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent).toMatch(message);
+      expect(document.querySelector('svg')).toBeNull();
+    });
+  }
+
+  it('keeps a null cell null in the table and the chart data, never 0', async () => {
+    const withNull = {
+      ...good,
+      rows: [
+        ['Ingested', null],
+        ['Converted', 397],
+      ],
+    };
+    const records = parseDataset(JSON.stringify(withNull));
+    expect(records.at(0)).toEqual({ category: 'Ingested', value: null });
+    const { container } = render(
+      <BindingsContext.Provider
+        value={{
+          charts: new Map(),
+          sources: new Map(),
+          bindings: new Map(),
+          tables: new Map([['metrics', records]]),
+        }}
+      >
+        <Layout spec={zViewDocument.parse(viewDocumentFixture).spec} />
+      </BindingsContext.Provider>,
+    );
+    const cells = Array.from(
+      container.querySelectorAll('tbody tr:first-child td'),
+      (n) => n.textContent,
+    );
+    expect(cells).not.toContain('0');
+    expect(cells.at(0)).toBe('Ingested');
   });
 });
