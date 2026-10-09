@@ -196,8 +196,9 @@ async fn a_cursor_continues_only_its_own_read() -> TestResult {
     let first = read_as_alice(&world, request.clone()).await?;
     let cursor = some(first.next_cursor, "a continuation")?;
     let mut other = request.clone();
+    // A longer selection, so only the cursor's own check can refuse it.
     other.selection = Selection::Lines {
-        range: TextRange { start: 1, end: 2 },
+        range: TextRange { start: 2, end: 40 },
     };
     other.cursor = Some(cursor.clone());
     let refused = err_of(read_as_alice(&world, other).await)?;
@@ -375,6 +376,38 @@ async fn the_pages_view_returns_the_selected_page_renders_within_max_images() ->
     let pictures: Vec<&Digest> = multimodal.media.iter().map(|media| &media.object).collect();
     assert_eq!(pictures, vec![&digest('7')?]);
     assert_eq!(multimodal.markdown, CARD_BODY);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_continued_multimodal_read_returns_its_images_once() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    let mut body = CARD_BODY.to_owned();
+    for line in 1..=40 {
+        writeln!(body, "| Q{line} | {line}00.0 |")?;
+    }
+    world.versions.put_document(
+        &at,
+        source_card(
+            CARD,
+            &at,
+            "sources/report-pdf.md",
+            &body,
+            converted(&digest('b')?),
+        )?,
+    )?;
+    world.blobs.put_object(
+        digest('b')?,
+        serde_json::to_vec(&record(vec![image('7', AssetRole::Picture, 2)?])?)?,
+    )?;
+    let mut request = read(CARD, ReadView::Multimodal, Selection::All)?;
+    request.max_bytes = 256;
+    let first = read_as_alice(&world, request.clone()).await?;
+    assert_eq!(first.media.len(), 1);
+    request.cursor = Some(some(first.next_cursor, "a continuation")?);
+    let next = read_as_alice(&world, request).await?;
+    assert_eq!(next.media.len(), 0);
     Ok(())
 }
 

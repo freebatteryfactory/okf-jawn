@@ -164,15 +164,20 @@ pub(super) async fn read_item(
     };
     let source = citation(&scope, &revision, &material, &request.view, cited, &located);
     let scope_pages = page_scope(&material, &request.selection, span.as_ref());
-    let media = media(
-        &scope,
-        &revision,
-        &material,
-        &request.view,
-        &scope_pages,
-        request.max_images,
-        &mut warnings,
-    );
+    // Images go with the first block of a read; a continuation returns only more text.
+    let media = if offset == 0 {
+        media(
+            &scope,
+            &revision,
+            &material,
+            &request.view,
+            &scope_pages,
+            request.max_images,
+            &mut warnings,
+        )
+    } else {
+        Vec::new()
+    };
     let next_cursor = block
         .next
         .map(|offset| {
