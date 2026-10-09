@@ -204,7 +204,8 @@ pub enum TreeEdit {
     },
     /// Create an import source card, or replace the card that has the same identity.
     ///
-    /// Corrections recorded with `CorrectDigest` are kept when a card is replaced.
+    /// Corrections recorded with `CorrectDigest` are kept when a card is replaced, and so is
+    /// the stored `archived` flag of its application header (`SourceCard::header`).
     WriteSourceCard(Box<SourceCard>),
     /// Write the accepted agent-supplied text of a source beside its card, with the proposal
     /// and the supplier it came from. The promotion commit's committer is the approver.
@@ -672,6 +673,19 @@ pub trait Backups: Send + Sync {
         tenant: &'a TenantId,
         mutation_id: MutationId,
     ) -> PortFuture<'a, ObjectInfo>;
+    /// Open a selected byte interval of an installation archive in the tenant's store, for the
+    /// `download_tenant_artifact` transport; `NotFound` when the tenant holds no such object.
+    ///
+    /// `BlobStore` is workspace-scoped and a tenant may have no workspace, so the store that
+    /// writes installation archives also reads them back. Like `BlobStore::open`, a digest
+    /// authorizes nothing: the caller has already authorized the artifact record.
+    fn open_installation_archive<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        digest: &'a Digest,
+        offset: u64,
+        length: u64,
+    ) -> PortFuture<'a, ObjectRead>;
     /// Import a workspace archive into `scope`. `editors` are the subjects with `write` on
     /// the target, computed by core from `AccessControl`: a draft whose editor is not among them
     /// stays in the archive and is counted as unassigned. Idempotent on the mutation id.
@@ -755,13 +769,16 @@ impl From<PageRequest> for Page {
 }
 
 impl SourceCard {
-    /// The application header the card is written with: its item id, the original's first
-    /// observed name and digest, and the extraction it shows. A new card is not archived.
+    /// The application header the card is written with: its item id, `archived`, the
+    /// original's first observed name and digest, and the extraction it shows.
+    ///
+    /// `archived` is the flag the item has now: `false` for a new card, and the stored flag
+    /// when a redigest replaces a card, so replacing an archived source never unarchives it.
     #[must_use]
-    pub fn header(&self) -> ApplicationHeader {
+    pub fn header(&self, archived: bool) -> ApplicationHeader {
         ApplicationHeader {
             item_id: self.item_id,
-            archived: false,
+            archived,
             source: Some(SourceHeader {
                 original_name: self
                     .appearance

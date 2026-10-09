@@ -382,6 +382,37 @@ fn a_reversed_cell_selection_reads_no_table() -> TestResult {
 }
 
 #[test]
+fn a_cell_selection_past_the_table_grid_reads_no_table() -> TestResult {
+    // The locator claims rows 1 to 100, but the table's grid has 3 rows: row 50 does not exist,
+    // so selecting it must not read an invented empty row.
+    let mut record = record()?;
+    let table = record.tables.first_mut().ok_or("the fixture has a table")?;
+    table.location = SourceLocation::Direct {
+        locator: SourceLocator::Cells {
+            range: CellRange {
+                sheet: "Q1".to_owned(),
+                row_start: 1,
+                row_end: 100,
+                column_start: 1,
+                column_end: 3,
+            },
+        },
+    };
+    let past = binding(Selection::Cells {
+        range: CellRange {
+            sheet: "Q1".to_owned(),
+            row_start: 1,
+            row_end: 50,
+            column_start: 1,
+            column_end: 3,
+        },
+    })?;
+    let failure = err_of(materialize(&past, &record, TextOrigin::Converter, &[]))?;
+    assert_eq!(failure.reason, ChartFailure::DatasetUnavailable);
+    Ok(())
+}
+
+#[test]
 fn a_dataset_digest_does_not_depend_on_filled_locations() -> TestResult {
     let record = record()?;
     let bare = binding(Selection::All)?;

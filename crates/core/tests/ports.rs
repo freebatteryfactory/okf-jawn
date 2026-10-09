@@ -739,6 +739,7 @@ async fn search_index_calls(
 async fn artifact_calls(
     records: &dyn RecordStore,
     blobs: &dyn BlobStore,
+    backups: &dyn Backups,
     claimed: &ClaimedJob,
     stored: ObjectInfo,
 ) -> Result<ObjectInfo, ApiError> {
@@ -766,13 +767,20 @@ async fn artifact_calls(
         })
         .await?;
     let found = records.get_artifact(&claimed.scope, record.id).await?;
-    // A workspace artifact's bytes; no port opens a tenant artifact's bytes yet.
-    let JobScope::Workspace(workspace) = &found.scope else {
-        return Err(ApiError::new(ErrorCode::NotFound, "no tenant blob reader"));
+    // A workspace artifact's bytes come from the blob store, an installation backup's from the
+    // tenant's archive store.
+    let read = match &found.scope {
+        JobScope::Workspace(workspace) => {
+            blobs
+                .open(workspace, &found.object.digest, 0, found.object.size)
+                .await?
+        }
+        JobScope::Tenant(tenant) => {
+            backups
+                .open_installation_archive(tenant, &found.object.digest, 0, found.object.size)
+                .await?
+        }
     };
-    let read = blobs
-        .open(workspace, &found.object.digest, 0, found.object.size)
-        .await?;
     Ok(read.object)
 }
 

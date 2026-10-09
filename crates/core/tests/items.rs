@@ -61,7 +61,7 @@ fn card() -> Result<SourceCard, Box<dyn std::error::Error>> {
 }
 
 fn stored_properties() -> Result<BTreeMap<String, serde_json::Value>, Box<dyn std::error::Error>> {
-    let header = card()?.header().to_property()?;
+    let header = card()?.header(false).to_property()?;
     Ok(BTreeMap::from([
         (APP_HEADER_KEY.to_owned(), header),
         ("status".to_owned(), json!("stable")),
@@ -140,9 +140,13 @@ fn a_write_that_changes_the_application_header_is_refused() -> TestResult {
 #[test]
 fn a_card_header_reads_back_from_the_file_properties() -> TestResult {
     let card = card()?;
-    let header = card.header();
+    let header = card.header(false);
     assert_eq!(header.item_id, card.item_id);
     assert!(!header.archived);
+    // A redigest replacing an archived source keeps it archived.
+    let replaced = card.header(true);
+    assert!(replaced.archived);
+    assert_eq!(replaced.to_property()?.get("archived"), Some(&json!(true)));
     let source = header.source.clone().ok_or("a card names its original")?;
     assert_eq!(source.original_name, "report.pdf");
     assert_eq!(source.digest, card.appearance.object);

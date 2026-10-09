@@ -292,12 +292,15 @@ fn cell_window(table: &ConvertedTable, range: &CellRange) -> Option<CellWindow> 
     if !inside {
         return None;
     }
-    Some(CellWindow {
+    let window = CellWindow {
         first_row: range.row_start.checked_sub(located.row_start)?,
         last_row: range.row_end.checked_sub(located.row_start)?,
         first_column: range.column_start.checked_sub(located.column_start)?,
         last_column: range.column_end.checked_sub(located.column_start)?,
-    })
+    };
+    // The locator may claim more cells than the table's grid holds; a window past the grid
+    // would read rows and columns that do not exist.
+    (window.last_row < table.num_rows && window.last_column < table.num_cols).then_some(window)
 }
 
 /// The rows and columns of `table` to read: all of it, or the selected window.
