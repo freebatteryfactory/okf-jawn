@@ -1,5 +1,5 @@
 {
-  "git_sha": "c82f9cb17bef1c6e56293ab2809e14081769905e",
+  "git_sha": "3a6606428dc6821d1d427a6b0c97c277e3d4ef71",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-09T12:07:25.465Z",
+  "produced_at": "2026-10-09T12:44:34.295Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-09T12:10:48.044Z",
+  "finished_at": "2026-10-09T12:47:14.969Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -286,7 +286,7 @@
   "harness_binary": {
     "path": "<abs>/release/okf-qualify-mcp-apps.exe",
     "bytes": 5278208,
-    "sha256": "89670c510ccd8f514f3ff964f9430570da191be050b05dfb37db1d5efd58f26a",
+    "sha256": "ef0a7373eb977a673ba86d314258869158401f01b574c9dd88da508809130e68",
     "args": [
       "--http",
       "127.0.0.1:18765"
@@ -540,7 +540,7 @@
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
-      "commit_resolved_at": "2026-10-09T12:09:30.802Z",
+      "commit_resolved_at": "2026-10-09T12:46:43.689Z",
       "files_verified": 14,
       "files_expected": 14,
       "package": {
