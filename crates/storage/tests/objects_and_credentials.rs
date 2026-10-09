@@ -10,7 +10,7 @@ use okf_jawn_core::uploads::{NewUpload, UploadStore};
 use okf_jawn_storage::Storage;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use check::{TestResult, err_of, some};
 
@@ -111,6 +111,109 @@ async fn a_blob_past_its_limit_or_with_another_digest_is_not_retained() -> TestR
         )?;
         assert_eq!(error.code, ErrorCode::NotFound, "nothing was retained");
     }
+    Ok(())
+}
+
+fn announced(size: u64) -> NewUpload {
+    NewUpload {
+        filename: "notes.txt".to_owned(),
+        relative_path: String::new(),
+        expected_size: size,
+        expected_sha256: None,
+        supplied_by: Provenance {
+            subject: "owner".to_owned(),
+            route: AccessRoute::LocalOwner,
+            client_id: None,
+        },
+    }
+}
+
+#[tokio::test]
+async fn one_transfer_writes_an_upload_at_a_time() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let slot = uploads.create(&local, uuid!(5)?, announced(8)).await?;
+    let (mut sender, receiver) = tokio::io::duplex(64);
+    let first = {
+        let uploads = storage.uploads();
+        let local = local.clone();
+        tokio::spawn(async move {
+            uploads
+                .put_content(&local, slot.id, Box::pin(receiver), 1024)
+                .await
+        })
+    };
+    sender.write_all(b"abcd").await?;
+    // The first transfer is under way once its private file holds the first bytes.
+    let incoming = directory
+        .path()
+        .join("uploads")
+        .join(format!("{}.incoming", slot.id.0));
+    let mut waited = 0_u32;
+    while std::fs::metadata(&incoming).map_or(0, |metadata| metadata.len()) < 4 {
+        assert!(waited < 500, "the first transfer never started");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        waited = waited.saturating_add(1);
+    }
+    let second = err_of(
+        uploads
+            .put_content(&local, slot.id, body(b"WXYZ"), 1024)
+            .await,
+    )?;
+    assert_eq!(second.code, ErrorCode::Conflict, "{}", second.message);
+    let finishing = err_of(
+        uploads
+            .complete(&local, slot.id, sha256(b"abcdefgh")?)
+            .await,
+    )?;
+    assert_eq!(finishing.code, ErrorCode::Conflict, "{}", finishing.message);
+    sender.write_all(b"efgh").await?;
+    drop(sender);
+    let written = first.await??;
+    assert_eq!(written.received_bytes, 8);
+    let complete = uploads
+        .complete(&local, slot.id, sha256(b"abcdefgh")?)
+        .await?;
+    assert_eq!(
+        some(complete.object, "the retained object")?.digest,
+        sha256(b"abcdefgh")?,
+        "the bytes of one transfer, never interleaved with another"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_resumed_upload_counts_the_bytes_its_part_file_holds() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let slot = uploads.create(&local, uuid!(5)?, announced(9)).await?;
+    uploads
+        .put_content(&local, slot.id, body(b"abc"), 1024)
+        .await?;
+    // A crash after the second chunk reached the part file and before its count was recorded.
+    let part = directory
+        .path()
+        .join("uploads")
+        .join(format!("{}.part", slot.id.0));
+    let mut file = std::fs::OpenOptions::new().append(true).open(&part)?;
+    std::io::Write::write_all(&mut file, b"def")?;
+    drop(file);
+    let resumed = uploads.get(&local, slot.id).await?;
+    assert_eq!(
+        resumed.received_bytes, 6,
+        "the record is reconciled from the part file"
+    );
+    uploads
+        .put_content(&local, slot.id, body(b"ghi"), 1024)
+        .await?;
+    let complete = uploads
+        .complete(&local, slot.id, sha256(b"abcdefghi")?)
+        .await?;
+    assert_eq!(some(complete.object, "the retained object")?.size, 9);
     Ok(())
 }
 

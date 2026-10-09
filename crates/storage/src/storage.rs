@@ -29,7 +29,7 @@ use crate::records::SqliteRecords;
 use crate::sandbox::SqliteSandbox;
 use crate::schema;
 use crate::search::SqliteSearch;
-use crate::uploads::SqliteUploads;
+use crate::uploads::{SqliteUploads, UploadWriters};
 
 /// An opened data directory; every store it hands out shares its lock.
 #[derive(Debug, Clone)]
@@ -39,6 +39,8 @@ pub struct Storage {
     pub(crate) index: Db,
     pub(crate) blobs: LocalBlobs,
     pub(crate) repositories: Repositories,
+    /// Uploads a transfer is writing now, shared by every upload store handed out.
+    pub(crate) upload_writers: UploadWriters,
 }
 
 impl Storage {
@@ -80,6 +82,7 @@ impl Storage {
             index: Db::new(index.connection, Arc::clone(&data)),
             blobs: LocalBlobs::open(Arc::clone(&data))?,
             repositories: Repositories::new(Arc::clone(&data)),
+            upload_writers: UploadWriters::default(),
             data,
         })
     }
@@ -133,6 +136,7 @@ impl Storage {
             self.records.clone(),
             self.blobs.clone(),
             self.data.root().join("uploads"),
+            self.upload_writers.clone(),
         )
     }
 

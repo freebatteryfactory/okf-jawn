@@ -5,9 +5,17 @@
 //! pass the limit or the announced size appends nothing. `complete` retains the bytes in the
 //! blob store only when their length and SHA-256 match; `consume` marks a complete upload as the
 //! input of exactly one job.
+//!
+//! One transfer writes an upload at a time: a concurrent `put_content` or `complete` on the same
+//! upload is refused as `Conflict`, never interleaved into the same `.incoming` or `.part` file.
+//! `received_bytes` is reconciled from the `.part` file's length whenever the upload is read for
+//! a resume (`get`, `put_content`, `complete`), so a crash between the append and the record
+//! update never makes a resent chunk duplicate bytes.
 
+use std::collections::HashSet;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{Digest, JobId, MutationId, UploadId};
@@ -28,15 +36,106 @@ pub struct SqliteUploads {
     db: Db,
     blobs: LocalBlobs,
     directory: PathBuf,
+    writers: UploadWriters,
+}
+
+/// The uploads a transfer is writing now; shared by every `SqliteUploads` of one `Storage`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UploadWriters {
+    busy: Arc<Mutex<HashSet<UploadId>>>,
+}
+
+/// One transfer's claim on an upload, released when dropped.
+struct Writing {
+    writers: UploadWriters,
+    upload: UploadId,
+}
+
+impl UploadWriters {
+    /// Claim `upload` for one transfer; a second concurrent transfer is refused, never
+    /// interleaved into the same files.
+    fn claim(&self, upload: UploadId) -> Result<Writing, ApiError> {
+        let mut busy = self.busy.lock().map_err(|_| {
+            ApiError::new(ErrorCode::Internal, "the upload writer table was poisoned")
+        })?;
+        if !busy.insert(upload) {
+            return Err(conflict(
+                "another transfer to this upload is in progress; resume it after that one ends",
+            ));
+        }
+        Ok(Writing {
+            writers: self.clone(),
+            upload,
+        })
+    }
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        // A poisoned table is already reported to every later claim.
+        if let Ok(mut busy) = self.writers.busy.lock() {
+            busy.remove(&self.upload);
+        }
+    }
 }
 
 impl SqliteUploads {
-    pub(crate) const fn new(db: Db, blobs: LocalBlobs, directory: PathBuf) -> Self {
+    pub(crate) const fn new(
+        db: Db,
+        blobs: LocalBlobs,
+        directory: PathBuf,
+        writers: UploadWriters,
+    ) -> Self {
         Self {
             db,
             blobs,
             directory,
+            writers,
         }
+    }
+
+    /// The bytes durably in the `.part` file of an unfinished upload.
+    fn part_length(&self, upload: UploadId) -> Result<u64, ApiError> {
+        let part = self.part(upload);
+        match std::fs::metadata(&part) {
+            Ok(metadata) => Ok(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(io_error("inspect", &part, &error)),
+        }
+    }
+
+    /// The upload with `received_bytes` reconciled from its `.part` file.
+    ///
+    /// The `.part` file is synced before `received_bytes` is updated, so after a crash between
+    /// the two the file holds more than the record says; those bytes were fully received and
+    /// checked against the limit, so the record is brought up to the file. A resuming client
+    /// then sends from the true offset and nothing is duplicated.
+    async fn reconciled(
+        &self,
+        scope: &StorageScope,
+        upload: UploadId,
+    ) -> Result<UploadRecord, ApiError> {
+        let record = self.record(scope, upload).await?;
+        if record.object.is_some() {
+            return Ok(record);
+        }
+        let durable = self.part_length(upload)?;
+        if durable == record.received_bytes {
+            return Ok(record);
+        }
+        let (tenant, workspace) = scope_key(scope);
+        self.db
+            .transaction(move |transaction| {
+                transaction
+                    .execute(
+                        "UPDATE uploads SET received_bytes = ?1
+                         WHERE upload_id = ?2 AND object_digest IS NULL",
+                        params![to_i64(durable)?, upload.0.to_string()],
+                    )
+                    .map_err(|error| sql(&error))?;
+                read(transaction, &tenant, &workspace, upload)?.ok_or_else(|| not_found("upload"))
+            })
+            .await
     }
 
     fn part(&self, upload: UploadId) -> PathBuf {
@@ -63,7 +162,8 @@ impl SqliteUploads {
         mut body: ByteReader,
         limit: u64,
     ) -> Result<UploadRecord, ApiError> {
-        let record = self.record(scope, upload).await?;
+        let _writing = self.writers.claim(upload)?;
+        let record = self.reconciled(scope, upload).await?;
         if record.object.is_some() {
             return Err(conflict("this upload is already complete"));
         }
@@ -120,7 +220,8 @@ impl SqliteUploads {
         upload: UploadId,
         sha256: Digest,
     ) -> Result<UploadRecord, ApiError> {
-        let record = self.record(scope, upload).await?;
+        let _writing = self.writers.claim(upload)?;
+        let record = self.reconciled(scope, upload).await?;
         if let Some(object) = &record.object {
             if object.digest == sha256 {
                 return Ok(record);
@@ -228,7 +329,7 @@ impl UploadStore for SqliteUploads {
         scope: &'a StorageScope,
         upload: UploadId,
     ) -> PortFuture<'a, UploadRecord> {
-        Box::pin(self.record(scope, upload))
+        Box::pin(self.reconciled(scope, upload))
     }
 
     fn put_content<'a>(
