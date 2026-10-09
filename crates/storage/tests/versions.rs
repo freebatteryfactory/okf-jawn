@@ -510,6 +510,100 @@ async fn a_commit_is_staged_checked_and_refused_whole() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_reserved_name_in_any_letter_case_is_refused_naming_the_path() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let reserved = [
+        "notes/INDEX.md",
+        "notes/index.MD",
+        ".OKF/x.md",
+        "Log.md",
+        "index.md",
+        "deep/er/LOG.md",
+    ];
+    for (mutation, at) in (30..).zip(reserved) {
+        let error = err_of(
+            versions
+                .commit(
+                    &scope,
+                    changes(mutation, &initial, vec![note(uuid!(10)?, at, "Mine.")?])?,
+                    Arc::new(Counting::default()),
+                )
+                .await,
+        )?;
+        assert_eq!(
+            error.code,
+            ErrorCode::InvalidInput,
+            "{at}: {}",
+            error.message
+        );
+        assert_eq!(error.field.as_deref(), Some("/path"), "{at}");
+        assert!(error.message.contains(at), "{at}: {}", error.message);
+        assert_eq!(
+            versions.head(&scope).await?,
+            initial,
+            "{at}: nothing committed"
+        );
+    }
+    let created = versions
+        .commit(
+            &scope,
+            changes(
+                40,
+                &initial,
+                vec![note(uuid!(10)?, "notes/plan.md", "Mine.")?],
+            )?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let moved = err_of(
+        versions
+            .commit(
+                &scope,
+                changes(
+                    41,
+                    &created,
+                    vec![TreeEdit::MoveItem {
+                        item_id: uuid!(10)?,
+                        destination: path("notes/Index.md")?,
+                    }],
+                )?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(moved.code, ErrorCode::InvalidInput, "{}", moved.message);
+    assert_eq!(moved.field.as_deref(), Some("/destination"));
+    assert!(
+        moved.message.contains("notes/Index.md"),
+        "{}",
+        moved.message
+    );
+    let folder = err_of(
+        versions
+            .commit(
+                &scope,
+                changes(
+                    42,
+                    &created,
+                    vec![TreeEdit::CreateFolder {
+                        folder: path(".Okf/inner")?,
+                    }],
+                )?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(folder.code, ErrorCode::InvalidInput, "{}", folder.message);
+    assert_eq!(versions.head(&scope).await?, created);
+    let kept = versions.show(&scope, &created, uuid!(10)?).await?;
+    assert_eq!(kept.body, "Mine.", "the item's content is intact");
+    Ok(())
+}
+
+#[tokio::test]
 async fn items_are_shown_listed_moved_with_their_links_and_archived() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (storage, scope, initial) = workspace(directory.path()).await?;

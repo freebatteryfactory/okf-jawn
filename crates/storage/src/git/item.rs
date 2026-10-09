@@ -155,15 +155,33 @@ pub(crate) fn status_of(status: &okf_core::Status) -> ItemStatus {
     }
 }
 
-/// Whether a tree path is an item file: Markdown, outside `.okf/`, and not a folder index or
-/// the change log.
+/// Whether a tree path is an item file: Markdown and not reserved (`is_reserved`).
 pub(crate) fn is_item_path(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or_default();
     std::path::Path::new(path)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-        && !path.starts_with(".okf/")
-        && !okf_core::RESERVED_FILENAMES.contains(&name)
+        && !is_reserved(path)
+}
+
+/// Whether a tree path is one the server keeps for itself: anything under `.okf/`, or a file
+/// named `index.md` or `log.md` at any depth. Compared by collision key (NFC, then lower case),
+/// on every platform: on a case-insensitive filesystem `notes/INDEX.md` is the folder index
+/// that every commit regenerates, so an item there would be overwritten.
+pub(crate) fn is_reserved(path: &str) -> bool {
+    let key = collision_key(path);
+    let first = key.split('/').next().unwrap_or_default();
+    let name = key.rsplit('/').next().unwrap_or_default();
+    first == APP_DIR
+        || okf_core::RESERVED_FILENAMES
+            .iter()
+            .any(|reserved| collision_key(reserved) == name)
+}
+
+/// The key two paths collide on (`WorkspacePath::collision_key`); a path that is not a valid
+/// workspace path is lower-cased as it is.
+pub(crate) fn collision_key(path: &str) -> String {
+    WorkspacePath::try_from(path.to_owned())
+        .map_or_else(|_| path.to_lowercase(), |valid| valid.collision_key())
 }
 
 fn properties_of(document: &Document) -> BTreeMap<String, Json> {
@@ -247,16 +265,31 @@ pub(crate) fn yaml_to_json(value: &Yaml) -> Json {
     }
 }
 
-/// An item path that is not an item path for the caller (inside `.okf/`, or not Markdown).
-pub(crate) fn check_item_path(path: &WorkspacePath) -> Result<(), ApiError> {
+/// Refuse, naming it, a path that cannot hold an item: not Markdown, or reserved in any letter
+/// case (`is_reserved`). `field` is the request field that named the path.
+pub(crate) fn check_item_path(path: &WorkspacePath, field: &str) -> Result<(), ApiError> {
+    if is_reserved(path.as_str()) {
+        return Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            format!(
+                "{} is reserved: .okf/, index.md and log.md (in any letter case) are kept by \
+                 the server and cannot hold an item",
+                path.as_str()
+            ),
+        )
+        .with_field(field));
+    }
     if is_item_path(path.as_str()) {
         Ok(())
     } else {
         Err(ApiError::new(
             ErrorCode::InvalidInput,
-            "an item path is a Markdown file outside .okf/ and is not index.md or log.md",
+            format!(
+                "{} is not a Markdown file, so it cannot hold an item",
+                path.as_str()
+            ),
         )
-        .with_field("/path"))
+        .with_field(field))
     }
 }
 

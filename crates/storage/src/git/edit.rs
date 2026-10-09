@@ -3,12 +3,14 @@
 //! Edits run in order on the staging directory. A caller edit may not change an application
 //! header (`items::refuse_header_change`, `items::refuse_header_in_type`); the server's own
 //! header updates (`SetStatus`, `WriteSourceCard`, `CorrectDigest`, `SupplyExtraction`) may.
-//! Moves rewrite the links that point at the item (`okf_core::move_concept`). After the
-//! edits, no two items may share a path collision key, the folder indexes are regenerated and
-//! the change is appended to `log.md`. Conformance is the `CandidateCheck`'s decision, not this
+//! Moves rewrite the links that point at the item (`okf_core::move_concept`). An item, a move
+//! or a folder may not land on a reserved name (`.okf/`, `index.md`, `log.md`) in any letter
+//! case: it is refused naming the path before anything is written. After the edits, no two
+//! files may share a path collision key, the folder indexes are regenerated and the change is
+//! appended to `log.md`. Conformance is the `CandidateCheck`'s decision, not this
 //! module's.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use git2::Repository;
@@ -22,7 +24,7 @@ use okf_jawn_core::storage::{SourceCard, TreeEdit};
 
 use super::item::{
     APP_DIR, ItemFile, LOG_FILE, RULES_FILE, TYPES_FILE, bare_header, check_item_path,
-    is_item_path, new_item,
+    collision_key, is_item_path, is_reserved, new_item,
 };
 use super::repo::{commit_of, internal, materialize};
 use crate::data::io_error;
@@ -90,30 +92,41 @@ impl Staged {
         Ok(())
     }
 
-    /// Refuse two items whose paths share a collision key (Stage 1b design section 7).
+    /// Refuse two files of the staged tree whose paths share a collision key (Stage 1b design
+    /// section 7), so a tree never holds two files a case-insensitive filesystem would merge.
     pub(crate) fn refuse_collisions(&self) -> Result<(), ApiError> {
-        let mut keys = BTreeSet::new();
         for path in self.items.values() {
-            let parsed = WorkspacePath::try_from(path.clone()).map_err(|error| {
+            WorkspacePath::try_from(path.clone()).map_err(|error| {
                 ApiError::new(ErrorCode::InvalidInput, format!("{path}: {error}"))
             })?;
-            if !keys.insert(parsed.collision_key()) {
+        }
+        let mut keys = BTreeMap::new();
+        for path in files_under(&self.root, "")? {
+            if let Some(other) = keys.insert(collision_key(&path), path.clone()) {
                 return Err(ApiError::new(
                     ErrorCode::Conflict,
-                    format!("{path} collides with another item's path"),
+                    format!("{path} collides with {other}"),
                 ));
             }
         }
         Ok(())
     }
 
-    fn occupied(&self, path: &WorkspacePath) -> bool {
+    /// Whether a file or folder of the staged tree, or an item, already holds `path`'s
+    /// collision key (or a folder above it holds a file's).
+    fn occupied(&self, path: &WorkspacePath) -> Result<bool, ApiError> {
         let key = path.collision_key();
-        self.root.join(path.as_str()).exists()
-            || self.items.values().any(|existing| {
-                WorkspacePath::try_from(existing.clone())
-                    .is_ok_and(|existing| existing.collision_key() == key)
-            })
+        if self.root.join(path.as_str()).exists() {
+            return Ok(true);
+        }
+        let folder_prefix = format!("{key}/");
+        Ok(files_under(&self.root, "")?.iter().any(|existing| {
+            let existing = collision_key(existing);
+            existing == key || existing.starts_with(&folder_prefix)
+        }) || self
+            .items
+            .values()
+            .any(|existing| collision_key(existing) == key))
     }
 }
 
@@ -174,18 +187,7 @@ fn apply_one(repository: &Repository, staged: &mut Staged, edit: TreeEdit) -> Re
             staged.items.remove(&item_id);
             Ok(())
         }
-        TreeEdit::CreateFolder { folder } => {
-            let target = staged.root.join(folder.as_str());
-            if target.exists() || folder.as_str().starts_with(APP_DIR) {
-                return Err(conflict(format!("{} is already taken", folder.as_str())));
-            }
-            std::fs::create_dir_all(&target)
-                .map_err(|error| io_error("create", &target, &error))?;
-            write_text(
-                &target.join("index.md"),
-                &okf_core::index::build_index_text(&[]),
-            )
-        }
+        TreeEdit::CreateFolder { folder } => create_folder(staged, &folder),
         TreeEdit::SetType { definition } => set_type(&staged.root, definition),
         TreeEdit::SetRules { rules } => {
             let text = yaml_serde::to_string(&rules)
@@ -236,12 +238,12 @@ fn create_item(
     body: &str,
     mut properties: BTreeMap<String, serde_json::Value>,
 ) -> Result<(), ApiError> {
-    check_item_path(path)?;
+    check_item_path(path, "/path")?;
     refuse_header_change(&BTreeMap::new(), &properties, "/properties")?;
     if staged.items.contains_key(&header.item_id) {
         return Err(conflict("an item with this identity already exists"));
     }
-    if staged.occupied(path) {
+    if staged.occupied(path)? {
         return Err(conflict(format!("{} is already taken", path.as_str())));
     }
     properties.insert("type".to_owned(), serde_json::Value::String(type_name));
@@ -250,6 +252,30 @@ fn create_item(
     }
     let file = new_item(&properties, body, header)?;
     staged.write(path.as_str(), &file)
+}
+
+/// Create an empty folder with its index, refusing a reserved name in any letter case.
+fn create_folder(staged: &Staged, folder: &WorkspacePath) -> Result<(), ApiError> {
+    if is_reserved(folder.as_str()) {
+        return Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            format!(
+                "{} is reserved: .okf/, index.md and log.md (in any letter case) are kept by \
+                 the server",
+                folder.as_str()
+            ),
+        )
+        .with_field("/folder"));
+    }
+    let target = staged.root.join(folder.as_str());
+    if target.exists() || staged.occupied(folder)? {
+        return Err(conflict(format!("{} is already taken", folder.as_str())));
+    }
+    std::fs::create_dir_all(&target).map_err(|error| io_error("create", &target, &error))?;
+    write_text(
+        &target.join("index.md"),
+        &okf_core::index::build_index_text(&[]),
+    )
 }
 
 /// Keep agent-supplied text beside the card; the card shows it unless a correction is shown.
@@ -349,12 +375,12 @@ fn move_item(
     item: ItemId,
     destination: &WorkspacePath,
 ) -> Result<(), ApiError> {
-    check_item_path(destination)?;
+    check_item_path(destination, "/destination")?;
     let source = staged.path_of(item)?;
     if source == destination.as_str() {
         return Ok(());
     }
-    if staged.occupied(destination) {
+    if staged.occupied(destination)? {
         return Err(conflict(format!(
             "{} is already taken",
             destination.as_str()
@@ -429,7 +455,7 @@ fn set_type(root: &Path, definition: TypeDefinition) -> Result<(), ApiError> {
 /// Create a card, or replace the card with the same identity, keeping its archived flag and
 /// any correction recorded for the digest it now shows.
 fn write_card(staged: &mut Staged, card: &SourceCard) -> Result<(), ApiError> {
-    check_item_path(&card.path)?;
+    check_item_path(&card.path, "/path")?;
     refuse_header_change(&BTreeMap::new(), &card.properties, "/properties")?;
     let existing = staged.items.get(&card.item_id).cloned();
     let archived = match &existing {
@@ -441,7 +467,7 @@ fn write_card(staged: &mut Staged, card: &SourceCard) -> Result<(), ApiError> {
         }
         None => false,
     };
-    if staged.occupied(&card.path) {
+    if staged.occupied(&card.path)? {
         return Err(conflict(format!("{} is already taken", card.path.as_str())));
     }
     let mut header = card.header(archived)?;
