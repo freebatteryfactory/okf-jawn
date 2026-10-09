@@ -250,7 +250,7 @@ is followed by the requalification named on that line before the next merge (1.5
 | core-cli M0: any port-trait change the wave needs; the export and import rules as core functions with tests (export writes `verified` for current reviews; import reads an incoming `verified` as imported coverage; lint at import) | Wave 0 | - | none |
 | views M1: PresentView reads `Dataset` | Wave 0 | the rows file `present-metrics-dataset.json` is deleted; the Wave 0 `Dataset` file stays as the permanent fixture (see the list after this table) | MCP Apps |
 | Batch A (`lock`): ingest's memory-cap crate(s) and conversion bin target (I4), core-cli's pulldown-cmark, any storage request; plus the measurement criteria of `converter-worker-memory-ceiling` (b) in `qualification/docling` | requests in hand, ideally by the first task boundary of each lane | the `vendors.json` entries, manifests, `Cargo.lock`, `gen`, the new Docling criteria | Docling (which runs the measurement) and MCP Apps. Criteria not ready with the dependencies get a Docling-only requalification of their own; until then `window_pages = 4` |
-| storage M1: format, migrations, lock, all stores, index | core-cli M0 | - | none (no dependency carried) |
+| storage M1: format, migrations, lock, all stores, index | core-cli M0; Batch A only if storage requested a dependency | - | none (no dependency carried) |
 | ingest M1: converter, cap mechanism, handlers | core-cli M0, Batch A | - | none |
 | views M2: per-chart failure isolation, saved views | views M1 | `tests/foundation/records.test.mjs:227` and the `authored-typescript-seams` `covers` sentence (and its evidence list, if a test file changes) follow the changed `ui/tests/unit/layout.test.tsx` | MCP Apps |
 | core-cli M1: operations except present/resolve; item outlines; CLI surface and relay | core-cli M0, Batch A | - | none |
@@ -276,8 +276,9 @@ Integration-owner edits in the views M1 PR (separate commits after the merge, 1.
   `qualification/mcp-apps` is a workspace member, so premerge `test` runs these.
 - Both `materialized` digests in `tests/fixtures/views/present-response.json` (in
   `resolved_bindings` and in `view.bindings`) become the Wave 0 file's sha256.
-- `qualification/mcp-apps/lib/views.mjs:25`, `criteria.mjs` and
-  `tests/foundation/harness.test.mjs:4024` name the Wave 0 file.
+- `qualification/mcp-apps/lib/views.mjs:9` and `:25` and `tests/foundation/harness.test.mjs:4024`
+  name the Wave 0 file, and `views.mjs:217-218` (`datasetExpectation`) accepts a `Dataset` object
+  instead of refusing it.
 
 The views lane's own M1 edits include `ui/tests/unit/view-document-roundtrip.test.tsx:13` and
 `:126`. Line 13 imports the rows file, and line 126 asserts `toHaveLength(5)`. Both move to the
