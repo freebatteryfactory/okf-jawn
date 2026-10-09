@@ -4,11 +4,11 @@
 //! touches jobs, reviews, or receipts, which live only in `RecordStore` and cannot be rebuilt.
 //! Every query names exactly one resolved `Revision`; drafts are never indexed.
 
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::extraction::ExtractionFilter;
 use okf_jawn_contract::identity::{ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::search::{
-    GetGraphResponse, GetLinksResponse, LinkDirection, SearchResponse,
+    GetGraphResponse, GetLinksResponse, LinkDirection, SearchResponse, require_text_or_filter,
 };
 
 use crate::ports::PortFuture;
@@ -93,16 +93,12 @@ pub trait SearchIndex: Send + Sync {
 impl SearchQuery {
     /// Refuse a query with neither text nor a filter: it would list the whole revision.
     ///
+    /// The rule has one implementation, `okf_jawn_contract::search::require_text_or_filter`,
+    /// which `SearchRequest::check_rules` calls too; this names the field `/text`.
+    ///
     /// # Errors
     /// Returns `InvalidInput` on `/text` when the text is blank and there is no filter.
     pub fn check(&self) -> Result<(), ApiError> {
-        if self.text.trim().is_empty() && self.extraction.is_none() {
-            return Err(ApiError::new(
-                ErrorCode::InvalidInput,
-                "a search needs text, or an extraction filter to list matching sources",
-            )
-            .with_field("/text"));
-        }
-        Ok(())
+        require_text_or_filter(&self.text, self.extraction, "/text")
     }
 }

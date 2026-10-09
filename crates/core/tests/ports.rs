@@ -33,7 +33,7 @@ use okf_jawn_contract::workspace::{RestoreReport, Workspace};
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::conversion::{
     ConversionInput, ConversionSettings, ConversionStatus, ConvertedAsset, Converter,
-    ConverterLimits, OcrPolicy, PixelSize,
+    ConverterLimits, OcrPolicy, PixelSize, RetainedAsset,
 };
 use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, NewConnector, SessionRecord, secret_hash,
@@ -1248,34 +1248,59 @@ fn an_artifact_record_yields_the_wire_download_for_its_transport() -> TestResult
 }
 
 #[test]
-fn a_converted_image_carries_its_size_and_its_own_caption() {
+fn a_converted_image_carries_its_size_and_its_own_caption() -> TestResult {
+    let location = SourceLocation::Direct {
+        locator: SourceLocator::Page { page_no: 2 },
+    };
     let asset = ConvertedAsset {
         path: PathBuf::from("out/figure-1.png"),
         media_type: "image/png".to_owned(),
         role: AssetRole::Picture,
-        location: SourceLocation::Direct {
-            locator: SourceLocator::Page { page_no: 2 },
-        },
+        location: location.clone(),
         pixel_size: Some(PixelSize {
             width: 640,
             height: 480,
         }),
         caption: Some("Revenue by quarter".to_owned()),
     };
-    assert_eq!(
-        asset.pixel_size,
-        Some(PixelSize {
-            width: 640,
-            height: 480,
-        })
-    );
-    // The caption is the document's own text; no generated caption has a producer
-    // (Stage 1b design section 3), so the origin word is gone.
-    assert_eq!(asset.caption.as_deref(), Some("Revenue by quarter"));
-    let uncaptioned = ConvertedAsset {
-        caption: None,
-        ..asset.clone()
+    // The retained form is what ingest stores and core reads back: size and caption survive
+    // the stored JSON, and an image without them stores neither key.
+    let retained = RetainedAsset {
+        digest: Digest::try_from("c".repeat(64))?,
+        media_type: asset.media_type.clone(),
+        role: asset.role,
+        location,
+        pixel_size: asset.pixel_size,
+        caption: asset.caption.clone(),
     };
-    assert_eq!(uncaptioned.caption, None);
-    assert_eq!(asset.media_type, "image/png");
+    let stored = serde_json::to_value(&retained)?;
+    assert_eq!(
+        stored.get("pixel_size"),
+        Some(&json!({ "width": 640, "height": 480 }))
+    );
+    assert_eq!(stored.get("caption"), Some(&json!("Revenue by quarter")));
+    assert_eq!(
+        serde_json::from_value::<RetainedAsset>(stored.clone())?,
+        retained
+    );
+    let bare = RetainedAsset {
+        pixel_size: None,
+        caption: None,
+        ..retained
+    };
+    let bare_stored = serde_json::to_value(&bare)?;
+    assert!(bare_stored.get("pixel_size").is_none(), "{bare_stored}");
+    assert!(bare_stored.get("caption").is_none(), "{bare_stored}");
+    assert_eq!(serde_json::from_value::<RetainedAsset>(bare_stored)?, bare);
+    // The caption is the document's own text. No generated caption has a producer (Stage 1b
+    // design section 3), so a stored image with a field beside them, such as the old origin
+    // word, is refused rather than read.
+    let mut with_origin = stored;
+    with_origin
+        .as_object_mut()
+        .ok_or("a retained asset serializes as an object")?
+        .insert("caption_origin".to_owned(), json!("generated"));
+    let refused = serde_json::from_value::<RetainedAsset>(with_origin);
+    assert!(refused.is_err(), "{refused:?}");
+    Ok(())
 }

@@ -58,6 +58,11 @@ pub trait EventLog: Send + Sync {
     /// With a `mutation_id`, an identical notification already appended under that mutation is
     /// not appended again and the prior event is returned. Without one, as for job progress, the
     /// notification is always appended.
+    ///
+    /// An append to `EventScope::Workspace` for a workspace the tenant does not hold (never
+    /// created, or purged) records the event at tenant level instead. It never creates or
+    /// revives rows for that workspace, so a refusal that names any workspace id cannot write
+    /// there.
     fn append<'a>(
         &'a self,
         scope: &'a EventScope,

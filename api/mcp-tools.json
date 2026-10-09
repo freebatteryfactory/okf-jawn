@@ -1298,7 +1298,7 @@
               },
               "selection": {
                 "$ref": "#/$defs/Selection",
-                "description": "Precise location to request next."
+                "description": "Precise location to request next. A heading entry selects its section as lines: from the\nheading line to the line before the next heading of the same or a higher level, or to\nthe end of the text."
               }
             },
             "required": [
@@ -8455,7 +8455,7 @@
               },
               {
                 "const": "too_large",
-                "description": "The dataset exceeds the row or byte limit.",
+                "description": "The dataset exceeds a row, column, cell or column-name size bound.",
                 "type": "string"
               }
             ]

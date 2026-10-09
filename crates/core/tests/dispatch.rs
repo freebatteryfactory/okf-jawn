@@ -1503,6 +1503,115 @@ async fn a_tenant_refusal_is_a_tenant_event_even_when_workspaces_follow() -> Tes
     Ok(())
 }
 
+/// A request body for `add_comment` writing in `workspace_id`, reading `source_workspace`.
+fn add_comment_body(workspace_id: &str, source_workspace: &str, key: &str) -> Value {
+    json!({
+        "workspace_id": workspace_id,
+        "proposal_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "text": "note",
+        "source": {
+            "workspace_id": source_workspace,
+            "item_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "path": "notes/a.md",
+            "revision": REVISION,
+            "selection": { "kind": "all" }
+        },
+        "idempotency_key": key
+    })
+}
+
+#[tokio::test]
+async fn a_handler_refusal_of_a_deployment_request_is_a_tenant_event() -> TestResult {
+    // create_connector names a Deployment target and workspace A; its handler refuses.
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.fail_once(
+        "create_connector",
+        ApiError::new(ErrorCode::Forbidden, "not for you"),
+    )?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_connector_body(KEY_ONE);
+    let refused = err_of(call(&app, &ports, &alice, "create_connector", body).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    let appended = ports.events.appended()?;
+    let (scope, _) = some(appended.first(), "the refusal event")?;
+    assert_eq!(appended.len(), 1);
+    assert_eq!(scope, &EventScope::Tenant(tenant("tenant-local")?));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_handler_refusal_naming_two_workspaces_is_a_tenant_event() -> TestResult {
+    let mut table = GrantTable::default();
+    let alice = table.workspaces.entry("alice".to_owned()).or_default();
+    alice.insert(workspace(WORKSPACE_A)?, all_permissions());
+    alice.insert(workspace(WORKSPACE_B)?, all_permissions());
+    let ports = FixturePorts::new(table);
+    let app = CountingApplication::new();
+    app.fail_once(
+        "add_comment",
+        ApiError::new(ErrorCode::Forbidden, "not for you"),
+    )?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = add_comment_body(WORKSPACE_A, WORKSPACE_B, KEY_ONE);
+    let refused = err_of(call(&app, &ports, &alice, "add_comment", body).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    let appended = ports.events.appended()?;
+    let (scope, _) = some(appended.first(), "the refusal event")?;
+    assert_eq!(appended.len(), 1);
+    assert_eq!(scope, &EventScope::Tenant(tenant("tenant-local")?));
+    // The same request naming one workspace twice is that workspace's.
+    app.fail_once(
+        "add_comment",
+        ApiError::new(ErrorCode::Forbidden, "not for you"),
+    )?;
+    let body = add_comment_body(WORKSPACE_A, WORKSPACE_A, KEY_TWO);
+    err_of(call(&app, &ports, &alice, "add_comment", body).await)?;
+    let appended = ports.events.appended()?;
+    let (scope, _) = some(appended.get(1), "the second refusal event")?;
+    assert_eq!(
+        scope,
+        &EventScope::Workspace(StorageScope {
+            tenant_id: tenant("tenant-local")?,
+            workspace_id: workspace(WORKSPACE_A)?,
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_route_refusal_is_the_workspaces_event_or_the_tenants_by_what_the_request_names()
+-> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let agent = connector("alice", all_permissions())?;
+    // A single-workspace request refused by route: that workspace's log.
+    let (input, _) = draft_exchange(OperationName::ListDrafts, KEY_ONE)?;
+    let refused = err_of(call(&app, &ports, &agent, "list_drafts", input).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    // A Deployment request refused by route: the tenant's log.
+    let purge = json!({
+        "workspace_id": WORKSPACE_A,
+        "base_revision": REVISION,
+        "idempotency_key": KEY_ONE
+    });
+    let refused = err_of(call(&app, &ports, &agent, "purge_workspace", purge).await)?;
+    assert_eq!(refused.code, ErrorCode::Forbidden);
+    let appended = ports.events.appended()?;
+    assert_eq!(appended.len(), 2);
+    let (first, _) = some(appended.first(), "the list_drafts refusal")?;
+    assert_eq!(
+        first,
+        &EventScope::Workspace(StorageScope {
+            tenant_id: tenant("tenant-local")?,
+            workspace_id: workspace(WORKSPACE_A)?,
+        })
+    );
+    let (second, _) = some(appended.get(1), "the purge_workspace refusal")?;
+    assert_eq!(second, &EventScope::Tenant(tenant("tenant-local")?));
+    Ok(())
+}
+
 /// Bob writes on A without admin; Carol administers A.
 fn ports_writer_and_admin() -> Result<FixturePorts, serde_json::Error> {
     let mut table = GrantTable::default();

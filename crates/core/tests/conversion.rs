@@ -7,7 +7,7 @@ use okf_jawn_contract::extraction::{
     ConversionOutcome, ConversionSettings, ConverterIdentity, PageCoverage,
 };
 use okf_jawn_contract::identity::Digest;
-use okf_jawn_contract::read::AssetRole;
+use okf_jawn_contract::read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection};
 use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
 use okf_jawn_core::conversion::{
     ConversionRecord, ConvertedCell, ConvertedTable, LineLocation, PixelSize, RetainedAsset,
@@ -169,6 +169,14 @@ fn record() -> Result<ConversionRecord, Box<dyn std::error::Error>> {
                 },
             },
         ],
+        outline: vec![OutlineEntry {
+            label: "Results".to_owned(),
+            level: 1,
+            selection: Selection::Lines {
+                range: TextRange { start: 1, end: 7 },
+            },
+            kind: OutlineEntryKind::Heading,
+        }],
         tables: vec![ConvertedTable {
             lines: TextRange { start: 5, end: 7 },
             location: page_two.clone(),
@@ -240,6 +248,25 @@ fn a_stored_record_with_an_unknown_field_is_refused() -> TestResult {
         .as_object_mut()
         .ok_or("a conversion record serializes as an object")?;
     object.insert("selection".to_owned(), serde_json::json!({ "kind": "all" }));
+    let refused = serde_json::from_value::<ConversionRecord>(value);
+    assert!(refused.is_err(), "{refused:?}");
+    Ok(())
+}
+
+#[test]
+fn a_conversion_record_keeps_its_outline_and_requires_it() -> TestResult {
+    let record = record()?;
+    let mut value = serde_json::to_value(&record)?;
+    let kept = value
+        .get("outline")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len);
+    assert_eq!(kept, Some(1));
+    // A record written without the outline would leave `section_lines` with no input.
+    value
+        .as_object_mut()
+        .ok_or("a conversion record serializes as an object")?
+        .remove("outline");
     let refused = serde_json::from_value::<ConversionRecord>(value);
     assert!(refused.is_err(), "{refused:?}");
     Ok(())

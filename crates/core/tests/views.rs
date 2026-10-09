@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use okf_jawn_contract::common::{CellRange, PageRange, TextRange};
 use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_contract::extraction::TextOrigin;
+use okf_jawn_contract::extraction::{Extraction, TextOrigin};
 use okf_jawn_contract::identity::ItemId;
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::{SourceLocation, SourceLocator};
@@ -13,11 +13,14 @@ use okf_jawn_contract::views::{ChartFailure, ColumnKind, Dataset, DatasetValue, 
 use okf_jawn_core::conversion::{ConversionRecord, ConvertedCell};
 use okf_jawn_core::jobs::DerivedKind;
 use okf_jawn_core::reading::{ObjectRole, RevisionObjects, object_role};
-use okf_jawn_core::views::{MAX_DATASET_HEADER_BYTES, dataset_bytes, dataset_object, materialize};
+use okf_jawn_core::views::{
+    MAX_DATASET_COLUMNS, MAX_DATASET_HEADER_BYTES, MAX_DATASET_ROWS, dataset_bytes, dataset_object,
+    materialize,
+};
 use uuid::Uuid;
 
 use check::{TestResult, err_of};
-use records::{Built, ITEM, appearance, citation, record, revision};
+use records::{Built, ITEM, appearance, citation, converted, record, revision};
 
 fn binding(selection: Selection) -> Built<ViewBinding> {
     Ok(ViewBinding {
@@ -36,8 +39,8 @@ fn a_materialized_dataset_is_an_object_of_the_bound_revision() -> TestResult {
     let bound = binding(Selection::Lines {
         range: TextRange { start: 4, end: 9 },
     })?;
-    let dataset = materialize(&bound, &record, TextOrigin::Converter, &[])
-        .map_err(|failure| failure.message)?;
+    let dataset =
+        materialize(&bound, &record, &converted()?, &[]).map_err(|failure| failure.message)?;
     let (bytes, digest) = dataset_bytes(&dataset)?;
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&bytes)?.get("schema_version"),
@@ -90,7 +93,7 @@ fn a_dataset_types_its_columns_from_every_value() -> TestResult {
             range: PageRange { start: 2, end: 2 },
         })?,
         &record,
-        TextOrigin::Converter,
+        &converted()?,
         &[],
     )
     .map_err(|failure| failure.message)?;
@@ -121,19 +124,14 @@ fn a_dataset_types_its_columns_from_every_value() -> TestResult {
             range: PageRange { start: 2, end: 2 },
         })?,
         &record,
-        TextOrigin::Converter,
+        &converted()?,
         &[],
     )
     .map_err(|failure| failure.message)?;
     assert_eq!(dataset_bytes(&dataset)?, dataset_bytes(&again)?);
     // The whole source holds one table, so it reads that table.
-    let whole = materialize(
-        &binding(Selection::All)?,
-        &record,
-        TextOrigin::Converter,
-        &[],
-    )
-    .map_err(|failure| failure.message)?;
+    let whole = materialize(&binding(Selection::All)?, &record, &converted()?, &[])
+        .map_err(|failure| failure.message)?;
     assert_eq!(whole.rows, dataset.rows);
     Ok(())
 }
@@ -146,7 +144,7 @@ fn a_selection_covering_no_table_fails_only_its_chart() -> TestResult {
             range: TextRange { start: 1, end: 3 },
         })?,
         &record,
-        TextOrigin::Converter,
+        &converted()?,
         &[],
     ))?;
     assert_eq!(failure.reason, ChartFailure::DatasetUnavailable);
@@ -155,7 +153,7 @@ fn a_selection_covering_no_table_fails_only_its_chart() -> TestResult {
             heading: "Revenue".to_owned(),
         })?,
         &record,
-        TextOrigin::Converter,
+        &converted()?,
         &[],
     ))?;
     assert_eq!(section.reason, ChartFailure::DatasetUnavailable);
@@ -189,7 +187,7 @@ fn read_one_column(values: &[&str]) -> Built<Dataset> {
     Ok(materialize(
         &binding(Selection::All)?,
         &one_column(values)?,
-        TextOrigin::Converter,
+        &converted()?,
         &[],
     )
     .map_err(|failure| failure.message)?)
@@ -244,7 +242,7 @@ fn a_table_within_the_row_and_column_bounds_but_too_many_cells_is_too_large() ->
     let failure = err_of(materialize(
         &binding(Selection::All)?,
         &record,
-        TextOrigin::Converter,
+        &converted()?,
         &[],
     ))?;
     assert_eq!(failure.reason, ChartFailure::TooLarge);
@@ -259,7 +257,7 @@ fn a_cell_outside_its_table_fails_the_chart() -> TestResult {
     let failure = err_of(materialize(
         &binding(Selection::All)?,
         &record,
-        TextOrigin::Converter,
+        &converted()?,
         &[],
     ))?;
     assert_eq!(failure.reason, ChartFailure::DatasetUnavailable);
@@ -271,13 +269,10 @@ fn read_with(change: impl FnOnce(&mut Vec<ConvertedCell>)) -> Built<Result<Datas
     let mut record = record()?;
     let table = record.tables.first_mut().ok_or("the fixture has a table")?;
     change(&mut table.cells);
-    Ok(materialize(
-        &binding(Selection::All)?,
-        &record,
-        TextOrigin::Converter,
-        &[],
+    Ok(
+        materialize(&binding(Selection::All)?, &record, &converted()?, &[])
+            .map_err(|failure| failure.reason),
     )
-    .map_err(|failure| failure.reason))
 }
 
 /// The fixture cell at (`row`, `column`).
@@ -371,13 +366,8 @@ fn a_header_spanning_columns_names_each_column_it_covers() -> TestResult {
         column_header: false,
         ..header(column, 1, "10", 2)
     }));
-    let dataset = materialize(
-        &binding(Selection::All)?,
-        &record,
-        TextOrigin::Converter,
-        &[],
-    )
-    .map_err(|failure| failure.message)?;
+    let dataset = materialize(&binding(Selection::All)?, &record, &converted()?, &[])
+        .map_err(|failure| failure.message)?;
     let names: Vec<&str> = dataset
         .columns
         .iter()
@@ -416,14 +406,9 @@ fn a_long_header_spanning_many_columns_is_too_large_before_names_are_built() -> 
             row_header: false,
         },
     ];
-    let refused = materialize(
-        &binding(Selection::All)?,
-        &record,
-        TextOrigin::Converter,
-        &[],
-    )
-    .map(|_| ())
-    .map_err(|failure| failure.reason);
+    let refused = materialize(&binding(Selection::All)?, &record, &converted()?, &[])
+        .map(|_| ())
+        .map_err(|failure| failure.reason);
     assert_eq!(err_of(refused)?, ChartFailure::TooLarge);
     Ok(())
 }
@@ -473,15 +458,10 @@ fn a_reversed_cell_selection_reads_no_table() -> TestResult {
             },
         })
     };
-    let read = materialize(&select(1, 3)?, &record, TextOrigin::Converter, &[])
+    let read = materialize(&select(1, 3)?, &record, &converted()?, &[])
         .map_err(|failure| failure.message)?;
     assert_eq!(read.rows.len(), 2);
-    let reversed = err_of(materialize(
-        &select(3, 2)?,
-        &record,
-        TextOrigin::Converter,
-        &[],
-    ))?;
+    let reversed = err_of(materialize(&select(3, 2)?, &record, &converted()?, &[]))?;
     assert_eq!(reversed.reason, ChartFailure::DatasetUnavailable);
     Ok(())
 }
@@ -512,7 +492,7 @@ fn a_cell_selection_past_the_table_grid_reads_no_table() -> TestResult {
             column_end: 3,
         },
     })?;
-    let failure = err_of(materialize(&past, &record, TextOrigin::Converter, &[]))?;
+    let failure = err_of(materialize(&past, &record, &converted()?, &[]))?;
     assert_eq!(failure.reason, ChartFailure::DatasetUnavailable);
     Ok(())
 }
@@ -525,13 +505,68 @@ fn a_dataset_digest_does_not_depend_on_filled_locations() -> TestResult {
     filled.source.locations = vec![SourceLocation::Direct {
         locator: SourceLocator::Page { page_no: 2 },
     }];
+    let extraction = converted()?;
     let read = |binding: &ViewBinding| {
-        materialize(binding, &record, TextOrigin::Converter, &[]).map_err(|failure| failure.message)
+        materialize(binding, &record, &extraction, &[]).map_err(|failure| failure.message)
     };
     assert_eq!(
         dataset_bytes(&read(&bare)?)?,
         dataset_bytes(&read(&filled)?)?
     );
+    Ok(())
+}
+
+#[test]
+fn a_dataset_is_read_only_from_text_the_converter_produced() -> TestResult {
+    let record = record()?;
+    let bound = binding(Selection::All)?;
+    let shown = |change: &dyn Fn(&mut Extraction)| -> Built<Extraction> {
+        let mut extraction = converted()?;
+        change(&mut extraction);
+        Ok(extraction)
+    };
+    // A correction is shown over the converter's text: the tables are not what the reader sees.
+    let corrected = shown(&|extraction| extraction.corrected = true)?;
+    let failure = err_of(materialize(&bound, &record, &corrected, &[]))?;
+    assert_eq!(failure.reason, ChartFailure::DatasetUnavailable);
+    assert!(
+        failure.message.contains("correction"),
+        "{}",
+        failure.message
+    );
+    // Text an agent supplied, or no text, is not described by the converter's tables either.
+    let supplied = shown(&|extraction| extraction.text_origin = TextOrigin::SuppliedByAgent)?;
+    let failure = err_of(materialize(&bound, &record, &supplied, &[]))?;
+    assert_eq!(failure.reason, ChartFailure::DatasetUnavailable);
+    assert!(failure.message.contains("agent"), "{}", failure.message);
+    let none = shown(&|extraction| extraction.text_origin = TextOrigin::None)?;
+    let failure = err_of(materialize(&bound, &record, &none, &[]))?;
+    assert_eq!(failure.reason, ChartFailure::DatasetUnavailable);
+    assert!(
+        failure.message.contains("no converter text"),
+        "{}",
+        failure.message
+    );
+    // The converter's own text yields a dataset that says so.
+    let dataset =
+        materialize(&bound, &record, &converted()?, &[]).map_err(|failure| failure.message)?;
+    assert_eq!(dataset.text_origin, TextOrigin::Converter);
+    Ok(())
+}
+
+#[test]
+fn the_dataset_schema_bounds_equal_the_constants_core_checks() -> TestResult {
+    let schema = serde_json::to_value(schemars::schema_for!(Dataset))?;
+    let max_items = |field: &str| {
+        schema
+            .pointer(&format!("/properties/{field}/maxItems"))
+            .and_then(serde_json::Value::as_u64)
+    };
+    assert_eq!(
+        max_items("columns"),
+        Some(u64::try_from(MAX_DATASET_COLUMNS)?)
+    );
+    assert_eq!(max_items("rows"), Some(u64::try_from(MAX_DATASET_ROWS)?));
     Ok(())
 }
 
