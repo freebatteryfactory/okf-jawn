@@ -22,9 +22,16 @@ type Row = Readonly<Record<string, string | number | boolean | null>>;
 
 /**
  * The records a chart and a table draw, one per row, keyed by the dataset's column names. A row
- * whose width differs from the columns is refused, never padded or cut.
+ * whose width differs from the columns is refused, never padded or cut. Two columns of one name are
+ * refused too: the producer guarantees distinct names, so a duplicate is a malformed payload and
+ * the later column would silently replace the earlier one.
  */
 export function datasetRecords(data: z.infer<typeof zDataset>): ReadonlyArray<Row> {
+  const names = new Set<string>();
+  for (const column of data.columns) {
+    if (names.has(column.name)) throw new Error(`Dataset has two columns named "${column.name}"`);
+    names.add(column.name);
+  }
   return data.rows.map((cells, index) => {
     if (cells.length !== data.columns.length)
       throw new Error(
@@ -32,6 +39,24 @@ export function datasetRecords(data: z.infer<typeof zDataset>): ReadonlyArray<Ro
       );
     return Object.fromEntries(data.columns.map((column, at) => [column.name, cells[at] ?? null]));
   });
+}
+/**
+ * Read the bytes of a retained dataset. A dataset is read only from the converter's text (SPEC
+ * R5, decision O2): any other origin, or any shape the generated `zDataset` refuses, is that
+ * chart's own alert with the reason, never a drawn chart.
+ */
+export function parseDataset(text: string): ReadonlyArray<Row> {
+  const parsed = zDataset.safeParse(JSON.parse(text));
+  if (!parsed.success) {
+    const issue = parsed.error.issues.at(0);
+    const where = issue && issue.path.length > 0 ? ` at ${issue.path.join('.')}` : '';
+    throw new Error(`Dataset is malformed${where}: ${issue?.message ?? 'invalid'}`);
+  }
+  if (parsed.data.text_origin !== 'converter')
+    throw new Error(
+      `Dataset text is not the converter's (text_origin is ${parsed.data.text_origin}); no chart is drawn from it`,
+    );
+  return datasetRecords(parsed.data);
 }
 const toolResult = z.object({
   isError: z.boolean().optional(),
@@ -118,9 +143,7 @@ async function dataset(
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', merged));
   const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
   if (hex !== binding.materialized) throw new Error('Dataset digest verification failed');
-  return datasetRecords(
-    zDataset.parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(merged))),
-  );
+  return parseDataset(new TextDecoder('utf-8', { fatal: true }).decode(merged));
 }
 
 function chartsFromView(view: z.infer<typeof zPresentResponse>['view']): {
