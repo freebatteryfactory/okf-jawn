@@ -49,7 +49,7 @@ export function SavedView({ workspaceId, itemId, callTool, client }: SavedViewPr
           const said: unknown = result.error.message;
           settle({
             state: 'refused',
-            message: String(said),
+            message: typeof said === 'string' && said.trim() !== '' ? said : noMessage,
           });
           return;
         }

@@ -657,4 +657,25 @@ describe('a saved View follows the ids it was asked for', () => {
     expect(screen.queryByRole('heading', { name: 'Board of the first' })).toBeNull();
     expect(screen.getByRole('heading', { name: 'Board of the second' })).toBeTruthy();
   });
+
+  it('shows a fixed sentence when the refusal has no message', async () => {
+    for (const body of [{ code: 'not_found' }, { code: 'not_found', message: '  ' }]) {
+      const client = createClient({
+        baseUrl: 'http://okf.test',
+        fetch: Object.assign(
+          async () =>
+            new Response(JSON.stringify(body), {
+              status: 404,
+              headers: { 'Content-Type': 'application/json' },
+            }),
+          { preconnect: () => {} },
+        ),
+      });
+      const view = render(<SavedView {...first} callTool={noTools} client={client} />);
+      expect((await screen.findByRole('alert')).textContent).toBe(
+        'The server refused to open the View.',
+      );
+      view.unmount();
+    }
+  });
 });
