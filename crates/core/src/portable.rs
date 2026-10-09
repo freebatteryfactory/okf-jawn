@@ -286,7 +286,7 @@ fn yaml_value(value: &Value) -> YamlValue {
 }
 
 /// `path` relative to `root`, `/`-separated; `None` when it is not a plain path below `root`.
-fn relative_path(root: &Path, path: &Path) -> Option<String> {
+pub(crate) fn relative_path(root: &Path, path: &Path) -> Option<String> {
     let segments = path
         .strip_prefix(root)
         .ok()?

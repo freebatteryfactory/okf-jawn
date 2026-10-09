@@ -6,6 +6,8 @@
 pub mod access;
 /// Production application service composed over injected ports.
 pub mod application;
+/// The production OKF conformance check of a staged candidate.
+pub mod conformance;
 /// Session-bound confirmation challenges.
 pub mod confirmations;
 /// Per-request authorization context and grants.
