@@ -37,7 +37,7 @@ pub(crate) use read::items as items_of;
 use edit::{Staged, apply, maintain};
 use repo::{
     HEAD_REF, Repositories, commit_of, find_trailer, git, head, internal, materialize,
-    message_with_trailer, reference_target, revision_of, signature, staged_tree,
+    message_with_trailer, reference_target, revision_of, signature, staged_tree, sync_directories,
 };
 
 /// `VersionStore` over one Git repository per workspace.
@@ -292,6 +292,10 @@ impl VersionStore for GitVersions {
                 let (commit, _) =
                     stage_and_commit(repositories, scope, &repository, write, &*check)?;
                 move_reference(&repository, &name, commit, None)?;
+                sync_directories(
+                    &repository,
+                    &["refs", "refs/okf-jawn", "refs/okf-jawn/proposals"],
+                )?;
                 revision_of(commit)
             })
         }))
@@ -380,6 +384,7 @@ fn stage_and_commit(
             &[&base],
         )
         .map_err(|error| git(&error))?;
+    sync_directories(repository, &["objects"])?;
     Ok((commit, warnings))
 }
 
@@ -438,6 +443,7 @@ fn promote(repository: &Repository, promotion: &Promotion) -> Result<Committed, 
             &[&parent],
         )
         .map_err(|error| git(&error))?;
+    sync_directories(repository, &["objects"])?;
     move_reference(repository, HEAD_REF, commit, Some(current))?;
     Ok(Committed {
         revision: revision_of(commit)?,

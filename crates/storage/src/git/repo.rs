@@ -167,6 +167,24 @@ pub(crate) fn durable(path: &Path) -> Result<Repository, ApiError> {
     Repository::open_bare(path).map_err(|error| git(&error))
 }
 
+/// Sync directories of the repository (relative to its Git directory) whose entries a write
+/// just added: libgit2 syncs a new object or reference file and its parent, but not a new
+/// fan-out directory (`objects/xx/`) or a new `refs/okf-jawn/proposals/` in its own parent.
+pub(crate) fn sync_directories(repository: &Repository, relative: &[&str]) -> Result<(), ApiError> {
+    // Unix only. Not needed on Windows: NTFS journals directory metadata, so a new directory
+    // entry is as durable as the file written into it (libgit2's own directory sync is a no-op
+    // there, and std cannot open a directory as a file there).
+    if cfg!(unix) {
+        for name in relative {
+            let path = repository.path().join(name);
+            std::fs::File::open(&path)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| io_error("sync", &path, &error))?;
+        }
+    }
+    Ok(())
+}
+
 /// The accepted head of a repository.
 pub(crate) fn head(repository: &Repository) -> Result<Oid, ApiError> {
     reference_target(repository, HEAD_REF)?

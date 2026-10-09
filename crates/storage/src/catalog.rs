@@ -20,7 +20,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use crate::db::{Db, conflict, json, not_found, scope_key, sql};
 use crate::git::repo::{
     HEAD_REF, Repositories, durable, git, head, message_with_trailer, reference_target,
-    revision_of, signature, staged_tree,
+    revision_of, signature, staged_tree, sync_directories,
 };
 use crate::seam;
 
@@ -268,6 +268,7 @@ fn initialize(
             &[],
         )
         .map_err(|error| git(&error))?;
+    sync_directories(&repository, &["objects"])?;
     repository
         .reference(HEAD_REF, commit, false, "okf-jawn create")
         .map_err(|error| git(&error))?;
