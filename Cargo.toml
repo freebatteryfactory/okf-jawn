@@ -68,6 +68,17 @@ proptest = { version = "=1.11.0" }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
 sha2 = { version = "=0.10.9" }
 base64 = { version = "=0.22.1" }
+# Batch A (construction plan 1.6), 2026-10-09.
+# Connector secrets come from the operating system's random source (storage).
+getrandom = { version = "=0.4.3" }
+# Item Markdown outlines (core); already in the lock through docling. No HTML renderer.
+pulldown-cmark = { version = "=0.13.4", default-features = false }
+# The conversion child's memory cap (ingest), one facility per platform (verification.json
+# converter-worker-memory-ceiling): a job-object memory limit on Windows, RLIMIT_DATA set by the
+# child itself on Linux, and a sampling watchdog on macOS. vendors.json process-memory-cap.
+processkit = { version = "=3.3.4", default-features = false, features = ["limits"] }
+rlimit = { version = "=0.11.0" }
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
 
 clap_complete = "=4.6.11"
 clap_mangen = "=0.3.3"
