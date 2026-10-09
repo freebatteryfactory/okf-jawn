@@ -26,7 +26,7 @@ pub type ValidatorCell = OnceLock<Result<jsonschema::Validator, String>>;
 /// `what` names the stored value in the error, such as `a stored job specification`.
 ///
 /// The text of the violation or decode error quotes the stored value, so it is cut to
-/// [`crate::echo::ECHO_LIMIT`] bytes.
+/// [`crate::echo::ECHO_LIMIT`] bytes, and so is the field pointer.
 ///
 /// # Errors
 /// Returns `Internal` naming the first violation's JSON Pointer when the value does not meet
@@ -54,7 +54,8 @@ pub fn decode_stored<T: DeserializeOwned + JsonSchema>(
                 bounded(error.to_string())
             ),
         );
-        let location = error.instance_path().as_str().to_owned();
+        // A key of the stored value is part of the pointer, so it is bounded like the text.
+        let location = bounded(error.instance_path().as_str().to_owned());
         return Err(if location.is_empty() {
             refused
         } else {

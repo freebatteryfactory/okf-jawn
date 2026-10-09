@@ -1,15 +1,18 @@
 //! Values read back from storage meet their schema: serde alone accepts a field beside a unit
 //! variant's tag, the stored decoders do not.
 
+use std::collections::BTreeMap;
+
 use okf_jawn_contract::error::ErrorCode;
 use okf_jawn_contract::identity::Revision;
 use okf_jawn_core::conversion::ConversionSettings;
 use okf_jawn_core::echo::ECHO_LIMIT;
 use okf_jawn_core::jobs::JobSpec;
+use okf_jawn_core::stored::{ValidatorCell, decode_stored};
 use serde_json::json;
 use uuid::Uuid;
 
-use check::{TestResult, err_of};
+use check::{TestResult, err_of, some};
 
 fn import() -> Result<JobSpec, Box<dyn std::error::Error>> {
     Ok(JobSpec::Import {
@@ -70,6 +73,27 @@ fn a_stored_value_is_quoted_in_a_refusal_only_up_to_a_bound() -> TestResult {
     let short = err_of(JobSpec::from_stored(json!({ "kind": "compact" })))?;
     assert!(short.message.contains("compact"));
     assert!(!short.message.ends_with('…'));
+    Ok(())
+}
+
+#[test]
+fn the_field_pointer_of_a_stored_refusal_is_bounded_too() -> TestResult {
+    static SCHEMA: ValidatorCell = ValidatorCell::new();
+    // A map key of a stored value becomes part of the JSON Pointer in the refusal's field.
+    let key = "é".repeat(10_000);
+    let stored = json!({ key: "not a number" });
+    let refused = err_of(decode_stored::<BTreeMap<String, u32>>(
+        stored,
+        "a stored map",
+        &SCHEMA,
+    ))?;
+    let field = some(refused.field.as_deref(), "the field pointer")?;
+    assert!(
+        field.len() <= ECHO_LIMIT + '…'.len_utf8(),
+        "{} bytes",
+        field.len()
+    );
+    assert!(field.ends_with('…'));
     Ok(())
 }
 
