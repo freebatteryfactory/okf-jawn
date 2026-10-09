@@ -8,22 +8,28 @@ use std::sync::Arc;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 
+use crate::access::LocalAccess;
+use crate::blobs::LocalBlobs;
 use crate::confirmations::SqliteConfirmations;
+use crate::credentials::SqliteCredentials;
 use crate::data::{DataDir, FormatState};
 use crate::db::Db;
 use crate::drafts::SqliteDrafts;
+use crate::events::SqliteEvents;
 use crate::format::{migrate_database, refuse_newer};
 use crate::mutations::SqliteMutations;
 use crate::proposals::SqliteProposals;
 use crate::records::SqliteRecords;
 use crate::sandbox::SqliteSandbox;
 use crate::schema;
+use crate::uploads::SqliteUploads;
 
 /// An opened data directory; every store it hands out shares its lock.
 #[derive(Debug, Clone)]
 pub struct Storage {
     pub(crate) data: Arc<DataDir>,
     pub(crate) records: Db,
+    pub(crate) blobs: LocalBlobs,
 }
 
 impl Storage {
@@ -64,9 +70,11 @@ impl Storage {
         let records = migrate_database(&records_path, &schema::RECORDS, &backups)?;
         // TODO(search index): the index store keeps this connection once it lands.
         drop(migrate_database(&index_path, &schema::INDEX, &backups)?);
+        let blobs = LocalBlobs::open(&data.objects_path(), data.staging_path().join("incoming"))?;
         Ok(Self {
             data: Arc::new(data),
             records: Db::new(records.connection),
+            blobs,
         })
     }
 
@@ -104,6 +112,40 @@ impl Storage {
     #[must_use]
     pub fn proposals(&self) -> SqliteProposals {
         SqliteProposals::new(self.records.clone())
+    }
+
+    /// Content-addressed bytes.
+    #[must_use]
+    pub fn blobs(&self) -> LocalBlobs {
+        self.blobs.clone()
+    }
+
+    /// Upload slots.
+    #[must_use]
+    pub fn uploads(&self) -> SqliteUploads {
+        SqliteUploads::new(
+            self.records.clone(),
+            self.blobs.clone(),
+            self.data.root().join("uploads"),
+        )
+    }
+
+    /// The workspace and tenant event logs.
+    #[must_use]
+    pub fn events(&self) -> SqliteEvents {
+        SqliteEvents::new(self.records.clone())
+    }
+
+    /// Connectors, sessions and the installation identity.
+    #[must_use]
+    pub fn credentials(&self) -> SqliteCredentials {
+        SqliteCredentials::new(self.records.clone())
+    }
+
+    /// The local access control.
+    #[must_use]
+    pub fn access(&self) -> LocalAccess {
+        LocalAccess::new(self.records.clone())
     }
 
     /// The opened data directory.

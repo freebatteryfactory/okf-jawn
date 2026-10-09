@@ -14,13 +14,21 @@ pub use storage::Storage;
 mod macros;
 
 #[cfg(feature = "runtime")]
+pub mod access;
+#[cfg(feature = "runtime")]
+pub mod blobs;
+#[cfg(feature = "runtime")]
 pub mod confirmations;
+#[cfg(feature = "runtime")]
+pub mod credentials;
 #[cfg(feature = "runtime")]
 pub mod data;
 #[cfg(feature = "runtime")]
 mod db;
 #[cfg(feature = "runtime")]
 pub mod drafts;
+#[cfg(feature = "runtime")]
+pub mod events;
 #[cfg(feature = "runtime")]
 pub mod format;
 #[cfg(feature = "runtime")]
@@ -37,3 +45,5 @@ pub mod schema;
 mod seam;
 #[cfg(feature = "runtime")]
 mod storage;
+#[cfg(feature = "runtime")]
+pub mod uploads;
