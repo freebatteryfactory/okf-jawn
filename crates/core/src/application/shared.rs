@@ -42,7 +42,7 @@ pub(super) struct Write {
     pub(super) edits: Vec<TreeEdit>,
     /// The item the write changes, for the `changed` event.
     pub(super) item: Option<ItemId>,
-    /// The check the candidate runs: this service's conformance check, possibly wrapped.
+    /// The check the candidate runs: this service's edit check, possibly wrapped.
     pub(super) check: Arc<dyn CandidateCheck>,
 }
 

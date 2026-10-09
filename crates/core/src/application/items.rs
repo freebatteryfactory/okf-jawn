@@ -7,7 +7,8 @@
 //! (dispatch has already refused it on every route that is not a human session). Every
 //! returned `ItemDocument` carries the server's content digest. Writes refuse a caller's
 //! application header before any port is touched (`items::refuse_supplied_header`,
-//! `items::refuse_header_in_type`) and commit through `shared::commit`.
+//! `items::refuse_header_in_type`) and commit through `shared::commit` with the edit check:
+//! OKF conformance refuses, and OKF lint comes back as warnings.
 
 use okf_jawn_contract::common::MutationResult;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
@@ -146,7 +147,7 @@ pub(super) async fn create_item(
                 properties: request.properties,
             }],
             item: Some(item_id),
-            check: service.conformance(),
+            check: service.edit_check(),
         },
     )
     .await?;
@@ -180,7 +181,7 @@ pub(super) async fn move_item(
                 destination: request.destination,
             }],
             item: Some(request.item_id),
-            check: service.conformance(),
+            check: service.edit_check(),
         },
     )
     .await
@@ -213,7 +214,7 @@ pub(super) async fn set_lifecycle(
                 archived: request.archived,
             }],
             item: Some(request.item_id),
-            check: service.conformance(),
+            check: service.edit_check(),
         },
     )
     .await
@@ -238,7 +239,7 @@ pub(super) async fn delete_item(
                 item_id: request.item_id,
             }],
             item: Some(request.item_id),
-            check: service.conformance(),
+            check: service.edit_check(),
         },
     )
     .await
@@ -263,7 +264,7 @@ pub(super) async fn create_folder(
                 folder: request.folder,
             }],
             item: None,
-            check: service.conformance(),
+            check: service.edit_check(),
         },
     )
     .await
@@ -318,7 +319,7 @@ pub(super) async fn set_type(
                 definition: request.definition,
             }],
             item: None,
-            check: service.conformance(),
+            check: service.edit_check(),
         },
     )
     .await

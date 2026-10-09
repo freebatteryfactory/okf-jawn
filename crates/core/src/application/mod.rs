@@ -20,7 +20,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 
 use crate::access::AccessControl;
 use crate::confirmations::ConfirmationStore;
-use crate::conformance::OkfConformance;
+use crate::conformance::{EditCheck, OkfConformance};
 use crate::context::OperationContext;
 use crate::conversion::Converter;
 use crate::credentials::CredentialStore;
@@ -170,6 +170,7 @@ pub struct ApplicationService {
     ports: Ports,
     config: ApplicationConfig,
     conformance: Arc<dyn CandidateCheck>,
+    edit: Arc<dyn CandidateCheck>,
 }
 
 impl ApplicationConfig {
@@ -209,6 +210,7 @@ impl ApplicationService {
             ports,
             config,
             conformance: Arc::new(OkfConformance),
+            edit: Arc::new(EditCheck),
         })
     }
 
@@ -229,6 +231,13 @@ impl ApplicationService {
     #[must_use]
     pub fn conformance(&self) -> Arc<dyn CandidateCheck> {
         Arc::clone(&self.conformance)
+    }
+
+    /// The check of an edit this service commits: the conformance check, then OKF lint of the
+    /// candidate as warnings.
+    #[must_use]
+    pub fn edit_check(&self) -> Arc<dyn CandidateCheck> {
+        Arc::clone(&self.edit)
     }
 }
 

@@ -6,7 +6,7 @@ use std::error::Error;
 use std::path::PathBuf;
 
 use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_core::conformance::OkfConformance;
+use okf_jawn_core::conformance::{EditCheck, OkfConformance};
 use okf_jawn_core::storage::CandidateCheck;
 use uuid::Uuid;
 
@@ -104,6 +104,29 @@ fn candidate_check_refuses_a_candidate_it_cannot_read_as_internal() -> TestResul
     let missing = std::env::temp_dir().join(format!("okf-jawn-absent-{}", Uuid::new_v4()));
     let refused = err_of(OkfConformance.check(&missing))?;
     assert_eq!(refused.code, ErrorCode::Internal);
+    Ok(())
+}
+
+#[test]
+fn candidate_check_of_an_edit_adds_lint_as_warnings_and_never_refuses_for_it() -> TestResult {
+    let staged = Staged::new()?;
+    staged.write("notes/plan.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
+    let edit = EditCheck.check(&staged.0)?;
+    assert!(
+        edit.iter().any(|warning| warning.code == "okf_lint_l1"
+            && warning.location.as_deref() == Some("notes/plan.md")),
+        "{edit:?}"
+    );
+    let plain = OkfConformance.check(&staged.0)?;
+    assert!(
+        plain
+            .iter()
+            .all(|warning| !warning.code.starts_with("okf_lint")),
+        "{plain:?}"
+    );
+    staged.write("notes/untyped.md", "---\ntitle: No type\n---\nBody\n")?;
+    let refused = err_of(EditCheck.check(&staged.0))?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
     Ok(())
 }
 

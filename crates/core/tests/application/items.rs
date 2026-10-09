@@ -426,6 +426,34 @@ async fn a_write_is_judged_by_the_conformance_check_and_a_refusal_commits_nothin
 }
 
 #[tokio::test]
+async fn an_edit_returns_okf_lint_findings_as_warnings() -> TestResult {
+    let world = World::new()?;
+    world.versions.queue_revision(revision('b')?)?;
+    world
+        .versions
+        .stage()
+        .write("notes/bare.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
+    let moved = world
+        .service
+        .move_item(
+            &alice(OperationName::MoveItem, Some(mutation(1)))?,
+            move_request()?,
+        )
+        .await?;
+    assert!(
+        moved
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "okf_lint_l1"
+                && warning.location.as_deref() == Some("notes/bare.md")),
+        "{:?}",
+        moved.warnings
+    );
+    assert_eq!(world.versions.commits()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_write_on_a_moved_head_conflicts_and_one_on_a_purged_base_is_refused() -> TestResult {
     let world = World::new()?;
     world.versions.queue_revision(revision('b')?)?;

@@ -315,7 +315,7 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> Option<String> {
 }
 
 /// The warning code and text of a lint message, which okf-validator writes as `[L1] text`.
-fn lint_code(message: &str) -> (String, String) {
+pub(crate) fn lint_code(message: &str) -> (String, String) {
     message
         .strip_prefix('[')
         .and_then(|rest| rest.split_once("] "))
