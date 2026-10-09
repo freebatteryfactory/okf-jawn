@@ -179,12 +179,14 @@ mod flags_undecodable_text_in_a_window {
                 .contains(&format!("{UNDECODED} Work {UNDECODED} Function"))
         );
         let coverage = some(coverage, "the window's coverage")?;
-        // Page 1 has a placeholder in a table cell, page 2 in a paragraph; page 3 has none.
-        assert_eq!(coverage.converted, vec![PageRange { start: 3, end: 3 }]);
+        // Page 1 has a placeholder in a table cell, page 2 in a paragraph. Page 3 is not in the
+        // export at all, so it was not converted.
+        assert_eq!(coverage.converted, Vec::new());
         assert_eq!(
             coverage.partly_extracted,
             vec![PageRange { start: 1, end: 2 }]
         );
+        assert_eq!(coverage.not_converted, vec![PageRange { start: 3, end: 3 }]);
         coverage.check()?;
         assert!(
             document
@@ -280,6 +282,55 @@ mod flags_undecodable_text_in_a_window {
         let window = PageRange { start: 1, end: 2 };
         let (document, _coverage) = read_window(directory.path(), Some(&window), &reply)?;
         assert_eq!(document.tables, Vec::new());
+        Ok(())
+    }
+}
+
+mod partial_windows {
+    use okf_jawn_contract::common::PageRange;
+    use okf_jawn_core::conversion::ConversionStatus;
+    use okf_jawn_ingest::converter::read_window;
+    use okf_jawn_ingest::protocol::{EXPORT_FILE, MARKDOWN_FILE, Reply};
+    use serde_json::{Value, json};
+
+    use crate::check::{TestResult, some};
+
+    fn prov(page: u64) -> Value {
+        json!([{ "page_no": page, "bbox": { "l": 72.0, "t": 700.0, "r": 300.0, "b": 680.0, "coord_origin": "BOTTOMLEFT" } }])
+    }
+
+    #[test]
+    fn a_window_that_ran_out_of_time_lists_only_the_pages_it_converted() -> TestResult {
+        // Docling 2.3.0 `PartialSuccess`: the budget ran out after two of four pages, and only
+        // the finished pages became the document.
+        let directory = tempfile::tempdir()?;
+        let size = json!({ "width": 612.0, "height": 792.0 });
+        let export = json!({
+            "pages": { "1": { "page_no": 1, "size": size }, "2": { "page_no": 2, "size": size } },
+            "body": { "self_ref": "#/body", "children": [] },
+            "texts": [
+                { "self_ref": "#/texts/0", "label": "text", "text": "One", "prov": prov(1), "parent": { "$ref": "#/body" } },
+                { "self_ref": "#/texts/1", "label": "text", "text": "Two", "prov": prov(2), "parent": { "$ref": "#/body" } },
+            ],
+            "tables": [],
+            "pictures": [],
+        });
+        std::fs::write(directory.path().join(MARKDOWN_FILE), "One\n\nTwo\n")?;
+        std::fs::write(directory.path().join(EXPORT_FILE), export.to_string())?;
+        let reply = Reply {
+            status: ConversionStatus::PartialSuccess,
+            page_count: None,
+            issues: Vec::new(),
+            blocks: Vec::new(),
+            text_layer: false,
+        };
+        let window = PageRange { start: 1, end: 4 };
+        let (_document, coverage) = read_window(directory.path(), Some(&window), &reply)?;
+        let coverage = some(coverage, "the window's coverage")?;
+        assert_eq!(coverage.converted, vec![PageRange { start: 1, end: 2 }]);
+        assert_eq!(coverage.partly_extracted, Vec::new());
+        assert_eq!(coverage.not_converted, vec![PageRange { start: 3, end: 4 }]);
+        coverage.check()?;
         Ok(())
     }
 }

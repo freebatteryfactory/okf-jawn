@@ -9,6 +9,10 @@
 //! child. A missing model or native library is a worker fault, found before any child starts.
 //!
 //! `read_window` is pure over the child's files, so it is tested without models:
+//! - the window's coverage lists exactly the pages it converted: a page missing from the
+//!   export's `pages` (the time budget ran out before it, `PartialSuccess`, or the converter
+//!   dropped it) is `not_converted`, whatever the status, so no unconverted page is shown as
+//!   converted (SPEC section 5);
 //! - the Markdown has each undecodable-glyph placeholder replaced by U+FFFD
 //!   (`glyphs::scrub_placeholders`), so flagged text is never indexed as words, and each page
 //!   with one is `partly_extracted`;
@@ -305,17 +309,23 @@ pub fn read_window(
     let glyphs = undecoded_glyphs(&export, |item| page_of.get(item).copied());
     warnings.extend(glyphs.warning());
     let coverage = window.map(|window| {
+        let present = exported_pages(&export);
         let partly: BTreeSet<u32> = glyphs
             .pages
             .keys()
             .copied()
-            .filter(|page| *page >= window.start && *page <= window.end)
+            .filter(|page| *page >= window.start && *page <= window.end && present.contains(page))
             .collect();
         WindowCoverage {
             window: window.clone(),
-            converted: ranges((window.start..=window.end).filter(|page| !partly.contains(page))),
+            converted: ranges(
+                (window.start..=window.end)
+                    .filter(|page| present.contains(page) && !partly.contains(page)),
+            ),
             partly_extracted: ranges(partly.into_iter()),
-            not_converted: Vec::new(),
+            not_converted: ranges(
+                (window.start..=window.end).filter(|page| !present.contains(page)),
+            ),
         }
     });
     let document = ConvertedDocument {
@@ -478,6 +488,23 @@ fn table(export: &Value, item: &Value, run: &Block) -> ConvertedTable {
         num_cols: number(data.and_then(|data| data.get("num_cols"))),
         cells,
     }
+}
+
+/// The pages the export holds (its `pages` map): the pages the conversion finished. In docling
+/// 2.3.0 a `PartialSuccess` is a document whose budget ran out, and only the pages already
+/// finished become the document, so a page of the window missing here was not converted.
+fn exported_pages(export: &Value) -> BTreeSet<u32> {
+    export
+        .get("pages")
+        .and_then(Value::as_object)
+        .map(|pages| {
+            pages
+                .values()
+                .filter_map(|page| page.get("page_no").and_then(Value::as_u64))
+                .filter_map(|page| u32::try_from(page).ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Ascending pages as ranges.
