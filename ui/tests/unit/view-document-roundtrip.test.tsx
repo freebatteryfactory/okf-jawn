@@ -14,6 +14,7 @@ import metricsDatasetFixture from '../../../tests/fixtures/views/present-metrics
 import presentResponseFixture from '../../../tests/fixtures/views/present-response.json';
 import sourceReadItemFixture from '../../../tests/fixtures/views/source-read-item.json';
 import viewDocumentFixture from '../../../tests/fixtures/views/view-document-six-component.json';
+import { createClient } from '../../src/api/generated/client';
 import {
   zDataset,
   zPresentResponse,
@@ -23,6 +24,7 @@ import {
 import { BindingsContext, type ResolvedPresentation } from '../../src/features/views/Bindings';
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
 import { datasetRecords, PresentView, parseDataset } from '../../src/features/views/PresentView';
+import { SavedView } from '../../src/features/views/SavedView';
 
 /** The source the committed dataset cites, as the generated schema reads it. */
 const fixtureSource = zDataset.parse(metricsDatasetFixture).source;
@@ -248,7 +250,11 @@ describe('the Dataset the views read', () => {
       structuredContent: zReadItemResponse.parse(sourceReadItemFixture),
     });
     render(<PresentView response={refused} callTool={callTool} />);
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(message));
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toBe(`Dataset unavailable: ${message}`),
+    );
+    // The View's own title and description stay: only the chart is refused.
+    expect(screen.getByRole('heading', { name: refused.view.title })).toBeTruthy();
   });
 });
 
@@ -507,5 +513,86 @@ describe('a dataset read from another source than its binding cites is stale', (
       source: Object.fromEntries(Object.entries(same.source).reverse()),
     };
     expect(parseDataset(JSON.stringify(reordered), cited)).toHaveLength(5);
+  });
+});
+
+describe('a saved View reopens with the server as the source of truth', () => {
+  const saved = zPresentResponse.parse(presentResponseFixture);
+  const noTools = async () => ({ isError: true, content: [{ type: 'text', text: 'no host' }] });
+
+  /** The generated client, with only its transport replaced: what resolve-view answers, and what it was asked. */
+  function server(status: number, body: unknown) {
+    const asked: { url: string; body: unknown }[] = [];
+    const client = createClient({
+      baseUrl: 'http://okf.test',
+      // Bun's `typeof fetch` also carries `preconnect`; the client never calls it.
+      fetch: Object.assign(
+        async (input: URL | RequestInfo, init?: RequestInit) => {
+          const request = new Request(input, init);
+          asked.push({ url: request.url, body: await request.json() });
+          return new Response(JSON.stringify(body), {
+            status,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        },
+        { preconnect: () => {} },
+      ),
+    });
+    return { client, asked };
+  }
+  const ids = {
+    workspaceId: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
+    itemId: '11111111-2222-4333-8444-555555555555',
+  };
+
+  it('asks the server to resolve the pinned View, never to refresh it', async () => {
+    const { client, asked } = server(200, { ...saved, resolved_bindings: [] });
+    render(<SavedView {...ids} callTool={noTools} client={client} />);
+    expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.url).toBe('http://okf.test/api/views/resolve-view');
+    expect(asked[0]?.body).toEqual({
+      workspace_id: ids.workspaceId,
+      item_id: ids.itemId,
+      at: { kind: 'latest' },
+      refresh_live: false,
+    });
+  });
+
+  it("shows the server's failed chart status as that chart's alert, beside the View's text", async () => {
+    const diagnosed = {
+      ...saved,
+      resolved_bindings: [],
+      charts: [
+        {
+          chart: { kind: 'named', name: 'metrics_chart' },
+          status: { status: 'failed', reason: 'invalidated', message: 'the source was purged' },
+        },
+      ],
+    };
+    const { client } = server(200, diagnosed);
+    render(<SavedView {...ids} callTool={noTools} client={client} />);
+    expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
+    const chart = screen.getByRole('heading', { name: 'Metrics chart' }).closest('section');
+    expect(chart?.querySelector('[role="alert"]')?.textContent).toBe(
+      'Invalidated: the source was purged',
+    );
+  });
+
+  it("shows the server's refusal as the reopen's alert, with its own message", async () => {
+    const { client } = server(404, {
+      code: 'not_found',
+      message: 'no saved View at that item',
+    });
+    render(<SavedView {...ids} callTool={noTools} client={client} />);
+    expect((await screen.findByRole('alert')).textContent).toBe('no saved View at that item');
+  });
+
+  it('refuses a body the generated schema does not read, rather than drawing it', async () => {
+    const { client } = server(200, { view: 'not a view' });
+    render(<SavedView {...ids} callTool={noTools} client={client} />);
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      'The server returned a View this client cannot read.',
+    );
   });
 });
