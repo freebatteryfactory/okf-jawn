@@ -1193,6 +1193,45 @@ async fn history_is_a_bundle_of_the_accepted_line_that_stock_git_clones() -> Tes
 }
 
 #[tokio::test]
+async fn a_creation_that_crashed_before_its_record_is_adopted_on_retry() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let tenant = TenantId::try_from("local".to_owned())?;
+    let creation = || NewWorkspace {
+        name: "Research".to_owned(),
+        description: String::new(),
+        creator: person("ana"),
+    };
+    let first = storage
+        .catalog()
+        .create(&tenant, uuid!(1)?, creation())
+        .await?;
+    assert_eq!(
+        first.id,
+        okf_jawn_core::storage::derive_workspace_id(uuid!(1)?)
+    );
+    // The crash: the repository was written, the record never committed.
+    rusqlite::Connection::open(storage.data().records_path())?.execute(
+        "DELETE FROM workspaces WHERE mutation_id = ?1",
+        [uuid_text(1)],
+    )?;
+    let retried = storage
+        .catalog()
+        .create(&tenant, uuid!(1)?, creation())
+        .await?;
+    assert_eq!(retried.id, first.id, "the retry keeps the identity");
+    assert_eq!(
+        retried.head, first.head,
+        "the repository is adopted, not written again"
+    );
+    let repositories =
+        std::fs::read_dir(directory.path().join("repositories").join("local"))?.count();
+    assert_eq!(repositories, 1, "no unreachable repository is left");
+    assert_eq!(storage.catalog().list(&tenant, true).await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_catalog_creates_once_lists_updates_and_archives() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (storage, scope, initial) = workspace(directory.path()).await?;

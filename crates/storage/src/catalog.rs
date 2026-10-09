@@ -1,9 +1,12 @@
 //! The workspace catalog (`WorkspaceCatalog`): names in SQLite, content in one Git repository
 //! per workspace.
 //!
-//! `create` inserts the row first (unique on `mutation_id`) and then makes the repository and
-//! its initial commit, each step skipped when a resumed attempt finds it done, so a crash
-//! between them is completed by the retry. `update`, `archive` and `unarchive` record their
+//! `create` names the workspace `derive_workspace_id(mutation_id)`, inserts the row (unique on
+//! `mutation_id`) and makes the repository and its initial commit in one SQLite transaction,
+//! each Git step skipped when a resumed attempt finds it done. A crash after the repository was
+//! written and before the row was committed is therefore retried under the same identity: the
+//! retry finds that repository and adopts it, never allocating a second identity or leaving an
+//! unreachable repository. `update`, `archive` and `unarchive` record their
 //! result under their mutation id (primary key) in the same transaction as the change, so a
 //! repeated id changes nothing and returns the first result. The catalog never filters and
 //! returns `Workspace::permissions` empty.
@@ -14,6 +17,7 @@ use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     NewWorkspace, Provenance, StorageScope, WorkspaceArchive, WorkspaceCatalog, WorkspaceUpdate,
+    derive_workspace_id,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -157,7 +161,7 @@ impl WorkspaceCatalog for GitCatalog {
         let tenant = tenant.clone();
         let repositories = self.repositories.clone();
         Box::pin(self.db.transaction(move |transaction| {
-            let id: WorkspaceId = new_id!()?;
+            let id: WorkspaceId = derive_workspace_id(mutation_id);
             transaction
                 .execute(
                     "INSERT INTO workspaces (tenant_id, workspace_id, mutation_id, name,

@@ -1371,6 +1371,38 @@ export const zListTypesResponse = z.object({
 });
 
 /**
+ * Why an OKF `sources` entry is not a citation.
+ */
+export const zUncitedReason = z.union([
+    z.literal('external'),
+    z.literal('scope'),
+    z.literal('not_found'),
+    z.literal('malformed')
+]);
+
+/**
+ * What an OKF `sources` entry resolved to.
+ */
+export const zDeclaredOutcome = z.union([
+    z.object({
+        index: z.int().gte(0).max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+        kind: z.literal('cited')
+    }),
+    z.object({
+        kind: z.literal('uncited'),
+        reason: zUncitedReason
+    })
+]);
+
+/**
+ * One entry of an item's OKF `sources` and what it resolved to.
+ */
+export const zDeclaredSource = z.object({
+    entry: z.unknown(),
+    outcome: zDeclaredOutcome
+});
+
+/**
  * Why a location is not known; one variant per reason the producing rule states.
  */
 export const zUnresolvedReason = z.union([
@@ -2494,6 +2526,7 @@ export const zGetObjectRequest = z.object({
  */
 export const zGetSourcesResponse = z.object({
     appearance: zSourceAppearance.nullish(),
+    declared: z.array(zDeclaredSource).optional(),
     revision: zRevision,
     sources: z.array(zSourceReference)
 });
