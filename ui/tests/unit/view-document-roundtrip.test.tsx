@@ -22,7 +22,7 @@ import {
 } from '../../src/api/generated/zod.gen';
 import { BindingsContext, type ResolvedPresentation } from '../../src/features/views/Bindings';
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
-import { datasetRecords, PresentView } from '../../src/features/views/PresentView';
+import { datasetRecords, PresentView, parseDataset } from '../../src/features/views/PresentView';
 
 const emptyBindings: ResolvedPresentation = {
   charts: new Map(),
@@ -246,5 +246,105 @@ describe('the Dataset the views read', () => {
     });
     render(<PresentView response={refused} callTool={callTool} />);
     await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(message));
+  });
+});
+
+/** PresentView resolving one dataset whose bytes are exactly `payload`, as the host serves them. */
+async function presentServing(payload: unknown) {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+  const fixture = zPresentResponse.parse(presentResponseFixture);
+  const metrics = fixture.resolved_bindings.find((entry) => entry.name === 'metrics');
+  const response = zPresentResponse.parse({
+    ...presentResponseFixture,
+    resolved_bindings: [{ ...metrics, materialized: digest }],
+  });
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const callTool = async (name: string) =>
+    name === 'show'
+      ? { structuredContent: zReadItemResponse.parse(sourceReadItemFixture) }
+      : {
+          structuredContent: {
+            data_base64: btoa(binary),
+            has_more: false,
+            media_type: 'application/json',
+            offset: '0',
+            sha256: digest,
+            total_size: String(bytes.byteLength),
+          },
+        };
+  return render(<PresentView response={response} callTool={callTool} />);
+}
+
+describe("PresentView refuses a dataset that is not the converter's typed table", () => {
+  const good = JSON.parse(JSON.stringify(metricsDatasetFixture)) as Record<string, unknown> & {
+    columns: unknown[];
+    rows: unknown[][];
+  };
+  const refusals: Array<[string, unknown, RegExp]> = [
+    ['a missing columns', { ...good, columns: undefined }, /malformed at columns/],
+    [
+      'a wrong column kind',
+      { ...good, columns: [{ name: 'category', kind: 'text' }, good.columns[1]] },
+      /malformed at columns.0.kind/,
+    ],
+    ['a row of the wrong width', { ...good, rows: [['Ingested']] }, /row 0 has 1 values for 2/],
+    ['a bare records array', [{ category: 'Ingested', value: 412 }], /malformed/],
+    [
+      'text supplied by an agent',
+      { ...good, text_origin: 'supplied_by_agent' },
+      /not the converter's .text_origin is supplied_by_agent./,
+    ],
+    [
+      'text with no origin',
+      { ...good, text_origin: 'none' },
+      /not the converter's .text_origin is none./,
+    ],
+    [
+      'two columns of one name',
+      { ...good, columns: [good.columns[0], good.columns[0]], rows: [['a', 'b']] },
+      /two columns named "category"/,
+    ],
+  ];
+  for (const [name, payload, message] of refusals) {
+    it(`shows the chart's own alert for ${name}`, async () => {
+      await presentServing(payload);
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent).toMatch(message);
+      expect(document.querySelector('svg')).toBeNull();
+    });
+  }
+
+  it('keeps a null cell null in the table and the chart data, never 0', async () => {
+    const withNull = {
+      ...good,
+      rows: [
+        ['Ingested', null],
+        ['Converted', 397],
+      ],
+    };
+    const records = parseDataset(JSON.stringify(withNull));
+    expect(records.at(0)).toEqual({ category: 'Ingested', value: null });
+    const { container } = render(
+      <BindingsContext.Provider
+        value={{
+          charts: new Map(),
+          sources: new Map(),
+          bindings: new Map(),
+          tables: new Map([['metrics', records]]),
+        }}
+      >
+        <Layout spec={zViewDocument.parse(viewDocumentFixture).spec} />
+      </BindingsContext.Provider>,
+    );
+    const cells = Array.from(
+      container.querySelectorAll('tbody tr:first-child td'),
+      (n) => n.textContent,
+    );
+    expect(cells).not.toContain('0');
+    expect(cells.at(0)).toBe('Ingested');
   });
 });
