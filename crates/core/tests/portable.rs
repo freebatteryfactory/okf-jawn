@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use okf_core::trust::{TrustTier, Verification};
 use okf_core::yaml::{Mapping, Value as YamlValue};
-use okf_jawn_contract::common::{TextRange, Warning};
+use okf_jawn_contract::common::{PageRange, TextRange, Warning};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{
     Digest, ItemId, ReviewId, Revision, Timestamp, WorkspaceId, WorkspacePath,
@@ -159,12 +159,31 @@ fn export_writes_only_current_whole_item_reviews_as_okf_verified() -> TestResult
             Selection::All,
             ReviewCoverage::Current,
         )?,
-        // A review of two lines is not a review of the concept.
+        // A review of two lines, of one section or of some pages is not a review of the
+        // concept, however current: OKF `verified` speaks for the whole concept.
         review(
             "user_3",
             "2026-10-08T10:00:00.000Z",
             content.clone(),
             lines,
+            ReviewCoverage::Current,
+        )?,
+        review(
+            "user_5",
+            "2026-10-08T10:30:00.000Z",
+            content.clone(),
+            Selection::Section {
+                heading: "Plan".to_owned(),
+            },
+            ReviewCoverage::Current,
+        )?,
+        review(
+            "user_6",
+            "2026-10-08T10:45:00.000Z",
+            content.clone(),
+            Selection::Pages {
+                range: PageRange { start: 1, end: 1 },
+            },
             ReviewCoverage::Current,
         )?,
         // Purged content: the review covers nothing that exists.
