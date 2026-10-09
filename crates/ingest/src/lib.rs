@@ -27,6 +27,8 @@ pub mod glyphs;
 #[cfg(feature = "runtime")]
 pub mod handler;
 #[cfg(feature = "runtime")]
+mod import;
+#[cfg(feature = "runtime")]
 pub mod locate;
 #[cfg(feature = "runtime")]
 pub mod outline;

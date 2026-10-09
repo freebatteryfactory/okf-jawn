@@ -3,28 +3,38 @@
 //! A claim is all a handler gets and all it needs. Every write is idempotent on the claim's
 //! `MutationId`, so a second run of the same job repeats no effect. The ports are storage's and
 //! the rules are core's; this module only sequences them and writes the completion through the
-//! claim's lease.
+//! claim's lease. A job found cancelled while it runs stops and writes no completion.
 //!
-//! Built so far: index rebuild, both backups, both purges. Construction limitation, stated
-//! rather than hidden: import and redigest wait for the conversion child and the docling
-//! adapter. Export, View export and restore wait for core-cli M0's export, import and restore
-//! inputs. A claim of one of those kinds fails with `NotImplemented`, which the runtime records
-//! as a non-retryable failure. Nothing is reported as done that was not done.
+//! Built: import and redigest (`import`), index rebuild, both backups, restore, both purges.
+//! Construction limitations, stated rather than hidden: a portable export and a View export
+//! fail as `NotImplemented`, which the runtime records as a non-retryable failure (requests
+//! R-I6 and R-I7 in the lane report). Nothing is reported as done that was not done.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{ArtifactId, Digest, PurgeId, TenantId, WorkspaceId};
+use okf_jawn_contract::identity::{
+    ArtifactId, Digest, ItemId, PurgeId, Revision, TenantId, UploadId, WorkspaceId,
+};
 use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
+use okf_jawn_contract::workspace::RestoreReport;
+use okf_jawn_core::conversion::Converter;
 use okf_jawn_core::jobs::{
     ArtifactKind, ClaimedJob, JobCompletion, JobHandler, JobScope, JobSpec, NewArtifact,
     RecordStore,
 };
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::search::SearchIndex;
-use okf_jawn_core::storage::{Backups, ObjectInfo, Purger, StorageScope, VersionStore};
+use okf_jawn_core::storage::{
+    Backups, BlobStore, CandidateCheck, ObjectInfo, Purger, StorageScope, VersionStore,
+};
+use okf_jawn_core::uploads::UploadStore;
 
-/// The ports the handler calls, all implemented by storage.
+use crate::import::{ImportRequest, import, redigest};
+
+/// The ports the handler calls: storage's, the converter and the injected check.
 #[derive(Clone)]
 pub struct HandlerPorts {
     /// Durable job, artifact and purge records.
@@ -37,15 +47,44 @@ pub struct HandlerPorts {
     pub backups: Arc<dyn Backups>,
     /// Purge execution.
     pub purger: Arc<dyn Purger>,
+    /// Upload slots an import or a restore consumes.
+    pub uploads: Arc<dyn UploadStore>,
+    /// Retained originals, exports, assets and records.
+    pub blobs: Arc<dyn BlobStore>,
+    /// The bounded converter.
+    pub converter: Arc<dyn Converter>,
+    /// The conformance check composition injects (core-cli's production check).
+    pub check: Arc<dyn CandidateCheck>,
+    /// Timing.
+    pub limits: HandlerLimits,
+}
+
+/// How the handler paces long work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandlerLimits {
+    /// How often a converting job renews its lease; at most a third of the lease.
+    pub heartbeat: Duration,
+    /// The time budget of one window (`ConversionInput::timeout`).
+    pub window_timeout: Duration,
 }
 
 /// What a finished job produced, before it is written as the claim's completion.
 #[derive(Debug, Clone, Default)]
-struct Done {
+pub(crate) struct Done {
+    /// The committed revision, when the job changed the workspace.
+    pub(crate) revision: Option<Revision>,
+    /// Items the job produced.
+    pub(crate) item_ids: Vec<ItemId>,
     /// Retained output objects.
-    outputs: Vec<Digest>,
+    pub(crate) outputs: Vec<Digest>,
     /// The recorded artifact.
-    artifact: Option<ArtifactId>,
+    pub(crate) artifact: Option<ArtifactId>,
+    /// What a restore did.
+    pub(crate) restore: Option<RestoreReport>,
+    /// Findings of the checks the commits ran.
+    pub(crate) warnings: Vec<Warning>,
+    /// The job was found cancelled: no completion is written.
+    pub(crate) cancelled: bool,
 }
 
 /// Runs claimed jobs of every kind.
@@ -67,98 +106,125 @@ impl IngestHandler {
 
     /// Run one claimed job to its completion.
     async fn run(&self, claimed: &ClaimedJob) -> Result<(), ApiError> {
-        let done = match (&claimed.spec, &claimed.scope) {
-            (JobSpec::RebuildIndex, JobScope::Workspace(scope)) => self.rebuild(scope).await?,
-            (JobSpec::BackupWorkspace, JobScope::Workspace(scope)) => {
-                let object = self
-                    .ports
-                    .backups
-                    .write_workspace_archive(scope, claimed.mutation_id)
-                    .await?;
-                self.artifact(claimed, ArtifactKind::WorkspaceBackup, object)
-                    .await?
-            }
-            (JobSpec::BackupInstallation, JobScope::Tenant(tenant)) => {
-                let object = self
-                    .ports
-                    .backups
-                    .write_installation_archive(tenant, claimed.mutation_id)
-                    .await?;
-                self.artifact(claimed, ArtifactKind::InstallationBackup, object)
-                    .await?
-            }
-            (
-                JobSpec::PurgeWorkspace {
-                    purge_id,
-                    workspace_id,
-                },
-                JobScope::Tenant(tenant),
-            ) => {
-                self.purge(tenant, *purge_id, |purger| {
-                    purger.purge_workspace(tenant, claimed.mutation_id, *purge_id, *workspace_id)
-                })
-                .await?
-            }
-            (
-                JobSpec::PurgeItem {
-                    purge_id,
-                    workspace_id,
-                    item_id,
-                },
-                JobScope::Tenant(tenant),
-            ) => {
-                let scope = item_scope(tenant, *workspace_id);
-                self.purge(tenant, *purge_id, |purger| async move {
-                    purger
-                        .purge_item(&scope, claimed.mutation_id, *purge_id, *item_id)
-                        .await
-                })
-                .await?
-            }
-            (
-                JobSpec::Import { .. }
-                | JobSpec::Redigest { .. }
-                | JobSpec::ExportWorkspace { .. }
-                | JobSpec::ExportView { .. }
-                | JobSpec::RestoreWorkspace { .. },
-                _,
-            ) => {
-                return Err(ApiError::new(
-                    ErrorCode::NotImplemented,
-                    format!(
-                        "the ingest handler does not run {:?} jobs yet",
-                        claimed.spec.kind()
-                    ),
-                ));
-            }
-            (
-                JobSpec::RebuildIndex
-                | JobSpec::BackupWorkspace
-                | JobSpec::BackupInstallation
-                | JobSpec::PurgeWorkspace { .. }
-                | JobSpec::PurgeItem { .. },
-                _,
-            ) => {
-                return Err(ApiError::new(
-                    ErrorCode::Internal,
-                    "the claimed job's specification does not fit its scope",
-                ));
-            }
-        };
+        let done = self.dispatch(claimed).await?;
+        if done.cancelled {
+            return Ok(());
+        }
         let _job = self
             .ports
             .records
             .complete_job(JobCompletion {
                 lease: claimed.lease.clone(),
-                revision: None,
-                item_ids: Vec::new(),
+                revision: done.revision,
+                item_ids: done.item_ids,
                 artifact: done.artifact,
-                restore: None,
+                restore: done.restore,
                 outputs: done.outputs,
-                warnings: Vec::new(),
+                warnings: done.warnings,
             })
             .await?;
         Ok(())
+    }
+
+    /// Do the work the claim's specification names.
+    async fn dispatch(&self, claimed: &ClaimedJob) -> Result<Done, ApiError> {
+        let ports = &self.ports;
+        match (&claimed.spec, &claimed.scope) {
+            (
+                JobSpec::Import {
+                    base_revision,
+                    upload_ids,
+                    destination,
+                    apply_naming_rules,
+                    settings,
+                },
+                JobScope::Workspace(scope),
+            ) => {
+                let request = ImportRequest {
+                    base_revision,
+                    upload_ids,
+                    destination: destination.as_ref(),
+                    apply_naming_rules: *apply_naming_rules,
+                    settings,
+                };
+                import(ports, claimed, scope, request).await
+            }
+            (
+                JobSpec::Redigest {
+                    item_id,
+                    base_revision,
+                    settings,
+                    pages,
+                },
+                JobScope::Workspace(scope),
+            ) => {
+                redigest(
+                    ports,
+                    claimed,
+                    scope,
+                    *item_id,
+                    base_revision,
+                    settings,
+                    pages.as_ref(),
+                )
+                .await
+            }
+            (JobSpec::RebuildIndex, JobScope::Workspace(scope)) => self.rebuild(scope).await,
+            (JobSpec::BackupWorkspace, JobScope::Workspace(scope)) => {
+                let object = ports
+                    .backups
+                    .write_workspace_archive(scope, claimed.mutation_id)
+                    .await?;
+                self.artifact(claimed, ArtifactKind::WorkspaceBackup, object)
+                    .await
+            }
+            (
+                JobSpec::RestoreWorkspace {
+                    upload_id,
+                    archive,
+                    editors,
+                },
+                JobScope::Workspace(scope),
+            ) => {
+                self.restore(claimed, scope, *upload_id, archive, editors)
+                    .await
+            }
+            (JobSpec::BackupInstallation, JobScope::Tenant(tenant)) => {
+                let object = ports
+                    .backups
+                    .write_installation_archive(tenant, claimed.mutation_id)
+                    .await?;
+                self.artifact(claimed, ArtifactKind::InstallationBackup, object)
+                    .await
+            }
+            (
+                JobSpec::PurgeWorkspace { .. } | JobSpec::PurgeItem { .. },
+                JobScope::Tenant(tenant),
+            ) => self.purge_job(claimed, tenant).await,
+            (JobSpec::ExportWorkspace { .. } | JobSpec::ExportView { .. }, _) => {
+                Err(ApiError::new(
+                    ErrorCode::NotImplemented,
+                    format!(
+                        "the ingest handler does not run {:?} jobs yet",
+                        claimed.spec.kind()
+                    ),
+                ))
+            }
+            (
+                JobSpec::Import { .. }
+                | JobSpec::Redigest { .. }
+                | JobSpec::RebuildIndex
+                | JobSpec::BackupWorkspace
+                | JobSpec::RestoreWorkspace { .. }
+                | JobSpec::BackupInstallation
+                | JobSpec::PurgeWorkspace { .. }
+                | JobSpec::PurgeItem { .. },
+                _,
+            ) => Err(ApiError::new(
+                ErrorCode::Internal,
+                "the claimed job's specification does not fit its scope",
+            )),
+        }
     }
 
     /// Rebuild the derived index at the current head.
@@ -166,6 +232,40 @@ impl IngestHandler {
         let head = self.ports.versions.head(scope).await?;
         self.ports.search.rebuild(scope, head).await?;
         Ok(Done::default())
+    }
+
+    /// Import a workspace archive into the job's workspace.
+    ///
+    /// The editors were read from `AccessControl` when the request was accepted; the handler
+    /// passes them on and never consults `AccessControl` itself. The upload is consumed when
+    /// the restore completes (Stage 1b design section 8).
+    async fn restore(
+        &self,
+        claimed: &ClaimedJob,
+        scope: &StorageScope,
+        upload_id: UploadId,
+        archive: &Digest,
+        editors: &[String],
+    ) -> Result<Done, ApiError> {
+        let ports = &self.ports;
+        let report = ports
+            .backups
+            .restore_import(
+                scope,
+                archive.clone(),
+                claimed.mutation_id,
+                editors.to_vec(),
+            )
+            .await?;
+        let _consumed = ports
+            .uploads
+            .consume(scope, upload_id, claimed.lease.job_id)
+            .await?;
+        Ok(Done {
+            revision: Some(ports.versions.head(scope).await?),
+            restore: Some(report),
+            ..Done::default()
+        })
     }
 
     /// Record a retained archive as the job's artifact.
@@ -193,7 +293,47 @@ impl IngestHandler {
         Ok(Done {
             outputs: vec![digest],
             artifact: Some(record.id),
+            ..Done::default()
         })
+    }
+
+    /// Run a purge job of the tenant: a workspace purge or an item purge.
+    async fn purge_job(&self, claimed: &ClaimedJob, tenant: &TenantId) -> Result<Done, ApiError> {
+        match &claimed.spec {
+            JobSpec::PurgeWorkspace {
+                purge_id,
+                workspace_id,
+            } => {
+                self.purge(tenant, *purge_id, |purger| {
+                    purger.purge_workspace(tenant, claimed.mutation_id, *purge_id, *workspace_id)
+                })
+                .await
+            }
+            JobSpec::PurgeItem {
+                purge_id,
+                workspace_id,
+                item_id,
+            } => {
+                let scope = item_scope(tenant, *workspace_id);
+                self.purge(tenant, *purge_id, |purger| async move {
+                    purger
+                        .purge_item(&scope, claimed.mutation_id, *purge_id, *item_id)
+                        .await
+                })
+                .await
+            }
+            JobSpec::Import { .. }
+            | JobSpec::Redigest { .. }
+            | JobSpec::ExportWorkspace { .. }
+            | JobSpec::BackupWorkspace
+            | JobSpec::RestoreWorkspace { .. }
+            | JobSpec::RebuildIndex
+            | JobSpec::ExportView { .. }
+            | JobSpec::BackupInstallation => Err(ApiError::new(
+                ErrorCode::Internal,
+                "a purge job was expected",
+            )),
+        }
     }
 
     /// Carry out a purge and keep its record current: running, then its report.
