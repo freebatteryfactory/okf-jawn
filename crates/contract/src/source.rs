@@ -220,6 +220,32 @@ pub struct GetSourcesResponse {
     /// Occurrence metadata if the item is a source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appearance: Option<SourceAppearance>,
+    /// Entries of the item's OKF `sources` that are not citations of an item in this workspace
+    /// at this revision, in the file's order; kept so no declared source is silently dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncited: Vec<UncitedSource>,
+}
+
+/// One OKF `sources` entry that is not a citation of an item at the resolved revision.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UncitedSource {
+    /// The entry's `resource`, exactly as written in the file.
+    pub resource: String,
+    /// Why it is not a citation.
+    pub reason: UncitedReason,
+}
+
+/// Why an OKF `sources` entry is not a citation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UncitedReason {
+    /// A URL outside the workspace.
+    External,
+    /// A scope (a folder or a pattern) rather than one item.
+    Scope,
+    /// A workspace path that names no item at the resolved revision.
+    NotFound,
 }
 
 /// Read an authorized stored object through an item reference, never by hash alone.
