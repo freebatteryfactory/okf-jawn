@@ -71,7 +71,7 @@
               "ui/tests/unit/mcp-apps-dispatch.test.tsx"
             ]
           },
-          "covers": "On every push the authored UI source and its tests type-check under the authored policy (ui/tsconfig.tests.json covers ui/tests), and the unit tests run in Vitest under Bun with happy-dom. They hold these seams: the json-render Layout rejects on and watch and passes visible through; the wire helper omits an undefined optional and keeps null; RulesForm mounts with invalid data and shows the AJV errors; the SDK's resource MIME type is the one api/mcp-apps.json declares; PresentView refuses a chart specification that Vega-Lite's compile rejects, before any host call, with an alert that names the chart and no chart drawn; and the Apps bridge in ui/src/mcp-apps/main.tsx omits undefined optionals once, as a tool call leaves for the host, while PresentView passes its fields through. It does not prove that a valid chart beside a rejected one is still drawn (PresentView refuses the whole view, and no test holds either behaviour), rendering in a real host (the receipt gate mcp-apps-protocol-qualification) or any behaviour against a running server."
+          "covers": "On every push the authored UI source and its tests type-check under the authored policy (ui/tsconfig.tests.json covers ui/tests), and the unit tests run in Vitest under Bun with happy-dom. They hold these seams: the json-render Layout rejects on and watch and passes visible through; the wire helper omits an undefined optional and keeps null; RulesForm mounts with invalid data and shows the AJV errors; the SDK's resource MIME type is the one api/mcp-apps.json declares; PresentView shows a chart that Vega-Lite's compile rejects, or that the server reports failed, as that chart's own alert naming the chart, while the View's text, source components and other charts still render; and the Apps bridge in ui/src/mcp-apps/main.tsx omits undefined optionals once, as a tool call leaves for the host, while PresentView passes its fields through. It does not prove rendering in a real host (the receipt gate mcp-apps-protocol-qualification) or any behaviour against a running server."
         },
         {
           "id": "deterministic-foundation",
@@ -352,7 +352,7 @@
           "status": "blocked_on_lanes",
           "owner": "views",
           "receipt": "bun scripts/dev.mjs lane views",
-          "meaning": "SPEC §10: a chart that fails to render shows its own alert, and the View's text and other charts still render. ui/tests/unit/layout.test.tsx currently pins the opposite: its test \"refuses a chart specification that compile rejects\" has the whole view refused before any host call. The views lane changes that test with the behaviour; the authored-typescript-seams gate text and tests/foundation/records.test.mjs, which name it, change with it at merge"
+          "meaning": "SPEC §10: a chart that fails to render shows its own alert, and the View's text and other charts still render. ui/tests/unit/layout.test.tsx pins it: its test \"isolates a chart specification that compile rejects\" draws the other chart and the text beside the rejected one, and each server chart failure status is that chart's own alert"
         }
       ],
       "acceptance": [
