@@ -115,7 +115,7 @@ function canonical(value: unknown): unknown {
  */
 export function parseDataset(
   text: string,
-  expected?: z.infer<typeof zViewBinding>['source'],
+  expected: z.infer<typeof zViewBinding>['source'],
 ): ReadonlyArray<Row> {
   const parsed = zDataset.safeParse(JSON.parse(text));
   if (!parsed.success) {
@@ -127,7 +127,7 @@ export function parseDataset(
     throw new Error(
       `Dataset text is not the converter's (text_origin is ${parsed.data.text_origin}); no chart is drawn from it`,
     );
-  if (expected && sourceKey(parsed.data.source) !== sourceKey(expected))
+  if (sourceKey(parsed.data.source) !== sourceKey(expected))
     throw new Error(
       'Dataset was read from a different source than its binding cites (stale); no chart is drawn from it',
     );

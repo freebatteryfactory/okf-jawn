@@ -24,6 +24,9 @@ import { BindingsContext, type ResolvedPresentation } from '../../src/features/v
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
 import { datasetRecords, PresentView, parseDataset } from '../../src/features/views/PresentView';
 
+/** The source the committed dataset cites, as the generated schema reads it. */
+const fixtureSource = zDataset.parse(metricsDatasetFixture).source;
+
 const emptyBindings: ResolvedPresentation = {
   charts: new Map(),
   sources: new Map(),
@@ -365,7 +368,7 @@ describe("PresentView refuses a dataset that is not the converter's typed table"
         ['Converted', 397],
       ],
     };
-    const records = parseDataset(JSON.stringify(withNull));
+    const records = parseDataset(JSON.stringify(withNull), fixtureSource);
     expect(records.at(0)).toEqual({ category: 'Ingested', value: null });
     const { container } = render(
       <BindingsContext.Provider
@@ -435,7 +438,7 @@ describe("each column's declared kind is enforced as the contract's DatasetValue
   ];
   for (const [kind, what, value] of bad) {
     it(`refuses ${what} in a ${kind} column, with its path`, async () => {
-      expect(() => parseDataset(JSON.stringify(one(kind, value)))).toThrow(
+      expect(() => parseDataset(JSON.stringify(one(kind, value)), fixtureSource)).toThrow(
         /malformed at rows.0.0: a value of column c is not of its kind/,
       );
       await presentServing(one(kind, value));
@@ -456,8 +459,12 @@ describe("each column's declared kind is enforced as the contract's DatasetValue
       ['date_time', '2026-01-01T00:00:00.000Z'],
     ];
     for (const [kind, value] of good) {
-      expect(parseDataset(JSON.stringify(one(kind, value))).at(0)).toEqual({ c: value });
-      expect(parseDataset(JSON.stringify(one(kind, null))).at(0)).toEqual({ c: null });
+      expect(parseDataset(JSON.stringify(one(kind, value)), fixtureSource).at(0)).toEqual({
+        c: value,
+      });
+      expect(parseDataset(JSON.stringify(one(kind, null)), fixtureSource).at(0)).toEqual({
+        c: null,
+      });
     }
   });
 });
