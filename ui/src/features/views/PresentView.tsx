@@ -4,9 +4,11 @@ import { compile, type TopLevelSpec } from 'vega-lite';
 import { z } from 'zod';
 import {
   zDataset,
+  type zDatasetValue,
   zGetObjectResponse,
   type zPresentResponse,
   zReadItemResponse,
+  type zViewBinding,
 } from '../../api/generated/zod.gen';
 import type { ResolvedPresentation } from './Bindings';
 import { BindingsContext } from './Bindings';
@@ -40,12 +42,81 @@ export function datasetRecords(data: z.infer<typeof zDataset>): ReadonlyArray<Ro
     return Object.fromEntries(data.columns.map((column, at) => [column.name, cells[at] ?? null]));
   });
 }
+type Cell = z.infer<typeof zDatasetValue>;
+type Kind = z.infer<typeof zDataset>['columns'][number]['kind'];
+const timestampShape = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9].[0-9]{3}Z$/;
+
+/**
+ * Whether a cell is null or of its column's kind, as the contract's `DatasetValue::fits` reads it:
+ * an integer is a whole number that fits 64 bits; a date_time is the one canonical spelling
+ * `YYYY-MM-DDTHH:MM:SS.sssZ` of an instant that exists. Limitation: a JSON `1.0` parses to the
+ * number 1 here and is taken as an integer; the server's parser would call it a float.
+ */
+export function fits(value: Cell, kind: Kind): boolean {
+  if (value === null) return true;
+  switch (kind) {
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'number':
+      return typeof value === 'number';
+    case 'string':
+      return typeof value === 'string';
+    case 'integer':
+      return (
+        typeof value === 'number' &&
+        Number.isInteger(value) &&
+        value >= -(2 ** 63) &&
+        value < 2 ** 64
+      );
+    case 'date_time': {
+      if (typeof value !== 'string' || !timestampShape.test(value)) return false;
+      const instant = new Date(value);
+      return !Number.isNaN(instant.getTime()) && instant.toISOString() === value;
+    }
+  }
+}
+
+function firstMisfit(data: z.infer<typeof zDataset>) {
+  for (const [row, cells] of data.rows.entries())
+    for (const [column, definition] of data.columns.entries()) {
+      const value = cells[column];
+      if (value !== undefined && !fits(value, definition.kind))
+        return { row, column, name: definition.name };
+    }
+  return undefined;
+}
+
+/** A citation's identity: everything but the derived `locations`, in a key order of its own. */
+function sourceKey(source: z.infer<typeof zViewBinding>['source']): string {
+  return JSON.stringify([
+    source.workspace_id,
+    source.item_id,
+    source.path,
+    source.revision,
+    source.digest ?? null,
+    canonical(source.selection),
+  ]);
+}
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (typeof value === 'object' && value !== null)
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([key, inner]) => [key, canonical(inner)]),
+    );
+  return value;
+}
+
 /**
  * Read the bytes of a retained dataset. A dataset is read only from the converter's text (SPEC
  * R5, decision O2): any other origin, or any shape the generated `zDataset` refuses, is that
  * chart's own alert with the reason, never a drawn chart.
  */
-export function parseDataset(text: string): ReadonlyArray<Row> {
+export function parseDataset(
+  text: string,
+  expected: z.infer<typeof zViewBinding>['source'],
+): ReadonlyArray<Row> {
   const parsed = zDataset.safeParse(JSON.parse(text));
   if (!parsed.success) {
     const issue = parsed.error.issues.at(0);
@@ -55,6 +126,15 @@ export function parseDataset(text: string): ReadonlyArray<Row> {
   if (parsed.data.text_origin !== 'converter')
     throw new Error(
       `Dataset text is not the converter's (text_origin is ${parsed.data.text_origin}); no chart is drawn from it`,
+    );
+  if (sourceKey(parsed.data.source) !== sourceKey(expected))
+    throw new Error(
+      'Dataset was read from a different source than its binding cites (stale); no chart is drawn from it',
+    );
+  const misfit = firstMisfit(parsed.data);
+  if (misfit)
+    throw new Error(
+      `Dataset is malformed at rows.${misfit.row}.${misfit.column}: a value of column ${misfit.name} is not of its kind`,
     );
   return datasetRecords(parsed.data);
 }
@@ -143,7 +223,7 @@ async function dataset(
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', merged));
   const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
   if (hex !== binding.materialized) throw new Error('Dataset digest verification failed');
-  return parseDataset(new TextDecoder('utf-8', { fatal: true }).decode(merged));
+  return new TextDecoder('utf-8', { fatal: true }).decode(merged);
 }
 
 function chartsFromView(view: z.infer<typeof zPresentResponse>['view']): {
@@ -184,6 +264,7 @@ export function PresentView({ response, callTool }: PresentViewProps) {
       const sources = new Map(resolved.sources);
       const definitions = new Map(resolved.bindings);
       const tables = new Map(resolved.tables);
+      const datasetErrors = new Map<string, string>();
       for (const binding of response.resolved_bindings) {
         definitions.set(binding.name, binding);
         const output = await callChecked(
@@ -204,10 +285,21 @@ export function PresentView({ response, callTool }: PresentViewProps) {
         if (source.source.revision !== binding.source.revision)
           throw new Error('Returned source revision differs from the binding');
         sources.set(binding.name, source);
-        const rows = await dataset(binding, callTool);
-        if (rows) tables.set(binding.name, rows);
+        const text = await dataset(binding, callTool);
+        if (text !== undefined) {
+          // The bytes are verified; a dataset the contract refuses is that binding's alert alone.
+          try {
+            tables.set(binding.name, parseDataset(text, binding.source));
+          } catch (cause) {
+            datasetErrors.set(
+              binding.name,
+              cause instanceof Error ? cause.message : 'The dataset could not be read',
+            );
+          }
+        }
       }
-      if (active) setBindings({ ...resolved, sources, bindings: definitions, tables, charts });
+      if (active)
+        setBindings({ ...resolved, sources, bindings: definitions, tables, charts, datasetErrors });
     };
     load().catch((cause) => {
       if (active) setError(cause instanceof Error ? cause.message : 'Source resolution failed');
@@ -229,12 +321,14 @@ export function PresentView({ response, callTool }: PresentViewProps) {
   const first = response.resolved_bindings.at(0);
   const rows = first ? bindings.tables.get(first.name) : undefined;
   if (!first || !rows) {
+    const refused = first ? bindings.datasetErrors?.get(first.name) : undefined;
     const failed = response.charts.find((result) => result.status.status === 'failed')?.status;
     return (
       <p role="alert">
-        {failed && failed.status === 'failed'
-          ? failed.message
-          : 'A chart requires a retained materialized dataset. No model-provided data was substituted.'}
+        {refused ??
+          (failed && failed.status === 'failed'
+            ? failed.message
+            : 'A chart requires a retained materialized dataset. No model-provided data was substituted.')}
       </p>
     );
   }

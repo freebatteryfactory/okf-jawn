@@ -24,6 +24,9 @@ import { BindingsContext, type ResolvedPresentation } from '../../src/features/v
 import { Layout, prepareSpec } from '../../src/features/views/Layout';
 import { datasetRecords, PresentView, parseDataset } from '../../src/features/views/PresentView';
 
+/** The source the committed dataset cites, as the generated schema reads it. */
+const fixtureSource = zDataset.parse(metricsDatasetFixture).source;
+
 const emptyBindings: ResolvedPresentation = {
   charts: new Map(),
   sources: new Map(),
@@ -249,34 +252,73 @@ describe('the Dataset the views read', () => {
   });
 });
 
-/** PresentView resolving one dataset whose bytes are exactly `payload`, as the host serves them. */
-async function presentServing(payload: unknown) {
-  const bytes = new TextEncoder().encode(JSON.stringify(payload));
-  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) =>
+async function digestOf(bytes: Uint8Array<ArrayBuffer>) {
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) =>
     byte.toString(16).padStart(2, '0'),
   ).join('');
-  const fixture = zPresentResponse.parse(presentResponseFixture);
-  const metrics = fixture.resolved_bindings.find((entry) => entry.name === 'metrics');
-  const response = zPresentResponse.parse({
-    ...presentResponseFixture,
-    resolved_bindings: [{ ...metrics, materialized: digest }],
-  });
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  const callTool = async (name: string) =>
-    name === 'show'
-      ? { structuredContent: zReadItemResponse.parse(sourceReadItemFixture) }
-      : {
-          structuredContent: {
-            data_base64: btoa(binary),
-            has_more: false,
-            media_type: 'application/json',
-            offset: '0',
-            sha256: digest,
-            total_size: String(bytes.byteLength),
-          },
-        };
+}
+
+/**
+ * PresentView resolving the fixture's View with these datasets behind the named bindings. A name
+ * not in the fixture is added as a table and a chart over the metrics source. The bytes are exactly
+ * the payloads, as the host serves them; `venue` has none.
+ */
+async function presentMany(datasets: Record<string, unknown>) {
+  const fixture = JSON.parse(JSON.stringify(presentResponseFixture));
+  const metrics = fixture.resolved_bindings.find(
+    (entry: { name: string }) => entry.name === 'metrics',
+  );
+  const served = new Map<string, string>();
+  const bindings = [fixture.resolved_bindings[0]];
+  const elements = fixture.view.spec.elements;
+  for (const [name, payload] of Object.entries(datasets)) {
+    const bytes = new TextEncoder().encode(JSON.stringify(payload));
+    const digest = await digestOf(bytes);
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    served.set(digest, binary);
+    bindings.push({ ...metrics, name, materialized: digest });
+    if (name !== 'metrics') {
+      elements[`${name}_table`] = { type: 'DataTable', props: { binding: name }, children: [] };
+      elements[`${name}_chart`] = {
+        type: 'Chart',
+        props: { binding: name, chart: 'metrics_chart', title: `${name} chart` },
+        children: [],
+      };
+      elements.root.children.push(`${name}_table`, `${name}_chart`);
+      elements.root.slots.default.push(`${name}_table`, `${name}_chart`);
+      fixture.view.bindings.push({ ...metrics, name, materialized: digest });
+    }
+  }
+  fixture.resolved_bindings = bindings;
+  fixture.charts = [
+    {
+      chart: { kind: 'named', name: 'metrics_chart' },
+      status: { status: 'ready', bindings: Object.keys(datasets) },
+    },
+  ];
+  const response = zPresentResponse.parse(fixture);
+  const callTool = async (name: string, input: Record<string, unknown>) => {
+    if (name === 'show')
+      return { structuredContent: zReadItemResponse.parse(sourceReadItemFixture) };
+    const binary = served.get(String(input.object)) ?? '';
+    return {
+      structuredContent: {
+        data_base64: btoa(binary),
+        has_more: false,
+        media_type: 'application/json',
+        offset: '0',
+        sha256: String(input.object),
+        total_size: String(binary.length),
+      },
+    };
+  };
   return render(<PresentView response={response} callTool={callTool} />);
+}
+
+/** PresentView resolving one dataset behind `metrics`. */
+function presentServing(payload: unknown) {
+  return presentMany({ metrics: payload });
 }
 
 describe("PresentView refuses a dataset that is not the converter's typed table", () => {
@@ -312,8 +354,8 @@ describe("PresentView refuses a dataset that is not the converter's typed table"
   for (const [name, payload, message] of refusals) {
     it(`shows the chart's own alert for ${name}`, async () => {
       await presentServing(payload);
-      const alert = await screen.findByRole('alert');
-      expect(alert.textContent).toMatch(message);
+      const alerts = await screen.findAllByRole('alert');
+      expect(alerts.some((alert) => message.test(alert.textContent ?? ''))).toBe(true);
       expect(document.querySelector('svg')).toBeNull();
     });
   }
@@ -326,7 +368,7 @@ describe("PresentView refuses a dataset that is not the converter's typed table"
         ['Converted', 397],
       ],
     };
-    const records = parseDataset(JSON.stringify(withNull));
+    const records = parseDataset(JSON.stringify(withNull), fixtureSource);
     expect(records.at(0)).toEqual({ category: 'Ingested', value: null });
     const { container } = render(
       <BindingsContext.Provider
@@ -346,5 +388,124 @@ describe("PresentView refuses a dataset that is not the converter's typed table"
     );
     expect(cells).not.toContain('0');
     expect(cells.at(0)).toBe('Ingested');
+  });
+});
+
+describe("a bad dataset is its own binding's alert, not the View's", () => {
+  it('renders the prose, the source and the valid chart around one malformed dataset', async () => {
+    const { container } = await presentMany({
+      metrics: metricsDatasetFixture,
+      broken: { ...metricsDatasetFixture, columns: undefined },
+    });
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole('alert')
+          .some((node) => /malformed at columns/.test(node.textContent ?? '')),
+      ).toBe(true),
+    );
+    // The valid binding still draws its table cells and its chart marks.
+    expect(container.textContent).toContain('Ingested');
+    await waitFor(() => expect(container.querySelector('svg')).not.toBeNull(), { timeout: 15_000 });
+    // The View, its title and the source components are all still there.
+    expect(screen.getByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
+    expect(container.querySelector('article.source-excerpt, .view-columns')).not.toBeNull();
+    // The broken binding's table and chart each say why; nothing else was replaced.
+    const reasons = screen
+      .getAllByRole('alert')
+      .filter((node) => /malformed at columns/.test(node.textContent ?? ''));
+    expect(reasons.length).toBe(2);
+  });
+});
+
+describe("each column's declared kind is enforced as the contract's DatasetValue::fits", () => {
+  const one = (kind: string, value: unknown) => ({
+    ...metricsDatasetFixture,
+    columns: [{ name: 'c', kind }],
+    rows: [[value]],
+  });
+  const bad: Array<[string, string, unknown]> = [
+    ['integer', 'unknown text', 'unknown'],
+    ['integer', 'a fraction', 1.5],
+    ['integer', 'beyond 64 bits', 1e30],
+    ['number', 'text', '1'],
+    ['boolean', 'a number', 1],
+    ['string', 'a number', 5],
+    ['date_time', 'a date without a time', '2026-01-01'],
+    ['date_time', 'an instant that does not exist', '2026-02-30T00:00:00.000Z'],
+    ['date_time', 'an offset spelling', '2026-01-01T00:00:00.000+01:00'],
+    ['date_time', 'no milliseconds', '2026-01-01T00:00:00Z'],
+  ];
+  for (const [kind, what, value] of bad) {
+    it(`refuses ${what} in a ${kind} column, with its path`, async () => {
+      expect(() => parseDataset(JSON.stringify(one(kind, value)), fixtureSource)).toThrow(
+        /malformed at rows.0.0: a value of column c is not of its kind/,
+      );
+      await presentServing(one(kind, value));
+      const alerts = await screen.findAllByRole('alert');
+      expect(alerts.some((node) => /malformed at rows.0.0/.test(node.textContent ?? ''))).toBe(
+        true,
+      );
+    });
+  }
+
+  it('accepts a value of its kind, and null in every kind', () => {
+    const good: Array<[string, unknown]> = [
+      ['integer', 3],
+      ['integer', -7],
+      ['number', 1.5],
+      ['boolean', false],
+      ['string', 'text'],
+      ['date_time', '2026-01-01T00:00:00.000Z'],
+    ];
+    for (const [kind, value] of good) {
+      expect(parseDataset(JSON.stringify(one(kind, value)), fixtureSource).at(0)).toEqual({
+        c: value,
+      });
+      expect(parseDataset(JSON.stringify(one(kind, null)), fixtureSource).at(0)).toEqual({
+        c: null,
+      });
+    }
+  });
+});
+
+describe('a dataset read from another source than its binding cites is stale', () => {
+  const cited = zPresentResponse
+    .parse(presentResponseFixture)
+    .resolved_bindings.find((entry) => entry.name === 'metrics')?.source;
+  if (!cited) throw new Error('the fixture has no metrics binding');
+  const from = (change: Record<string, unknown>) => ({
+    ...metricsDatasetFixture,
+    source: { ...metricsDatasetFixture.source, ...change },
+  });
+
+  it('is refused for a different revision, path, item, workspace or selection', async () => {
+    const other: Array<Record<string, unknown>> = [
+      { revision: 'f'.repeat(40) },
+      { path: 'fixtures/another.json' },
+      { item_id: '99999999-3333-4444-8555-666666666666' },
+      { workspace_id: 'bbbbbbbb-bbbb-4ccc-8ddd-ffffffffffff' },
+      { selection: { kind: 'lines', range: { start: 1, end: 2 } } },
+      { digest: 'a'.repeat(64) },
+    ];
+    for (const change of other) {
+      expect(
+        () => parseDataset(JSON.stringify(from(change)), cited),
+        JSON.stringify(change),
+      ).toThrow(/stale/);
+    }
+    await presentServing(from({ revision: 'f'.repeat(40) }));
+    const alerts = await screen.findAllByRole('alert');
+    expect(alerts.some((node) => /stale/.test(node.textContent ?? ''))).toBe(true);
+  });
+
+  it('is accepted when only the derived locations or the key order differ', () => {
+    const same = from({ locations: [] });
+    expect(parseDataset(JSON.stringify(same), cited)).toHaveLength(5);
+    const reordered = {
+      ...same,
+      source: Object.fromEntries(Object.entries(same.source).reverse()),
+    };
+    expect(parseDataset(JSON.stringify(reordered), cited)).toHaveLength(5);
   });
 });

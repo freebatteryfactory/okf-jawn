@@ -15,6 +15,11 @@ import { catalog } from './catalog';
 import { DataTable } from './DataTable';
 import { type RawElement, rawSpecSchema, repeatSchema, slotsSchema } from './spec-schema';
 
+function refusal(bindings: ReturnType<typeof useBindings>, name: string): string {
+  const why = bindings.datasetErrors?.get(name);
+  return why ? `: ${why}` : '';
+}
+
 const { registry } = defineRegistry(catalog, {
   components: {
     Stack: ({ props, children }) => (
@@ -33,11 +38,15 @@ const { registry } = defineRegistry(catalog, {
       );
     },
     DataTable: ({ props }) => {
-      const rows = useBindings().tables.get(props.binding);
+      const bindings = useBindings();
+      const rows = bindings.tables.get(props.binding);
       return rows ? (
         <DataTable rows={rows} caption={props.binding} />
       ) : (
-        <p role="alert">Dataset unavailable: {props.binding}</p>
+        <p role="alert">
+          Dataset unavailable: {props.binding}
+          {refusal(bindings, props.binding)}
+        </p>
       );
     },
     Chart: ({ props }) => {
@@ -50,7 +59,10 @@ const { registry } = defineRegistry(catalog, {
           {rows && spec ? (
             <Chart spec={spec} rows={rows} bindingName={props.binding} />
           ) : (
-            <p role="alert">Resolved chart data or specification unavailable.</p>
+            <p role="alert">
+              {bindings.datasetErrors?.get(props.binding) ??
+                'Resolved chart data or specification unavailable.'}
+            </p>
           )}
         </section>
       );
