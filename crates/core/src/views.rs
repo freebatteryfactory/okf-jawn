@@ -75,6 +75,10 @@ pub const DATASET_SCHEMA_VERSION: u32 = 1;
 pub const MAX_DATASET_ROWS: usize = 100_000;
 /// Most columns a dataset may hold (the contract schema's bound).
 pub const MAX_DATASET_COLUMNS: usize = 1024;
+/// Most cells (rows times columns) a dataset may hold. The row and column bounds alone allow
+/// about 102 million; the grid is laid out in memory before values are read, so the product is
+/// bounded too.
+pub const MAX_DATASET_CELLS: usize = 1_000_000;
 /// Largest integer magnitude a JSON reader holds exactly (2^53).
 const MAX_EXACT_INTEGER: u64 = 1 << 53;
 /// Most significant digits of a decimal a double holds exactly as written.
@@ -87,7 +91,7 @@ const MAX_EXACT_DECIMAL_DIGITS: usize = 15;
 ///
 /// # Errors
 /// Returns `DatasetUnavailable` when the selection covers no table or several, or a kind the
-/// record cannot answer; `TooLarge` past the row or column bound.
+/// record cannot answer; `TooLarge` past the row, column or cell bound.
 pub fn materialize(
     binding: &ViewBinding,
     record: &ConversionRecord,
@@ -98,12 +102,16 @@ pub fn materialize(
     let (rows, columns) = extent(table, cells.as_ref());
     // Bound the layout before allocating it: a record's counts are not trusted to be small.
     let (height, width) = (rows.len(), columns.len());
-    if width > MAX_DATASET_COLUMNS || height > MAX_DATASET_ROWS {
+    if width > MAX_DATASET_COLUMNS
+        || height > MAX_DATASET_ROWS
+        || height.saturating_mul(width) > MAX_DATASET_CELLS
+    {
         return Err(BindingFailure {
             reason: ChartFailure::TooLarge,
             message: format!(
                 "the selected table has {height} rows and {width} columns; a dataset holds at \
-                 most {MAX_DATASET_ROWS} rows and {MAX_DATASET_COLUMNS} columns"
+                 most {MAX_DATASET_ROWS} rows, {MAX_DATASET_COLUMNS} columns and \
+                 {MAX_DATASET_CELLS} cells"
             ),
         });
     }
@@ -418,7 +426,8 @@ fn value_of(text: Option<&str>, kind: ColumnKind) -> DatasetValue {
 /// The value of `text` when it is a number that a dataset keeps exactly: the JSON number
 /// grammar without an exponent (no leading `+`, no leading zero before other digits, so an
 /// identifier such as `02134` stays text), an integer within ±2^53, or a decimal of at most 15
-/// significant digits, which a double holds exactly as written. Anything else is text.
+/// significant digits and 15 digits after the point, which a double holds exactly as written
+/// and which cannot underflow to zero. Anything else is text.
 fn exact_number(text: &str) -> Option<ExactNumber> {
     let unsigned = text.strip_prefix('-').unwrap_or(text);
     let (whole, fraction) = match unsigned.split_once('.') {
@@ -436,8 +445,12 @@ fn exact_number(text: &str) -> Option<ExactNumber> {
             .filter(|value| value.unsigned_abs() <= MAX_EXACT_INTEGER)
             .map(ExactNumber::Integer),
         Some(fraction) if digits(fraction) => {
+            // At most 15 significant digits, and at most 15 after the point: the value is then
+            // at least 1e-15 when nonzero, far from where a double underflows to zero.
             let joined = format!("{whole}{fraction}");
-            if joined.trim_start_matches('0').len() > MAX_EXACT_DECIMAL_DIGITS {
+            if joined.trim_start_matches('0').len() > MAX_EXACT_DECIMAL_DIGITS
+                || fraction.len() > MAX_EXACT_DECIMAL_DIGITS
+            {
                 return None;
             }
             text.parse::<f64>()

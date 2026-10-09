@@ -213,6 +213,13 @@ fn identifiers_and_long_numbers_stay_text_exactly() -> TestResult {
             .map(|text| DatasetValue::Text((*text).to_owned()));
         assert_eq!(first, written.as_ref(), "{values:?}");
     }
+    // A nonzero decimal below a double's range would parse as 0.0; it stays text exactly.
+    let tiny = format!("0.{}1", "0".repeat(400));
+    let dataset = read_one_column(&[tiny.as_str(), "0.5"])?;
+    let kind = dataset.columns.first().map(|column| column.kind);
+    assert_eq!(kind, Some(ColumnKind::String));
+    let first = dataset.rows.first().and_then(|row| row.first());
+    assert_eq!(first, Some(&DatasetValue::Text(tiny.clone())));
     let integers = read_one_column(&["-12", "9007199254740992", "0"])?;
     let kind = integers.columns.first().map(|column| column.kind);
     assert_eq!(kind, Some(ColumnKind::Integer));
@@ -223,6 +230,24 @@ fn identifiers_and_long_numbers_stay_text_exactly() -> TestResult {
         serde_json::to_value(&decimals.rows)?,
         serde_json::json!([[-0.25], [3], [1200.5]])
     );
+    Ok(())
+}
+
+#[test]
+fn a_table_within_the_row_and_column_bounds_but_too_many_cells_is_too_large() -> TestResult {
+    // 100,000 rows by 1,024 columns passes each bound alone; laid out it would be about 102
+    // million cells, so it is refused before any grid is allocated.
+    let mut record = one_column(&["1"])?;
+    let table = record.tables.first_mut().ok_or("the fixture has a table")?;
+    table.num_rows = 100_000;
+    table.num_cols = 1024;
+    let failure = err_of(materialize(
+        &binding(Selection::All)?,
+        &record,
+        TextOrigin::Converter,
+        &[],
+    ))?;
+    assert_eq!(failure.reason, ChartFailure::TooLarge);
     Ok(())
 }
 
