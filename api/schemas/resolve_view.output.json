@@ -105,7 +105,7 @@
         },
         {
           "const": "too_large",
-          "description": "The dataset exceeds the row or byte limit.",
+          "description": "The dataset exceeds a row, column, cell or column-name size bound.",
           "type": "string"
         }
       ]

@@ -2894,7 +2894,9 @@ export type OutlineEntry = {
      */
     level: number;
     /**
-     * Precise location to request next.
+     * Precise location to request next. A heading entry selects its section as lines: from the
+     * heading line to the line before the next heading of the same or a higher level, or to
+     * the end of the text.
      */
     selection: Selection;
 };

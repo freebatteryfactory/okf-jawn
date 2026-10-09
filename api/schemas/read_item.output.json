@@ -244,7 +244,7 @@
         },
         "selection": {
           "$ref": "#/$defs/Selection",
-          "description": "Precise location to request next."
+          "description": "Precise location to request next. A heading entry selects its section as lines: from the\nheading line to the line before the next heading of the same or a higher level, or to\nthe end of the text."
         }
       },
       "required": [
