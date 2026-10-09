@@ -134,3 +134,20 @@ pub(crate) fn job_scope_key(scope: &JobScope) -> (String, Option<String>) {
         scope.workspace().map(|workspace| workspace.0.to_string()),
     )
 }
+
+/// Rows read one past the page limit, split into a page of records and the cursor (the last
+/// row's sequence) that continues it.
+pub(crate) fn paged(rows: Vec<(i64, String)>, limit: i64) -> (Vec<String>, Option<String>) {
+    let wanted = usize::try_from(limit).unwrap_or(usize::MAX);
+    let more = rows.len() > wanted;
+    let page: Vec<(i64, String)> = rows.into_iter().take(wanted).collect();
+    let next_cursor = if more {
+        page.last().map(|(sequence, _)| sequence.to_string())
+    } else {
+        None
+    };
+    (
+        page.into_iter().map(|(_, record)| record).collect(),
+        next_cursor,
+    )
+}

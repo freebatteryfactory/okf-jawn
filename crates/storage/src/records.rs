@@ -24,8 +24,8 @@ use okf_jawn_core::storage::{ObjectInfo, Page, Provenance, StorageScope};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::db::{
-    Db, conflict, cursor, internal, job_scope_key, json, not_found, page_limit, scope_key, sql,
-    to_i64, to_u64,
+    Db, conflict, cursor, internal, job_scope_key, json, not_found, page_limit, paged, scope_key,
+    sql, to_i64, to_u64,
 };
 use crate::seam;
 
@@ -126,7 +126,11 @@ impl RecordStore for SqliteRecords {
                 .map_err(|error| sql(&error))?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| sql(&error))?;
-            let (items, next_cursor) = paged(rows, limit, |record| decode_job(&record))?;
+            let (records, next_cursor) = paged(rows, limit);
+            let items = records
+                .iter()
+                .map(|record| decode_job(record))
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(ListJobsResponse { items, next_cursor })
         }))
     }
@@ -986,27 +990,6 @@ fn job_scope(tenant: &str, workspace: Option<&str>) -> Result<JobScope, ApiError
 
 fn decode_job(record: &str) -> Result<Job, ApiError> {
     serde_json::from_str(record).map_err(|error| json(&error))
-}
-
-/// Rows read one past the page limit, split into a page and the cursor that continues it.
-fn paged<T>(
-    rows: Vec<(i64, String)>,
-    limit: i64,
-    decode: impl Fn(String) -> Result<T, ApiError>,
-) -> Result<(Vec<T>, Option<String>), ApiError> {
-    let wanted = usize::try_from(limit).unwrap_or(usize::MAX);
-    let more = rows.len() > wanted;
-    let page: Vec<(i64, String)> = rows.into_iter().take(wanted).collect();
-    let next_cursor = if more {
-        page.last().map(|(sequence, _)| sequence.to_string())
-    } else {
-        None
-    };
-    let items = page
-        .into_iter()
-        .map(|(_, record)| decode(record))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((items, next_cursor))
 }
 
 fn lease_expiry_ms() -> Result<i64, ApiError> {

@@ -8,11 +8,15 @@ use std::sync::Arc;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 
+use crate::confirmations::SqliteConfirmations;
 use crate::data::{DataDir, FormatState};
 use crate::db::Db;
+use crate::drafts::SqliteDrafts;
 use crate::format::{migrate_database, refuse_newer};
 use crate::mutations::SqliteMutations;
+use crate::proposals::SqliteProposals;
 use crate::records::SqliteRecords;
+use crate::sandbox::SqliteSandbox;
 use crate::schema;
 
 /// An opened data directory; every store it hands out shares its lock.
@@ -76,6 +80,30 @@ impl Storage {
     #[must_use]
     pub fn records(&self) -> SqliteRecords {
         SqliteRecords::new(self.records.clone())
+    }
+
+    /// Per-editor drafts.
+    #[must_use]
+    pub fn drafts(&self) -> SqliteDrafts {
+        SqliteDrafts::new(self.records.clone())
+    }
+
+    /// Session-bound confirmation challenges.
+    #[must_use]
+    pub fn confirmations(&self) -> SqliteConfirmations {
+        SqliteConfirmations::new(self.records.clone())
+    }
+
+    /// Sandbox-origin capabilities.
+    #[must_use]
+    pub fn sandbox(&self) -> SqliteSandbox {
+        SqliteSandbox::new(self.records.clone())
+    }
+
+    /// Proposals and their discussion.
+    #[must_use]
+    pub fn proposals(&self) -> SqliteProposals {
+        SqliteProposals::new(self.records.clone())
     }
 
     /// The opened data directory.
