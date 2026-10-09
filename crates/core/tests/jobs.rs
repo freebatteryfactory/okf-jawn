@@ -168,6 +168,33 @@ async fn a_restore_carries_the_editors_read_when_it_was_accepted() -> TestResult
     Ok(())
 }
 
+#[tokio::test]
+async fn a_restore_sorts_the_editors_and_drops_repeats_whatever_the_adapter_answers() -> TestResult
+{
+    let access = FixtureAccess::new(GrantTable::default());
+    access.answer_editors_as(vec![
+        "dave".to_owned(),
+        "alice".to_owned(),
+        "dave".to_owned(),
+        "carol".to_owned(),
+    ])?;
+    let scope = StorageScope {
+        tenant_id: tenant()?,
+        workspace_id: WorkspaceId(Uuid::from_u128(1)),
+    };
+    let spec =
+        restore_job_spec(&access, &scope, UploadId(Uuid::from_u128(12)), digest('c')?).await?;
+    // The stored job is the same whatever order and repeats the adapter returned.
+    let JobSpec::RestoreWorkspace { editors, .. } = spec else {
+        return Err(format!("expected a restore, got {spec:?}").into());
+    };
+    assert_eq!(
+        editors,
+        vec!["alice".to_owned(), "carol".to_owned(), "dave".to_owned()]
+    );
+    Ok(())
+}
+
 #[test]
 fn a_stored_restore_without_its_editors_is_a_store_fault() -> TestResult {
     let without_editors = serde_json::json!({

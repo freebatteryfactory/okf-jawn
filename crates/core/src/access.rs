@@ -53,8 +53,9 @@ pub trait AccessControl: Send + Sync {
         workspace: WorkspaceId,
     ) -> PortFuture<'a, WorkspaceGrant>;
 
-    /// Every subject whose raw grant on the workspace in `scope` includes `write`, in any
-    /// order; the application sorts them and removes repeats.
+    /// Every subject whose raw grant on the workspace in `scope` includes `write`, resolved as
+    /// `authorize` resolves it (hosted, a tenant-wide role that grants `write` counts), in any
+    /// order and possibly with repeats; the application sorts them and removes repeats.
     ///
     /// Always fetched fresh, never from the grant cache: a workspace restore gives an archived
     /// draft back only to an editor among these subjects (`JobSpec::RestoreWorkspace`), and
