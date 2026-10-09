@@ -1,5 +1,5 @@
 {
-  "git_sha": "8775c7570579ceca860d3c45894fc3568bd629e0",
+  "git_sha": "11c53916cb7ae63bc9b85a144399b7b37287cc24",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-09T21:56:07.285Z",
+  "produced_at": "2026-10-09T22:05:18.398Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-09T21:57:43.878Z",
+  "finished_at": "2026-10-09T22:06:49.006Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -285,8 +285,8 @@
   },
   "harness_binary": {
     "path": "<abs>/release/okf-qualify-mcp-apps.exe",
-    "bytes": 5307904,
-    "sha256": "e843b07b0ddba08aee6ee82c45efe05201656c1dac1054a0f91c7e277d9d6cb7",
+    "bytes": 5308416,
+    "sha256": "72e4937aba414a8ec0f30c44e06b78e9e3ec081d0d335b80c38cc3eb0731477e",
     "args": [
       "--http",
       "127.0.0.1:18765"
@@ -311,7 +311,7 @@
     ]
   },
   "bundle_sizes": {
-    "app": 1586396
+    "app": 1586389
   },
   "app_bundle": {
     "node_env": "development",
@@ -336,7 +336,7 @@
     "resource_count": 1,
     "resources": [
       {
-        "byteLength": 1586396,
+        "byteLength": 1586389,
         "metaUi": {
           "csp": {
             "connectDomains": [],
@@ -348,7 +348,7 @@
         "name": "app",
         "path": "ui/dist-apps/app.html",
         "readable": true,
-        "sha256": "a92f4481686d0448d632dbdafd5a944f74603d3dad14449e4927c7a7ee92d1d9",
+        "sha256": "e5c2b4173131316f93037b67ef640e6c7f07af9dcd5d7e9ddd7b7e4600845b8d",
         "uri": "ui://okf-jawn/app.html"
       }
     ],
@@ -451,7 +451,7 @@
       {
         "uri": "ui://okf-jawn/app.html",
         "mime_type": "text/html;profile=mcp-app",
-        "text_sha256": "a92f4481686d0448d632dbdafd5a944f74603d3dad14449e4927c7a7ee92d1d9",
+        "text_sha256": "e5c2b4173131316f93037b67ef640e6c7f07af9dcd5d7e9ddd7b7e4600845b8d",
         "csp": {
           "connectDomains": [],
           "resourceDomains": []
