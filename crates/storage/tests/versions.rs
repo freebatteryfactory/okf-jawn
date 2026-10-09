@@ -903,12 +903,21 @@ async fn git_writes_are_synced_before_a_commit_returns() -> TestResult {
         let local = repository.config()?.open_level(git2::ConfigLevel::Local)?;
         Ok(local.get_bool("core.fsyncObjectFiles")?)
     };
+    // Read right after `catalog().create` (all `workspace` does), before any other store opens
+    // the repository: the catalog's first commit and `refs/heads/main` were written synced.
     assert!(setting(&path)?, "a created repository syncs its writes");
     // A repository without the setting (as an older build left it) gets it before it writes.
     git2::Repository::open_bare(&path)?
         .config()?
         .open_level(git2::ConfigLevel::Local)?
         .remove("core.fsyncObjectFiles")?;
+    let versions = storage.versions();
+    versions.head(&scope).await?;
+    storage.catalog().open(&scope).await?;
+    assert!(
+        !setting(&path).unwrap_or(false),
+        "a read changes nothing, so only a write path can have set the setting"
+    );
     storage
         .versions()
         .commit(

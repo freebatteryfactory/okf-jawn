@@ -61,17 +61,30 @@ impl Repositories {
             .join(format!("{}.git", scope.workspace_id.0))
     }
 
-    /// Open an existing workspace repository, with durable writes (`durable`); `NotFound` when
-    /// the workspace has none.
+    /// Open an existing workspace repository to read it; `NotFound` when the workspace has
+    /// none. A read changes nothing, not even the repository's config.
     pub(crate) fn open(&self, scope: &StorageScope) -> Result<Repository, ApiError> {
+        let path = self.existing(scope)?;
+        Repository::open_bare(&path).map_err(|error| git(&error))
+    }
+
+    /// Open an existing workspace repository to write it, with durable writes (`durable`);
+    /// `NotFound` when the workspace has none.
+    pub(crate) fn open_durable(&self, scope: &StorageScope) -> Result<Repository, ApiError> {
+        durable(&self.existing(scope)?)
+    }
+
+    /// The repository directory of a workspace that has one.
+    fn existing(&self, scope: &StorageScope) -> Result<PathBuf, ApiError> {
         let path = self.path(scope);
-        if !path.exists() {
-            return Err(ApiError::new(
+        if path.exists() {
+            Ok(path)
+        } else {
+            Err(ApiError::new(
                 ErrorCode::NotFound,
                 "No workspace with that identity here",
-            ));
+            ))
         }
-        durable(&path)
     }
 
     /// Create a new bare repository with durable writes, replacing a partial one a crash left.

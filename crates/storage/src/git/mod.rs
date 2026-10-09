@@ -211,7 +211,7 @@ impl VersionStore for GitVersions {
     ) -> PortFuture<'a, Committed> {
         Box::pin(self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
-                let repository = repositories.open(scope)?;
+                let repository = repositories.open_durable(scope)?;
                 let expected = oid(&changes.expected_head)?;
                 let current = head(&repository)?;
                 if let Some(found) =
@@ -265,7 +265,7 @@ impl VersionStore for GitVersions {
     ) -> PortFuture<'a, Revision> {
         Box::pin(self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
-                let repository = repositories.open(scope)?;
+                let repository = repositories.open_durable(scope)?;
                 let name = proposal_reference(proposal_id);
                 let base = oid(&changes.base)?;
                 commit_of(&repository, &changes.base)?;
@@ -303,7 +303,9 @@ impl VersionStore for GitVersions {
         promotion: Promotion,
     ) -> PortFuture<'a, Committed> {
         Box::pin(self.blocking(scope, move |repositories, scope| {
-            repositories.locked(scope, || promote(&repositories.open(scope)?, &promotion))
+            repositories.locked(scope, || {
+                promote(&repositories.open_durable(scope)?, &promotion)
+            })
         }))
     }
 
