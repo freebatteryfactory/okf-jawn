@@ -222,10 +222,7 @@ fn binding() -> Built<ViewBinding> {
 
 fn dataset(binding: &ViewBinding) -> Built<Dataset> {
     let extraction = converted()?;
-    Ok(
-        materialize(binding, &record()?, extraction.text_origin, &[])
-            .map_err(|failure| failure.message)?,
-    )
+    Ok(materialize(binding, &record()?, &extraction, &[]).map_err(|failure| failure.message)?)
 }
 
 #[tokio::test]

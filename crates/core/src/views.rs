@@ -21,7 +21,7 @@ use sha2::{Digest as _, Sha256};
 use okf_jawn_contract::{
     common::CellRange,
     error::{ApiError, ErrorCode},
-    extraction::{ExtractionWarning, TextOrigin},
+    extraction::{Extraction, ExtractionWarning, TextOrigin},
     identity::Digest,
     read::Selection,
     source::{SourceLocation, SourceLocator, SourceReference},
@@ -99,18 +99,41 @@ const MAX_EXACT_DECIMAL_DIGITS: usize = 15;
 
 /// Build the dataset of `binding` from the conversion record of the digest it cites.
 ///
-/// `text_origin` is whose text the record describes; `warnings` are the source's extraction
-/// warnings, of which those that bear on cell values are kept.
+/// `extraction` is the source's, whose text the binding cites. A dataset is read from the
+/// converter's tables, so it is produced only when the source's shown text is the converter's:
+/// a corrected source shows text the tables do not, and a source whose text an agent supplied
+/// (or that has none) is not described by them. Either is `DatasetUnavailable`, decided before
+/// any table is read; a produced dataset always has `text_origin: Converter`. `warnings` are
+/// the source's extraction warnings, of which those that bear on cell values are kept.
 ///
 /// # Errors
-/// Returns `DatasetUnavailable` when the selection covers no table or several, or a kind the
-/// record cannot answer; `TooLarge` past the row, column, cell or header-byte bound.
+/// Returns `DatasetUnavailable` when the source's text is not the converter's, when the
+/// selection covers no table or several, or a kind the record cannot answer; `TooLarge` past
+/// the row, column, cell or header-byte bound.
 pub fn materialize(
     binding: &ViewBinding,
     record: &ConversionRecord,
-    text_origin: TextOrigin,
+    extraction: &Extraction,
     warnings: &[ExtractionWarning],
 ) -> Result<Dataset, BindingFailure> {
+    if extraction.corrected {
+        return Err(unavailable(
+            "a dataset is read from the converter's tables, and the source's shown text is a correction, not the converter's",
+        ));
+    }
+    match extraction.text_origin {
+        TextOrigin::Converter => {}
+        TextOrigin::SuppliedByAgent => {
+            return Err(unavailable(
+                "a dataset is read from the converter's tables, and the source's shown text was supplied by an agent, not the converter's",
+            ));
+        }
+        TextOrigin::None => {
+            return Err(unavailable(
+                "a dataset is read from the converter's tables, and the source shows no converter text",
+            ));
+        }
+    }
     let (table, cells) = covered_table(record, &binding.source.selection)?;
     let (rows, columns) = extent(table, cells.as_ref());
     // Bound the layout before allocating it: a record's counts are not trusted to be small.
@@ -168,7 +191,7 @@ pub fn materialize(
             locations: Vec::new(),
             ..binding.source.clone()
         },
-        text_origin,
+        text_origin: TextOrigin::Converter,
         columns,
         rows,
         warnings: warnings
