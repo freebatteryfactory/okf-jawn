@@ -5,7 +5,7 @@
 //! sandbox route applies the same `token_hash` to the token it is presented before `resolve`.
 //! `create_sandbox_capability` is a read operation, so minting carries no `MutationId`.
 
-use okf_jawn_contract::identity::{Digest, ItemId, Revision};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, Timestamp};
 use sha2::{Digest as _, Sha256};
 
 use crate::ports::PortFuture;
@@ -22,8 +22,9 @@ pub struct SandboxMint {
     pub object: Digest,
     /// Media type the sandbox route sends for the object.
     pub media_type: String,
-    /// RFC 3339 expiry.
-    pub expires_at: String,
+    /// When the capability expires, in the canonical UTC spelling; `resolve` does not return
+    /// it from that instant on.
+    pub expires_at: Timestamp,
 }
 
 /// The binding of an unexpired capability.

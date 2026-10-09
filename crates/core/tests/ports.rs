@@ -25,7 +25,7 @@ use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::proposal::{Change, Comment, Proposal, ProposalStatus};
 use okf_jawn_contract::purge::PurgeTarget;
 use okf_jawn_contract::read::AssetRole;
-use okf_jawn_contract::review::{Confirmation, Review};
+use okf_jawn_contract::review::{Confirmation, ConfirmationAction, ConfirmationTarget, Review};
 use okf_jawn_contract::search::{GetGraphResponse, LinkDirection};
 use okf_jawn_contract::source::{SourceLocation, SourceLocator};
 use okf_jawn_contract::transport::TRANSPORTS;
@@ -36,7 +36,7 @@ use okf_jawn_core::conversion::{
     ConverterLimits, OcrPolicy, PixelSize, RetainedAsset,
 };
 use okf_jawn_core::credentials::{
-    ConnectorIssue, CredentialStore, NewConnector, SessionRecord, secret_hash,
+    ConnectorIssue, CredentialStore, InstallationIdentity, NewConnector, SessionRecord, secret_hash,
 };
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
@@ -1133,10 +1133,85 @@ fn sandbox_tokens_are_hashed_before_they_reach_the_store() -> TestResult {
         revision: revision('a')?,
         object: digest('b')?,
         media_type: "text/html".to_owned(),
-        expires_at: "2026-10-05T00:05:00Z".to_owned(),
+        expires_at: instant("2026-10-05T00:05:00.000Z")?,
     };
     assert_eq!(mint.media_type, "text/html");
     assert!(type_checked(&sandbox_calls));
+    Ok(())
+}
+
+#[test]
+fn every_instant_a_core_port_carries_is_a_timestamp() -> TestResult {
+    // Design section 7: core expiry and creation fields are `Timestamp`, so a store never
+    // receives or returns another spelling of an instant, and comparing two compares instants.
+    let opened = instant("2026-10-05T00:00:00.000Z")?;
+    let expires = instant("2026-10-05T00:05:00.000Z")?;
+    assert!(opened < expires);
+    // The spelling these fields once held as free text is refused.
+    err_of(Timestamp::try_from("2026-10-05T00:05:00Z".to_owned()))?;
+
+    let confirmation = ConfirmationCreate {
+        action: ConfirmationAction::Review,
+        target: ConfirmationTarget::Item {
+            item_id: ItemId(Uuid::from_u128(10)),
+        },
+        revision: revision('a')?,
+        content_digest: digest('d')?,
+        session_id: "session_1".to_owned(),
+        subject: "user_1".to_owned(),
+        expires_at: expires.clone(),
+    };
+    let session = SessionRecord {
+        session_id: "session_1".to_owned(),
+        principal: Principal {
+            subject: "user_1".to_owned(),
+            tenant_id: TenantId::try_from("local".to_owned())?,
+            route: AccessRoute::LocalOwner,
+            client_id: None,
+            delegation: None,
+        },
+        expires_at: expires.clone(),
+    };
+    let identity = InstallationIdentity {
+        subject: "owner".to_owned(),
+        created_at: opened.clone(),
+    };
+    let mint = SandboxMint {
+        item_id: ItemId(Uuid::from_u128(10)),
+        revision: revision('a')?,
+        object: digest('b')?,
+        media_type: "text/html".to_owned(),
+        expires_at: expires.clone(),
+    };
+    let upload = UploadRecord {
+        id: UploadId(Uuid::from_u128(9)),
+        filename: "report.pdf".to_owned(),
+        relative_path: String::new(),
+        expected_size: 10,
+        expected_sha256: None,
+        supplied_by: initiator(),
+        created_at: opened.clone(),
+        received_bytes: 0,
+        object: None,
+        consumed_by: None,
+    };
+    let instants: [&Timestamp; 5] = [
+        &confirmation.expires_at,
+        &session.expires_at,
+        &identity.created_at,
+        &mint.expires_at,
+        &upload.created_at,
+    ];
+    assert_eq!(
+        instants.map(Timestamp::as_str),
+        [
+            expires.as_str(),
+            expires.as_str(),
+            opened.as_str(),
+            expires.as_str(),
+            opened.as_str()
+        ]
+    );
     Ok(())
 }
 
