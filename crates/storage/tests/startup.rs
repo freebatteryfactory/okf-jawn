@@ -298,6 +298,30 @@ fn single_writer_lock_refuses_a_second_process_until_the_first_exits() -> TestRe
     Ok(())
 }
 
+#[test]
+fn startup_removes_what_a_crash_left_in_staging() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    drop(Storage::open(directory.path())?);
+    let left = directory
+        .path()
+        .join("staging")
+        .join("local")
+        .join("00000000-0000-4000-8000-000000000001")
+        .join("00000000-0000-4000-8000-000000000002");
+    std::fs::create_dir_all(left.join("notes"))?;
+    std::fs::write(left.join("notes").join("x.md"), "left by a crash")?;
+    let storage = Storage::open(directory.path())?;
+    let staging = storage.data().staging_path();
+    assert!(staging.is_dir(), "staging exists after startup");
+    assert!(!left.exists(), "a crash's staging directory was removed");
+    assert_eq!(
+        std::fs::read_dir(&staging)?.count(),
+        0,
+        "nothing a crash left survives startup"
+    );
+    Ok(())
+}
+
 /// A second open of `directory` must be refused because the lock is still held.
 fn refused_while_held(directory: &Path) -> TestResult {
     let error = err_of(Storage::open(directory))?;
