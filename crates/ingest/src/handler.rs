@@ -212,12 +212,13 @@ impl IngestHandler {
         if purge.state != PurgeState::Completed {
             purge.state = PurgeState::Running;
             purge.error = None;
+            purge.completed_at = None;
             purge = records.update_purge(tenant, purge).await?;
-            // Limitation: `completed_at` is left as the store has it. Ingest has no clock
-            // dependency, and the `update_purge` doc does not say whether the store stamps it
-            // (request in the lane report).
             purge.report = Some(remove(self.ports.purger.as_ref()).await?);
             purge.state = PurgeState::Completed;
+            // The store stamps `completed_at` in the write that first records completion
+            // (`RecordStore::update_purge`); the handler has no clock and passes none.
+            purge.completed_at = None;
             let _stored = records.update_purge(tenant, purge).await?;
         }
         Ok(Done::default())

@@ -246,6 +246,7 @@ mod job_handler {
                     "00000000-0000-0000-0000-0000000000ee"
                 ))?,
                 archive: Digest::try_from("cd".repeat(32))?,
+                editors: vec!["owner".to_owned()],
             },
         )?;
         assert!(run(&world, id).await?);
