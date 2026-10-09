@@ -45,6 +45,13 @@ struct Counting {
 /// A check that refuses every candidate.
 struct Refusing;
 
+/// A check that, while the commit is staged, moves the workspace head as a concurrent writer
+/// would (another handle on the same repository), and records where it moved it.
+struct Interloper {
+    repository: std::path::PathBuf,
+    moved_to: std::sync::Mutex<Option<git2::Oid>>,
+}
+
 impl CandidateCheck for Counting {
     fn check(&self, root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
         self.runs.fetch_add(1, Ordering::SeqCst);
@@ -56,6 +63,31 @@ impl CandidateCheck for Counting {
 impl CandidateCheck for Refusing {
     fn check(&self, _root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
         Err(ApiError::new(ErrorCode::InvalidInput, "not conformant"))
+    }
+}
+
+impl CandidateCheck for Interloper {
+    fn check(&self, _root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
+        let fault = |error: git2::Error| ApiError::new(ErrorCode::Internal, error.to_string());
+        let repository = git2::Repository::open_bare(&self.repository).map_err(fault)?;
+        let head = repository.refname_to_id("refs/heads/main").map_err(fault)?;
+        let parent = repository.find_commit(head).map_err(fault)?;
+        let tree = parent.tree().map_err(fault)?;
+        let who = git2::Signature::now("other", "other").map_err(fault)?;
+        let moved = repository
+            .commit(
+                Some("refs/heads/main"),
+                &who,
+                &who,
+                "a concurrent move",
+                &tree,
+                &[&parent],
+            )
+            .map_err(fault)?;
+        if let Ok(mut slot) = self.moved_to.lock() {
+            *slot = Some(moved);
+        }
+        Ok(Vec::new())
     }
 }
 
@@ -769,6 +801,44 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
         stale.code,
         ErrorCode::Conflict,
         "the head moved since the confirmation"
+    );
+    Ok(())
+}
+
+fn repository_path(directory: &Path, scope: &StorageScope) -> std::path::PathBuf {
+    directory
+        .join("repositories")
+        .join(scope.tenant_id.as_str())
+        .join(format!("{}.git", scope.workspace_id.0))
+}
+
+#[tokio::test]
+async fn a_concurrent_head_move_wins_and_the_commit_conflicts() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let interloper = Arc::new(Interloper {
+        repository: repository_path(directory.path(), &scope),
+        moved_to: std::sync::Mutex::new(None),
+    });
+    let error = err_of(
+        versions
+            .commit(
+                &scope,
+                changes(20, &initial, vec![note(uuid!(10)?, "a.md", "Mine.")?])?,
+                Arc::clone(&interloper) as Arc<dyn CandidateCheck>,
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    let moved = some(
+        interloper.moved_to.lock().ok().and_then(|slot| *slot),
+        "the concurrent move",
+    )?;
+    assert_eq!(
+        versions.head(&scope).await?.as_str(),
+        moved.to_string(),
+        "the reference moves only from the head the commit was staged on"
     );
     Ok(())
 }
