@@ -4,15 +4,12 @@
 //! touches jobs, reviews, or receipts, which live only in `RecordStore` and cannot be rebuilt.
 //! Every query names exactly one resolved `Revision`; drafts are never indexed.
 
-use okf_jawn_contract::common::PageRequest;
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::extraction::ExtractionFilter;
-use okf_jawn_contract::identity::{At, ItemId, Revision, WorkspaceId, WorkspacePath};
-use okf_jawn_contract::scope::RequestScope;
+use okf_jawn_contract::identity::{ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::search::{
-    GetGraphResponse, GetLinksResponse, LinkDirection, SearchRequest, SearchResponse,
+    GetGraphResponse, GetLinksResponse, LinkDirection, SearchResponse, require_text_or_filter,
 };
-use uuid::Uuid;
 
 use crate::ports::PortFuture;
 use crate::storage::{Page, StorageScope};
@@ -96,30 +93,12 @@ pub trait SearchIndex: Send + Sync {
 impl SearchQuery {
     /// Refuse a query with neither text nor a filter: it would list the whole revision.
     ///
-    /// The rule has one implementation, `SearchRequest::check_rules` in the contract. This asks
-    /// it about the same text and filter (the workspace, revision and page it does not read are
-    /// placeholders) and names the field as this query does, `/text` for the request's
-    /// `/query`.
+    /// The rule has one implementation, `okf_jawn_contract::search::require_text_or_filter`,
+    /// which `SearchRequest::check_rules` calls too; this names the field `/text`.
     ///
     /// # Errors
     /// Returns `InvalidInput` on `/text` when the text is blank and there is no filter.
     pub fn check(&self) -> Result<(), ApiError> {
-        SearchRequest {
-            workspace_id: WorkspaceId(Uuid::nil()),
-            at: At::Latest,
-            query: self.text.clone(),
-            folder: None,
-            include_archived: self.include_archived,
-            extraction: self.extraction,
-            page: PageRequest {
-                cursor: None,
-                limit: 1,
-            },
-        }
-        .check_rules()
-        .map_err(|refused| match refused.field.as_deref() {
-            Some("/query") => refused.with_field("/text"),
-            _ => refused,
-        })
+        require_text_or_filter(&self.text, self.extraction, "/text")
     }
 }

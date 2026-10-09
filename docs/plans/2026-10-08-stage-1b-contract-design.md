@@ -1890,10 +1890,10 @@ contract removed what they served: core re-exports the contract settings,
   scope rule of section 7 (the tenant's for a `Deployment` target; the one named workspace's;
   otherwise the tenant's).
 - `SearchQuery::check` refuses a query with neither text nor an extraction filter. The rule has
-  one implementation, `SearchRequest::check_rules` in the contract; `SearchQuery::check` asks it
-  about the same text and filter and names the field `/text` for the request's `/query`. A
-  shared function in the contract would be simpler than the placeholder request this builds and
-  is the integration owner's to add.
+  one implementation, the contract's `search::require_text_or_filter(text, extraction, field)`
+  (no wire or schema change; it reads only the text and the filter). `SearchRequest::check_rules`
+  calls it with field `/query`, which the contract's own test pins; `SearchQuery::check` calls it
+  with `/text`.
 - `ConversionRecord::outline` (section 9.1) is the outline of the Markdown the record describes,
   for the whole document: it is what the `outline` read view serves for a converted source and
   the input of `reading::section_lines`. A heading entry selects its section as lines, from the
