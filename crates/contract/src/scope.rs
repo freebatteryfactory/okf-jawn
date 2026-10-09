@@ -48,7 +48,7 @@ use crate::read::{CreateSandboxCapabilityRequest, ReadItemRequest};
 use crate::review::{
     ConfirmationAction, CreateConfirmationRequest, CreateReviewRequest, ListReviewsRequest,
 };
-use crate::search::{GetGraphRequest, GetLinksRequest, SearchRequest};
+use crate::search::{GetGraphRequest, GetLinksRequest, SearchRequest, require_text_or_filter};
 use crate::source::{GetObjectRequest, GetSourcesRequest};
 use crate::views::{
     ExportViewRequest, GetCatalogRequest, GetViewRequest, PresentRequest, ResolveViewRequest,
@@ -281,15 +281,7 @@ impl RequestScope for SearchRequest {
     }
     /// An empty query matches nothing to rank; it lists sources only through a filter.
     fn check_rules(&self) -> Result<(), ApiError> {
-        if self.query.trim().is_empty() && self.extraction.is_none() {
-            Err(ApiError::new(
-                ErrorCode::InvalidInput,
-                "The query may be empty only with an extraction filter",
-            )
-            .with_field("/query"))
-        } else {
-            Ok(())
-        }
+        require_text_or_filter(&self.query, self.extraction, "/query")
     }
 }
 

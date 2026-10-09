@@ -102,7 +102,7 @@ pub enum ChartFailure {
     DatasetUnavailable,
     /// A binding cites purged content.
     Invalidated,
-    /// The dataset exceeds the row or byte limit.
+    /// The dataset exceeds a row, column, cell or column-name size bound.
     TooLarge,
 }
 

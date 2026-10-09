@@ -3,6 +3,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::error::{ApiError, ErrorCode};
+use crate::extraction::ExtractionFilter;
+
 /// Search the workspace at one revision with explicit scope and pagination.
 ///
 /// `query` may be empty (or only whitespace) only when `extraction` is set: then every
@@ -144,4 +147,29 @@ pub struct GetGraphResponse {
     pub edges: Vec<Link>,
     /// The graph is partial due to budget.
     pub truncated: bool,
+}
+
+/// The one rule of a search's text: it may be empty (or only whitespace) only with an
+/// extraction filter, since an empty query matches nothing to rank.
+///
+/// `SearchRequest::check_rules` and core's `SearchQuery::check` both call this, each naming its
+/// own field in `field` (`/query` on the request, `/text` on the stored-index query). It reads
+/// only the text and the filter.
+///
+/// # Errors
+/// Returns `InvalidInput` on `field` when the text is blank and there is no filter.
+pub fn require_text_or_filter(
+    text: &str,
+    extraction: Option<ExtractionFilter>,
+    field: &str,
+) -> Result<(), ApiError> {
+    if text.trim().is_empty() && extraction.is_none() {
+        Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            "The query may be empty only with an extraction filter",
+        )
+        .with_field(field))
+    } else {
+        Ok(())
+    }
 }

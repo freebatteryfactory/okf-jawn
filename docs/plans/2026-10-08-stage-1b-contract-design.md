@@ -1349,7 +1349,13 @@ Where each is written: `connector_issued` and `connector_revoked` by `create_con
 `revoke_connector`, tenant-level; `signed_in` by the server's session routes through a core
 method (`ApplicationService::record_sign_in`), tenant-level; `permission_denied` by core dispatch
 when authorization refuses an authenticated caller: in the workspace's log for a workspace
-target, tenant-level otherwise. `list_events` and `stream_events` return security events of a
+target, tenant-level otherwise. A handler's own `Forbidden` (the job-kind rule of `retry_job` and
+`cancel_job`) is recorded the same way as `permission_denied` (added by the core-ports package);
+a refusal with no evaluated refusing target, whether by route before targets or from a handler,
+goes to the tenant's log when the request has any `Deployment` target, to the workspace's log when
+its targets name exactly one distinct workspace, and to the tenant's log otherwise (none, or two
+or more). An append to a workspace the tenant does not hold records at tenant level instead and
+never creates or revives rows for it. `list_events` and `stream_events` return security events of a
 workspace only to callers holding `admin` on it. New operation `list_tenant_events`
 (`ListTenantEventsRequest { after: Option<String>, page: PageRequest }`, response
 `ListEventsResponse`, tenant `admin`).
@@ -1710,6 +1716,9 @@ pub struct ConversionRecord {
     /// SHA-256 of the Markdown the record describes.
     pub markdown: Digest,
     pub locations: Vec<LineLocation>,
+    /// Added by the core-ports package: the whole-document outline, window outlines joined with
+    /// lines in the joined Markdown; a heading entry selects its section as lines (see 9.6).
+    pub outline: Vec<OutlineEntry>,
     pub tables: Vec<ConvertedTable>,
     pub assets: Vec<RetainedAsset>, // ConvertedAsset with `digest` in place of `path`
     pub warnings: Vec<ExtractionWarning>,
@@ -1862,12 +1871,36 @@ contract removed what they served: core re-exports the contract settings,
   `ConvertedTable` that the binding's selection covers (or the cells of an XLSX `cells`
   selection), write the `Dataset` blob, record it with `record_derived_object` against the
   binding's item and revision, and return `charts` and `as_of`. This is the "producer of a View's
-  materialized dataset" of the gate.
+  materialized dataset" of the gate. A dataset is read only from the converter's tables:
+  `materialize` takes the source's `Extraction` and refuses with `DatasetUnavailable`, before any
+  table is read, when the source is corrected, its text was supplied by an agent, or it has none;
+  a produced `Dataset` always has `text_origin: converter` (added by the core-ports package).
 - `get_object` serves an object only when it belongs to the cited item revision: the original of
   its source card, its conversion record, that record's structured exports and assets, or a
   derived object recorded for that (item, revision). It never serves a backup artifact's object.
 - Export writes `verified` for current reviews (section 8); import reads an incoming `verified`
   as `imported` coverage.
+
+### 9.6 Added by the core-ports package, beyond sections 9.1 to 9.5
+
+- `Backups::open_installation_archive(tenant, digest, offset, length)` reads an installation
+  archive back for the `download_tenant_artifact` transport: `BlobStore` is workspace-scoped and
+  a tenant may have no workspace.
+- A handler's own `Forbidden` is recorded as `permission_denied`, in the log decided by the
+  scope rule of section 7 (the tenant's for a `Deployment` target; the one named workspace's;
+  otherwise the tenant's).
+- `SearchQuery::check` refuses a query with neither text nor an extraction filter. The rule has
+  one implementation, the contract's `search::require_text_or_filter(text, extraction, field)`
+  (no wire or schema change; it reads only the text and the filter). `SearchRequest::check_rules`
+  calls it with field `/query`, which the contract's own test pins; `SearchQuery::check` calls it
+  with `/text`.
+- `ConversionRecord::outline` (section 9.1) is the outline of the Markdown the record describes,
+  for the whole document: it is what the `outline` read view serves for a converted source and
+  the input of `reading::section_lines`. A heading entry selects its section as lines, from the
+  heading line to the line before the next heading of the same or a higher level, or to the end
+  of the text (`OutlineEntry::selection` states it; ingest applies it, `section_lines` trusts it).
+- `ChartFailure::TooLarge` is a row, column, cell or column-name size bound; no byte cap exists
+  on a dataset beyond the conversion record it is read from.
 
 ## 10. Operation table delta
 
@@ -1992,6 +2025,17 @@ appears in `ItemDocument::properties` and is server-owned: `create_item`, `save_
 on `/properties/okf_jawn`, and `VersionStore` refuses such an edit (made through Create, Edit,
 `set_type` or a draft; the server's own header updates are allowed, section 9.3). OKF preserves unknown
 frontmatter keys, so the header survives export.
+
+A type schema (`set_type`) is checked against the header at every schema position (a property,
+a `required` entry or a conditional requirement named `okf_jawn`), and its references are
+limited: a `$ref`, `$dynamicRef` or `$recursiveRef` is allowed only as `#`, `#/$defs/<token>` or
+`#/definitions/<token>` with one RFC 6901 reference token, otherwise `invalid_input` on
+`{at}/$ref` (the keyword used). The check applies to the reference after the resolver's
+percent-decoding of the fragment (a malformed `%` sequence or non-UTF-8 result is refused), so
+`#/$defs/a%2Fx` is refused and `#/%24defs/a` is `#/$defs/a`. Every `$defs` and `definitions`
+entry is scanned, so every subschema such a reference reaches has been scanned. A type is evaluated against an item's properties
+without the header, so no type constrains its value; a schema that demands it by other means
+(for example `not` over `propertyNames`) is satisfied by no item, like the schema `false`.
 
 | Decision | Mapping |
 | --- | --- |

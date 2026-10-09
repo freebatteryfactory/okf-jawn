@@ -107,14 +107,16 @@ pub struct ReadItemRequest {
 }
 
 /// A navigable structural element from a document.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OutlineEntry {
     /// Visible heading or media caption.
     pub label: String,
     /// Heading depth or zero for non-heading elements.
     pub level: u16,
-    /// Precise location to request next.
+    /// Precise location to request next. A heading entry selects its section as lines: from the
+    /// heading line to the line before the next heading of the same or a higher level, or to
+    /// the end of the text.
     pub selection: Selection,
     /// Structural element type.
     pub kind: OutlineEntryKind,
