@@ -10,9 +10,20 @@
 //! - `create_item` and `Change::Create` may not supply it at all; the server assigns it.
 //! - `save_draft` and `Change::Edit` may leave it out (the stored header is kept) or echo it
 //!   unchanged, as `get_item` returned it; any other value is refused.
-//! - `set_type` may not declare or require a property of that name at any depth of its schema,
-//!   and a type schema is evaluated against an item's properties without the header
-//!   (`without_header`), so no type can constrain or refuse it.
+//! - `set_type` is checked as `refuse_header_in_type` states, and a type schema is evaluated
+//!   against an item's properties without the header (`without_header`).
+//!
+//! What the type rule guarantees, and no more:
+//!
+//! 1. A type is evaluated against the properties without the header, so no type can constrain
+//!    the header's value.
+//! 2. `set_type` refuses a schema that names the header as a property, as a `required` entry or
+//!    as a conditional requirement at any schema position, and refuses a reference other than
+//!    to its own `$defs` or `definitions` entries. Every entry there is scanned, so every
+//!    subschema a reference can reach has been scanned.
+//! 3. A schema that demands the header by any other means (for example `not` over
+//!    `propertyNames`) can be satisfied by no item, exactly like the schema `false`, because
+//!    the header is never shown to a type.
 //!
 //! `VersionStore` applies the same rule to the edits it is handed, so a handler that skipped
 //! the check still cannot write a changed header.
@@ -58,6 +69,13 @@ pub struct SourceHeader {
     pub digest: Digest,
 }
 
+/// What `header_declaration` found and where.
+struct TypeFault {
+    /// JSON Pointer of the field the refusal names.
+    field: String,
+    message: &'static str,
+}
+
 /// JSON Schema keywords whose value is one subschema.
 const SCHEMA_KEYWORDS: &[&str] = &[
     "additionalItems",
@@ -73,7 +91,8 @@ const SCHEMA_KEYWORDS: &[&str] = &[
 ];
 
 /// JSON Schema keywords whose value maps names to subschemas. A nested property named like the
-/// header is refused too, so the rule needs no `$ref` resolution.
+/// header is refused too. `$defs` and `definitions` are among them, so every subschema a
+/// permitted reference reaches is scanned without resolving it.
 const SCHEMA_MAP_KEYWORDS: &[&str] = &[
     "$defs",
     "definitions",
@@ -85,6 +104,10 @@ const SCHEMA_MAP_KEYWORDS: &[&str] = &[
 
 /// JSON Schema keywords whose value is a list of subschemas (`items` may also be one).
 const SCHEMA_LIST_KEYWORDS: &[&str] = &["allOf", "anyOf", "items", "oneOf", "prefixItems"];
+
+/// The reference keywords: each value points at a schema, which a type may do only inside
+/// itself.
+const REFERENCE_KEYWORDS: &[&str] = &["$ref", "$dynamicRef", "$recursiveRef"];
 
 impl ApplicationHeader {
     /// The header as the property value stored under `APP_HEADER_KEY`.
@@ -167,26 +190,41 @@ pub fn refuse_header_change(
     }
 }
 
-/// Refuse a type definition that declares a property named `APP_HEADER_KEY` (`set_type`).
+/// Refuse a type definition whose schema names the header or reaches beyond itself
+/// (`set_type`).
+///
+/// Refused, at any schema position: a property named `APP_HEADER_KEY`, a `required` entry or a
+/// conditional requirement (`dependentRequired`, `dependencies`) naming it, and a `$ref`,
+/// `$dynamicRef` or `$recursiveRef` whose value is not exactly `#`, `#/$defs/<token>` or
+/// `#/definitions/<token>` (one RFC 6901 reference token). Every `$defs` and `definitions` entry
+/// is scanned, so a permitted reference leads only to schemas that have been checked. The first
+/// fault found is returned.
+///
+/// This does not forbid every schema that demands the header: one that does so by other means,
+/// such as `not` over `propertyNames`, is accepted and can be satisfied by no item, like the
+/// schema `false`, because a type is evaluated without the header (`without_header`).
 ///
 /// # Errors
-/// Returns `InvalidInput` on `/definition/properties_schema/properties/okf_jawn`.
+/// Returns `InvalidInput` on `/definition/properties_schema/.../okf_jawn` for a header
+/// declaration, or on `/definition/properties_schema/.../$ref` (the keyword used) for a
+/// reference.
 pub fn refuse_header_in_type(definition: &TypeDefinition) -> Result<(), ApiError> {
     match header_declaration(
         &definition.properties_schema,
         "/definition/properties_schema",
     ) {
-        Some(at) => Err(header_error(
-            "a type cannot define or require the server-owned application header",
-            &at,
-        )),
+        Some(fault) => {
+            Err(ApiError::new(ErrorCode::InvalidInput, fault.message).with_field(fault.field))
+        }
         None => Ok(()),
     }
 }
 
 /// An item's properties without its application header: what a type schema is evaluated
 /// against, so no type, whatever its schema (`additionalProperties: false` included), can
-/// constrain or refuse the header the server writes.
+/// constrain the header's value or refuse an item for carrying it. A schema that demands the
+/// header can be satisfied by no item, exactly like the schema `false`, because the header is
+/// never shown to it.
 #[must_use]
 pub fn without_header(
     properties: &BTreeMap<String, serde_json::Value>,
@@ -198,26 +236,61 @@ pub fn without_header(
         .collect()
 }
 
-/// Where `schema` names the header, at any depth of its subschemas (inside `allOf`, `$defs`,
-/// `items` and every other applicator): as a key of a `properties` map, or in a `required`
-/// list. The result is the JSON Pointer of the map or list, below `at`. Only keywords whose
-/// values are schemas are descended; annotations and instance values (`examples`, `default`,
-/// `const`, `enum`) are data, so a header-shaped value there declares nothing.
-fn header_declaration(schema: &serde_json::Value, at: &str) -> Option<String> {
+/// Whether a reference value stays inside the schema's own `$defs` or `definitions` entries:
+/// exactly `#`, or `#/$defs/<token>` or `#/definitions/<token>` with one non-empty RFC 6901
+/// reference token (no further `/`, and `~` only as `~0` or `~1`).
+fn is_own_reference(value: &serde_json::Value) -> bool {
+    let Some(reference) = value.as_str() else {
+        return false;
+    };
+    if reference == "#" {
+        return true;
+    }
+    ["#/$defs/", "#/definitions/"]
+        .iter()
+        .filter_map(|prefix| reference.strip_prefix(prefix))
+        .any(|token| {
+            !token.is_empty()
+                && !token.contains('/')
+                && token
+                    .split('~')
+                    .skip(1)
+                    .all(|rest| rest.starts_with(['0', '1']))
+        })
+}
+
+/// Where `schema` names the header or reaches outside itself, at any depth of its subschemas
+/// (inside `allOf`, `$defs`, `items` and every other applicator): a key of a `properties` map,
+/// an entry of a `required` list, a conditional requirement, or a reference that is not to the
+/// schema itself or one of its own `$defs` or `definitions` entries. Only keywords whose values
+/// are schemas are descended; annotations and instance values (`examples`, `default`, `const`,
+/// `enum`) are data, so a header-shaped value there declares nothing, and a reference cannot
+/// make it count because a reference may not leave the schema's own definitions.
+fn header_declaration(schema: &serde_json::Value, at: &str) -> Option<TypeFault> {
     let object = schema.as_object()?;
+    for keyword in REFERENCE_KEYWORDS {
+        if let Some(value) = object.get(*keyword)
+            && !is_own_reference(value)
+        {
+            return Some(TypeFault {
+                field: format!("{at}/{keyword}"),
+                message: "a type schema may reference only its own $defs or definitions entries",
+            });
+        }
+    }
     let declares = object
         .get("properties")
         .and_then(serde_json::Value::as_object)
         .is_some_and(|properties| properties.contains_key(APP_HEADER_KEY));
     if declares {
-        return Some(format!("{at}/properties"));
+        return Some(header_fault(&format!("{at}/properties")));
     }
     let requires = object
         .get("required")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|required| required.iter().any(|name| name == APP_HEADER_KEY));
     if requires {
-        return Some(format!("{at}/required"));
+        return Some(header_fault(&format!("{at}/required")));
     }
     // A conditional requirement: `dependentRequired`, or the list form of Draft 4 to 7
     // `dependencies` (its schema form is descended below).
@@ -230,7 +303,7 @@ fn header_declaration(schema: &serde_json::Value, at: &str) -> Option<String> {
                     value
                         .as_array()
                         .is_some_and(|list| list.iter().any(|entry| entry == APP_HEADER_KEY))
-                        .then(|| format!("{at}/{keyword}/{}", pointer_token(name)))
+                        .then(|| header_fault(&format!("{at}/{keyword}/{}", pointer_token(name))))
                 })
             });
         if conditional.is_some() {
@@ -264,6 +337,14 @@ fn header_declaration(schema: &serde_json::Value, at: &str) -> Option<String> {
 /// A key escaped as one JSON Pointer reference token (RFC 6901).
 fn pointer_token(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")
+}
+
+/// The fault of a map or list that names the header, below `at`.
+fn header_fault(at: &str) -> TypeFault {
+    TypeFault {
+        field: format!("{at}/{APP_HEADER_KEY}"),
+        message: "a type cannot define or require the server-owned application header",
+    }
 }
 
 fn header_error(message: &str, at: &str) -> ApiError {

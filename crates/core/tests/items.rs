@@ -247,5 +247,91 @@ fn a_type_cannot_reach_the_header_at_any_depth() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn a_type_cannot_reference_anything_but_its_own_definitions() -> TestResult {
+    let typed = |schema: serde_json::Value| TypeDefinition {
+        name: "note".to_owned(),
+        schema_version: 1,
+        properties_schema: schema,
+        ui_schema: json!({}),
+    };
+    // A reference to a header requirement kept where no keyword scan reaches it would make
+    // every item fail; both are refused.
+    for schema in [
+        json!({ "$ref": "#/examples/0", "examples": [{ "required": ["okf_jawn"] }] }),
+        json!({ "$ref": "#/x", "x": { "required": ["okf_jawn"] } }),
+    ] {
+        let refused = err_of(refuse_header_in_type(&typed(schema)))?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert_eq!(
+            refused.field.as_deref(),
+            Some("/definition/properties_schema/$ref")
+        );
+        assert!(refused.message.contains("$defs or definitions"));
+    }
+    for reference in [
+        "#/$defs/a/properties/b",
+        "#foo",
+        "other.json#/x",
+        "https://example.com/s",
+        "#/$defs/",
+        "#/$defs/a~2",
+        "#/definitions/a/b",
+    ] {
+        let refused = err_of(refuse_header_in_type(&typed(json!({ "$ref": reference }))))?;
+        assert_eq!(
+            refused.field.as_deref(),
+            Some("/definition/properties_schema/$ref"),
+            "{reference}"
+        );
+    }
+    let refused = err_of(refuse_header_in_type(&typed(
+        json!({ "$dynamicRef": "#meta" }),
+    )))?;
+    assert_eq!(
+        refused.field.as_deref(),
+        Some("/definition/properties_schema/$dynamicRef")
+    );
+    let refused = err_of(refuse_header_in_type(&typed(
+        json!({ "$recursiveRef": "#/x" }),
+    )))?;
+    assert_eq!(
+        refused.field.as_deref(),
+        Some("/definition/properties_schema/$recursiveRef")
+    );
+    // A reference nested in an applicator is checked too.
+    let nested = typed(json!({ "allOf": [{ "$ref": "#/x" }] }));
+    let refused = err_of(refuse_header_in_type(&nested))?;
+    assert_eq!(
+        refused.field.as_deref(),
+        Some("/definition/properties_schema/allOf/0/$ref")
+    );
+    // A property that is itself named `$ref` is a property, not a reference.
+    refuse_header_in_type(&typed(
+        json!({ "properties": { "$ref": { "type": "string" } } }),
+    ))?;
+    // References to the schema itself or to its own definitions are accepted.
+    refuse_header_in_type(&typed(json!({
+        "$ref": "#/$defs/a",
+        "$defs": { "a": { "type": "object" } }
+    })))?;
+    refuse_header_in_type(&typed(json!({
+        "$ref": "#/definitions/a~1b",
+        "definitions": { "a/b": { "type": "object" } }
+    })))?;
+    refuse_header_in_type(&typed(json!({ "$ref": "#" })))?;
+    // The definitions a reference reaches are scanned.
+    let reached = typed(json!({
+        "$ref": "#/$defs/a",
+        "$defs": { "a": { "required": ["okf_jawn"] } }
+    }));
+    let refused = err_of(refuse_header_in_type(&reached))?;
+    assert_eq!(
+        refused.field.as_deref(),
+        Some("/definition/properties_schema/$defs/a/required/okf_jawn")
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
