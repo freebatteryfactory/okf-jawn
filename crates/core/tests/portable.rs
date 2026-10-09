@@ -258,21 +258,25 @@ fn export_keeps_the_files_own_verified_and_writes_each_review_once() -> TestResu
 fn export_orders_the_reviews_it_writes_whatever_order_it_is_given() -> TestResult {
     let item = document("# Plan\n", json!({ "type": "Note" }))?;
     let content = item_content_digest(&item)?;
-    let current = |subject: &str, at: &str| {
-        review(
-            subject,
-            at,
-            content.clone(),
-            Selection::All,
-            ReviewCoverage::Current,
-        )
+    let current = |id: u128, subject: &str, at: &str| -> Result<Review, Box<dyn Error>> {
+        Ok(Review {
+            id: ReviewId(Uuid::from_u128(id)),
+            ..review(
+                subject,
+                at,
+                content.clone(),
+                Selection::All,
+                ReviewCoverage::Current,
+            )?
+        })
     };
-    // Newest first, with two reviews at the same instant.
+    // Newest first, with two reviews at the same instant whose identities order the other way
+    // round from their subjects, so the subject is what breaks the tie.
     let reviews = vec![
-        current("user_2", "2026-10-08T10:00:00.000Z")?,
-        current("user_9", "2026-10-08T11:00:00.000Z")?,
-        current("user_1", "2026-10-08T09:00:00.000Z")?,
-        current("user_0", "2026-10-08T10:00:00.000Z")?,
+        current(1, "user_2", "2026-10-08T10:00:00.000Z")?,
+        current(3, "user_9", "2026-10-08T11:00:00.000Z")?,
+        current(4, "user_1", "2026-10-08T09:00:00.000Z")?,
+        current(2, "user_0", "2026-10-08T10:00:00.000Z")?,
     ];
     let expected = json!([
         { "by": "human:user_1", "at": "2026-10-08T09:00:00.000Z" },
