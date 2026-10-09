@@ -261,7 +261,8 @@ fn read(connection: &Connection, connector: ConnectorId) -> Result<Option<Connec
         .transpose()
 }
 
-/// A new connector secret: 32 random bytes, hex-spelled after a recognizable prefix.
+/// A new connector secret: 32 bytes from the operating system's random source (`seam`), never
+/// from SQLite's generator, hex-spelled after a recognizable prefix.
 fn new_secret() -> Result<String, ApiError> {
     let bytes = seam::random_bytes::<32>()?;
     if bytes.iter().all(|byte| *byte == 0) {
@@ -271,4 +272,32 @@ fn new_secret() -> Result<String, ApiError> {
         ));
     }
     Ok(format!("{SECRET_PREFIX}{}", seam::hex(&bytes)))
+}
+
+/// Unit tests here, not in `tests/`: the seam's draw counter is private to the crate. They
+/// return `ApiError` like core's unit tests, since the shared test helper is for test targets.
+#[cfg(test)]
+mod tests {
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
+
+    use super::{SECRET_PREFIX, new_secret};
+    use crate::seam;
+
+    #[test]
+    fn a_connector_secret_is_32_bytes_drawn_once_from_the_seam() -> Result<(), ApiError> {
+        let before = seam::draws::so_far();
+        let secret = new_secret()?;
+        assert_eq!(
+            seam::draws::so_far(),
+            before.saturating_add(1),
+            "the secret is drawn from the operating system's random source"
+        );
+        let spelled = secret
+            .strip_prefix(SECRET_PREFIX)
+            .ok_or_else(|| ApiError::new(ErrorCode::Internal, "the secret has no prefix"))?;
+        assert_eq!(spelled.len(), 64, "32 random bytes, hex-spelled");
+        assert!(spelled.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(new_secret()?, secret, "every secret is fresh");
+        Ok(())
+    }
 }

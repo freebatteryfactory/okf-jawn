@@ -14,9 +14,7 @@ macro_rules! from_text {
 /// A fresh random identity of the type the context names.
 macro_rules! new_id {
     () => {
-        $crate::seam::new_uuid().and_then(|value| {
-            serde_json::from_value(value).map_err(|error| $crate::db::json(&error))
-        })
+        serde_json::from_value($crate::seam::new_uuid()).map_err(|error| $crate::db::json(&error))
     };
 }
 
