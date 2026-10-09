@@ -281,7 +281,10 @@ fn cell_window(table: &ConvertedTable, range: &CellRange) -> Option<CellWindow> 
     else {
         return None;
     };
+    // A reversed range selects nothing; it is not a citation of these cells.
     let inside = located.sheet == range.sheet
+        && range.row_start <= range.row_end
+        && range.column_start <= range.column_end
         && range.row_start >= located.row_start
         && range.row_end <= located.row_end
         && range.column_start >= located.column_start
@@ -380,7 +383,7 @@ fn grid_of<'a>(
 /// Column names from the header rows, joined top to bottom; `column_<n>` where there is none.
 /// A repeated name gets its column number appended, so every name is distinct.
 fn column_names(headers: &[Vec<Option<GridCell<'_>>>], width: usize) -> Vec<String> {
-    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut emitted: BTreeSet<String> = BTreeSet::new();
     (0..width)
         .map(|column| {
             let joined = headers
@@ -396,13 +399,20 @@ fn column_names(headers: &[Vec<Option<GridCell<'_>>>], width: usize) -> Vec<Stri
             } else {
                 joined
             };
-            let count = seen.entry(base.clone()).or_insert(0);
-            *count = count.saturating_add(1);
-            if *count == 1 {
-                base
-            } else {
-                format!("{base} ({number})")
+            // Each name is allocated against every name already emitted, a generated one
+            // included, so `A`, `A`, `A (2)` cannot yield two `A (2)` columns.
+            let mut name = base.clone();
+            let mut attempt = 1_u32;
+            while emitted.contains(&name) {
+                name = if attempt == 1 {
+                    format!("{base} ({number})")
+                } else {
+                    format!("{base} ({number}-{attempt})")
+                };
+                attempt = attempt.saturating_add(1);
             }
+            emitted.insert(name.clone());
+            name
         })
         .collect()
 }

@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use okf_jawn_contract::common::{PageRange, TextRange};
+use okf_jawn_contract::common::{CellRange, PageRange, TextRange};
 use okf_jawn_contract::error::ErrorCode;
 use okf_jawn_contract::extraction::TextOrigin;
 use okf_jawn_contract::identity::ItemId;
@@ -320,6 +320,64 @@ fn an_empty_out_of_table_or_overlapping_span_fails_the_chart() -> TestResult {
     .map_err(|reason| format!("{reason:?}"))?;
     let second = spanned.rows.get(1).ok_or("a second row")?;
     assert_eq!(second.get(1), Some(&DatasetValue::Null));
+    Ok(())
+}
+
+#[test]
+fn every_column_name_is_distinct_even_against_generated_ones() -> TestResult {
+    let dataset = read_with(|cells| {
+        for (column, header) in [(0, "A"), (1, "A"), (2, "A (2)")] {
+            if let Some(cell) = cell_at(cells, 0, column) {
+                header.clone_into(&mut cell.text);
+            }
+        }
+    })?
+    .map_err(|reason| format!("{reason:?}"))?;
+    let names: Vec<&str> = dataset
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect();
+    assert_eq!(names, ["A", "A (2)", "A (2) (3)"]);
+    Ok(())
+}
+
+#[test]
+fn a_reversed_cell_selection_reads_no_table() -> TestResult {
+    let mut record = record()?;
+    let table = record.tables.first_mut().ok_or("the fixture has a table")?;
+    table.location = SourceLocation::Direct {
+        locator: SourceLocator::Cells {
+            range: CellRange {
+                sheet: "Q1".to_owned(),
+                row_start: 1,
+                row_end: 3,
+                column_start: 1,
+                column_end: 3,
+            },
+        },
+    };
+    let select = |row_start, row_end| -> Built<ViewBinding> {
+        binding(Selection::Cells {
+            range: CellRange {
+                sheet: "Q1".to_owned(),
+                row_start,
+                row_end,
+                column_start: 1,
+                column_end: 3,
+            },
+        })
+    };
+    let read = materialize(&select(1, 3)?, &record, TextOrigin::Converter, &[])
+        .map_err(|failure| failure.message)?;
+    assert_eq!(read.rows.len(), 2);
+    let reversed = err_of(materialize(
+        &select(3, 2)?,
+        &record,
+        TextOrigin::Converter,
+        &[],
+    ))?;
+    assert_eq!(reversed.reason, ChartFailure::DatasetUnavailable);
     Ok(())
 }
 
