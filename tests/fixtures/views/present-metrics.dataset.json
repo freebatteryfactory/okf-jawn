@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "source": {
+    "workspace_id": "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff",
+    "item_id": "22222222-3333-4444-8555-666666666666",
+    "path": "fixtures/qualification-metrics.json",
+    "revision": "0123456789abcdef0123456789abcdef01234567",
+    "selection": { "kind": "all" }
+  },
+  "text_origin": "converter",
+  "columns": [
+    { "name": "category", "kind": "string" },
+    { "name": "value", "kind": "integer" }
+  ],
+  "rows": [
+    ["Ingested", 412],
+    ["Converted", 397],
+    ["Indexed", 389],
+    ["Reviewed", 127],
+    ["Published", 61]
+  ]
+}

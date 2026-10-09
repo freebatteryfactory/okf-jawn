@@ -224,6 +224,37 @@ fn content_identity_cannot_be_a_filename() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn the_present_dataset_fixture_is_a_dataset_of_the_metrics_binding() -> Result<(), Box<dyn Error>> {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/views");
+    let raw = fs::read_to_string(fixtures.join("present-metrics.dataset.json"))?;
+    let dataset: Dataset = serde_json::from_str(&raw)?;
+    dataset.check()?;
+    assert_eq!(dataset.schema_version, 1);
+    assert_eq!(dataset.text_origin, TextOrigin::Converter);
+    assert_eq!(dataset.columns.len(), 2);
+    assert_eq!(dataset.rows.len(), 5);
+    // The citation is the `metrics` binding's source in the present fixture, so a View that
+    // binds it reads this dataset.
+    let present: Value =
+        serde_json::from_str(&fs::read_to_string(fixtures.join("present-response.json"))?)?;
+    let bindings = present
+        .get("resolved_bindings")
+        .and_then(Value::as_array)
+        .ok_or("present-response.json has resolved_bindings")?;
+    let metrics = bindings
+        .iter()
+        .find(|binding| binding.get("name") == Some(&json!("metrics")))
+        .and_then(|binding| binding.get("source"))
+        .ok_or("present-response.json binds metrics")?;
+    let cited = serde_json::from_value::<SourceReference>(metrics.clone())?;
+    assert_eq!(
+        serde_json::to_value(&cited)?,
+        serde_json::to_value(&dataset.source)?
+    );
+    Ok(())
+}
+
+#[test]
 fn view_document_six_component_round_trips_with_deny_unknown_fields() -> Result<(), Box<dyn Error>>
 {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
