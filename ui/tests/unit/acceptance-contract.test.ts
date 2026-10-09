@@ -9,7 +9,7 @@
  * survive parsing unchanged carries a field the contract does not have (additionalProperties: false).
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { ZodType } from 'zod';
@@ -85,14 +85,11 @@ function violations(id: string, kind: 'request' | 'response', value: unknown): s
 }
 
 /**
- * The item content digest the server's `portable::item_content_digest` computes: SHA-256 of the
- * compact JSON of `{ body, properties }` with keys sorted. Computed, never typed.
+ * The stand-in server's item content digest. Only the server computes the real value
+ * (`okf_jawn_core::portable::item_content_digest`); a client never computes it and only sends back
+ * what it was given, so a fixed, well-formed value is what this scripted stand-in owes.
  */
-function contentDigest(body: unknown, properties: unknown): string {
-  return createHash('sha256')
-    .update(JSON.stringify(sortKeys({ body, properties })))
-    .digest('hex');
-}
+const STAND_IN_CONTENT_DIGEST = '9'.repeat(64);
 
 /** A scripted stand-in: schema-valid answers, and the refusals the journey expects of an agent. */
 function standIn(
@@ -164,7 +161,7 @@ function standIn(
           },
           body: body.body,
           properties: body.properties,
-          content_digest: contentDigest(body.body, body.properties),
+          content_digest: STAND_IN_CONTENT_DIGEST,
         };
       case 'read_item':
         return {
