@@ -461,3 +461,44 @@ describe("each column's declared kind is enforced as the contract's DatasetValue
     }
   });
 });
+
+describe('a dataset read from another source than its binding cites is stale', () => {
+  const cited = zPresentResponse
+    .parse(presentResponseFixture)
+    .resolved_bindings.find((entry) => entry.name === 'metrics')?.source;
+  if (!cited) throw new Error('the fixture has no metrics binding');
+  const from = (change: Record<string, unknown>) => ({
+    ...metricsDatasetFixture,
+    source: { ...metricsDatasetFixture.source, ...change },
+  });
+
+  it('is refused for a different revision, path, item, workspace or selection', async () => {
+    const other: Array<Record<string, unknown>> = [
+      { revision: 'f'.repeat(40) },
+      { path: 'fixtures/another.json' },
+      { item_id: '99999999-3333-4444-8555-666666666666' },
+      { workspace_id: 'bbbbbbbb-bbbb-4ccc-8ddd-ffffffffffff' },
+      { selection: { kind: 'lines', range: { start: 1, end: 2 } } },
+      { digest: 'a'.repeat(64) },
+    ];
+    for (const change of other) {
+      expect(
+        () => parseDataset(JSON.stringify(from(change)), cited),
+        JSON.stringify(change),
+      ).toThrow(/stale/);
+    }
+    await presentServing(from({ revision: 'f'.repeat(40) }));
+    const alerts = await screen.findAllByRole('alert');
+    expect(alerts.some((node) => /stale/.test(node.textContent ?? ''))).toBe(true);
+  });
+
+  it('is accepted when only the derived locations or the key order differ', () => {
+    const same = from({ locations: [] });
+    expect(parseDataset(JSON.stringify(same), cited)).toHaveLength(5);
+    const reordered = {
+      ...same,
+      source: Object.fromEntries(Object.entries(same.source).reverse()),
+    };
+    expect(parseDataset(JSON.stringify(reordered), cited)).toHaveLength(5);
+  });
+});

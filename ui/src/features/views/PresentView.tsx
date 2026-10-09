@@ -8,6 +8,7 @@ import {
   zGetObjectResponse,
   type zPresentResponse,
   zReadItemResponse,
+  type zViewBinding,
 } from '../../api/generated/zod.gen';
 import type { ResolvedPresentation } from './Bindings';
 import { BindingsContext } from './Bindings';
@@ -85,12 +86,37 @@ function firstMisfit(data: z.infer<typeof zDataset>) {
   return undefined;
 }
 
+/** A citation's identity: everything but the derived `locations`, in a key order of its own. */
+function sourceKey(source: z.infer<typeof zViewBinding>['source']): string {
+  return JSON.stringify([
+    source.workspace_id,
+    source.item_id,
+    source.path,
+    source.revision,
+    source.digest ?? null,
+    canonical(source.selection),
+  ]);
+}
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (typeof value === 'object' && value !== null)
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([key, inner]) => [key, canonical(inner)]),
+    );
+  return value;
+}
+
 /**
  * Read the bytes of a retained dataset. A dataset is read only from the converter's text (SPEC
  * R5, decision O2): any other origin, or any shape the generated `zDataset` refuses, is that
  * chart's own alert with the reason, never a drawn chart.
  */
-export function parseDataset(text: string): ReadonlyArray<Row> {
+export function parseDataset(
+  text: string,
+  expected?: z.infer<typeof zViewBinding>['source'],
+): ReadonlyArray<Row> {
   const parsed = zDataset.safeParse(JSON.parse(text));
   if (!parsed.success) {
     const issue = parsed.error.issues.at(0);
@@ -100,6 +126,10 @@ export function parseDataset(text: string): ReadonlyArray<Row> {
   if (parsed.data.text_origin !== 'converter')
     throw new Error(
       `Dataset text is not the converter's (text_origin is ${parsed.data.text_origin}); no chart is drawn from it`,
+    );
+  if (expected && sourceKey(parsed.data.source) !== sourceKey(expected))
+    throw new Error(
+      'Dataset was read from a different source than its binding cites (stale); no chart is drawn from it',
     );
   const misfit = firstMisfit(parsed.data);
   if (misfit)
@@ -259,7 +289,7 @@ export function PresentView({ response, callTool }: PresentViewProps) {
         if (text !== undefined) {
           // The bytes are verified; a dataset the contract refuses is that binding's alert alone.
           try {
-            tables.set(binding.name, parseDataset(text));
+            tables.set(binding.name, parseDataset(text, binding.source));
           } catch (cause) {
             datasetErrors.set(
               binding.name,
