@@ -17,17 +17,20 @@ use okf_jawn_contract::{
     error::ApiError,
     history::{BlameResponse, DiffResponse, LogResponse},
     identity::{
-        Digest, ItemId, MutationId, ProposalId, Revision, TenantId, WorkspaceId, WorkspacePath,
+        Digest, ItemId, MutationId, ProposalId, PurgeId, Revision, TenantId, WorkspaceId,
+        WorkspacePath,
     },
     item::{ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition},
     proposal::Change,
+    purge::PurgeReport,
     source::SourceAppearance,
-    workspace::Workspace,
+    workspace::{RestoreReport, Workspace},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncRead;
 
+use crate::items::{ApplicationHeader, SourceHeader};
 use crate::ports::PortFuture;
 
 /// Owned streaming bytes, not a base64 document copied through application messages.
@@ -201,7 +204,8 @@ pub enum TreeEdit {
     },
     /// Create an import source card, or replace the card that has the same identity.
     ///
-    /// Corrections recorded with `CorrectDigest` are kept when a card is replaced.
+    /// Corrections recorded with `CorrectDigest` are kept when a card is replaced, and so is
+    /// the stored `archived` flag of its application header (`SourceCard::header`).
     WriteSourceCard(Box<SourceCard>),
     /// Write the accepted agent-supplied text of a source beside its card, with the proposal
     /// and the supplier it came from. The promotion commit's committer is the approver.
@@ -227,6 +231,8 @@ pub enum TreeEdit {
         digest: Digest,
         /// Corrected Markdown, kept separate from the generated text.
         corrected_markdown: String,
+        /// The supplied-text proposal a person adopted as the correction, when it came from one.
+        adopts: Option<ProposalId>,
     },
     /// Restore the listed paths to their content at an earlier revision.
     ///
@@ -255,35 +261,15 @@ pub struct SourceCard {
     pub title: String,
     /// User-selected OKF type name.
     pub type_name: String,
-    /// Generated extraction shown as the card body; empty unless `extraction` is `Converted`.
+    /// The shown text (Stage 1b design section 5, rule 3): the correction, the supplied text or
+    /// the converter text, as `appearance.extraction.text_origin` says; empty when it is `none`.
     pub body: String,
     /// Preserved extension properties.
     pub properties: BTreeMap<String, serde_json::Value>,
-    /// Occurrence metadata: object, observed names, media type, size, parent and successor.
+    /// Occurrence metadata: object, observed names, media type, size, parent and successor,
+    /// and the contract `Extraction` the card shows. The import handler commits the card with
+    /// outcome `pending` before converting and replaces it afterwards.
     pub appearance: SourceAppearance,
-    /// What the card shows about turning its bytes into text.
-    pub extraction: Extraction,
-}
-
-/// The extraction state a source card shows; the original bytes are retained in every state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Extraction {
-    /// Conversion has not finished.
-    Pending,
-    /// The card body is a generated digest of the source bytes.
-    Converted {
-        /// Identity of the retained conversion record in the blob store.
-        digest: Digest,
-        /// The converter stopped early; the body covers only part of the source.
-        partial: bool,
-    },
-    /// No extractor exists for this format; the body is empty.
-    Unsupported,
-    /// Conversion failed; the body is empty.
-    Failed {
-        /// Safe explanation shown with the item.
-        message: String,
-    },
 }
 
 /// What `TreeEdit::from_change` needs beyond the change itself.
@@ -405,7 +391,9 @@ pub struct BlameQuery {
 ///
 /// The implementation lives in core and decides OKF conformance; storage calls it and never
 /// decides. It is synchronous because it reads a directory, and storage calls it from the
-/// blocking task that owns that directory.
+/// blocking task that owns that directory. It evaluates an item's properties against its type
+/// schema without the application header (`items::without_header`): the header is the
+/// server's, and no type may constrain or refuse it.
 pub trait CandidateCheck: Send + Sync {
     /// Inspect the complete candidate bundle rooted at `root`.
     ///
@@ -480,6 +468,13 @@ pub trait VersionStore: Send + Sync {
     ///
     /// `check` runs once on the staged candidate tree. Its error rejects the commit; its
     /// warnings are returned in the result.
+    ///
+    /// Refuses, writing nothing, an edit whose path collides with another item (Stage 1b design
+    /// section 7) and a caller edit that changes an application header
+    /// (`items::refuse_header_change`): `CreateItem` and `EditItem` properties, a `SetType`
+    /// definition (`items::refuse_header_in_type`), or a draft. The server's own header
+    /// updates are allowed: `SetStatus`, `WriteSourceCard`, `CorrectDigest` and
+    /// `SupplyExtraction`.
     fn commit<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -505,7 +500,8 @@ pub trait VersionStore: Send + Sync {
     ///
     /// Idempotent on `changes.mutation_id`: when the reference already points at a commit
     /// carrying this mutation's trailer, that revision is returned and nothing is written.
-    /// `check` runs on the staged candidate tree exactly as it does for `commit`.
+    /// `check` runs on the staged candidate tree exactly as it does for `commit`, and the
+    /// path-collision and application-header refusals of `commit` apply.
     fn create_candidate<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -581,8 +577,13 @@ pub struct WorkspaceArchive {
 /// `Workspace::permissions` with `workspace_with_permissions`. The catalog returns that field
 /// empty.
 pub trait WorkspaceCatalog: Send + Sync {
-    /// Every workspace of the tenant that is not archived, unfiltered, in creation order.
-    fn list<'a>(&'a self, tenant: &'a TenantId) -> PortFuture<'a, Vec<Workspace>>;
+    /// Every workspace of the tenant, in creation order; archived ones only when
+    /// `include_archived`.
+    fn list<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        include_archived: bool,
+    ) -> PortFuture<'a, Vec<Workspace>>;
     /// Create a blank workspace: its repository and an initial commit, with no sample content.
     ///
     /// Unique on `mutation_id`: a repeated id creates nothing and returns the prior workspace.
@@ -604,7 +605,7 @@ pub trait WorkspaceCatalog: Send + Sync {
         mutation_id: MutationId,
         update: WorkspaceUpdate,
     ) -> PortFuture<'a, Workspace>;
-    /// Archive the workspace; its history, objects and records stay.
+    /// Archive the workspace and set `archived_at`; its history, objects and records stay.
     ///
     /// Fails with `Conflict` when the head is not `archive.expected_head`. A repeated
     /// `mutation_id` changes nothing and returns the archived workspace.
@@ -614,6 +615,89 @@ pub trait WorkspaceCatalog: Send + Sync {
         mutation_id: MutationId,
         archive: WorkspaceArchive,
     ) -> PortFuture<'a, Workspace>;
+    /// Return an archived workspace to ordinary listings and clear `archived_at`.
+    ///
+    /// A workspace that is not archived is returned unchanged. A repeated `mutation_id`
+    /// changes nothing and returns the workspace as the first call left it.
+    fn unarchive<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        mutation_id: MutationId,
+        author: Provenance,
+    ) -> PortFuture<'a, Workspace>;
+}
+
+/// Removes a purge target from every store that holds it; storage implements it, because one
+/// call must own every store it clears (Stage 1b design section 6).
+///
+/// Both calls are idempotent on the mutation id and resumable after a crash: they return only
+/// when nothing section 6 lists still holds the target, and count the objects kept because a
+/// surviving item still references them.
+pub trait Purger: Send + Sync {
+    /// Remove a workspace: its repository, the objects only it references, its records, index
+    /// entries, managed backups and retained exports.
+    fn purge_workspace<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        mutation_id: MutationId,
+        purge: PurgeId,
+        workspace: WorkspaceId,
+    ) -> PortFuture<'a, PurgeReport>;
+    /// Remove one item's bytes, derivatives, index entries and history, rewrite or delete the
+    /// managed backups that hold it, and write the revision map
+    /// (`RecordStore::revision_mapping`).
+    fn purge_item<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        mutation_id: MutationId,
+        purge: PurgeId,
+        item: ItemId,
+    ) -> PortFuture<'a, PurgeReport>;
+}
+
+/// Independently recoverable backups (Stage 1b design section 8); storage implements them.
+///
+/// The offline backup, the pre-migration backup and the replacement restore are storage
+/// functions the server command and startup call, not ports.
+pub trait Backups: Send + Sync {
+    /// Write a workspace archive into the blob store; the backup handler records it as a
+    /// `WorkspaceBackup` artifact. Idempotent on the mutation id.
+    fn write_workspace_archive<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        mutation_id: MutationId,
+    ) -> PortFuture<'a, ObjectInfo>;
+    /// Write an installation archive (identities, grants, connector records without secrets,
+    /// purge records, tenant events; no workspace content) into the tenant's store; the
+    /// handler records it as an `InstallationBackup` artifact. Idempotent on the mutation id.
+    fn write_installation_archive<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        mutation_id: MutationId,
+    ) -> PortFuture<'a, ObjectInfo>;
+    /// Open a selected byte interval of an installation archive in the tenant's store, for the
+    /// `download_tenant_artifact` transport; `NotFound` when the tenant holds no such object.
+    ///
+    /// `BlobStore` is workspace-scoped and a tenant may have no workspace, so the store that
+    /// writes installation archives also reads them back. Like `BlobStore::open`, a digest
+    /// authorizes nothing: the caller has already authorized the artifact record.
+    fn open_installation_archive<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        digest: &'a Digest,
+        offset: u64,
+        length: u64,
+    ) -> PortFuture<'a, ObjectRead>;
+    /// Import a workspace archive into `scope`. `editors` are the subjects with `write` on
+    /// the target, computed by core from `AccessControl`: a draft whose editor is not among them
+    /// stays in the archive and is counted as unassigned. Idempotent on the mutation id.
+    fn restore_import<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        archive: Digest,
+        mutation_id: MutationId,
+        editors: Vec<String>,
+    ) -> PortFuture<'a, RestoreReport>;
 }
 
 impl TreeEdit {
@@ -686,6 +770,31 @@ impl From<PageRequest> for Page {
     }
 }
 
+impl SourceCard {
+    /// The application header the card is written with: its item id, `archived`, the
+    /// original's first observed name and digest, and the extraction it shows.
+    ///
+    /// `archived` is the flag the item has now: `false` for a new card, and the stored flag
+    /// when a redigest replaces a card, so replacing an archived source never unarchives it.
+    #[must_use]
+    pub fn header(&self, archived: bool) -> ApplicationHeader {
+        ApplicationHeader {
+            item_id: self.item_id,
+            archived,
+            source: Some(SourceHeader {
+                original_name: self
+                    .appearance
+                    .names
+                    .first()
+                    .map(|name| name.filename.clone())
+                    .unwrap_or_default(),
+                digest: self.appearance.object.clone(),
+            }),
+            extraction: Some(self.appearance.extraction.clone()),
+        }
+    }
+}
+
 impl Provenance {
     /// Record the authenticated principal as the author of a write or the initiator of a job.
     #[must_use]
@@ -725,6 +834,15 @@ pub fn derive_item_id(mutation_id: MutationId, ordinal: u32) -> ItemId {
 #[must_use]
 pub fn derive_proposal_id(mutation_id: MutationId) -> ProposalId {
     ProposalId(derived_uuid(b"proposal", mutation_id, 0))
+}
+
+/// The identity of the purge recorded under one mutation.
+///
+/// Derived, not allocated, so the tenant job that carries the purge out can name it in its
+/// specification and both are written in one transaction (`RecordStore::create_purge`).
+#[must_use]
+pub fn derive_purge_id(mutation_id: MutationId) -> PurgeId {
+    PurgeId(derived_uuid(b"purge", mutation_id, 0))
 }
 
 /// A version-8 UUID from SHA-256 of a label, a mutation identity and a count.

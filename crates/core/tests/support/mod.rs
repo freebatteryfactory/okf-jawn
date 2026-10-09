@@ -1,5 +1,5 @@
-//! Fixture `AccessControl` and `MutationStore` for dispatch and binding tests; not production
-//! adapters.
+//! Fixture `AccessControl`, `MutationStore` and `EventLog` for dispatch and binding tests; not
+//! production adapters.
 //!
 //! The including test target declares `mod check;` (`tests/support/check.rs`) at its crate
 //! root. Every public item here is exercised by the self-tests at the end of this file, so a
@@ -12,12 +12,14 @@ use std::time::{Duration, Instant};
 
 use okf_jawn_contract::access::{Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::events::{Event, ListEventsResponse};
 use okf_jawn_contract::identity::{
-    Digest, IdempotencyKey, IdentityError, MutationId, TenantId, WorkspaceId,
+    Digest, IdempotencyKey, IdentityError, MutationId, TenantId, Timestamp, WorkspaceId,
 };
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::context::{TenantGrant, WorkspaceGrant};
 use okf_jawn_core::dispatch::new_mutation_id;
+use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
 use okf_jawn_core::mutations::{
     BeginOutcome, MutationKey, MutationLease, MutationStore, StoredResponse,
 };
@@ -100,6 +102,61 @@ pub struct FixturePorts {
     pub access: Arc<FixtureAccess>,
     /// Mutation ledger.
     pub mutations: Arc<FixtureMutations>,
+    /// Event log that keeps what was appended.
+    pub events: Arc<FixtureEvents>,
+}
+
+/// `EventLog` that keeps every appended event with its scope, in order.
+#[derive(Debug, Default)]
+pub struct FixtureEvents {
+    appended: Mutex<Vec<(EventScope, NewEvent)>>,
+}
+
+impl FixtureEvents {
+    /// Every event appended so far, with its scope, oldest first.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn appended(&self) -> Result<Vec<(EventScope, NewEvent)>, ApiError> {
+        Ok(lock(&self.appended, "event log")?.clone())
+    }
+}
+
+impl EventLog for FixtureEvents {
+    fn append<'a>(
+        &'a self,
+        scope: &'a EventScope,
+        _mutation_id: Option<MutationId>,
+        event: NewEvent,
+    ) -> PortFuture<'a, Event> {
+        Box::pin(async move {
+            let mut appended = lock(&self.appended, "event log")?;
+            appended.push((scope.clone(), event.clone()));
+            wire_event(appended.len(), scope, event)
+        })
+    }
+
+    fn list<'a>(
+        &'a self,
+        scope: &'a EventScope,
+        _query: EventQuery,
+    ) -> PortFuture<'a, ListEventsResponse> {
+        Box::pin(async move {
+            let appended = lock(&self.appended, "event log")?;
+            let events = appended
+                .iter()
+                .enumerate()
+                .filter(|(_, (stored, _))| stored == scope)
+                .map(|(index, (stored, event))| {
+                    wire_event(index.saturating_add(1), stored, event.clone())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ListEventsResponse {
+                events,
+                next_cursor: None,
+            })
+        })
+    }
 }
 
 impl FixtureAccess {
@@ -411,8 +468,34 @@ impl FixturePorts {
         Self {
             access: Arc::new(FixtureAccess::new(table)),
             mutations: Arc::new(FixtureMutations::new()),
+            events: Arc::new(FixtureEvents::default()),
         }
     }
+}
+
+/// The wire form of the `cursor`-th appended event, stamped with a fixed instant.
+fn wire_event(cursor: usize, scope: &EventScope, event: NewEvent) -> Result<Event, ApiError> {
+    Ok(Event {
+        id: cursor.to_string(),
+        workspace_id: match scope {
+            EventScope::Tenant(_) => None,
+            EventScope::Workspace(scope) => Some(scope.workspace_id),
+        },
+        kind: event.kind,
+        at: fixed_instant()?,
+        revision: event.revision,
+        item_id: event.item_id,
+        job_id: event.job_id,
+        connector_id: event.connector_id,
+        actor: event.actor,
+        operation: event.operation,
+    })
+}
+
+/// A valid instant for fixture records; `Timestamp` accepts this spelling.
+fn fixed_instant() -> Result<Timestamp, ApiError> {
+    Timestamp::try_from("2026-10-08T12:00:00.000Z".to_owned())
+        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))
 }
 
 /// Lock a fixture mutex, turning poisoning into an error instead of a panic.
@@ -488,8 +571,9 @@ mod tests {
     use okf_jawn_contract::identity::{Digest, IdentityError};
     use okf_jawn_contract::metadata::OperationName;
     use okf_jawn_core::access::AccessControl;
+    use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
     use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationStore};
-    use okf_jawn_core::storage::StorageScope;
+    use okf_jawn_core::storage::{Page, StorageScope};
     use serde_json::json;
 
     use super::{
@@ -502,6 +586,53 @@ mod tests {
 
     fn digest_of(letter: &str) -> Result<Digest, IdentityError> {
         letter.repeat(64).parse()
+    }
+
+    #[tokio::test]
+    async fn fixture_events_keep_each_append_in_its_own_log() -> TestResult {
+        let ports = FixturePorts::new(GrantTable::default());
+        let alice = Principal {
+            subject: "alice".to_owned(),
+            tenant_id: tenant("tenant-local")?,
+            route: AccessRoute::Service,
+            client_id: None,
+            delegation: None,
+        };
+        let tenant_log = EventScope::Tenant(tenant("tenant-local")?);
+        let home = EventScope::Workspace(StorageScope {
+            tenant_id: tenant("tenant-local")?,
+            workspace_id: workspace(HOME)?,
+        });
+        let event = NewEvent::permission_denied(&alice, OperationName::PurgeItem);
+        let appended = ports
+            .events
+            .append(&tenant_log, None, event.clone())
+            .await?;
+        assert_eq!(appended.workspace_id, None);
+        assert_eq!(appended.operation, Some(OperationName::PurgeItem));
+        ports.events.append(&home, None, event.clone()).await?;
+        assert_eq!(
+            ports.events.appended()?,
+            vec![(tenant_log.clone(), event.clone()), (home.clone(), event)]
+        );
+        let query = || EventQuery {
+            after: None,
+            page: Page {
+                cursor: None,
+                limit: 10,
+            },
+        };
+        assert_eq!(
+            ports.events.list(&tenant_log, query()).await?.events.len(),
+            1
+        );
+        let listed = ports.events.list(&home, query()).await?;
+        assert_eq!(listed.events.len(), 1);
+        assert_eq!(
+            listed.events.first().and_then(|event| event.workspace_id),
+            Some(workspace(HOME)?)
+        );
+        Ok(())
     }
 
     #[tokio::test]

@@ -68,6 +68,7 @@ fn anonymous(application: Arc<dyn Application>, ports: &FixturePorts) -> Router 
         application,
         access: ports.access.clone(),
         mutations: ports.mutations.clone(),
+        events: ports.events.clone(),
     })
 }
 

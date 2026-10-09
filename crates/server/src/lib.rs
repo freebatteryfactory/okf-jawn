@@ -21,6 +21,7 @@ use okf_jawn_contract::access::Principal;
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
+use okf_jawn_core::events::EventLog;
 use okf_jawn_core::mutations::MutationStore;
 use okf_jawn_core::ports::Application;
 use serde_json::Value;
@@ -55,6 +56,8 @@ pub struct BoundApplication {
     pub access: Arc<dyn AccessControl>,
     /// Idempotency ledger.
     pub mutations: Arc<dyn MutationStore>,
+    /// Where dispatch records a refusal of an authenticated caller (`permission_denied`).
+    pub events: Arc<dyn EventLog>,
 }
 
 /// Browser session identity. Session middleware inserts it as a request extension; bearer and
@@ -110,6 +113,7 @@ async fn respond(
     let ports = DispatchPorts {
         access: bound.access.as_ref(),
         mutations: bound.mutations.as_ref(),
+        events: bound.events.as_ref(),
     };
     let caller = Caller {
         principal: &authenticated.principal,

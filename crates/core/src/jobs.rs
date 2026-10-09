@@ -5,31 +5,53 @@
 //! A job is created from a core-owned `JobSpec`, never from the wire `Job`: the specification
 //! carries the inputs, the initiator and the `MutationId` a handler needs to do the work again
 //! after a crash. Every insert is unique on `MutationId` and a repeated id returns the prior row.
+//!
+//! A job belongs to a workspace or, for an installation backup and a purge, to the tenant
+//! (`JobScope`); a tenant job outlives a purged workspace. `JobSpec::fits` holds the two
+//! together. Purge records and the revision map are tenant and workspace records the same store
+//! keeps (Stage 1b design sections 6 and 9.2); derived objects (a View's materialized dataset)
+//! are recorded against the item revision they were made from (section 4).
 
 use okf_jawn_contract::{
-    common::Warning,
+    common::{PageRange, Warning},
+    error::{ApiError, ErrorCode},
     events::Receipt,
     identity::{
-        ArtifactId, Digest, ItemId, JobId, MutationId, ReceiptId, Revision, UploadId, WorkspaceId,
-        WorkspacePath,
+        ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, ReceiptId, Revision, TenantId,
+        Timestamp, UploadId, WorkspaceId, WorkspacePath,
     },
     import::{Job, JobKind, ListJobsResponse},
+    purge::{Purge, PurgeTarget},
     review::Review,
-    workspace::{ArtifactScope, DownloadArtifact},
+    workspace::{ArtifactScope, DownloadArtifact, RestoreReport},
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::conversion::ConversionSettings;
 use crate::ports::PortFuture;
 use crate::storage::{ObjectInfo, Page, Provenance, StorageScope};
+use crate::stored::{ValidatorCell, decode_stored};
 
 /// What a retained artifact is; the contract's, so the record and the wire agree.
 pub use okf_jawn_contract::workspace::ArtifactKind;
 
+/// Whose job or artifact a record is: the tenant's (an installation backup, a purge) or one
+/// workspace's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobScope {
+    /// Installation-level work; the wire `Job` has no `workspace_id`.
+    Tenant(TenantId),
+    /// Work within one workspace.
+    Workspace(StorageScope),
+}
+
 /// What a job must do: the inputs of the request that started it, with selectors resolved.
 ///
-/// The record store keeps the specification as written and hands it back on every claim.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The record store keeps the specification as written (`JobSpec::to_stored`) and hands it
+/// back on every claim, decoded with `JobSpec::from_stored` so a value that does not meet the
+/// schema is a store fault rather than a silently accepted job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobSpec {
     /// Convert finalized uploads into source cards.
@@ -42,6 +64,8 @@ pub enum JobSpec {
         destination: Option<WorkspacePath>,
         /// Apply the workspace naming rules to the new cards.
         apply_naming_rules: bool,
+        /// Conversion settings, resolved when the request was accepted.
+        settings: ConversionSettings,
     },
     /// Convert one source again with explicit settings, keeping human corrections.
     Redigest {
@@ -51,6 +75,9 @@ pub enum JobSpec {
         base_revision: Revision,
         /// Settings that identify the new digest.
         settings: ConversionSettings,
+        /// The `not_converted` pages at `base_revision` when only those are converted again;
+        /// `None` converts the whole document.
+        pages: Option<Vec<PageRange>>,
     },
     /// Build a portable export of the workspace.
     ExportWorkspace {
@@ -61,12 +88,12 @@ pub enum JobSpec {
     },
     /// Back up content, retained objects and application records.
     BackupWorkspace,
-    /// Restore content and application records from a retained backup artifact.
+    /// Restore content and application records from an uploaded workspace archive.
     RestoreWorkspace {
-        /// Backup artifact to restore from.
-        artifact_id: ArtifactId,
-        /// Digest the artifact must have before the restore begins, when supplied.
-        sha256: Option<Digest>,
+        /// Upload slot holding the archive; consumed by this job.
+        upload_id: UploadId,
+        /// Digest of the archive, checked against the request's `sha256` at acceptance.
+        archive: Digest,
     },
     /// Rebuild the derived search and link index at the current head.
     RebuildIndex,
@@ -76,6 +103,25 @@ pub enum JobSpec {
         item_id: ItemId,
         /// Resolved revision to export.
         revision: Revision,
+    },
+    /// Back up the installation's identities, grants, connector records without secrets,
+    /// purge records and tenant events; no workspace content. Tenant-scoped.
+    BackupInstallation,
+    /// Remove a workspace and everything only it references. Tenant-scoped.
+    PurgeWorkspace {
+        /// The purge record this job carries out.
+        purge_id: PurgeId,
+        /// Workspace removed.
+        workspace_id: WorkspaceId,
+    },
+    /// Remove one item's bytes, derivatives, index entries and history. Tenant-scoped.
+    PurgeItem {
+        /// The purge record this job carries out.
+        purge_id: PurgeId,
+        /// Its workspace.
+        workspace_id: WorkspaceId,
+        /// Item removed.
+        item_id: ItemId,
     },
 }
 
@@ -100,13 +146,15 @@ pub struct JobLease {
     pub token: String,
     /// Monotonic attempt number.
     pub attempt: u32,
+    /// When the claim lapses unless `RecordStore::update_progress` renews it.
+    pub expires_at: Timestamp,
 }
 
 /// A claimed job: everything `JobHandler::handle` needs, with nothing to look up elsewhere.
 #[derive(Debug, Clone)]
 pub struct ClaimedJob {
-    /// Tenant and workspace scope for the work.
-    pub scope: StorageScope,
+    /// Tenant, or tenant and workspace, the work belongs to.
+    pub scope: JobScope,
     /// Compare-and-set claim identity.
     pub lease: JobLease,
     /// Durable job record as it stands at the claim.
@@ -130,6 +178,8 @@ pub struct JobCompletion {
     pub item_ids: Vec<ItemId>,
     /// Artifact the job produced, already recorded with `RecordStore::record_artifact`.
     pub artifact: Option<ArtifactId>,
+    /// What a restore did; present exactly for a `RestoreWorkspace` job.
+    pub restore: Option<RestoreReport>,
     /// Retained output objects, kept as garbage-collection roots.
     pub outputs: Vec<Digest>,
     /// Non-fatal issues recorded during the work.
@@ -154,6 +204,8 @@ pub struct NewArtifact {
 pub struct ArtifactRecord {
     /// Artifact identity, allocated by the store.
     pub id: ArtifactId,
+    /// Whose artifact it is: the tenant's for an installation backup, a workspace's otherwise.
+    pub scope: JobScope,
     /// What the artifact is.
     pub kind: ArtifactKind,
     /// Identity and size of the retained bytes; open them with `BlobStore::open`.
@@ -164,26 +216,71 @@ pub struct ArtifactRecord {
     pub created_by_job: JobId,
 }
 
+/// A purge to record; it holds no content of the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPurge {
+    /// Identity, from `derive_purge_id` of the request's mutation id, so the tenant job's
+    /// specification can name it.
+    pub id: PurgeId,
+    /// What is removed.
+    pub target: PurgeTarget,
+    /// The tenant administrator who asked.
+    pub initiator: Provenance,
+}
+
+/// What became of a revision a purge rewrote or removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionMapping {
+    /// The purge that rewrote or removed it.
+    pub purge_id: PurgeId,
+    /// The rewritten revision; `None` when the revision no longer exists.
+    pub replacement: Option<Revision>,
+}
+
+/// What a derived object is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedKind {
+    /// A View binding's materialized `Dataset`.
+    Dataset,
+}
+
+/// An object the application derived from one item revision and retained; a
+/// garbage-collection root, and an object `get_object` serves for that revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedObject {
+    /// Item it was derived from.
+    pub item_id: ItemId,
+    /// Revision it was derived from.
+    pub revision: Revision,
+    /// Digest of the retained bytes.
+    pub digest: Digest,
+    /// What it is.
+    pub kind: DerivedKind,
+    /// Media type the object is served with.
+    pub media_type: String,
+}
+
 /// SQLite-backed non-rebuildable application records.
 pub trait RecordStore: Send + Sync {
     /// Register a queued job and allocate its identity.
     ///
     /// Unique on `job.mutation_id`: a repeated id inserts nothing and returns the prior job,
-    /// whatever state it has reached. The returned `Job::kind` is `job.spec.kind()`.
-    fn create_job<'a>(&'a self, scope: &'a StorageScope, job: NewJob) -> PortFuture<'a, Job>;
-    /// Read one durable job within workspace scope.
-    fn get_job<'a>(&'a self, scope: &'a StorageScope, job: JobId) -> PortFuture<'a, Job>;
-    /// List durable jobs for a workspace, newest first, with bounded pagination.
-    fn list_jobs<'a>(
-        &'a self,
-        scope: &'a StorageScope,
-        page: Page,
-    ) -> PortFuture<'a, ListJobsResponse>;
+    /// whatever state it has reached. The returned `Job::kind` is `job.spec.kind()`, and a
+    /// tenant job's `Job::workspace_id` is absent. Refuses with `Internal` a specification that
+    /// does not fit the scope (`JobSpec::fits`).
+    fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job>;
+    /// Read one durable job within its scope.
+    fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job>;
+    /// List durable jobs of one scope, newest first, with bounded pagination.
+    fn list_jobs<'a>(&'a self, scope: &'a JobScope, page: Page)
+    -> PortFuture<'a, ListJobsResponse>;
     /// Claim runnable work under a compare-and-set lease; `None` when it is not runnable.
     fn claim_job(&self, job: JobId) -> PortFuture<'_, Option<ClaimedJob>>;
-    /// Record progress, 0 to 100, for the current claim and return the job as it now stands.
+    /// Record progress, 0 to 100, for the current claim, renew the lease to now plus the lease
+    /// duration, and return the job as it now stands.
     ///
-    /// A handler reads the returned state: a cancelled job stops working.
+    /// It is the heartbeat: a handler converting a long window calls it at least every third
+    /// of the lease. A handler reads the returned state: a cancelled job stops working.
     fn update_progress<'a>(&'a self, lease: &'a JobLease, progress: u8) -> PortFuture<'a, Job>;
     /// Commit completion only for the current unexpired claim.
     ///
@@ -198,7 +295,7 @@ pub trait RecordStore: Send + Sync {
     /// row as it stands.
     fn cancel_job<'a>(
         &'a self,
-        scope: &'a StorageScope,
+        scope: &'a JobScope,
         mutation_id: MutationId,
         job: JobId,
     ) -> PortFuture<'a, Job>;
@@ -208,7 +305,7 @@ pub trait RecordStore: Send + Sync {
     /// the job has run and failed again since, and returns the job row as it stands.
     fn retry_job<'a>(
         &'a self,
-        scope: &'a StorageScope,
+        scope: &'a JobScope,
         mutation_id: MutationId,
         job: JobId,
     ) -> PortFuture<'a, Job>;
@@ -216,24 +313,64 @@ pub trait RecordStore: Send + Sync {
     ///
     /// The bytes are already retained in `BlobStore` under `artifact.object.digest`. Unique on
     /// `mutation_id`, the producing job's write identity: a repeated id records nothing and
-    /// returns the prior record.
+    /// returns the prior record. Refuses with `Internal` a kind whose scope is not `scope`'s.
     fn record_artifact<'a>(
         &'a self,
-        scope: &'a StorageScope,
+        scope: &'a JobScope,
         mutation_id: MutationId,
         artifact: NewArtifact,
     ) -> PortFuture<'a, ArtifactRecord>;
-    /// Read one artifact record within workspace scope; `NotFound` when this workspace has no
-    /// artifact with that identity.
+    /// Read one artifact record within its scope; `NotFound` when the scope has no artifact
+    /// with that identity.
     fn get_artifact<'a>(
         &'a self,
-        scope: &'a StorageScope,
+        scope: &'a JobScope,
         artifact: ArtifactId,
     ) -> PortFuture<'a, ArtifactRecord>;
     /// Enumerate unfinished records across tenants for queue reconciliation on restart.
-    fn pending_jobs(&self) -> PortFuture<'_, Vec<(StorageScope, JobId)>>;
+    fn pending_jobs(&self) -> PortFuture<'_, Vec<(JobScope, JobId)>>;
     /// Release claims whose leases have expired so work can be reclaimed.
     fn expire_leases(&self) -> PortFuture<'_, u32>;
+    /// Record a purge and, in the same transaction, its tenant job (`PurgeWorkspace` or
+    /// `PurgeItem` from the target) under `mutation_id`.
+    ///
+    /// Unique on `purge.id`: a repeated id returns the prior purge. While a purge of the same
+    /// target is not completed, any request for that target returns that unfinished purge and
+    /// records nothing: that is how a failed purge is resumed.
+    fn create_purge<'a>(
+        &'a self,
+        tenant: &'a TenantId,
+        mutation_id: MutationId,
+        purge: NewPurge,
+    ) -> PortFuture<'a, Purge>;
+    /// Read one purge; it outlives the workspace it removed.
+    fn get_purge<'a>(&'a self, tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge>;
+    /// Store the progress, report or failure of a purge and return it as stored.
+    fn update_purge<'a>(&'a self, tenant: &'a TenantId, purge: Purge) -> PortFuture<'a, Purge>;
+    /// What became of a revision a purge rewrote or removed; `None` when no purge touched it.
+    /// Written by `Purger`.
+    fn revision_mapping<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+    ) -> PortFuture<'a, Option<RevisionMapping>>;
+    /// Record an object derived from one item revision.
+    ///
+    /// Unique on (item, revision, digest): a repeated record inserts nothing and returns the
+    /// prior one. Recorded objects are garbage-collection roots.
+    fn record_derived_object<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        object: DerivedObject,
+    ) -> PortFuture<'a, DerivedObject>;
+    /// The object recorded for this (item, revision, digest), if any.
+    fn derived_object<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        item: ItemId,
+        revision: &'a Revision,
+        digest: &'a Digest,
+    ) -> PortFuture<'a, Option<DerivedObject>>;
     /// Record exact reviewed content after application-level confirmation.
     ///
     /// Unique on `mutation_id`: a repeated id inserts nothing and returns the prior review.
@@ -272,7 +409,7 @@ pub trait RecordStore: Send + Sync {
 /// Delivery adapter; job truth remains in `RecordStore`.
 pub trait JobQueue: Send + Sync {
     /// Deliver an existing durable job identity, accepting possible duplicate delivery.
-    fn enqueue(&self, workspace: WorkspaceId, job: JobId) -> PortFuture<'_, ()>;
+    fn enqueue(&self, scope: JobScope, job: JobId) -> PortFuture<'_, ()>;
 }
 
 /// Executes claimed durable work; ingest owns the Tokio + `RecordStore` runtime adapter.
@@ -281,21 +418,46 @@ pub trait JobHandler: Send + Sync {
     fn handle<'a>(&'a self, claimed: &'a ClaimedJob) -> PortFuture<'a, ()>;
 }
 
+impl JobScope {
+    /// The tenant the record belongs to.
+    #[must_use]
+    pub const fn tenant(&self) -> &TenantId {
+        match self {
+            Self::Tenant(tenant) => tenant,
+            Self::Workspace(scope) => &scope.tenant_id,
+        }
+    }
+
+    /// The workspace, for a workspace record.
+    #[must_use]
+    pub const fn workspace(&self) -> Option<&WorkspaceId> {
+        match self {
+            Self::Tenant(_) => None,
+            Self::Workspace(scope) => Some(&scope.workspace_id),
+        }
+    }
+
+    /// Which artifact scope this is, so a kind's scope can be compared with it.
+    #[must_use]
+    pub const fn artifact_scope(&self) -> ArtifactScope {
+        match self {
+            Self::Tenant(_) => ArtifactScope::Tenant,
+            Self::Workspace(_) => ArtifactScope::Workspace,
+        }
+    }
+}
+
 impl ArtifactRecord {
-    /// The wire form shown on a job, with the path of the transport that serves its kind:
+    /// The wire form shown on a job, with the path of the transport that serves its scope:
     /// `download_artifact` for a workspace artifact, `download_tenant_artifact` for a tenant one.
     #[must_use]
-    pub fn download(&self, workspace: WorkspaceId) -> DownloadArtifact {
-        let download_path = match self.kind.scope() {
-            ArtifactScope::Workspace => artifact_download_path(workspace, self.id),
-            ArtifactScope::Tenant => tenant_artifact_download_path(self.id),
-        };
+    pub fn download(&self) -> DownloadArtifact {
         DownloadArtifact {
             artifact_id: self.id,
             kind: self.kind,
             sha256: self.object.digest.clone(),
             size: self.object.size.to_string(),
-            download_path,
+            download_path: artifact_download_path(&self.scope, self.id),
         }
     }
 }
@@ -312,20 +474,77 @@ impl JobSpec {
             Self::RestoreWorkspace { .. } => JobKind::RestoreWorkspace,
             Self::RebuildIndex => JobKind::RebuildIndex,
             Self::ExportView { .. } => JobKind::ExportView,
+            Self::BackupInstallation => JobKind::BackupInstallation,
+            Self::PurgeWorkspace { .. } => JobKind::PurgeWorkspace,
+            Self::PurgeItem { .. } => JobKind::PurgeItem,
         }
+    }
+
+    /// The JSON the record store keeps.
+    ///
+    /// # Errors
+    /// Returns `Internal` if the specification cannot be represented as JSON.
+    pub fn to_stored(&self) -> Result<serde_json::Value, ApiError> {
+        serde_json::to_value(self).map_err(|error| {
+            ApiError::new(
+                ErrorCode::Internal,
+                format!("a job specification did not serialize: {error}"),
+            )
+        })
+    }
+
+    /// Decode a specification the record store kept, validated against its schema: a field
+    /// beside a unit variant's tag, which serde alone accepts, is refused.
+    ///
+    /// # Errors
+    /// Returns `Internal` naming the first violation when the stored value is not a job
+    /// specification.
+    pub fn from_stored(value: serde_json::Value) -> Result<Self, ApiError> {
+        static SCHEMA: ValidatorCell = ValidatorCell::new();
+        decode_stored(value, "a stored job specification", &SCHEMA)
+    }
+
+    /// Whether the specification belongs in `scope`: a tenant kind in the tenant scope, every
+    /// other kind in a workspace scope.
+    #[must_use]
+    pub const fn fits(&self, scope: &JobScope) -> bool {
+        self.kind().is_tenant() == matches!(scope, JobScope::Tenant(_))
     }
 }
 
-/// The application-relative path of the `download_artifact` transport for one artifact.
+/// The tenant job specification that carries out a purge of `target`.
+#[must_use]
+pub fn purge_job_spec(target: &PurgeTarget, purge_id: PurgeId) -> JobSpec {
+    match target {
+        PurgeTarget::Workspace { workspace_id } => JobSpec::PurgeWorkspace {
+            purge_id,
+            workspace_id: *workspace_id,
+        },
+        PurgeTarget::Item {
+            workspace_id,
+            item_id,
+        } => JobSpec::PurgeItem {
+            purge_id,
+            workspace_id: *workspace_id,
+            item_id: *item_id,
+        },
+    }
+}
+
+/// The application-relative path of the transport that serves one artifact: `download_artifact`
+/// (`/api/workspaces/{workspace_id}/artifacts/{artifact_id}`) for a workspace artifact,
+/// `download_tenant_artifact` (`/api/artifacts/{artifact_id}`) for a tenant one.
 ///
 /// Defined once so the record store, the application and the server route agree.
 #[must_use]
-pub fn artifact_download_path(workspace: WorkspaceId, artifact: ArtifactId) -> String {
-    format!("/api/workspaces/{}/artifacts/{}", workspace.0, artifact.0)
-}
-
-/// The application-relative path of the `download_tenant_artifact` transport for one artifact.
-#[must_use]
-pub fn tenant_artifact_download_path(artifact: ArtifactId) -> String {
-    format!("/api/artifacts/{}", artifact.0)
+pub fn artifact_download_path(scope: &JobScope, artifact: ArtifactId) -> String {
+    match scope {
+        JobScope::Workspace(scope) => {
+            format!(
+                "/api/workspaces/{}/artifacts/{}",
+                scope.workspace_id.0, artifact.0
+            )
+        }
+        JobScope::Tenant(_) => format!("/api/artifacts/{}", artifact.0),
+    }
 }

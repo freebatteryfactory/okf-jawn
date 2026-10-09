@@ -23,6 +23,8 @@ pub mod ports;
 
 /// Bounded conversion worker interface.
 pub mod conversion;
+/// The server-owned application header of item files.
+pub mod items;
 /// Durable job specifications, leases, reviews, receipts and artifact records.
 pub mod jobs;
 /// Durable mutation ledger.
@@ -31,11 +33,17 @@ pub mod mutations;
 pub mod proposals;
 /// Configured dependency readiness probe.
 pub mod readiness;
+/// Which retained objects a citation may open.
+pub mod reading;
 /// Sandbox-origin capability tokens.
 pub mod sandbox;
 /// Rebuildable search, link, and graph index interface.
 pub mod search;
 /// Blob, version and workspace-catalog ports with their core parameter types.
 pub mod storage;
+/// Schema validation of values read back from storage.
+pub mod stored;
 /// Authenticated upload occurrence slots.
 pub mod uploads;
+/// The producer of a View binding's materialized dataset.
+pub mod views;
