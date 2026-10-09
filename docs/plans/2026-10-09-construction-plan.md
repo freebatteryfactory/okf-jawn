@@ -243,7 +243,11 @@ and the models:
   directory, restores with the offline command (installation archive first, then every workspace
   archive), and compares identities, items, history, retained objects, records and drafts; it
   also imports a workspace archive into another installation and checks the unassigned-draft
-  count. `tests/integration/acceptance.mjs` reports restoration as `not_covered` today. storage
+  count. It also requests a portable export and checks, without the application, that the
+  folder/archive holds the committed content at the chosen revision with the originals and
+  derivatives it references, that current reviews are written as OKF `verified`, and that no
+  draft, session or credential is in it. The offline commands are server M2's (3.4).
+  `tests/integration/acceptance.mjs` reports export and restoration as `not_covered` today. storage
   owns its failures;
 - core's tests run against the real storage adapter (risk table, section 7);
 - then the acceptance gates (section 5).
@@ -604,8 +608,17 @@ expected to need; (5) its own obligations and task order.
      (I4). Server tests that convert set it to a fake conversion child, so no server test needs a
      Docling model (1.1). Real conversion through the server is proven in Wave 3 against the
      built binaries.
+   - **The offline commands of the binary** (design section 8): `okf-jawn-server backup --output
+     <directory>` (hosted: `--tenant <id>`), which takes the single-writer lock and writes the
+     installation archive and every workspace archive; and `okf-jawn-server restore --replacement
+     <installation archive> <workspace archive>...`, run with no service on the data directory,
+     which restores the installation archive first and then each workspace archive, with the
+     design's refusals (a different tenant id, a completed purge of that workspace, or an existing
+     workspace). Both call storage M2's functions and hold no behaviour of their own. Tests run each
+     command against a temporary data directory, including a refusal while another process holds
+     the lock. They are the interface the Wave 3 restore harness drives.
    - Merges: M1 is the bindings (`http-fallback-errors`, `grant-cache-ttl` and the binding parts of
-     `server-binary-and-startup`). M2 is the composition and the binary.
+     `server-binary-and-startup`). M2 is the composition, the binary and its offline commands.
 
 ### 3.5 mcp-execution
 
