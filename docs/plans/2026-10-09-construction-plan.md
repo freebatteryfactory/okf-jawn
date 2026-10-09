@@ -1,8 +1,8 @@
 # Construction plan: the seven lanes (2026-10-09)
 
 Temporary, like the rest of `docs/plans/`: removed at Stage 1 close. Base: `main` at `de3b5ec`.
-The core-ports fixes R1 to R8 (`cure/core-ports-review`, `d94adec`..`d1b0e27`) are treated as
-landed before any lane starts (Wave 0).
+The core-ports fixes R1 to R8 and their review follow-ups (`cure/core-ports-review`,
+`d94adec`..`ec7fc5f`) are treated as landed before any lane starts (Wave 0).
 
 The integration owner runs construction from this document, locally, three or four lanes at a
 time. It fixes execution order and boundaries. It does not redesign anything: the contract and
@@ -30,9 +30,21 @@ review and its rulings R1 to R8.
   parallel builds wait on its lock. Test binaries built from another checkout also keep that
   checkout's `CARGO_MANIFEST_DIR` paths (observed: a qualification test failed with os error 3
   naming another worktree). The UI lanes need no Cargo target. D: has about 190 GB free.
-- Ingest tests, and server tests once the server composes ingest, need `DOCLING_RS_MODELS_DIR`
-  set to the owner's pinned model copy (2026-10-08 handoff: that local copy is the pinned
-  reference).
+- **CI never needs the Docling models.** The required CI `test` job runs on `ubuntu-24.04` with
+  no model step and no `DOCLING_RS_MODELS_DIR` (`.github/workflows/ci.yml`). So no `cargo test`
+  of any lane loads a model:
+  - ingest tests its cap mechanism with a small test child (3.2);
+  - server tests that convert use a fake conversion child through the configurable child path
+    (I4).
+
+  Real conversion runs only in the Docling qualification (`bun scripts/dev.mjs qualify docling`),
+  locally as today, and in the Wave 3 runs against the built binaries. Those set
+  `DOCLING_RS_MODELS_DIR` to the owner's pinned model copy (2026-10-08 handoff: that local copy is
+  the pinned reference).
+- **Lane branches stay local until they merge.** `scripts/hooks/pre-push` runs the full
+  `check-offline` on every push. That check fails while a receipt is stale or an
+  integration-owner edit (such as `records.test.mjs:227`) is still missing. The remote is used
+  only for the integration owner's `integration/*` PRs.
 
 ### 1.2 The lane cycle
 
@@ -45,11 +57,14 @@ review and its rulings R1 to R8.
 3. Independent review, mutation-tested. For each rule a gate names, the reviewer undoes the rule,
    shows the named test going red, then reverts. A finding blocks only when it cites a failing
    command or a named SPEC or AGENTS sentence. At most two review rounds.
-4. The integration owner merges with `git merge --no-ff`. The same merge carries the
-   integration-owner edits this plan names for it. Where generated outputs disagree, the owner
-   runs `bun scripts/dev.mjs gen`. The owner requalifies every receipt whose inputs the merge
-   changed (1.5), runs `bun scripts/dev.mjs premerge`, and brings the merge to `main` through a PR
-   merged with a merge commit, as #4 to #6 were. The `main` ruleset requires the CI jobs.
+4. The integration owner merges the lane branch into an `integration/*` branch with
+   `git merge --no-ff`. The integration-owner edits this plan names for that merge then follow as
+   **separate commits after the merge commit**, never folded into the merge itself, so
+   `git log -p` shows them. Where generated outputs disagree, the owner runs
+   `bun scripts/dev.mjs gen` (also its own commit). The owner requalifies every receipt whose
+   inputs changed (1.5) and runs `bun scripts/dev.mjs premerge`. All of it reaches `main` in one PR
+   merged with a merge commit, as #4 to #6 were. Only the PR's tip must be green: the `main`
+   ruleset requires the CI jobs, and SPEC section 13 allows a red intermediate commit.
 5. Lanes still running take `git merge main` at their next task boundary, on a clean tree. On a
    conflict in a generated directory or a lockfile they take `main`'s side, run `gen` and commit.
 
@@ -117,7 +132,7 @@ premerge ends with `check-receipts`.
 
 Batching: all dependency requests of a wave go into one `bun scripts/dev.mjs lock` commit with one
 requalification of both receipts (batches A and B, section 2). Integration-owner edits travel in
-the merge they belong to, so that merge needs only one requalification.
+the PR of the merge they belong to, so that PR needs only one requalification.
 
 ### 1.6 Requesting a dependency
 
@@ -131,6 +146,19 @@ commits on `main` inside the wave's batch, and requalifies (1.5). Lanes pick the
 `git merge main`. `unsafe_code = "forbid"` applies to authored code, so any OS facility is reached
 only through a crate with a safe API.
 
+### 1.7 Port changes and fakes
+
+core-cli owns the port traits in `crates/core`, while storage and ingest implement them in the
+same wave. So:
+
+- Any port-trait change the wave needs is in core-cli M0, which lands before any storage or
+  ingest merge.
+- A port change discovered during the wave goes to `main` as its own small core-cli merge, never
+  inside a lane's big merge. Storage and ingest take it with `git merge main`.
+- core-cli's fakes (in `tests/support` only) encode only the port behaviour the trait docs state.
+  Where a doc is silent, core-cli asks for the doc to be completed (a port change, as above). It
+  does not assume what storage will do. The same holds for ingest's fakes of the storage ports.
+
 ## 2. Waves
 
 | Wave | Lanes running | Starts when |
@@ -142,17 +170,33 @@ only through a crate with a safe API.
 
 ### Wave 0: integration owner, before any lane
 
-1. Land R1 to R8: review and merge `cure/core-ports-review`. Decide its two flagged items: the
-   `PartialEq` derive added to contract `OutlineEntry` (no wire change), and the placeholder
-   `SearchRequest` inside `SearchQuery::check`. Design 9.6 says a shared contract function for that
-   rule "is the integration owner's to add". Recommended: accept the derive, and add the shared
-   function now, before core-cli builds search.
-2. Add the `Dataset` form of the views dataset fixture as a new file beside
-   `tests/fixtures/views/present-metrics-dataset.json`. That file stays rows of records until the
-   views merge (design section 12). This lets the views lane test against a shared `Dataset`
-   fixture without editing `tests/fixtures/views` (decision I2). [inferred]
-3. Requalify MCP Apps once for steps 1 and 2. R3's regeneration changed `api/mcp-tools.json` and
-   `ui/src/api/generated/types.gen.ts`, per the fix report. Docling stays valid.
+1. Land R1 to R8: review and merge `cure/core-ports-review` (now ending at `ec7fc5f`).
+   - The `PartialEq` derive on contract `OutlineEntry` (no wire change) is accepted.
+   - Done: `4f60651` gives the search text rule one implementation that both callers use (the
+     shared contract function of design 9.6).
+   - The MCP Apps requalification for this merge is already running on
+     `integration/core-ports-review`. R3's regeneration changed `api/mcp-tools.json` and
+     `ui/src/api/generated/types.gen.ts`. Docling stays valid.
+2. Add the permanent `Dataset` fixture as a new file in `tests/fixtures/views/`. Its path is the
+   integration owner's choice [inferred]. Views' tests read it from the start. The rows file
+   `tests/fixtures/views/present-metrics-dataset.json` stays until views M1, which deletes it
+   (I2).
+   - `tests/fixtures/views` is an MCP Apps input. If the file misses the running requalification
+     of step 1, it needs one more MCP Apps requalification before the lanes start.
+3. Amend `verification.json`. These are integration-owner edits; `verification.json` is no
+   receipt input.
+   - `converter-worker-memory-ceiling`: split its meaning and receipt into (a) the cap mechanism,
+     proven by `cargo test -p okf-jawn-ingest --features runtime` with a small test child and no
+     models, and (b) the window size and cap values, set from a real measurement recorded as new
+     criteria of the existing Docling qualification (`qualification/docling`, receipt
+     `docling.json`). There is no new receipt kind.
+   - In the same meaning, record the owner's decision of 2026-10-07 for 4-page windows. It is not
+     yet written anywhere in the repository. `window_pages = 4` is the default until the
+     measurement sets it.
+   - `cli-mcp-stdio-relay` and the CLI part of `application-operations`: name both the cargo
+     command and the Wave 3 `tests/integration/` harness command (I5).
+   - `tests/foundation/records.test.mjs` pins none of these three receipts today (checked by grep
+     on `de3b5ec`). If a later version does, the same change updates it.
 4. Record decisions I1, I3, I4 and I5 (section 6), so the lanes start from them.
 5. Run `bun scripts/dev.mjs lanes storage ingest core-cli views`.
 
@@ -160,11 +204,12 @@ only through a crate with a safe API.
 
 - **storage** is first because "storage's data-format version and migrations land before anything
   stores data", and every real-adapter test of another lane waits for it.
-- **ingest** is a long pole: Docling page windows, the child-process memory cap and its
-  measurement, location, glyph flagging, and every job handler. Its converter work needs no
-  neighbour. Its RecordStore work waits for storage M1.
-- **core-cli** is a long pole: 77 operations, built over its own ports with test fakes. Its
-  present/resolve producer call waits for views M1.
+- **ingest** is a long pole: Docling page windows, the child-process memory cap, location, glyph
+  flagging, and every job handler. Its converter work needs no neighbour. Its export and import
+  handlers call core-cli M0's functions.
+- **core-cli** is a long pole: 77 operations, built over its own ports with test fakes. It first
+  lands M0 (port changes, plus the export and import rules), before any storage or ingest merge.
+  Its present/resolve wiring is a separate later merge, after views M1.
 - **views** is here because PresentView must switch to the generated `Dataset` before
   application-operations calls the dataset producer. It is small and light on CPU.
 
@@ -173,7 +218,8 @@ only through a crate with a safe API.
 - **workspace-ui** is independent, but four lanes is the cap. It takes views' slot when views
   finishes, and then consumes views' merged components instead of racing them.
 - **mcp-execution** is an adapter over `ports::Application` and needs no neighbour. It runs as one
-  short lane, and its wire receipt waits for Wave 3.
+  short lane, and its wire receipt waits for Wave 3. Its worktree is kept until Wave 3's
+  `qualify mcp-wire` passes, because a failure there reopens the lane.
 - **server** takes storage's slot. Its bindings need only core. Its composition is its last task
   by rule: "server composes the real storage and ingest adapters last, after both are merged".
   It also needs core-cli's `ApplicationService` and mcp-execution's handler on `main`. [inferred:
@@ -182,31 +228,60 @@ only through a crate with a safe API.
 
 ### Wave 3: assembly (no new lane)
 
-The server composition merge comes first. After it, the receipts that need a running service:
-`bun scripts/dev.mjs qualify mcp-wire` (mcp-execution), core-cli's tests of the CLI against a
-running server and of the stdio relay (decision I5), the SPEC section 12 crash/restart check
-(ingest, decision I1), and then the acceptance gates (section 5).
+The server composition merge comes first. After it come the checks that need the built binaries
+and the models:
+
+- `bun scripts/dev.mjs qualify mcp-wire` (mcp-execution);
+- the `tests/integration/` harness for the CLI against a running server and for the relay
+  starting the service when none is running (core-cli, I5);
+- the SPEC section 12 crash/restart check (ingest, I1);
+- core's tests run against the real storage adapter (risk table, section 7);
+- then the acceptance gates (section 5).
+
+A failure in any of them reopens the owning lane.
 
 ### Planned merges and requalifications
 
 Each merge happens when its prerequisites are on `main`. Each step that changes a receipt input
 is followed by the requalification named on that line before the next merge (1.5).
 
-| Merge | Prerequisite on `main` | Integration-owner edits in the same merge | Requalify |
+| Merge | Prerequisite on `main` | Integration-owner edits in the same PR (separate commits after the merge) | Requalify |
 | --- | --- | --- | --- |
-| views M1: PresentView reads `Dataset` | Wave 0 | `present-metrics-dataset.json` becomes the `Dataset` document. `qualification/mcp-apps/lib/views.mjs`, `criteria.mjs` and `tests/foundation/harness.test.mjs` follow it. The separate Wave 0 file goes. | MCP Apps |
-| Batch A (`lock`): ingest's memory-cap crate(s) and conversion bin target (I4), core-cli's pulldown-cmark, any storage request | requests in hand, ideally by the first task boundary of each lane | the `vendors.json` entries, manifests, `Cargo.lock`, `gen` | Docling and MCP Apps |
-| storage M1: format, migrations, lock, all stores, index | - | - | none (no dependency carried) |
-| ingest M1: converter, handlers | Batch A | - | none |
+| core-cli M0: any port-trait change the wave needs; the export and import rules as core functions with tests (export writes `verified` for current reviews; import reads an incoming `verified` as imported coverage; lint at import) | Wave 0 | - | none |
+| views M1: PresentView reads `Dataset` | Wave 0 | the rows file `present-metrics-dataset.json` is deleted; the Wave 0 `Dataset` file stays as the permanent fixture (see the list after this table) | MCP Apps |
+| Batch A (`lock`): ingest's memory-cap crate(s) and conversion bin target (I4), core-cli's pulldown-cmark, any storage request; plus the measurement criteria of `converter-worker-memory-ceiling` (b) in `qualification/docling` | requests in hand, ideally by the first task boundary of each lane | the `vendors.json` entries, manifests, `Cargo.lock`, `gen`, the new Docling criteria | Docling (which runs the measurement) and MCP Apps. Criteria not ready with the dependencies get a Docling-only requalification of their own; until then `window_pages = 4` |
+| storage M1: format, migrations, lock, all stores, index | core-cli M0 | - | none (no dependency carried) |
+| ingest M1: converter, cap mechanism, handlers | core-cli M0, Batch A | - | none |
 | views M2: per-chart failure isolation, saved views | views M1 | `tests/foundation/records.test.mjs:227` and the `authored-typescript-seams` `covers` sentence (and its evidence list, if a test file changes) follow the changed `ui/tests/unit/layout.test.tsx` | MCP Apps |
-| core-cli M1: operations; present/resolve once views M1 is on `main`; item outlines | views M1, Batch A | - | none |
+| core-cli M1: operations except present/resolve; item outlines; CLI surface and relay | core-cli M0, Batch A | - | none |
+| core-cli M1b: `present_view`/`resolve_view` wiring | views M1, core-cli M1 | - | none |
 | storage M2: Purger, Backups | storage M1 | - | none |
-| Batch B (`lock`): server session/cookie crates and any token-validation crate; the cli dev-dependency of I5 | vendor notes recorded | as Batch A | Docling and MCP Apps |
+| Batch B (`lock`): server session/cookie crates and any token-validation crate | vendor notes recorded | as Batch A | Docling and MCP Apps |
 | mcp-execution | - | - | none |
 | server M1: bindings | Batch B | - | none |
 | workspace-ui (one or more merges) | views M2 | - | MCP Apps, after each |
-| server M2: composition and binary | storage M2, ingest M1, core-cli M1, mcp-execution, server M1 | `deploy/` follows the binaries (I4) | none, unless it carries a dependency |
-| core-cli M2: CLI against a running server, stdio relay | server M2, Batch B | - | none |
+| server M2: composition and binary | storage M2, ingest M1, core-cli M1b, mcp-execution, server M1 | `deploy/` follows the binaries (I4) | none, unless it carries a dependency |
+
+Port changes found during a wave are additional small core-cli merges, landed as soon as they
+are reviewed (1.7).
+
+Integration-owner edits in the views M1 PR (separate commits after the merge, 1.2):
+
+- `qualification/mcp-apps/src/main.rs`:
+  - `DATASET_FIXTURE` (`:112`) names the Wave 0 file;
+  - the digest check of `Dataset::load` (`:154-171`) must still find the fixture's sha256 among
+    the digests `present-response.json` retains;
+  - the parse that asserts 5 flat rows (`:1044-1046`) and its test read a `Dataset`.
+
+  `qualification/mcp-apps` is a workspace member, so premerge `test` runs these.
+- Both `materialized` digests in `tests/fixtures/views/present-response.json` (in
+  `resolved_bindings` and in `view.bindings`) become the Wave 0 file's sha256.
+- `qualification/mcp-apps/lib/views.mjs:25`, `criteria.mjs` and
+  `tests/foundation/harness.test.mjs:4024` name the Wave 0 file.
+
+The views lane's own M1 edits include `ui/tests/unit/view-document-roundtrip.test.tsx:13` and
+`:126`. Line 13 imports the rows file, and line 126 asserts `toHaveLength(5)`. Both move to the
+Wave 0 file.
 
 ## 3. The lanes
 
@@ -292,10 +367,17 @@ expected to need; (5) its own obligations and task order.
    `PASS ingest <sha>`: converter and job-handler tests pass; crash/restart against the real
    RecordStore is a separate construction receipt.
 2. Gates (owner `ingest`):
-   - `converter-worker-memory-ceiling`: `cargo test -p okf-jawn-ingest --features runtime`.
-     Conversion runs in a child process with a hard memory cap, in page windows. The cap and the
-     window size are set from a measurement of whole-document against windowed conversion. The
-     bound is not `DOCLING_RS_MAX_MEMORY_MB`.
+   - `converter-worker-memory-ceiling`: `cargo test -p okf-jawn-ingest --features runtime`, as
+     amended in Wave 0 into two parts:
+     - (a) The cap mechanism, in that cargo command. A small test child allocates past the cap.
+       It must be killed and reported as `Failure(MemoryLimit)` / `not_converted` pages. No
+       models are needed, so CI runs it.
+     - (b) The window size and the cap values. They come from a real measurement of
+       whole-document against windowed conversion, recorded as new criteria of the existing
+       Docling qualification and run locally like today.
+
+     Conversion runs in a child process with a hard memory cap, in page windows. The bound is not
+     `DOCLING_RS_MAX_MEMORY_MB`.
    - `job-crash-against-record-store`: `.artifacts/qualification/ or construction receipt for import restart`.
      This is the only one of the 26 receipts that is not a command (decision I1). It passes when a
      kill and restart against the real RecordStore with `JobHandler(&ClaimedJob)` leaves no
@@ -313,17 +395,26 @@ expected to need; (5) its own obligations and task order.
    Also the storage port traits named under "Ports to call" in `crates/ingest/AGENTS.md`, as
    trait objects, plus `Purger`, `Backups` and `SearchIndex::rebuild` for the jobs that are not
    imports (I3); `core::storage::derive_item_id`; the `CandidateCheck` that composition injects
-   (core-cli's production check); and `generated/converter/packages.json` through `include_str!`.
+   (core-cli's production check); `generated/converter/packages.json` through `include_str!`.
+   It also calls core-cli M0's export and import functions, plus `views::materialize` for
+   `ExportView`. ingest adds them to the "Ports to call" list in its own `crates/ingest/AGENTS.md`.
    It reimplements the rules of `qualification/docling/src/locate.rs` and `glyphs.rs` in the
    crate. [inferred: depending on the qualification crate would be a manifest change]
    Must not: depend on the storage crate in production code (only through core's ports); build an
-   OKF conformance policy of its own; add an external job engine or queue service; add Python; or
-   enable `asr`, `fetch-images` or `vlm` without a shared change.
+   OKF conformance policy of its own; re-implement the export, import or lint rules that core-cli
+   M0 provides; add an external job engine or queue service; add Python; enable `asr`,
+   `fetch-images` or `vlm` without a shared change; or load a Docling model in any `cargo test`
+   (1.1).
 4. Dependencies:
-   - The memory-cap facility, chosen after a vendor lookup (rlimit, or Windows job objects).
-     [inferred] Candidates: on Unix the `rlimit` crate, where the child sets its own limit at start
-     (this avoids the unsafe `pre_exec`); on Windows, job objects through a crate with a safe API.
-     Container hosts may also bound the process with cgroups. macOS: decision O3.
+   - The memory-cap facility on each platform (O3), chosen after a vendor lookup:
+     - Windows: a job-object process-memory limit.
+     - Linux: `RLIMIT_DATA` or `RLIMIT_AS`, whichever the measurement supports. ONNX Runtime
+       reserves address space, so `RLIMIT_AS` can fire spuriously. [inferred] With the `rlimit`
+       crate the child sets its own limit at start, which avoids the unsafe `pre_exec`.
+     - macOS: a supervisor watchdog that samples the child's memory through a crate with a safe
+       API.
+
+     Every facility is reached through a crate with a safe API.
    - The conversion child's executable (I4). Both go into Batch A.
    - pulldown-cmark is not ingest's. The converter outline comes from Docling's document. [inferred]
 5. Obligations, in order:
@@ -332,14 +423,28 @@ expected to need; (5) its own obligations and task order.
      fault. Dropping the future kills the child. Build `DocumentConverter` from
      `ConversionSettings` and the timeout, and open the source with `SourceDocument::from_bytes`,
      using the format of `file_name`.
-   - **Memory cap and window size come from a measurement.** It compares whole-document against
-     windowed conversion (Markdown, tables and peak memory) and includes a PDF whose tables cross
-     pages. [inferred] No fixture in `tests/fixtures/documents/SOURCES.json` is described as
-     having a table that crosses pages. The lane adds one under `crates/ingest/` with its source
-     and licence, or asks the integration owner to add it to `tests/fixtures/documents` (a Docling
-     receipt input, so a requalification follows). Record the chosen `window_pages` and
-     `memory_limit_bytes` with the measurement. The handoff reports a peak of about 2.2 GB for the
-     18-page PDF with page images on.
+   - **The cap mechanism (part a)** is tested with a small test child that allocates past the cap
+     and must be killed and reported as `Failure(MemoryLimit)` / `not_converted` pages. The test
+     asserts kill-at-cap on every platform it runs on, and the macOS watchdog samples every 50 to
+     100 ms. Conversion is never refused on a platform (O3).
+   - **The window size and cap values (part b)** come from a real measurement. It is recorded as
+     new criteria of the existing Docling qualification (`qualification/docling`, receipt
+     `docling.json`), which the integration owner adds in Batch A and runs locally. ingest
+     supplies what to measure:
+     - whole-document against windowed conversion: Markdown, tables, and peak memory;
+     - a PDF whose tables cross pages;
+     - for each candidate cap, what the cap actually limits: virtual memory for `RLIMIT_AS`,
+       private data for `RLIMIT_DATA`, committed memory for a job object. Peak RSS alone is not
+       enough.
+
+     [inferred] No fixture in `tests/fixtures/documents/SOURCES.json` is described as having a
+     table that crosses pages. One has to be added to `tests/fixtures/documents`, a Docling input
+     that is requalified in the same Batch A run.
+
+     `window_pages = 4` (the owner's decision of 2026-10-07, recorded in the gate meaning in Wave
+     0) is the default until the measurement sets it. `memory_limit_bytes` comes from the
+     measurement. The handoff reports a peak of about 2.2 GB for the whole 18-page PDF with page
+     images on.
    - **`ConversionRecord::outline`** is filled with heading entries that select their section as
      lines: from the heading line to the line before the next heading of the same or a higher
      level, or to the end of the text. Lines refer to the joined Markdown (R3).
@@ -350,14 +455,20 @@ expected to need; (5) its own obligations and task order.
      `unconverted_only` joins the previous record's converted windows with the new ones.
    - The import handler commits each source card as `pending` before it converts, and replaces
      the card afterwards. The card shows the contract `Extraction` in every outcome.
+   - The export and import handlers call core-cli M0's functions: `verified` written for current
+     reviews; an incoming `verified` read as imported coverage; lint at import. The
+     `ExportView` handler calls `views::materialize`. ingest never re-implements these rules.
    - Idempotency: every commit uses `CommitChanges { mutation_id: claimed.mutation_id, .. }` and new
      items use `derive_item_id`. `update_progress` is called as a heartbeat at most every third of
      the lease, and the handler stops when the job is cancelled. At startup the worker reconciles
      with `expire_leases()` and `pending_jobs()`.
    - Locating unlocated items and flagging undecodable text follow `crates/ingest/AGENTS.md` and
-     both gates. The lane asks for O1 before it builds `ingest-locates-unlocated-items`.
-   - Merges: M1 is the converter and the handlers (three gates), tested against fakes of the
-     storage ports. The crash receipt follows in Wave 3 (I1).
+     both gates. The lane asks for O1 before it builds `ingest-locates-unlocated-items`. Both tests
+     run without models, on Docling exports kept as fixtures under `crates/ingest/` and on the PDF
+     text layer. [inferred: `docling::pdf_text_layer_pages` reads the text layer, not a model]
+   - Merges: M1 is the converter, the cap mechanism and the handlers (three gates), tested
+     against fakes of the storage ports and with no model. The crash receipt follows in Wave 3
+     (I1), as does real conversion through the built binaries.
 
 ### 3.3 core-cli
 
@@ -373,7 +484,9 @@ expected to need; (5) its own obligations and task order.
      call the checks the core ports provide: `authorize_job_kind`, `authorize_object`,
      `check_revision`, `cited_locations`/`fill_locations`, `section_lines`,
      `materialize`/`retain_dataset` and the header refusals. Export writes `verified`, and import
-     reads it as imported coverage. The CLI is exercised against a running server (I5).
+     reads it as imported coverage. Those rules are core functions with tests, landed in M0 and
+     called by ingest's handlers (I3). The CLI is exercised against a running
+     server in the Wave 3 harness, whose command the Wave 0 amendment adds to this receipt (I5).
    - `view-server-validation`: `cargo test -p okf-jawn-core -- views::`. `views::validate` checks
      against `catalog.schema.json` and `vega-lite.schema.json` plus referential checks, and
      rejects bindings outside the workspace. Present and saved-view writes call it first. The
@@ -385,35 +498,54 @@ expected to need; (5) its own obligations and task order.
      candidate is never committed. The filter needs care (1.3).
    - `cli-mcp-stdio-relay`: `cargo test -p okf-jawn-cli -- mcp_stdio`. `mcp --stdio` forwards each
      message to the running service with a connector credential. It holds no store of its own,
-     and it starts the service when none is running.
+     and it starts the service when none is running. The cargo command covers framing, the
+     connector-credential header, the start-or-connect decision and the error paths, with the
+     launcher and transport injected. The real start, against the built binaries, is the Wave 3
+     harness the Wave 0 amendment adds to this receipt (I5).
 3. Consumes: the contract (operation table, `for_each_operation!`), `generated/cli/` (generator
    output), core's own ports, `okf-validator`/`okf-core`, pulldown-cmark (Batch A), and views M1
    on `main` before it wires the producer.
-   Must not: let core depend on the storage, ingest, server, mcp or cli crates; ship an in-memory
-   or fixture store (fakes live in `tests/support` only); let the CLI open storage or carry a
-   credential in argv; scan Markdown in core itself ("Core parses no Markdown",
-   `crates/core/src/reading.rs:344`).
+   Must not: let core depend on the storage, ingest, server, mcp or cli crates; let the CLI
+   depend on the server crate; ship an in-memory or fixture store (fakes live in `tests/support`
+   only, and encode only documented port behaviour, 1.7); assume storage behaviour that a port
+   doc does not state; let the CLI open storage or carry a credential in argv; or hand-write a
+   Markdown scan in core.
 4. Dependencies: pulldown-cmark, which is already in `Cargo.lock` through docling and is approved
    for item Markdown outlines. It is added once, in Batch A, with any other core-cli request,
    followed by one requalification. [inferred] core-cli is the lane that builds item outlines:
    `reading.rs:344-349` gives the outline of an item's own Markdown to "the selected parser's
    ... (`application-operations`)". No new crate is expected for the relay [inferred: tokio
-   `io-std` and `process`, and `reqwest`, are present]. The cli dev-dependency of I5 is in Batch B.
+   `io-std` and `process`, and `reqwest`, are present]. There is no cli→server crate edge (I5).
 5. Obligations, in order:
+   - **M0, first, before any storage or ingest merge:**
+     - any port-trait change the wave needs;
+     - the export and import rules as core functions with tests under `application-operations`:
+       the `verified` value export writes for a revision's current reviews; an incoming
+       `verified` read as imported coverage; OKF lint at import.
+
+     ingest's handlers call these functions (I3). Later port changes are their own small merges
+     (1.7).
    - Handlers in cohesive child modules of `crates/core/src/application/`, using only the injected
      `Ports`. Dispatch is already in place. OKF validation and lint are applied at import, edit,
      refactor and proposal.
    - The production `CandidateCheck` is exported so that startup can hand it to ingest's handler.
      [inferred: ingest commits through `VersionStore::commit(check)`, and core injects no handler]
-   - `present_view`/`resolve_view` call `views::materialize` and `retain_dataset` only once views
-     M1 is on `main`. Until then the lane builds the other operations. A source whose shown text
-     is not the converter's gets `DatasetUnavailable` (R5; decision O2).
+   - **`present_view`/`resolve_view` wiring is its own later merge (M1b), after views M1.** Those
+     two operations call `views::materialize` and `retain_dataset`. Only the integration owner's
+     merge order enforces this rule; no test detects it. At core-cli review before views M1, the
+     owner greps `crates/core/src/application/` for `materialize` and `retain_dataset`. A source
+     whose shown text is not the converter's gets `DatasetUnavailable` (R5; decision O2).
    - Item outlines are built with pulldown-cmark and follow the same section-span rule as ingest's
-     outline, so `section_lines` behaves the same for both producers.
+     outline, so `section_lines` behaves the same for both producers. When it adds pulldown-cmark,
+     core-cli rewords the "Core parses no Markdown" line of `crates/core/src/reading.rs:344` to
+     say that core hand-writes no Markdown scan and takes outlines from a parser.
    - Name tests so each filtered receipt selects the gate's own tests (1.3).
-   - Last, after server M2: the CLI against a running server and the stdio relay (I5).
-   - Merges: M1 is all operations (with present/resolve once views M1 has landed) and outlines.
-     M2 is the CLI against the server and the relay.
+   - The stdio relay launches the server executable shipped beside the CLI, and the path can be
+     configured. Its cargo tests inject the launcher and transport (I5). There is no cli→server
+     crate edge.
+   - Merges: M0 as above; M1 is every operation except present/resolve, plus outlines, the CLI
+     surface and the relay; M1b is present/resolve. The Wave 3 harness proves the CLI against a
+     running server and the relay's real start. A failure there reopens core-cli.
 
 ### 3.4 server
 
@@ -457,6 +589,10 @@ expected to need; (5) its own obligations and task order.
      with core-cli's `ApplicationService` and mcp-execution's handler. At that point storage takes
      the single-writer lock before its stores open, the pre-migration backup runs, and the worker
      reconciles.
+   - The conversion child's path is configuration, defaulting to beside the server executable
+     (I4). Server tests that convert set it to a fake conversion child, so no server test needs a
+     Docling model (1.1). Real conversion through the server is proven in Wave 3 against the
+     built binaries.
    - Merges: M1 is the bindings (`http-fallback-errors`, `grant-cache-ttl` and the binding parts of
      `server-binary-and-startup`). M2 is the composition and the binary.
 
@@ -479,7 +615,12 @@ expected to need; (5) its own obligations and task order.
 4. Dependencies: none expected. [inferred: the rmcp features `server`, `macros`, `schemars` and
    `transport-streamable-http-server` are declared]
 5. Obligations: results go through `read_result`, `structured_result` and `error_result`, as
-   `crates/mcp/AGENTS.md` states. Permissions apply independently of visibility hints. One merge.
+   `crates/mcp/AGENTS.md` states. Permissions apply independently of visibility hints.
+   - The handler reads the App bundle at runtime from a configured path, as the harness does
+     (`qualification/mcp-apps/src/main.rs`). It never embeds the bundle with `include_bytes!`: the
+     bundle is uncommitted build output, and premerge runs cargo `test` before `ui-build`.
+   - One merge. The worktree is kept until Wave 3's `qualify mcp-wire` passes, because a failure
+     there reopens the lane.
 
 ### 3.6 workspace-ui
 
@@ -526,13 +667,16 @@ expected to need; (5) its own obligations and task order.
 5. Obligations, in order:
    - **M1:** PresentView and `ui/src/mcp-apps/main.tsx` parse the dataset with the generated
      `zDataset` instead of rows of records (`rowsSchema`, `PresentView.tsx:20-22`, `:108`). The
-     integration owner's edits for this merge are in section 2.
+     views tests read the Wave 0 `Dataset` fixture from the start, including
+     `ui/tests/unit/view-document-roundtrip.test.tsx:13` (the import of the rows file) and `:126`
+     (`toHaveLength(5)`). The integration owner's edits for this merge, which include deleting
+     the rows file, are listed in section 2.
    - **M2:** per-chart failure isolation, using `charts`. The lane changes
      `ui/tests/unit/layout.test.tsx` along with the behaviour: its test "refuses a chart
      specification that compile rejects" pinned the opposite. The gate text names that file and
-     the records test, which the integration owner changes in the same merge. A
-     `DatasetUnavailable` or `TooLarge` chart status is that chart's alert, not the View's. Saved
-     views persist and reopen.
+     the records test, which the integration owner changes in the same PR. A
+     `DatasetUnavailable` or `TooLarge` chart status is that chart's own alert, saying why, and not
+     the View's. Saved views persist and reopen.
 
 ## 4. Integration owner
 
@@ -542,12 +686,20 @@ keeps it.
 
 Duties, by wave:
 
-- Wave 0: section 2.
+- Wave 0: section 2, including the `verification.json` amendments.
 - Batches A and B: the vendor notes, manifest edits, `lock`, `gen` and one requalification each.
-- The edits that travel in views M1 and M2 (section 2).
+  Batch A also adds the measurement criteria of `converter-worker-memory-ceiling` (b), and a
+  fixture PDF whose tables cross pages, to the Docling qualification.
+- The edits that travel in the views M1 and M2 PRs (section 2), as separate commits after each
+  merge (1.2).
 - Requalification after every merge that changes a receipt input (1.5).
-- Wave 3: the crash/restart harness and its command (I1); updating `deploy/Dockerfile` and
-  `deploy/compose.yaml` for the composed binaries; and the acceptance runs (section 5).
+- Wave 3:
+  - the crash/restart harness and its command (I1);
+  - the CLI and relay harness (I5);
+  - core's tests against the real storage adapter (section 7);
+  - updating `deploy/Dockerfile` and `deploy/compose.yaml` for the built binaries (server, CLI,
+    conversion child);
+  - the acceptance runs (section 5).
 - Answering shared-change requests from lanes: symbol, SPEC sentence, proposed change, failing output.
 
 ## 5. Acceptance gates: when each becomes runnable
@@ -557,7 +709,7 @@ from the lanes or the composed server.
 
 | Gate | Status | Runnable after | Needs the owner for |
 | --- | --- | --- | --- |
-| `release-model-inventory` | `blocked_on_product` | now (independent of the lanes); required before any installer or image ships models | where the pinned model bytes the project holds are published (the models-v1 tag was re-published, and the owner's local copy is the reference) |
+| `release-model-inventory` | `blocked_on_product` | stays a pre-installer gate: required before any installer or image ships models. CI does not wait on it, because CI never needs the models (1.1) | where the pinned model bytes the project holds are published (the models-v1 tag was re-published, and the owner's local copy is the reference) |
 | `qualify-application` | `blocked_on_product` | Wave 3: `bun scripts/dev.mjs qualify application` against a real disposable deployment | no |
 | `index-rebuild` | `blocked_on_product` | Wave 3 | no |
 | `saved-view-persist-reopen` | `blocked_on_product` | Wave 3 (views, core-cli, storage, server) | no |
@@ -577,23 +729,32 @@ from the lanes or the composed server.
   is recorded as `inferred`, and SPEC section 5 says the interface never presents an inferred
   location with the certainty of a direct one. The contract carries no distance, so a bound could
   only drop locations. Revisit if acceptance finds a wrong placement that readers rely on.
+  Recording the decision changes the gate text pinned at `tests/foundation/records.test.mjs:261`,
+  which ends "open until this gate is built", in the same change.
 - **O2. Charts over approved agent-supplied text, or human-corrected text.** These are refused
   today: `views::materialize` returns `DatasetUnavailable` (R5). Recommended default: keep
-  refusing, and show the refusal as that chart's own alert. A dataset is read only from the
-  converter's tables, and supplied text is Markdown with no `ConvertedTable`. Allowing it would
-  need a table source for that text and a shared change.
-- **O3. A memory cap on a platform without a hard facility.** [inferred: on macOS the address-space
-  limit is not enforced, which the ingest vendor lookup confirms or refutes] Recommended
-  default: conversion refuses to start there. That is a worker fault, and readiness reports it,
-  so no unbounded conversion runs. Revisit at `desktop-launcher-trial`. The alternative is to
-  sample the child's memory and kill it over the cap, but that is not the hard bound the gate
-  names.
+  refusing. The refusal is that chart's own alert, and it says why: the source's shown text is
+  not the converter's, and whether it was corrected or supplied by an agent. A dataset is read
+  only from the converter's tables, and supplied text is Markdown with no `ConvertedTable`.
+  Allowing it would need a table source for that text and a shared change.
+- **O3. How the memory cap is enforced on each platform.** Recommended default: the same shape
+  everywhere (page windows in a child process with a memory cap), enforced with the strongest
+  facility each platform has. Conversion is never refused on a platform.
+  - Windows: a job-object process-memory limit (committed memory).
+  - Linux: `RLIMIT_DATA` or `RLIMIT_AS`, whichever the measurement supports. ONNX Runtime
+    reserves address space, so `RLIMIT_AS` can fire spuriously.
+  - macOS: a supervisor watchdog. It samples the child's memory every 50 to 100 ms through a
+    crate with a safe API, kills the child at the cap, and records the window as
+    `Failure(MemoryLimit)` / `not_converted` pages. [inferred: macOS enforces no address-space
+    limit] **Owner to confirm that the watchdog counts as the hard cap on macOS.**
 - **O4. How a construction gate is recorded as closed.** The status vocabulary is closed
   (`tests/foundation/records.test.mjs:272`), and statuses are never typed. Recommended default: no
   status change during construction; the evidence is the lane log and the merge commit's
   `Verified:` line, and premerge re-runs every cargo and Vitest receipt. At Stage close, the
   integration owner proposes moving each gate whose command premerge runs to the existing `ci`
-  kind. That is one change to `verification.json` and its records test.
+  kind. That is one change to `verification.json` and its records test. Receipts that premerge
+  never runs (`qualify mcp-wire`, and the Wave 3 harnesses) stay `blocked_on_lanes` until their
+  own commands are run.
 
 ### Integration owner (engineering, recorded before the lane that needs it)
 
@@ -604,53 +765,77 @@ from the lanes or the composed server.
   against the composed server binary (no second composition). The integration owner writes it and
   puts its exact command into the gate's `receipt`. The ingest lane owns its failures, and its own
   handler tests cover replay against fakes until then.
-- **I2. A `Dataset` fixture beside the rows fixture in Wave 0.** Recommended: yes (section 2).
-  `ui/tests/unit/mcp-apps-dispatch.test.tsx` and `view-document-roundtrip.test.tsx` (both views
-  files) read `tests/fixtures/views`, which views cannot edit. Without the new file, views M1
-  cannot test the switch.
+- **I2. The views dataset fixture.** Decided: the Wave 0 file is the permanent `Dataset`
+  fixture, and the rows file `tests/fixtures/views/present-metrics-dataset.json` is deleted at
+  views M1, together with the harness and digest edits listed in section 2. One shared fixture
+  then serves the views specs, the MCP Apps harness and the foundation tests.
 - **I3. ingest's handler runs every `JobSpec` kind.** Recommended: yes. Core injects no
   `JobHandler` (`crates/core/src/application/mod.rs`, the `Ports` doc), and ingest owns the
   runtime adapter. So exports, backups, restore, index rebuild, View export and purge
   (`crates/core/src/jobs.rs`, `JobSpec`) run through ingest's handler, which calls the storage
   ports. Otherwise those jobs would never run.
+  - The rules those jobs apply are core's. Export writes `verified` for current reviews; import
+    reads an incoming `verified` as imported coverage; lint runs at import. Those are core
+    functions with tests, landed in core-cli M0, and `ExportView` uses `views::materialize`.
+  - ingest's handlers call them and never re-implement them, so `application-operations` proves
+    the rules and the reviewer can mutate them in core.
 - **I4. The conversion child's executable.** Recommended: a bin target of `okf-jawn-ingest` with
   `required-features = ["runtime"]`, declared in `crates/ingest/Cargo.toml` in Batch A. Tests reach
-  it through `CARGO_BIN_EXE_<name>`, the server finds it beside its own executable, and `deploy/`
-  and the launcher ship it. The alternative, a worker mode of the server binary, couples server's
-  `main` to ingest.
-- **I5. How the cli tests reach a running server.** `application-operations` ("CLI against a running
-  server") and `cli-mcp-stdio-relay` ("starts the service when none is running") need the
-  composed server, and `okf-jawn-cli` depends only on the contract. Recommended: in Batch B,
-  `okf-jawn-cli` gets a dev-dependency on `okf-jawn-server` (features `runtime`). The tests start
-  the composed service in-process on a loopback port with a temporary data directory, and core-cli
-  M2 lands after server M2. This keeps CI's `cargo test --workspace` self-contained.
+  it through `CARGO_BIN_EXE_<name>`, and `deploy/` and the launcher ship it. The alternative, a
+  worker mode of the server binary, couples server's `main` to ingest.
+  - **The child's path is configuration, defaulting to beside the server executable.**
+    `cargo test -p okf-jawn-server` does not build another package's bins, and test binaries live
+    in `target/*/deps`, not beside the server executable. So server tests that convert set the
+    path to a fake conversion child (1.1).
+- **I5. How the CLI and relay are proven against a real server.** Decided: there is no cli→server
+  crate edge.
+  - The relay starts the service by launching the server executable shipped beside the CLI, the
+    same layout as I4, the launcher and `deploy/`. The path can be configured.
+  - `cargo test -p okf-jawn-cli -- mcp_stdio` covers framing, the connector-credential header,
+    the start-or-connect decision and the error paths, with the launcher and transport injected.
+  - The real "CLI against a running server" and "starts the service when none is running" checks
+    run in Wave 3, from a `tests/integration/` harness against the built binaries, like
+    `qualify mcp-wire` and I1.
+  - In Wave 0 the integration owner amends the receipts of `cli-mcp-stdio-relay` and of
+    `application-operations` (its CLI part) to name both commands. `records.test.mjs` pins neither
+    today.
 
 ## 7. Risks by wave
 
 | Wave | Risk | What detects it |
 | --- | --- | --- |
 | 0 | Landing R1 to R8 regresses a core test or the regenerated outputs | premerge on the merge (`test`, `gen-check`) |
-| 0 | The new `Dataset` fixture breaks the MCP Apps harness | the MCP Apps receipt's criteria |
+| 0 | The new `Dataset` fixture misses the running MCP Apps requalification | `check-receipts` names `tests/fixtures/views` as changed; requalify again before the lanes start |
+| 1 | views M1 deletes the rows file while `qualification/mcp-apps/src/main.rs` or `present-response.json` still expects it | premerge `test` (the `qualification/mcp-apps` crate) and `qualify mcp-apps` on the views M1 PR |
+| 1 | A cargo test loads a Docling model and fails in CI | the required CI `test` job (no models on `ubuntu-24.04`); review checks that ingest and server tests use the test child or the fake child |
 | 1 | Three parallel cargo builds slow a requalification past the Docling timeout probe | the Docling receipt's `timeout_case` and failed criteria; requalify with lane builds paused |
 | 1 | A shared target directory leaks another worktree's paths into test binaries | a test failing with os error 3 that names another worktree |
 | 1 | A filtered receipt passes on zero tests | the reviewer reads the test count in the log (1.3) |
 | 1 | Real storage code shows a core port is wrong | the storage lane's compile or tests; the lane stops and reports the symbol, the SPEC sentence and the output |
-| 1 | A window boundary changes what Docling assembles (a heading level, or a table across pages) | ingest's whole-against-windowed measurement test |
+| 1 | A window boundary changes what Docling assembles (a heading level, or a table across pages) | the whole-against-windowed criteria in the Docling qualification (Batch A run) |
+| 1 | A cap facility limits something other than what was measured (the ONNX address-space reservation under `RLIMIT_AS`) | the measurement records what each cap limits, not only peak RSS; the part (a) test child |
 | 1 | The only Windows job-object crate needs authored unsafe | clippy (`unsafe_code = "forbid"`) and `xtask source-policy`; the vendor note must name a safe API |
-| 1 | core-cli wires the producer before views M1 is on `main` | the merge order in section 2; the views specs and the MCP Apps receipt fail on the shape |
-| 1 | views M2's `layout.test.tsx` change breaks `records.test.mjs:227` | premerge `check-offline`; the integration owner's edit travels in the same merge |
+| 1 | core-cli wires the producer before views M1 is on `main` | nothing automated: the views specs and the MCP Apps harness read fixtures, not core's producer. Only merge order enforces it (present/resolve in core-cli M1b), with a grep of `crates/core/src/application/` for `materialize` and `retain_dataset` at core-cli review |
+| 1 | ingest needs a core function or port change that is still inside core-cli's big merge | core-cli M0 lands first; later port changes are small merges of their own (1.7) |
+| 1 | A core-cli or ingest fake disagrees with the real storage behaviour; it first shows at server M2 | core's tests run against the real storage adapter in Wave 3 [inferred: through a crate that may depend on both, such as the server's tests or a `tests/integration/` harness]; `qualify application` |
+| 1 | views M2's `layout.test.tsx` change breaks `records.test.mjs:227` | premerge `check-offline`; the integration owner's edit travels in the same PR |
 | 1 | Item outlines (pulldown-cmark) and converter outlines disagree on section spans | core-cli's `section_lines` tests over both producers |
 | 2 | Every UI merge makes MCP Apps stale | `check-receipts` in premerge |
 | 2 | A non-browser request carries `BrowserSession` or `LocalOwner` and reaches drafts | server route tests with the mutation in 3.4, and `qualify application` |
 | 2 | A session crate lands without a vendor note | Batch B review against `vendors.json` and the `crates/server/AGENTS.md` TODO |
 | 2 | workspace-ui needs a views component that is not merged yet | workspace-ui's `typecheck`; take `main` after views M2 |
 | 2 | Composition shows an adapter that does not fit `Ports` | `cargo test -p okf-jawn-server --features runtime`; request a shared change, never an adapter shim |
-| 3 | Tool shapes or Apps resources fail on the wire | `bun scripts/dev.mjs qualify mcp-wire` |
+| 3 | Tool shapes or Apps resources fail on the wire | `bun scripts/dev.mjs qualify mcp-wire`; the kept mcp-execution worktree reopens |
+| 3 | The relay cannot find or start the server executable in the shipped layout | the I5 harness against the built binaries |
 | 3 | Crash and restart duplicates an occurrence or a commit, or loses an original | the I1 harness |
 | 3 | Authorization refuses everything ("Universal refusal is a product failure") | `qualify application`: a drafter proposes but cannot approve, and a reviewer accepts the exact revision |
 | 3 | A journey fails only in WebKit | the WebKit project of `explorer-playwright-journeys` |
 
 ## Appendix: the 26 construction gates
+
+The receipts below are the ones in `verification.json` on `de3b5ec`. The Wave 0 amendments
+(section 2) change three of them: `converter-worker-memory-ceiling`, `application-operations`
+(its CLI part) and `cli-mcp-stdio-relay`.
 
 | Gate | Owner | Receipt | Section | First runnable |
 | --- | --- | --- | --- | --- |
@@ -664,15 +849,15 @@ from the lanes or the composed server.
 | `storage-single-writer-lock` | storage | `cargo test -p okf-jawn-storage --features runtime -- single_writer` | 3.1 | Wave 1, storage M1 |
 | `storage-format-version-and-migrations` | storage | `cargo test -p okf-jawn-storage --features runtime -- migrations` | 3.1 | Wave 1, storage M1 |
 | `storage-purge-workspace` | storage | `cargo test -p okf-jawn-storage --features runtime -- purge` | 3.1 | Wave 1, storage M2 |
-| `converter-worker-memory-ceiling` | ingest | `cargo test -p okf-jawn-ingest --features runtime` | 3.2 | Wave 1, after Batch A |
+| `converter-worker-memory-ceiling` | ingest | `cargo test -p okf-jawn-ingest --features runtime` | 3.2, O3 | split in Wave 0: (a) the cap mechanism at ingest M1; (b) the values in the Batch A Docling run |
 | `job-crash-against-record-store` | ingest | `.artifacts/qualification/ or construction receipt for import restart` | 3.2, I1 | Wave 3 |
 | `ingest-locates-unlocated-items` | ingest | `cargo test -p okf-jawn-ingest --features runtime -- locates_unlocated_items` | 3.2, O1 | Wave 1, after O1 |
 | `ingest-flags-undecodable-text` | ingest | `cargo test -p okf-jawn-ingest --features runtime -- flags_undecodable_text` | 3.2 | Wave 1 |
-| `application-operations` | core-cli | `cargo test -p okf-jawn-core -p okf-jawn-cli` | 3.3, I5 | core parts in Wave 1; complete in Wave 3 |
+| `application-operations` | core-cli | `cargo test -p okf-jawn-core -p okf-jawn-cli` | 3.3, I3, I5 | export/import rules at core-cli M0; operations in Wave 1; the CLI part (harness, Wave 0 amendment) in Wave 3 |
 | `view-server-validation` | core-cli | `cargo test -p okf-jawn-core -- views::` | 3.3, 1.3 | Wave 1 |
 | `draft-visibility` | core-cli | `cargo test -p okf-jawn-core -- draft_visibility` | 3.3 | Wave 1 |
 | `candidate-check-runs-validator` | core-cli | `cargo test -p okf-jawn-core -- candidate_check` | 3.3, 1.3 | Wave 1 |
-| `cli-mcp-stdio-relay` | core-cli | `cargo test -p okf-jawn-cli -- mcp_stdio` | 3.3, I5 | Wave 3 |
+| `cli-mcp-stdio-relay` | core-cli | `cargo test -p okf-jawn-cli -- mcp_stdio` | 3.3, I5 | the cargo part at core-cli M1; the real start (harness, Wave 0 amendment) in Wave 3 |
 | `server-binary-and-startup` | server | `cargo test -p okf-jawn-server --features runtime` | 3.4 | bindings in Wave 2; complete at server M2 |
 | `http-fallback-errors` | server | `cargo test -p okf-jawn-server --features runtime -- http_fallback_errors` | 3.4 | Wave 2, server M1 |
 | `grant-cache-ttl` | server | `cargo test -p okf-jawn-server --features runtime -- grant_cache_ttl` | 3.4 | Wave 2, server M1 |
