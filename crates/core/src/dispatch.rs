@@ -11,9 +11,12 @@
 //! and so is a draft-bearing, backup, restore or purge operation on a route that is not a human
 //! session (`access::check_human_route`, refused as `Forbidden`). Every `Forbidden` from
 //! authorization, dispatch's or a handler's own (such as `access::authorize_job_kind`), is
-//! recorded as a `permission_denied` event, in the log of the refusing workspace, else the
-//! first workspace the request names, else the tenant's, before the refusal is returned. A grant is used only when it is for
-//! the workspace and tenant that were asked for. The ledger never inspects other stores: a
+//! recorded as a `permission_denied` event before the refusal is returned: in the log of the
+//! refusing workspace target; when no target was evaluated as the refuser (a route refusal, a
+//! handler's own), in the tenant's log if the request has a `Deployment` target, else in the
+//! workspace's log if its targets name exactly one distinct workspace, else in the tenant's
+//! (see `denial_scope`). A grant is used only when it is for the workspace and tenant that were
+//! asked for. The ledger never inspects other stores: a
 //! resumed attempt re-runs the handler under the same `MutationId`, and what the ledger
 //! retains is decided by the request's `ReplayPolicy`.
 //!
@@ -74,7 +77,8 @@ macro_rules! dispatch_operations {
                     match prepare_mutation(ports, &mut context, replay, &request).await? {
                         MutationGate::Run(lease) => {
                             // A handler's own authorization (the job-kind rule) is recorded
-                            // like dispatch's, in the log of the request's first workspace.
+                            // like a route refusal: no target refused, so `denial_scope`'s
+                            // rule for a request decides the log.
                             let scope = denial_scope(caller.principal, None, &request);
                             let outcome = match service.$id(&context, request).await {
                                 Err(error) if error.code == ErrorCode::Forbidden => Err(
@@ -361,7 +365,7 @@ async fn authorize_targets(
 /// The event goes to the log of the workspace whose target refused, and to the tenant's when a
 /// tenant or sign-in target refused (Stage 1b design section 7: "in the workspace's log for a
 /// workspace target, tenant-level otherwise"). A refusal by route comes before any target is
-/// evaluated; it goes to the log of the first workspace the request names, or the tenant's.
+/// evaluated; `denial_scope` decides its log from the request.
 /// Other errors are returned without an event. The refusal is the answer: a failed append does
 /// not turn it into another error, so a caller cannot learn whether the log is writable from
 /// the code it receives.
@@ -398,8 +402,15 @@ async fn record_denied(
     error
 }
 
-/// The log a refusal is recorded in: the refusing workspace target's, else the first workspace
-/// the request names, else the tenant's.
+/// The log a refusal is recorded in.
+///
+/// A refusal at an evaluated `Target::Workspace` is recorded in that workspace's log; at an
+/// evaluated tenant or sign-in target, in the tenant's. A refusal with no evaluated refusing
+/// target (a route refusal before targets, and a handler's `Forbidden`) is one rule:
+/// tenant-level when the request has any `Target::Deployment`; otherwise the workspace's log
+/// when its targets name exactly one distinct workspace; otherwise (none, or two or more
+/// distinct workspaces) tenant-level. So a request that is not about one workspace never writes
+/// into one workspace's log.
 fn denial_scope(
     principal: &Principal,
     target: Option<Target>,
@@ -408,13 +419,7 @@ fn denial_scope(
     let workspace = match target {
         Some(Target::Workspace(workspace_id, _)) => Some(workspace_id),
         Some(Target::Authenticated | Target::Deployment(_)) => None,
-        None => request
-            .targets()
-            .into_iter()
-            .find_map(|target| match target {
-                Target::Workspace(workspace_id, _) => Some(workspace_id),
-                Target::Authenticated | Target::Deployment(_) => None,
-            }),
+        None => sole_workspace(&request.targets()),
     };
     workspace.map_or_else(
         || EventScope::Tenant(principal.tenant_id.clone()),
@@ -425,6 +430,23 @@ fn denial_scope(
             })
         },
     )
+}
+
+/// The one workspace `targets` name, or `None` when they include a `Deployment` target or name
+/// no workspace or more than one.
+fn sole_workspace(targets: &[Target]) -> Option<WorkspaceId> {
+    let mut named: Option<WorkspaceId> = None;
+    for target in targets {
+        match *target {
+            Target::Deployment(_) => return None,
+            Target::Workspace(workspace_id, _) => match named {
+                Some(existing) if existing != workspace_id => return None,
+                _ => named = Some(workspace_id),
+            },
+            Target::Authenticated => {}
+        }
+    }
+    named
 }
 
 /// Refuse a workspace grant the adapter returned for a workspace or tenant that was not asked.
