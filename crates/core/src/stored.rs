@@ -16,12 +16,17 @@ use serde_json::Value;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 
+use crate::echo::bounded;
+
 /// A compiled validator for one type, built on first use.
 pub type ValidatorCell = OnceLock<Result<jsonschema::Validator, String>>;
 
 /// Validate `value` against `T`'s schema, then decode it.
 ///
 /// `what` names the stored value in the error, such as `a stored job specification`.
+///
+/// The text of the violation or decode error quotes the stored value, so it is cut to
+/// [`crate::echo::ECHO_LIMIT`] bytes.
 ///
 /// # Errors
 /// Returns `Internal` naming the first violation's JSON Pointer when the value does not meet
@@ -44,7 +49,10 @@ pub fn decode_stored<T: DeserializeOwned + JsonSchema>(
     if let Err(error) = validator.validate(&value) {
         let refused = ApiError::new(
             ErrorCode::Internal,
-            format!("{what} does not meet its schema: {error}"),
+            format!(
+                "{what} does not meet its schema: {}",
+                bounded(error.to_string())
+            ),
         );
         let location = error.instance_path().as_str().to_owned();
         return Err(if location.is_empty() {
@@ -56,7 +64,7 @@ pub fn decode_stored<T: DeserializeOwned + JsonSchema>(
     serde_json::from_value(value).map_err(|error| {
         ApiError::new(
             ErrorCode::Internal,
-            format!("{what} does not decode: {error}"),
+            format!("{what} does not decode: {}", bounded(error.to_string())),
         )
     })
 }

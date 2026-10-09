@@ -4,6 +4,7 @@
 use okf_jawn_contract::error::ErrorCode;
 use okf_jawn_contract::identity::Revision;
 use okf_jawn_core::conversion::ConversionSettings;
+use okf_jawn_core::echo::ECHO_LIMIT;
 use okf_jawn_core::jobs::JobSpec;
 use serde_json::json;
 use uuid::Uuid;
@@ -47,6 +48,28 @@ fn every_well_formed_specification_round_trips_through_storage() -> TestResult {
     }
     let unknown_kind = err_of(JobSpec::from_stored(json!({ "kind": "compact" })))?;
     assert_eq!(unknown_kind.code, ErrorCode::Internal);
+    Ok(())
+}
+
+#[test]
+fn a_stored_value_is_quoted_in_a_refusal_only_up_to_a_bound() -> TestResult {
+    // The validator quotes the offending value; a stored value of megabytes must not come back
+    // whole. Multi-byte characters put the cut inside a character unless it is moved back.
+    let huge = "é".repeat(100_000);
+    let refused = err_of(JobSpec::from_stored(json!({ "kind": huge })))?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    let prefix = "a stored job specification does not meet its schema: ";
+    assert!(refused.message.starts_with(prefix), "{}", refused.message);
+    assert!(
+        refused.message.len() <= prefix.len() + ECHO_LIMIT + '…'.len_utf8(),
+        "{} bytes",
+        refused.message.len()
+    );
+    assert!(refused.message.ends_with('…'));
+    // A short value is quoted whole.
+    let short = err_of(JobSpec::from_stored(json!({ "kind": "compact" })))?;
+    assert!(short.message.contains("compact"));
+    assert!(!short.message.ends_with('…'));
     Ok(())
 }
 

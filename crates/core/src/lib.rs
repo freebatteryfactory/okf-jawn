@@ -16,6 +16,8 @@ pub mod credentials;
 pub mod dispatch;
 /// Per-editor draft persistence.
 pub mod drafts;
+/// The bound on text an error message quotes.
+pub mod echo;
 /// Resumable workspace notification log.
 pub mod events;
 /// Complete typed operation port for parallel implementation lanes.

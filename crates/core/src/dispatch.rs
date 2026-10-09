@@ -39,6 +39,7 @@ use uuid::Uuid;
 
 use crate::access::{self, AccessControl};
 use crate::context::{Attempt, OperationContext, TenantGrant, WorkspaceGrant};
+use crate::echo::bounded;
 use crate::events::{EventLog, EventScope, NewEvent};
 use crate::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore, request_digest};
 use crate::ports::Application;
@@ -131,9 +132,6 @@ struct Refusal {
     /// request with no target).
     target: Option<Target>,
 }
-
-/// Most bytes of validator or decoder text an `InvalidInput` message carries.
-const INVALID_INPUT_ECHO_LIMIT: usize = 512;
 
 impl Refusal {
     /// A refusal before any target was evaluated.
@@ -489,20 +487,6 @@ fn parse_operation(operation_id: &str) -> Result<OperationName, ApiError> {
 fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
     serde_json::from_value(value)
         .map_err(|error| ApiError::new(ErrorCode::InvalidInput, bounded(error.to_string())))
-}
-
-/// Keep at most [`INVALID_INPUT_ECHO_LIMIT`] bytes of `text`, cut on a character boundary and
-/// marked with `…`.
-///
-/// Validator and decoder texts quote the caller's value. Unbounded, a request of megabytes
-/// comes back whole in its own refusal, and from there into logs.
-fn bounded(mut text: String) -> String {
-    if text.len() <= INVALID_INPUT_ECHO_LIMIT {
-        return text;
-    }
-    text.truncate(text.floor_char_boundary(INVALID_INPUT_ECHO_LIMIT));
-    text.push('…');
-    text
 }
 
 fn decode_validated<T: DeserializeOwned + JsonSchema>(

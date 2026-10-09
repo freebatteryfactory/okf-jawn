@@ -14,7 +14,7 @@ use okf_jawn_contract::{
     access::{AccessRoute, Permission, Principal},
     common::{PageRange, PageRequest, TextRange, Warning},
     conventions::NamingRules,
-    error::ApiError,
+    error::{ApiError, ErrorCode},
     history::{BlameResponse, DiffResponse, LogResponse},
     identity::{
         Digest, ItemId, MutationId, ProposalId, PurgeId, Revision, TenantId, WorkspaceId,
@@ -776,22 +776,31 @@ impl SourceCard {
     ///
     /// `archived` is the flag the item has now: `false` for a new card, and the stored flag
     /// when a redigest replaces a card, so replacing an archived source never unarchives it.
-    #[must_use]
-    pub fn header(&self, archived: bool) -> ApplicationHeader {
-        ApplicationHeader {
+    ///
+    /// # Errors
+    /// Returns `Internal` when the appearance has no observed name: the header records the
+    /// original's name exactly, and an empty one would be written as if it were observed.
+    pub fn header(&self, archived: bool) -> Result<ApplicationHeader, ApiError> {
+        let original_name = self
+            .appearance
+            .names
+            .first()
+            .map(|name| name.filename.clone())
+            .ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::Internal,
+                    "a source card needs an observed name for its application header",
+                )
+            })?;
+        Ok(ApplicationHeader {
             item_id: self.item_id,
             archived,
             source: Some(SourceHeader {
-                original_name: self
-                    .appearance
-                    .names
-                    .first()
-                    .map(|name| name.filename.clone())
-                    .unwrap_or_default(),
+                original_name,
                 digest: self.appearance.object.clone(),
             }),
             extraction: Some(self.appearance.extraction.clone()),
-        }
+        })
     }
 }
 
