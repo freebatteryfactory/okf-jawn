@@ -556,6 +556,7 @@ mod tests {
     use crate::context::{TenantGrant, WorkspaceGrant};
     use crate::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore};
     use crate::ports::PortFuture;
+    use crate::storage::StorageScope;
 
     /// Access double that grants nothing and counts how often it was asked.
     #[derive(Default)]
@@ -617,6 +618,10 @@ mod tests {
             _principal: &'a Principal,
             _workspace: WorkspaceId,
         ) -> PortFuture<'a, WorkspaceGrant> {
+            Box::pin(async { self.refuse() })
+        }
+
+        fn editors<'a>(&'a self, _scope: &'a StorageScope) -> PortFuture<'a, Vec<String>> {
             Box::pin(async { self.refuse() })
         }
     }

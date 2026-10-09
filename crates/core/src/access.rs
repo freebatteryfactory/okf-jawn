@@ -52,6 +52,15 @@ pub trait AccessControl: Send + Sync {
         principal: &'a Principal,
         workspace: WorkspaceId,
     ) -> PortFuture<'a, WorkspaceGrant>;
+
+    /// Every subject whose raw grant on the workspace in `scope` includes `write`, resolved as
+    /// `authorize` resolves it (hosted, a tenant-wide role that grants `write` counts), in any
+    /// order and possibly with repeats; the application sorts them and removes repeats.
+    ///
+    /// Always fetched fresh, never from the grant cache: a workspace restore gives an archived
+    /// draft back only to an editor among these subjects (`JobSpec::RestoreWorkspace`), and
+    /// keeps every other draft in the archive, unassigned.
+    fn editors<'a>(&'a self, scope: &'a StorageScope) -> PortFuture<'a, Vec<String>>;
 }
 
 /// Reject routes that cannot exercise `permission` regardless of grants.
