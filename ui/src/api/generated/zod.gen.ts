@@ -1371,6 +1371,23 @@ export const zListTypesResponse = z.object({
 });
 
 /**
+ * Why an OKF `sources` entry is not a citation.
+ */
+export const zUncitedReason = z.union([
+    z.literal('external'),
+    z.literal('scope'),
+    z.literal('not_found')
+]);
+
+/**
+ * One OKF `sources` entry that is not a citation of an item at the resolved revision.
+ */
+export const zUncitedSource = z.object({
+    reason: zUncitedReason,
+    resource: z.string()
+});
+
+/**
  * Why a location is not known; one variant per reason the producing rule states.
  */
 export const zUnresolvedReason = z.union([
@@ -2495,7 +2512,8 @@ export const zGetObjectRequest = z.object({
 export const zGetSourcesResponse = z.object({
     appearance: zSourceAppearance.nullish(),
     revision: zRevision,
-    sources: z.array(zSourceReference)
+    sources: z.array(zSourceReference),
+    uncited: z.array(zUncitedSource).optional()
 });
 
 /**

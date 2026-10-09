@@ -155,6 +155,7 @@ fn record() -> Result<ConversionRecord, Box<dyn std::error::Error>> {
         structured: vec![WindowExport {
             window: Some(pages(1, 4)),
             digest: digest('a')?,
+            lines: Some(TextRange { start: 1, end: 6 }),
         }],
         markdown: digest('b')?,
         locations: vec![
@@ -233,9 +234,11 @@ fn a_whole_document_export_names_no_window() -> TestResult {
     let whole = WindowExport {
         window: None,
         digest: digest('d')?,
+        lines: None,
     };
     let value = serde_json::to_value(&whole)?;
     assert!(value.get("window").is_none(), "{value}");
+    assert!(value.get("lines").is_none(), "{value}");
     let read: WindowExport = serde_json::from_value(value)?;
     assert_eq!(read, whole);
     Ok(())

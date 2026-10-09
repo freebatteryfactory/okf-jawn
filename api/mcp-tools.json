@@ -3439,6 +3439,45 @@
             "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
             "type": "string"
           },
+          "UncitedReason": {
+            "description": "Why an OKF `sources` entry is not a citation.",
+            "oneOf": [
+              {
+                "const": "external",
+                "description": "A URL outside the workspace.",
+                "type": "string"
+              },
+              {
+                "const": "scope",
+                "description": "A scope (a folder or a pattern) rather than one item.",
+                "type": "string"
+              },
+              {
+                "const": "not_found",
+                "description": "A workspace path that names no item at the resolved revision.",
+                "type": "string"
+              }
+            ]
+          },
+          "UncitedSource": {
+            "additionalProperties": false,
+            "description": "One OKF `sources` entry that is not a citation of an item at the resolved revision.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/UncitedReason",
+                "description": "Why it is not a citation."
+              },
+              "resource": {
+                "description": "The entry's `resource`, exactly as written in the file.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "resource",
+              "reason"
+            ],
+            "type": "object"
+          },
           "UnresolvedReason": {
             "description": "Why a location is not known; one variant per reason the producing rule states.",
             "oneOf": [
@@ -3626,6 +3665,13 @@
             "description": "Supporting citations.",
             "items": {
               "$ref": "#/$defs/SourceReference"
+            },
+            "type": "array"
+          },
+          "uncited": {
+            "description": "Entries of the item's OKF `sources` that are not citations of an item in this workspace\nat this revision, in the file's order; kept so no declared source is silently dropped.",
+            "items": {
+              "$ref": "#/$defs/UncitedSource"
             },
             "type": "array"
           }

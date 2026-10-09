@@ -51,8 +51,8 @@ use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, ChangeContext,
     CommitChanges, Committed, DiffQuery, LocalSource, LogQuery, NewWorkspace, ObjectInfo, Page,
     Promotion, Provenance, Purger, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
-    WorkspaceCatalog, WorkspaceUpdate, derive_item_id, derive_proposal_id, derive_purge_id,
-    workspace_with_permissions,
+    WorkspaceCatalog, WorkspaceUpdate, derive_commit_mutation_id, derive_item_id,
+    derive_proposal_id, derive_purge_id, workspace_with_permissions,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 use serde_json::json;
@@ -865,6 +865,20 @@ fn derived_identities_are_stable_per_mutation() {
     assert_eq!(derive_proposal_id(first), derive_proposal_id(first));
     assert_ne!(derive_proposal_id(first), derive_proposal_id(second));
     assert_ne!(derive_proposal_id(first).0, derive_item_id(first, 0).0);
+    // Each commit of one job replays on its own identity, never on the job's.
+    assert_eq!(
+        derive_commit_mutation_id(first, 0),
+        derive_commit_mutation_id(first, 0)
+    );
+    assert_ne!(
+        derive_commit_mutation_id(first, 0),
+        derive_commit_mutation_id(first, 1)
+    );
+    assert_ne!(derive_commit_mutation_id(first, 0), first);
+    assert_ne!(
+        derive_commit_mutation_id(first, 0).0,
+        derive_item_id(first, 0).0
+    );
 }
 
 #[test]

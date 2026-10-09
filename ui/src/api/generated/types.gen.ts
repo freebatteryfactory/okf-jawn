@@ -2047,6 +2047,11 @@ export type GetSourcesResponse = {
      * Supporting citations.
      */
     sources: Array<SourceReference>;
+    /**
+     * Entries of the item's OKF `sources` that are not citations of an item in this workspace
+     * at this revision, in the file's order; kept so no declared source is silently dropped.
+     */
+    uncited?: Array<UncitedSource>;
 };
 
 /**
@@ -4403,6 +4408,25 @@ export type UnarchiveWorkspaceRequest = {
      * Workspace whose permissions and storage scope apply.
      */
     workspace_id: WorkspaceId;
+};
+
+/**
+ * Why an OKF `sources` entry is not a citation.
+ */
+export type UncitedReason = 'external' | 'scope' | 'not_found';
+
+/**
+ * One OKF `sources` entry that is not a citation of an item at the resolved revision.
+ */
+export type UncitedSource = {
+    /**
+     * Why it is not a citation.
+     */
+    reason: UncitedReason;
+    /**
+     * The entry's `resource`, exactly as written in the file.
+     */
+    resource: string;
 };
 
 /**
