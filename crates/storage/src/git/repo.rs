@@ -200,7 +200,7 @@ pub(crate) fn find_trailer(
     since: Oid,
     mutation: MutationId,
 ) -> Result<Option<Oid>, ApiError> {
-    let wanted = format!("{TRAILER} {}", mutation.0);
+    let wanted = mutation.0.to_string();
     let mut walk = repository.revwalk().map_err(|error| git(&error))?;
     walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)
         .map_err(|error| git(&error))?;
@@ -211,7 +211,7 @@ pub(crate) fn find_trailer(
         let commit = repository.find_commit(oid).map_err(|error| git(&error))?;
         if commit
             .message()
-            .is_ok_and(|message| message.lines().any(|line| line.trim() == wanted))
+            .is_ok_and(|message| trailer_of(message) == Some(wanted.as_str()))
         {
             return Ok(Some(oid));
         }
@@ -222,6 +222,30 @@ pub(crate) fn find_trailer(
 /// The message of a commit with its trailer.
 pub(crate) fn message_with_trailer(message: &str, mutation: MutationId) -> String {
     format!("{}\n\n{TRAILER} {}\n", message.trim_end(), mutation.0)
+}
+
+/// The mutation id a commit message's trailer block names: only the message's last
+/// paragraph is the trailer block, and only a line that starts with the exact key counts. A
+/// body that quotes another commit's trailer line names nothing.
+pub(crate) fn trailer_of(message: &str) -> Option<&str> {
+    let (_, block) = split_trailer_block(message);
+    block?
+        .lines()
+        .find_map(|line| line.strip_prefix(TRAILER))
+        .and_then(|value| value.strip_prefix(' '))
+        .map(str::trim_end)
+}
+
+/// A message split into its text and its trailer block (the last paragraph, when the message
+/// has more than one paragraph and that paragraph holds the trailer key at a line start).
+pub(crate) fn split_trailer_block(message: &str) -> (&str, Option<&str>) {
+    let trimmed = message.trim_end();
+    match trimmed.rsplit_once("\n\n") {
+        Some((text, block)) if block.lines().any(|line| line.starts_with(TRAILER)) => {
+            (text, Some(block))
+        }
+        _ => (trimmed, None),
+    }
 }
 
 /// A commit signature for `who` at the current time.

@@ -871,6 +871,76 @@ async fn git_writes_are_synced_before_a_commit_returns() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_quoted_trailer_line_in_a_message_body_replays_nothing() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let quoted = format!(
+        "Explain an earlier change\n\nIt said:\nOkf-Jawn-Mutation: {}\nand more.",
+        uuid_text(31)
+    );
+    let quoting = versions
+        .commit(
+            &scope,
+            CommitChanges {
+                message: quoted,
+                ..changes(30, &initial, vec![note(uuid!(10)?, "a.md", "A.")?])?
+            },
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(31)?, &initial).await?,
+        None,
+        "a quoted line is not the trailer of mutation 31"
+    );
+    let error = err_of(
+        versions
+            .commit(
+                &scope,
+                changes(31, &initial, vec![note(uuid!(11)?, "b.md", "B.")?])?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(
+        error.code,
+        ErrorCode::Conflict,
+        "mutation 31 is not replayed as the quoting commit: {}",
+        error.message
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(30)?, &initial).await?,
+        Some(quoting.clone()),
+        "the real trailer is still found"
+    );
+    let shown = versions
+        .log(
+            &scope,
+            LogQuery {
+                tip: quoting,
+                item_id: None,
+                page: Page {
+                    cursor: None,
+                    limit: 1,
+                },
+            },
+        )
+        .await?;
+    let message = &some(shown.commits.first(), "the quoting commit")?.message;
+    assert!(
+        message.contains(&format!("Okf-Jawn-Mutation: {}", uuid_text(31))),
+        "the body keeps the quoted line: {message}"
+    );
+    assert!(
+        !message.contains(&uuid_text(30)),
+        "the trailer itself is not shown: {message}"
+    );
+    Ok(())
+}
+
 /// Clone a bundle with stock `git` and open the clone with git2.
 fn clone_bundle(bundle: &Path, into: &Path) -> Fallible<git2::Repository> {
     let output = std::process::Command::new("git")

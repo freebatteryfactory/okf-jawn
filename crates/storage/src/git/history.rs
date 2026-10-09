@@ -14,7 +14,7 @@ use okf_jawn_contract::source::SourceReference;
 use okf_jawn_core::storage::{BlameQuery, DiffQuery, LogQuery, StorageScope};
 
 use super::read::find;
-use super::repo::{TRAILER, commit_of, git, internal, revision_of};
+use super::repo::{commit_of, git, internal, revision_of, split_trailer_block};
 use crate::seam;
 
 pub(crate) fn log(repository: &Repository, query: &LogQuery) -> Result<LogResponse, ApiError> {
@@ -267,15 +267,8 @@ fn blob_at(commit: &Commit<'_>, path: &str) -> Result<Option<Oid>, ApiError> {
 
 /// The wire form of a commit; its message is shown without the mutation trailer.
 pub(crate) fn wire_commit(commit: &Commit<'_>) -> Result<WireCommit, ApiError> {
-    let message = commit
-        .message()
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| !line.starts_with(TRAILER))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end()
-        .to_owned();
+    let (message, _) = split_trailer_block(commit.message().unwrap_or_default());
+    let message = message.trim_end().to_owned();
     Ok(WireCommit {
         revision: revision_of(commit.id())?,
         parents: commit
