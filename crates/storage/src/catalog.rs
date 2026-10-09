@@ -8,7 +8,6 @@
 //! repeated id changes nothing and returns the first result. The catalog never filters and
 //! returns `Workspace::permissions` empty.
 
-use git2::Repository;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{MutationId, TenantId, WorkspaceId};
 use okf_jawn_contract::workspace::Workspace;
@@ -20,8 +19,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::db::{Db, conflict, json, not_found, scope_key, sql};
 use crate::git::repo::{
-    HEAD_REF, Repositories, git, head, message_with_trailer, reference_target, revision_of,
-    signature, staged_tree,
+    HEAD_REF, Repositories, durable, git, head, message_with_trailer, reference_target,
+    revision_of, signature, staged_tree,
 };
 use crate::seam;
 
@@ -248,7 +247,7 @@ fn initialize(
 ) -> Result<(), ApiError> {
     let path = repositories.path(scope);
     let repository = if path.exists() {
-        Repository::open_bare(&path).map_err(|error| git(&error))?
+        durable(&path)?
     } else {
         repositories.create(scope)?
     };

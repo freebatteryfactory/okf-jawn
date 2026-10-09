@@ -36,6 +36,8 @@ pub(crate) struct Staging {
 pub(crate) const HEAD_REF: &str = "refs/heads/main";
 /// The trailer every commit carries.
 pub(crate) const TRAILER: &str = "Okf-Jawn-Mutation:";
+/// The repository setting that makes libgit2 sync object and reference writes.
+pub(crate) const FSYNC_SETTING: &str = "core.fsyncObjectFiles";
 /// File mode of a regular blob.
 const BLOB_MODE: i32 = 0o100_644;
 /// File mode of a tree.
@@ -59,7 +61,8 @@ impl Repositories {
             .join(format!("{}.git", scope.workspace_id.0))
     }
 
-    /// Open an existing workspace repository; `NotFound` when the workspace has none.
+    /// Open an existing workspace repository, with durable writes (`durable`); `NotFound` when
+    /// the workspace has none.
     pub(crate) fn open(&self, scope: &StorageScope) -> Result<Repository, ApiError> {
         let path = self.path(scope);
         if !path.exists() {
@@ -68,16 +71,17 @@ impl Repositories {
                 "No workspace with that identity here",
             ));
         }
-        Repository::open_bare(&path).map_err(|error| git(&error))
+        durable(&path)
     }
 
-    /// Create a new bare repository, replacing a partial one a crash left.
+    /// Create a new bare repository with durable writes, replacing a partial one a crash left.
     pub(crate) fn create(&self, scope: &StorageScope) -> Result<Repository, ApiError> {
         let path = self.path(scope);
         if path.exists() {
             std::fs::remove_dir_all(&path).map_err(|error| io_error("clear", &path, &error))?;
         }
-        Repository::init_bare(&path).map_err(|error| git(&error))
+        drop(Repository::init_bare(&path).map_err(|error| git(&error))?);
+        durable(&path)
     }
 
     /// Hold the workspace's write lock while `work` runs.
@@ -124,6 +128,30 @@ impl Drop for Staging {
         // A directory that cannot be removed now is removed at the next startup.
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// Open the bare repository at `path` with `core.fsyncObjectFiles` set in its own config.
+///
+/// git2 0.21 exposes no safe global fsync option (`GIT_OPT_ENABLE_FSYNC_GITDIR` is reachable
+/// only through `raw`), but libgit2 1.9 reads this repository setting when it loads the object
+/// database (`git_odb__set_caps`, so every loose object is written through a synced file and
+/// its directory is synced) and the reference database (`refdb_fs`, so every reference write
+/// is synced with its directory). A commit's objects and its reference move are therefore on
+/// disk when `VersionStore::commit` returns, before core records the result in SQLite. A
+/// repository that lacks the setting gets it here and is reopened, so the setting is read.
+pub(crate) fn durable(path: &Path) -> Result<Repository, ApiError> {
+    let repository = Repository::open_bare(path).map_err(|error| git(&error))?;
+    let config = repository.config().map_err(|error| git(&error))?;
+    if config.get_bool(FSYNC_SETTING).unwrap_or(false) {
+        return Ok(repository);
+    }
+    config
+        .open_level(git2::ConfigLevel::Local)
+        .and_then(|mut local| local.set_bool(FSYNC_SETTING, true))
+        .map_err(|error| git(&error))?;
+    drop(config);
+    drop(repository);
+    Repository::open_bare(path).map_err(|error| git(&error))
 }
 
 /// The accepted head of a repository.

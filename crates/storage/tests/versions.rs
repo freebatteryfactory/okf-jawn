@@ -843,6 +843,34 @@ async fn a_concurrent_head_move_wins_and_the_commit_conflicts() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn git_writes_are_synced_before_a_commit_returns() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let path = repository_path(directory.path(), &scope);
+    let setting = |path: &Path| -> Fallible<bool> {
+        let repository = git2::Repository::open_bare(path)?;
+        let local = repository.config()?.open_level(git2::ConfigLevel::Local)?;
+        Ok(local.get_bool("core.fsyncObjectFiles")?)
+    };
+    assert!(setting(&path)?, "a created repository syncs its writes");
+    // A repository without the setting (as an older build left it) gets it before it writes.
+    git2::Repository::open_bare(&path)?
+        .config()?
+        .open_level(git2::ConfigLevel::Local)?
+        .remove("core.fsyncObjectFiles")?;
+    storage
+        .versions()
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note(uuid!(10)?, "a.md", "Mine.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?;
+    assert!(setting(&path)?, "the setting is restored before the commit");
+    Ok(())
+}
+
 /// Clone a bundle with stock `git` and open the clone with git2.
 fn clone_bundle(bundle: &Path, into: &Path) -> Fallible<git2::Repository> {
     let output = std::process::Command::new("git")
