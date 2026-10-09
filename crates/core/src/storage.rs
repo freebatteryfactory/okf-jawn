@@ -150,7 +150,8 @@ pub enum TreeEdit {
         title: Option<String>,
         /// User-selected OKF type name.
         type_name: String,
-        /// Built-in rendering role.
+        /// Built-in rendering role; storage writes it into the new item's application header
+        /// (`ApplicationHeader::kind`) and reads it back from there, never from the body.
         kind: ItemKind,
         /// Markdown body.
         body: String,
@@ -786,8 +787,8 @@ impl From<PageRequest> for Page {
 }
 
 impl SourceCard {
-    /// The application header the card is written with: its item id, `archived`, the
-    /// original's first observed name and digest, and the extraction it shows.
+    /// The application header the card is written with: its item id, kind `Source`,
+    /// `archived`, the original's first observed name and digest, and the extraction it shows.
     ///
     /// `archived` is the flag the item has now: `false` for a new card, and the stored flag
     /// when a redigest replaces a card, so replacing an archived source never unarchives it.
@@ -808,13 +809,15 @@ impl SourceCard {
                 )
             })?;
         Ok(ApplicationHeader {
-            item_id: self.item_id,
             archived,
-            source: Some(SourceHeader {
-                original_name,
-                digest: self.appearance.object.clone(),
-            }),
-            extraction: Some(self.appearance.extraction.clone()),
+            ..ApplicationHeader::assigned(
+                self.item_id,
+                Some(SourceHeader {
+                    original_name,
+                    digest: self.appearance.object.clone(),
+                }),
+                Some(self.appearance.extraction.clone()),
+            )
         })
     }
 }

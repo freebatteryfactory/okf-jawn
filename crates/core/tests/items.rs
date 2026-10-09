@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 use okf_jawn_contract::error::ErrorCode;
 use okf_jawn_contract::extraction::{ConversionOutcome, Extraction, TextOrigin};
 use okf_jawn_contract::identity::{Digest, ItemId, Timestamp, WorkspacePath};
-use okf_jawn_contract::item::{APP_HEADER_KEY, TypeDefinition};
+use okf_jawn_contract::item::{APP_HEADER_KEY, ItemKind, TypeDefinition};
 use okf_jawn_contract::source::{SourceAppearance, SourceName};
 use okf_jawn_core::items::{
-    ApplicationHeader, refuse_header_change, refuse_header_in_type, refuse_supplied_header,
-    without_header,
+    ApplicationHeader, SourceHeader, refuse_header_change, refuse_header_in_type,
+    refuse_supplied_header, without_header,
 };
 use okf_jawn_core::storage::SourceCard;
 use serde_json::json;
@@ -106,9 +106,18 @@ fn a_write_that_changes_the_application_header_is_refused() -> TestResult {
     assert_eq!(edited.field.as_deref(), Some("/properties/okf_jawn"));
     written.insert(
         APP_HEADER_KEY.to_owned(),
-        json!({ "item_id": Uuid::from_u128(11) }),
+        json!({ "item_id": Uuid::from_u128(11), "kind": "source" }),
     );
     err_of(refuse_header_change(&stored, &written, "/properties"))?;
+    // The rendering role is the header's too: a write cannot turn the card into a View.
+    let mut viewed = header.clone();
+    viewed
+        .as_object_mut()
+        .ok_or("the header is a mapping")?
+        .insert("kind".to_owned(), json!("view"));
+    written.insert(APP_HEADER_KEY.to_owned(), viewed);
+    let rekinded = err_of(refuse_header_change(&stored, &written, "/properties"))?;
+    assert_eq!(rekinded.field.as_deref(), Some("/properties/okf_jawn"));
 
     // A stored file without a header cannot gain one through a write.
     let headerless = BTreeMap::from([("status".to_owned(), json!("stable"))]);
@@ -143,6 +152,7 @@ fn a_card_header_reads_back_from_the_file_properties() -> TestResult {
     let card = card()?;
     let header = card.header(false)?;
     assert_eq!(header.item_id, card.item_id);
+    assert_eq!(header.kind, ItemKind::Source);
     assert!(!header.archived);
     // A redigest replacing an archived source keeps it archived.
     let replaced = card.header(true)?;
@@ -161,6 +171,41 @@ fn a_card_header_reads_back_from_the_file_properties() -> TestResult {
         Some(header)
     );
     assert_eq!(ApplicationHeader::from_properties(&BTreeMap::new())?, None);
+    Ok(())
+}
+
+#[test]
+fn the_header_records_the_kind_and_a_headerless_import_is_never_a_view() -> TestResult {
+    let item_id = ItemId(Uuid::from_u128(12));
+    // A file imported without a header: a source card is a Source, anything else a Note,
+    // whatever its body shows (a fenced vega-lite example does not make a View).
+    let note = ApplicationHeader::assigned(item_id, None, None);
+    assert_eq!(note.kind, ItemKind::Note);
+    assert!(!note.archived);
+    let source = SourceHeader {
+        original_name: "report.pdf".to_owned(),
+        digest: digest('a')?,
+    };
+    let card = ApplicationHeader::assigned(item_id, Some(source), Some(pending()));
+    assert_eq!(card.kind, ItemKind::Source);
+    assert_eq!(card.to_property()?.get("kind"), Some(&json!("source")));
+
+    // The kind reads back as written, a View included.
+    let view = ApplicationHeader {
+        kind: ItemKind::View,
+        ..note
+    };
+    let properties = BTreeMap::from([(APP_HEADER_KEY.to_owned(), view.to_property()?)]);
+    assert_eq!(ApplicationHeader::from_properties(&properties)?, Some(view));
+
+    // It is required: a stored header without it is unparseable, never defaulted.
+    let kindless = BTreeMap::from([(
+        APP_HEADER_KEY.to_owned(),
+        json!({ "item_id": Uuid::from_u128(12) }),
+    )]);
+    let refused = err_of(ApplicationHeader::from_properties(&kindless))?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("/properties/okf_jawn"));
     Ok(())
 }
 
