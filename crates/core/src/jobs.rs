@@ -14,6 +14,7 @@
 
 use okf_jawn_contract::{
     common::{PageRange, Warning},
+    error::{ApiError, ErrorCode},
     events::Receipt,
     identity::{
         ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, ReceiptId, Revision, TenantId,
@@ -24,11 +25,13 @@ use okf_jawn_contract::{
     review::Review,
     workspace::{ArtifactScope, DownloadArtifact, RestoreReport},
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::conversion::ConversionSettings;
 use crate::ports::PortFuture;
 use crate::storage::{ObjectInfo, Page, Provenance, StorageScope};
+use crate::stored::{ValidatorCell, decode_stored};
 
 /// What a retained artifact is; the contract's, so the record and the wire agree.
 pub use okf_jawn_contract::workspace::ArtifactKind;
@@ -45,8 +48,10 @@ pub enum JobScope {
 
 /// What a job must do: the inputs of the request that started it, with selectors resolved.
 ///
-/// The record store keeps the specification as written and hands it back on every claim.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The record store keeps the specification as written (`JobSpec::to_stored`) and hands it
+/// back on every claim, decoded with `JobSpec::from_stored` so a value that does not meet the
+/// schema is a store fault rather than a silently accepted job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobSpec {
     /// Convert finalized uploads into source cards.
@@ -473,6 +478,30 @@ impl JobSpec {
             Self::PurgeWorkspace { .. } => JobKind::PurgeWorkspace,
             Self::PurgeItem { .. } => JobKind::PurgeItem,
         }
+    }
+
+    /// The JSON the record store keeps.
+    ///
+    /// # Errors
+    /// Returns `Internal` if the specification cannot be represented as JSON.
+    pub fn to_stored(&self) -> Result<serde_json::Value, ApiError> {
+        serde_json::to_value(self).map_err(|error| {
+            ApiError::new(
+                ErrorCode::Internal,
+                format!("a job specification did not serialize: {error}"),
+            )
+        })
+    }
+
+    /// Decode a specification the record store kept, validated against its schema: a field
+    /// beside a unit variant's tag, which serde alone accepts, is refused.
+    ///
+    /// # Errors
+    /// Returns `Internal` naming the first violation when the stored value is not a job
+    /// specification.
+    pub fn from_stored(value: serde_json::Value) -> Result<Self, ApiError> {
+        static SCHEMA: ValidatorCell = ValidatorCell::new();
+        decode_stored(value, "a stored job specification", &SCHEMA)
     }
 
     /// Whether the specification belongs in `scope`: a tenant kind in the tenant scope, every

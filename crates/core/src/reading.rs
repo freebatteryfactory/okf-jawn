@@ -26,6 +26,7 @@ use okf_jawn_contract::{
 use crate::conversion::ConversionRecord;
 use crate::jobs::{DerivedKind, DerivedObject, RecordStore, RevisionMapping};
 use crate::storage::{BlobStore, StorageScope, VersionStore};
+use crate::stored::{ValidatorCell, decode_stored};
 
 /// What an object is to the item revision that may serve it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,17 +170,19 @@ pub async fn read_conversion_record(
     decode_conversion_record(&bytes)
 }
 
-/// Decode stored conversion-record bytes.
+/// Decode stored conversion-record bytes, validated against the record's schema.
 ///
 /// # Errors
-/// Returns `Internal` when the bytes are not a conversion record.
+/// Returns `Internal` when the bytes are not JSON or not a conversion record.
 pub fn decode_conversion_record(bytes: &[u8]) -> Result<ConversionRecord, ApiError> {
-    serde_json::from_slice(bytes).map_err(|error| {
+    static SCHEMA: ValidatorCell = ValidatorCell::new();
+    let value = serde_json::from_slice(bytes).map_err(|error| {
         ApiError::new(
             ErrorCode::Internal,
-            format!("a stored conversion record does not decode: {error}"),
+            format!("a stored conversion record is not JSON: {error}"),
         )
-    })
+    })?;
+    decode_stored(value, "a stored conversion record", &SCHEMA)
 }
 
 /// Refuse a revision a purge removed or rewrote, as a typed `NotFound` naming the purge and,

@@ -27,6 +27,8 @@ use okf_jawn_contract::{
     item::{APP_HEADER_KEY, TypeDefinition},
 };
 
+use crate::stored::{ValidatorCell, decode_stored};
+
 /// The server-owned header of one item file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -76,12 +78,13 @@ impl ApplicationHeader {
     pub fn from_properties(
         properties: &BTreeMap<String, serde_json::Value>,
     ) -> Result<Option<Self>, ApiError> {
+        static SCHEMA: ValidatorCell = ValidatorCell::new();
         properties
             .get(APP_HEADER_KEY)
             .map(|value| {
-                serde_json::from_value(value.clone()).map_err(|error| {
+                decode_stored(value.clone(), "the application header", &SCHEMA).map_err(|error| {
                     header_error(
-                        &format!("the application header does not parse: {error}"),
+                        &format!("the application header does not parse: {}", error.message),
                         "/properties",
                     )
                 })

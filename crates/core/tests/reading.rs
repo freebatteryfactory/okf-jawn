@@ -7,12 +7,14 @@ use okf_jawn_contract::extraction::TextOrigin;
 use okf_jawn_contract::identity::{ArtifactId, ItemId, JobId, PurgeId, TenantId, WorkspaceId};
 use okf_jawn_contract::read::{AssetRole, Selection};
 use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
+use okf_jawn_core::conversion::ConversionRecord;
 use okf_jawn_core::jobs::{ArtifactKind, ArtifactRecord, JobScope, RevisionMapping};
 use okf_jawn_core::reading::{
     ObjectRole, RevisionObjects, cited_locations, decode_conversion_record, fill_locations,
     invalidated, object_role,
 };
 use okf_jawn_core::storage::{ObjectInfo, StorageScope};
+use serde_json::json;
 use uuid::Uuid;
 
 use check::{TestResult, err_of};
@@ -184,6 +186,26 @@ fn a_stored_record_decodes_and_garbage_does_not() -> TestResult {
     assert_eq!(decode_conversion_record(&bytes)?, record);
     let refused = err_of(decode_conversion_record(b"{\"outcome\":{}}"))?;
     assert_eq!(refused.code, ErrorCode::Internal);
+    Ok(())
+}
+
+#[test]
+fn a_stored_outcome_with_a_field_beside_its_tag_is_refused() -> TestResult {
+    let mut value = serde_json::to_value(record()?)?;
+    let object = value
+        .as_object_mut()
+        .ok_or("a conversion record is a mapping")?;
+    object.insert(
+        "outcome".to_owned(),
+        json!({ "status": "completed", "pages_skipped": 3 }),
+    );
+    let bytes = serde_json::to_vec(&value)?;
+    // Plain serde reads the outcome as completed and drops the extra field.
+    let lenient: ConversionRecord = serde_json::from_slice(&bytes)?;
+    assert_eq!(lenient.page_count, Some(2));
+    let refused = err_of(decode_conversion_record(&bytes))?;
+    assert_eq!(refused.code, ErrorCode::Internal);
+    assert_eq!(refused.field.as_deref(), Some("/outcome"));
     Ok(())
 }
 

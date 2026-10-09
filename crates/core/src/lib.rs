@@ -41,6 +41,8 @@ pub mod sandbox;
 pub mod search;
 /// Blob, version and workspace-catalog ports with their core parameter types.
 pub mod storage;
+/// Schema validation of values read back from storage.
+pub mod stored;
 /// Authenticated upload occurrence slots.
 pub mod uploads;
 /// The producer of a View binding's materialized dataset.
