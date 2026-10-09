@@ -20,17 +20,20 @@ export interface SavedViewProps {
   client?: Client;
 }
 
-type Reopened =
-  | { state: 'opening' }
+/** What a resolve answered, for the item it was asked about: an answer for other ids is never shown. */
+type Answer =
   | { state: 'refused'; message: string }
   | { state: 'opened'; response: z.infer<typeof zResolveViewResponse> };
+type Reopened = Answer & { key: string };
+const noMessage = 'The server refused to open the View.';
 
 export function SavedView({ workspaceId, itemId, callTool, client }: SavedViewProps) {
-  const [reopened, setReopened] = useState<Reopened>({ state: 'opening' });
+  const [reopened, setReopened] = useState<Reopened | null>(null);
+  const key = JSON.stringify([workspaceId, itemId]);
   useEffect(() => {
     let active = true;
-    const settle = (next: Reopened) => {
-      if (active) setReopened(next);
+    const settle = (next: Answer) => {
+      if (active) setReopened({ ...next, key });
     };
     resolveView({
       ...(client ? { client } : {}),
@@ -43,7 +46,11 @@ export function SavedView({ workspaceId, itemId, callTool, client }: SavedViewPr
     })
       .then((result) => {
         if (result.error !== undefined) {
-          settle({ state: 'refused', message: result.error.message });
+          const said: unknown = result.error.message;
+          settle({
+            state: 'refused',
+            message: String(said),
+          });
           return;
         }
         const parsed = zResolveViewResponse.safeParse(result.data);
@@ -62,8 +69,9 @@ export function SavedView({ workspaceId, itemId, callTool, client }: SavedViewPr
     return () => {
       active = false;
     };
-  }, [workspaceId, itemId, client]);
-  if (reopened.state === 'opening') return <p role="status">Reopening the saved View…</p>;
+  }, [workspaceId, itemId, client, key]);
+  if (reopened === null || reopened.key !== key)
+    return <p role="status">Reopening the saved View…</p>;
   if (reopened.state === 'refused') return <p role="alert">{reopened.message}</p>;
   return <PresentView response={reopened.response} callTool={callTool} />;
 }
