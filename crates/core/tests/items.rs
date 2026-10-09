@@ -200,6 +200,23 @@ fn a_type_cannot_reach_the_header_at_any_depth() -> TestResult {
     );
     let required = typed(json!({ "type": "object", "required": ["okf_jawn"] }));
     err_of(refuse_header_in_type(&required))?;
+    let listed = typed(json!({ "items": [{ "required": ["okf_jawn"] }] }));
+    let refused = err_of(refuse_header_in_type(&listed))?;
+    assert_eq!(
+        refused.field.as_deref(),
+        Some("/definition/properties_schema/items/0/required/okf_jawn")
+    );
+    // Annotations and instance values are data, not subschemas: a header-shaped value there
+    // declares nothing.
+    let annotated = typed(json!({
+        "type": "object",
+        "examples": [{ "required": ["okf_jawn"] }],
+        "default": { "properties": { "okf_jawn": {} } },
+        "const": { "required": ["okf_jawn"] },
+        "enum": [{ "properties": { "okf_jawn": 1 } }],
+        "properties": { "status": { "type": "string", "examples": [{ "required": ["okf_jawn"] }] } }
+    }));
+    refuse_header_in_type(&annotated)?;
     // A strict type that does not name the header is accepted; the header is left out of what
     // it is evaluated against.
     let strict = typed(json!({

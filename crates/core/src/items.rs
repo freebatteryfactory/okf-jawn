@@ -58,6 +58,34 @@ pub struct SourceHeader {
     pub digest: Digest,
 }
 
+/// JSON Schema keywords whose value is one subschema.
+const SCHEMA_KEYWORDS: &[&str] = &[
+    "additionalItems",
+    "additionalProperties",
+    "contains",
+    "else",
+    "if",
+    "not",
+    "propertyNames",
+    "then",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+];
+
+/// JSON Schema keywords whose value maps names to subschemas. A nested property named like the
+/// header is refused too, so the rule needs no `$ref` resolution.
+const SCHEMA_MAP_KEYWORDS: &[&str] = &[
+    "$defs",
+    "definitions",
+    "dependencies",
+    "dependentSchemas",
+    "patternProperties",
+    "properties",
+];
+
+/// JSON Schema keywords whose value is a list of subschemas (`items` may also be one).
+const SCHEMA_LIST_KEYWORDS: &[&str] = &["allOf", "anyOf", "items", "oneOf", "prefixItems"];
+
 impl ApplicationHeader {
     /// The header as the property value stored under `APP_HEADER_KEY`.
     ///
@@ -170,39 +198,49 @@ pub fn without_header(
         .collect()
 }
 
-/// Where `schema` names the header, at any depth (inside `allOf`, `$defs`, `items` and every
-/// other applicator): as a key of a `properties` map, or in a `required` list. The result is
-/// the JSON Pointer of the map or list, below `at`.
+/// Where `schema` names the header, at any depth of its subschemas (inside `allOf`, `$defs`,
+/// `items` and every other applicator): as a key of a `properties` map, or in a `required`
+/// list. The result is the JSON Pointer of the map or list, below `at`. Only keywords whose
+/// values are schemas are descended; annotations and instance values (`examples`, `default`,
+/// `const`, `enum`) are data, so a header-shaped value there declares nothing.
 fn header_declaration(schema: &serde_json::Value, at: &str) -> Option<String> {
-    match schema {
-        serde_json::Value::Object(object) => {
-            let declares = object
-                .get("properties")
-                .and_then(serde_json::Value::as_object)
-                .is_some_and(|properties| properties.contains_key(APP_HEADER_KEY));
-            if declares {
-                return Some(format!("{at}/properties"));
-            }
-            let requires = object
-                .get("required")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|required| required.iter().any(|name| name == APP_HEADER_KEY));
-            if requires {
-                return Some(format!("{at}/required"));
-            }
-            object.iter().find_map(|(key, value)| {
-                header_declaration(value, &format!("{at}/{}", pointer_token(key)))
-            })
-        }
-        serde_json::Value::Array(items) => items
-            .iter()
-            .enumerate()
-            .find_map(|(index, value)| header_declaration(value, &format!("{at}/{index}"))),
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => None,
+    let object = schema.as_object()?;
+    let declares = object
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|properties| properties.contains_key(APP_HEADER_KEY));
+    if declares {
+        return Some(format!("{at}/properties"));
     }
+    let requires = object
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|required| required.iter().any(|name| name == APP_HEADER_KEY));
+    if requires {
+        return Some(format!("{at}/required"));
+    }
+    object.iter().find_map(|(key, value)| {
+        let below = format!("{at}/{}", pointer_token(key));
+        if SCHEMA_KEYWORDS.contains(&key.as_str()) {
+            header_declaration(value, &below)
+        } else if SCHEMA_MAP_KEYWORDS.contains(&key.as_str()) {
+            value.as_object()?.iter().find_map(|(name, subschema)| {
+                header_declaration(subschema, &format!("{below}/{}", pointer_token(name)))
+            })
+        } else if SCHEMA_LIST_KEYWORDS.contains(&key.as_str()) {
+            match value {
+                // Draft 4 to 2019-09 `items` may be a list of schemas.
+                serde_json::Value::Array(list) => {
+                    list.iter().enumerate().find_map(|(index, subschema)| {
+                        header_declaration(subschema, &format!("{below}/{index}"))
+                    })
+                }
+                single => header_declaration(single, &below),
+            }
+        } else {
+            None
+        }
+    })
 }
 
 /// A key escaped as one JSON Pointer reference token (RFC 6901).
