@@ -231,8 +231,24 @@ fn the_present_dataset_fixture_is_a_dataset_of_the_metrics_binding() -> Result<(
     dataset.check()?;
     assert_eq!(dataset.schema_version, 1);
     assert_eq!(dataset.text_origin, TextOrigin::Converter);
-    assert_eq!(dataset.columns.len(), 2);
-    assert_eq!(dataset.rows.len(), 5);
+    assert_eq!(
+        serde_json::to_value(&dataset.columns)?,
+        json!([
+            {"name": "category", "kind": "string"},
+            {"name": "value", "kind": "integer"}
+        ])
+    );
+    // The rows the View's chart and table are expected to draw, in order.
+    assert_eq!(
+        serde_json::to_value(&dataset.rows)?,
+        json!([
+            ["Ingested", 412],
+            ["Converted", 397],
+            ["Indexed", 389],
+            ["Reviewed", 127],
+            ["Published", 61]
+        ])
+    );
     // The citation is the `metrics` binding's source in the present fixture, so a View that
     // binds it reads this dataset.
     let present: Value =
