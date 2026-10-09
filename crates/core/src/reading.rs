@@ -12,6 +12,9 @@
 //! locations are computed from the conversion record (`cited_locations`) and filled or
 //! compared (`fill_locations`); a saved View keeps none (`strip_locations`).
 
+use std::collections::BTreeMap;
+
+use okf_core::ResourceKind;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use tokio::io::AsyncReadExt as _;
 
@@ -19,7 +22,7 @@ use okf_jawn_contract::{
     common::TextRange,
     error::{ApiError, ErrorCode, ErrorDetail},
     extraction::{Extraction, TextOrigin},
-    identity::{Digest, ItemId, Revision},
+    identity::{Digest, ItemId, Revision, WorkspacePath},
     read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection},
     source::{SourceAppearance, SourceLocation, SourceLocator, SourceReference, UnresolvedReason},
     views::ViewDocument,
@@ -27,6 +30,7 @@ use okf_jawn_contract::{
 
 use crate::conversion::ConversionRecord;
 use crate::jobs::{DerivedKind, DerivedObject, RecordStore, RevisionMapping};
+use crate::portable::yaml_value;
 use crate::storage::{BlobStore, StorageScope, VersionStore};
 use crate::stored::{ValidatorCell, decode_stored};
 
@@ -58,6 +62,46 @@ pub struct RevisionObjects<'a> {
     pub record: Option<&'a ConversionRecord>,
     /// What `RecordStore::derived_object` returned for (item, revision, digest).
     pub derived: Option<&'a DerivedObject>,
+}
+
+/// Why an OKF `sources` entry of a note cites no item of the workspace.
+///
+/// The shape of the contract's `UncitedReason` the integration owner is adding to
+/// `GetSourcesResponse`; core switches to that type once it is on `main`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UncitedReason {
+    /// The resource is a URL (okf-core `ResourceKind::Url`).
+    External,
+    /// The resource describes a population or scope (okf-core `ResourceKind::Scope`).
+    Scope,
+    /// The resource is a path, or is missing, and names no item at the read revision.
+    NotFound,
+}
+
+/// One OKF `sources` entry of a note that is not a citation, with its resource as written
+/// (empty when the entry has none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncitedSource {
+    /// The entry's `resource`, trimmed.
+    pub resource: String,
+    /// Why it cites nothing.
+    pub reason: UncitedReason,
+}
+
+/// One OKF `sources` entry of a note, in the order the note lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoteSource {
+    /// A path resource: the workspace paths it may name, in the order okf-core tries them
+    /// (relative to the note, then from the workspace root), each with the `.md` an OKF concept
+    /// path implies. The first that names an item at the read revision is the citation.
+    Candidates {
+        /// The entry's `resource`, trimmed.
+        resource: String,
+        /// Where the item may lie.
+        paths: Vec<WorkspacePath>,
+    },
+    /// An entry that names no item, and why.
+    Uncited(UncitedSource),
 }
 
 /// Where each line of a text starts: lines are one-based and end at `\n`, and a final `\n`
@@ -499,6 +543,75 @@ pub fn markdown_outline(text: &str) -> Vec<OutlineEntry> {
                     range: TextRange { start: *start, end },
                 },
                 kind: OutlineEntryKind::Heading,
+            }
+        })
+        .collect()
+}
+
+/// The OKF `sources` entries of the note at `note`, read with okf-core's own rules, in order.
+///
+/// okf-core classifies each `resource`: a URL is `External`, prose is a `Scope`, a missing
+/// resource names nothing (`NotFound`), and a path gives the candidates okf-core's
+/// `field_path_candidates` gives (relative to the note, then from the root), each with `.md`
+/// appended when it lacks it, kept when it is a valid workspace path. A path with no valid
+/// candidate is `NotFound`. Nothing is dropped: every entry is either a candidate list or an
+/// uncited source.
+#[must_use]
+pub fn note_sources(
+    properties: &BTreeMap<String, serde_json::Value>,
+    note: &WorkspacePath,
+) -> Vec<NoteSource> {
+    let Some(value) = properties.get("sources") else {
+        return Vec::new();
+    };
+    let from = okf_core::links::concept_id_for_path(note.as_str());
+    okf_core::Source::list_from_value(&yaml_value(value))
+        .into_iter()
+        .map(|source| {
+            let resource = source
+                .resource
+                .as_deref()
+                .map_or_else(String::new, |resource| resource.trim().to_owned());
+            let uncited = |reason| {
+                NoteSource::Uncited(UncitedSource {
+                    resource: resource.clone(),
+                    reason,
+                })
+            };
+            match source.resource_kind() {
+                ResourceKind::Url => uncited(UncitedReason::External),
+                ResourceKind::Scope => uncited(UncitedReason::Scope),
+                ResourceKind::Missing => uncited(UncitedReason::NotFound),
+                ResourceKind::Path => {
+                    let raw = match &from {
+                        Some(from) => okf_core::field_path_candidates(&resource, from),
+                        None => vec![resource.clone()],
+                    };
+                    let mut paths: Vec<WorkspacePath> = Vec::new();
+                    for candidate in raw {
+                        let file = if std::path::Path::new(&candidate)
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                        {
+                            candidate
+                        } else {
+                            format!("{candidate}.md")
+                        };
+                        if let Ok(path) = WorkspacePath::try_from(file)
+                            && !paths.contains(&path)
+                        {
+                            paths.push(path);
+                        }
+                    }
+                    if paths.is_empty() {
+                        uncited(UncitedReason::NotFound)
+                    } else {
+                        NoteSource::Candidates {
+                            resource: resource.clone(),
+                            paths,
+                        }
+                    }
+                }
             }
         })
         .collect()

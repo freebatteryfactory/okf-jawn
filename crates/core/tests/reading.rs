@@ -4,14 +4,17 @@
 use okf_jawn_contract::common::{CellRange, PageRange, TextRange};
 use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::TextOrigin;
-use okf_jawn_contract::identity::{ArtifactId, ItemId, JobId, PurgeId, TenantId, WorkspaceId};
+use okf_jawn_contract::identity::{
+    ArtifactId, ItemId, JobId, PurgeId, TenantId, WorkspaceId, WorkspacePath,
+};
 use okf_jawn_contract::read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection};
 use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
 use okf_jawn_core::conversion::ConversionRecord;
 use okf_jawn_core::jobs::{ArtifactKind, ArtifactRecord, JobScope, RevisionMapping};
 use okf_jawn_core::reading::{
-    ObjectRole, RevisionObjects, cited_locations, decode_conversion_record, fill_locations,
-    invalidated, markdown_outline, object_role, section_lines,
+    NoteSource, ObjectRole, RevisionObjects, UncitedReason, UncitedSource, cited_locations,
+    decode_conversion_record, fill_locations, invalidated, markdown_outline, note_sources,
+    object_role, section_lines,
 };
 use okf_jawn_core::storage::{ObjectInfo, StorageScope};
 use serde_json::json;
@@ -327,6 +330,53 @@ fn section_lines_agrees_for_the_converter_outline_and_an_item_outline() -> TestR
             "{heading}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_notes_okf_sources_are_classified_in_order_and_none_is_dropped() -> TestResult {
+    let properties = serde_json::from_value(json!({
+        "sources": [
+            { "id": "web", "resource": "https://example.test/report" },
+            { "id": "card", "resource": "card" },
+            { "id": "scope", "resource": "all queries in project X" },
+            { "id": "bare" },
+            { "id": "up", "resource": "../sources/report-pdf.md" }
+        ]
+    }))?;
+    let note = WorkspacePath::try_from("notes/plan.md".to_owned())?;
+    let path = |text: &str| WorkspacePath::try_from(text.to_owned());
+    assert_eq!(
+        note_sources(&properties, &note),
+        vec![
+            NoteSource::Uncited(UncitedSource {
+                resource: "https://example.test/report".to_owned(),
+                reason: UncitedReason::External,
+            }),
+            NoteSource::Candidates {
+                resource: "card".to_owned(),
+                paths: vec![path("notes/card.md")?, path("card.md")?],
+            },
+            NoteSource::Uncited(UncitedSource {
+                resource: "all queries in project X".to_owned(),
+                reason: UncitedReason::Scope,
+            }),
+            NoteSource::Uncited(UncitedSource {
+                resource: String::new(),
+                reason: UncitedReason::NotFound,
+            }),
+            NoteSource::Candidates {
+                resource: "../sources/report-pdf.md".to_owned(),
+                paths: vec![path("sources/report-pdf.md")?],
+            },
+        ]
+    );
+    let bare = serde_json::from_value(json!({ "sources": { "resource": "card" } }))?;
+    assert_eq!(note_sources(&bare, &note).len(), 1);
+    assert_eq!(
+        note_sources(&serde_json::from_value(json!({}))?, &note),
+        Vec::new()
+    );
     Ok(())
 }
 
