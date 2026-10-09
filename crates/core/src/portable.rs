@@ -28,7 +28,7 @@ use okf_jawn_contract::{
     identity::{Digest, WorkspacePath},
     item::ItemDocument,
     read::Selection,
-    review::{Review, ReviewCoverage},
+    review::{ImportedClaim, Review, ReviewCoverage},
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -36,18 +36,6 @@ use serde_json::Value;
 use crate::items::without_header;
 use crate::mutations::request_digest;
 use crate::storage::CandidateCheck;
-
-/// One `verified` event an imported file claims, kept exactly as written.
-///
-/// It is a claim, never a review: it has no review identity, no authenticated reviewer and no
-/// confirmed content, and its coverage is always `ReviewCoverage::Imported`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImportedVerification {
-    /// The claimed verifier as written; `None` when the entry names none.
-    pub by: Option<String>,
-    /// The claimed instant as written; `None` when the entry has none.
-    pub at: Option<String>,
-}
 
 /// The candidate check of an import commit: the conformance check first, whose refusal stands,
 /// then OKF lint of the imported files, whose findings are added to its warnings.
@@ -76,14 +64,6 @@ const HUMAN_ACTOR: &str = "human:";
 /// The prefix of the `Warning::code` of an okf-validator lint finding; the rule follows.
 const LINT_CODE: &str = "okf_lint";
 
-impl ImportedVerification {
-    /// How the claim is shown: imported coverage, whoever it names and however valid it is.
-    #[must_use]
-    pub const fn coverage(&self) -> ReviewCoverage {
-        ReviewCoverage::Imported
-    }
-}
-
 impl ImportCheck {
     /// Wrap `conformance` (the production `CandidateCheck`) for a commit that writes the
     /// `imported` paths.
@@ -102,6 +82,12 @@ impl CandidateCheck for ImportCheck {
         warnings.extend(lint_imported(root, &self.imported)?);
         Ok(warnings)
     }
+}
+
+/// How an imported claim is shown: imported coverage, whoever it names and however valid it is.
+#[must_use]
+pub const fn claim_coverage(_claim: &ImportedClaim) -> ReviewCoverage {
+    ReviewCoverage::Imported
 }
 
 /// The digest a review of a whole item records, computed from the item's committed content.
@@ -206,13 +192,13 @@ pub fn exported_verified(
 /// Each claim's coverage is `ReviewCoverage::Imported`. The import writes no review record for
 /// any of them, and the property stays in the file as written.
 #[must_use]
-pub fn imported_verification(properties: &BTreeMap<String, Value>) -> Vec<ImportedVerification> {
+pub fn imported_verification(properties: &BTreeMap<String, Value>) -> Vec<ImportedClaim> {
     let Some(value) = properties.get(VERIFIED_KEY) else {
         return Vec::new();
     };
     Verification::list_from_value(&yaml_value(value))
         .into_iter()
-        .map(|event| ImportedVerification {
+        .map(|event| ImportedClaim {
             by: event.by.map(|by| by.as_str().to_owned()),
             at: event.at.map(|at| at.raw),
         })

@@ -84,6 +84,13 @@ function violations(id: string, kind: 'request' | 'response', value: unknown): s
   return [];
 }
 
+/**
+ * The stand-in server's item content digest. Only the server computes the real value
+ * (`okf_jawn_core::portable::item_content_digest`); a client never computes it and only sends back
+ * what it was given, so a fixed, well-formed value is what this scripted stand-in owes.
+ */
+const STAND_IN_CONTENT_DIGEST = '9'.repeat(64);
+
 /** A scripted stand-in: schema-valid answers, and the refusals the journey expects of an agent. */
 function standIn(
   recorded: Recorded[],
@@ -154,6 +161,7 @@ function standIn(
           },
           body: body.body,
           properties: body.properties,
+          content_digest: STAND_IN_CONTENT_DIGEST,
         };
       case 'read_item':
         return {

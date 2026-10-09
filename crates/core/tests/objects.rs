@@ -13,6 +13,7 @@ use okf_jawn_contract::item::{ItemDocument, ItemKind, ItemStatus, ItemSummary};
 use okf_jawn_contract::read::{AssetRole, Selection};
 use okf_jawn_contract::views::{Dataset, ViewBinding};
 use okf_jawn_core::jobs::{DerivedKind, DerivedObject, RevisionMapping};
+use okf_jawn_core::portable::item_content_digest;
 use okf_jawn_core::reading::{
     MAX_CONVERSION_RECORD_BYTES, ObjectRole, authorize_object, check_revision,
 };
@@ -39,31 +40,32 @@ fn item() -> ItemId {
 /// `d`.
 fn card() -> Built<FakeVersions> {
     let source = appearance()?;
-    Ok(FakeVersions {
-        document: ItemDocument {
-            summary: ItemSummary {
-                id: item(),
-                path: citation(revision('1')?, Selection::All)?.path,
-                title: "Report".to_owned(),
-                description: String::new(),
-                type_name: "source".to_owned(),
-                kind: ItemKind::Source,
-                revision: revision('1')?,
-                status: ItemStatus::Stable,
-                archived: false,
-                media_type: Some(source.media_type.clone()),
-                extraction: Some(ExtractionSummary {
-                    status: ExtractionStatus::Completed,
-                    text_origin: TextOrigin::Converter,
-                    corrected: false,
-                }),
-            },
-            body: String::new(),
-            properties: BTreeMap::new(),
-            source: Some(source),
-            draft: None,
+    let mut document = ItemDocument {
+        summary: ItemSummary {
+            id: item(),
+            path: citation(revision('1')?, Selection::All)?.path,
+            title: "Report".to_owned(),
+            description: String::new(),
+            type_name: "source".to_owned(),
+            kind: ItemKind::Source,
+            revision: revision('1')?,
+            status: ItemStatus::Stable,
+            archived: false,
+            media_type: Some(source.media_type.clone()),
+            extraction: Some(ExtractionSummary {
+                status: ExtractionStatus::Completed,
+                text_origin: TextOrigin::Converter,
+                corrected: false,
+            }),
         },
-    })
+        body: String::new(),
+        properties: BTreeMap::new(),
+        content_digest: digest('0')?,
+        source: Some(source),
+        draft: None,
+    };
+    document.content_digest = item_content_digest(&document)?;
+    Ok(FakeVersions { document })
 }
 
 /// A blob store that serves the fixture conversion record.
