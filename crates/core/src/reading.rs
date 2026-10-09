@@ -162,7 +162,7 @@ pub async fn read_conversion_record(
     scope: &StorageScope,
     digest: &Digest,
 ) -> Result<ConversionRecord, ApiError> {
-    let mut read = blobs
+    let read = blobs
         .open(scope, digest, 0, MAX_CONVERSION_RECORD_BYTES)
         .await?;
     if read.object.size > MAX_CONVERSION_RECORD_BYTES {
@@ -172,7 +172,9 @@ pub async fn read_conversion_record(
         ));
     }
     let mut bytes = Vec::new();
+    // The bound holds whatever the store streams, not only what it reports.
     read.body
+        .take(MAX_CONVERSION_RECORD_BYTES)
         .read_to_end(&mut bytes)
         .await
         .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
