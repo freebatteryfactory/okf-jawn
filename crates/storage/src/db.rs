@@ -8,6 +8,8 @@
 use std::sync::{Arc, Mutex};
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_core::jobs::JobScope;
+use okf_jawn_core::storage::StorageScope;
 use rusqlite::{Connection, TransactionBehavior};
 
 /// A shared connection to one database file.
@@ -77,4 +79,58 @@ pub(crate) fn json(error: &serde_json::Error) -> ApiError {
 /// A precondition that no longer holds.
 pub(crate) fn conflict(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorCode::Conflict, message)
+}
+
+/// The usual refusal of a record that the scope does not hold.
+pub(crate) fn not_found(what: &str) -> ApiError {
+    ApiError::new(
+        ErrorCode::NotFound,
+        format!("No {what} with that identity here"),
+    )
+}
+
+/// A `u64` as the `i64` SQLite stores.
+pub(crate) fn to_i64(value: u64) -> Result<i64, ApiError> {
+    i64::try_from(value).map_err(|_| internal("a byte count exceeds what the store records"))
+}
+
+/// A stored `i64` back as the `u64` it was written from.
+pub(crate) fn to_u64(value: i64) -> Result<u64, ApiError> {
+    u64::try_from(value).map_err(|_| internal("a stored count is negative"))
+}
+
+/// Decode a page cursor this store issued: the decimal sequence number to continue after.
+pub(crate) fn cursor(value: Option<&str>) -> Result<Option<i64>, ApiError> {
+    value
+        .map(|text| {
+            text.parse::<i64>().map_err(|_| {
+                ApiError::new(
+                    ErrorCode::InvalidInput,
+                    "the page cursor is not one this store issued",
+                )
+                .with_field("/page/cursor")
+            })
+        })
+        .transpose()
+}
+
+/// The page size a listing reads: at least one row, at most 500.
+pub(crate) fn page_limit(limit: u16) -> i64 {
+    i64::from(limit.clamp(1, 500))
+}
+
+/// The (tenant, workspace) key columns of a workspace record.
+pub(crate) fn scope_key(scope: &StorageScope) -> (String, String) {
+    (
+        scope.tenant_id.as_str().to_owned(),
+        scope.workspace_id.0.to_string(),
+    )
+}
+
+/// The (tenant, workspace or none) key columns of a job or artifact record.
+pub(crate) fn job_scope_key(scope: &JobScope) -> (String, Option<String>) {
+    (
+        scope.tenant().as_str().to_owned(),
+        scope.workspace().map(|workspace| workspace.0.to_string()),
+    )
 }

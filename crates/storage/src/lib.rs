@@ -22,6 +22,8 @@ pub mod format;
 #[cfg(feature = "runtime")]
 pub mod mutations;
 #[cfg(feature = "runtime")]
+pub mod records;
+#[cfg(feature = "runtime")]
 pub mod schema;
 #[cfg(feature = "runtime")]
 mod seam;

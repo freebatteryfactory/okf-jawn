@@ -11,7 +11,31 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::Timestamp;
 use rusqlite::Connection;
+
+/// The current instant in the canonical spelling.
+pub(crate) fn now() -> Result<Timestamp, ApiError> {
+    later(0)
+}
+
+/// The instant `seconds` from now in the canonical spelling.
+pub(crate) fn later(seconds: i64) -> Result<Timestamp, ApiError> {
+    let connection = Connection::open_in_memory().map_err(|error| clock_error(&error))?;
+    let spelled: String = connection
+        .query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+            [format!("{seconds:+} seconds")],
+            |row| row.get(0),
+        )
+        .map_err(|error| clock_error(&error))?;
+    Timestamp::try_from(spelled).map_err(|error| {
+        ApiError::new(
+            ErrorCode::Internal,
+            format!("the clock did not give a canonical instant: {error}"),
+        )
+    })
+}
 
 /// Milliseconds since the Unix epoch, for lease and retention arithmetic inside one store.
 pub(crate) fn now_ms() -> Result<i64, ApiError> {
@@ -71,6 +95,13 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
             let _ = write!(text, "{byte:02x}");
             text
         },
+    )
+}
+
+fn clock_error(error: &rusqlite::Error) -> ApiError {
+    ApiError::new(
+        ErrorCode::Internal,
+        format!("the clock is unavailable: {error}"),
     )
 }
 

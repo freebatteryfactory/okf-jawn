@@ -12,6 +12,7 @@ use crate::data::{DataDir, FormatState};
 use crate::db::Db;
 use crate::format::{migrate_database, refuse_newer};
 use crate::mutations::SqliteMutations;
+use crate::records::SqliteRecords;
 use crate::schema;
 
 /// An opened data directory; every store it hands out shares its lock.
@@ -69,6 +70,12 @@ impl Storage {
     #[must_use]
     pub fn mutations(&self) -> SqliteMutations {
         SqliteMutations::new(self.records.clone())
+    }
+
+    /// Jobs, artifacts, purges, the revision map, derived objects, reviews and receipts.
+    #[must_use]
+    pub fn records(&self) -> SqliteRecords {
+        SqliteRecords::new(self.records.clone())
     }
 
     /// The opened data directory.

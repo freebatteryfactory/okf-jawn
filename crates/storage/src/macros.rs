@@ -19,3 +19,17 @@ macro_rules! new_id {
         })
     };
 }
+
+/// The wire spelling of a unit enum value, such as `succeeded` or `workspace_backup`.
+macro_rules! variant_text {
+    ($value:expr) => {
+        serde_json::to_value($value)
+            .map_err(|error| $crate::db::json(&error))
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(::std::borrow::ToOwned::to_owned)
+                    .ok_or_else(|| $crate::db::internal("a stored value is not a unit variant"))
+            })
+    };
+}
