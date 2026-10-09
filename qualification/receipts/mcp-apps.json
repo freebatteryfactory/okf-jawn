@@ -1,5 +1,5 @@
 {
-  "git_sha": "3a6606428dc6821d1d427a6b0c97c277e3d4ef71",
+  "git_sha": "e9e612d5dae81429f4e7224ab14d997d7fd02335",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-09T12:44:34.295Z",
+  "produced_at": "2026-10-09T14:34:18.602Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-09T12:47:14.969Z",
+  "finished_at": "2026-10-09T14:37:15.566Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -285,8 +285,8 @@
   },
   "harness_binary": {
     "path": "<abs>/release/okf-qualify-mcp-apps.exe",
-    "bytes": 5278208,
-    "sha256": "ef0a7373eb977a673ba86d314258869158401f01b574c9dd88da508809130e68",
+    "bytes": 5304832,
+    "sha256": "821fdf0edda8d65f37de0cd84a9b87f711b407725660718a649d0414f58fd33a",
     "args": [
       "--http",
       "127.0.0.1:18765"
@@ -299,7 +299,7 @@
       "signal": null,
       "error": null
     },
-    "stderr_tail": "l_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"128\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":31,\"has_more\":false,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"192\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"ok\":false,\"tool\":\"read_object\"}\nokf-qualify-mcp-apps tool-call {\"ok\":false,\"tool\":\"read_object\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_source\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_source\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_changes\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_changes\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_timeline\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_timeline\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_present\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_present\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"show\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"show\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"0\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"64\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"128\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":31,\"has_more\":false,\"object\":\"d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff\",\"offset\":\"192\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"223\"}\n"
+    "stderr_tail": "r_present\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"render_present\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"show\"}\nokf-qualify-mcp-apps tool-call {\"ok\":true,\"tool\":\"show\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"0\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"64\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"128\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"192\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"256\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"320\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"384\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":true,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"448\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\nokf-qualify-mcp-apps tool-call {\"bytes\":64,\"has_more\":false,\"object\":\"aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c\",\"offset\":\"512\",\"ok\":true,\"tool\":\"read_object\",\"total_size\":\"576\"}\n"
   },
   "mime_check": {
     "sdk_constant": "text/html;profile=mcp-app",
@@ -311,7 +311,7 @@
     ]
   },
   "bundle_sizes": {
-    "app": 1582914
+    "app": 1583683
   },
   "app_bundle": {
     "node_env": "development",
@@ -327,16 +327,16 @@
       "read_object"
     ],
     "dataset": {
-      "byteLength": 223,
-      "fixture": "present-metrics-dataset.json",
+      "byteLength": 576,
+      "fixture": "present-metrics.dataset.json",
       "maxBlockBytes": 64,
-      "sha256": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff"
+      "sha256": "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c"
     },
     "mode": "check",
     "resource_count": 1,
     "resources": [
       {
-        "byteLength": 1582914,
+        "byteLength": 1583683,
         "metaUi": {
           "csp": {
             "connectDomains": [],
@@ -348,7 +348,7 @@
         "name": "app",
         "path": "ui/dist-apps/app.html",
         "readable": true,
-        "sha256": "673484731ead9292b65d9f0c6d6868fd7b4e7797a7217a9e60dfc826c70541b3",
+        "sha256": "6017ff2061cdeebc54eaf4012f95946a7fcc5e49d8e77470bf5db300bb27765d",
         "uri": "ui://okf-jawn/app.html"
       }
     ],
@@ -451,7 +451,7 @@
       {
         "uri": "ui://okf-jawn/app.html",
         "mime_type": "text/html;profile=mcp-app",
-        "text_sha256": "673484731ead9292b65d9f0c6d6868fd7b4e7797a7217a9e60dfc826c70541b3",
+        "text_sha256": "6017ff2061cdeebc54eaf4012f95946a7fcc5e49d8e77470bf5db300bb27765d",
         "csp": {
           "connectDomains": [],
           "resourceDomains": []
@@ -509,16 +509,21 @@
     "object_reads": [
       {
         "binding": "metrics",
-        "object": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff",
-        "blocks": 4,
+        "object": "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c",
+        "blocks": 9,
         "stopped": "finished",
-        "assembled_bytes": 223,
-        "assembled_sha256": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff",
+        "assembled_bytes": 576,
+        "assembled_sha256": "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c",
         "block_offsets": [
           "0",
           "64",
           "128",
-          "192"
+          "192",
+          "256",
+          "320",
+          "384",
+          "448",
+          "512"
         ]
       }
     ],
@@ -536,18 +541,18 @@
   "basic_host": {
     "status": "passed",
     "source": {
-      "status": "fetched",
+      "status": "cached",
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
-      "commit_resolved_at": "2026-10-09T12:46:43.689Z",
+      "commit_resolved_at": "2026-10-09T14:27:45.833Z",
       "files_verified": 14,
       "files_expected": 14,
       "package": {
         "name": "@modelcontextprotocol/ext-apps-basic-host",
         "version": "2.0.3"
       },
-      "lockfile_sha256": "9d0c8e47ddebaa046075a2a50dec2d57edd73b7ea2c6b7edf37221a4d0ed8ab8"
+      "lockfile_sha256": "ebc6498c106ec40577efbf058ca984642f419f26757caf0057d05431ab80c3ea"
     },
     "browser": {
       "name": "chromium",
@@ -705,8 +710,8 @@
         "present_dataset": {
           "status": "exercised",
           "expected_binding": "metrics",
-          "expected_digest": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff",
-          "expected_bytes": 223,
+          "expected_digest": "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c",
+          "expected_bytes": 576,
           "expected_rows": 5,
           "expected_chart_marks": 5,
           "table_captions": [
@@ -714,23 +719,33 @@
             "metrics"
           ],
           "read_object_digests": [
-            "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff"
+            "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c"
           ],
-          "read_object_calls": 4,
+          "read_object_calls": 9,
           "read_object_offsets": [
             "0",
             "64",
             "128",
-            "192"
+            "192",
+            "256",
+            "320",
+            "384",
+            "448",
+            "512"
           ],
           "read_object_bytes": [
             64,
             64,
             64,
-            31
+            64,
+            64,
+            64,
+            64,
+            64,
+            64
           ],
           "read_object_total_sizes": [
-            "223"
+            "576"
           ],
           "read_object_resolutions": 1,
           "show_calls": 2,
@@ -785,8 +800,8 @@
     "present_dataset": {
       "status": "exercised",
       "expected_binding": "metrics",
-      "expected_digest": "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff",
-      "expected_bytes": 223,
+      "expected_digest": "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c",
+      "expected_bytes": 576,
       "expected_rows": 5,
       "expected_chart_marks": 5,
       "table_captions": [
@@ -794,23 +809,33 @@
         "metrics"
       ],
       "read_object_digests": [
-        "d5ef75eb5436a2cb0dbfed37180053db30edc146df97358cf33ca76b66881bff"
+        "aab513246005fcf5431e5452e4afe5b2620a41024b9c230fa50b10c3c655e74c"
       ],
-      "read_object_calls": 4,
+      "read_object_calls": 9,
       "read_object_offsets": [
         "0",
         "64",
         "128",
-        "192"
+        "192",
+        "256",
+        "320",
+        "384",
+        "448",
+        "512"
       ],
       "read_object_bytes": [
         64,
         64,
         64,
-        31
+        64,
+        64,
+        64,
+        64,
+        64,
+        64
       ],
       "read_object_total_sizes": [
-        "223"
+        "576"
       ],
       "read_object_resolutions": 1,
       "show_calls": 2,
@@ -833,7 +858,7 @@
   },
   "host_render": {
     "status": "not_run",
-    "meaning": "No files under .artifacts/qualification/mcp-apps/hosts/. Host render for claude.ai / ChatGPT remains not_run until screenshots or notes are placed there. This receipt does not invent PASS.",
+    "meaning": "hosts/ directory exists but is empty. Place screenshots or notes from claude.ai / ChatGPT before claiming an observed host render.",
     "gate": "mcp-apps-web-hosts"
   },
   "static_bundle_smoke": {
