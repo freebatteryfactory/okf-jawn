@@ -10,6 +10,7 @@ use okf_jawn_contract::extraction::{SuppliedText, TextOrigin};
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{ItemDocument, TypeDefinition};
 use okf_jawn_contract::source::SourceAppearance;
+use okf_jawn_core::portable::item_content_digest;
 use okf_jawn_core::storage::{FolderListing, Page, Provenance};
 
 use super::edit::{appearance_file, correction_file, supplied_file};
@@ -145,13 +146,19 @@ pub(crate) fn show(
         }
     }
     let summary = file.summary(&path, revision, source.as_ref());
-    Ok(ItemDocument {
+    // `item_content_digest` reads only the body and properties, so the document is built with
+    // a placeholder digest first and then given the digest computed from it.
+    let mut document = ItemDocument {
         summary,
         body: file.document.body.clone(),
         properties: file.properties(),
+        content_digest: Digest::try_from("0".repeat(64))
+            .map_err(|error| internal(error.to_string()))?,
         source,
         draft: None,
-    })
+    };
+    document.content_digest = item_content_digest(&document)?;
+    Ok(document)
 }
 
 pub(crate) fn file(

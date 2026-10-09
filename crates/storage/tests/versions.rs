@@ -605,6 +605,39 @@ async fn a_reserved_name_in_any_letter_case_is_refused_naming_the_path() -> Test
 }
 
 #[tokio::test]
+async fn a_shown_item_carries_the_content_digest_core_computes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let first = versions
+        .commit(
+            &scope,
+            changes(
+                20,
+                &initial,
+                vec![
+                    note(uuid!(10)?, "a.md", "One.")?,
+                    note(uuid!(11)?, "b.md", "Two.")?,
+                ],
+            )?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let one = versions.show(&scope, &first, uuid!(10)?).await?;
+    let two = versions.show(&scope, &first, uuid!(11)?).await?;
+    assert_eq!(
+        one.content_digest,
+        okf_jawn_core::portable::item_content_digest(&one)?
+    );
+    assert_ne!(
+        one.content_digest, two.content_digest,
+        "other content has another digest"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_refusal_never_names_the_server_staging_directory() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (storage, scope, initial) = workspace(directory.path()).await?;
