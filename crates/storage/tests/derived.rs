@@ -538,6 +538,66 @@ async fn local_access_grants_the_owner_connectors_and_creators() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_connector_is_granted_only_on_the_workspaces_it_lists() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, _) = populated(directory.path()).await?;
+    let other = storage
+        .catalog()
+        .create(
+            &scope.tenant_id,
+            uuid!(80)?,
+            NewWorkspace {
+                name: "Private".to_owned(),
+                description: String::new(),
+                creator: person("ana"),
+            },
+        )
+        .await?;
+    let ConnectorIssue::Issued(issued) = storage
+        .credentials()
+        .create_connector(
+            uuid!(70)?,
+            NewConnector {
+                label: "agent".to_owned(),
+                workspace_ids: vec![scope.workspace_id],
+                allow_propose: true,
+            },
+        )
+        .await?
+    else {
+        return Err("expected a new connector".into());
+    };
+    let identity = storage.credentials().installation_identity().await?;
+    let agent = owner(
+        &identity.subject,
+        AccessRoute::McpDelegation,
+        Some(issued.connector.connector_id.0.to_string()),
+    )?;
+    let access = storage.access();
+    let listed = access
+        .authorize(&agent, scope.workspace_id, Permission::Read)
+        .await?;
+    assert_eq!(
+        listed.permissions,
+        vec![Permission::Read, Permission::Propose]
+    );
+    let unlisted = access.authorize(&agent, other.id, Permission::Read).await?;
+    assert!(
+        unlisted.permissions.is_empty(),
+        "the owner's connector holds nothing on a workspace it does not list"
+    );
+    let grants = access.grants(&agent).await?;
+    assert_eq!(
+        grants
+            .iter()
+            .map(|grant| grant.scope.workspace_id)
+            .collect::<Vec<_>>(),
+        vec![scope.workspace_id]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn local_editors_are_the_owner_and_every_grant_with_write_sorted_once() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (storage, scope, _) = populated(directory.path()).await?;
