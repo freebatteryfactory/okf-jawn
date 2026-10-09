@@ -13,6 +13,8 @@ export interface ResolvedPresentation {
     string,
     ReadonlyArray<Readonly<Record<string, string | number | boolean | null>>>
   >;
+  /** Why a binding's dataset was refused (malformed, not the converter's, stale): that chart's alert. */
+  datasetErrors?: ReadonlyMap<string, string>;
 }
 export const BindingsContext = createContext<ResolvedPresentation | null>(null);
 export function useBindings(): ResolvedPresentation {

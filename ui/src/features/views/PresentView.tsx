@@ -143,7 +143,7 @@ async function dataset(
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', merged));
   const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
   if (hex !== binding.materialized) throw new Error('Dataset digest verification failed');
-  return parseDataset(new TextDecoder('utf-8', { fatal: true }).decode(merged));
+  return new TextDecoder('utf-8', { fatal: true }).decode(merged);
 }
 
 function chartsFromView(view: z.infer<typeof zPresentResponse>['view']): {
@@ -184,6 +184,7 @@ export function PresentView({ response, callTool }: PresentViewProps) {
       const sources = new Map(resolved.sources);
       const definitions = new Map(resolved.bindings);
       const tables = new Map(resolved.tables);
+      const datasetErrors = new Map<string, string>();
       for (const binding of response.resolved_bindings) {
         definitions.set(binding.name, binding);
         const output = await callChecked(
@@ -204,10 +205,21 @@ export function PresentView({ response, callTool }: PresentViewProps) {
         if (source.source.revision !== binding.source.revision)
           throw new Error('Returned source revision differs from the binding');
         sources.set(binding.name, source);
-        const rows = await dataset(binding, callTool);
-        if (rows) tables.set(binding.name, rows);
+        const text = await dataset(binding, callTool);
+        if (text !== undefined) {
+          // The bytes are verified; a dataset the contract refuses is that binding's alert alone.
+          try {
+            tables.set(binding.name, parseDataset(text));
+          } catch (cause) {
+            datasetErrors.set(
+              binding.name,
+              cause instanceof Error ? cause.message : 'The dataset could not be read',
+            );
+          }
+        }
       }
-      if (active) setBindings({ ...resolved, sources, bindings: definitions, tables, charts });
+      if (active)
+        setBindings({ ...resolved, sources, bindings: definitions, tables, charts, datasetErrors });
     };
     load().catch((cause) => {
       if (active) setError(cause instanceof Error ? cause.message : 'Source resolution failed');
@@ -229,12 +241,14 @@ export function PresentView({ response, callTool }: PresentViewProps) {
   const first = response.resolved_bindings.at(0);
   const rows = first ? bindings.tables.get(first.name) : undefined;
   if (!first || !rows) {
+    const refused = first ? bindings.datasetErrors?.get(first.name) : undefined;
     const failed = response.charts.find((result) => result.status.status === 'failed')?.status;
     return (
       <p role="alert">
-        {failed && failed.status === 'failed'
-          ? failed.message
-          : 'A chart requires a retained materialized dataset. No model-provided data was substituted.'}
+        {refused ??
+          (failed && failed.status === 'failed'
+            ? failed.message
+            : 'A chart requires a retained materialized dataset. No model-provided data was substituted.')}
       </p>
     );
   }
