@@ -194,7 +194,9 @@ pub struct ConvertedDocument {
     pub markdown: String,
     /// File beneath the output directory holding the docling JSON export of this window.
     pub structured: PathBuf,
-    /// Navigable source locations.
+    /// Navigable source locations, with lines relative to this window's Markdown. A heading
+    /// entry selects its section as lines, from the heading line to the line before the next
+    /// heading of the same or a higher level, or to the end of the text.
     pub outline: Vec<OutlineEntry>,
     /// Page renders and pictures.
     pub assets: Vec<ConvertedAsset>,
@@ -252,6 +254,12 @@ pub struct ConversionRecord {
     pub markdown: Digest,
     /// Line-to-location map of that Markdown.
     pub locations: Vec<LineLocation>,
+    /// The outline of the Markdown the record describes, for the whole document: the window
+    /// outlines joined, with lines in the joined Markdown. A heading entry selects its section
+    /// as lines, from the heading line to the line before the next heading of the same or a
+    /// higher level, or to the end of the text. It is what the `outline` read view serves for a
+    /// converted source and the input of `reading::section_lines`.
+    pub outline: Vec<OutlineEntry>,
     /// Tables, for datasets.
     pub tables: Vec<ConvertedTable>,
     /// Retained page renders and pictures.

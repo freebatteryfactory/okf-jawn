@@ -346,7 +346,8 @@ pub(crate) const fn location_page(location: &SourceLocation) -> Option<u32> {
 /// the selected parser's for an item's own Markdown (`application-operations`), so ATX and
 /// Setext headings, fences and indented code are that parser's call. A heading entry selects
 /// its section: the heading line to the line before the next heading of the same or a higher
-/// level, or to the end.
+/// level, or to the end. `section_lines` trusts the producer to have applied that rule when it
+/// wrote the entry's `Lines` selection; it does not recompute a section.
 ///
 /// # Errors
 /// Returns `NotFound` on `/selection/heading` when no heading entry has exactly this label,

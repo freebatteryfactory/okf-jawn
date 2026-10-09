@@ -7,7 +7,7 @@ use okf_jawn_contract::extraction::{
     ConversionOutcome, ConversionSettings, ConverterIdentity, Extraction, TextOrigin,
 };
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspaceId, WorkspacePath};
-use okf_jawn_contract::read::{AssetRole, Selection};
+use okf_jawn_contract::read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection};
 use okf_jawn_contract::source::{SourceAppearance, SourceLocation, SourceLocator, SourceReference};
 use okf_jawn_core::conversion::{
     ConversionRecord, ConvertedCell, ConvertedTable, LineLocation, RetainedAsset, WindowExport,
@@ -118,6 +118,24 @@ pub fn record() -> Built<ConversionRecord> {
             LineLocation {
                 lines: TextRange { start: 5, end: 8 },
                 location: page(2),
+            },
+        ],
+        outline: vec![
+            OutlineEntry {
+                label: "Overview".to_owned(),
+                level: 1,
+                selection: Selection::Lines {
+                    range: TextRange { start: 1, end: 4 },
+                },
+                kind: OutlineEntryKind::Heading,
+            },
+            OutlineEntry {
+                label: "Revenue".to_owned(),
+                level: 1,
+                selection: Selection::Lines {
+                    range: TextRange { start: 5, end: 8 },
+                },
+                kind: OutlineEntryKind::Heading,
             },
         ],
         tables: vec![ConvertedTable {
