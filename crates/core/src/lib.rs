@@ -33,6 +33,8 @@ pub mod mutations;
 pub mod proposals;
 /// Configured dependency readiness probe.
 pub mod readiness;
+/// Which retained objects a citation may open.
+pub mod reading;
 /// Sandbox-origin capability tokens.
 pub mod sandbox;
 /// Rebuildable search, link, and graph index interface.
@@ -41,3 +43,5 @@ pub mod search;
 pub mod storage;
 /// Authenticated upload occurrence slots.
 pub mod uploads;
+/// The producer of a View binding's materialized dataset.
+pub mod views;
