@@ -223,6 +223,17 @@ async fn version_writes(
         .await
 }
 
+/// What the export handler does when `include_history` is set: write the history up to the
+/// exported revision once, under the job's mutation id.
+async fn version_history(
+    versions: &dyn VersionStore,
+    scope: &StorageScope,
+    revision: &Revision,
+    mutation_id: MutationId,
+) -> Result<ObjectInfo, ApiError> {
+    versions.write_history(scope, revision, mutation_id).await
+}
+
 async fn blob_store_calls(
     blobs: &dyn BlobStore,
     scope: &StorageScope,
@@ -849,6 +860,7 @@ fn object_info_is_digest_and_size_only() -> TestResult {
 fn version_store_calls_type_check() {
     assert!(type_checked(&version_reads));
     assert!(type_checked(&version_writes));
+    assert!(type_checked(&version_history));
 }
 
 #[test]

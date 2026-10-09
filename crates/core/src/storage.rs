@@ -535,6 +535,21 @@ pub trait VersionStore: Send + Sync {
         scope: &'a StorageScope,
         query: BlameQuery,
     ) -> PortFuture<'a, BlameResponse>;
+    /// Write the retained history of the accepted line up to `revision` into the blob store,
+    /// for a portable export that asks for it (`JobSpec::ExportWorkspace::include_history`).
+    ///
+    /// The object is a Git repository that stock `git` can clone once the export archive is
+    /// extracted; storage picks the concrete form (a bundle, or an archived bare repository).
+    /// It holds the commits reachable from `revision` on the accepted line and nothing else: no
+    /// proposal or candidate reference, and nothing a purge removed. Idempotent on
+    /// `mutation_id`: a repeated id writes nothing and returns the object the first call wrote.
+    /// The export handler adds the returned object to the export archive.
+    fn write_history<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        mutation_id: MutationId,
+    ) -> PortFuture<'a, ObjectInfo>;
 }
 
 /// A new blank workspace.
