@@ -10,10 +10,16 @@
 //! - `outline` and `record` assemble the whole-document `ConversionRecord` from its windows.
 //! - `cap` is the per-platform memory cap of the conversion child
 //!   (`converter-worker-memory-ceiling`).
+//! - `protocol`, `child` and `converter` are the docling adapter: the request and reply between
+//!   supervisor and child, the child's body, and the `Converter` that runs it under the cap.
 //! - `runtime` is the Tokio + `RecordStore` job runtime, and `handler` runs every `JobSpec`.
 
 #[cfg(feature = "runtime")]
 pub mod cap;
+#[cfg(feature = "runtime")]
+pub mod child;
+#[cfg(feature = "runtime")]
+pub mod converter;
 #[cfg(feature = "runtime")]
 pub mod export;
 #[cfg(feature = "runtime")]
@@ -24,6 +30,8 @@ pub mod handler;
 pub mod locate;
 #[cfg(feature = "runtime")]
 pub mod outline;
+#[cfg(feature = "runtime")]
+pub mod protocol;
 #[cfg(feature = "runtime")]
 pub mod record;
 #[cfg(feature = "runtime")]
