@@ -999,6 +999,100 @@
         "authored-typescript-seams",
         "mcp-apps-protocol-qualification"
       ]
+    },
+    {
+      "name": "process-memory-cap",
+      "use_sites": [
+        "crates/ingest/Cargo.toml"
+      ],
+      "planned_use_sites": [
+        "crates/ingest/src/"
+      ],
+      "official_sources": [
+        "https://docs.rs/processkit/3.3.4/processkit/",
+        "https://docs.rs/rlimit/0.11.0/rlimit/",
+        "https://docs.rs/sysinfo/0.39.6/sysinfo/",
+        "https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects",
+        "https://man7.org/linux/man-pages/man2/setrlimit.2.html"
+      ],
+      "symbols": [
+        "processkit::ProcessGroupOptions::max_memory",
+        "processkit::ProcessGroup::with_options",
+        "processkit::ProcessGroup::spawn",
+        "processkit::ProcessGroup::stats",
+        "rlimit::Resource::DATA",
+        "sysinfo::System::refresh_processes_specifics"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Reference notes from reading each pinned crate source downloaded from crates.io (sha256 below); no Context7 lookup was executed (the server was not connected)",
+      "offline_notes": [
+        "One facility per platform behind one cap interface in ingest (verification.json converter-worker-memory-ceiling): Windows a job-object memory limit, Linux RLIMIT_DATA set by the child itself as the first statement of main, macOS a sampling watchdog (owner to confirm it counts as the hard cap). Conversion is never refused on a platform.",
+        "processkit 3.3.4 (.crate sha256 1549b59abbe4fc78aa39860e36c81da89262c1278679b8f7299ef4ad7668c004, MIT): ProcessGroup::with_options sets JOB_OBJECT_LIMIT_JOB_MEMORY with KILL_ON_JOB_CLOSE (src/sys/windows.rs:491-497); spawn creates the child CREATE_SUSPENDED, assigns it to the job and resumes it (src/sys/windows.rs:636), so no instruction runs outside the cap; stats().peak_memory_bytes is the job PeakJobMemoryUsed (peak committed). Reviewed source of exactly this version: a young crate (first release 2026-05-31) with one maintainer, so any version bump needs a fresh source review. Fallback: process_control 5.2.0, which assigns the job only after the child runs and whose wait cannot kill on drop.",
+        "win32job 2.0.3 was rejected: its ExtendedLimitInfo field is pub(crate) and it exposes only limit_working_memory (a working-set limit trims pages and is not a cap). Calling the windows crate directly needs authored unsafe, which AGENTS.md forbids.",
+        "rlimit 0.11.0 (.crate sha256 f35ee2729c56bb610f6dba436bf78135f728b7373bdffae2ec815b2d3eb98cc3, MIT): Resource::DATA.set(soft, hard) (src/resource/mod.rs:60). RLIMIT_DATA counts private writable mappings since Linux 4.7 but not PROT_NONE reservations, which ONNX Runtime makes; Resource::AS stays available if the measurement chooses it.",
+        "sysinfo 0.39.6 (.crate sha256 d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6, MIT), default features off, system only, macOS only: refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing().with_memory()) then process(pid).memory(); it samples and so can overshoot between samples."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": [
+        "converter-worker-memory-ceiling"
+      ]
+    },
+    {
+      "name": "pulldown-cmark",
+      "use_sites": [
+        "crates/core/Cargo.toml"
+      ],
+      "planned_use_sites": [
+        "crates/core/src/"
+      ],
+      "official_sources": [
+        "https://docs.rs/pulldown-cmark/0.13.4/pulldown_cmark/",
+        "https://spec.commonmark.org/"
+      ],
+      "symbols": [
+        "Parser::new_ext",
+        "Event",
+        "Tag::Heading",
+        "HeadingLevel",
+        "Parser::into_offset_iter"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Owner-approved for item Markdown outlines; already in Cargo.lock through docling, so adding it to core adds no package. default-features off: no HTML renderer.",
+        "Core hand-writes no Markdown scan: heading entries come from the parser and follow the same section-span rule as the converter outline (contract read::OutlineEntry.selection), so reading::section_lines behaves the same for both producers."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": [
+        "application-operations"
+      ]
+    },
+    {
+      "name": "getrandom",
+      "use_sites": [
+        "crates/storage/Cargo.toml"
+      ],
+      "planned_use_sites": [
+        "crates/storage/src/"
+      ],
+      "official_sources": [
+        "https://docs.rs/getrandom/0.4.3/getrandom/"
+      ],
+      "symbols": [
+        "getrandom::fill"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Official documentation reference; qualify installed version before use",
+      "offline_notes": [
+        "Connector secrets are at least 32 bytes from the operating system random source (crates/core/src/credentials.rs CredentialStore::create_connector); getrandom::fill(&mut [u8; 32]). Already locked through uuid."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": [
+        "storage-git-cas-sqlite"
+      ]
     }
   ]
 }

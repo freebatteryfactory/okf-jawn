@@ -25,6 +25,7 @@ base64.workspace = true
 # okf-core is required because Bundle is not re-exported by the validator.
 okf-core.workspace = true
 okf-validator.workspace = true
+pulldown-cmark.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
