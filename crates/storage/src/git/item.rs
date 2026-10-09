@@ -163,18 +163,18 @@ pub(crate) fn is_item_path(path: &str) -> bool {
         && !is_reserved(path)
 }
 
-/// Whether a tree path is one the server keeps for itself: anything under `.okf/`, or a file
-/// named `index.md` or `log.md` at any depth. Compared by collision key (NFC, then lower case),
-/// on every platform: on a case-insensitive filesystem `notes/INDEX.md` is the folder index
-/// that every commit regenerates, so an item there would be overwritten.
+/// Whether a tree path is one the server keeps for itself or one that would collide with such
+/// a path: any segment, at any depth, that is `.okf`, `index.md` or `log.md`. Compared by
+/// collision key (NFC, then lower case) on every platform: on a case-insensitive filesystem
+/// `notes/INDEX.md` is the folder index every commit regenerates, so an item there would be
+/// overwritten, and a folder `a/INDEX.MD/` would merge with the file `a/index.md`.
 pub(crate) fn is_reserved(path: &str) -> bool {
-    let key = collision_key(path);
-    let first = key.split('/').next().unwrap_or_default();
-    let name = key.rsplit('/').next().unwrap_or_default();
-    first == APP_DIR
-        || okf_core::RESERVED_FILENAMES
-            .iter()
-            .any(|reserved| collision_key(reserved) == name)
+    collision_key(path).split('/').any(|segment| {
+        segment == APP_DIR
+            || okf_core::RESERVED_FILENAMES
+                .iter()
+                .any(|reserved| collision_key(reserved) == segment)
+    })
 }
 
 /// The key two paths collide on (`WorkspacePath::collision_key`); a path that is not a valid
@@ -272,8 +272,8 @@ pub(crate) fn check_item_path(path: &WorkspacePath, field: &str) -> Result<(), A
         return Err(ApiError::new(
             ErrorCode::InvalidInput,
             format!(
-                "{} is reserved: .okf/, index.md and log.md (in any letter case) are kept by \
-                 the server and cannot hold an item",
+                "{} is reserved: .okf, index.md and log.md (in any letter case, as any path \
+                 segment) are kept by the server and cannot hold an item",
                 path.as_str()
             ),
         )

@@ -355,14 +355,18 @@ fn stage_and_commit(
     let base = repository
         .find_commit(write.base)
         .map_err(|error| git(&error))?;
-    let tree = base.tree().map_err(|error| git(&error))?;
-    materialize(repository, &tree, &staging.path)?;
-    let mut staged = Staged::scan(&staging.path)?;
-    apply(repository, &mut staged, write.edits)?;
-    staged.refuse_collisions()?;
-    maintain(&staging.path, &write.message)?;
-    let warnings = check.check(&staging.path)?;
-    let tree = staged_tree(repository, &staging.path)?;
+    let staged_root = staging.path.clone();
+    let candidate = || -> Result<(Oid, Vec<Warning>), ApiError> {
+        let tree = base.tree().map_err(|error| git(&error))?;
+        materialize(repository, &tree, &staged_root)?;
+        let mut staged = Staged::scan(&staged_root)?;
+        apply(repository, &mut staged, write.edits)?;
+        staged.refuse_collisions()?;
+        maintain(&staged_root, &write.message)?;
+        let warnings = check.check(&staged_root)?;
+        Ok((staged_tree(repository, &staged_root)?, warnings))
+    };
+    let (tree, warnings) = candidate().map_err(|error| without_staging(error, &staging.path))?;
     let tree = repository.find_tree(tree).map_err(|error| git(&error))?;
     let commit = repository
         .commit(
@@ -375,6 +379,20 @@ fn stage_and_commit(
         )
         .map_err(|error| git(&error))?;
     Ok((commit, warnings))
+}
+
+/// An error with the server's staging directory removed from its message, so a refusal names
+/// the workspace path the request gave and never a path on the server.
+fn without_staging(mut error: ApiError, staging: &std::path::Path) -> ApiError {
+    let shown = staging.display().to_string();
+    for prefix in [
+        format!("{shown}{}", std::path::MAIN_SEPARATOR),
+        format!("{shown}/"),
+        shown.clone(),
+    ] {
+        error.message = error.message.replace(&prefix, "");
+    }
+    error
 }
 
 /// Accept a candidate: its exact tree on top of the unchanged head, the approver committing.

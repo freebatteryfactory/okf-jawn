@@ -120,9 +120,16 @@ impl Staged {
             return Ok(true);
         }
         let folder_prefix = format!("{key}/");
+        // Every folder the path would need: a file already holding one of those keys blocks it.
+        let folders: Vec<&str> = key
+            .match_indices('/')
+            .filter_map(|(at, _)| key.get(..at))
+            .collect();
         Ok(files_under(&self.root, "")?.iter().any(|existing| {
             let existing = collision_key(existing);
-            existing == key || existing.starts_with(&folder_prefix)
+            existing == key
+                || existing.starts_with(&folder_prefix)
+                || folders.contains(&existing.as_str())
         }) || self
             .items
             .values()
@@ -260,8 +267,8 @@ fn create_folder(staged: &Staged, folder: &WorkspacePath) -> Result<(), ApiError
         return Err(ApiError::new(
             ErrorCode::InvalidInput,
             format!(
-                "{} is reserved: .okf/, index.md and log.md (in any letter case) are kept by \
-                 the server",
+                "{} is reserved: .okf, index.md and log.md (in any letter case, as any path \
+                 segment) are kept by the server",
                 folder.as_str()
             ),
         )

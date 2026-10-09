@@ -553,6 +553,11 @@ async fn a_reserved_name_in_any_letter_case_is_refused_naming_the_path() -> Test
         "Log.md",
         "index.md",
         "deep/er/LOG.md",
+        "a/INDEX.MD/b.md",
+        "LOG.md/x.md",
+        "a/Index.md/c.md",
+        ".okf/sources/x.md",
+        "notes/.Okf/x.md",
     ];
     for (mutation, at) in (30..).zip(reserved) {
         let error = err_of(
@@ -572,17 +577,30 @@ async fn a_reserved_name_in_any_letter_case_is_refused_naming_the_path() -> Test
         );
         assert_eq!(error.field.as_deref(), Some("/path"), "{at}");
         assert!(error.message.contains(at), "{at}: {}", error.message);
+        assert!(
+            !error.message.contains("staging"),
+            "{at}: no server path leaks: {}",
+            error.message
+        );
         assert_eq!(
             versions.head(&scope).await?,
             initial,
             "{at}: nothing committed"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_move_or_folder_onto_a_reserved_name_is_refused_naming_the_path() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
     let created = versions
         .commit(
             &scope,
             changes(
-                40,
+                50,
                 &initial,
                 vec![note(uuid!(10)?, "notes/plan.md", "Mine.")?],
             )?,
@@ -613,22 +631,54 @@ async fn a_reserved_name_in_any_letter_case_is_refused_naming_the_path() -> Test
         "{}",
         moved.message
     );
-    let folder = err_of(
+    for (mutation, folder) in [
+        (42, ".Okf/inner"),
+        (43, "notes/INDEX.md"),
+        (44, "a/Log.MD/inner"),
+    ] {
+        let refused = err_of(
+            versions
+                .commit(
+                    &scope,
+                    changes(
+                        mutation,
+                        &created,
+                        vec![TreeEdit::CreateFolder {
+                            folder: path(folder)?,
+                        }],
+                    )?,
+                    Arc::new(Counting::default()),
+                )
+                .await,
+        )?;
+        assert_eq!(
+            refused.code,
+            ErrorCode::InvalidInput,
+            "{folder}: {}",
+            refused.message
+        );
+        assert_eq!(refused.field.as_deref(), Some("/folder"), "{folder}");
+    }
+    // A folder an item path needs, where a file already is: refused naming the request's path.
+    let blocked = err_of(
         versions
             .commit(
                 &scope,
                 changes(
-                    42,
+                    45,
                     &created,
-                    vec![TreeEdit::CreateFolder {
-                        folder: path(".Okf/inner")?,
-                    }],
+                    vec![note(uuid!(11)?, "notes/PLAN.md/inner.md", "Below a file.")?],
                 )?,
                 Arc::new(Counting::default()),
             )
             .await,
     )?;
-    assert_eq!(folder.code, ErrorCode::InvalidInput, "{}", folder.message);
+    assert_eq!(blocked.code, ErrorCode::Conflict, "{}", blocked.message);
+    assert!(
+        blocked.message.contains("notes/PLAN.md/inner.md") && !blocked.message.contains("staging"),
+        "{}",
+        blocked.message
+    );
     assert_eq!(versions.head(&scope).await?, created);
     let kept = versions.show(&scope, &created, uuid!(10)?).await?;
     assert_eq!(kept.body, "Mine.", "the item's content is intact");
