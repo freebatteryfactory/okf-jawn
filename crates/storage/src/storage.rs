@@ -192,3 +192,47 @@ impl Storage {
         &self.data
     }
 }
+
+/// Unit tests here, not in `tests/`: a test target's own SQLite connection would not show the
+/// pragmas of the store's connections. They return `ApiError` like core's unit tests.
+#[cfg(test)]
+mod tests {
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
+
+    use super::Storage;
+    use crate::db::sql;
+
+    fn io(error: &std::io::Error) -> ApiError {
+        ApiError::new(ErrorCode::Internal, error.to_string())
+    }
+
+    #[tokio::test]
+    async fn every_store_connection_enforces_foreign_keys() -> Result<(), ApiError> {
+        let directory = tempfile::tempdir().map_err(|error| io(&error))?;
+        let storage = Storage::open(directory.path())?;
+        for db in [&storage.records, &storage.index] {
+            let enforced: i64 = db
+                .call(|connection| {
+                    connection
+                        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+                        .map_err(|error| sql(&error))
+                })
+                .await?;
+            assert_eq!(enforced, 1, "foreign_keys is ON on every store connection");
+        }
+        let refused = storage
+            .records
+            .call(|connection| {
+                Ok(connection
+                    .execute(
+                        "INSERT INTO job_controls (mutation_id, job_id, action)
+                         VALUES ('m', 'no-such-job', 'cancel')",
+                        [],
+                    )
+                    .is_err())
+            })
+            .await?;
+        assert!(refused, "a row naming a missing job is refused");
+        Ok(())
+    }
+}
