@@ -6,7 +6,7 @@
 //! `rotate_connector_secret`, which invalidates the secret nobody received and returns a new one.
 
 use okf_jawn_contract::access::{Connector, IssuedConnector, Principal};
-use okf_jawn_contract::identity::{ConnectorId, MutationId, WorkspaceId};
+use okf_jawn_contract::identity::{ConnectorId, MutationId, Timestamp, WorkspaceId};
 use sha2::{Digest as _, Sha256};
 
 use crate::ports::PortFuture;
@@ -16,8 +16,8 @@ use crate::ports::PortFuture;
 pub struct InstallationIdentity {
     /// Stable subject for the local owner principal.
     pub subject: String,
-    /// RFC 3339 creation time.
-    pub created_at: String,
+    /// When the identity was created, in the canonical UTC spelling.
+    pub created_at: Timestamp,
 }
 
 /// Authenticated browser session record without exposing the cookie secret.
@@ -27,8 +27,9 @@ pub struct SessionRecord {
     pub session_id: String,
     /// Authenticated principal bound to the session.
     pub principal: Principal,
-    /// RFC 3339 expiry.
-    pub expires_at: String,
+    /// When the session expires, in the canonical UTC spelling; `get_session` does not return
+    /// it from that instant on.
+    pub expires_at: Timestamp,
 }
 
 /// The scope of a local MCP connector to issue.

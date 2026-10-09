@@ -1,8 +1,9 @@
 //! The application header of an item file is server-owned (Stage 1b design section 13).
 //!
-//! Every item file carries one mapping under `APP_HEADER_KEY`: the item id, the archived flag
-//! when set, and on a source card the original name and digest and the extraction. Index
-//! rebuild and export read it back, so it is written only by the server's own edits
+//! Every item file carries one mapping under `APP_HEADER_KEY`: the item id, the item's
+//! rendering role (`kind`), the archived flag when set, and on a source card the original name
+//! and digest and the extraction. Index rebuild and export read it back, so it is written only
+//! by the server's own edits
 //! (`TreeEdit::SetStatus`, a redigest's `WriteSourceCard`, `CorrectDigest`,
 //! `SupplyExtraction`). A caller's write that would change it is refused as `InvalidInput` on
 //! the header's field before any port is touched:
@@ -28,6 +29,10 @@
 //!
 //! `VersionStore` applies the same rule to the edits it is handed, so a handler that skipped
 //! the check still cannot write a changed header.
+//!
+//! The rendering role is recorded, never inferred: storage reads an item's `kind` from its
+//! header, not from its body. A Note that shows a fenced vega-lite example stays a Note; only a
+//! creation that says `View` makes one.
 
 use std::collections::BTreeMap;
 
@@ -38,7 +43,7 @@ use okf_jawn_contract::{
     error::{ApiError, ErrorCode},
     extraction::Extraction,
     identity::{Digest, ItemId},
-    item::{APP_HEADER_KEY, TypeDefinition},
+    item::{APP_HEADER_KEY, ItemKind, TypeDefinition},
 };
 
 use crate::stored::{ValidatorCell, decode_stored};
@@ -49,6 +54,10 @@ use crate::stored::{ValidatorCell, decode_stored};
 pub struct ApplicationHeader {
     /// Stable application identity of the item.
     pub item_id: ItemId,
+    /// Built-in rendering role, written when the item is created and required. No caller
+    /// write changes it (the header refusals), and storage reads it from here instead of
+    /// inferring it from the body.
+    pub kind: ItemKind,
     /// Present and true when the item is archived.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
@@ -111,6 +120,32 @@ const SCHEMA_LIST_KEYWORDS: &[&str] = &["allOf", "anyOf", "items", "oneOf", "pre
 const REFERENCE_KEYWORDS: &[&str] = &["$ref", "$dynamicRef", "$recursiveRef"];
 
 impl ApplicationHeader {
+    /// The header the server assigns to an imported file that arrives without one: kind
+    /// `Source` when the file is a source card (it names its original in `source`), otherwise
+    /// `Note`, and not archived.
+    ///
+    /// A headerless file is never made a `View`: a View is only what a creation names as one,
+    /// so a Note that shows a fenced vega-lite example stays a Note.
+    #[must_use]
+    pub fn assigned(
+        item_id: ItemId,
+        source: Option<SourceHeader>,
+        extraction: Option<Extraction>,
+    ) -> Self {
+        let kind = if source.is_some() {
+            ItemKind::Source
+        } else {
+            ItemKind::Note
+        };
+        Self {
+            item_id,
+            kind,
+            archived: false,
+            source,
+            extraction,
+        }
+    }
+
     /// The header as the property value stored under `APP_HEADER_KEY`.
     ///
     /// # Errors

@@ -192,6 +192,14 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, BlameResponse> {
         unused()
     }
+    fn write_history<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _revision: &'a Revision,
+        _mutation_id: MutationId,
+    ) -> PortFuture<'a, ObjectInfo> {
+        unused()
+    }
 }
 
 impl FakeBlobs {
