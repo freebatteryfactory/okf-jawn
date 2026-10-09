@@ -8,7 +8,10 @@ mod check;
 
 mod memory_cap_classification {
     use okf_jawn_contract::extraction::FailureReason;
-    use okf_jawn_ingest::cap::{CAP_MARGIN_MIN_BYTES, ChildEnd, ChildVerdict, classify};
+    use okf_jawn_ingest::cap::{
+        CAP_MARGIN_MIN_BYTES, ChildEnd, ChildVerdict, WATCHDOG_SAMPLE_PERIOD_MS,
+        WORST_ALLOCATION_RATE_BYTES_PER_SECOND, classify, watchdog_threshold,
+    };
 
     const CAP: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -62,6 +65,31 @@ mod memory_cap_classification {
         assert_eq!(
             classify(&below, CAP, 600),
             ChildVerdict::Failed(FailureReason::ConverterCrashed)
+        );
+    }
+
+    #[test]
+    fn the_watchdog_kills_at_the_cap_minus_the_greater_headroom() {
+        const MIB: u64 = 1024 * 1024;
+        // Two 75 ms samples at 512 MiB/s is 76.8 MiB; 5% of 2 GiB is 102.4 MiB, the greater.
+        assert_eq!(
+            watchdog_threshold(2048 * MIB, 75, 512 * MIB),
+            2048 * MIB - 2048 * MIB / 20
+        );
+        // At 2 GiB/s growth dominates: 2 x 75 ms x 2 GiB/s = 307.2 MiB.
+        assert_eq!(
+            watchdog_threshold(2048 * MIB, 75, 2048 * MIB),
+            2048 * MIB - 2048 * MIB * 150 / 1000
+        );
+        // Headroom never takes the threshold below zero.
+        assert_eq!(watchdog_threshold(MIB, 100, 1024 * MIB), 0);
+        assert_eq!(
+            watchdog_threshold(
+                2048 * MIB,
+                WATCHDOG_SAMPLE_PERIOD_MS,
+                WORST_ALLOCATION_RATE_BYTES_PER_SECOND
+            ),
+            2048 * MIB - 2048 * MIB / 20
         );
     }
 

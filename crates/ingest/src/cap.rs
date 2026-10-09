@@ -5,7 +5,9 @@
 //!
 //! - Windows: a job object with a committed-memory limit, assigned before the child runs.
 //! - Linux: the child sets its own `RLIMIT_DATA` as the first thing it does.
-//! - macOS: a supervisor watchdog samples the child every 50 to 100 ms and kills it at the cap.
+//! - macOS: a supervisor watchdog samples the child's `phys_footprint` (what jetsam uses) and
+//!   kills it with SIGKILL at `watchdog_threshold`, the cap minus a headroom. The metric is read
+//!   in one private function, so the crate behind it can change (sysinfo, then libproc).
 //!   The owner has not yet confirmed that this counts as the hard cap there.
 //!
 //! The facilities come from Batch A (`processkit`, `rlimit`, `sysinfo`). Until it is on `main`
@@ -63,6 +65,38 @@ pub const ALLOCATION_FAILURE_MARKERS: [&str; 4] = [
     "bad allocation",
     "Failed to allocate memory",
 ];
+
+/// How often the macOS watchdog samples the child, within the 50 to 100 ms the plan allows.
+pub const WATCHDOG_SAMPLE_PERIOD_MS: u64 = 75;
+
+/// The fastest the converter child was seen to grow, in bytes per second.
+///
+/// Placeholder until part (b) of `converter-worker-memory-ceiling` measures it: 512 MiB/s is an
+/// assumption, not a measurement. The watchdog kills at the cap minus a headroom large enough
+/// for two samples of growth at this rate, so the child cannot pass the cap between samples.
+pub const WORST_ALLOCATION_RATE_BYTES_PER_SECOND: u64 = 512 * 1024 * 1024;
+
+/// The least headroom, as a share of the cap: one twentieth, 5%.
+pub const WATCHDOG_MIN_HEADROOM_DIVISOR: u64 = 20;
+
+/// The footprint at which the macOS watchdog kills the child with SIGKILL: the cap minus the
+/// headroom. The headroom is the greater of two sample periods of growth at the worst observed
+/// rate and 5% of the cap.
+#[must_use]
+pub fn watchdog_threshold(
+    limit_bytes: u64,
+    sample_period_ms: u64,
+    worst_rate_per_second: u64,
+) -> u64 {
+    let growth = worst_rate_per_second
+        .saturating_mul(sample_period_ms.saturating_mul(2))
+        .checked_div(1000)
+        .unwrap_or(0);
+    let share = limit_bytes
+        .checked_div(WATCHDOG_MIN_HEADROOM_DIVISOR)
+        .unwrap_or(0);
+    limit_bytes.saturating_sub(growth.max(share))
+}
 
 /// Read a child's end against its cap and time bound.
 #[must_use]
