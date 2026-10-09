@@ -2,9 +2,8 @@
 
 use okf_jawn_contract::source::{GetSourcesResponse, UncitedReason, UncitedSource};
 use serde_json::json;
-use std::error::Error;
 
-type TestResult = Result<(), Box<dyn Error>>;
+use check::{TestResult, err_of};
 
 #[test]
 fn a_response_without_uncited_entries_reads_as_none_and_writes_none() -> TestResult {
@@ -48,12 +47,15 @@ fn uncited_entries_keep_their_resource_reason_and_order() -> TestResult {
 }
 
 #[test]
-fn an_uncited_entry_refuses_unknown_fields_and_reasons() {
-    let extra = serde_json::from_value::<UncitedSource>(
+fn an_uncited_entry_refuses_unknown_fields_and_reasons() -> TestResult {
+    err_of(serde_json::from_value::<UncitedSource>(
         json!({ "resource": "x", "reason": "external", "guess": true }),
-    );
-    assert!(extra.is_err(), "{extra:?}");
-    let reason =
-        serde_json::from_value::<UncitedSource>(json!({ "resource": "x", "reason": "web" }));
-    assert!(reason.is_err(), "{reason:?}");
+    ))?;
+    err_of(serde_json::from_value::<UncitedSource>(
+        json!({ "resource": "x", "reason": "web" }),
+    ))?;
+    Ok(())
 }
+
+#[path = "../../../tests/support/check.rs"]
+mod check;
