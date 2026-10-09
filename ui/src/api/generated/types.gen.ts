@@ -1149,6 +1149,39 @@ export type DatasetValue = null | boolean | number | string;
 export type DateOrder = 'ymd' | 'mdy' | 'dmy' | 'reject_ambiguous';
 
 /**
+ * What an OKF `sources` entry resolved to.
+ */
+export type DeclaredOutcome = {
+    /**
+     * Its position in `sources`.
+     */
+    index: number;
+    kind: 'cited';
+} | {
+    kind: 'uncited';
+    /**
+     * Why not.
+     */
+    reason: UncitedReason;
+};
+
+/**
+ * One entry of an item's OKF `sources` and what it resolved to.
+ */
+export type DeclaredSource = {
+    /**
+     * The entry exactly as written in the file, of whatever shape: OKF gives a mapping, and an
+     * entry that is not one (a bare string, a number) is kept as written with the outcome
+     * `uncited` / `malformed`. A `sources` value that is not a list is one such entry.
+     */
+    entry: unknown;
+    /**
+     * Whether it is a citation of an item at the resolved revision.
+     */
+    outcome: DeclaredOutcome;
+};
+
+/**
  * Close a proposal without changing accepted content.
  */
 export type DeclineProposalRequest = {
@@ -2039,6 +2072,12 @@ export type GetSourcesResponse = {
      * Occurrence metadata if the item is a source.
      */
     appearance?: SourceAppearance | null;
+    /**
+     * Every entry of the item's OKF `sources`, in the file's order, each exactly as written
+     * (its `id`, the key a footnote cites, and every other field kept) with what it resolved to;
+     * so no declared source, and none of its fields, is silently dropped.
+     */
+    declared?: Array<DeclaredSource>;
     /**
      * Resolved version.
      */
@@ -4404,6 +4443,11 @@ export type UnarchiveWorkspaceRequest = {
      */
     workspace_id: WorkspaceId;
 };
+
+/**
+ * Why an OKF `sources` entry is not a citation.
+ */
+export type UncitedReason = 'external' | 'scope' | 'not_found' | 'malformed';
 
 /**
  * Why a location is not known; one variant per reason the producing rule states.

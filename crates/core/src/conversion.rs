@@ -234,6 +234,11 @@ pub struct WindowExport {
     pub window: Option<PageRange>,
     /// Digest of the retained export.
     pub digest: Digest,
+    /// The lines of the record's joined Markdown this window produced; `None` when the window
+    /// produced no text. A redigest that converts only a source's unconverted pages replaces
+    /// exactly these line ranges, and only under the same converter identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<TextRange>,
 }
 
 /// The retained record a conversion digest names; JSON in the blob store, written by ingest
