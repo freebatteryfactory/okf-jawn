@@ -46,7 +46,14 @@ pub struct BindingFailure {
 #[derive(Debug, Clone, Copy)]
 struct GridCell<'a> {
     text: &'a str,
-    header: bool,
+}
+
+/// A table laid out over the read area.
+struct Grid<'a> {
+    /// One row per read row, one entry per read column: the cell whose origin is there.
+    cells: Vec<Vec<Option<GridCell<'a>>>>,
+    /// Read rows a column-header cell covers, at its origin or by its row span.
+    header_rows: BTreeSet<u32>,
 }
 
 /// Zero-based rows and columns of a table that a cell range selects.
@@ -118,12 +125,13 @@ pub fn materialize(
     if width == 0 {
         return Err(unavailable("the selected table has no columns"));
     }
-    let grid = grid_of(table, rows, columns)?;
-    let header_rows = grid
-        .iter()
-        .take_while(|row| row.iter().any(|cell| cell.is_some_and(|cell| cell.header)))
+    // The header is the leading rows a column-header cell covers, so a header spanning two
+    // rows leaves no empty row in the body.
+    let grid = grid_of(table, rows.clone(), columns)?;
+    let header_rows = rows
+        .take_while(|row| grid.header_rows.contains(row))
         .count();
-    let (headers, body) = grid.split_at(header_rows);
+    let (headers, body) = grid.cells.split_at(header_rows);
     let names = column_names(headers, width);
     let kinds: Vec<ColumnKind> = (0..width).map(|column| column_kind(body, column)).collect();
     let columns = names
@@ -323,7 +331,8 @@ fn grid_of<'a>(
     table: &'a ConvertedTable,
     rows: Range<u32>,
     columns: Range<u32>,
-) -> Result<Vec<Vec<Option<GridCell<'a>>>>, BindingFailure> {
+) -> Result<Grid<'a>, BindingFailure> {
+    let mut header_rows: BTreeSet<u32> = BTreeSet::new();
     let mut by_position: BTreeMap<(u32, u32), GridCell<'a>> = BTreeMap::new();
     // Every position of the read area a cell's span covers; two spans meeting there overlap.
     // Only the read area is marked, which the cell bound keeps small.
@@ -351,6 +360,9 @@ fn grid_of<'a>(
         let spanned_columns =
             cell.column.max(columns.start)..column_end.unwrap_or(cell.column).min(columns.end);
         for row in spanned_rows {
+            if cell.column_header && !spanned_columns.is_empty() {
+                header_rows.insert(row);
+            }
             for column in spanned_columns.clone() {
                 if !occupied.insert((row, column)) {
                     return Err(unavailable(&format!(
@@ -361,7 +373,6 @@ fn grid_of<'a>(
         }
         let placed = GridCell {
             text: cell.text.as_str(),
-            header: cell.column_header,
         };
         if by_position
             .insert((cell.row, cell.column), placed)
@@ -373,14 +384,15 @@ fn grid_of<'a>(
             )));
         }
     }
-    Ok(rows
+    let cells = rows
         .map(|row| {
             columns
                 .clone()
                 .map(|column| by_position.get(&(row, column)).copied())
                 .collect()
         })
-        .collect())
+        .collect();
+    Ok(Grid { cells, header_rows })
 }
 
 /// Column names from the header rows, joined top to bottom; `column_<n>` where there is none.

@@ -324,6 +324,28 @@ fn an_empty_out_of_table_or_overlapping_span_fails_the_chart() -> TestResult {
 }
 
 #[test]
+fn a_header_spanning_two_rows_leaves_no_empty_body_row() -> TestResult {
+    let dataset = read_with(|cells| {
+        cells.retain(|cell| cell.row != 1);
+        for cell in cells.iter_mut().filter(|cell| cell.row == 0) {
+            cell.row_span = 2;
+        }
+    })?
+    .map_err(|reason| format!("{reason:?}"))?;
+    let names: Vec<&str> = dataset
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect();
+    assert_eq!(names, ["Quarter", "Revenue", "Audited"]);
+    // Only the Q2 row is data; the second header row is not an invented row of nulls.
+    assert_eq!(dataset.rows.len(), 1);
+    let first = dataset.rows.first().ok_or("one body row")?;
+    assert_eq!(first.first(), Some(&DatasetValue::Text("Q2".to_owned())));
+    Ok(())
+}
+
+#[test]
 fn every_column_name_is_distinct_even_against_generated_ones() -> TestResult {
     let dataset = read_with(|cells| {
         for (column, header) in [(0, "A"), (1, "A"), (2, "A (2)")] {
