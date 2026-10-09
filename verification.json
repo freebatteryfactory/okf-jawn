@@ -190,7 +190,7 @@
           "status": "blocked_on_lanes",
           "owner": "core-cli",
           "receipt": "cargo test -p okf-jawn-core",
-          "meaning": "After contract-expresses-extraction-sources-views and before the ingest and views lanes start: the core ports carry what that gate puts on the wire. Missing in core today: a producer for Extraction::Pending; a line-to-page map in ConvertedDocument; an asset role (page render or figure) on ConvertedAsset and import settings on JobSpec::Import; a Converter port that converts in page windows, reports the pages a partial conversion covered, and lets a long conversion renew its lease; a producer of a View's materialized dataset; and a check that a fetched object belongs to the item revision"
+          "meaning": "After contract-expresses-extraction-sources-views and before the ingest and views lanes start: the core ports carry what that gate puts on the wire (Stage 1b design section 9). Core carries: the Converter port converting one-based page windows in a child process under a memory cap, with page_count, limits and per-window coverage, and the retained ConversionRecord (line-to-location map, tables, retained assets with role and location, one structured export per window); JobSpec::Import settings, Redigest pages, RestoreWorkspace from an upload, tenant-scoped jobs and artifacts (JobScope), the lease-renewing update_progress heartbeat, purge records, the revision map and derived-object records; source cards that show the contract Extraction (committed pending before conversion by ingest's import handler) and the server-owned application header; the Purger and Backups ports; EventScope and security events; the extraction search filter. Split with application-operations: what dispatch or access can enforce before a handler belongs here and is enforced or provided as core functions with tests: route refusal of DRAFT_BEARING and HUMAN_SESSION_ONLY operations, permission_denied recording, the job-kind rule (access::authorize_job_kind), object ownership (reading::authorize_object), the revision-map check, citation locations, the header refusals (items), the dataset producer (views::materialize and retain_dataset) and schema validation of stored values (stored::decode_stored). Calling them from the operation handlers is application-operations"
         },
         {
           "id": "storage-git-cas-sqlite",
@@ -281,7 +281,7 @@
           "status": "blocked_on_lanes",
           "owner": "core-cli",
           "receipt": "cargo test -p okf-jawn-core -p okf-jawn-cli",
-          "meaning": "ApplicationService implements all 69 operations over OperationContext; CLI against a running server"
+          "meaning": "ApplicationService implements all 77 operations over OperationContext; CLI against a running server. The handlers call the checks core-ports-carry-extraction-and-views provides: retry_job and cancel_job apply access::authorize_job_kind after loading the job; get_object serves only what reading::authorize_object allows; a request naming a revision is checked with reading::check_revision first; citations are filled and compared with reading::cited_locations and fill_locations, and a saved View is stripped of locations; present_view and resolve_view materialize and record each binding's dataset with views::materialize and retain_dataset; create_item, save_draft, set_type and proposal changes apply the items header refusals; export writes verified for current reviews"
         },
         {
           "id": "view-server-validation",
