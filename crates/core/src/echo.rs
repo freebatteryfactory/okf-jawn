@@ -6,13 +6,14 @@
 /// Most bytes of validator or decoder text an error message carries.
 pub const ECHO_LIMIT: usize = 512;
 
-/// Keep at most [`ECHO_LIMIT`] bytes of `text`, cut on a character boundary and marked with `…`.
+/// Keep at most [`ECHO_LIMIT`] bytes of `text`, cut on a character boundary and marked with `…`;
+/// the mark is counted within the limit.
 #[must_use]
 pub fn bounded(mut text: String) -> String {
     if text.len() <= ECHO_LIMIT {
         return text;
     }
-    text.truncate(text.floor_char_boundary(ECHO_LIMIT));
+    text.truncate(text.floor_char_boundary(ECHO_LIMIT.saturating_sub('…'.len_utf8())));
     text.push('…');
     text
 }

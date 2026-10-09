@@ -64,7 +64,7 @@ fn a_stored_value_is_quoted_in_a_refusal_only_up_to_a_bound() -> TestResult {
     let prefix = "a stored job specification does not meet its schema: ";
     assert!(refused.message.starts_with(prefix), "{}", refused.message);
     assert!(
-        refused.message.len() <= prefix.len() + ECHO_LIMIT + '…'.len_utf8(),
+        refused.message.len() <= prefix.len() + ECHO_LIMIT,
         "{} bytes",
         refused.message.len()
     );
@@ -88,11 +88,7 @@ fn the_field_pointer_of_a_stored_refusal_is_bounded_too() -> TestResult {
         &SCHEMA,
     ))?;
     let field = some(refused.field.as_deref(), "the field pointer")?;
-    assert!(
-        field.len() <= ECHO_LIMIT + '…'.len_utf8(),
-        "{} bytes",
-        field.len()
-    );
+    assert!(field.len() <= ECHO_LIMIT, "{} bytes", field.len());
     assert!(field.ends_with('…'));
     Ok(())
 }
