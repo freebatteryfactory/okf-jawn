@@ -189,7 +189,7 @@
         },
         {
           "const": "imported",
-          "description": "Imported metadata has no authenticated in-app review event.",
+          "description": "Describes a claim a file carries, never an app review: an imported file's OKF `verified`\nvalue has no authenticated in-app review event. It never appears on a recorded `Review`\ncreated by `create_review`.",
           "type": "string"
         },
         {

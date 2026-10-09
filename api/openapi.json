@@ -3705,6 +3705,27 @@
         "format": "uuid",
         "type": "string"
       },
+      "ImportedClaim": {
+        "additionalProperties": false,
+        "description": "An unconfirmed claim carried in an imported file's OKF `verified` value; never an app review.\n\nIt has no review identity, no authenticated reviewer and no confirmed content, and its\ncoverage is always `ReviewCoverage::Imported`.",
+        "properties": {
+          "at": {
+            "description": "The claimed instant as written in the file, not normalized: it is the file's claim and\nnot a server instant.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "by": {
+            "description": "The claimed verifier as written in the file.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "IssuedConnector": {
         "additionalProperties": false,
         "description": "A newly issued connector and its secret, which is returned exactly once and never stored in plain text.",
@@ -3731,6 +3752,10 @@
           "body": {
             "description": "Markdown body, preserving source locators.",
             "type": "string"
+          },
+          "content_digest": {
+            "$ref": "#/components/schemas/Digest",
+            "description": "SHA-256 of the item's body and properties without the server-owned header, keys sorted.\nIt is the value a confirmation and a review cite, so a client never computes it; the\nserver computes it with `okf_jawn_core::portable::item_content_digest`."
           },
           "draft": {
             "anyOf": [
@@ -3767,7 +3792,8 @@
         "required": [
           "summary",
           "body",
-          "properties"
+          "properties",
+          "content_digest"
         ],
         "type": "object"
       },
@@ -4516,6 +4542,13 @@
         "additionalProperties": false,
         "description": "Recorded reviews and current coverage.",
         "properties": {
+          "imported": {
+            "description": "The item's imported claims at the resolved revision; empty when the file carries none.",
+            "items": {
+              "$ref": "#/components/schemas/ImportedClaim"
+            },
+            "type": "array"
+          },
           "items": {
             "description": "Reviews, including non-current ones.",
             "items": {
@@ -6911,7 +6944,7 @@
           },
           {
             "const": "imported",
-            "description": "Imported metadata has no authenticated in-app review event.",
+            "description": "Describes a claim a file carries, never an app review: an imported file's OKF `verified`\nvalue has no authenticated in-app review event. It never appears on a recorded `Review`\ncreated by `create_review`.",
             "type": "string"
           },
           {

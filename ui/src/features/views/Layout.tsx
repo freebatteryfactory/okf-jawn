@@ -20,6 +20,24 @@ function refusal(bindings: ReturnType<typeof useBindings>, name: string): string
   return why ? `: ${why}` : '';
 }
 
+/**
+ * Why one chart cannot be drawn, or undefined when nothing known stands in its way. The chart's own
+ * failure comes first (a specification compile rejects, a status the server reports failed), then
+ * the binding it cites: not resolved at all, or a dataset that was refused.
+ */
+function chartFailure(
+  bindings: ReturnType<typeof useBindings>,
+  binding: string,
+  chart: string,
+): string | undefined {
+  const own = bindings.chartErrors?.get(chart);
+  if (own !== undefined) return own;
+  if (!bindings.charts.has(chart)) return `Chart "${chart}" has no specification in this View.`;
+  if (!bindings.bindings.has(binding))
+    return `Unknown binding "${binding}": the chart cites a binding this View does not resolve.`;
+  return bindings.datasetErrors?.get(binding);
+}
+
 const { registry } = defineRegistry(catalog, {
   components: {
     Stack: ({ props, children }) => (
@@ -30,11 +48,16 @@ const { registry } = defineRegistry(catalog, {
     ),
     Columns: ({ children }) => <div className="view-columns">{children}</div>,
     SourceExcerpt: ({ props }) => {
-      const source = useBindings().sources.get(props.binding);
+      const bindings = useBindings();
+      const source = bindings.sources.get(props.binding);
+      const why = bindings.sourceErrors?.get(props.binding);
       return source ? (
         <SourceExcerpt result={source} />
       ) : (
-        <p role="alert">Source binding unavailable: {props.binding}</p>
+        <p role="alert">
+          Source binding unavailable: {props.binding}
+          {why ? `: ${why}` : ''}
+        </p>
       );
     },
     DataTable: ({ props }) => {
@@ -53,16 +76,14 @@ const { registry } = defineRegistry(catalog, {
       const bindings = useBindings();
       const rows = bindings.tables.get(props.binding);
       const spec = bindings.charts.get(props.chart);
+      const failure = chartFailure(bindings, props.binding, props.chart);
       return (
         <section>
           <h3>{props.title}</h3>
-          {rows && spec ? (
+          {failure === undefined && rows && spec ? (
             <Chart spec={spec} rows={rows} bindingName={props.binding} />
           ) : (
-            <p role="alert">
-              {bindings.datasetErrors?.get(props.binding) ??
-                'Resolved chart data or specification unavailable.'}
-            </p>
+            <p role="alert">{failure ?? 'Resolved chart data or specification unavailable.'}</p>
           )}
         </section>
       );
