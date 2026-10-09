@@ -34,8 +34,8 @@ const KEY_TWO: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CONNECTOR: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const JOB: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-/// Longest `InvalidInput` message: 512 bytes of validator text and the three bytes of `…`.
-const BOUNDED_MESSAGE: usize = 515;
+/// Longest `InvalidInput` message: 512 bytes, the closing `…` included.
+const BOUNDED_MESSAGE: usize = 512;
 
 fn principal(subject: &str, route: AccessRoute) -> Result<Principal, IdentityError> {
     Ok(Principal {
