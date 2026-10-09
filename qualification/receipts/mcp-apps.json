@@ -1,5 +1,5 @@
 {
-  "git_sha": "46258a18e17e429bf4a76e51c68dd84d517b1b68",
+  "git_sha": "54a1e38e332135f521ecb44c9e41d89cc2bb2efd",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-09T19:04:58.961Z",
+  "produced_at": "2026-10-09T19:22:57.615Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-09T19:10:36.394Z",
+  "finished_at": "2026-10-09T19:23:55.448Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -311,7 +311,7 @@
     ]
   },
   "bundle_sizes": {
-    "app": 1585846
+    "app": 1586008
   },
   "app_bundle": {
     "node_env": "development",
@@ -336,7 +336,7 @@
     "resource_count": 1,
     "resources": [
       {
-        "byteLength": 1585846,
+        "byteLength": 1586008,
         "metaUi": {
           "csp": {
             "connectDomains": [],
@@ -348,7 +348,7 @@
         "name": "app",
         "path": "ui/dist-apps/app.html",
         "readable": true,
-        "sha256": "8008da0f6e2b9232f7850c577d94de76ebea104ba288ac99ca1ac97e7a96a1ff",
+        "sha256": "3259203b998910ff8818f3c2742ddf99a88e00dd5ff4679c4cbad039c9e60741",
         "uri": "ui://okf-jawn/app.html"
       }
     ],
@@ -451,7 +451,7 @@
       {
         "uri": "ui://okf-jawn/app.html",
         "mime_type": "text/html;profile=mcp-app",
-        "text_sha256": "8008da0f6e2b9232f7850c577d94de76ebea104ba288ac99ca1ac97e7a96a1ff",
+        "text_sha256": "3259203b998910ff8818f3c2742ddf99a88e00dd5ff4679c4cbad039c9e60741",
         "csp": {
           "connectDomains": [],
           "resourceDomains": []
