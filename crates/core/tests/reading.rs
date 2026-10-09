@@ -11,7 +11,7 @@ use okf_jawn_core::conversion::ConversionRecord;
 use okf_jawn_core::jobs::{ArtifactKind, ArtifactRecord, JobScope, RevisionMapping};
 use okf_jawn_core::reading::{
     ObjectRole, RevisionObjects, cited_locations, decode_conversion_record, fill_locations,
-    invalidated, object_role, section_lines,
+    invalidated, markdown_outline, object_role, section_lines,
 };
 use okf_jawn_core::storage::{ObjectInfo, StorageScope};
 use serde_json::json;
@@ -284,6 +284,49 @@ fn a_section_is_located_as_the_lines_its_heading_opens() -> TestResult {
         err_of(section_lines(&unlined, "A"))?.code,
         ErrorCode::Internal
     );
+    Ok(())
+}
+
+#[test]
+fn an_item_outline_sections_end_before_the_next_heading_of_the_same_or_a_higher_level() {
+    let text =
+        "# Plan\nintro\n## Goals\none\n### Detail\ntwo\n## Risks\nthree\n\nSetext top\n===\nlast\n";
+    assert_eq!(
+        markdown_outline(text),
+        vec![
+            heading("Plan", 1, 1, 9),
+            heading("Goals", 2, 3, 6),
+            heading("Detail", 3, 5, 6),
+            heading("Risks", 2, 7, 9),
+            heading("Setext top", 1, 10, 12),
+        ]
+    );
+}
+
+#[test]
+fn an_item_outline_takes_headings_from_the_parser_not_from_code() {
+    let text =
+        "Intro\n\n```\n# not a heading\n```\n\n    # indented code\n\n# Real `code` heading\nbody";
+    assert_eq!(
+        markdown_outline(text),
+        vec![heading("Real code heading", 1, 9, 10)]
+    );
+    assert_eq!(markdown_outline(""), Vec::new());
+}
+
+#[test]
+fn section_lines_agrees_for_the_converter_outline_and_an_item_outline() -> TestResult {
+    // The same Markdown the fixture record describes: Overview on lines 1-4, Revenue on 5-8.
+    let text = "# Overview\nfirst\nsecond\n\n# Revenue\n| Quarter | Revenue |\n|---|---|\n| Q1 | 1200.5 |\n";
+    let converter = record()?.outline;
+    let parsed = markdown_outline(text);
+    for heading in ["Overview", "Revenue"] {
+        assert_eq!(
+            section_lines(&parsed, heading)?,
+            section_lines(&converter, heading)?,
+            "{heading}"
+        );
+    }
     Ok(())
 }
 

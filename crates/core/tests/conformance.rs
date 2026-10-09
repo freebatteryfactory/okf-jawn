@@ -53,8 +53,7 @@ fn candidate_check_accepts_a_conformant_bundle() -> TestResult {
 }
 
 #[test]
-fn candidate_check_refuses_a_non_conformant_bundle_with_the_validators_diagnostics() -> TestResult
-{
+fn candidate_check_refuses_a_non_conformant_bundle_with_the_validators_diagnostics() -> TestResult {
     let staged = Staged::new()?;
     staged.write("notes/plan.md", "---\ntype: Note\n---\n# Plan\n")?;
     staged.write("notes/untyped.md", "---\ntitle: No type\n---\nBody\n")?;
@@ -62,11 +61,17 @@ fn candidate_check_refuses_a_non_conformant_bundle_with_the_validators_diagnosti
     assert_eq!(refused.code, ErrorCode::InvalidInput);
     assert!(
         refused.message.contains("notes/untyped.md")
-            && refused.message.contains("missing required frontmatter field `type`"),
+            && refused
+                .message
+                .contains("missing required frontmatter field `type`"),
         "{}",
         refused.message
     );
-    assert!(!refused.message.contains("notes/plan.md"), "{}", refused.message);
+    assert!(
+        !refused.message.contains("notes/plan.md"),
+        "{}",
+        refused.message
+    );
     Ok(())
 }
 

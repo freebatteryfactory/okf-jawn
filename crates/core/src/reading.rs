@@ -12,6 +12,7 @@
 //! locations are computed from the conversion record (`cited_locations`) and filled or
 //! compared (`fill_locations`); a saved View keeps none (`strip_locations`).
 
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use tokio::io::AsyncReadExt as _;
 
 use okf_jawn_contract::{
@@ -59,8 +60,61 @@ pub struct RevisionObjects<'a> {
     pub derived: Option<&'a DerivedObject>,
 }
 
+/// Where each line of a text starts: lines are one-based and end at `\n`, and a final `\n`
+/// opens no further line, the counting a `Lines` selection uses.
+#[derive(Debug, Clone)]
+pub struct LineIndex {
+    /// Byte offset of the first byte of each line.
+    starts: Vec<usize>,
+    /// Byte length of the text.
+    len: usize,
+}
+
 /// Most bytes of a conversion record core reads into memory.
 pub const MAX_CONVERSION_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+
+impl LineIndex {
+    /// Index the lines of `text`.
+    #[must_use]
+    pub fn new(text: &str) -> Self {
+        let len = text.len();
+        let mut starts = Vec::new();
+        if len > 0 {
+            starts.push(0);
+        }
+        starts.extend(
+            text.match_indices('\n')
+                .map(|(at, _)| at.saturating_add(1))
+                .filter(|start| *start < len),
+        );
+        Self { starts, len }
+    }
+
+    /// How many lines the text has; 0 for the empty text.
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        u32::try_from(self.starts.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The one-based line holding byte `offset`.
+    #[must_use]
+    pub fn line_of(&self, offset: usize) -> u32 {
+        let line = self.starts.partition_point(|start| *start <= offset);
+        u32::try_from(line).unwrap_or(u32::MAX).max(1)
+    }
+
+    /// The bytes of lines `range.start..=range.end`, through the end of the last one (its `\n`
+    /// included); `None` when the range starts past the last line. An end past the last line
+    /// stops at the end of the text.
+    #[must_use]
+    pub fn span(&self, range: &TextRange) -> Option<std::ops::Range<usize>> {
+        let first = usize::try_from(range.start.checked_sub(1)?).ok()?;
+        let start = *self.starts.get(first)?;
+        let after = usize::try_from(range.end).ok()?;
+        let end = self.starts.get(after).copied().unwrap_or(self.len);
+        Some(start..end.max(start))
+    }
+}
 
 /// What `digest` is to the cited item revision.
 ///
@@ -341,13 +395,14 @@ pub(crate) const fn location_page(location: &SourceLocation) -> Option<u32> {
 /// The lines of the section a heading opens, read from the outline of the shown Markdown: the
 /// `Lines` selection of the one heading entry whose label is exactly `heading`.
 ///
-/// Core parses no Markdown. The outline is what a Markdown parser made of the text the read
-/// serves, the same outline the `outline` view returns: the converter's for converted text and
-/// the selected parser's for an item's own Markdown (`application-operations`), so ATX and
-/// Setext headings, fences and indented code are that parser's call. A heading entry selects
-/// its section: the heading line to the line before the next heading of the same or a higher
-/// level, or to the end. `section_lines` trusts the producer to have applied that rule when it
-/// wrote the entry's `Lines` selection; it does not recompute a section.
+/// Core hand-writes no Markdown scan; it takes outlines from a parser. The outline is what a
+/// Markdown parser made of the text the read serves, the same outline the `outline` view
+/// returns: the converter's for converted text, and pulldown-cmark's for an item's own Markdown
+/// (`markdown_outline`), so ATX and Setext headings, fences and indented code are that
+/// parser's call. A heading entry selects its section: the heading line to the line before the
+/// next heading of the same or a higher level, or to the end. `section_lines` trusts the
+/// producer to have applied that rule when it wrote the entry's `Lines` selection; it does not
+/// recompute a section.
 ///
 /// # Errors
 /// Returns `NotFound` on `/selection/heading` when no heading entry has exactly this label,
@@ -383,6 +438,81 @@ pub fn section_lines(outline: &[OutlineEntry], heading: &str) -> Result<TextRang
             ),
         )
         .with_field("/selection/heading")),
+    }
+}
+
+/// The outline of an item's own Markdown, as pulldown-cmark parses it: one heading entry per
+/// ATX or Setext heading, in order, labelled with the heading's text.
+///
+/// Each entry selects its section as lines, the rule `OutlineEntry::selection` states and the
+/// converter's outline follows: from the heading's first line to the line before the next
+/// heading of the same or a higher level (a level number no greater), or to the last line of
+/// the text. Lines are one-based and counted by `\n`, as a `Lines` selection counts them. A
+/// heading inside a fence or indented code is code to the parser and gets no entry.
+#[must_use]
+pub fn markdown_outline(text: &str) -> Vec<OutlineEntry> {
+    let lines = LineIndex::new(text);
+    let mut headings: Vec<(u32, u16, String)> = Vec::new();
+    let mut open: Option<(u32, u16, String)> = None;
+    for (event, range) in Parser::new_ext(text, Options::empty()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                open = Some((
+                    lines.line_of(range.start),
+                    heading_level(level),
+                    String::new(),
+                ));
+            }
+            Event::Text(text) | Event::Code(text) => {
+                if let Some((_, _, label)) = open.as_mut() {
+                    label.push_str(&text);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some((_, _, label)) = open.as_mut() {
+                    label.push(' ');
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some(heading) = open.take() {
+                    headings.push(heading);
+                }
+            }
+            _ => {}
+        }
+    }
+    let last = lines.count();
+    headings
+        .iter()
+        .enumerate()
+        .map(|(index, (start, level, label))| {
+            let end = headings
+                .iter()
+                .skip(index.saturating_add(1))
+                .find(|(_, next_level, _)| next_level <= level)
+                .map_or(last, |(next_start, _, _)| next_start.saturating_sub(1))
+                .max(*start);
+            OutlineEntry {
+                label: label.trim().to_owned(),
+                level: *level,
+                selection: Selection::Lines {
+                    range: TextRange { start: *start, end },
+                },
+                kind: OutlineEntryKind::Heading,
+            }
+        })
+        .collect()
+}
+
+/// The depth of a heading: 1 for `#` to 6 for `######`.
+const fn heading_level(level: HeadingLevel) -> u16 {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
     }
 }
 
