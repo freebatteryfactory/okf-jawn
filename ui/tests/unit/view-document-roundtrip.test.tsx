@@ -525,13 +525,18 @@ describe('a saved View reopens with the server as the source of truth', () => {
     const asked: { url: string; body: unknown }[] = [];
     const client = createClient({
       baseUrl: 'http://okf.test',
-      fetch: async (request: Request) => {
-        asked.push({ url: request.url, body: await request.json() });
-        return new Response(JSON.stringify(body), {
-          status,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      },
+      // Bun's `typeof fetch` also carries `preconnect`; the client never calls it.
+      fetch: Object.assign(
+        async (input: URL | RequestInfo, init?: RequestInit) => {
+          const request = new Request(input, init);
+          asked.push({ url: request.url, body: await request.json() });
+          return new Response(JSON.stringify(body), {
+            status,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        },
+        { preconnect: () => {} },
+      ),
     });
     return { client, asked };
   }
