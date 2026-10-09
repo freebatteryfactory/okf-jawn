@@ -11,7 +11,9 @@ pub enum ReviewCoverage {
     Current,
     /// Content changed after this review.
     Changed,
-    /// Imported metadata has no authenticated in-app review event.
+    /// Describes a claim a file carries, never an app review: an imported file's OKF `verified`
+    /// value has no authenticated in-app review event. It never appears on a recorded `Review`
+    /// created by `create_review`.
     Imported,
     /// No covering review exists.
     Unreviewed,
@@ -63,12 +65,31 @@ pub struct ListReviewsRequest {
     pub at: crate::identity::At,
 }
 
+/// An unconfirmed claim carried in an imported file's OKF `verified` value; never an app review.
+///
+/// It has no review identity, no authenticated reviewer and no confirmed content, and its
+/// coverage is always `ReviewCoverage::Imported`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImportedClaim {
+    /// The claimed verifier as written in the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// The claimed instant as written in the file, not normalized: it is the file's claim and
+    /// not a server instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+}
+
 /// Recorded reviews and current coverage.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListReviewsResponse {
     /// Reviews, including non-current ones.
     pub items: Vec<Review>,
+    /// The item's imported claims at the resolved revision; empty when the file carries none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imported: Vec<ImportedClaim>,
 }
 
 /// The explicit human action a confirmation authorizes; never an arbitrary method.

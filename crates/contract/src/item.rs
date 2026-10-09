@@ -78,6 +78,10 @@ pub struct ItemDocument {
     /// All user and OKF properties; unknown extension values are retained. The server-owned
     /// application header appears under `APP_HEADER_KEY`.
     pub properties: std::collections::BTreeMap<String, serde_json::Value>,
+    /// SHA-256 of the item's body and properties without the server-owned header, keys sorted.
+    /// It is the value a confirmation and a review cite, so a client never computes it; the
+    /// server computes it with `okf_jawn_core::portable::item_content_digest`.
+    pub content_digest: crate::identity::Digest,
     /// Source occurrence metadata when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<crate::source::SourceAppearance>,

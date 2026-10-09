@@ -9,6 +9,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::identity::IdentityError;
 use okf_jawn_contract::import::JobKind;
+use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::operations::DRAFT_BEARING;
 use okf_jawn_core::access::authorize_job_kind;
@@ -16,6 +17,7 @@ use okf_jawn_core::context::Attempt;
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use okf_jawn_core::events::EventScope;
 use okf_jawn_core::mutations::request_digest;
+use okf_jawn_core::portable::item_content_digest;
 use okf_jawn_core::storage::StorageScope;
 use serde_json::{Value, json};
 
@@ -141,8 +143,9 @@ fn create_item_body(workspace_id: &str, key: &str, text: &str) -> Value {
     })
 }
 
-fn item_document(text: &str) -> Value {
-    json!({
+/// A committed item as the application returns it; its digest is the core function's, never typed.
+fn item_document(text: &str) -> Result<Value, ApiError> {
+    let mut document = json!({
         "summary": {
             "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "path": "notes/a.md",
@@ -155,8 +158,16 @@ fn item_document(text: &str) -> Value {
             "archived": false
         },
         "body": text,
-        "properties": {}
-    })
+        "properties": {},
+        "content_digest": "0".repeat(64)
+    });
+    let typed: ItemDocument = serde_json::from_value(document.clone())
+        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+    let digest = item_content_digest(&typed)?;
+    if let Some(object) = document.as_object_mut() {
+        object.insert("content_digest".to_owned(), json!(digest.as_str()));
+    }
+    Ok(document)
 }
 
 fn list_items_body(workspace_id: &str) -> Value {
@@ -330,7 +341,7 @@ fn draft_exchange(operation: OperationName, key: &str) -> Result<(Value, Value),
     match operation {
         OperationName::GetItem => Ok((
             json!({ "workspace_id": WORKSPACE_A, "item_id": item_id, "at": { "kind": "latest" } }),
-            item_document("committed"),
+            item_document("committed").map_err(|error| error.to_string())?,
         )),
         OperationName::SaveDraft => Ok((
             json!({
@@ -371,7 +382,7 @@ fn draft_exchange(operation: OperationName, key: &str) -> Result<(Value, Value),
 async fn write_needs_a_write_grant_and_read_needs_only_read() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello"))?;
+    app.set_response("create_item", item_document("hello")?)?;
     app.set_response("list_items", listing())?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
 
@@ -624,7 +635,7 @@ async fn delegation_ceiling_decides_whether_a_connector_may_propose() -> TestRes
     assert_eq!(app.call_count("open_proposal")?, 1);
 
     // A propose-capable ceiling still never reaches a write.
-    app.set_response("create_item", item_document("hello"))?;
+    app.set_response("create_item", item_document("hello")?)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     let refused = err_of(call(&app, &ports, &drafter, "create_item", body).await)?;
     assert_eq!(refused.code, ErrorCode::Forbidden);
@@ -636,7 +647,7 @@ async fn delegation_ceiling_decides_whether_a_connector_may_propose() -> TestRes
 async fn replay_returns_the_stored_response_and_the_handler_runs_once() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello"))?;
+    app.set_response("create_item", item_document("hello")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     let created = call(&app, &ports, &alice, "create_item", body.clone()).await?;
@@ -650,7 +661,7 @@ async fn replay_returns_the_stored_response_and_the_handler_runs_once() -> TestR
 async fn the_same_key_with_a_different_body_conflicts() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello"))?;
+    app.set_response("create_item", item_document("hello")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     call(&app, &ports, &alice, "create_item", body).await?;
@@ -665,7 +676,7 @@ async fn the_same_key_with_a_different_body_conflicts() -> TestResult {
 async fn a_second_attempt_during_a_live_lease_is_in_progress() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello"))?;
+    app.set_response("create_item", item_document("hello")?)?;
     app.park_next("create_item")?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
@@ -704,7 +715,7 @@ async fn a_second_attempt_during_a_live_lease_is_in_progress() -> TestResult {
 async fn an_abandoned_attempt_reruns_the_handler_once_as_resumed() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello"))?;
+    app.set_response("create_item", item_document("hello")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     crash_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
@@ -732,7 +743,7 @@ async fn an_abandoned_attempt_reruns_the_handler_once_as_resumed() -> TestResult
 async fn a_slow_attempt_whose_lease_was_taken_over_cannot_complete() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("from the second attempt"))?;
+    app.set_response("create_item", item_document("from the second attempt")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     let slow = park_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
@@ -748,7 +759,7 @@ async fn a_slow_attempt_whose_lease_was_taken_over_cannot_complete() -> TestResu
     assert_eq!(second_context.attempt, Attempt::Resumed);
 
     // The slow handler now returns, with another response, under a lease it no longer holds.
-    app.set_response("create_item", item_document("from the slow attempt"))?;
+    app.set_response("create_item", item_document("from the slow attempt")?)?;
     app.resume();
     let refused = err_of(slow.await)?;
     assert_eq!(refused.code, ErrorCode::Conflict);
@@ -779,7 +790,7 @@ async fn a_slow_attempt_cannot_complete_while_its_successor_is_still_running() -
 
     // The slow handler returns first and succeeds. The row is leased, but to the other attempt:
     // only the token tells the two holders apart.
-    app.set_response("create_item", item_document("from the slow attempt"))?;
+    app.set_response("create_item", item_document("from the slow attempt")?)?;
     app.resume();
     let refused = err_of(slow.await)?;
     assert_eq!(refused.code, ErrorCode::Conflict);
@@ -787,7 +798,7 @@ async fn a_slow_attempt_cannot_complete_while_its_successor_is_still_running() -
     let waiting = err_of(call(&app, &ports, &alice, "create_item", body).await)?;
     assert_eq!(waiting.code, ErrorCode::InProgress);
 
-    app.set_response("create_item", item_document("from the current attempt"))?;
+    app.set_response("create_item", item_document("from the current attempt")?)?;
     app.resume();
     let finished = current.await?;
     assert_eq!(
@@ -803,7 +814,7 @@ async fn a_slow_attempt_cannot_complete_while_its_successor_is_still_running() -
 async fn a_failed_attempt_whose_lease_was_taken_over_leaves_the_new_lease_held() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello"))?;
+    app.set_response("create_item", item_document("hello")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
     let slow = park_in_handler(&app, &ports, &alice, "create_item", body.clone()).await?;
@@ -898,10 +909,10 @@ async fn the_same_key_from_two_subjects_is_two_mutations() -> TestResult {
     let app = CountingApplication::new();
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
 
-    app.set_response("create_item", item_document("for xavier"))?;
+    app.set_response("create_item", item_document("for xavier")?)?;
     let xavier = principal("xavier", AccessRoute::LocalOwner)?;
     let xavier_item = call(&app, &ports, &xavier, "create_item", body.clone()).await?;
-    app.set_response("create_item", item_document("for yolanda"))?;
+    app.set_response("create_item", item_document("for yolanda")?)?;
     let yolanda = principal("yolanda", AccessRoute::LocalOwner)?;
     let yolanda_item = call(&app, &ports, &yolanda, "create_item", body).await?;
 
@@ -923,10 +934,10 @@ async fn the_same_subject_and_key_in_two_tenants_are_two_mutations() -> TestResu
     let app = CountingApplication::new();
     let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
 
-    app.set_response("create_item", item_document("in the local tenant"))?;
+    app.set_response("create_item", item_document("in the local tenant")?)?;
     let here = principal("alice", AccessRoute::LocalOwner)?;
     let here_item = call(&app, &ports, &here, "create_item", body.clone()).await?;
-    app.set_response("create_item", item_document("in the other tenant"))?;
+    app.set_response("create_item", item_document("in the other tenant")?)?;
     let mut there = principal("alice", AccessRoute::LocalOwner)?;
     there.tenant_id = tenant("tenant-other")?;
     let there_item = call(&app, &ports, &there, "create_item", body).await?;
@@ -1107,7 +1118,7 @@ async fn the_session_id_of_the_caller_reaches_the_handler() -> TestResult {
 async fn handler_error_then_retry_runs_again() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello"))?;
+    app.set_response("create_item", item_document("hello")?)?;
     app.fail_once(
         "create_item",
         ApiError::new(ErrorCode::Unavailable, "index offline"),
@@ -1134,7 +1145,7 @@ async fn handler_error_then_retry_runs_again() -> TestResult {
 async fn a_failed_begin_is_returned_and_the_handler_does_not_run() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello"))?;
+    app.set_response("create_item", item_document("hello")?)?;
     ports.mutations.fail_next(
         LedgerCall::Begin,
         ApiError::new(ErrorCode::Unavailable, "ledger offline"),
@@ -1152,7 +1163,7 @@ async fn a_failed_begin_is_returned_and_the_handler_does_not_run() -> TestResult
 async fn a_failed_complete_releases_the_lease_so_a_retry_resumes_at_once() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello"))?;
+    app.set_response("create_item", item_document("hello")?)?;
     ports.mutations.fail_next(
         LedgerCall::Complete,
         ApiError::new(ErrorCode::Unavailable, "ledger offline"),
@@ -1201,7 +1212,7 @@ async fn a_failed_release_does_not_replace_the_handler_error() -> TestResult {
 async fn reordered_keys_replay_instead_of_conflicting() -> TestResult {
     let ports = ports_admin_a_read_b()?;
     let app = CountingApplication::new();
-    app.set_response("create_item", item_document("hello"))?;
+    app.set_response("create_item", item_document("hello")?)?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
     let original = json!({
         "workspace_id": WORKSPACE_A,
