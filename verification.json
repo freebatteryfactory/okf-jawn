@@ -378,6 +378,11 @@
           "meaning": "Rebuild without losing records"
         },
         {
+          "id": "backup-restore-journey",
+          "status": "blocked_on_product",
+          "meaning": "SPEC §12 and §13 (portable export and full restore): a full backup, one archive per workspace and one installation archive, is restored after the original data directory is deleted, with no service on it, the installation archive first and then every workspace archive, and the same identities, items, history, retained objects, application records and drafts come back; importing a workspace archive into another installation fills a blank workspace, gives each draft to its editor when that editor is a validated identity there and reports the count of the others; a portable export opens independently of the application. Proven in Wave 3 by a tests/integration/ harness against the composed server and the offline command; its command is recorded here when it is written"
+        },
+        {
           "id": "explorer-playwright-journeys",
           "status": "blocked_on_product",
           "meaning": "Import, naming, viewer, Changes, Timeline, View, keyboard, axe, workspace isolation; the same tests run in Chromium and WebKit (one Playwright config with two projects)"
