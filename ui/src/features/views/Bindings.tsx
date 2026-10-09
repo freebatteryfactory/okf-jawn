@@ -15,6 +15,14 @@ export interface ResolvedPresentation {
   >;
   /** Why a binding's dataset was refused (malformed, not the converter's, stale): that chart's alert. */
   datasetErrors?: ReadonlyMap<string, string>;
+  /** Why a binding's source could not be read: that source excerpt's alert, never the View's. */
+  sourceErrors?: ReadonlyMap<string, string>;
+  /**
+   * Why a named chart cannot be drawn whatever its data: a specification compile rejects, or the
+   * server's own failed status for it. The key is the chart's name; the empty key is the View's one
+   * `vega_lite` chart. That chart's alert alone.
+   */
+  chartErrors?: ReadonlyMap<string, string>;
 }
 export const BindingsContext = createContext<ResolvedPresentation | null>(null);
 export function useBindings(): ResolvedPresentation {

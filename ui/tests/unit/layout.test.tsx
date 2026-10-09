@@ -325,7 +325,12 @@ describe('PresentView refused dataset read', () => {
       mode: 'pinned',
       grammar: 'json_render',
       bindings: [],
-      spec: { root: 'root', elements: { root: { type: 'Stack', props: {}, children: [] } } },
+      spec: {
+        root: 'root',
+        elements: {
+          root: { type: 'DataTable', props: { binding: 'metrics' }, children: [] },
+        },
+      },
     },
     resolved_bindings: [
       { name: 'metrics', source, units: {}, transforms: [], materialized: digest },
@@ -365,14 +370,18 @@ describe('PresentView refused dataset read', () => {
     });
     render(<PresentView response={response} callTool={callTool} />);
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toBe('object is not retained by this source');
+    expect(alert.textContent).toBe(
+      'Dataset unavailable: metrics: object is not retained by this source',
+    );
     expect(alert.textContent).not.toMatch(/invalid_type|expected|"path"/i);
   });
 
   it('shows a fixed plain sentence when the refusal carries no text', async () => {
     render(<PresentView response={response} callTool={refusing({ isError: true, content: [] })} />);
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toBe('The host refused to read the dataset.');
+    expect(alert.textContent).toBe(
+      'Dataset unavailable: metrics: The host refused to read the dataset.',
+    );
   });
 
   it('bounds a long refusal text to 512 characters ending with an ellipsis', async () => {
@@ -382,7 +391,7 @@ describe('PresentView refused dataset read', () => {
     });
     render(<PresentView response={response} callTool={callTool} />);
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toBe(`${'x'.repeat(511)}…`);
+    expect(alert.textContent).toBe(`Dataset unavailable: metrics: ${'x'.repeat(511)}…`);
   });
 
   it('cuts a long refusal on a character boundary, never inside a surrogate pair', async () => {
@@ -392,36 +401,65 @@ describe('PresentView refused dataset read', () => {
     });
     render(<PresentView response={response} callTool={callTool} />);
     const shown = (await screen.findByRole('alert')).textContent ?? '';
-    expect(shown.length).toBeLessThanOrEqual(512);
+    expect(shown.startsWith('Dataset unavailable: metrics: ')).toBe(true);
+    expect(shown.length).toBeLessThanOrEqual(512 + 'Dataset unavailable: metrics: '.length);
     expect(shown.endsWith('…')).toBe(true);
     expect(() => encodeURIComponent(shown)).not.toThrow();
   });
-  it("shows the tool's own message when `show` is refused", async () => {
-    const callTool = async () => ({
+  /** Refuses `show` as given; the dataset is refused plainly, to keep the two alerts apart. */
+  function showRefused(refusal: unknown) {
+    return async (name: string) => {
+      if (name === 'show') return refusal;
+      return { isError: true, content: [{ type: 'text', text: 'dataset refused' }] };
+    };
+  }
+  const withSource = {
+    ...response,
+    view: {
+      ...response.view,
+      spec: {
+        root: 'root',
+        elements: {
+          root: { type: 'Stack', props: {}, children: ['excerpt', 'table'] },
+          excerpt: { type: 'SourceExcerpt', props: { binding: 'metrics' }, children: [] },
+          table: { type: 'DataTable', props: { binding: 'metrics' }, children: [] },
+        },
+      },
+    },
+  } as z.infer<typeof zPresentResponse>;
+  async function sourceAlert() {
+    const alerts = await screen.findAllByRole('alert');
+    await expect.poll(() => screen.getAllByRole('alert').length).toBe(2);
+    return alerts.map((alert) => alert.textContent ?? '').find((text) => text.startsWith('Source'));
+  }
+
+  it("shows the tool's own message when `show` is refused, beside the table's own alert", async () => {
+    const callTool = showRefused({
       isError: true,
       content: [{ type: 'text', text: 'revision is not retained by this source' }],
     });
-    render(<PresentView response={response} callTool={callTool} />);
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toBe('revision is not retained by this source');
-    expect(alert.textContent).not.toMatch(/invalid_type|expected|"path"/i);
+    render(<PresentView response={withSource} callTool={callTool} />);
+    expect(await sourceAlert()).toBe(
+      'Source binding unavailable: metrics: revision is not retained by this source',
+    );
   });
 
   it('bounds a long `show` refusal to 512 characters ending with an ellipsis', async () => {
-    const callTool = async () => ({
+    const callTool = showRefused({
       isError: true,
       content: [{ type: 'text', text: 'y'.repeat(10_000) }],
     });
-    render(<PresentView response={response} callTool={callTool} />);
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toBe(`${'y'.repeat(511)}…`);
+    render(<PresentView response={withSource} callTool={callTool} />);
+    expect(await sourceAlert()).toBe(`Source binding unavailable: metrics: ${'y'.repeat(511)}…`);
   });
 
   it('shows a fixed plain sentence when a `show` refusal carries no text', async () => {
-    const callTool = async () => ({ isError: true, content: [] });
-    render(<PresentView response={response} callTool={callTool} />);
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toBe('The host refused to read the source.');
+    render(
+      <PresentView response={withSource} callTool={showRefused({ isError: true, content: [] })} />,
+    );
+    expect(await sourceAlert()).toBe(
+      'Source binding unavailable: metrics: The host refused to read the source.',
+    );
   });
 });
 
@@ -718,20 +756,153 @@ describe('PresentView chart specification validation', () => {
     expect(() => compile(validChart as TopLevelSpec)).not.toThrow();
   });
 
-  it('refuses a chart specification that compile rejects: an alert names the chart and no chart is drawn', async () => {
-    const { response, digest } = await responseWith({ metrics_chart: rejectedChart });
-    const { called, callTool } = host(digest);
-    const { container } = render(<PresentView response={response} callTool={callTool} />);
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toMatch(
-      /^Chart "metrics_chart" failed validation: Invalid specification /,
+  /**
+   * A board of two charts over one dataset, with text and sources around them: a titled stack, an
+   * excerpt, the two charts (`bad_chart`, `good_chart`) and the source list.
+   */
+  async function board(
+    charts: Record<string, unknown>,
+    statuses: z.infer<typeof zPresentResponse>['charts'] = [],
+    cited: { bad: string; good: string } = { bad: 'metrics', good: 'metrics' },
+  ) {
+    const { response, digest } = await responseWith(charts);
+    const view = {
+      ...response.view,
+      title: 'Quarterly board',
+      spec: {
+        root: 'root',
+        elements: {
+          root: {
+            type: 'Stack',
+            props: { title: 'Quarterly board' },
+            children: ['excerpt', 'bad', 'good', 'sources'],
+          },
+          excerpt: { type: 'SourceExcerpt', props: { binding: 'metrics' }, children: [] },
+          bad: {
+            type: 'Chart',
+            props: { binding: cited.bad, chart: 'bad_chart', title: 'Bad chart' },
+            children: [],
+          },
+          good: {
+            type: 'Chart',
+            props: { binding: cited.good, chart: 'good_chart', title: 'Good chart' },
+            children: [],
+          },
+          sources: { type: 'SourceList', props: { bindings: ['metrics'] }, children: [] },
+        },
+      },
+    };
+    return { response: { ...response, view, charts: statuses }, digest };
+  }
+
+  /** What must survive any one chart's failure: the text, the source components, the other chart. */
+  async function expectEverythingElseRendered(container: HTMLElement) {
+    expect(await screen.findByRole('heading', { name: 'Quarterly board' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Bad chart' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Good chart' })).toBeTruthy();
+    expect(
+      screen.getByText('fixtures/metrics.json @ 0123456789abcdef0123456789abcdef01234567'),
+    ).toBeTruthy();
+    expect(container.querySelector('article.source-excerpt')).not.toBeNull();
+    await expect
+      .poll(() => container.querySelector('svg') !== null, { timeout: 15_000 })
+      .toBe(true);
+  }
+
+  async function renderBoard(
+    charts: Record<string, unknown>,
+    statuses: z.infer<typeof zPresentResponse>['charts'] = [],
+    cited?: { bad: string; good: string },
+  ) {
+    const { response, digest } = await board(charts, statuses, cited);
+    const { callTool } = host(digest);
+    return render(<PresentView response={response} callTool={callTool} />).container;
+  }
+
+  it('isolates a chart specification that compile rejects: its own alert names the chart, the text and the other chart still render', async () => {
+    const container = await renderBoard({ bad_chart: rejectedChart, good_chart: validChart });
+    await expectEverythingElseRendered(container);
+    const alerts = screen.getAllByRole('alert');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.textContent).toMatch(
+      /^Chart "bad_chart" failed validation: Invalid specification /,
     );
-    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    // The alert sits inside the bad chart's own section, not beside the View.
+    expect(alerts[0]?.closest('section')?.querySelector('h3')?.textContent).toBe('Bad chart');
+    // The good chart drew exactly once.
+    expect(container.querySelectorAll('svg')).toHaveLength(1);
+  });
+
+  it('isolates a chart that names a binding the View does not resolve', async () => {
+    const container = await renderBoard({ bad_chart: validChart, good_chart: validChart }, [], {
+      bad: 'missing',
+      good: 'metrics',
+    });
+    await expectEverythingElseRendered(container);
+    const alerts = screen.getAllByRole('alert');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.textContent).toBe(
+      'Unknown binding "missing": the chart cites a binding this View does not resolve.',
+    );
+    expect(alerts[0]?.closest('section')?.querySelector('h3')?.textContent).toBe('Bad chart');
+  });
+
+  it.each([
+    ['dataset_unavailable', 'Dataset unavailable', 'the blob is not retained'],
+    ['too_large', 'Dataset too large', 'the dataset has 9000000 rows'],
+    ['invalidated', 'Invalidated', 'the source revision was purged'],
+    ['invalid_spec', 'Invalid specification', 'mark is missing'],
+    ['unknown_binding', 'Unknown binding', 'binding "elsewhere" is not in this View'],
+  ] as const)(
+    'isolates a chart the server reports as %s: its own alert says why',
+    async (reasonCode, label, message) => {
+      const container = await renderBoard({ bad_chart: validChart, good_chart: validChart }, [
+        {
+          chart: { kind: 'named', name: 'bad_chart' },
+          status: { status: 'failed', reason: reasonCode, message },
+        },
+        {
+          chart: { kind: 'named', name: 'good_chart' },
+          status: { status: 'ready', bindings: ['metrics'] },
+        },
+      ]);
+      await expectEverythingElseRendered(container);
+      const alerts = screen.getAllByRole('alert');
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]?.textContent).toBe(`${label}: ${message}`);
+      expect(alerts[0]?.closest('section')?.querySelector('h3')?.textContent).toBe('Bad chart');
+    },
+  );
+
+  it('keeps the title and description of a vega_lite View whose one chart the server reports failed', async () => {
+    const { response, digest } = await responseWith({});
+    const failed = {
+      ...response,
+      view: {
+        ...response.view,
+        grammar: 'vega_lite' as const,
+        spec: validChart,
+        charts: undefined,
+      },
+      charts: [
+        {
+          chart: { kind: 'spec' as const },
+          status: {
+            status: 'failed' as const,
+            reason: 'dataset_unavailable' as const,
+            message: 'the blob is not retained',
+          },
+        },
+      ],
+    } as z.infer<typeof zPresentResponse>;
+    const { callTool } = host(digest);
+    const { container } = render(<PresentView response={failed} callTool={callTool} />);
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      'Dataset unavailable: the blob is not retained',
+    );
+    expect(screen.getByRole('heading', { name: 'Chart board' })).toBeTruthy();
+    expect(screen.getByText('One named Vega-Lite entry')).toBeTruthy();
     expect(container.querySelector('svg')).toBeNull();
-    expect(container.querySelector('table')).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Metrics chart' })).toBeNull();
-    // The specification is judged before anything is asked of the host.
-    expect(called).toEqual([]);
   });
 
   it('draws the chart of the same view when its specification is one compile accepts', async () => {
@@ -744,5 +915,31 @@ describe('PresentView chart specification validation', () => {
       .toBe(true);
     expect(screen.queryByRole('alert')).toBeNull();
     expect(called).toEqual(['show', 'read_object']);
+  });
+});
+
+describe('PresentView unexpected failure', () => {
+  it('shows an alert instead of resolving forever when something outside a binding throws', async () => {
+    const response = {
+      view: {
+        schema_version: 1,
+        title: 'Board',
+        description: 'd',
+        mode: 'pinned',
+        grammar: 'json_render',
+        bindings: [],
+        spec: { root: 'root', elements: { root: { type: 'Stack', props: {}, children: [] } } },
+      },
+      get resolved_bindings(): never {
+        throw new Error('the response could not be walked');
+      },
+      charts: [],
+      as_of: '2026-10-08T14:03:07.250Z',
+      warnings: [],
+      receipt_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    } as unknown as z.infer<typeof zPresentResponse>;
+    render(<PresentView response={response} callTool={async () => ({})} />);
+    expect((await screen.findByRole('alert')).textContent).toBe('the response could not be walked');
+    expect(screen.queryByRole('status')).toBeNull();
   });
 });

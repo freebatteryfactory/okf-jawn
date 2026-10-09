@@ -83,6 +83,33 @@ describe('MCP App AppResult dispatch', () => {
     expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
   });
 
+  it('isolates a chart the server reports failed: its own alert says why, the View still renders', async () => {
+    const present = {
+      ...presentFixture,
+      resolved_bindings: [],
+      charts: [
+        {
+          chart: { kind: 'named', name: 'metrics_chart' },
+          status: {
+            status: 'failed',
+            reason: 'too_large',
+            message: 'the dataset has 9000000 rows',
+          },
+        },
+      ],
+    };
+    render(
+      <AppResult result={present} callTool={vi.fn(async () => ({ structuredContent: {} }))} />,
+    );
+    expect(await screen.findByRole('heading', { name: 'Six-component catalog' })).toBeTruthy();
+    const chart = screen.getByRole('heading', { name: 'Metrics chart' }).closest('section');
+    expect(chart?.querySelector('[role="alert"]')?.textContent).toBe(
+      'Dataset too large: the dataset has 9000000 rows',
+    );
+    // The other components of the same View are still on the page.
+    expect(screen.getByText('Unresolved: venue')).toBeTruthy();
+  });
+
   it('falls back to text for an unknown structuredContent shape', () => {
     render(<AppResult result={{ unexpected: true }} callTool={vi.fn()} />);
     expect(screen.getByRole('status').textContent).toMatch(/unexpected/);
@@ -183,7 +210,7 @@ describe('MCP App wire boundary', () => {
         const source = bound.get(String(call.arguments?.item_id));
         return { structuredContent: { ...sourceFixture, source } };
       }
-      // A refusal ends the dataset read; by then the bridge has sent both kinds of call.
+      // A refused dataset read is that binding's alert; by then the bridge has sent both kinds of call.
       return {
         isError: true,
         content: [{ type: 'text', text: 'not retained by this host double' }],
@@ -191,7 +218,9 @@ describe('MCP App wire boundary', () => {
     };
     const omitUndefined = await mountApp();
     await deliver(presentFixture);
-    await waitFor(() => expect(document.body.textContent).toBe('not retained by this host double'));
+    await waitFor(() =>
+      expect(document.body.textContent).toContain('not retained by this host double'),
+    );
 
     const keys = {
       show: ['workspace_id', 'item_id', 'at', 'view', 'selection', 'max_bytes', 'max_images'],
