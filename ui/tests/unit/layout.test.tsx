@@ -36,6 +36,28 @@ const validSpec = {
   },
 };
 
+/** The converter's `Dataset` for rows of (category, value), as the host serves it. */
+function datasetBytes(rows: ReadonlyArray<{ category: string; value: number }>): Uint8Array {
+  return new TextEncoder().encode(
+    JSON.stringify({
+      schema_version: 1,
+      source: {
+        workspace_id: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
+        item_id: '11111111-2222-4333-8444-555555555555',
+        path: 'fixtures/metrics.json',
+        revision: '0123456789abcdef0123456789abcdef01234567',
+        selection: { kind: 'all' },
+      },
+      text_origin: 'converter',
+      columns: [
+        { name: 'category', kind: 'string' },
+        { name: 'value', kind: 'integer' },
+      ],
+      rows: rows.map((row) => [row.category, row.value]),
+    }),
+  );
+}
+
 describe('materializeSlots', () => {
   it('keeps a canonical record of string arrays', () => {
     expect(materializeSlots({ default: ['a', 'b'] }, undefined)).toEqual({
@@ -182,7 +204,7 @@ describe('PresentView', () => {
 
   it('fills charts from view.charts and renders svg without unavailable alert', async () => {
     const rows = [{ category: 'a', value: 1 }];
-    const payload = new TextEncoder().encode(JSON.stringify(rows));
+    const payload = datasetBytes(rows);
     const digestBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
     const digest = Array.from(digestBytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
     const chartSpec = {
@@ -413,7 +435,7 @@ describe('PresentView dataset integrity checks', () => {
     { category: 'a', value: 1 },
     { category: 'b', value: 2 },
   ];
-  const payload = new TextEncoder().encode(JSON.stringify(rows));
+  const payload = datasetBytes(rows);
   const chartSpec = {
     $schema: 'https://vega.github.io/schema/vega-lite/v6.json',
     data: { name: 'metrics' },
@@ -593,7 +615,7 @@ describe('PresentView chart specification validation', () => {
     workspace_id: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',
   };
   const rows = [{ category: 'a', value: 1 }];
-  const payload = new TextEncoder().encode(JSON.stringify(rows));
+  const payload = datasetBytes(rows);
   const validChart = {
     $schema: 'https://vega.github.io/schema/vega-lite/v6.json',
     data: { name: 'metrics' },
