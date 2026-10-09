@@ -9,7 +9,7 @@
  * survive parsing unchanged carries a field the contract does not have (additionalProperties: false).
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { ZodType } from 'zod';
@@ -84,6 +84,16 @@ function violations(id: string, kind: 'request' | 'response', value: unknown): s
   return [];
 }
 
+/**
+ * The item content digest the server's `portable::item_content_digest` computes: SHA-256 of the
+ * compact JSON of `{ body, properties }` with keys sorted. Computed, never typed.
+ */
+function contentDigest(body: unknown, properties: unknown): string {
+  return createHash('sha256')
+    .update(JSON.stringify(sortKeys({ body, properties })))
+    .digest('hex');
+}
+
 /** A scripted stand-in: schema-valid answers, and the refusals the journey expects of an agent. */
 function standIn(
   recorded: Recorded[],
@@ -154,6 +164,7 @@ function standIn(
           },
           body: body.body,
           properties: body.properties,
+          content_digest: contentDigest(body.body, body.properties),
         };
       case 'read_item':
         return {
