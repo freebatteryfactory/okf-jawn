@@ -8,7 +8,8 @@ use okf_jawn_contract::identity::{At, Digest, ItemId, PurgeId};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::{
-    GetObjectRequest, GetSourcesRequest, SourceLocation, SourceLocator, SourceReference,
+    DeclaredOutcome, DeclaredSource, GetObjectRequest, GetSourcesRequest, SourceLocation,
+    SourceLocator, SourceReference, UncitedReason,
 };
 use okf_jawn_core::jobs::{DerivedKind, DerivedObject, RevisionMapping};
 use okf_jawn_core::ports::Application;
@@ -89,13 +90,15 @@ async fn a_source_card_is_supported_by_its_appearance_and_one_whole_citation() -
         .get_sources(&alice(OperationName::GetSources, None)?, sources_of(CARD)?)
         .await?;
     assert_eq!(response.revision, revision('a')?);
-    let appearance = some(response.appearance, "the appearance")?;
+    let appearance = some(response.appearance.clone(), "the appearance")?;
     assert_eq!(appearance.object, digest('a')?);
     let cited = some(response.sources.first(), "the card's citation")?;
     assert_eq!(response.sources.len(), 1);
     assert_eq!(cited.item_id, ItemId(Uuid::from_u128(CARD)));
     assert_eq!(cited.digest, Some(digest('b')?));
     assert_eq!(cited.selection, Selection::All);
+    assert_eq!(response.declared.len(), 0);
+    assert!(serde_json::to_value(&response)?.get("declared").is_none());
     assert_eq!(
         cited.locations,
         vec![
@@ -110,9 +113,8 @@ async fn a_source_card_is_supported_by_its_appearance_and_one_whole_citation() -
     Ok(())
 }
 
-#[tokio::test]
-async fn a_note_cites_the_items_its_okf_sources_name() -> TestResult {
-    let world = card_world()?;
+/// Put a note at `notes/plan.md` declaring `sources`, and list the card in `notes`.
+fn note_declaring(world: &World, sources: &serde_json::Value) -> Built<()> {
     let at = revision('a')?;
     world.versions.put_document(
         &at,
@@ -121,18 +123,10 @@ async fn a_note_cites_the_items_its_okf_sources_name() -> TestResult {
             &at,
             "notes/plan.md",
             "# Plan\n",
-            json!({
-                "type": "Note",
-                "sources": [
-                    { "id": "external", "resource": "https://example.test/report" },
-                    { "id": "report", "resource": "report-pdf.md" },
-                    { "id": "scope", "resource": "all queries in project X" },
-                    { "id": "missing", "resource": "missing.md" }
-                ]
-            }),
+            json!({ "type": "Note", "sources": sources }),
         )?,
     )?;
-    let listed = source_card(
+    let card = source_card(
         CARD,
         &at,
         "notes/report-pdf.md",
@@ -143,28 +137,130 @@ async fn a_note_cites_the_items_its_okf_sources_name() -> TestResult {
         &at,
         Some(path("notes")?),
         FolderListing {
-            items: vec![listed.summary],
+            items: vec![card.summary],
             folders: Vec::new(),
             next_cursor: None,
         },
-    )?;
+    )
+}
+
+#[tokio::test]
+async fn a_note_declares_every_okf_source_as_written_and_cites_the_items_they_name() -> TestResult {
+    let world = card_world()?;
+    let entries = json!([
+        { "id": "web", "resource": "https://example.test/report", "title": "Report" },
+        { "id": "report", "resource": "report-pdf.md", "usage_count": 3, "author": "team:finance" },
+        { "id": "all", "resource": "all queries in project X" },
+        { "id": "bare", "title": "No resource" },
+        { "id": "gone", "resource": "missing.md" },
+        "just a string",
+        { "id": "again", "resource": "report-pdf" }
+    ]);
+    note_declaring(&world, &entries)?;
     let response = world
         .service
         .get_sources(&alice(OperationName::GetSources, None)?, sources_of(NOTE)?)
         .await?;
     assert!(response.appearance.is_none());
-    let cited: Vec<ItemId> = response
-        .sources
+    // Field preservation: every entry, in the file's order, exactly as written.
+    let written: Vec<&serde_json::Value> = response
+        .declared
         .iter()
-        .map(|source| source.item_id)
+        .map(|declared| &declared.entry)
         .collect();
-    assert_eq!(cited, vec![ItemId(Uuid::from_u128(CARD))]);
+    let expected: Vec<&serde_json::Value> =
+        some(entries.as_array(), "the entries")?.iter().collect();
+    assert_eq!(written, expected);
+    let uncited = |reason| DeclaredOutcome::Uncited { reason };
+    let outcomes: Vec<&DeclaredOutcome> = response
+        .declared
+        .iter()
+        .map(|declared| &declared.outcome)
+        .collect();
+    assert_eq!(
+        outcomes,
+        vec![
+            &uncited(UncitedReason::External),
+            &DeclaredOutcome::Cited { index: 0 },
+            &uncited(UncitedReason::Scope),
+            &uncited(UncitedReason::Malformed),
+            &uncited(UncitedReason::NotFound),
+            &uncited(UncitedReason::Malformed),
+            &DeclaredOutcome::Cited { index: 0 },
+        ]
+    );
+    // The cited index is the citation's position in `sources`; two entries share one.
+    assert_eq!(response.sources.len(), 1);
     let card = some(response.sources.first(), "the card's citation")?;
+    assert_eq!(card.item_id, ItemId(Uuid::from_u128(CARD)));
     assert_eq!(card.digest, Some(digest('b')?));
     assert_eq!(card.locations.len(), 2);
+    // On the wire.
+    let wire = serde_json::to_value(&response)?;
+    assert_eq!(
+        wire.pointer("/declared/1"),
+        Some(&json!({
+            "entry": { "id": "report", "resource": "report-pdf.md", "usage_count": 3, "author": "team:finance" },
+            "outcome": { "kind": "cited", "index": 0 }
+        }))
+    );
+    for (at, reason) in [
+        (0, "external"),
+        (2, "scope"),
+        (3, "malformed"),
+        (4, "not_found"),
+        (5, "malformed"),
+    ] {
+        assert_eq!(
+            wire.pointer(&format!("/declared/{at}/outcome")),
+            Some(&json!({ "kind": "uncited", "reason": reason })),
+            "entry {at}"
+        );
+    }
+    assert_eq!(
+        wire.pointer("/declared/5/entry"),
+        Some(&json!("just a string"))
+    );
     Ok(())
 }
 
+#[tokio::test]
+async fn a_bare_mapping_is_one_entry_and_a_scalar_sources_value_is_malformed() -> TestResult {
+    let world = card_world()?;
+    note_declaring(
+        &world,
+        &json!({ "id": "report", "resource": "report-pdf.md" }),
+    )?;
+    let caller = alice(OperationName::GetSources, None)?;
+    let mapping = world
+        .service
+        .get_sources(&caller, sources_of(NOTE)?)
+        .await?;
+    assert_eq!(
+        mapping.declared,
+        vec![DeclaredSource {
+            entry: json!({ "id": "report", "resource": "report-pdf.md" }),
+            outcome: DeclaredOutcome::Cited { index: 0 },
+        }]
+    );
+    let world = card_world()?;
+    note_declaring(&world, &json!("see the report"))?;
+    let scalar = world
+        .service
+        .get_sources(&caller, sources_of(NOTE)?)
+        .await?;
+    assert_eq!(
+        scalar.declared,
+        vec![DeclaredSource {
+            entry: json!("see the report"),
+            outcome: DeclaredOutcome::Uncited {
+                reason: UncitedReason::Malformed
+            },
+        }]
+    );
+    assert_eq!(scalar.sources.len(), 0);
+    Ok(())
+}
 #[tokio::test]
 async fn get_object_serves_a_bounded_block_of_an_object_of_the_cited_revision() -> TestResult {
     let world = card_world()?;

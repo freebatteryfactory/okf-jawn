@@ -8,13 +8,12 @@ use okf_jawn_contract::identity::{
     ArtifactId, ItemId, JobId, PurgeId, TenantId, WorkspaceId, WorkspacePath,
 };
 use okf_jawn_contract::read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection};
-use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
+use okf_jawn_contract::source::{SourceLocation, SourceLocator, UncitedReason, UnresolvedReason};
 use okf_jawn_core::conversion::ConversionRecord;
 use okf_jawn_core::jobs::{ArtifactKind, ArtifactRecord, JobScope, RevisionMapping};
 use okf_jawn_core::reading::{
-    ObjectRole, RevisionObjects, SourceTarget, UncitedReason, cited_locations,
-    decode_conversion_record, fill_locations, invalidated, markdown_outline, note_sources,
-    object_role, section_lines,
+    ObjectRole, RevisionObjects, SourceTarget, cited_locations, decode_conversion_record,
+    fill_locations, invalidated, markdown_outline, note_sources, object_role, section_lines,
 };
 use okf_jawn_core::storage::{ObjectInfo, StorageScope};
 use serde_json::json;

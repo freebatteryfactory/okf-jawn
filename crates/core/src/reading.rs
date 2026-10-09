@@ -24,7 +24,10 @@ use okf_jawn_contract::{
     extraction::{Extraction, TextOrigin},
     identity::{Digest, ItemId, Revision, WorkspacePath},
     read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection},
-    source::{SourceAppearance, SourceLocation, SourceLocator, SourceReference, UnresolvedReason},
+    source::{
+        SourceAppearance, SourceLocation, SourceLocator, SourceReference, UncitedReason,
+        UnresolvedReason,
+    },
     views::ViewDocument,
 };
 
@@ -62,22 +65,6 @@ pub struct RevisionObjects<'a> {
     pub record: Option<&'a ConversionRecord>,
     /// What `RecordStore::derived_object` returned for (item, revision, digest).
     pub derived: Option<&'a DerivedObject>,
-}
-
-/// Why an OKF `sources` entry of a note cites no item of the workspace.
-///
-/// The variants of the contract's `DeclaredOutcome::Uncited` reason (PR #14); core switches to
-/// that type once it is on `main`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UncitedReason {
-    /// The resource is a URL (okf-core `ResourceKind::Url`).
-    External,
-    /// The resource describes a population or scope (okf-core `ResourceKind::Scope`).
-    Scope,
-    /// The resource is a path that names no item at the read revision.
-    NotFound,
-    /// The entry has no `resource`, or is not a mapping at all.
-    Malformed,
 }
 
 /// Where one OKF `sources` entry of a note may point.

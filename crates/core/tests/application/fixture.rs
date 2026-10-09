@@ -1469,6 +1469,7 @@ pub fn record(assets: Vec<RetainedAsset>) -> Built<ConversionRecord> {
         structured: vec![WindowExport {
             window: Some(PageRange { start: 1, end: 2 }),
             digest: digest('c')?,
+            lines: Some(TextRange { start: 1, end: 8 }),
         }],
         markdown: digest('e')?,
         locations: vec![

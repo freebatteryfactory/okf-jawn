@@ -3,8 +3,9 @@
 //! A source card's support is the card itself: its appearance and one whole-item citation of
 //! its digest. A note's support is its OKF `sources` frontmatter (`reading::note_sources`): an
 //! entry whose path names an item at the read revision becomes a whole-item citation of that
-//! item; every other entry (a URL, a scope, a path that names nothing) is kept, in order, as an
-//! uncited source. A digest authorizes nothing: `get_object` serves an object only when
+//! item, and every entry, cited or not, is declared in the file's order exactly as written (its
+//! `id`, the key a footnote cites, and every other field), with the position of its citation or
+//! why it cites nothing. A digest authorizes nothing: `get_object` serves an object only when
 //! `reading::authorize_object` finds it among the cited item revision's objects, after the
 //! cited revision passed the purge check.
 
@@ -15,8 +16,8 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::{
-    GetObjectRequest, GetObjectResponse, GetSourcesRequest, GetSourcesResponse, SourceAppearance,
-    SourceReference,
+    DeclaredOutcome, DeclaredSource, GetObjectRequest, GetObjectResponse, GetSourcesRequest,
+    GetSourcesResponse, SourceAppearance, SourceReference, UncitedReason,
 };
 use tokio::io::AsyncReadExt as _;
 
@@ -25,21 +26,10 @@ use super::shared::{check_named, invalid, resolve, workspace_scope};
 use crate::context::OperationContext;
 use crate::conversion::ConversionRecord;
 use crate::reading::{
-    NoteSource, ObjectRole, SourceTarget, UncitedReason, authorize_object, cited_locations,
-    note_sources, read_conversion_record,
+    NoteSource, ObjectRole, SourceTarget, authorize_object, cited_locations, note_sources,
+    read_conversion_record,
 };
 use crate::storage::{Page, StorageScope};
-
-/// An item's support at one revision: the contract response plus the `sources` entries that
-/// cite nothing, in order.
-///
-/// `uncited` is the shape of `GetSourcesResponse.uncited`, which the integration owner is
-/// adding to the contract; until it is on `main` the field cannot reach the wire, and this
-/// lane does not merge before it is.
-struct ItemSources {
-    response: GetSourcesResponse,
-    uncited: Vec<(serde_json::Value, UncitedReason)>,
-}
 
 /// Most bytes one `get_object` block returns; larger objects take the streaming route.
 pub(super) const MAX_OBJECT_BLOCK: u32 = 1_048_576;
@@ -50,7 +40,13 @@ const JSON_MEDIA_TYPE: &str = "application/json";
 /// Page size of the folder listings a path is looked up in.
 const LOOKUP_PAGE: u16 = 200;
 
-/// An item's supporting citations and, for a source card, its appearance.
+/// An item's supporting citations and, for a source card, its appearance; for a note, every
+/// entry of its OKF `sources` declared in the file's order, exactly as written, with what it
+/// resolved to.
+///
+/// A note's entry that names an item at the resolved revision is cited: the item's whole-item
+/// citation is in `sources` and the entry's outcome is its position there. Two entries that
+/// name one item share its one citation. Every other entry is declared uncited, with its reason.
 ///
 /// # Errors
 /// Returns the typed `NotFound` of an invalidated revision, or any port error.
@@ -59,13 +55,72 @@ pub(super) async fn get_sources(
     context: &OperationContext,
     request: GetSourcesRequest,
 ) -> Result<GetSourcesResponse, ApiError> {
-    let ItemSources { response, uncited } = item_sources(service, context, request).await?;
-    // The contract has no field for them yet (see `ItemSources`); the integration owner's
-    // change adds `GetSourcesResponse.uncited` before this lane merges.
-    drop(uncited);
-    Ok(response)
+    let scope = workspace_scope(context)?;
+    let revision = resolve(service, &scope, &request.at).await?;
+    let ports = service.ports();
+    let document = ports
+        .versions
+        .show(&scope, &revision, request.item_id)
+        .await?;
+    if let Some(appearance) = document.source.clone() {
+        let record = record_of(service, &scope, Some(&appearance)).await?;
+        return Ok(GetSourcesResponse {
+            sources: vec![whole_citation(
+                &scope,
+                &revision,
+                &document,
+                record.as_ref(),
+            )],
+            revision,
+            appearance: Some(appearance),
+            declared: Vec::new(),
+        });
+    }
+    let mut sources: Vec<SourceReference> = Vec::new();
+    let mut declared = Vec::new();
+    for NoteSource { entry, target } in note_sources(&document.properties, &document.summary.path) {
+        let cited = match target {
+            SourceTarget::Uncited(reason) => Err(reason),
+            SourceTarget::Candidates(paths) => {
+                first_item(service, &scope, &revision, &paths, request.item_id)
+                    .await?
+                    .ok_or(UncitedReason::NotFound)
+            }
+        };
+        let outcome = match cited {
+            Err(reason) => DeclaredOutcome::Uncited { reason },
+            Ok(item) => {
+                let index = if let Some(index) =
+                    sources.iter().position(|citation| citation.item_id == item)
+                {
+                    index
+                } else {
+                    let document = ports.versions.show(&scope, &revision, item).await?;
+                    let record = record_of(service, &scope, document.source.as_ref()).await?;
+                    sources.push(whole_citation(
+                        &scope,
+                        &revision,
+                        &document,
+                        record.as_ref(),
+                    ));
+                    sources.len().saturating_sub(1)
+                };
+                DeclaredOutcome::Cited {
+                    index: u32::try_from(index).map_err(|_| {
+                        ApiError::new(ErrorCode::TooLarge, "the note declares too many sources")
+                    })?,
+                }
+            }
+        };
+        declared.push(DeclaredSource { entry, outcome });
+    }
+    Ok(GetSourcesResponse {
+        revision,
+        sources,
+        appearance: None,
+        declared,
+    })
 }
-
 /// Return a bounded block of an object the citation may open.
 ///
 /// `length` defaults to, and is capped at, `MAX_OBJECT_BLOCK`; `has_more` says whether bytes
@@ -239,68 +294,6 @@ pub(super) async fn record_of(
     }
 }
 
-/// An item's support at the resolved revision, with the entries that cite nothing.
-async fn item_sources(
-    service: &ApplicationService,
-    context: &OperationContext,
-    request: GetSourcesRequest,
-) -> Result<ItemSources, ApiError> {
-    let scope = workspace_scope(context)?;
-    let revision = resolve(service, &scope, &request.at).await?;
-    let ports = service.ports();
-    let document = ports
-        .versions
-        .show(&scope, &revision, request.item_id)
-        .await?;
-    if let Some(appearance) = document.source.clone() {
-        let record = record_of(service, &scope, Some(&appearance)).await?;
-        return Ok(ItemSources {
-            response: GetSourcesResponse {
-                sources: vec![whole_citation(
-                    &scope,
-                    &revision,
-                    &document,
-                    record.as_ref(),
-                )],
-                revision,
-                appearance: Some(appearance),
-            },
-            uncited: Vec::new(),
-        });
-    }
-    let mut sources: Vec<SourceReference> = Vec::new();
-    let mut uncited = Vec::new();
-    for NoteSource { entry, target } in note_sources(&document.properties, &document.summary.path) {
-        match target {
-            SourceTarget::Uncited(reason) => uncited.push((entry, reason)),
-            SourceTarget::Candidates(paths) => {
-                match first_item(service, &scope, &revision, &paths, request.item_id).await? {
-                    Some(item) => {
-                        if !sources.iter().any(|cited| cited.item_id == item) {
-                            let cited = ports.versions.show(&scope, &revision, item).await?;
-                            let record = record_of(service, &scope, cited.source.as_ref()).await?;
-                            sources.push(whole_citation(
-                                &scope,
-                                &revision,
-                                &cited,
-                                record.as_ref(),
-                            ));
-                        }
-                    }
-                    None => uncited.push((entry, UncitedReason::NotFound)),
-                }
-            }
-        }
-    }
-    Ok(ItemSources {
-        response: GetSourcesResponse {
-            revision,
-            sources,
-            appearance: None,
-        },
-        uncited,
-    })
-}
 /// The first of `paths` that names an item at `revision` other than the citing note itself.
 async fn first_item(
     service: &ApplicationService,
