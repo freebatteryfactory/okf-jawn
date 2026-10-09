@@ -12,7 +12,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::extraction::ExtractionFilter;
 use okf_jawn_contract::identity::{ItemId, Revision, TenantId, WorkspacePath};
-use okf_jawn_contract::item::ItemKind;
+use okf_jawn_contract::item::{ItemKind, ItemStatus};
 use okf_jawn_contract::purge::{PurgeState, PurgeTarget};
 use okf_jawn_contract::search::LinkDirection;
 use okf_jawn_core::access::AccessControl;
@@ -222,6 +222,49 @@ async fn search_reads_committed_trees_and_never_drafts() -> TestResult {
     assert_eq!(sources.hits.len(), 1);
     let error = err_of(search.search(&scope, query(&revision, "  ")).await)?;
     assert_eq!(error.code, ErrorCode::InvalidInput);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_deprecated_item_is_always_searchable() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, revision) = populated(directory.path()).await?;
+    let deprecated = storage
+        .versions()
+        .commit(
+            &scope,
+            CommitChanges {
+                mutation_id: uuid!(3)?,
+                expected_head: revision,
+                author: person("ana"),
+                message: "Deprecate the budget".to_owned(),
+                edits: vec![TreeEdit::SetStatus {
+                    item_id: uuid!(11)?,
+                    status: Some(ItemStatus::Deprecated),
+                    archived: None,
+                }],
+            },
+            Arc::new(Accept),
+        )
+        .await?
+        .revision;
+    let search = storage.search();
+    search.index_revision(&scope, deprecated.clone()).await?;
+    let found = search.search(&scope, query(&deprecated, "budget")).await?;
+    let budget: ItemId = uuid!(11)?;
+    assert!(
+        found.hits.iter().any(|hit| hit.source.item_id == budget),
+        "the deprecated item is found"
+    );
+    let shown = storage
+        .versions()
+        .show(&scope, &deprecated, uuid!(11)?)
+        .await?;
+    assert_eq!(
+        shown.summary.status,
+        ItemStatus::Deprecated,
+        "the hit is the deprecated item"
+    );
     Ok(())
 }
 
