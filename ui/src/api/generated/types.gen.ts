@@ -795,7 +795,7 @@ export type ConverterIdentity = {
      */
     settings: ConversionSettings;
     /**
-     * The docling crate version, such as `1.93.5`.
+     * The docling crate version, such as `2.3.0`.
      */
     version: string;
 };

@@ -12,7 +12,7 @@
     "direct_versions": {
       "okf-core": "0.2.7",
       "okf-validator": "0.2.7 (default-features=false)",
-      "docling": "1.93.5 (default-features=false, features=[pdf]; owns docling-core 1.93.6; docling-pdf, docling-core and docling-onnx built from the fork of converter-docling-pdf-font-run-patch)",
+      "docling": "2.3.0 (default-features=false, features=[pdf]; owns docling-core 2.3.0; docling-pdf, docling-core and docling-onnx built from the fork of converter-docling-pdf-font-run-patch)",
       "swagger-ui-dist": "5.33.1",
       "@modelcontextprotocol/client": "2.3.0",
       "@modelcontextprotocol/core": "2.3.0",
@@ -40,16 +40,10 @@
         "path": "docling → image → pulp/rav1e/tokenizers"
       },
       {
-        "id": "RUSTSEC-2026-0206",
-        "crate": "rustybuzz",
-        "label": "upstream-only",
-        "path": "docling → resvg 0.47 → usvg"
-      },
-      {
         "id": "RUSTSEC-2026-0192",
         "crate": "ttf-parser",
         "label": "upstream-only",
-        "path": "docling → resvg 0.47 → usvg"
+        "path": "docling → docling-pdf (declared dependency)"
       },
       {
         "id": "GHSA-vfj7-8cjw-p6xm",
@@ -114,10 +108,10 @@
         {
           "id": "converter-docling-pdf-font-run-patch",
           "kind": "decision",
-          "decision": "docling-pdf is built from a one-commit fork of docling.rs so that a phrase that changes font is extracted as one run, as docling-parse 7.21 and later do.",
-          "decided_on": "2026-10-06",
+          "decision": "docling-pdf is built from a two-commit fork of docling.rs 2.3.0 so that a phrase that changes font is extracted as one run, as docling-parse 7.21 and later do, and a blank cell is never taken for overpaint on the text-layer path.",
+          "decided_on": "2026-10-08",
           "decided_by": "owner",
-          "covers": "docling-pdf, docling-core and docling-onnx 1.93.6 are built from the fork https://github.com/Heyoub/docling.rs, branch okf/docling-pdf-1.93.6-font-runs, at the commit the [patch.crates-io] section of Cargo.toml names by rev (Cargo.lock records it as their source): one commit on the upstream docling.rs commit that crates.io publishes as 1.93.6 (the .cargo_vcs_info.json of that release names it). docling-core and docling-onnx come from the same tree so that Cargo.lock holds one of each, and docling stays 1.93.5 from crates.io. The one rule changed: in the line contraction of docling-pdf (dp_lines.rs, applicable) a change of font no longer ends a line cell; word cells still end at a change of font. Upstream docling-parse made this change in #351 (7.21.0), and docling.rs has not ported it (upstream master, 2026-10-06). Nothing was reported upstream. The patch is removed, and the three crates return to crates.io, when a docling.rs release ports the docling-parse 7.21 or later line contractor."
+          "covers": "docling-pdf, docling-core and docling-onnx 2.3.0 are built from the fork https://github.com/Heyoub/docling.rs, branch okf/docling-2.3.0-font-runs, at the commit the [patch.crates-io] section of Cargo.toml names by rev (Cargo.lock records it as their source): two commits on the upstream docling.rs commit that crates.io publishes as 2.3.0. docling-core and docling-onnx come from the same tree so that Cargo.lock holds one of each, and docling is 2.3.0 from crates.io. The first rule changed: in the line contraction of docling-pdf (dp_lines.rs, applicable) a change of font no longer ends a line cell; word cells still end at a change of font. Upstream docling-parse made this change in #351 (7.21.0), and docling.rs has not ported it (upstream master v2.3.0, 2026-10-08). The second: on the text-layer path (textparse.rs, drop_overpainted_cells) a blank cell is never paired as overpaint; with the first change alone, a checkbox glyph, a space and option text in another font merge into one line whose blank cell lies inside it, and the whole line was dropped (measured 2026-10-08: 2,978 to 1,507 non-space characters on upstream table_mislabeled_as_picture.pdf with the first change alone on 1.93.6; every character back with the second; no change on this repository's fixtures). The fork first carried the first change on 1.93.6 (owner decision 2026-10-06); it moved to 2.3.0 on 2026-10-08 after the Docling qualification on 2.3.0 with both changes matched every criterion of the 1.93.6 receipt. A pull request with both changes is drafted on the fork (branch okf/upstream-pr-draft). Nothing was reported upstream. The patch is removed, and the three crates return to crates.io, when a docling.rs release carries both changes."
         },
         {
           "id": "mcp-apps-protocol-qualification",
@@ -406,7 +400,7 @@
         {
           "id": "release-model-inventory",
           "status": "blocked_on_product",
-          "meaning": "Before any installer or image ships models: every model and native library is listed with its upstream source, version, SHA-256 and licence, and the installer verifies that pinned inventory and never discovers a different set. Today the Docling receipt verifies hashes against a machine-local manifest, which proves consistency, not origin or distribution rights"
+          "meaning": "Before any installer or image ships models: every model and native library is listed with its upstream source, version, SHA-256 and licence, and the installer verifies that pinned inventory and never discovers a different set. Today the Docling receipt verifies hashes against a machine-local manifest, which proves consistency, not origin or distribution rights. The models-v1 release was re-published under the same tag: on 2026-10-08 seven model graph files (both layout models and five table models) downloaded from it no longer matched the receipt's hashes at the same sizes, while every weights file did; the owner's local copy still matches the receipt exactly and is kept as the pinned reference. So the inventory must pin bytes the project holds, not a mutable release tag"
         },
         {
           "id": "scale-reference-workload",
