@@ -6,7 +6,7 @@
 //! a crash, any other is refused as already used.
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{MutationId, Timestamp};
+use okf_jawn_contract::identity::MutationId;
 use okf_jawn_contract::review::{Confirmation, ConfirmationTarget};
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::ports::PortFuture;
@@ -50,7 +50,6 @@ impl ConfirmationStore for SqliteConfirmations {
     ) -> PortFuture<'a, Confirmation> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
-            let expires_at = canonical_expiry(&create.expires_at)?;
             let id: okf_jawn_contract::identity::ConfirmationId = new_id!()?;
             transaction
                 .execute(
@@ -70,7 +69,7 @@ impl ConfirmationStore for SqliteConfirmations {
                         create.content_digest.as_str(),
                         create.session_id,
                         create.subject,
-                        expires_at.as_str()
+                        create.expires_at.as_str()
                     ],
                 )
                 .map_err(|error| sql(&error))?;
@@ -196,15 +195,4 @@ fn confirmation(challenge: &Challenge) -> Result<Confirmation, ApiError> {
 /// The canonical JSON of a target, compared as text.
 fn target_text(target: &ConfirmationTarget) -> Result<String, ApiError> {
     serde_json::to_string(target).map_err(|error| json(&error))
-}
-
-/// The expiry as a canonical `Timestamp`, so it compares as text against the clock.
-pub(crate) fn canonical_expiry(expires_at: &str) -> Result<Timestamp, ApiError> {
-    Timestamp::try_from(expires_at.to_owned()).map_err(|error| {
-        ApiError::new(
-            ErrorCode::InvalidInput,
-            format!("an expiry must be a canonical UTC instant: {error}"),
-        )
-        .with_field("/expires_at")
-    })
 }

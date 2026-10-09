@@ -13,7 +13,6 @@ use okf_jawn_core::credentials::{
 use okf_jawn_core::ports::PortFuture;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::confirmations::canonical_expiry;
 use crate::db::{Db, conflict, json, not_found, sql};
 use crate::seam;
 
@@ -165,14 +164,13 @@ impl CredentialStore for SqliteCredentials {
 
     fn insert_session(&self, session: SessionRecord) -> PortFuture<'_, SessionRecord> {
         Box::pin(self.db.transaction(move |transaction| {
-            let expires_at = canonical_expiry(&session.expires_at)?;
             transaction
                 .execute(
                     "INSERT INTO sessions (session_id, principal, expires_at) VALUES (?1, ?2, ?3)",
                     params![
                         session.session_id,
                         serde_json::to_string(&session.principal).map_err(|error| json(&error))?,
-                        expires_at.as_str()
+                        session.expires_at.as_str()
                     ],
                 )
                 .map_err(|error| sql(&error))?;
@@ -199,7 +197,7 @@ impl CredentialStore for SqliteCredentials {
                     Ok(SessionRecord {
                         session_id: session_id.clone(),
                         principal,
-                        expires_at,
+                        expires_at: from_text!(expires_at.as_str())?,
                     })
                 })
                 .transpose()
@@ -233,17 +231,17 @@ pub(crate) fn installation(connection: &Connection) -> Result<InstallationIdenti
     if let Some((subject, created_at)) = found {
         return Ok(InstallationIdentity {
             subject,
-            created_at,
+            created_at: from_text!(created_at.as_str())?,
         });
     }
     let identity = InstallationIdentity {
         subject: format!("local-owner-{}", seam::hex(&seam::random_bytes::<8>()?)),
-        created_at: seam::now()?.to_string(),
+        created_at: seam::now()?,
     };
     connection
         .execute(
             "INSERT INTO installation (singleton, subject, created_at) VALUES (1, ?1, ?2)",
-            params![identity.subject, identity.created_at],
+            params![identity.subject, identity.created_at.as_str()],
         )
         .map_err(|error| sql(&error))?;
     Ok(identity)

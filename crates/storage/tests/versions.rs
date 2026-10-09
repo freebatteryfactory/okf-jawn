@@ -17,12 +17,13 @@ use okf_jawn_contract::item::{ItemKind, ItemStatus};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationStore};
 use okf_jawn_core::storage::{
-    CandidateChanges, CandidateCheck, CommitChanges, LogQuery, NewWorkspace, Page, Promotion,
-    Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive, WorkspaceCatalog,
-    WorkspaceUpdate,
+    BlobStore, CandidateChanges, CandidateCheck, CommitChanges, LogQuery, NewWorkspace, Page,
+    Promotion, Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
+    WorkspaceCatalog, WorkspaceUpdate,
 };
 use okf_jawn_storage::Storage;
 use serde_json::json;
+use tokio::io::AsyncReadExt as _;
 
 use check::{TestResult, err_of, some};
 
@@ -169,20 +170,22 @@ async fn history_follows_the_move(
     Ok(())
 }
 
-fn staging_is_empty(storage: &Storage) -> Fallible<bool> {
-    fn files(dir: &Path) -> std::io::Result<usize> {
-        let mut count = 0_usize;
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            count = count.saturating_add(if entry.file_type()?.is_dir() {
-                files(&entry.path())?
-            } else {
-                1
-            });
-        }
-        Ok(count)
+/// How many files lie under `dir`, at any depth.
+fn files_under(dir: &Path) -> std::io::Result<usize> {
+    let mut count = 0_usize;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        count = count.saturating_add(if entry.file_type()?.is_dir() {
+            files_under(&entry.path())?
+        } else {
+            1
+        });
     }
-    Ok(files(&storage.data().staging_path())? == 0)
+    Ok(count)
+}
+
+fn staging_is_empty(storage: &Storage) -> Fallible<bool> {
+    Ok(files_under(&storage.data().staging_path())? == 0)
 }
 
 #[tokio::test]
@@ -520,6 +523,15 @@ async fn items_are_shown_listed_moved_with_their_links_and_archived() -> TestRes
                 vec![
                     note(uuid!(10)?, "a.md", "See [the plan](b.md).")?,
                     note(uuid!(11)?, "b.md", "The plan.\n\n```vega-lite\n{}\n```")?,
+                    TreeEdit::CreateItem {
+                        item_id: uuid!(12)?,
+                        path: path("chart.md")?,
+                        title: None,
+                        type_name: "Chart".to_owned(),
+                        kind: ItemKind::View,
+                        body: "No fence here.".to_owned(),
+                        properties: BTreeMap::new(),
+                    },
                 ],
             )?,
             Arc::new(Counting::default()),
@@ -527,13 +539,23 @@ async fn items_are_shown_listed_moved_with_their_links_and_archived() -> TestRes
         .await?
         .revision;
     let shown = versions.show(&scope, &first, uuid!(11)?).await?;
-    assert_eq!(shown.summary.kind, ItemKind::View);
+    assert_eq!(
+        shown.summary.kind,
+        ItemKind::Note,
+        "a fenced vega-lite example does not make a Note a View"
+    );
     assert_eq!(shown.summary.status, ItemStatus::Stable);
     assert_eq!(shown.summary.description, "a note");
     assert_eq!(shown.properties.get("type"), Some(&json!("Note")));
     assert_eq!(
         shown.properties.get("okf_jawn"),
-        Some(&json!({ "item_id": uuid_text(11) }))
+        Some(&json!({ "item_id": uuid_text(11), "kind": "note" }))
+    );
+    let view = versions.show(&scope, &first, uuid!(12)?).await?;
+    assert_eq!(
+        view.summary.kind,
+        ItemKind::View,
+        "the kind the creation names is the kind read back"
     );
     let listing = versions
         .list(
@@ -546,7 +568,7 @@ async fn items_are_shown_listed_moved_with_their_links_and_archived() -> TestRes
             },
         )
         .await?;
-    assert_eq!(listing.items.len(), 2);
+    assert_eq!(listing.items.len(), 3);
     let index = versions
         .read_file(&scope, &first, &path("index.md")?)
         .await?;
@@ -653,6 +675,127 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
         stale.code,
         ErrorCode::Conflict,
         "the head moved since the confirmation"
+    );
+    Ok(())
+}
+
+/// Clone a bundle with stock `git` and open the clone with git2.
+fn clone_bundle(bundle: &Path, into: &Path) -> Fallible<git2::Repository> {
+    let output = std::process::Command::new("git")
+        .arg("clone")
+        .arg("--quiet")
+        .arg(bundle)
+        .arg(into)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "stock git did not clone the bundle: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(git2::Repository::open(into)?)
+}
+
+#[tokio::test]
+async fn history_is_a_bundle_of_the_accepted_line_that_stock_git_clones() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let first = versions
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note(uuid!(10)?, "a.md", "First.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let second = versions
+        .commit(
+            &scope,
+            changes(21, &first, vec![note(uuid!(11)?, "b.md", "Second.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let candidate = versions
+        .create_candidate(
+            &scope,
+            uuid!(50)?,
+            CandidateChanges {
+                mutation_id: uuid!(51)?,
+                base: second.clone(),
+                author: person("agent"),
+                message: "Propose".to_owned(),
+                edits: vec![note(uuid!(12)?, "proposed.md", "Proposed.")?],
+            },
+            Arc::new(Counting::default()),
+        )
+        .await?;
+    let off_line = err_of(versions.write_history(&scope, &candidate, uuid!(60)?).await)?;
+    assert_eq!(
+        off_line.code,
+        ErrorCode::NotFound,
+        "a revision off the accepted line has no history to export"
+    );
+
+    let object = versions.write_history(&scope, &first, uuid!(61)?).await?;
+    let retained = files_under(&storage.data().objects_path())?;
+    let repeated = versions.write_history(&scope, &second, uuid!(61)?).await?;
+    assert_eq!(
+        repeated, object,
+        "a repeated mutation id returns the object the first call wrote"
+    );
+    assert_eq!(
+        files_under(&storage.data().objects_path())?,
+        retained,
+        "a repeated mutation id writes nothing"
+    );
+    let mut bytes = Vec::new();
+    storage
+        .blobs()
+        .open(&scope, &object.digest, 0, object.size)
+        .await?
+        .body
+        .read_to_end(&mut bytes)
+        .await?;
+    assert!(bytes.starts_with(b"# v2 git bundle\n"));
+    let bundle = directory.path().join("history.bundle");
+    std::fs::write(&bundle, &bytes)?;
+    let clone = clone_bundle(&bundle, &directory.path().join("clone"))?;
+    let cloned_head = some(clone.head()?.target(), "the cloned head")?;
+    assert_eq!(cloned_head.to_string(), first.as_str());
+    let parent = clone.find_commit(cloned_head)?.parent_id(0)?;
+    assert_eq!(
+        parent.to_string(),
+        initial.as_str(),
+        "the whole line, not one commit"
+    );
+    for absent in [&second, &candidate] {
+        assert!(
+            clone
+                .find_commit(git2::Oid::from_str(absent.as_str())?)
+                .is_err(),
+            "{} is not on the line up to the revision",
+            absent.as_str()
+        );
+    }
+    let mut references = Vec::new();
+    for reference in clone.references()? {
+        references.push(reference?.name()?.to_owned());
+    }
+    assert!(
+        references
+            .iter()
+            .all(|name| !name.contains("okf-jawn") && !name.contains("proposals")),
+        "no proposal or candidate reference travels: {references:?}"
+    );
+    let workdir = some(clone.workdir(), "the clone's working tree")?;
+    assert!(workdir.join("a.md").is_file());
+    assert!(!workdir.join("b.md").exists());
+
+    let whole = versions.write_history(&scope, &second, uuid!(62)?).await?;
+    assert_ne!(
+        whole, object,
+        "another revision under another id is another bundle"
     );
     Ok(())
 }

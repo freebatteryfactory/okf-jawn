@@ -495,6 +495,62 @@ async fn local_access_grants_the_owner_connectors_and_creators() -> TestResult {
 }
 
 #[tokio::test]
+async fn local_editors_are_the_owner_and_every_grant_with_write_sorted_once() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, _) = populated(directory.path()).await?;
+    let access = storage.access();
+    let identity = storage.credentials().installation_identity().await?;
+    assert_eq!(
+        access.editors(&scope).await?,
+        vec![identity.subject.clone()]
+    );
+    // `zed` and `amy` create (all permissions); the owner's own grant repeats the owner.
+    for subject in ["zed", "amy"] {
+        access
+            .grant_creator(
+                &owner(subject, AccessRoute::BrowserSession, None)?,
+                scope.workspace_id,
+            )
+            .await?;
+    }
+    access
+        .grant_creator(
+            &owner(&identity.subject, AccessRoute::LocalOwner, None)?,
+            scope.workspace_id,
+        )
+        .await?;
+    // A grant without `write`, recorded directly: the adapter has no call that makes one.
+    rusqlite::Connection::open(storage.data().records_path())?.execute(
+        "INSERT INTO grants (tenant_id, workspace_id, subject, permissions)
+         VALUES (?1, ?2, 'reader', '[\"read\",\"propose\"]')",
+        rusqlite::params![scope.tenant_id.as_str(), scope.workspace_id.0.to_string()],
+    )?;
+    storage
+        .credentials()
+        .create_connector(
+            uuid!(70)?,
+            NewConnector {
+                label: "agent".to_owned(),
+                workspace_ids: vec![scope.workspace_id],
+                allow_propose: true,
+            },
+        )
+        .await?;
+    let mut expected = vec!["amy".to_owned(), identity.subject.clone(), "zed".to_owned()];
+    expected.sort();
+    assert_eq!(access.editors(&scope).await?, expected);
+    let unheld = StorageScope {
+        tenant_id: scope.tenant_id.clone(),
+        workspace_id: uuid!(77)?,
+    };
+    assert!(
+        access.editors(&unheld).await?.is_empty(),
+        "a workspace the tenant does not hold has no editor"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn readiness_reports_each_store() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;

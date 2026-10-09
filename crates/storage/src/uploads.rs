@@ -343,7 +343,7 @@ fn read(
             .map(|digest| from_text!(digest.as_str()))
             .transpose()?,
         supplied_by: serde_json::from_str(&supplied_by).map_err(|error| json(&error))?,
-        created_at,
+        created_at: from_text!(created_at.as_str())?,
         received_bytes: to_u64(received)?,
         object,
         consumed_by: consumed_by

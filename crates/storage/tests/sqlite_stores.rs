@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_contract::identity::{Digest, Revision, TenantId};
+use okf_jawn_contract::identity::{Digest, Revision, TenantId, Timestamp};
 use okf_jawn_contract::proposal::{Comment, Proposal, ProposalStatus};
 use okf_jawn_contract::review::{ConfirmationAction, ConfirmationTarget};
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
@@ -71,7 +71,7 @@ fn challenge(expires_at: &str) -> Fallible<ConfirmationCreate> {
         content_digest: digest('d')?,
         session_id: "session-1".to_owned(),
         subject: "owner".to_owned(),
-        expires_at: expires_at.to_owned(),
+        expires_at: Timestamp::try_from(expires_at.to_owned())?,
     })
 }
 
@@ -304,7 +304,7 @@ async fn a_sandbox_capability_resolves_by_hash_until_it_expires() -> TestResult 
             revision: revision('a')?,
             object: digest('f')?,
             media_type: "text/html".to_owned(),
-            expires_at: expires_at.to_owned(),
+            expires_at: Timestamp::try_from(expires_at.to_owned())?,
         })
     };
     sandbox

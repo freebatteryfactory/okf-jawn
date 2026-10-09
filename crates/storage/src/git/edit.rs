@@ -17,7 +17,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::TextOrigin;
 use okf_jawn_contract::identity::{Digest, ItemId, WorkspacePath};
 use okf_jawn_contract::item::{ItemStatus, TypeDefinition};
-use okf_jawn_core::items::{refuse_header_change, refuse_header_in_type};
+use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_header_in_type};
 use okf_jawn_core::storage::{SourceCard, TreeEdit};
 
 use super::item::{
@@ -136,10 +136,18 @@ fn apply_one(repository: &Repository, staged: &mut Staged, edit: TreeEdit) -> Re
             path,
             title,
             type_name,
-            kind: _,
+            kind,
             body,
             properties,
-        } => create_item(staged, item_id, &path, title, type_name, &body, properties),
+        } => create_item(
+            staged,
+            bare_header(item_id, kind),
+            &path,
+            title,
+            type_name,
+            &body,
+            properties,
+        ),
         TreeEdit::EditItem {
             item_id,
             body,
@@ -221,7 +229,7 @@ fn apply_one(repository: &Repository, staged: &mut Staged, edit: TreeEdit) -> Re
 
 fn create_item(
     staged: &mut Staged,
-    item_id: ItemId,
+    header: ApplicationHeader,
     path: &WorkspacePath,
     title: Option<String>,
     type_name: String,
@@ -230,7 +238,7 @@ fn create_item(
 ) -> Result<(), ApiError> {
     check_item_path(path)?;
     refuse_header_change(&BTreeMap::new(), &properties, "/properties")?;
-    if staged.items.contains_key(&item_id) {
+    if staged.items.contains_key(&header.item_id) {
         return Err(conflict("an item with this identity already exists"));
     }
     if staged.occupied(path) {
@@ -240,7 +248,7 @@ fn create_item(
     if let Some(title) = title {
         properties.insert("title".to_owned(), serde_json::Value::String(title));
     }
-    let file = new_item(&properties, body, bare_header(item_id))?;
+    let file = new_item(&properties, body, header)?;
     staged.write(path.as_str(), &file)
 }
 

@@ -9,7 +9,6 @@ use okf_jawn_core::sandbox::{SandboxCapabilityStore, SandboxMint, SandboxResolve
 use okf_jawn_core::storage::StorageScope;
 use rusqlite::{OptionalExtension, params};
 
-use crate::confirmations::canonical_expiry;
 use crate::db::{Db, conflict, scope_key, sql};
 use crate::seam;
 
@@ -37,7 +36,6 @@ impl SandboxCapabilityStore for SqliteSandbox {
     ) -> PortFuture<'a, ()> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
-            let expires_at = canonical_expiry(&mint.expires_at)?;
             let inserted = transaction
                 .execute(
                     "INSERT INTO sandbox_capabilities (token_hash, tenant_id, workspace_id,
@@ -51,7 +49,7 @@ impl SandboxCapabilityStore for SqliteSandbox {
                         mint.revision.as_str(),
                         mint.object.as_str(),
                         mint.media_type,
-                        expires_at.as_str()
+                        mint.expires_at.as_str()
                     ],
                 )
                 .map_err(|error| sql(&error))?;

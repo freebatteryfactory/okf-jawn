@@ -371,6 +371,55 @@ async fn a_removal_record_is_unique_while_unfinished_and_carries_a_tenant_job() 
 }
 
 #[tokio::test]
+async fn a_removal_record_is_stamped_once_when_its_completion_is_recorded() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let first = records
+        .create_purge(
+            &tenant()?,
+            uuid!(21)?,
+            NewPurge {
+                id: uuid!(20)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: uuid!(1)?,
+                },
+                initiator: owner(),
+            },
+        )
+        .await?;
+    assert_eq!(first.completed_at, None);
+    let mut running = first.clone();
+    running.state = PurgeState::Running;
+    running.completed_at = Some(okf_jawn_contract::identity::Timestamp::try_from(
+        "2020-01-01T00:00:00.000Z".to_owned(),
+    )?);
+    let stored = records.update_purge(&tenant()?, running).await?;
+    assert_eq!(
+        stored.completed_at, None,
+        "a purge that has not completed carries no completion time"
+    );
+    let mut completed = first.clone();
+    completed.state = PurgeState::Completed;
+    let stamped = records.update_purge(&tenant()?, completed.clone()).await?;
+    let at = some(stamped.completed_at.clone(), "the completion time")?;
+    assert!(at >= first.requested_at, "stamped from the store's clock");
+    // A later clock reading differs, so a re-stamp would show.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let again = records.update_purge(&tenant()?, completed).await?;
+    assert_eq!(
+        again.completed_at,
+        Some(at.clone()),
+        "recording the completion again keeps the first stamp"
+    );
+    assert_eq!(
+        records.get_purge(&tenant()?, first.id).await?.completed_at,
+        Some(at)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn derived_objects_are_unique_per_item_revision_and_digest() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;

@@ -7,10 +7,9 @@
 //! (`.okf/supplied/<item>.json`), type definitions (`.okf/types.json`) and naming rules
 //! (`.okf/rules.yaml`).
 //!
-//! An item's rendering role is not stored: a card with a source header is a Source, a note whose
-//! body holds a fenced `vega-lite` or `json-render` specification is a View (SPEC section 10:
-//! "A View is a versioned Markdown note with ... a fenced Vega-Lite or json-render
-//! specification"), and anything else is a Note.
+//! An item's rendering role is recorded in its header (`ApplicationHeader::kind`) when it is
+//! created and read back from there, never inferred from the body: a Note that shows a fenced
+//! vega-lite example stays a Note.
 
 use std::collections::BTreeMap;
 
@@ -127,15 +126,9 @@ impl ItemFile {
         }
     }
 
-    /// The rendering role (see the module header).
+    /// The rendering role recorded in the header (see the module header).
     pub(crate) fn kind(&self) -> ItemKind {
-        if self.header.source.is_some() {
-            ItemKind::Source
-        } else if has_view_fence(&self.document.body) {
-            ItemKind::View
-        } else {
-            ItemKind::Note
-        }
+        self.header.kind.clone()
     }
 }
 
@@ -160,22 +153,6 @@ pub(crate) fn status_of(status: &okf_core::Status) -> ItemStatus {
         okf_core::Status::Deprecated => ItemStatus::Deprecated,
         okf_core::Status::Other(_) => ItemStatus::Other,
     }
-}
-
-/// Whether a Markdown body holds a fenced View specification.
-pub(crate) fn has_view_fence(body: &str) -> bool {
-    body.lines().any(|line| {
-        let trimmed = line.trim_start();
-        let info = trimmed
-            .strip_prefix("```")
-            .or_else(|| trimmed.strip_prefix("~~~"))
-            .map(|rest| rest.trim_start_matches(['`', '~']).trim());
-        info.and_then(|info| info.split_whitespace().next())
-            .is_some_and(|language| {
-                language.eq_ignore_ascii_case("vega-lite")
-                    || language.eq_ignore_ascii_case("json-render")
-            })
-    })
 }
 
 /// Whether a tree path is an item file: Markdown, outside `.okf/`, and not a folder index or
@@ -283,10 +260,12 @@ pub(crate) fn check_item_path(path: &WorkspacePath) -> Result<(), ApiError> {
     }
 }
 
-/// The header stored for an item that has none yet.
-pub(crate) const fn bare_header(item_id: ItemId) -> ApplicationHeader {
+/// The header a created item is written with: its identity and the rendering role its
+/// creation names.
+pub(crate) const fn bare_header(item_id: ItemId, kind: ItemKind) -> ApplicationHeader {
     ApplicationHeader {
         item_id,
+        kind,
         archived: false,
         source: None,
         extraction: None,

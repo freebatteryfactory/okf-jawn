@@ -160,7 +160,11 @@ impl Storage {
     /// Versioned workspace content.
     #[must_use]
     pub fn versions(&self) -> GitVersions {
-        GitVersions::new(self.repositories.clone())
+        GitVersions::new(
+            self.repositories.clone(),
+            self.records.clone(),
+            self.blobs.clone(),
+        )
     }
 
     /// The workspace catalog.

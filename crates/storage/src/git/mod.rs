@@ -6,6 +6,9 @@
 //! path collisions, maintain the folder indexes and the change log, run the caller's
 //! `CandidateCheck` on that directory, write the tree and the commit, and only then move the
 //! reference with a compare-and-set. The staging directory is removed when the call returns.
+//!
+//! `write_history` writes the accepted line up to a revision as a Git bundle into the blob
+//! store (`export`).
 
 use std::sync::Arc;
 
@@ -21,8 +24,12 @@ use okf_jawn_contract::item::{ItemDocument, TypeDefinition};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, DiffQuery,
-    FolderListing, LogQuery, Page, Promotion, Provenance, StorageScope, TreeEdit, VersionStore,
+    FolderListing, LogQuery, ObjectInfo, Page, Promotion, Provenance, StorageScope, TreeEdit,
+    VersionStore,
 };
+
+use crate::blobs::{LocalBlobs, file_reader};
+use crate::db::Db;
 
 pub(crate) use item::ItemFile;
 pub(crate) use read::items as items_of;
@@ -37,6 +44,10 @@ use repo::{
 #[derive(Debug, Clone)]
 pub struct GitVersions {
     repositories: Repositories,
+    /// The records database, where a written history is recorded under its mutation.
+    records: Db,
+    /// Where a written history is retained.
+    blobs: LocalBlobs,
 }
 
 /// What a staged write commits on top of.
@@ -50,8 +61,45 @@ struct Write {
 }
 
 impl GitVersions {
-    pub(crate) const fn new(repositories: Repositories) -> Self {
-        Self { repositories }
+    pub(crate) const fn new(repositories: Repositories, records: Db, blobs: LocalBlobs) -> Self {
+        Self {
+            repositories,
+            records,
+            blobs,
+        }
+    }
+
+    /// See `VersionStore::write_history`.
+    async fn history(
+        &self,
+        scope: &StorageScope,
+        revision: &Revision,
+        mutation_id: MutationId,
+    ) -> Result<ObjectInfo, ApiError> {
+        if let Some(object) = export::recorded(&self.records, scope, mutation_id).await? {
+            return Ok(object);
+        }
+        let wanted = revision.clone();
+        let (staging, size) = self
+            .blocking(scope, move |repositories, scope| {
+                let staging = repositories.stage(scope, mutation_id)?;
+                let bundle = staging.path.join(export::BUNDLE_FILE);
+                let size = export::write_bundle(&repositories.open(scope)?, &wanted, &bundle)?;
+                Ok((staging, size))
+            })
+            .await?;
+        let bundle = staging.path.join(export::BUNDLE_FILE);
+        let object = self
+            .blobs
+            .put_for(
+                &scope.tenant_id,
+                file_reader(Some(bundle), 0, size),
+                size,
+                None,
+            )
+            .await?;
+        drop(staging);
+        export::record(&self.records, scope, mutation_id, revision, object).await
     }
 
     async fn blocking<T, F>(&self, scope: &StorageScope, work: F) -> Result<T, ApiError>
@@ -284,6 +332,15 @@ impl VersionStore for GitVersions {
             history::blame(&repositories.open(scope)?, scope, &query)
         }))
     }
+
+    fn write_history<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        mutation_id: MutationId,
+    ) -> PortFuture<'a, ObjectInfo> {
+        Box::pin(self.history(scope, revision, mutation_id))
+    }
 }
 
 /// Stage `write.base`, apply the edits, check, and write the commit (no reference moves).
@@ -419,6 +476,7 @@ pub(crate) fn proposal_reference(proposal: ProposalId) -> String {
 }
 
 mod edit;
+mod export;
 mod history;
 mod item;
 mod read;

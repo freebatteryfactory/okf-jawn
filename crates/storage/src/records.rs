@@ -353,6 +353,27 @@ impl RecordStore for SqliteRecords {
     fn update_purge<'a>(&'a self, tenant: &'a TenantId, purge: Purge) -> PortFuture<'a, Purge> {
         let tenant = tenant.as_str().to_owned();
         Box::pin(self.db.transaction(move |transaction| {
+            let mut purge = purge;
+            let stored: Option<String> = transaction
+                .query_row(
+                    "SELECT record FROM purges WHERE purge_id = ?1 AND tenant_id = ?2",
+                    params![purge.id.0.to_string(), tenant],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| sql(&error))?;
+            let stored: Purge = serde_json::from_str(&stored.ok_or_else(|| not_found("purge"))?)
+                .map_err(|error| json(&error))?;
+            // The store's clock stamps the first recorded completion; a repeat keeps it, and
+            // a purge in any other state has none.
+            purge.completed_at = if purge.state == PurgeState::Completed {
+                match stored.completed_at {
+                    Some(first) => Some(first),
+                    None => Some(seam::now()?),
+                }
+            } else {
+                None
+            };
             let record = serde_json::to_string(&purge).map_err(|error| json(&error))?;
             let changed = transaction
                 .execute(

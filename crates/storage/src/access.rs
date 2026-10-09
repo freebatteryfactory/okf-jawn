@@ -9,6 +9,9 @@
 //! - Any other subject holds what `grant_creator` recorded for it: every permission on a
 //!   workspace it created.
 //!
+//! `editors` names the subjects holding `write` on a workspace: the installation owner and every
+//! recorded grant that includes `write`, sorted and unique, read fresh.
+//!
 //! Route and delegation rules are core's; this adapter returns raw grants only.
 
 use std::collections::BTreeSet;
@@ -23,7 +26,7 @@ use okf_jawn_core::storage::StorageScope;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::credentials::installation;
-use crate::db::{Db, json, sql};
+use crate::db::{Db, json, scope_key, sql};
 use crate::events::holds;
 
 /// `AccessControl` over the records database.
@@ -130,6 +133,48 @@ impl AccessControl for LocalAccess {
             Ok(grant(&principal, workspace, ALL.to_vec()))
         }))
     }
+
+    fn editors<'a>(&'a self, scope: &'a StorageScope) -> PortFuture<'a, Vec<String>> {
+        let (tenant, workspace) = scope_key(scope);
+        Box::pin(
+            self.db
+                .transaction(move |transaction| editors_of(transaction, &tenant, &workspace)),
+        )
+    }
+}
+
+/// The subjects holding `write` on a workspace, sorted and unique: the installation owner and
+/// every recorded grant that includes `write`. A connector never holds `write`, and a
+/// workspace the tenant does not hold has no editor.
+fn editors_of(
+    connection: &Connection,
+    tenant: &str,
+    workspace: &str,
+) -> Result<Vec<String>, ApiError> {
+    if !holds(connection, tenant, workspace)? {
+        return Ok(Vec::new());
+    }
+    let mut editors = BTreeSet::from([installation(connection)?.subject]);
+    let mut statement = connection
+        .prepare(
+            "SELECT subject, permissions FROM grants WHERE tenant_id = ?1 AND workspace_id = ?2",
+        )
+        .map_err(|error| sql(&error))?;
+    let rows = statement
+        .query_map(params![tenant, workspace], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| sql(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sql(&error))?;
+    for (subject, permissions) in rows {
+        let permissions: BTreeSet<Permission> =
+            serde_json::from_str(&permissions).map_err(|error| json(&error))?;
+        if permissions.contains(&Permission::Write) {
+            editors.insert(subject);
+        }
+    }
+    Ok(editors.into_iter().collect())
 }
 
 /// The raw permissions `principal` holds on `workspace`; empty for a workspace the tenant does

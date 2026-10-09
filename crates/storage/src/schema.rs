@@ -245,6 +245,15 @@ CREATE TABLE events (
 ) STRICT;
 CREATE INDEX events_by_log ON events (tenant_id, workspace_id, seq);
 
+CREATE TABLE history_exports (
+    mutation_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    size INTEGER NOT NULL
+) STRICT;
+
 CREATE TABLE installation (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     subject TEXT NOT NULL,
