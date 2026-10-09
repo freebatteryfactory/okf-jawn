@@ -4,7 +4,7 @@
 //! hash) so the import that follows preserves the occurrence. Opening a slot takes
 //! `MutationId`; a repeated id opens nothing and returns the prior slot.
 
-use okf_jawn_contract::identity::{Digest, JobId, MutationId, UploadId};
+use okf_jawn_contract::identity::{Digest, JobId, MutationId, Timestamp, UploadId};
 
 use crate::ports::PortFuture;
 use crate::storage::{ByteReader, ObjectInfo, Provenance, StorageScope};
@@ -39,8 +39,8 @@ pub struct UploadRecord {
     pub expected_sha256: Option<Digest>,
     /// Who supplies the bytes.
     pub supplied_by: Provenance,
-    /// RFC 3339 time the slot was opened.
-    pub created_at: String,
+    /// When the slot was opened, in the canonical UTC spelling.
+    pub created_at: Timestamp,
     /// Bytes durably received so far.
     pub received_bytes: u64,
     /// Retained object identity; present exactly when the upload is complete.

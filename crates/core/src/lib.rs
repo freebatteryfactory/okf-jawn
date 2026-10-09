@@ -31,6 +31,8 @@ pub mod items;
 pub mod jobs;
 /// Durable mutation ledger.
 pub mod mutations;
+/// Portable export and import rules: OKF `verified` and lint at import.
+pub mod portable;
 /// Proposal and comment persistence.
 pub mod proposals;
 /// Configured dependency readiness probe.

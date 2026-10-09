@@ -28,6 +28,7 @@ use okf_jawn_contract::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::access::AccessControl;
 use crate::conversion::ConversionSettings;
 use crate::ports::PortFuture;
 use crate::storage::{ObjectInfo, Page, Provenance, StorageScope};
@@ -89,11 +90,19 @@ pub enum JobSpec {
     /// Back up content, retained objects and application records.
     BackupWorkspace,
     /// Restore content and application records from an uploaded workspace archive.
+    ///
+    /// Built with `restore_job_spec`.
     RestoreWorkspace {
         /// Upload slot holding the archive; consumed by this job.
         upload_id: UploadId,
         /// Digest of the archive, checked against the request's `sha256` at acceptance.
         archive: Digest,
+        /// The subjects with `write` on the target workspace, read from `AccessControl` when
+        /// the request was accepted, sorted and without repeats. The handler holds only its
+        /// `ClaimedJob` and never consults `AccessControl`: it passes these to
+        /// `Backups::restore_import`, which gives an archived draft back only to an editor
+        /// among them.
+        editors: Vec<String>,
     },
     /// Rebuild the derived search and link index at the current head.
     RebuildIndex,
@@ -346,6 +355,11 @@ pub trait RecordStore: Send + Sync {
     /// Read one purge; it outlives the workspace it removed.
     fn get_purge<'a>(&'a self, tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge>;
     /// Store the progress, report or failure of a purge and return it as stored.
+    ///
+    /// The store stamps `Purge::completed_at` from its own clock in the write that first
+    /// records `PurgeState::Completed`, because the handler has no clock: the caller passes
+    /// `completed_at` as `None` and reads the stamp from the returned purge. Recording the
+    /// completion again keeps the first stamp; a purge in any other state has none.
     fn update_purge<'a>(&'a self, tenant: &'a TenantId, purge: Purge) -> PortFuture<'a, Purge>;
     /// What became of a revision a purge rewrote or removed; `None` when no purge touched it.
     /// Written by `Purger`.
@@ -529,6 +543,30 @@ pub fn purge_job_spec(target: &PurgeTarget, purge_id: PurgeId) -> JobSpec {
             item_id: *item_id,
         },
     }
+}
+
+/// The specification of a `restore_workspace` job accepted for the workspace in `scope`.
+///
+/// The editors are read from `access` now, when the request is accepted, because the handler
+/// that later runs the job holds only its `ClaimedJob`; they are sorted and repeats removed, so
+/// the specification does not depend on the adapter's order.
+///
+/// # Errors
+/// Returns any error of `AccessControl::editors`.
+pub async fn restore_job_spec(
+    access: &dyn AccessControl,
+    scope: &StorageScope,
+    upload_id: UploadId,
+    archive: Digest,
+) -> Result<JobSpec, ApiError> {
+    let mut editors = access.editors(scope).await?;
+    editors.sort();
+    editors.dedup();
+    Ok(JobSpec::RestoreWorkspace {
+        upload_id,
+        archive,
+        editors,
+    })
 }
 
 /// The application-relative path of the transport that serves one artifact: `download_artifact`

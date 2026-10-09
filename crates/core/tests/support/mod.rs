@@ -45,6 +45,7 @@ pub struct FixtureAccess {
     table: Mutex<GrantTable>,
     workspace_answer: Mutex<Option<StorageScope>>,
     tenant_answer: Mutex<Option<TenantId>>,
+    editors_answer: Mutex<Option<Vec<String>>>,
     lookups: AtomicUsize,
 }
 
@@ -187,6 +188,17 @@ impl FixtureAccess {
         Ok(())
     }
 
+    /// Answer every later `editors` call with exactly `editors`, in that order and with any
+    /// repeats: the port promises no order and no uniqueness, and the table alone always
+    /// answers sorted and unique.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn answer_editors_as(&self, editors: Vec<String>) -> Result<(), ApiError> {
+        *lock(&self.editors_answer, "editors answer")? = Some(editors);
+        Ok(())
+    }
+
     /// Number of `authorize` and `authorize_tenant` lookups made so far.
     #[must_use]
     pub fn lookups(&self) -> usize {
@@ -278,6 +290,25 @@ impl AccessControl for FixtureAccess {
                 },
                 permissions: all_permissions(),
             })
+        })
+    }
+
+    fn editors<'a>(&'a self, scope: &'a StorageScope) -> PortFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            if let Some(scripted) = lock(&self.editors_answer, "editors answer")?.clone() {
+                return Ok(scripted);
+            }
+            // The table has no tenant column: it answers for the workspace that was asked.
+            Ok(lock(&self.table, "grant table")?
+                .workspaces
+                .iter()
+                .filter(|(_, granted)| {
+                    granted
+                        .get(&scope.workspace_id)
+                        .is_some_and(|permissions| permissions.contains(&Permission::Write))
+                })
+                .map(|(subject, _)| subject.clone())
+                .collect())
         })
     }
 }
@@ -776,6 +807,24 @@ mod tests {
         let created = access.grant_creator(&alice, elsewhere).await?;
         assert_eq!(created.permissions, all_permissions());
         assert_eq!(access.grants(&alice).await?.len(), 2);
+        // Alice reads `home` and holds everything on `elsewhere`.
+        let scope_of = |workspace_id| -> Result<StorageScope, IdentityError> {
+            Ok(StorageScope {
+                tenant_id: tenant("tenant-local")?,
+                workspace_id,
+            })
+        };
+        assert_eq!(
+            access.editors(&scope_of(home)?).await?,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            access.editors(&scope_of(elsewhere)?).await?,
+            vec!["alice".to_owned()]
+        );
+        let scripted = vec!["dave".to_owned(), "alice".to_owned(), "dave".to_owned()];
+        access.answer_editors_as(scripted.clone())?;
+        assert_eq!(access.editors(&scope_of(home)?).await?, scripted);
 
         access.answer_workspaces_as(StorageScope {
             tenant_id: tenant("tenant-other")?,
