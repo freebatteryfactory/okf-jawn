@@ -144,12 +144,14 @@ pub fn coverage_at(review: &Review, content: &Digest) -> ReviewCoverage {
 ///
 /// - `existing` is the file's own `verified` at the exported revision, such as an imported
 ///   claim; it is kept as written.
-/// - `reviews` are the item's app reviews (`RecordStore::list_reviews`).
+/// - `reviews` are the item's app reviews (`RecordStore::list_reviews`), in any order.
 /// - `content` is `item_content_digest` of the item at the exported revision.
 ///
-/// Each review of the whole item whose `coverage_at` that content is `Current` is appended,
-/// oldest first, as `{ by: "human:<reviewer subject>", at: <reviewed_at> }`, unless the list
-/// already holds that exact entry. A bare mapping is first read as a one-element list, as OKF
+/// Each review of the whole item whose `coverage_at` that content is `Current` is appended as
+/// `{ by: "human:<reviewer subject>", at: <reviewed_at> }`, unless the list already holds that
+/// exact entry. The function orders them itself, whatever order `reviews` has: oldest
+/// `reviewed_at` first, then by reviewer subject, then by review identity, so the same reviews
+/// always give the same file. A bare mapping is first read as a one-element list, as OKF
 /// requires; any other shape is kept as the first element, where OKF readers ignore it as they
 /// did before. Returns `existing` unchanged when no review is written, and `None` when there is
 /// nothing to write, so an export never adds an empty `verified`.
@@ -159,14 +161,28 @@ pub fn exported_verified(
     reviews: &[Review],
     content: &Digest,
 ) -> Option<Value> {
-    let written: Vec<Value> = reviews
+    let mut current: Vec<&Review> = reviews
         .iter()
         .filter(|review| {
             review.source.selection == Selection::All
                 && coverage_at(review, content) == ReviewCoverage::Current
         })
-        .map(verified_entry)
         .collect();
+    // Oldest first whatever order the caller passes. A `Timestamp` has one fixed-width
+    // spelling, so its text orders as the instant; ties go by subject, then review identity.
+    current.sort_by(|left, right| {
+        (
+            left.reviewed_at.as_str(),
+            left.reviewer_subject.as_str(),
+            left.id,
+        )
+            .cmp(&(
+                right.reviewed_at.as_str(),
+                right.reviewer_subject.as_str(),
+                right.id,
+            ))
+    });
+    let written: Vec<Value> = current.into_iter().map(verified_entry).collect();
     if written.is_empty() {
         return existing.cloned();
     }
