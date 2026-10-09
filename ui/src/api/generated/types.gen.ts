@@ -4413,7 +4413,7 @@ export type UnarchiveWorkspaceRequest = {
 /**
  * Why an OKF `sources` entry is not a citation.
  */
-export type UncitedReason = 'external' | 'scope' | 'not_found';
+export type UncitedReason = 'external' | 'scope' | 'not_found' | 'malformed';
 
 /**
  * One OKF `sources` entry that is not a citation of an item at the resolved revision.

@@ -1376,7 +1376,8 @@ export const zListTypesResponse = z.object({
 export const zUncitedReason = z.union([
     z.literal('external'),
     z.literal('scope'),
-    z.literal('not_found')
+    z.literal('not_found'),
+    z.literal('malformed')
 ]);
 
 /**

@@ -5721,6 +5721,9 @@ components:
       - const: not_found
         description: A workspace path that names no item at the resolved revision.
         type: string
+      - const: malformed
+        description: An entry with no `resource` (its `resource` here is empty).
+        type: string
     UncitedSource:
       additionalProperties: false
       description: One OKF `sources` entry that is not a citation of an item at the resolved revision.

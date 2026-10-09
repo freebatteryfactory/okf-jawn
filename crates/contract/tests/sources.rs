@@ -24,6 +24,7 @@ fn uncited_entries_keep_their_resource_reason_and_order() -> TestResult {
             { "resource": "https://example.org/report", "reason": "external" },
             { "resource": "notes/", "reason": "scope" },
             { "resource": "notes/missing.md", "reason": "not_found" },
+            { "resource": "", "reason": "malformed" },
         ],
     }))?;
     assert_eq!(
@@ -40,6 +41,10 @@ fn uncited_entries_keep_their_resource_reason_and_order() -> TestResult {
             UncitedSource {
                 resource: "notes/missing.md".to_owned(),
                 reason: UncitedReason::NotFound,
+            },
+            UncitedSource {
+                resource: String::new(),
+                reason: UncitedReason::Malformed,
             },
         ]
     );

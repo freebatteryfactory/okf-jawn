@@ -246,6 +246,8 @@ pub enum UncitedReason {
     Scope,
     /// A workspace path that names no item at the resolved revision.
     NotFound,
+    /// An entry with no `resource` (its `resource` here is empty).
+    Malformed,
 }
 
 /// Read an authorized stored object through an item reference, never by hash alone.
