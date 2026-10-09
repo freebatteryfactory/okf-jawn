@@ -13,6 +13,8 @@
 //! - `runtime` is the Tokio + `RecordStore` job runtime, and `handler` runs every `JobSpec`.
 
 #[cfg(feature = "runtime")]
+pub mod cap;
+#[cfg(feature = "runtime")]
 pub mod export;
 #[cfg(feature = "runtime")]
 pub mod glyphs;
