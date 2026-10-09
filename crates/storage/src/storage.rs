@@ -22,9 +22,11 @@ use crate::git::GitVersions;
 use crate::git::repo::Repositories;
 use crate::mutations::SqliteMutations;
 use crate::proposals::SqliteProposals;
+use crate::readiness::StorageReadiness;
 use crate::records::SqliteRecords;
 use crate::sandbox::SqliteSandbox;
 use crate::schema;
+use crate::search::SqliteSearch;
 use crate::uploads::SqliteUploads;
 
 /// An opened data directory; every store it hands out shares its lock.
@@ -32,6 +34,7 @@ use crate::uploads::SqliteUploads;
 pub struct Storage {
     pub(crate) data: Arc<DataDir>,
     pub(crate) records: Db,
+    pub(crate) index: Db,
     pub(crate) blobs: LocalBlobs,
     pub(crate) repositories: Repositories,
 }
@@ -72,13 +75,13 @@ impl Storage {
         }
         let backups = data.pre_migration_path();
         let records = migrate_database(&records_path, &schema::RECORDS, &backups)?;
-        // TODO(search index): the index store keeps this connection once it lands.
-        drop(migrate_database(&index_path, &schema::INDEX, &backups)?);
+        let index = migrate_database(&index_path, &schema::INDEX, &backups)?;
         let repositories = Repositories::new(data.repositories_path(), data.staging_path());
         let blobs = LocalBlobs::open(&data.objects_path(), data.staging_path().join("incoming"))?;
         Ok(Self {
             data: Arc::new(data),
             records: Db::new(records.connection),
+            index: Db::new(index.connection),
             blobs,
             repositories,
         })
@@ -164,6 +167,18 @@ impl Storage {
     #[must_use]
     pub fn catalog(&self) -> GitCatalog {
         GitCatalog::new(self.records.clone(), self.repositories.clone())
+    }
+
+    /// The search, link and graph index.
+    #[must_use]
+    pub fn search(&self) -> SqliteSearch {
+        SqliteSearch::new(self.index.clone(), self.repositories.clone())
+    }
+
+    /// Readiness of these stores.
+    #[must_use]
+    pub fn readiness(&self) -> StorageReadiness {
+        StorageReadiness::new(self.clone())
     }
 
     /// The opened data directory.

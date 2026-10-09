@@ -24,6 +24,9 @@ use okf_jawn_core::storage::{
     FolderListing, LogQuery, Page, Promotion, Provenance, StorageScope, TreeEdit, VersionStore,
 };
 
+pub(crate) use item::ItemFile;
+pub(crate) use read::items as items_of;
+
 use edit::{Staged, apply, maintain};
 use repo::{
     HEAD_REF, Repositories, commit_of, find_trailer, git, head, internal, materialize,

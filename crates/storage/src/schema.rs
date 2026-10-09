@@ -299,7 +299,8 @@ CREATE TABLE index_links (
     source_path TEXT NOT NULL,
     target_path TEXT NOT NULL,
     target_item TEXT,
-    label TEXT NOT NULL
+    label TEXT NOT NULL,
+    line INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX index_links_by_source ON index_links (tenant_id, workspace_id, revision, source_item);
 CREATE INDEX index_links_by_target ON index_links (tenant_id, workspace_id, revision, target_item);

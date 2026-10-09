@@ -42,6 +42,8 @@ pub mod mutations;
 #[cfg(feature = "runtime")]
 pub mod proposals;
 #[cfg(feature = "runtime")]
+pub mod readiness;
+#[cfg(feature = "runtime")]
 pub mod records;
 #[cfg(feature = "runtime")]
 pub mod sandbox;
@@ -49,6 +51,8 @@ pub mod sandbox;
 pub mod schema;
 #[cfg(feature = "runtime")]
 mod seam;
+#[cfg(feature = "runtime")]
+pub mod search;
 #[cfg(feature = "runtime")]
 mod storage;
 #[cfg(feature = "runtime")]
