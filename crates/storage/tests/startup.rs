@@ -10,12 +10,16 @@ use std::process::Command;
 
 use check::{TestResult, err_of, some};
 use okf_jawn_contract::error::ErrorCode;
+use okf_jawn_core::mutations::{MutationKey, MutationStore};
 use okf_jawn_storage::Storage;
-use okf_jawn_storage::data::{FORMAT_FILE, LOCK_FILE};
+use okf_jawn_storage::data::{DataDir, FORMAT_FILE, LOCK_FILE};
 use okf_jawn_storage::format::migrate_database;
 use okf_jawn_storage::schema;
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
+
+/// The database file the `migrate_database` tests migrate inside a locked directory.
+const DATABASE: &str = "records.sqlite";
 
 /// Environment variable naming the data directory the child process probes.
 const PROBE_DIR: &str = "OKF_JAWN_LOCK_PROBE_DIR";
@@ -143,12 +147,12 @@ fn migrations_refuse_a_newer_format_version_and_leave_the_directory_unchanged() 
 #[test]
 fn migrations_back_up_then_upgrade_then_verify() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let database = directory.path().join("records.sqlite");
-    let backups = directory.path().join("backups");
+    let data = DataDir::open(directory.path())?;
+    let backups = data.pre_migration_path();
     let first = migrate_database(
-        &database,
+        &data,
+        DATABASE,
         &steps(&["CREATE TABLE notes (text TEXT);"]),
-        &backups,
     )?;
     assert_eq!((first.from, first.to), (0, 1));
     assert!(first.backup.is_none(), "a new database needs no backup");
@@ -158,12 +162,12 @@ fn migrations_back_up_then_upgrade_then_verify() -> TestResult {
     drop(first);
 
     let upgraded = migrate_database(
-        &database,
+        &data,
+        DATABASE,
         &steps(&[
             "CREATE TABLE notes (text TEXT);",
             "ALTER TABLE notes ADD COLUMN author TEXT;",
         ]),
-        &backups,
     )?;
     assert_eq!((upgraded.from, upgraded.to), (1, 2));
     let backup = some(upgraded.backup.clone(), "the pre-migration backup")?;
@@ -186,15 +190,16 @@ fn migrations_back_up_then_upgrade_then_verify() -> TestResult {
 #[test]
 fn migrations_refuse_a_newer_database_without_writing_it() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let database = directory.path().join("records.sqlite");
-    let backups = directory.path().join("backups");
+    let data = DataDir::open(directory.path())?;
+    let database = data.root().join(DATABASE);
+    let backups = data.pre_migration_path();
     let two = steps(&["CREATE TABLE a (x TEXT);", "CREATE TABLE b (x TEXT);"]);
-    drop(migrate_database(&database, &two, &backups)?);
+    drop(migrate_database(&data, DATABASE, &two)?);
     let before = std::fs::read(&database)?;
     let error = err_of(migrate_database(
-        &database,
+        &data,
+        DATABASE,
         &steps(&["CREATE TABLE a (x TEXT);"]),
-        &backups,
     ))?;
     assert_eq!(error.code, ErrorCode::Unsupported, "{}", error.message);
     assert_eq!(std::fs::read(&database)?, before);
@@ -205,24 +210,25 @@ fn migrations_refuse_a_newer_database_without_writing_it() -> TestResult {
 #[test]
 fn migrations_roll_back_a_failing_step_and_keep_the_backup() -> TestResult {
     let directory = tempfile::tempdir()?;
-    let database = directory.path().join("records.sqlite");
-    let backups = directory.path().join("backups");
+    let data = DataDir::open(directory.path())?;
+    let database = data.root().join(DATABASE);
+    let backups = data.pre_migration_path();
     let first = migrate_database(
-        &database,
+        &data,
+        DATABASE,
         &steps(&["CREATE TABLE notes (text TEXT);"]),
-        &backups,
     )?;
     first
         .connection
         .execute("INSERT INTO notes (text) VALUES ('kept')", [])?;
     drop(first);
     let error = err_of(migrate_database(
-        &database,
+        &data,
+        DATABASE,
         &steps(&[
             "CREATE TABLE notes (text TEXT);",
             "ALTER TABLE missing ADD COLUMN x;",
         ]),
-        &backups,
     ))?;
     assert_eq!(error.code, ErrorCode::Internal, "{}", error.message);
     assert_eq!(user_version(&database)?, 1);
@@ -289,6 +295,53 @@ fn single_writer_lock_refuses_a_second_process_until_the_first_exits() -> TestRe
     probe_in_child(directory.path(), "refused")?;
     drop(first);
     probe_in_child(directory.path(), "opened")?;
+    Ok(())
+}
+
+/// A second open of `directory` must be refused because the lock is still held.
+fn refused_while_held(directory: &Path) -> TestResult {
+    let error = err_of(Storage::open(directory))?;
+    assert_eq!(error.code, ErrorCode::Unavailable, "{}", error.message);
+    assert!(
+        error.message.contains("another okf-jawn process"),
+        "{}",
+        error.message
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn single_writer_lock_lives_as_long_as_any_store_it_handed_out() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let ledger = storage.mutations();
+    drop(storage);
+    refused_while_held(directory.path())?;
+    let key = MutationKey {
+        tenant_id: serde_json::from_value(serde_json::json!("local"))?,
+        subject: "owner".to_owned(),
+        client_id: None,
+        operation: okf_jawn_contract::metadata::OperationName::CreateWorkspace,
+        key: serde_json::from_value(serde_json::json!("00000000-0000-4000-8000-000000000001"))?,
+    };
+    ledger
+        .begin(
+            &key,
+            &okf_jawn_contract::identity::Digest::try_from("a".repeat(64))?,
+        )
+        .await?;
+    drop(ledger);
+    // The last store dropped, so the lock is free again.
+    let storage = Storage::open(directory.path())?;
+    // A Git store and the blob store each hold the lock on their own as well.
+    let versions = storage.versions();
+    let blobs = storage.blobs();
+    drop(storage);
+    refused_while_held(directory.path())?;
+    drop(versions);
+    refused_while_held(directory.path())?;
+    drop(blobs);
+    drop(Storage::open(directory.path())?);
     Ok(())
 }
 

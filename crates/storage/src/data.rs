@@ -3,7 +3,8 @@
 //! SPEC section 2: one process owns a data directory's writable Git, SQLite and object stores.
 //! `DataDir::open` takes an exclusive lock on `okf-jawn.lock` (std `File::try_lock`) before any
 //! writable store is opened, and the lock lives as long as the `DataDir`; a second process is
-//! refused with a clear error. A data directory on a network filesystem is not supported unless
+//! refused with a clear error. `Storage` and every store it hands out share the `DataDir`
+//! through an `Arc`, so the lock is released only when the last store that can write drops. A data directory on a network filesystem is not supported unless
 //! qualified: its lock semantics are not the local filesystem's.
 //!
 //! The layout itself is an application-owned format and carries a version in `format.json`.
@@ -42,6 +43,10 @@ pub const FORMAT_FILE: &str = "format.json";
 pub const FORMAT_NAME: &str = "okf-jawn-data";
 /// The layout version this build writes and reads.
 pub const FORMAT_VERSION: u32 = 1;
+/// The application records database, relative to the root.
+pub const RECORDS_FILE: &str = "records.sqlite";
+/// The rebuildable search index database, relative to the root.
+pub const INDEX_FILE: &str = "index.sqlite";
 
 impl DataDir {
     /// Take the single-writer lock on `root`, creating the directory when it is new, and check
@@ -94,13 +99,13 @@ impl DataDir {
     /// The application records database.
     #[must_use]
     pub fn records_path(&self) -> PathBuf {
-        self.root.join("records.sqlite")
+        self.root.join(RECORDS_FILE)
     }
 
     /// The rebuildable search index database; rebuilding it never touches the records.
     #[must_use]
     pub fn index_path(&self) -> PathBuf {
-        self.root.join("index.sqlite")
+        self.root.join(INDEX_FILE)
     }
 
     /// The content-addressed object store.

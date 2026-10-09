@@ -27,7 +27,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt as _, ReadBuf};
 use tokio::sync::mpsc;
 
-use crate::data::io_error;
+use crate::data::{DataDir, io_error};
 use crate::seam;
 
 /// `BlobStore` over the data directory's object store.
@@ -35,6 +35,8 @@ use crate::seam;
 pub struct LocalBlobs {
     store: Arc<LocalFileSystem>,
     incoming: PathBuf,
+    /// The data directory's single-writer lock, held while any copy of this value lives.
+    _lock: Arc<DataDir>,
 }
 
 /// An `AsyncRead` over chunks a blocking reader sends; an error is passed on, never hidden as
@@ -49,14 +51,15 @@ struct ChunkReader {
 const CHUNK: usize = 1 << 20;
 
 impl LocalBlobs {
-    /// Open the object store rooted at `objects`; uploads stage under `incoming`.
-    pub(crate) fn open(objects: &std::path::Path, incoming: PathBuf) -> Result<Self, ApiError> {
-        let store = LocalFileSystem::new_with_prefix(objects)
+    /// Open the object store of the locked `data` directory; bodies stage under its staging.
+    pub(crate) fn open(data: Arc<DataDir>) -> Result<Self, ApiError> {
+        let store = LocalFileSystem::new_with_prefix(data.objects_path())
             .map_err(|error| store_error(&error))?
             .with_fsync(true);
         Ok(Self {
             store: Arc::new(store),
-            incoming,
+            incoming: data.staging_path().join("incoming"),
+            _lock: data,
         })
     }
 

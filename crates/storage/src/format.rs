@@ -17,7 +17,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use rusqlite::{Connection, OpenFlags};
 use rusqlite_migration::Migrations;
 
-use crate::data::io_error;
+use crate::data::{DataDir, io_error};
 use crate::seam;
 
 /// An opened database at the latest schema version.
@@ -33,7 +33,11 @@ pub struct Migrated {
     pub backup: Option<PathBuf>,
 }
 
-/// Open `path` and bring it to the latest step of `migrations`.
+/// Open the database `file` of the locked `data` directory and bring it to the latest step of
+/// `migrations`, backing it up under `data`'s pre-migration directory first.
+///
+/// Taking the opened `DataDir` is the proof that this process holds the directory's
+/// single-writer lock, so nothing public opens a writable database without it.
 ///
 /// # Errors
 /// Returns `Unsupported`, changing nothing, when the database is newer than `migrations`;
@@ -41,10 +45,14 @@ pub struct Migrated {
 /// `Internal` when a step fails (the transaction rolls back) or the migrated result does not
 /// verify (the backup is kept and named).
 pub fn migrate_database(
-    path: &Path,
+    data: &DataDir,
+    file: &str,
     migrations: &Migrations<'_>,
-    backups: &Path,
 ) -> Result<Migrated, ApiError> {
+    let path = data.root().join(file);
+    let path = path.as_path();
+    let backups = data.pre_migration_path();
+    let backups = backups.as_path();
     if path.exists() {
         refuse_newer(path, migrations)?;
     }

@@ -1,7 +1,9 @@
 //! The opened data directory and every store over it.
 //!
 //! Opening is the only way to obtain a store, so no store writes before the single-writer lock
-//! is held, the format is checked and the databases are migrated.
+//! is held, the format is checked and the databases are migrated. Every store keeps a share of
+//! the lock (through its `Db`, `Repositories` or `LocalBlobs`), so dropping the `Storage` while
+//! a store is still in use keeps the directory locked until that store drops too.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -13,7 +15,7 @@ use crate::blobs::LocalBlobs;
 use crate::catalog::GitCatalog;
 use crate::confirmations::SqliteConfirmations;
 use crate::credentials::SqliteCredentials;
-use crate::data::{DataDir, FormatState};
+use crate::data::{DataDir, FormatState, INDEX_FILE, RECORDS_FILE};
 use crate::db::Db;
 use crate::drafts::SqliteDrafts;
 use crate::events::SqliteEvents;
@@ -47,12 +49,10 @@ impl Storage {
     /// `Unsupported` (changing nothing) when its data is newer than this build, and `Internal`
     /// when a migration fails or does not verify.
     pub fn open(root: &Path) -> Result<Self, ApiError> {
-        let data = DataDir::open(root)?;
-        let records_path = data.records_path();
-        let index_path = data.index_path();
+        let data = Arc::new(DataDir::open(root)?);
         for (path, migrations) in [
-            (&records_path, &schema::RECORDS),
-            (&index_path, &schema::INDEX),
+            (&data.records_path(), &schema::RECORDS),
+            (&data.index_path(), &schema::INDEX),
         ] {
             if path.exists() {
                 refuse_newer(path, migrations)?;
@@ -73,17 +73,14 @@ impl Storage {
             std::fs::create_dir_all(&directory)
                 .map_err(|error| crate::data::io_error("create", &directory, &error))?;
         }
-        let backups = data.pre_migration_path();
-        let records = migrate_database(&records_path, &schema::RECORDS, &backups)?;
-        let index = migrate_database(&index_path, &schema::INDEX, &backups)?;
-        let repositories = Repositories::new(data.repositories_path(), data.staging_path());
-        let blobs = LocalBlobs::open(&data.objects_path(), data.staging_path().join("incoming"))?;
+        let records = migrate_database(&data, RECORDS_FILE, &schema::RECORDS)?;
+        let index = migrate_database(&data, INDEX_FILE, &schema::INDEX)?;
         Ok(Self {
-            data: Arc::new(data),
-            records: Db::new(records.connection),
-            index: Db::new(index.connection),
-            blobs,
-            repositories,
+            records: Db::new(records.connection, Arc::clone(&data)),
+            index: Db::new(index.connection, Arc::clone(&data)),
+            blobs: LocalBlobs::open(Arc::clone(&data))?,
+            repositories: Repositories::new(Arc::clone(&data)),
+            data,
         })
     }
 

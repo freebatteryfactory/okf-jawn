@@ -14,7 +14,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{MutationId, Revision};
 use okf_jawn_core::storage::{Provenance, StorageScope};
 
-use crate::data::io_error;
+use crate::data::{DataDir, io_error};
 
 /// Repositories of every workspace, and their write locks.
 #[derive(Debug, Clone)]
@@ -22,6 +22,8 @@ pub(crate) struct Repositories {
     root: PathBuf,
     staging: PathBuf,
     locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// The data directory's single-writer lock, held while any copy of this value lives.
+    _lock: Arc<DataDir>,
 }
 
 /// A staging directory that is removed when dropped, success or failure.
@@ -40,11 +42,13 @@ const BLOB_MODE: i32 = 0o100_644;
 const TREE_MODE: i32 = 0o040_000;
 
 impl Repositories {
-    pub(crate) fn new(root: PathBuf, staging: PathBuf) -> Self {
+    /// The repositories and staging directory of the locked `data` directory.
+    pub(crate) fn new(data: Arc<DataDir>) -> Self {
         Self {
-            root,
-            staging,
+            root: data.repositories_path(),
+            staging: data.staging_path(),
             locks: Arc::new(Mutex::new(HashMap::new())),
+            _lock: data,
         }
     }
 

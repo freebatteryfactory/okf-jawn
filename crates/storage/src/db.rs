@@ -1,7 +1,8 @@
 //! One SQLite connection per database file, used from blocking tasks.
 //!
 //! The process holds the data directory's single-writer lock, so each database has exactly one
-//! writer: one connection behind a mutex, and every call runs on Tokio's blocking pool. Rows that
+//! writer: one connection behind a mutex, and every call runs on Tokio's blocking pool. Each
+//! `Db` keeps a share of the lock, so the lock outlives every store that can still write. Rows that
 //! mirror a contract type are kept as that type's JSON beside the key columns the store
 //! searches and constrains on, so a unique column, not a lookup, enforces each `MutationId`.
 
@@ -12,17 +13,23 @@ use okf_jawn_core::jobs::JobScope;
 use okf_jawn_core::storage::StorageScope;
 use rusqlite::{Connection, TransactionBehavior};
 
+use crate::data::DataDir;
+
 /// A shared connection to one database file.
 #[derive(Debug, Clone)]
 pub(crate) struct Db {
     connection: Arc<Mutex<Connection>>,
+    /// The data directory whose single-writer lock this connection writes under; held while
+    /// any copy of this value lives (SPEC section 2, "held for the process's life").
+    _lock: Arc<DataDir>,
 }
 
 impl Db {
-    /// Wrap an opened, migrated connection.
-    pub(crate) fn new(connection: Connection) -> Self {
+    /// Wrap an opened, migrated connection to a database of the locked `data` directory.
+    pub(crate) fn new(connection: Connection, data: Arc<DataDir>) -> Self {
         Self {
             connection: Arc::new(Mutex::new(connection)),
+            _lock: data,
         }
     }
 
