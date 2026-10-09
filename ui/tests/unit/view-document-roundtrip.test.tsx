@@ -414,3 +414,50 @@ describe("a bad dataset is its own binding's alert, not the View's", () => {
     expect(reasons.length).toBe(2);
   });
 });
+
+describe("each column's declared kind is enforced as the contract's DatasetValue::fits", () => {
+  const one = (kind: string, value: unknown) => ({
+    ...metricsDatasetFixture,
+    columns: [{ name: 'c', kind }],
+    rows: [[value]],
+  });
+  const bad: Array<[string, string, unknown]> = [
+    ['integer', 'unknown text', 'unknown'],
+    ['integer', 'a fraction', 1.5],
+    ['integer', 'beyond 64 bits', 1e30],
+    ['number', 'text', '1'],
+    ['boolean', 'a number', 1],
+    ['string', 'a number', 5],
+    ['date_time', 'a date without a time', '2026-01-01'],
+    ['date_time', 'an instant that does not exist', '2026-02-30T00:00:00.000Z'],
+    ['date_time', 'an offset spelling', '2026-01-01T00:00:00.000+01:00'],
+    ['date_time', 'no milliseconds', '2026-01-01T00:00:00Z'],
+  ];
+  for (const [kind, what, value] of bad) {
+    it(`refuses ${what} in a ${kind} column, with its path`, async () => {
+      expect(() => parseDataset(JSON.stringify(one(kind, value)))).toThrow(
+        /malformed at rows.0.0: a value of column c is not of its kind/,
+      );
+      await presentServing(one(kind, value));
+      const alerts = await screen.findAllByRole('alert');
+      expect(alerts.some((node) => /malformed at rows.0.0/.test(node.textContent ?? ''))).toBe(
+        true,
+      );
+    });
+  }
+
+  it('accepts a value of its kind, and null in every kind', () => {
+    const good: Array<[string, unknown]> = [
+      ['integer', 3],
+      ['integer', -7],
+      ['number', 1.5],
+      ['boolean', false],
+      ['string', 'text'],
+      ['date_time', '2026-01-01T00:00:00.000Z'],
+    ];
+    for (const [kind, value] of good) {
+      expect(parseDataset(JSON.stringify(one(kind, value))).at(0)).toEqual({ c: value });
+      expect(parseDataset(JSON.stringify(one(kind, null))).at(0)).toEqual({ c: null });
+    }
+  });
+});
