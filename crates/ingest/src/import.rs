@@ -635,21 +635,25 @@ fn percent(done: usize, total: usize) -> u8 {
     u8::try_from(done.saturating_mul(99).checked_div(total).unwrap_or(0)).unwrap_or(99)
 }
 
-/// Read back one output the converter wrote.
+/// Read back one output the converter wrote, on a blocking thread (the workspace tokio has no
+/// `fs` feature).
 async fn read_output(path: &Path) -> Result<Vec<u8>, ApiError> {
-    let size = tokio::fs::metadata(path)
-        .await
-        .map_err(|error| fault(&format!("{} could not be read: {error}", path.display())))?
-        .len();
-    if size > MAX_RETAINED_OUTPUT_BYTES {
-        return Err(fault(&format!(
-            "{} is larger than a retained output may be",
-            path.display()
-        )));
-    }
-    tokio::fs::read(path)
-        .await
-        .map_err(|error| fault(&format!("{} could not be read: {error}", path.display())))
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let unreadable = |error: std::io::Error| {
+            fault(&format!("{} could not be read: {error}", path.display()))
+        };
+        let size = std::fs::metadata(&path).map_err(unreadable)?.len();
+        if size > MAX_RETAINED_OUTPUT_BYTES {
+            return Err(fault(&format!(
+                "{} is larger than a retained output may be",
+                path.display()
+            )));
+        }
+        std::fs::read(&path).map_err(unreadable)
+    })
+    .await
+    .map_err(|error| fault(&format!("reading an output stopped: {error}")))?
 }
 
 /// A worker fault.
