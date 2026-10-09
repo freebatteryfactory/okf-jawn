@@ -37,7 +37,9 @@ const validSpec = {
 };
 
 /** The converter's `Dataset` for rows of (category, value), as the host serves it. */
-function datasetBytes(rows: ReadonlyArray<{ category: string; value: number }>): Uint8Array<ArrayBuffer> {
+function datasetBytes(
+  rows: ReadonlyArray<{ category: string; value: number }>,
+): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(
     JSON.stringify({
       schema_version: 1,
