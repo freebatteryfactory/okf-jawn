@@ -10,6 +10,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 
 use crate::access::LocalAccess;
 use crate::blobs::LocalBlobs;
+use crate::catalog::GitCatalog;
 use crate::confirmations::SqliteConfirmations;
 use crate::credentials::SqliteCredentials;
 use crate::data::{DataDir, FormatState};
@@ -17,6 +18,8 @@ use crate::db::Db;
 use crate::drafts::SqliteDrafts;
 use crate::events::SqliteEvents;
 use crate::format::{migrate_database, refuse_newer};
+use crate::git::GitVersions;
+use crate::git::repo::Repositories;
 use crate::mutations::SqliteMutations;
 use crate::proposals::SqliteProposals;
 use crate::records::SqliteRecords;
@@ -30,6 +33,7 @@ pub struct Storage {
     pub(crate) data: Arc<DataDir>,
     pub(crate) records: Db,
     pub(crate) blobs: LocalBlobs,
+    pub(crate) repositories: Repositories,
 }
 
 impl Storage {
@@ -70,11 +74,13 @@ impl Storage {
         let records = migrate_database(&records_path, &schema::RECORDS, &backups)?;
         // TODO(search index): the index store keeps this connection once it lands.
         drop(migrate_database(&index_path, &schema::INDEX, &backups)?);
+        let repositories = Repositories::new(data.repositories_path(), data.staging_path());
         let blobs = LocalBlobs::open(&data.objects_path(), data.staging_path().join("incoming"))?;
         Ok(Self {
             data: Arc::new(data),
             records: Db::new(records.connection),
             blobs,
+            repositories,
         })
     }
 
@@ -146,6 +152,18 @@ impl Storage {
     #[must_use]
     pub fn access(&self) -> LocalAccess {
         LocalAccess::new(self.records.clone())
+    }
+
+    /// Versioned workspace content.
+    #[must_use]
+    pub fn versions(&self) -> GitVersions {
+        GitVersions::new(self.repositories.clone())
+    }
+
+    /// The workspace catalog.
+    #[must_use]
+    pub fn catalog(&self) -> GitCatalog {
+        GitCatalog::new(self.records.clone(), self.repositories.clone())
     }
 
     /// The opened data directory.

@@ -37,6 +37,24 @@ pub(crate) fn later(seconds: i64) -> Result<Timestamp, ApiError> {
     })
 }
 
+/// The canonical spelling of a whole-second Unix time, such as a Git commit time.
+pub(crate) fn unix_instant(seconds: i64) -> Result<Timestamp, ApiError> {
+    let connection = Connection::open_in_memory().map_err(|error| clock_error(&error))?;
+    let spelled: String = connection
+        .query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', ?1, 'unixepoch')",
+            [seconds],
+            |row| row.get(0),
+        )
+        .map_err(|error| clock_error(&error))?;
+    Timestamp::try_from(spelled).map_err(|error| {
+        ApiError::new(
+            ErrorCode::Internal,
+            format!("a commit time has no canonical spelling: {error}"),
+        )
+    })
+}
+
 /// Milliseconds since the Unix epoch, for lease and retention arithmetic inside one store.
 pub(crate) fn now_ms() -> Result<i64, ApiError> {
     let elapsed = SystemTime::now()

@@ -7,6 +7,8 @@
 //! Without the feature the crate is empty, so code generation links no native library.
 
 #[cfg(feature = "runtime")]
+pub use git::GitVersions;
+#[cfg(feature = "runtime")]
 pub use storage::Storage;
 
 #[cfg(feature = "runtime")]
@@ -17,6 +19,8 @@ mod macros;
 pub mod access;
 #[cfg(feature = "runtime")]
 pub mod blobs;
+#[cfg(feature = "runtime")]
+pub mod catalog;
 #[cfg(feature = "runtime")]
 pub mod confirmations;
 #[cfg(feature = "runtime")]
@@ -31,6 +35,8 @@ pub mod drafts;
 pub mod events;
 #[cfg(feature = "runtime")]
 pub mod format;
+#[cfg(feature = "runtime")]
+mod git;
 #[cfg(feature = "runtime")]
 pub mod mutations;
 #[cfg(feature = "runtime")]
