@@ -18,3 +18,7 @@ pub mod export;
 pub mod glyphs;
 #[cfg(feature = "runtime")]
 pub mod locate;
+#[cfg(feature = "runtime")]
+pub mod outline;
+#[cfg(feature = "runtime")]
+pub mod record;
