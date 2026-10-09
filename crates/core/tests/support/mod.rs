@@ -280,6 +280,22 @@ impl AccessControl for FixtureAccess {
             })
         })
     }
+
+    fn editors<'a>(&'a self, scope: &'a StorageScope) -> PortFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            // The table has no tenant column: it answers for the workspace that was asked.
+            Ok(lock(&self.table, "grant table")?
+                .workspaces
+                .iter()
+                .filter(|(_, granted)| {
+                    granted
+                        .get(&scope.workspace_id)
+                        .is_some_and(|permissions| permissions.contains(&Permission::Write))
+                })
+                .map(|(subject, _)| subject.clone())
+                .collect())
+        })
+    }
 }
 
 impl Row {
@@ -776,6 +792,21 @@ mod tests {
         let created = access.grant_creator(&alice, elsewhere).await?;
         assert_eq!(created.permissions, all_permissions());
         assert_eq!(access.grants(&alice).await?.len(), 2);
+        // Alice reads `home` and holds everything on `elsewhere`.
+        let scope_of = |workspace_id| -> Result<StorageScope, IdentityError> {
+            Ok(StorageScope {
+                tenant_id: tenant("tenant-local")?,
+                workspace_id,
+            })
+        };
+        assert_eq!(
+            access.editors(&scope_of(home)?).await?,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            access.editors(&scope_of(elsewhere)?).await?,
+            vec!["alice".to_owned()]
+        );
 
         access.answer_workspaces_as(StorageScope {
             tenant_id: tenant("tenant-other")?,

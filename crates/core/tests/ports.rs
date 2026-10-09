@@ -351,6 +351,7 @@ fn job_specs() -> Result<Vec<JobSpec>, Box<dyn Error>> {
         JobSpec::RestoreWorkspace {
             upload_id: UploadId(Uuid::from_u128(12)),
             archive: digest('c')?,
+            editors: vec!["user_1".to_owned()],
         },
         JobSpec::RebuildIndex,
         JobSpec::ExportView {
