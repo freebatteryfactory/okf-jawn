@@ -141,7 +141,7 @@ async function expectations() {
     dataset: datasetExpectation({
       binding: PRESENT_DATASET.binding,
       digest: createHash('sha256').update(bytes).digest('hex'),
-      rows: JSON.parse(bytes.toString('utf8')),
+      dataset: JSON.parse(bytes.toString('utf8')),
       bytes: bytes.length,
       chart: chartForBinding(present, PRESENT_DATASET.binding),
     }),

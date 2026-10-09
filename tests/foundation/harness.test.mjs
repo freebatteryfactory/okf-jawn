@@ -106,6 +106,7 @@ import {
   basicHostUrl,
   chartForBinding,
   datasetExpectation,
+  datasetRecords,
   expectedChartMarks,
   judgePresentDataset,
   judgeView,
@@ -3088,12 +3089,17 @@ async function committedDataset() {
   const digest = createHash('sha256').update(bytes).digest('hex');
   const present = JSON.parse(await readFile(join(root, PRESENT_DATASET.present), 'utf8'));
   const chart = chartForBinding(present, PRESENT_DATASET.binding);
-  const rows = JSON.parse(bytes.toString('utf8'));
-  return { bytes, digest, present, chart, rows, expected: datasetExpectation({ binding: PRESENT_DATASET.binding, digest, rows, bytes: bytes.length, chart }) };
+  const dataset = JSON.parse(bytes.toString('utf8'));
+  const rows = datasetRecords(dataset);
+  return { bytes, digest, present, chart, dataset, rows, expected: datasetExpectation({ binding: PRESENT_DATASET.binding, digest, dataset, bytes: bytes.length, chart }) };
 }
 
+/** The blocks a correct ranged read of `total` bytes makes, `size` bytes at a time (the harness serves 64). */
+const blocksOf = (total, size = 64) =>
+  Array.from({ length: Math.ceil(total / size) }, (_, at) => ({ offset: String(at * size), bytes: Math.min(size, total - at * size), has_more: (at + 1) * size < total }));
+
 test('the present fixture retains exactly the committed dataset, and the expectation is the table DataTable draws', async () => {
-  const { bytes, digest, present, chart, expected } = await committedDataset();
+  const { bytes, digest, present, chart, dataset, expected } = await committedDataset();
   assert.equal(PRESENT_DATASET.present, 'tests/fixtures/views/present-response.json');
   const retained = (bindings) => bindings.filter((binding) => binding.materialized !== undefined).map((binding) => [binding.name, binding.materialized]);
   assert.deepEqual(retained(present.resolved_bindings), [[PRESENT_DATASET.binding, digest]]);
@@ -3106,7 +3112,7 @@ test('the present fixture retains exactly the committed dataset, and the expecta
   assert.deepEqual(expected, {
     binding: 'metrics',
     digest,
-    bytes: 223,
+    bytes: 576,
     rows: 5,
     columns: ['category', 'value'],
     cells: [['Ingested', '412'], ['Converted', '397'], ['Indexed', '389'], ['Reviewed', '127'], ['Published', '61']],
@@ -3122,15 +3128,33 @@ test('the present fixture retains exactly the committed dataset, and the expecta
   assert.throws(() => chartForBinding(present, 'venue'), /exactly one Chart element bound to venue; found 0/);
   assert.throws(() => chartForBinding({ view: { spec: { elements: { c: { type: 'Chart', props: { binding: 'b', chart: 'gone' } } } }, charts: {} } }, 'b'), /no chart named gone/);
 
-  // Columns come in first-seen order and a missing or null cell is the empty string.
+  // Columns come in the Dataset's order and a null cell is the empty string.
   const bar = { mark: 'bar', encoding: { x: { field: 'a', type: 'nominal' }, y: { field: 'n', type: 'quantitative' } } };
+  const typed = (rows, change = {}) => ({
+    schema_version: 1,
+    source: dataset.source,
+    text_origin: 'converter',
+    columns: [{ name: 'a', kind: 'string' }, { name: 'n', kind: 'integer' }, { name: 'm', kind: 'string' }],
+    rows,
+    ...change,
+  });
   assert.deepEqual(
-    datasetExpectation({ binding: 'b', digest: 'd', bytes: 9, chart: bar, rows: [{ a: 1, n: 1 }, { b: null, a: false, n: 2 }] }),
-    { binding: 'b', digest: 'd', bytes: 9, rows: 2, columns: ['a', 'n', 'b'], cells: [['1', '1', ''], ['false', '2', '']], chart_marks: 2 },
+    datasetExpectation({ binding: 'b', digest: 'd', bytes: 9, chart: bar, dataset: typed([['x', 1, null], ['y', 2, 'q']]) }),
+    { binding: 'b', digest: 'd', bytes: 9, rows: 2, columns: ['a', 'n', 'm'], cells: [['x', '1', ''], ['y', '2', 'q']], chart_marks: 2 },
   );
-  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', bytes: 9, chart: bar, rows: [] }), /non-empty JSON array/);
-  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', bytes: 9, chart: bar, rows: { a: 1 } }), /non-empty JSON array/);
-  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', chart: bar, rows: [{ a: 1, n: 1 }] }), /byte length must be a positive integer/);
+  const expectation = (change) => () => datasetExpectation({ binding: 'b', digest: 'd', bytes: 9, chart: bar, dataset: typed([['x', 1, 'p'], ['y', 2, 'q']], change) });
+  assert.doesNotThrow(expectation({}));
+  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', bytes: 9, chart: bar, dataset: typed([]) }), /non-empty rows/);
+  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', chart: bar, dataset: typed([['x', 1, 'p']]) }), /byte length must be a positive integer/);
+  // As strict as PresentView parseDataset: bare records, a ragged row, a repeated column and a text the converter did not write are refused.
+  assert.throws(() => datasetExpectation({ binding: 'b', digest: 'd', bytes: 9, chart: bar, dataset: [{ a: 'x', n: 1 }] }), /not bare records/);
+  assert.throws(expectation({ rows: [['x', 1, 'p'], ['y']] }), /dataset row 1 has 1 values for 3 columns/);
+  assert.throws(expectation({ rows: [['x', 1, 'p', 2]] }), /dataset row 0 has 4 values for 3 columns/);
+  assert.throws(expectation({ columns: [{ name: 'a', kind: 'string' }, { name: 'a', kind: 'integer' }, { name: 'm', kind: 'string' }] }), /two columns named "a"/);
+  assert.throws(expectation({ text_origin: 'agent' }), /not the converter's \(text_origin is "agent"\)/);
+  assert.throws(expectation({ text_origin: 'none' }), /not the converter's/);
+  assert.throws(expectation({ columns: [] }), /non-empty columns/);
+  assert.deepEqual(datasetRecords(typed([['x', null, 'p']])), [{ a: 'x', n: null, m: 'p' }]);
 });
 
 test('the chart draws one mark per dataset row only for the shape the fixture has, and any other shape is refused', async () => {
@@ -3189,9 +3213,11 @@ test('reads of one binding are contiguous from offset 0 to the size of the datas
 
 test('the present dataset counts as exercised only when the chart, the table, the reads and the alerts all agree', async () => {
   const { digest, expected } = await committedDataset();
+  const total = expected.bytes;
+  const blocks = blocksOf(total);
   const table = (extra) => ({ caption: 'metrics', visible: true, in_details: false, columns: expected.columns, rows: expected.cells, ...extra });
   const chartTable = (extra) => table({ visible: false, in_details: true, ...extra });
-  const read = (offset, has_more, bytes = 64) => ({ tool: 'read_object', ok: true, object: digest, offset, bytes, total_size: '223', has_more });
+  const read = (offset, has_more, bytes = 64) => ({ tool: 'read_object', ok: true, object: digest, offset, bytes, total_size: String(total), has_more });
   const good = {
     text: VIEW_TEXT.render_present,
     alerts: [],
@@ -3202,7 +3228,7 @@ test('the present dataset counts as exercised only when the chart, the table, th
       { tool: 'render_present', ok: true },
       { tool: 'show', ok: true },
       { tool: 'show', ok: true },
-      read('0', true), read('64', true), read('128', true), read('192', false, 31),
+      ...blocks.map((block) => read(block.offset, block.has_more, block.bytes)),
     ],
   };
   const verdict = judgePresentDataset(expected, good);
@@ -3215,15 +3241,15 @@ test('the present dataset counts as exercised only when the chart, the table, th
     status: 'exercised',
     expected_binding: 'metrics',
     expected_digest: digest,
-    expected_bytes: 223,
+    expected_bytes: total,
     expected_rows: 5,
     expected_chart_marks: 5,
     table_captions: ['metrics', 'metrics'],
     read_object_digests: [digest],
-    read_object_calls: 4,
-    read_object_offsets: ['0', '64', '128', '192'],
-    read_object_bytes: [64, 64, 64, 31],
-    read_object_total_sizes: ['223'],
+    read_object_calls: blocks.length,
+    read_object_offsets: blocks.map((block) => block.offset),
+    read_object_bytes: blocks.map((block) => block.bytes),
+    read_object_total_sizes: [String(total)],
     read_object_resolutions: 1,
     show_calls: 2,
     chart_svgs: 1,
@@ -3268,12 +3294,12 @@ test('the present dataset counts as exercised only when the chart, the table, th
     ['a chart table with one changed cell', { tables: [table(), chartTable({ rows: wrongCell })] }, 'chart_source_table', /chart's own data table does not show the dataset values \["Published"\]/],
     ['a chart table out of order', { tables: [table(), chartTable({ rows: [...expected.cells].reverse() })] }, 'chart_source_table', /chart's own data table cells are not the dataset rows in order/],
     ['read_object never called', { tool_calls: without('read_object') }, 'read_object_calls', /read_object for [0-9a-f]{64} 0 time\(s\)/],
-    ['read_object called once for everything', { tool_calls: [...without('read_object'), read('0', false, 223)] }, 'read_object_calls', /in one block; the ranged loop was not exercised/],
+    ['read_object called once for everything', { tool_calls: [...without('read_object'), read('0', false, total)] }, 'read_object_calls', /in one block; the ranged loop was not exercised/],
     ['reads of another object', { tool_calls: good.tool_calls.map((call) => (call.tool === 'read_object' ? { ...call, object: '0'.repeat(64) } : call)) }, 'read_object_calls', /0 time\(s\)/],
-    ['reads that skip the middle', { tool_calls: [...without('read_object'), read('0', true), read('192', false, 31)] }, 'read_object_calls', /block starts at 192/],
+    ['reads that skip the middle', { tool_calls: [...without('read_object'), read('0', true), read('512', false, 64)] }, 'read_object_calls', /block starts at 512/],
     ['a last block that still has more', { tool_calls: [...without('read_object'), read('0', true), read('64', true)] }, 'read_object_calls', /without a final block/],
     ['a read that does not start at 0', { tool_calls: [...without('read_object'), read('64', true), read('128', false, 95)] }, 'read_object_calls', /block starts at 64/],
-    ['a read that ends before the last byte', { tool_calls: [...without('read_object'), read('0', true), read('64', false)] }, 'read_object_calls', /ended at byte 128 of 223/],
+    ['a read that ends before the last byte', { tool_calls: [...without('read_object'), read('0', true), read('64', false)] }, 'read_object_calls', new RegExp(`ended at byte 128 of ${total}`)],
     ['show never called', { tool_calls: without('show') }, 'show_calls', /did not call show/],
     ['a refused tool call', { tool_calls: [...good.tool_calls, { tool: 'read_object', ok: false }] }, 'no_refused_call', /harness refused tool calls/],
   ];
@@ -3297,7 +3323,7 @@ test('the present dataset counts as exercised only when the chart, the table, th
   const doubled = judgePresentDataset(expected, { ...good, tool_calls: good.tool_calls.flatMap((call) => [call, call]) });
   assert.equal(doubled.ok, true, JSON.stringify(doubled.problems));
   assert.equal(doubled.record.read_object_resolutions, 2);
-  assert.equal(doubled.record.read_object_calls, 8);
+  assert.equal(doubled.record.read_object_calls, blocks.length * 2);
 });
 
 test('axe exclusions cover host chrome only; the App frame is judged by every rule', () => {
@@ -3426,10 +3452,10 @@ const AXE_CLEAN = { passes: [{ id: 'document-title', impact: null, nodes: [{ tar
 async function goodObservations() {
   const { digest, expected } = await committedDataset();
   const table = (extra) => ({ caption: 'metrics', visible: true, in_details: false, columns: expected.columns, rows: expected.cells, ...extra });
-  const read = (offset, bytes, has_more) => ({ tool: 'read_object', ok: true, object: digest, offset, bytes, total_size: '223', has_more });
+  const read = (offset, bytes, has_more) => ({ tool: 'read_object', ok: true, object: digest, offset, bytes, total_size: String(expected.bytes), has_more });
   const presentCalls = [
     { tool: 'render_present', ok: true }, { tool: 'show', ok: true }, { tool: 'show', ok: true },
-    read('0', 64, true), read('64', 64, true), read('128', 64, true), read('192', 31, false),
+    ...blocksOf(expected.bytes).map((block) => read(block.offset, block.bytes, block.has_more)),
   ];
   const of = (view) => ({
     url: basicHostUrl(view.tool),
@@ -3918,14 +3944,14 @@ test('a view is watched from the moment it is opened: only its own tool calls co
   assert.equal(watched.state.reads, 3, 'it reads until the view has settled, then stops');
   assert.equal(watched.state.waits, 2);
   assert.deepEqual(observation.tool_calls, presentCalls, 'only calls reported after the view was opened are this view\'s');
-  assert.equal(observation.tool_calls.filter((call) => call.tool === 'read_object').length, 4);
+  assert.equal(observation.tool_calls.filter((call) => call.tool === 'read_object').length, blocksOf(expected.bytes).length);
   assert.deepEqual(observation.frame, good.frame);
   assert.equal(observation.app_frame_depth, 2);
   assert.equal(observation.screenshot, 'basic-host-render_present.png');
   assert.equal(observation.axe, AXE_CLEAN);
   const judged = viewCriteria(present, expected, observation);
   assert.deepEqual(judged.criteria.filter((criterion) => criterion.result !== 'pass'), []);
-  assert.equal(judged.record.present_dataset.read_object_calls, 4);
+  assert.equal(judged.record.present_dataset.read_object_calls, blocksOf(expected.bytes).length);
   assert.equal(judged.record.present_dataset.read_object_resolutions, 1);
 
   // Settled means the dataset too: the text alone does not end the wait or pass the view.
@@ -4021,7 +4047,7 @@ test('the MCP Apps receipt inputs cover everything the run renders and executes'
   // configuration, and what `bun --bun run build` reads in ui/.
   for (const path of [
     'tests/fixtures/views/present-response.json',
-    'tests/fixtures/views/present-metrics-dataset.json',
+    'tests/fixtures/views/present-metrics.dataset.json',
     'qualification/mcp-apps/src/main.rs',
     'qualification/mcp-apps/Cargo.toml',
     'qualification/mcp-apps/criteria.json',
@@ -4148,7 +4174,7 @@ async function harnessDouble(change = {}) {
 }
 
 test('the protocol check judges every rule as a criterion and passes a server that answers as the harness must', async () => {
-  const { client, expected, digest } = await harnessDouble();
+  const { client, expected, digest, bytes } = await harnessDouble();
   const observed = await observeProtocol(client, { views: VIEWS });
   const judged = judgeProtocol(expected, observed);
   assert.deepEqual(judged.criteria.map((criterion) => criterion.id), PROTOCOL_CRITERIA);
@@ -4162,7 +4188,7 @@ test('the protocol check judges every rule as a criterion and passes a server th
   // What the receipt keeps is what was answered.
   assert.deepEqual(judged.record.server, { name: 'okf-qualify-mcp-apps', version: '0.1.0' });
   assert.deepEqual(judged.record.object_reads, [{
-    binding: 'metrics', object: digest, blocks: 4, block_offsets: ['0', '64', '128', '192'], stopped: 'finished', assembled_bytes: 223, assembled_sha256: digest,
+    binding: 'metrics', object: digest, blocks: blocksOf(bytes.length).length, block_offsets: blocksOf(bytes.length).map((block) => block.offset), stopped: 'finished', assembled_bytes: bytes.length, assembled_sha256: digest,
   }]);
   assert.deepEqual(judged.record.show_calls.map((call) => call.binding), ['venue', 'metrics']);
   assert.deepEqual(judged.record.unknown_digest, { is_error: true, structured: false, text: 'read_object: refused' });
@@ -4209,7 +4235,7 @@ test('each protocol rule fails on its own wrong answer, and every other rule is 
     ['read_object labels a block with another object', { block: (block) => ({ ...block, sha256: 'f'.repeat(64) }) }, ['read_object_ranged_loop'], /changed identity or range at 0/],
     ['read_object makes no progress', { block: (block) => ({ ...block, data_base64: '', has_more: true }) }, ['read_object_ranged_loop', 'read_object_digest'], /made no progress/],
     ['read_object serves other bytes', { block: (block) => ({ ...block, data_base64: Buffer.from(Buffer.from(block.data_base64, 'base64').map((byte) => (byte === 0x34 ? 0x35 : byte))).toString('base64') }) }, ['read_object_digest'], /bytes read hash to [0-9a-f]{64}, not/],
-    ['read_object states another total size', { block: (block) => ({ ...block, total_size: '999' }) }, ['read_object_digest'], /total_size is "999", 223 bytes were read/],
+    ['read_object states another total size', { block: (block) => ({ ...block, total_size: '999' }) }, ['read_object_digest'], /total_size is "999", 576 bytes were read/],
     ['read_object is rejected by the client', { readObject: refuse }, ['read_object_ranged_loop', 'read_object_digest', 'read_object_unknown_digest_refused', 'read_object_unknown_argument_refused'], /read_object for binding metrics failed: Structured content does not match/],
   ];
   for (const [label, change, failing, detail] of cases) {
