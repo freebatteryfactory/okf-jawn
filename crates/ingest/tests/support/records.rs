@@ -52,6 +52,7 @@ pub struct Entry {
 pub struct FakeRecords {
     entries: Mutex<BTreeMap<JobId, Entry>>,
     artifacts: Mutex<BTreeMap<MutationId, ArtifactRecord>>,
+    purges: Mutex<BTreeMap<PurgeId, Purge>>,
 }
 
 impl FakeRecords {
@@ -86,6 +87,45 @@ impl FakeRecords {
             },
         );
         Ok(())
+    }
+
+    /// Keep a purge record, as `create_purge` would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn insert_purge(&self, purge: Purge) -> Result<(), ApiError> {
+        self.purges
+            .lock()
+            .map_err(|_| poisoned())?
+            .insert(purge.id, purge);
+        Ok(())
+    }
+
+    /// A purge record as it stands.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for an unknown purge.
+    pub fn purge(&self, id: PurgeId) -> Result<Purge, ApiError> {
+        self.purges
+            .lock()
+            .map_err(|_| poisoned())?
+            .get(&id)
+            .cloned()
+            .ok_or_else(not_found)
+    }
+
+    /// The artifacts recorded, by mutation id.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn artifacts(&self) -> Result<Vec<ArtifactRecord>, ApiError> {
+        Ok(self
+            .artifacts
+            .lock()
+            .map_err(|_| poisoned())?
+            .values()
+            .cloned()
+            .collect())
     }
 
     /// A job as it stands.
@@ -307,12 +347,14 @@ impl RecordStore for FakeRecords {
         unmodelled("create_purge")
     }
 
-    fn get_purge<'a>(&'a self, _tenant: &'a TenantId, _purge: PurgeId) -> PortFuture<'a, Purge> {
-        unmodelled("get_purge")
+    fn get_purge<'a>(&'a self, _tenant: &'a TenantId, purge: PurgeId) -> PortFuture<'a, Purge> {
+        let found = self.purge(purge);
+        Box::pin(async move { found })
     }
 
-    fn update_purge<'a>(&'a self, _tenant: &'a TenantId, _purge: Purge) -> PortFuture<'a, Purge> {
-        unmodelled("update_purge")
+    fn update_purge<'a>(&'a self, _tenant: &'a TenantId, purge: Purge) -> PortFuture<'a, Purge> {
+        let stored = self.insert_purge(purge.clone()).map(|()| purge);
+        Box::pin(async move { stored })
     }
 
     fn revision_mapping<'a>(
@@ -406,6 +448,10 @@ fn uuid_text(value: u128) -> String {
     )
 }
 
+fn poisoned() -> ApiError {
+    ApiError::new(ErrorCode::Internal, "fake record store lock poisoned")
+}
+
 fn not_found() -> ApiError {
     ApiError::new(ErrorCode::NotFound, "no such job in the fake record store")
 }
@@ -417,4 +463,60 @@ fn unmodelled<'a, T: Send + 'a>(method: &'static str) -> PortFuture<'a, T> {
             format!("the fake record store does not model {method}"),
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use okf_jawn_contract::access::AccessRoute;
+    use okf_jawn_contract::error::ErrorCode;
+    use okf_jawn_contract::identity::{PurgeId, TenantId};
+    use okf_jawn_contract::import::JobState;
+    use okf_jawn_core::jobs::{JobScope, JobSpec, NewJob};
+    use okf_jawn_core::storage::Provenance;
+
+    use super::{FakeRecords, artifact_id, job_id};
+
+    type Checked = Result<(), Box<dyn std::error::Error>>;
+
+    /// Every helper of the ledger, used once, so no including target sees one as dead.
+    #[test]
+    fn the_ledger_helpers_keep_what_they_are_given() -> Checked {
+        let records = FakeRecords::default();
+        let id = job_id(7)?;
+        records.insert(
+            id,
+            JobScope::Tenant(TenantId::try_from("tenant-a".to_owned())?),
+            NewJob {
+                mutation_id: serde_json::from_value(serde_json::json!(
+                    "00000000-0000-0000-0000-000000000007"
+                ))?,
+                initiator: Provenance {
+                    subject: "owner".to_owned(),
+                    route: AccessRoute::LocalOwner,
+                    client_id: None,
+                },
+                spec: JobSpec::BackupInstallation,
+            },
+        )?;
+        records.expire_running()?;
+        assert_eq!(records.entry(id)?.job.state, JobState::Queued);
+        assert_eq!(records.artifacts()?.len(), 0);
+        let purge: PurgeId =
+            serde_json::from_value(serde_json::json!("00000000-0000-0000-0000-000000000008"))?;
+        assert_eq!(
+            records.purge(purge).map_err(|error| error.code).err(),
+            Some(ErrorCode::NotFound)
+        );
+        assert_ne!(artifact_id(1)?, artifact_id(2)?);
+        records.insert_purge(serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000008",
+            "target": { "kind": "workspace", "workspace_id": "00000000-0000-0000-0000-000000000009" },
+            "state": "requested",
+            "job_id": "00000000-0000-0000-0000-000000000007",
+            "requested_by": "admin",
+            "requested_at": "2026-10-09T00:00:00.000Z",
+        }))?)?;
+        assert!(records.purge(purge).is_ok());
+        Ok(())
+    }
 }

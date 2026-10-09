@@ -139,7 +139,10 @@ pub async fn run_one(
     if let Err(error) = handler.handle(&claimed).await {
         let retryable = !matches!(
             error.code,
-            ErrorCode::InvalidInput | ErrorCode::Forbidden | ErrorCode::Unsupported
+            ErrorCode::InvalidInput
+                | ErrorCode::Forbidden
+                | ErrorCode::Unsupported
+                | ErrorCode::NotImplemented
         );
         let _failed = records
             .fail_job(claimed.lease.clone(), error.message, retryable)
