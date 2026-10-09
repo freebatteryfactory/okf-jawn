@@ -2,7 +2,9 @@
 //!
 //! Stage 1b design section 9.1 says how. The Markdown of the windows is joined in page order,
 //! and each window's line ranges are shifted onto the joined text. There is one `WindowExport`
-//! per window that produced a document. Each `WindowCoverage` is checked and joined into the
+//! per window that produced a document, naming the lines of the joined text that window
+//! produced (`None` when it produced no text), so a redigest of only the unconverted pages can
+//! replace exactly those ranges. Each `WindowCoverage` is checked and joined into the
 //! contract `PageCoverage`, which is then checked over `1..=page_count`. The outline is
 //! computed again over the joined Markdown (`outline`).
 //!
@@ -296,9 +298,14 @@ fn join(
             line_count(&markdown)
         };
         markdown.push_str(&produced.markdown);
+        let produced_lines = line_count(&produced.markdown);
         structured.push(WindowExport {
             window: window.window,
             digest: produced.export,
+            lines: (produced_lines > 0).then(|| TextRange {
+                start: offset.saturating_add(1),
+                end: offset.saturating_add(produced_lines),
+            }),
         });
         locations.extend(produced.locations.into_iter().map(|mut location| {
             location.lines = shifted(&location.lines, offset);

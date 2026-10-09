@@ -172,6 +172,18 @@ mod assembled_records {
                 .collect::<Vec<_>>(),
             [Some(pages(1, 2)), Some(pages(3, 4))]
         );
+        // Each window names the lines of the joined text it produced (R-I5).
+        assert_eq!(
+            record
+                .structured
+                .iter()
+                .map(|export| export.lines.clone())
+                .collect::<Vec<_>>(),
+            [
+                Some(TextRange { start: 1, end: 3 }),
+                Some(TextRange { start: 5, end: 9 })
+            ]
+        );
         // The second window's first line is line 5 of the joined text.
         assert_eq!(
             record
@@ -227,6 +239,36 @@ mod assembled_records {
             }
         );
         assert_eq!(assembled.markdown, "one\n\nthree\n");
+        let record = some(assembled.record, "the record")?;
+        assert_eq!(
+            record
+                .structured
+                .iter()
+                .map(|export| (export.window.clone(), export.lines.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (Some(pages(1, 2)), Some(TextRange { start: 1, end: 1 })),
+                (Some(pages(5, 6)), Some(TextRange { start: 3, end: 3 }))
+            ]
+        );
+        // A window that produced a document without text names no lines.
+        let silent = assemble(
+            identity(),
+            Some(4),
+            vec![
+                converted(&pages(1, 2), "", Vec::new())?,
+                converted(&pages(3, 4), "four\n", Vec::new())?,
+            ],
+        )?;
+        let silent = some(silent.record, "the record")?;
+        assert_eq!(
+            silent
+                .structured
+                .iter()
+                .map(|export| export.lines.clone())
+                .collect::<Vec<_>>(),
+            [None, Some(TextRange { start: 1, end: 1 })]
+        );
         // When no window produced anything, the document failed with the first reason.
         let failed = assemble(
             identity(),
