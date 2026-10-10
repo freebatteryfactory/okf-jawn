@@ -11,6 +11,7 @@ use okf_jawn_contract::source::{
     DeclaredOutcome, DeclaredSource, GetObjectRequest, GetSourcesRequest, SourceLocation,
     SourceLocator, SourceReference, UncitedReason,
 };
+use okf_jawn_core::application::MAX_OBJECT_BLOCK;
 use okf_jawn_core::jobs::{DerivedKind, DerivedObject, RevisionMapping};
 use okf_jawn_core::ports::Application;
 use okf_jawn_core::storage::FolderListing;
@@ -388,6 +389,34 @@ async fn get_object_accepts_the_citations_read_item_returns() -> TestResult {
                 },
             )
             .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_object_reads_at_most_one_mebibyte_per_call() -> TestResult {
+    assert_eq!(MAX_OBJECT_BLOCK, 1_048_576);
+    let world = card_world()?;
+    let size = usize::try_from(MAX_OBJECT_BLOCK)?
+        .checked_add(10)
+        .ok_or("size")?;
+    world.blobs.put_object(digest('a')?, vec![7_u8; size])?;
+    let caller = alice(OperationName::GetObject, None)?;
+    let asked = MAX_OBJECT_BLOCK.checked_add(1).ok_or("length")?;
+    for length in [Some(asked), Some(u32::MAX), None] {
+        let block = world
+            .service
+            .get_object(&caller, object_request(digest('a')?, None, length)?)
+            .await?;
+        assert_eq!(
+            STANDARD.decode(&block.data_base64)?.len(),
+            usize::try_from(MAX_OBJECT_BLOCK)?
+        );
+        assert!(block.has_more);
+        let opens = world.blobs.opens()?;
+        let (opened, _, read) = some(opens.last(), "the open")?;
+        assert_eq!(*opened, digest('a')?);
+        assert_eq!(*read, u64::from(MAX_OBJECT_BLOCK));
     }
     Ok(())
 }

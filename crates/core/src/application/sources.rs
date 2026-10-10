@@ -34,8 +34,11 @@ use crate::reading::{
 };
 use crate::storage::{Page, StorageScope};
 
-/// Most bytes one `get_object` block returns; larger objects take the streaming route.
-pub(super) const MAX_OBJECT_BLOCK: u32 = 1_048_576;
+/// Most bytes one `get_object` block returns, 1 MiB; larger objects take the streaming route.
+///
+/// The wire schema puts no bound on `GetObjectRequest::length`, so this is the only bound on the
+/// bytes one call reads into memory: a larger request is cut to it, not refused.
+pub const MAX_OBJECT_BLOCK: u32 = 1_048_576;
 
 /// Media type of a conversion record and of a docling structured export.
 const JSON_MEDIA_TYPE: &str = "application/json";

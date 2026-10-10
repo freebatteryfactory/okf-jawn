@@ -37,6 +37,8 @@ use crate::search::SearchIndex;
 use crate::storage::{BlobStore, CandidateCheck, VersionStore, WorkspaceCatalog};
 use crate::uploads::UploadStore;
 
+pub use sources::MAX_OBJECT_BLOCK;
+
 /// The handler of one operation: its function in a child module, or `pending` while the
 /// operation's construction part has not landed.
 macro_rules! route {
