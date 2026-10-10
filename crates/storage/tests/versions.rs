@@ -310,7 +310,7 @@ async fn mutation_crash_reconcile_retry_returns_the_first_commit_and_writes_no_s
         "the creation commit and one commit, no second"
     );
     let found = versions
-        .find_commit(&scope, lease.mutation_id, &initial)
+        .find_commit(&scope, lease.mutation_id, Some(&initial))
         .await?;
     assert_eq!(found, Some(first.revision));
     Ok(())
@@ -430,7 +430,9 @@ async fn draft_per_editor_second_snapshot_conflicts_after_the_first() -> TestRes
             Arc::new(Counting::default()),
         )
         .await?;
-    drafts.discard(&scope, uuid!(40)?, item, "ana").await?;
+    drafts
+        .discard(&scope, uuid!(40)?, item, "ana", None)
+        .await?;
     let ben = some(drafts.get(&scope, item, "ben").await?, "ben's draft")?;
     let error = err_of(
         versions
@@ -1106,7 +1108,9 @@ async fn a_quoted_trailer_line_in_a_message_body_replays_nothing() -> TestResult
         .await?
         .revision;
     assert_eq!(
-        versions.find_commit(&scope, uuid!(31)?, &initial).await?,
+        versions
+            .find_commit(&scope, uuid!(31)?, Some(&initial))
+            .await?,
         None,
         "a quoted line is not the trailer of mutation 31"
     );
@@ -1126,7 +1130,9 @@ async fn a_quoted_trailer_line_in_a_message_body_replays_nothing() -> TestResult
         error.message
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(30)?, &initial).await?,
+        versions
+            .find_commit(&scope, uuid!(30)?, Some(&initial))
+            .await?,
         Some(quoting.clone()),
         "the real trailer is still found"
     );
@@ -1435,6 +1441,188 @@ async fn the_catalog_creates_once_lists_updates_and_archives() -> TestResult {
     };
     let error = err_of(catalog.open(&missing).await)?;
     assert_eq!(error.code, ErrorCode::NotFound);
+    Ok(())
+}
+
+/// Commit `message` with mutation `mutation`'s trailer on top of the head straight into the
+/// workspace repository, its committer time `age_seconds` before now, and return it.
+fn commit_aged(
+    directory: &Path,
+    scope: &StorageScope,
+    mutation: u32,
+    age_seconds: i64,
+) -> Fallible<Revision> {
+    let repository = git2::Repository::open_bare(repository_path(directory, scope))?;
+    let parent = repository.find_commit(repository.refname_to_id("refs/heads/main")?)?;
+    let tree = parent.tree()?;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+    )?;
+    let who = git2::Signature::new(
+        "raw",
+        "raw@example.invalid",
+        &git2::Time::new(now.saturating_sub(age_seconds), 0),
+    )?;
+    let message = format!(
+        "an aged change\n\nOkf-Jawn-Mutation: {}\n",
+        uuid_text(mutation)
+    );
+    let commit = repository.commit(
+        Some("refs/heads/main"),
+        &who,
+        &who,
+        &message,
+        &tree,
+        &[&parent],
+    )?;
+    Ok(Revision::try_from(commit.to_string())?)
+}
+
+#[tokio::test]
+async fn find_commit_with_no_base_searches_the_accepted_line_back_from_the_head() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let first = versions
+        .commit(
+            &scope,
+            changes(30, &initial, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    // A draft saved now is based on `base`, a revision after the commit asked about.
+    let base = versions
+        .commit(
+            &scope,
+            changes(31, &first, vec![note(uuid!(11)?, "b.md", "B.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let head = versions
+        .commit(
+            &scope,
+            changes(32, &base, vec![note(uuid!(12)?, "c.md", "C.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    assert_eq!(
+        versions
+            .find_commit(&scope, uuid!(30)?, Some(&base))
+            .await?,
+        None,
+        "searching after a later base cannot see it"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(30)?, None).await?,
+        Some(first),
+        "with no base, a commit older than the draft's base is found"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(32)?, None).await?,
+        Some(head),
+        "the head itself is examined"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(33)?, None).await?,
+        None,
+        "a mutation no commit carries"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn find_commit_with_no_base_never_reads_a_proposal_candidate() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let proposal = uuid!(50)?;
+    let candidate = versions
+        .create_candidate(
+            &scope,
+            proposal,
+            CandidateChanges {
+                mutation_id: uuid!(51)?,
+                base: initial.clone(),
+                author: person("agent"),
+                message: "Propose a note".to_owned(),
+                edits: vec![note(uuid!(10)?, "proposed.md", "Proposed.")?],
+            },
+            Arc::new(Counting::default()),
+        )
+        .await?;
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        None,
+        "the candidate carries the trailer but is not on the accepted line"
+    );
+    let accepted = versions
+        .promote_candidate(
+            &scope,
+            Promotion {
+                mutation_id: uuid!(52)?,
+                proposal_id: proposal,
+                expected_head: initial,
+                candidate,
+                approver: person("ana"),
+                message: "Accept the note".to_owned(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        None,
+        "promotion writes a new commit; the candidate's own stays off the line"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        Some(accepted.revision)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn find_commit_with_no_base_stops_at_the_first_commit_older_than_the_retention() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let day = 24 * 60 * 60;
+    let expired = commit_aged(directory.path(), &scope, 50, 8 * day)?;
+    let retained = commit_aged(directory.path(), &scope, 52, 6 * day)?;
+    let head = versions
+        .commit(
+            &scope,
+            changes(51, &retained, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        Some(head)
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        Some(retained),
+        "six days old is within the retention"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(50)?, None).await?,
+        None,
+        "eight days old is past the retention, so the walk stops before it"
+    );
+    assert_eq!(
+        versions
+            .find_commit(&scope, uuid!(50)?, Some(&initial))
+            .await?,
+        Some(expired),
+        "a search after a base is not bounded by the retention"
+    );
     Ok(())
 }
 

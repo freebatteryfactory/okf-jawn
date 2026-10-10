@@ -30,6 +30,8 @@ use okf_jawn_core::storage::{
 
 use crate::blobs::{LocalBlobs, file_reader};
 use crate::db::Db;
+use crate::mutations::RETENTION_SECONDS;
+use crate::seam;
 
 pub(crate) use item::ItemFile;
 pub(crate) use read::appearance as appearance_of;
@@ -37,8 +39,9 @@ pub(crate) use read::items as items_of;
 
 use edit::{Staged, apply, maintain};
 use repo::{
-    HEAD_REF, Repositories, commit_of, find_trailer, git, head, internal, materialize,
-    message_with_trailer, reference_target, revision_of, signature, staged_tree, sync_directories,
+    HEAD_REF, Repositories, commit_of, find_on_line, find_trailer, git, head, internal,
+    materialize, message_with_trailer, reference_target, revision_of, signature, staged_tree,
+    sync_directories,
 };
 
 /// `VersionStore` over one Git repository per workspace.
@@ -256,16 +259,30 @@ impl VersionStore for GitVersions {
         }))
     }
 
+    /// `Some(since)` walks the head's history after `since`, as a commit's replay scan does.
+    ///
+    /// `None` walks `refs/heads/main` from the head back through first parents, newest first,
+    /// and stops before the first commit whose committer time is more than
+    /// `mutations::RETENTION_SECONDS` (seven days) before now: that commit and every older one
+    /// are not examined, because a mutation older than the retention is no longer resumed.
+    /// Proposal candidates and every other reference are never examined.
     fn find_commit<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
-        since: &'a Revision,
+        since: Option<&'a Revision>,
     ) -> PortFuture<'a, Option<Revision>> {
-        let since = since.clone();
+        let since = since.cloned();
         Box::pin(self.blocking(scope, move |repositories, scope| {
             let repository = repositories.open(scope)?;
-            let found = find_trailer(&repository, head(&repository)?, oid(&since)?, mutation_id)?;
+            let tip = head(&repository)?;
+            let found = if let Some(since) = since {
+                find_trailer(&repository, tip, oid(&since)?, mutation_id)?
+            } else {
+                let now = seam::now_ms()? / 1000;
+                let not_before = now.saturating_sub(RETENTION_SECONDS);
+                find_on_line(&repository, tip, mutation_id, not_before)?
+            };
             found.map(revision_of).transpose()
         }))
     }

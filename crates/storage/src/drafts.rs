@@ -2,20 +2,22 @@
 //!
 //! A save or a discard first writes its (mutation, item, action) row with the result it
 //! returns; when that primary key already exists, the call changes nothing and returns the
-//! stored result. Drafts live only in the records database: they are never indexed, exported
+//! stored result. A discard with an expected digest compares it with the held draft after the
+//! replay lookup and before its row is written, so a refused removal records nothing under its
+//! mutation and a later call under that mutation may still remove the draft. Drafts live only in the records database: they are never indexed, exported
 //! or committed by storage.
 
 use std::collections::BTreeMap;
 
 use okf_jawn_contract::error::ApiError;
-use okf_jawn_contract::identity::{ItemId, MutationId};
+use okf_jawn_contract::identity::{Digest, ItemId, MutationId};
 use okf_jawn_contract::item::{Draft, DraftContent};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::StorageScope;
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::db::{Db, internal, json, not_found, scope_key, sql};
+use crate::db::{Db, conflict, internal, json, not_found, scope_key, sql};
 use crate::seam;
 
 /// `DraftStore` over the records database.
@@ -145,6 +147,7 @@ impl DraftStore for SqliteDrafts {
         mutation_id: MutationId,
         item: ItemId,
         editor: &'a str,
+        expected: Option<Digest>,
     ) -> PortFuture<'a, Draft> {
         let (tenant, workspace) = scope_key(scope);
         let editor = editor.to_owned();
@@ -163,6 +166,20 @@ impl DraftStore for SqliteDrafts {
                 return prior(transaction, mutation_id, item, "discard")?
                     .ok_or_else(|| not_found("draft"));
             };
+            // A replay answers first, whatever `expected` says; the digest is compared only
+            // before this mutation has removed anything, and before its row is written, so a
+            // refused removal leaves nothing a later replay could report.
+            if let Some(prior) = prior(transaction, mutation_id, item, "discard")? {
+                return Ok(prior);
+            }
+            if let Some(expected) = expected {
+                let held: Draft = serde_json::from_str(&current).map_err(|error| json(&error))?;
+                if held.content_digest != expected {
+                    return Err(conflict(
+                        "the draft was saved again after the content this removal expected",
+                    ));
+                }
+            }
             if let Some(prior) = remember(
                 transaction,
                 (&tenant, &workspace),

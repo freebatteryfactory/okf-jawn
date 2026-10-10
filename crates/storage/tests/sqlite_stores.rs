@@ -138,7 +138,7 @@ async fn draft_per_editor_two_editors_keep_independent_drafts() -> TestResult {
     assert_eq!(ben.body, "his");
     assert_eq!(drafts.list(&workspace, "ana").await?.len(), 1);
     drafts
-        .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana")
+        .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana", None)
         .await?;
     assert!(drafts.get(&workspace, uuid!(3)?, "ana").await?.is_none());
     let kept = some(
@@ -172,18 +172,132 @@ async fn a_repeated_draft_save_or_discard_changes_nothing() -> TestResult {
     let current = some(drafts.get(&workspace, uuid!(3)?, "ana").await?, "the draft")?;
     assert_eq!(current.body, "two", "a replayed save wrote nothing");
     let removed = drafts
-        .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana")
+        .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana", None)
         .await?;
     let again = drafts
-        .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana")
+        .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana", None)
         .await?;
     assert_eq!(again.saved_at, removed.saved_at);
     let error = err_of(
         drafts
-            .discard(&workspace, uuid!(13)?, uuid!(3)?, "ana")
+            .discard(&workspace, uuid!(13)?, uuid!(3)?, "ana", None)
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::NotFound);
+    Ok(())
+}
+
+/// How many rows the records database holds under `mutation` in `draft_mutations`.
+fn draft_mutation_rows(storage: &Storage, mutation: u32) -> Fallible<i64> {
+    let connection = rusqlite::Connection::open(storage.data().records_path())?;
+    Ok(connection.query_row(
+        "SELECT COUNT(*) FROM draft_mutations WHERE mutation_id = ?1",
+        [uuid_text(mutation)],
+        |row| row.get(0),
+    )?)
+}
+
+#[tokio::test]
+async fn a_discard_expecting_the_held_digest_removes_the_draft() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let drafts = storage.drafts();
+    let workspace = scope(1)?;
+    drafts
+        .save(&workspace, uuid!(10)?, draft("ana", "mine")?)
+        .await?;
+    let removed = drafts
+        .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana", Some(digest('d')?))
+        .await?;
+    assert_eq!(removed.content_digest, digest('d')?);
+    assert!(drafts.get(&workspace, uuid!(3)?, "ana").await?.is_none());
+    assert_eq!(draft_mutation_rows(&storage, 12)?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_discard_expecting_another_digest_conflicts_keeps_the_draft_and_records_nothing()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let drafts = storage.drafts();
+    let workspace = scope(1)?;
+    drafts
+        .save(&workspace, uuid!(10)?, draft("ana", "saved again")?)
+        .await?;
+    let error = err_of(
+        drafts
+            .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana", Some(digest('e')?))
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    let kept = some(drafts.get(&workspace, uuid!(3)?, "ana").await?, "the draft")?;
+    assert_eq!(
+        kept.body, "saved again",
+        "a refused removal deletes nothing"
+    );
+    assert_eq!(
+        draft_mutation_rows(&storage, 12)?,
+        0,
+        "a refused removal records nothing under its mutation"
+    );
+    let removed = drafts
+        .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana", None)
+        .await?;
+    assert_eq!(removed.content_digest, digest('d')?);
+    assert!(
+        drafts.get(&workspace, uuid!(3)?, "ana").await?.is_none(),
+        "the same mutation may still remove the draft once nothing refuses it"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_replayed_discard_ignores_the_expected_digest() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let drafts = storage.drafts();
+    let workspace = scope(1)?;
+    drafts
+        .save(&workspace, uuid!(10)?, draft("ana", "first")?)
+        .await?;
+    let removed = drafts
+        .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana", Some(digest('d')?))
+        .await?;
+    let gone = drafts
+        .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana", Some(digest('f')?))
+        .await?;
+    assert_eq!(
+        gone.saved_at, removed.saved_at,
+        "a replay with no draft held"
+    );
+    drafts
+        .save(
+            &workspace,
+            uuid!(11)?,
+            DraftWrite {
+                content_digest: digest('e')?,
+                ..draft("ana", "saved after the removal")?
+            },
+        )
+        .await?;
+    let held = drafts
+        .discard(&workspace, uuid!(12)?, uuid!(3)?, "ana", Some(digest('f')?))
+        .await?;
+    assert_eq!(
+        held.saved_at, removed.saved_at,
+        "a replay with a draft held"
+    );
+    assert_eq!(held.content_digest, digest('d')?);
+    let kept = some(
+        drafts.get(&workspace, uuid!(3)?, "ana").await?,
+        "the newer draft",
+    )?;
+    assert_eq!(
+        kept.body, "saved after the removal",
+        "a replay removes nothing"
+    );
+    assert_eq!(draft_mutation_rows(&storage, 12)?, 1);
     Ok(())
 }
 
