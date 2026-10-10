@@ -32,7 +32,7 @@ use crate::reading::{
     NoteSource, ObjectRole, SourceTarget, authorize_object, cited_locations, fill_locations,
     note_sources, read_conversion_record, section_lines,
 };
-use crate::storage::{Page, StorageScope};
+use crate::storage::StorageScope;
 
 /// Most bytes one `get_object` block returns, 1 MiB; larger objects take the streaming route.
 ///
@@ -42,9 +42,6 @@ pub const MAX_OBJECT_BLOCK: u32 = 1_048_576;
 
 /// Media type of a conversion record and of a docling structured export.
 const JSON_MEDIA_TYPE: &str = "application/json";
-
-/// Page size of the folder listings a path is looked up in.
-const LOOKUP_PAGE: u16 = 200;
 
 /// An item's supporting citations and, for a source card, its appearance; for a note, every
 /// entry of its OKF `sources` declared in the file's order, exactly as written, with what it
@@ -382,7 +379,9 @@ pub(super) async fn record_of(
     }
 }
 
-/// The first of `paths` that names an item at `revision` other than the citing note itself.
+/// The first of `paths` that names an item at `revision` other than the citing note itself,
+/// each looked up directly (`VersionStore::item_at_path`). An error, such as the `NotFound` of
+/// an unknown revision, is never read as "no item".
 async fn first_item(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -391,56 +390,15 @@ async fn first_item(
     citing: ItemId,
 ) -> Result<Option<ItemId>, ApiError> {
     for path in paths {
-        if let Some(item) = item_at(service, scope, revision, path).await?
-            && item != citing
+        if let Some(item) = service
+            .ports()
+            .versions
+            .item_at_path(scope, revision, path)
+            .await?
+            && item.id != citing
         {
-            return Ok(Some(item));
+            return Ok(Some(item.id));
         }
     }
     Ok(None)
-}
-
-/// The item whose path is exactly `path` at `revision`, looked up in its folder's listing.
-async fn item_at(
-    service: &ApplicationService,
-    scope: &StorageScope,
-    revision: &Revision,
-    path: &WorkspacePath,
-) -> Result<Option<ItemId>, ApiError> {
-    let folder = match path.as_str().rsplit_once('/') {
-        Some((parent, _)) => Some(
-            WorkspacePath::try_from(parent.to_owned())
-                .map_err(|error| ApiError::new(ErrorCode::Internal, error.0))?,
-        ),
-        None => None,
-    };
-    let mut cursor = None;
-    loop {
-        let listed = service
-            .ports()
-            .versions
-            .list(
-                scope,
-                revision,
-                folder.as_ref(),
-                Page {
-                    cursor,
-                    limit: LOOKUP_PAGE,
-                },
-            )
-            .await;
-        let listing = match listed {
-            Ok(listing) => listing,
-            // A folder that does not exist holds no item.
-            Err(error) if error.code == ErrorCode::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        if let Some(found) = listing.items.iter().find(|item| &item.path == path) {
-            return Ok(Some(found.id));
-        }
-        match listing.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(None),
-        }
-    }
 }

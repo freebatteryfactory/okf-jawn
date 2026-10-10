@@ -14,7 +14,6 @@ use okf_jawn_contract::source::{
 use okf_jawn_core::application::MAX_OBJECT_BLOCK;
 use okf_jawn_core::jobs::{DerivedKind, DerivedObject, RevisionMapping};
 use okf_jawn_core::ports::Application;
-use okf_jawn_core::storage::FolderListing;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -114,7 +113,9 @@ async fn a_source_card_is_supported_by_its_appearance_and_one_whole_citation() -
     Ok(())
 }
 
-/// Put a note at `notes/plan.md` declaring `sources`, and list the card in `notes`.
+/// Put a note at `notes/plan.md` declaring `sources`, beside the card `card_world` put at
+/// `notes/report-pdf.md`; a path is found through `VersionStore::item_at_path`, never through
+/// a folder listing (none is scripted).
 fn note_declaring(world: &World, sources: &serde_json::Value) -> Built<()> {
     let at = revision('a')?;
     world.versions.put_document(
@@ -126,22 +127,6 @@ fn note_declaring(world: &World, sources: &serde_json::Value) -> Built<()> {
             "# Plan\n",
             json!({ "type": "Note", "sources": sources }),
         )?,
-    )?;
-    let card = source_card(
-        CARD,
-        &at,
-        "notes/report-pdf.md",
-        CARD_BODY,
-        converted(&digest('b')?),
-    )?;
-    world.versions.put_listing(
-        &at,
-        Some(path("notes")?),
-        FolderListing {
-            items: vec![card.summary],
-            folders: Vec::new(),
-            next_cursor: None,
-        },
     )
 }
 
@@ -222,6 +207,25 @@ async fn a_note_declares_every_okf_source_as_written_and_cites_the_items_they_na
         wire.pointer("/declared/5/entry"),
         Some(&json!("just a string"))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_path_lookup_fails_get_sources_rather_than_reading_as_no_item() -> TestResult {
+    let world = card_world()?;
+    note_declaring(
+        &world,
+        &json!([{ "id": "report", "resource": "report-pdf.md" }]),
+    )?;
+    // The store answers `NotFound`, which `item_at_path` means only for an unknown revision.
+    world.versions.fail_next_lookup();
+    let refused = err_of(
+        world
+            .service
+            .get_sources(&alice(OperationName::GetSources, None)?, sources_of(NOTE)?)
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::NotFound);
     Ok(())
 }
 

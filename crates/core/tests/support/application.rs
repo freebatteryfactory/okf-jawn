@@ -6,7 +6,9 @@
 //! staged directory; the draft store keeps one draft per (item, editor); the record store
 //! answers revision maps and derived objects for exactly the (item, revision, digest) recorded.
 //! Content is scripted by the test (`put_document`, `put_listing`), never computed from edits,
-//! so what a test asserts is what the application did with the ports. A port the operations
+//! so what a test asserts is what the application did with the ports. `item_at_path` answers
+//! from the scripted documents as its port documents it: `None` when no item is at the path at
+//! a known revision, `NotFound` only for an unknown revision. A port the operations
 //! under test do not call answers `Internal` ("not used by this test").
 //!
 //! The search index, the event log and the receipt store keep their documented idempotence
@@ -111,6 +113,7 @@ pub struct FakeVersions {
     state: Mutex<VersionState>,
     stage: Staged,
     shows: AtomicUsize,
+    fail_next_lookup: AtomicBool,
 }
 
 #[derive(Default)]
@@ -276,6 +279,7 @@ impl FakeVersions {
             }),
             stage: Staged::conformant()?,
             shows: AtomicUsize::new(0),
+            fail_next_lookup: AtomicBool::new(false),
         })
     }
 
@@ -347,6 +351,11 @@ impl FakeVersions {
             .iter()
             .map(|(changes, _)| changes.clone())
             .collect())
+    }
+
+    /// Make the next `item_at_path` answer `NotFound`, as it does for an unknown revision.
+    pub fn fail_next_lookup(&self) {
+        self.fail_next_lookup.store(true, Ordering::SeqCst);
     }
 
     /// How many times `show` was called.
@@ -498,6 +507,33 @@ impl VersionStore for FakeVersions {
                 .find(|(at, listed, _)| at == revision && listed.as_ref() == folder)
                 .map(|(_, _, listing)| listing.clone())
                 .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such folder"))
+        })
+    }
+    fn item_at_path<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        revision: &'a Revision,
+        path: &'a WorkspacePath,
+    ) -> PortFuture<'a, Option<ItemSummary>> {
+        Box::pin(async move {
+            if self.fail_next_lookup.swap(false, Ordering::SeqCst) {
+                return Err(ApiError::new(ErrorCode::NotFound, "no such revision"));
+            }
+            let state = lock_api(&self.state)?;
+            // A revision is known when it is the head, a commit produced it, or the test
+            // scripted content at it; only an unknown revision is `NotFound`.
+            let known = state.head.as_ref() == Some(revision)
+                || state.commits.iter().any(|(_, at)| at == revision)
+                || state.documents.iter().any(|(at, _)| at == revision)
+                || state.listings.iter().any(|(at, _, _)| at == revision);
+            if !known {
+                return Err(ApiError::new(ErrorCode::NotFound, "no such revision"));
+            }
+            Ok(state
+                .documents
+                .iter()
+                .find(|(at, document)| at == revision && &document.summary.path == path)
+                .map(|(_, document)| document.summary.clone()))
         })
     }
     fn show<'a>(
