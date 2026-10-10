@@ -127,6 +127,7 @@ mod job_handler {
             },
             windows: Mutex::new(Vec::new()),
             on_window: Mutex::new(None),
+            on_page_count: Mutex::new(None),
             dropped: Arc::new(AtomicUsize::new(0)),
         });
         let handler = IngestHandler::new(HandlerPorts {
@@ -823,6 +824,46 @@ mod job_handler {
         assert_stopped(&world, id)?;
         assert_eq!(world.converter.dropped.load(Ordering::SeqCst), 1);
         assert_eq!(windows(&world)?, [Some(PageRange { start: 1, end: 4 })]);
+        assert_eq!(world.versions.written()?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_job_cancelled_while_its_pages_are_counted_stops_and_renews_its_lease() -> TestResult
+    {
+        let world = world_full(
+            Some(6),
+            Vec::new(),
+            Arc::new(AcceptAll),
+            Duration::from_millis(10),
+        )?;
+        let report = upload(&world, 107, "report.pdf", b"%PDF report")?;
+        let id = job(
+            &world,
+            22,
+            workspace_scope()?,
+            import_spec(vec![report], false)?,
+        )?;
+        let records = Arc::clone(&world.records);
+        let counting = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&counting);
+        // The page count never ends by itself; the heartbeat must renew the lease while it
+        // runs, and find the job cancelled.
+        *world
+            .converter
+            .on_page_count
+            .lock()
+            .map_err(|_| "poisoned")? = Some(Box::new(move || {
+            let _previous = seen.fetch_add(1, Ordering::SeqCst);
+            let _cancelled = records.cancel(id);
+            true
+        }));
+        // An `Elapsed` error here means nothing renewed the lease during the count.
+        assert!(tokio::time::timeout(Duration::from_secs(20), run(&world, id)).await??);
+        assert_stopped(&world, id)?;
+        assert_eq!(counting.load(Ordering::SeqCst), 1);
+        assert_eq!(world.converter.dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(windows(&world)?, Vec::<Option<PageRange>>::new());
         assert_eq!(world.versions.written()?.len(), 1);
         Ok(())
     }

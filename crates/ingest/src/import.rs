@@ -30,9 +30,10 @@
 //!
 //! A redigest writes one commit, under ordinal 0, on its base revision.
 //!
-//! A job stops when `update_progress` shows it cancelled, and writes no completion: while a
-//! window converts (it is called every `HandlerLimits::heartbeat`, and dropping the conversion
-//! kills its child), between windows, and between card commits. Cards already committed keep
+//! A job stops when `update_progress` shows it cancelled, and writes no completion: while the
+//! pages are counted and while a window converts (it is called every `HandlerLimits::heartbeat`,
+//! which also renews the lease, and dropping the work kills its child), between windows, and
+//! between card commits. Cards already committed keep
 //! the state they were committed with; a source not yet converted stays `pending`, with no job
 //! left to finish it (review N10), until it is redigested.
 //!
@@ -371,11 +372,19 @@ async fn convert_document(
     settings: &ConversionSettings,
 ) -> Result<Option<Converted>, ApiError> {
     let limits = ports.converter.limits();
-    let page_count = ports
-        .converter
-        .page_count(local, file_name)
-        .await?
-        .filter(|pages| *pages > 0);
+    // The page count runs in a child too, for up to its own time bound: it renews the lease
+    // and stops for a cancellation like a window (review N4).
+    let Some(page_count) = with_heartbeat(
+        ports,
+        claimed,
+        0,
+        ports.converter.page_count(local, file_name),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let page_count = page_count.filter(|pages| *pages > 0);
     let windows: Vec<Option<PageRange>> = match page_count {
         Some(pages) => windows_of(pages, limits.window_pages)
             .into_iter()

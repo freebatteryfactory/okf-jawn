@@ -88,6 +88,7 @@ pub struct FakeBlobs {
 /// A `Converter` that converts every window of a paginated original, except the windows that
 /// start on a page in `capped`, which end at the memory cap.
 ///
+/// `on_page_count` does the same for the page count.
 /// `on_window`, when set, runs as each window starts (a test cancels the job there) and says
 /// whether the conversion then never ends, as a long window would; such a conversion counts in
 /// `dropped` when its future is dropped.
@@ -102,12 +103,17 @@ pub struct FakeConverter {
     pub windows: Mutex<Vec<Option<PageRange>>>,
     /// Runs as a window starts; `true` makes that conversion never end.
     pub on_window: Mutex<Option<WindowHook>>,
+    /// Runs as the pages are counted; `true` makes the count never end.
+    pub on_page_count: Mutex<Option<PageCountHook>>,
     /// Conversions that never ended whose future was dropped.
     pub dropped: Arc<AtomicUsize>,
 }
 
 /// What a test runs as a window starts: `true` makes that conversion never end.
 pub type WindowHook = Box<dyn Fn(Option<&PageRange>) -> bool + Send + Sync>;
+
+/// What a test runs as the pages are counted: `true` makes the count never end.
+pub type PageCountHook = Box<dyn Fn() -> bool + Send + Sync>;
 
 /// What a test runs as the `n`-th `commit` call (1-based) starts.
 pub type CommitHook = Box<dyn Fn(usize) + Send + Sync>;
@@ -766,7 +772,19 @@ impl Converter for FakeConverter {
         _file_name: &'a str,
     ) -> PortFuture<'a, Option<u32>> {
         let pages = self.pages;
-        Box::pin(async move { Ok(pages) })
+        Box::pin(async move {
+            let hang = self
+                .on_page_count
+                .lock()
+                .map_err(|_| poisoned())?
+                .as_ref()
+                .is_some_and(|hook| hook());
+            if hang {
+                let _count = DropCount(Arc::clone(&self.dropped));
+                std::future::pending::<()>().await;
+            }
+            Ok(pages)
+        })
     }
     fn convert(&self, input: ConversionInput) -> PortFuture<'_, Conversion> {
         Box::pin(async move {
