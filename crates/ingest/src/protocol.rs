@@ -7,9 +7,11 @@
 //!
 //! Both files are JSON of derived serde types that refuse a field they do not know
 //! (`deny_unknown_fields`), so a request or reply of another shape is refused rather than read
-//! with a part silently dropped.
+//! with a part silently dropped. The reply is written under a temporary name and then renamed
+//! (`write_reply`), so a child stopped while writing it leaves no `RESULT_FILE`, and a partial
+//! reply is never read as a result.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use okf_jawn_contract::common::{PageRange, TextRange};
@@ -119,6 +121,8 @@ enum StatusWord {
 pub const REQUEST_FILE: &str = "request.json";
 /// The reply the child writes last.
 pub const RESULT_FILE: &str = "result.json";
+/// The name the reply is written under before it is renamed to `RESULT_FILE`.
+pub const PARTIAL_RESULT_FILE: &str = "result.json.partial";
 /// The window's Markdown, as docling exports it.
 pub const MARKDOWN_FILE: &str = "document.md";
 /// The window's docling JSON export.
@@ -221,6 +225,26 @@ impl Reply {
             text_layer: file.text_layer,
         })
     }
+}
+
+/// Write `reply` as the directory's `RESULT_FILE`, atomically: the bytes go to
+/// `PARTIAL_RESULT_FILE` and only a complete file is renamed into place, so a child stopped
+/// while writing leaves no `RESULT_FILE` and is read as not having reported (review N5).
+///
+/// # Errors
+/// Returns `Internal` when the reply cannot be encoded, written or renamed; no `RESULT_FILE`
+/// is left then.
+pub fn write_reply(directory: &Path, reply: &Reply) -> Result<(), ApiError> {
+    let bytes = reply.encode()?;
+    let partial = directory.join(PARTIAL_RESULT_FILE);
+    std::fs::write(&partial, bytes).map_err(|error| {
+        fault(&format!(
+            "{} could not be written: {error}",
+            partial.display()
+        ))
+    })?;
+    std::fs::rename(&partial, directory.join(RESULT_FILE))
+        .map_err(|error| fault(&format!("the reply could not be put in place: {error}")))
 }
 
 /// A worker fault.

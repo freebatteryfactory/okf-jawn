@@ -34,7 +34,7 @@ use okf_jawn_contract::extraction::{ConverterIssue, FailureReason, OcrPolicy};
 use okf_jawn_core::conversion::ConversionStatus;
 
 use crate::protocol::{
-    Block, EXPORT_FILE, MARKDOWN_FILE, RESULT_FILE, Reply, Request, TEXT_LAYER_FILE, Task,
+    Block, EXPORT_FILE, MARKDOWN_FILE, Reply, Request, TEXT_LAYER_FILE, Task, write_reply,
 };
 
 /// Run the request whose path is the first argument. Call after `cap::limit_self`.
@@ -64,9 +64,7 @@ pub fn run(request_path: &Path) -> Result<(), ApiError> {
         Task::PageCount => page_count(&request)?,
         Task::Convert => convert(&request, directory)?,
     };
-    let path = directory.join(RESULT_FILE);
-    std::fs::write(&path, reply.encode()?)
-        .map_err(|error| fault(&format!("{} could not be written: {error}", path.display())))
+    write_reply(directory, &reply)
 }
 
 /// The input format the occurrence's file name selects.

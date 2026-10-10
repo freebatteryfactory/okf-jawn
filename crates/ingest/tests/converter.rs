@@ -19,7 +19,9 @@ mod conversion_protocol {
     use okf_jawn_contract::error::ErrorCode;
     use okf_jawn_contract::extraction::{ConversionSettings, ConverterIssue, FailureReason};
     use okf_jawn_core::conversion::ConversionStatus;
-    use okf_jawn_ingest::protocol::{Block, Reply, Request, Task};
+    use okf_jawn_ingest::protocol::{
+        Block, PARTIAL_RESULT_FILE, RESULT_FILE, Reply, Request, Task, write_reply,
+    };
     use serde_json::json;
 
     use crate::check::{TestResult, err_of, some};
@@ -87,6 +89,35 @@ mod conversion_protocol {
             err_of(Reply::decode(reply.to_string().as_bytes()))?.code,
             ErrorCode::Internal
         );
+        Ok(())
+    }
+
+    fn small_reply() -> Reply {
+        Reply {
+            status: ConversionStatus::Failure(FailureReason::Damaged),
+            page_count: None,
+            issues: Vec::new(),
+            blocks: Vec::new(),
+            text_layer: false,
+        }
+    }
+
+    #[test]
+    fn the_reply_is_put_in_place_only_once_it_is_written_in_full() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        write_reply(directory.path(), &small_reply())?;
+        let written = std::fs::read(directory.path().join(RESULT_FILE))?;
+        assert_eq!(Reply::decode(&written)?, small_reply());
+        assert!(!directory.path().join(PARTIAL_RESULT_FILE).exists());
+
+        // A reply that cannot be written in full (here its temporary name is taken by a
+        // directory) leaves no result file, so the supervisor reads a child that did not
+        // report, never a partial reply.
+        let blocked = tempfile::tempdir()?;
+        std::fs::create_dir(blocked.path().join(PARTIAL_RESULT_FILE))?;
+        let error = err_of(write_reply(blocked.path(), &small_reply()))?;
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert!(!blocked.path().join(RESULT_FILE).exists());
         Ok(())
     }
 
