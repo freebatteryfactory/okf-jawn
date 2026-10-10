@@ -621,6 +621,85 @@ async fn two_items_that_traded_paths_are_restored_in_one_commit() -> TestResult 
     Ok(())
 }
 
+#[tokio::test]
+async fn a_deleted_card_leaves_no_companion_files() -> TestResult {
+    let space = Workspace::new().await?;
+    let carded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                card(12, "application/pdf", 'a')?,
+                supplied(12, 'a')?,
+                correction(12, 'a', "Corrected A.")?,
+            ],
+        )
+        .await?;
+    let deleted = space
+        .commit(
+            3,
+            &carded,
+            vec![TreeEdit::DeleteItem {
+                item_id: uuid!(12)?,
+            }],
+        )
+        .await?;
+    for at in [CARD.to_owned(), appearance_file(12), supplied_file(12)] {
+        assert!(
+            space.file(&carded, &at)?.is_some(),
+            "{at} before the delete"
+        );
+        assert_eq!(space.file(&deleted, &at)?, None, "{at} after the delete");
+    }
+    assert_eq!(
+        space.files_under(&deleted, &corrections_folder(12))?,
+        Vec::<String>::new(),
+        "the corrections folder goes with the item"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_card_restored_to_the_revision_that_deleted_it_leaves_no_companion_files() -> TestResult {
+    let space = Workspace::new().await?;
+    let carded = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                card(12, "application/pdf", 'a')?,
+                supplied(12, 'a')?,
+                correction(12, 'a', "Corrected A.")?,
+            ],
+        )
+        .await?;
+    let deleted = space
+        .commit(
+            3,
+            &carded,
+            vec![TreeEdit::DeleteItem {
+                item_id: uuid!(12)?,
+            }],
+        )
+        .await?;
+    let undeleted = space
+        .commit(4, &deleted, vec![restore(12, &carded)?])
+        .await?;
+    assert!(space.file(&undeleted, CARD)?.is_some());
+    assert!(space.file(&undeleted, &appearance_file(12))?.is_some());
+    let rewound = space
+        .commit(5, &undeleted, vec![restore(12, &deleted)?])
+        .await?;
+    for at in [CARD.to_owned(), appearance_file(12), supplied_file(12)] {
+        assert_eq!(space.file(&rewound, &at)?, None, "{at}");
+    }
+    assert_eq!(
+        space.files_under(&rewound, &corrections_folder(12))?,
+        Vec::<String>::new()
+    );
+    Ok(())
+}
+
 // Reviewer probes, adopted as regressions: grouping order, companions in odd shapes.
 
 #[tokio::test]

@@ -4,8 +4,9 @@
 //! header (`items::refuse_header_change`, `items::refuse_header_in_type`); the server's own
 //! header updates (`SetStatus`, `WriteSourceCard`, `CorrectDigest`, `SupplyExtraction`) may,
 //! and the server's restores (`RestoreItem`, `RestorePaths`, `RestoreWorkspace`) write the
-//! files an earlier revision holds without that refusal.
-//! Moves rewrite the links that point at the item (`okf_core::move_concept`). An item, a move
+//! files an earlier revision holds without that refusal. An item's companion files (its source
+//! appearance, supplied text and corrections folder under `.okf/`) go with it: `DeleteItem`
+//! removes them and `RestoreItem` sets them to `from`'s state. Moves rewrite the links that point at the item (`okf_core::move_concept`). An item, a move
 //! or a folder may not land on a reserved name (`.okf/`, `index.md`, `log.md`) in any letter
 //! case: it is refused naming the path before anything is written. After the edits, no two
 //! files may share a path collision key, the folder indexes are regenerated and the change is
@@ -208,7 +209,9 @@ fn apply_one(repository: &Repository, staged: &mut Staged, edit: TreeEdit) -> Re
             let path = staged.path_of(item_id)?;
             remove(&staged.root.join(&path))?;
             staged.items.remove(&item_id);
-            Ok(())
+            remove(&appearance_path(&staged.root, item_id))?;
+            remove(&supplied_path(&staged.root, item_id))?;
+            remove_folder(&staged.root.join(corrections_folder(item_id)))
         }
         TreeEdit::CreateFolder { folder } => create_folder(staged, &folder),
         TreeEdit::SetType { definition } => set_type(&staged.root, definition),
@@ -472,11 +475,7 @@ fn restore_folder(
     path: &str,
 ) -> Result<(), ApiError> {
     let target = root.join(path);
-    match std::fs::remove_dir_all(&target) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(io_error("remove", &target, &error)),
-    }
+    remove_folder(&target)?;
     match tree.get_path(Path::new(path)) {
         Ok(entry) if entry.kind() == Some(git2::ObjectType::Tree) => {
             let folder = repository
@@ -725,6 +724,15 @@ fn write_text(path: &Path, text: &str) -> Result<(), ApiError> {
 
 fn remove(path: &Path) -> Result<(), ApiError> {
     match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error("remove", path, &error)),
+    }
+}
+
+/// Remove the folder at `path` with everything under it; an absent folder is no error.
+fn remove_folder(path: &Path) -> Result<(), ApiError> {
+    match std::fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(io_error("remove", path, &error)),

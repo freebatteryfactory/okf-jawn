@@ -184,6 +184,9 @@ pub enum TreeEdit {
         archived: Option<bool>,
     },
     /// Remove an item from the tree; history and retained objects stay.
+    ///
+    /// Every companion file the item owns (the source appearance, the accepted supplied text
+    /// and every recorded correction, as `RestoreItem` names them) is removed with it.
     DeleteItem {
         /// Item to remove.
         item_id: ItemId,
