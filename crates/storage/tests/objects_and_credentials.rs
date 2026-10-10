@@ -261,6 +261,57 @@ async fn a_resumed_transfer_counts_the_part_file_without_a_read_first() -> TestR
 }
 
 #[tokio::test]
+async fn a_read_during_a_transfer_writes_no_count() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let uploads = storage.uploads();
+    let local = scope("local", 1)?;
+    let slot = uploads.create(&local, uuid!(5)?, announced(9)).await?;
+    uploads
+        .put_content(&local, slot.id, body(b"abc"), 1024)
+        .await?;
+    let (sender, receiver) = tokio::io::duplex(64);
+    let holding = {
+        let uploads = storage.uploads();
+        let local = local.clone();
+        tokio::spawn(async move {
+            uploads
+                .put_content(&local, slot.id, Box::pin(receiver), 1024)
+                .await
+        })
+    };
+    let uploads_dir = directory.path().join("uploads");
+    let incoming = uploads_dir.join(format!("{}.incoming", slot.id.0));
+    let mut waited = 0_u32;
+    while !incoming.exists() {
+        assert!(waited < 500, "the holding transfer never started");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        waited = waited.saturating_add(1);
+    }
+    // The part file grows as a transfer's append would, before that transfer records it.
+    let part = uploads_dir.join(format!("{}.part", slot.id.0));
+    let mut file = std::fs::OpenOptions::new().append(true).open(&part)?;
+    std::io::Write::write_all(&mut file, b"def")?;
+    drop(file);
+    let seen = uploads.get(&local, slot.id).await?;
+    assert_eq!(seen.received_bytes, 3, "the record as it is");
+    let stored: i64 = rusqlite::Connection::open(storage.data().records_path())?.query_row(
+        "SELECT received_bytes FROM uploads WHERE upload_id = ?1",
+        [slot.id.0.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(stored, 3, "a read during a transfer writes no count");
+    drop(sender);
+    holding.await??;
+    assert_eq!(
+        uploads.get(&local, slot.id).await?.received_bytes,
+        6,
+        "with no transfer holding it, a read reconciles"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_resumed_upload_counts_the_bytes_its_part_file_holds() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;

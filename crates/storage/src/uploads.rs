@@ -9,8 +9,9 @@
 //! One transfer writes an upload at a time: a concurrent `put_content` or `complete` on the same
 //! upload is refused as `Conflict`, never interleaved into the same `.incoming` or `.part` file.
 //! `received_bytes` is reconciled from the `.part` file's length whenever the upload is read for
-//! a resume (`get`, `put_content`, `complete`), so a crash between the append and the record
-//! update never makes a resent chunk duplicate bytes.
+//! a resume (`get`, `put_content`, `complete`), always under the upload's claim, so a crash
+//! between the append and the record update never makes a resent chunk duplicate bytes. A `get`
+//! while a transfer holds the claim reads the record as it is and writes nothing.
 
 use std::collections::HashSet;
 use std::io::{Read as _, Write as _};
@@ -104,7 +105,20 @@ impl SqliteUploads {
         }
     }
 
-    /// The upload with `received_bytes` reconciled from its `.part` file.
+    /// See `UploadStore::get`: the upload reconciled from its `.part` file when no transfer
+    /// holds it, and as recorded when one does. A transfer in progress appends to `.part`
+    /// before it records the count, so writing the count from the file then would race it; the
+    /// transfer reconciles under its own claim instead.
+    async fn look(&self, scope: &StorageScope, upload: UploadId) -> Result<UploadRecord, ApiError> {
+        match self.writers.claim(upload) {
+            Ok(_reading) => self.reconciled(scope, upload).await,
+            Err(error) if error.code == ErrorCode::Conflict => self.record(scope, upload).await,
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The upload with `received_bytes` reconciled from its `.part` file; only under the
+    /// upload's claim.
     ///
     /// The `.part` file is synced before `received_bytes` is updated, so after a crash between
     /// the two the file holds more than the record says; those bytes were fully received and
@@ -329,7 +343,7 @@ impl UploadStore for SqliteUploads {
         scope: &'a StorageScope,
         upload: UploadId,
     ) -> PortFuture<'a, UploadRecord> {
-        Box::pin(self.reconciled(scope, upload))
+        Box::pin(self.look(scope, upload))
     }
 
     fn put_content<'a>(
