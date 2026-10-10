@@ -45,7 +45,9 @@ use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 /// from the tip, newest first, as the storage lane's `find_trailer` walk does, so a handler
 /// that wrote two commits under one identity is caught replaying the wrong one. `find_commit`
 /// searches the same way. A source card whose path collision key another item holds at the
-/// head is refused with `Conflict`, as storage refuses a path collision. Folders list empty.
+/// head is refused with `Conflict`, as storage refuses a path collision. A commit that is
+/// written first runs the caller's check once over a staged directory holding the source cards
+/// it writes; its error refuses the commit and its warnings are returned. Folders list empty.
 ///
 /// Someone else's edit is modelled as a foreign commit (`edit_elsewhere`), which may take a
 /// path; `edit_elsewhere_before_call` makes one land just before the given `commit` call, as
@@ -115,6 +117,9 @@ struct DropCount(Arc<AtomicUsize>);
 
 /// A `CandidateCheck` that accepts every tree.
 pub struct AcceptAll;
+
+/// A `CandidateCheck` that refuses every tree, as a conformance refusal would.
+pub struct RefuseAll;
 
 /// A `SearchIndex` that records the heads it was rebuilt at.
 #[derive(Default)]
@@ -283,7 +288,11 @@ impl FakeVersions {
     }
 
     /// Apply the port's replay, head and path-collision rules to one commit.
-    fn apply(&self, changes: CommitChanges) -> Result<Committed, ApiError> {
+    fn apply(
+        &self,
+        changes: CommitChanges,
+        check: &dyn CandidateCheck,
+    ) -> Result<Committed, ApiError> {
         self.count_call()?;
         if let Some(revision) = self.found(changes.mutation_id, &changes.expected_head)? {
             return Ok(Committed {
@@ -318,6 +327,7 @@ impl FakeVersions {
                 ));
             }
         }
+        let warnings = staged_check(&changes.edits, check)?;
         let revision = Revision::try_from(format!("{:040x}", commits.len().saturating_add(1)))
             .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
         commits.push((changes, revision.clone()));
@@ -332,7 +342,7 @@ impl FakeVersions {
         Ok(Committed {
             revision,
             replayed: false,
-            warnings: Vec::new(),
+            warnings,
         })
     }
 }
@@ -459,9 +469,9 @@ impl VersionStore for FakeVersions {
         &'a self,
         _scope: &'a StorageScope,
         changes: CommitChanges,
-        _check: Arc<dyn CandidateCheck>,
+        check: Arc<dyn CandidateCheck>,
     ) -> PortFuture<'a, Committed> {
-        let committed = self.apply(changes);
+        let committed = self.apply(changes, check.as_ref());
         Box::pin(async move { committed })
     }
     fn find_commit<'a>(
@@ -831,6 +841,39 @@ impl CandidateCheck for AcceptAll {
     fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
     }
+}
+
+impl CandidateCheck for RefuseAll {
+    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+        Err(ApiError::new(
+            ErrorCode::InvalidInput,
+            "not a conformant OKF bundle",
+        ))
+    }
+}
+
+/// Run `check` once over a staged directory holding the source cards `edits` write, as storage
+/// runs the caller's check on its staging directory; its error refuses the commit.
+fn staged_check(edits: &[TreeEdit], check: &dyn CandidateCheck) -> Result<Vec<Warning>, ApiError> {
+    let internal = |error: std::io::Error| ApiError::new(ErrorCode::Internal, error.to_string());
+    let staging = tempfile::tempdir().map_err(internal)?;
+    for edit in edits {
+        if let TreeEdit::WriteSourceCard(card) = edit {
+            let file = staging.path().join(card.path.as_str());
+            if let Some(folder) = file.parent() {
+                std::fs::create_dir_all(folder).map_err(internal)?;
+            }
+            std::fs::write(
+                &file,
+                format!(
+                    "---\ntype: {}\ntitle: {}\n---\n\n{}\n",
+                    card.type_name, card.title, card.body
+                ),
+            )
+            .map_err(internal)?;
+        }
+    }
+    check.check(staging.path())
 }
 
 fn poisoned() -> ApiError {

@@ -42,7 +42,7 @@ mod job_handler {
     use crate::check::{TestResult, some};
     use crate::ports::{
         AcceptAll, FakeBackups, FakeBlobs, FakeConverter, FakePurger, FakeSearch, FakeUploads,
-        FakeVersions,
+        FakeVersions, RefuseAll,
     };
     use crate::records::{FakeRecords, job_id};
 
@@ -687,6 +687,56 @@ mod job_handler {
                 .any(|(_, pending)| *pending == id)
         );
         assert!(!run(&world, id).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_import_commits_through_the_import_check_lint_warns_and_a_refusal_refuses()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let report = upload(&world, 105, "report.pdf", b"%PDF report")?;
+        let id = job(
+            &world,
+            19,
+            workspace_scope()?,
+            import_spec(vec![report], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        // The pending card's body opens with no top-level heading: OKF lint of the imported
+        // file (portable::ImportCheck) reaches the completion as a warning, and refuses nothing.
+        let completion = some(entry.completions.first(), "the completion")?;
+        assert!(
+            completion.warnings.iter().any(|warning| {
+                warning.code.starts_with("okf_lint")
+                    && warning.location.as_deref() == Some("inbox/report-pdf.md")
+            }),
+            "{:?}",
+            completion.warnings
+        );
+
+        // The injected conformance check still refuses, and nothing is written.
+        let refusing = world_full(
+            Some(3),
+            Vec::new(),
+            Arc::new(RefuseAll),
+            Duration::from_secs(60),
+        )?;
+        let report = upload(&refusing, 106, "report.pdf", b"%PDF report")?;
+        let id = job(
+            &refusing,
+            20,
+            workspace_scope()?,
+            import_spec(vec![report], false)?,
+        )?;
+        assert!(run(&refusing, id).await?);
+        let entry = refusing.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("not a conformant"), "{message}");
+        assert!(!retryable);
+        assert!(refusing.versions.written()?.is_empty());
         Ok(())
     }
 
