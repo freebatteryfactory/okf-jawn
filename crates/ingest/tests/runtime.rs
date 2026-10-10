@@ -20,6 +20,7 @@ mod job_runtime {
     use okf_jawn_contract::error::{ApiError, ErrorCode};
     use okf_jawn_contract::identity::{JobId, MutationId, TenantId, WorkspaceId};
     use okf_jawn_contract::import::JobState;
+    use okf_jawn_core::events::{EventLog, EventScope};
     use okf_jawn_core::jobs::{
         ClaimedJob, JobCompletion, JobHandler, JobQueue, JobScope, JobSpec, NewJob, RecordStore,
     };
@@ -28,7 +29,7 @@ mod job_runtime {
     use okf_jawn_ingest::runtime::{JobRuntime, RuntimeConfig, run_one};
 
     use crate::check::TestResult;
-    use crate::records::{FakeRecords, job_id};
+    use crate::records::{FakeEvents, FakeRecords, job_id};
 
     /// What the handler does on one attempt.
     #[derive(Debug, Clone, Copy)]
@@ -160,8 +161,24 @@ mod job_runtime {
     #[tokio::test]
     async fn a_repeated_delivery_claims_nothing_and_runs_nothing_twice() -> TestResult {
         let (records, handler, id) = setup(|_| Action::Complete)?;
-        assert!(run_one(records.as_ref(), handler.as_ref(), id).await?);
-        assert!(!run_one(records.as_ref(), handler.as_ref(), id).await?);
+        assert!(
+            run_one(
+                records.as_ref(),
+                &FakeEvents::default(),
+                handler.as_ref(),
+                id
+            )
+            .await?
+        );
+        assert!(
+            !run_one(
+                records.as_ref(),
+                &FakeEvents::default(),
+                handler.as_ref(),
+                id
+            )
+            .await?
+        );
         assert_eq!(handler.attempts()?, [1]);
         let entry = records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Succeeded);
@@ -171,6 +188,7 @@ mod job_runtime {
         let (records, handler, id) = setup(|_| Action::Complete)?;
         let (runtime, queue) = JobRuntime::start(
             &(Arc::clone(&records) as Arc<dyn RecordStore>),
+            &(Arc::new(FakeEvents::default()) as Arc<dyn EventLog>),
             &(Arc::clone(&handler) as Arc<dyn JobHandler>),
             config(),
         );
@@ -188,10 +206,24 @@ mod job_runtime {
     #[tokio::test]
     async fn a_handler_fault_is_recorded_as_a_retryable_failure_through_its_lease() -> TestResult {
         let (records, handler, id) = setup(|_| Action::Fail)?;
-        assert!(run_one(records.as_ref(), handler.as_ref(), id).await?);
+        let events = FakeEvents::default();
+        assert!(run_one(records.as_ref(), &events, handler.as_ref(), id).await?);
         let entry = records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Failed);
         assert_eq!(entry.failures, [("the worker broke".to_owned(), true)]);
+        // The failure it wrote is announced, in the job's workspace log, with no mutation.
+        let JobScope::Workspace(scope) = entry.scope else {
+            return Err("a workspace job was expected".into());
+        };
+        let appended = events.appended()?;
+        assert_eq!(appended.len(), 1);
+        let (log, mutation, event) = crate::check::some(appended.first(), "the event")?;
+        assert_eq!(*log, EventScope::Workspace(scope));
+        assert_eq!(*mutation, None);
+        assert_eq!(
+            (&event.kind, event.job_id),
+            (&okf_jawn_contract::events::EventKind::JobUpdated, Some(id))
+        );
         Ok(())
     }
 
@@ -203,6 +235,7 @@ mod job_runtime {
         records.expire_running()?;
         let (runtime, _queue) = JobRuntime::start(
             &(Arc::clone(&records) as Arc<dyn RecordStore>),
+            &(Arc::new(FakeEvents::default()) as Arc<dyn EventLog>),
             &(Arc::clone(&handler) as Arc<dyn JobHandler>),
             config(),
         );
@@ -225,6 +258,7 @@ mod job_runtime {
         })?;
         let (runtime, queue) = JobRuntime::start(
             &(Arc::clone(&records) as Arc<dyn RecordStore>),
+            &(Arc::new(FakeEvents::default()) as Arc<dyn EventLog>),
             &(Arc::clone(&handler) as Arc<dyn JobHandler>),
             config(),
         );
@@ -261,6 +295,7 @@ mod job_runtime {
         // 5 ms, re-delivering every unfinished job, the running one included.
         let (runtime, queue) = JobRuntime::start(
             &(Arc::clone(&records) as Arc<dyn RecordStore>),
+            &(Arc::new(FakeEvents::default()) as Arc<dyn EventLog>),
             &(Arc::new(BusyHandler) as Arc<dyn JobHandler>),
             RuntimeConfig {
                 workers: 1,
@@ -285,6 +320,7 @@ mod job_runtime {
         let (records, handler, id) = setup(|_| Action::Complete)?;
         let (runtime, queue) = JobRuntime::start(
             &(Arc::clone(&records) as Arc<dyn RecordStore>),
+            &(Arc::new(FakeEvents::default()) as Arc<dyn EventLog>),
             &(Arc::clone(&handler) as Arc<dyn JobHandler>),
             config(),
         );

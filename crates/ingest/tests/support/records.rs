@@ -1,4 +1,5 @@
-//! An in-memory `RecordStore` for the runtime and handler tests: the job ledger only.
+//! An in-memory `RecordStore` for the runtime and handler tests (the job ledger only), and an
+//! `EventLog` that records what the job writes announce.
 //!
 //! It encodes what the `RecordStore` docs state about jobs:
 //! - `claim_job` claims a queued job under a new lease token and returns `None` otherwise;
@@ -10,12 +11,16 @@
 //! Time does not pass by itself: `expire_running` marks every live claim expired, as a lease
 //! lapsing would. Purge, review, receipt and derived-object records are not modelled; those
 //! methods answer `NotImplemented`, so a test that reaches one fails loudly.
+//!
+//! `FakeEvents` encodes the `EventLog::append` doc: with a mutation identity, an identical
+//! notification already appended under it in the same log is not appended again; without one,
+//! every notification is appended. `list` is not modelled.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::events::Receipt;
+use okf_jawn_contract::events::{Event, ListEventsResponse, Receipt};
 use okf_jawn_contract::identity::{
     ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, ReceiptId, Revision, TenantId,
     Timestamp,
@@ -23,6 +28,7 @@ use okf_jawn_contract::identity::{
 use okf_jawn_contract::import::{Job, JobState, ListJobsResponse};
 use okf_jawn_contract::purge::Purge;
 use okf_jawn_contract::review::Review;
+use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
 use okf_jawn_core::jobs::{
     ArtifactRecord, ClaimedJob, DerivedObject, JobCompletion, JobLease, JobScope, NewArtifact,
     NewJob, NewPurge, RecordStore, RevisionMapping,
@@ -54,6 +60,77 @@ pub struct FakeRecords {
     artifacts: Mutex<BTreeMap<MutationId, ArtifactRecord>>,
     purges: Mutex<BTreeMap<PurgeId, Purge>>,
     renewals: std::sync::atomic::AtomicUsize,
+}
+
+/// One notification as the fake log keeps it: its log, its mutation identity and the event.
+pub type Appended = (EventScope, Option<MutationId>, NewEvent);
+
+/// The event log.
+#[derive(Debug, Default)]
+pub struct FakeEvents {
+    appended: Mutex<Vec<Appended>>,
+}
+
+impl FakeEvents {
+    /// Every notification appended so far, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn appended(&self) -> Result<Vec<Appended>, ApiError> {
+        self.appended
+            .lock()
+            .map(|appended| appended.clone())
+            .map_err(|_| poisoned())
+    }
+}
+
+impl EventLog for FakeEvents {
+    fn append<'a>(
+        &'a self,
+        scope: &'a EventScope,
+        mutation_id: Option<MutationId>,
+        event: NewEvent,
+    ) -> PortFuture<'a, Event> {
+        let appended = self
+            .appended
+            .lock()
+            .map_err(|_| poisoned())
+            .and_then(|mut log| {
+                let repeated = mutation_id.is_some()
+                    && log.iter().any(|(earlier, mutation, prior)| {
+                        earlier == scope && *mutation == mutation_id && *prior == event
+                    });
+                if !repeated {
+                    log.push((scope.clone(), mutation_id, event.clone()));
+                }
+                let at = Timestamp::try_from("2026-10-09T00:00:00.000Z".to_owned())
+                    .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+                Ok(Event {
+                    id: log.len().to_string(),
+                    workspace_id: match scope {
+                        EventScope::Workspace(workspace) => Some(workspace.workspace_id),
+                        EventScope::Tenant(_) => None,
+                    },
+                    kind: event.kind,
+                    at,
+                    revision: event.revision,
+                    item_id: event.item_id,
+                    job_id: event.job_id,
+                    connector_id: event.connector_id,
+                    actor: event.actor,
+                    operation: event.operation,
+                })
+            });
+        Box::pin(async move { appended })
+    }
+
+    fn list<'a>(
+        &'a self,
+        _scope: &'a EventScope,
+        _query: EventQuery,
+    ) -> PortFuture<'a, ListEventsResponse> {
+        unmodelled("list")
+    }
 }
 
 impl FakeRecords {
@@ -496,7 +573,7 @@ mod tests {
     use okf_jawn_core::jobs::{JobScope, JobSpec, NewJob};
     use okf_jawn_core::storage::Provenance;
 
-    use super::{FakeRecords, artifact_id, job_id};
+    use super::{FakeEvents, FakeRecords, artifact_id, job_id};
 
     type Checked = Result<(), Box<dyn std::error::Error>>;
 
@@ -542,6 +619,7 @@ mod tests {
         records.cancel(id)?;
         assert_eq!(records.entry(id)?.job.state, JobState::Cancelled);
         assert_eq!(records.renewals(), 0);
+        assert_eq!(FakeEvents::default().appended()?, Vec::new());
         Ok(())
     }
 }

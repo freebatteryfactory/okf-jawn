@@ -49,6 +49,13 @@
 //! the item was deleted or its original changed since the base, and otherwise written onto the
 //! head's version of the card, keeping its path, title, properties and supplied text.
 //!
+//! Every commit the job lands, written now or replayed (the pending commit, each card's commit,
+//! the redigest's commit), is indexed and announced as `changed` under its own derived
+//! mutation identity (`handler::announce_commit`), naming the card's item when it writes one.
+//! An import that completes having produced items appends `imported` once, under the job's
+//! mutation, with the last revision. Progress goes through `Attempt::report`, which announces
+//! a value that changed.
+//!
 //! A job stops when `update_progress` shows it cancelled, and writes no completion: while the
 //! pages are counted and while a window converts (it is called every `HandlerLimits::heartbeat`,
 //! which also renews the lease, and dropping the work kills its child), between windows, and
@@ -71,6 +78,7 @@ use std::time::Duration;
 use okf_jawn_contract::common::{PageRange, Warning};
 use okf_jawn_contract::conventions::source_card_name;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::extraction::{
     ConversionOutcome, ConversionSettings, ConverterIdentity, Extraction, SuppliedText, TextOrigin,
 };
@@ -81,6 +89,7 @@ use okf_jawn_contract::source::{SourceAppearance, SourceName};
 use okf_jawn_core::conversion::{
     Conversion, ConversionInput, ConversionRecord, ConvertedDocument, PageCount, RetainedAsset,
 };
+use okf_jawn_core::events::EventScope;
 use okf_jawn_core::items::without_header;
 use okf_jawn_core::jobs::ClaimedJob;
 use okf_jawn_core::portable::ImportCheck;
@@ -89,7 +98,7 @@ use okf_jawn_core::storage::{
     TreeEdit, derive_commit_mutation_id, derive_item_id,
 };
 
-use crate::handler::{Done, HandlerPorts};
+use crate::handler::{Attempt, Done, HandlerPorts, announce_commit, job_event};
 use crate::record::{
     Assembled, ConvertedWindow, WindowOutcome, assemble, sha256_digest, windows_of,
 };
@@ -186,7 +195,7 @@ const HEAD_RACES: u32 = 8;
 /// Run an `Import` job.
 pub(crate) async fn import(
     ports: &HandlerPorts,
-    claimed: &ClaimedJob,
+    attempt: &Attempt<'_>,
     scope: &StorageScope,
     request: ImportRequest<'_>,
 ) -> Result<Done, ApiError> {
@@ -196,7 +205,7 @@ pub(crate) async fn import(
             "naming rules at import wait for core's rule function (request R-I4); import without them",
         ));
     }
-    let cards = pending_cards(ports, claimed, scope, &request).await?;
+    let cards = pending_cards(ports, attempt.claimed, scope, &request).await?;
     let check: Arc<dyn CandidateCheck> = Arc::new(ImportCheck::new(
         Arc::clone(&ports.check),
         cards.iter().map(|(card, _)| card.path.clone()).collect(),
@@ -204,7 +213,7 @@ pub(crate) async fn import(
     let base = request.base_revision;
     let pending = match commit(
         ports,
-        claimed,
+        attempt,
         scope,
         (base, 0),
         format!("Import {} sources, pending conversion", cards.len()),
@@ -230,19 +239,16 @@ pub(crate) async fn import(
     };
     let total = u32::try_from(cards.len()).unwrap_or(u32::MAX);
     for ((mut card, local), ordinal) in cards.into_iter().zip(1_u32..) {
-        let file_name = card
-            .appearance
-            .names
-            .first()
-            .map(|name| name.filename.clone())
-            .unwrap_or_default();
+        let file_name = observed_name(&card);
         // A card an earlier attempt already committed is not converted again: the completion
         // takes its commit and the outputs its committed extraction references.
-        if let Some(committed) = replayed(ports, claimed, scope, (base, ordinal), &check).await? {
+        let item = Some(card.item_id);
+        let replay = replayed(ports, attempt, scope, (base, ordinal), item, &check);
+        if let Some(committed) = replay.await? {
             take_committed(ports, scope, card.item_id, committed, Vec::new(), &mut done).await?;
         } else {
             let Some(converted) =
-                convert_document(ports, claimed, scope, &local, &file_name, request.settings)
+                convert_document(ports, attempt, scope, &local, &file_name, request.settings)
                     .await?
             else {
                 done.cancelled = true;
@@ -258,7 +264,7 @@ pub(crate) async fn import(
             };
             match commit(
                 ports,
-                claimed,
+                attempt,
                 scope,
                 (base, ordinal),
                 message,
@@ -283,12 +289,44 @@ pub(crate) async fn import(
         }
         done.item_ids.push(card.item_id);
         // Between card commits: a job cancelled now converts no further source.
-        if ordinal < total && cancelled_after(ports, claimed, ordinal, total).await? {
+        if ordinal < total && cancelled_after(ports, attempt, ordinal, total).await? {
             done.cancelled = true;
             return Ok(done);
         }
     }
+    announce_imported(ports, attempt.claimed, scope, &done).await?;
     Ok(done)
+}
+
+/// Append `imported` once, under the job's own mutation, with the last revision, when the
+/// import produced items; a replay appends no second one.
+async fn announce_imported(
+    ports: &HandlerPorts,
+    claimed: &ClaimedJob,
+    scope: &StorageScope,
+    done: &Done,
+) -> Result<(), ApiError> {
+    if done.item_ids.is_empty() {
+        return Ok(());
+    }
+    let _event = ports
+        .events
+        .append(
+            &EventScope::Workspace(scope.clone()),
+            Some(claimed.mutation_id),
+            job_event(EventKind::Imported, claimed, done.revision.clone(), None),
+        )
+        .await?;
+    Ok(())
+}
+
+/// The file name a new card's original was observed under.
+fn observed_name(card: &SourceCard) -> String {
+    card.appearance
+        .names
+        .first()
+        .map(|name| name.filename.clone())
+        .unwrap_or_default()
 }
 
 /// Take a card's commit into the completion: its revision and warnings, and its outputs. A
@@ -317,7 +355,7 @@ async fn take_committed(
 /// Report progress after `done` of `total` cards, and say whether the job is now cancelled.
 async fn cancelled_after(
     ports: &HandlerPorts,
-    claimed: &ClaimedJob,
+    attempt: &Attempt<'_>,
     done: u32,
     total: u32,
 ) -> Result<bool, ApiError> {
@@ -325,10 +363,7 @@ async fn cancelled_after(
         usize::try_from(done).unwrap_or(usize::MAX),
         usize::try_from(total).unwrap_or(usize::MAX),
     );
-    let job = ports
-        .records
-        .update_progress(&claimed.lease, progress)
-        .await?;
+    let job = attempt.report(ports, progress).await?;
     Ok(job.state == JobState::Cancelled)
 }
 
@@ -420,7 +455,7 @@ async fn pending_cards(
 /// Run a `Redigest` job: convert the source again and replace its card.
 pub(crate) async fn redigest(
     ports: &HandlerPorts,
-    claimed: &ClaimedJob,
+    attempt: &Attempt<'_>,
     scope: &StorageScope,
     item_id: ItemId,
     base_revision: &Revision,
@@ -434,8 +469,15 @@ pub(crate) async fn redigest(
         ));
     }
     // A redigest an earlier attempt already committed is not converted again.
-    if let Some(committed) =
-        replayed(ports, claimed, scope, (base_revision, 0), &ports.check).await?
+    if let Some(committed) = replayed(
+        ports,
+        attempt,
+        scope,
+        (base_revision, 0),
+        Some(item_id),
+        &ports.check,
+    )
+    .await?
     {
         return Ok(Done {
             outputs: committed_outputs(ports, scope, &committed.revision, item_id).await?,
@@ -460,7 +502,7 @@ pub(crate) async fn redigest(
         .ok_or_else(|| fault("a source card records the name it was observed under"))?;
     let local = ports.blobs.materialize(scope, &appearance.object).await?;
     let Some(converted) =
-        convert_document(ports, claimed, scope, &local, &file_name, settings).await?
+        convert_document(ports, attempt, scope, &local, &file_name, settings).await?
     else {
         return Ok(Done {
             cancelled: true,
@@ -487,7 +529,7 @@ pub(crate) async fn redigest(
     };
     let landed = commit(
         ports,
-        claimed,
+        attempt,
         scope,
         (base_revision, 0),
         format!("Redigest {}: {}", card.title, outcome_word(&converted)),
@@ -524,7 +566,7 @@ pub(crate) async fn redigest(
 /// recorded as the source's whole conversion, and no window is converted.
 async fn convert_document(
     ports: &HandlerPorts,
-    claimed: &ClaimedJob,
+    attempt: &Attempt<'_>,
     scope: &StorageScope,
     local: &LocalSource,
     file_name: &str,
@@ -535,7 +577,7 @@ async fn convert_document(
     // and stops for a cancellation like a window (review N4).
     let Some(page_count) = with_heartbeat(
         ports,
-        claimed,
+        attempt,
         0,
         ports.converter.page_count(local, file_name),
     )
@@ -578,7 +620,7 @@ async fn convert_document(
         };
         let progress = percent(index, total);
         let Some(conversion) =
-            with_heartbeat(ports, claimed, progress, ports.converter.convert(input)).await?
+            with_heartbeat(ports, attempt, progress, ports.converter.convert(input)).await?
         else {
             return Ok(None);
         };
@@ -586,9 +628,8 @@ async fn convert_document(
             identity = Some(conversion.converter.clone());
         }
         outcomes.push(window_outcome(ports, scope, window, conversion).await?);
-        let job = ports
-            .records
-            .update_progress(&claimed.lease, percent(index.saturating_add(1), total))
+        let job = attempt
+            .report(ports, percent(index.saturating_add(1), total))
             .await?;
         if job.state == JobState::Cancelled {
             return Ok(None);
@@ -633,7 +674,7 @@ async fn assembled(
 /// cancelled, in which case `work` is dropped.
 async fn with_heartbeat<T>(
     ports: &HandlerPorts,
-    claimed: &ClaimedJob,
+    attempt: &Attempt<'_>,
     progress: u8,
     work: impl Future<Output = Result<T, ApiError>>,
 ) -> Result<Option<T>, ApiError> {
@@ -645,7 +686,7 @@ async fn with_heartbeat<T>(
         tokio::select! {
             result = &mut work => return result.map(Some),
             _instant = ticks.tick() => {
-                let job = ports.records.update_progress(&claimed.lease, progress).await?;
+                let job = attempt.report(ports, progress).await?;
                 if job.state == JobState::Cancelled {
                     return Ok(None);
                 }
@@ -764,17 +805,20 @@ async fn retain(
 /// head's version of its item, or `Landed::Kept` when the item changed since its base in a way
 /// the card's rule blocks. A head that moved before the write is read again, at most
 /// `HEAD_RACES` times. A `Conflict` while the head stood still is the store refusing these
-/// edits, a real collision: `Landed::Refused`.
+/// edits, a real collision: `Landed::Refused`. A commit that lands, either way, is indexed and
+/// announced.
 async fn commit(
     ports: &HandlerPorts,
-    claimed: &ClaimedJob,
+    attempt: &Attempt<'_>,
     scope: &StorageScope,
     (base, ordinal): (&Revision, u32),
     message: String,
     writes: Writes<'_>,
     check: Arc<dyn CandidateCheck>,
 ) -> Result<Landed, ApiError> {
-    if let Some(committed) = replayed(ports, claimed, scope, (base, ordinal), &check).await? {
+    let claimed = attempt.claimed;
+    let item = written_item(&writes);
+    if let Some(committed) = replayed(ports, attempt, scope, (base, ordinal), item, &check).await? {
         return Ok(Landed::Committed(committed));
     }
     for _race in 0..HEAD_RACES {
@@ -799,7 +843,19 @@ async fn commit(
         )
         .await;
         match written {
-            Ok(committed) => return Ok(Landed::Committed(committed)),
+            Ok(committed) => {
+                let mutation_id = derive_commit_mutation_id(claimed.mutation_id, ordinal);
+                announce_commit(
+                    ports,
+                    claimed,
+                    scope,
+                    &committed.revision,
+                    mutation_id,
+                    item,
+                )
+                .await?;
+                return Ok(Landed::Committed(committed));
+            }
             Err(error) if error.code == ErrorCode::Conflict => {
                 if ports.versions.head(scope).await? == head {
                     return Ok(Landed::Refused(error));
@@ -817,18 +873,22 @@ async fn commit(
 /// The `ordinal`-th commit of the job when an earlier attempt already wrote it after `base`,
 /// with the warnings its check returned then. Storage returns no warnings on a replay, so the
 /// same check is run again over the replayed commit's tree (`checked_again`): the completion's
-/// warnings do not depend on where an attempt died.
+/// warnings do not depend on where an attempt died. A replayed commit is indexed and announced
+/// again, naming `item`, which has no second effect.
 async fn replayed(
     ports: &HandlerPorts,
-    claimed: &ClaimedJob,
+    attempt: &Attempt<'_>,
     scope: &StorageScope,
     (base, ordinal): (&Revision, u32),
+    item: Option<ItemId>,
     check: &Arc<dyn CandidateCheck>,
 ) -> Result<Option<Committed>, ApiError> {
+    let claimed = attempt.claimed;
     let mutation_id = derive_commit_mutation_id(claimed.mutation_id, ordinal);
     let Some(revision) = ports.versions.find_commit(scope, mutation_id, base).await? else {
         return Ok(None);
     };
+    announce_commit(ports, claimed, scope, &revision, mutation_id, item).await?;
     let warnings = checked_again(ports, scope, &revision, Arc::clone(check)).await?;
     Ok(Some(Committed {
         revision,
@@ -1006,6 +1066,17 @@ fn same_item(now: &ItemDocument, then: &ItemDocument) -> bool {
         && now.summary.archived == then.summary.archived
         && now.content_digest == then.content_digest
         && appearance(now) == appearance(then)
+}
+
+/// The item a commit writes, when it writes exactly one card: what its `changed` event names.
+fn written_item(writes: &Writes<'_>) -> Option<ItemId> {
+    match writes {
+        Writes::Card { card, .. } => Some(card.item_id),
+        Writes::Edits(edits) => match edits.as_slice() {
+            [TreeEdit::WriteSourceCard(card)] => Some(card.item_id),
+            _ => None,
+        },
+    }
 }
 
 /// The `ordinal`-th commit of the job, expecting `expected_head`, under its derived identity.

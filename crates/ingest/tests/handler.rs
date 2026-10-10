@@ -18,6 +18,7 @@ mod job_handler {
 
     use okf_jawn_contract::access::AccessRoute;
     use okf_jawn_contract::common::PageRange;
+    use okf_jawn_contract::events::EventKind;
     use okf_jawn_contract::extraction::{
         ConversionOutcome, ConversionSettings, FailureReason, TextOrigin,
     };
@@ -29,6 +30,7 @@ mod job_handler {
     use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
     use okf_jawn_contract::workspace::ArtifactKind;
     use okf_jawn_core::conversion::{ConversionRecord, ConverterLimits};
+    use okf_jawn_core::events::EventScope;
     use okf_jawn_core::jobs::{JobHandler, JobScope, JobSpec, NewJob, RecordStore};
     use okf_jawn_core::storage::{
         CandidateCheck, ObjectInfo, Provenance, SourceCard, StorageScope, TreeEdit,
@@ -47,12 +49,21 @@ mod job_handler {
         AcceptAll, FakeBackups, FakeBlobs, FakeConverter, FakePurger, FakeSearch, FakeUploads,
         FakeVersions, RefuseAll,
     };
-    use crate::records::{FakeRecords, job_id};
+    use crate::records::{Appended, FakeEvents, FakeRecords, job_id};
 
     type Built<T> = Result<T, Box<dyn std::error::Error>>;
 
+    /// A `changed` notification as a test compares it: log, mutation, revision and item.
+    type Announced = (
+        EventScope,
+        Option<MutationId>,
+        Option<Revision>,
+        Option<ItemId>,
+    );
+
     struct World {
         records: Arc<FakeRecords>,
+        events: Arc<FakeEvents>,
         versions: Arc<FakeVersions>,
         search: Arc<FakeSearch>,
         backups: Arc<FakeBackups>,
@@ -106,6 +117,7 @@ mod job_handler {
         heartbeat: Duration,
     ) -> Built<World> {
         let records = Arc::new(FakeRecords::default());
+        let events = Arc::new(FakeEvents::default());
         let versions = Arc::new(FakeVersions::at(base()?));
         let search = Arc::new(FakeSearch::default());
         let backups = Arc::new(FakeBackups {
@@ -142,6 +154,7 @@ mod job_handler {
             records: Arc::clone(&records) as Arc<dyn RecordStore>,
             versions: Arc::clone(&versions) as Arc<dyn okf_jawn_core::storage::VersionStore>,
             search: Arc::clone(&search) as Arc<dyn okf_jawn_core::search::SearchIndex>,
+            events: Arc::clone(&events) as Arc<dyn okf_jawn_core::events::EventLog>,
             backups: Arc::clone(&backups) as Arc<dyn okf_jawn_core::storage::Backups>,
             purger: Arc::clone(&purger) as Arc<dyn okf_jawn_core::storage::Purger>,
             uploads: Arc::clone(&uploads) as Arc<dyn okf_jawn_core::uploads::UploadStore>,
@@ -155,6 +168,7 @@ mod job_handler {
         });
         Ok(World {
             records,
+            events,
             versions,
             search,
             backups,
@@ -277,10 +291,116 @@ mod job_handler {
     async fn run(world: &World, id: okf_jawn_contract::identity::JobId) -> Built<bool> {
         Ok(run_one(
             world.records.as_ref(),
+            world.events.as_ref(),
             &world.handler as &dyn JobHandler,
             id,
         )
         .await?)
+    }
+
+    /// The notifications of `kind` appended so far, in order.
+    fn events_of(world: &World, kind: &EventKind) -> Built<Vec<Appended>> {
+        Ok(world
+            .events
+            .appended()?
+            .into_iter()
+            .filter(|(_, _, event)| event.kind == *kind)
+            .collect())
+    }
+
+    /// The storage scope of the test workspace.
+    fn storage_scope() -> Built<StorageScope> {
+        match workspace_scope()? {
+            JobScope::Workspace(scope) => Ok(scope),
+            JobScope::Tenant(_) => Err("a workspace scope was expected".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_import_indexes_and_announces_each_commit_and_a_replay_appends_no_duplicate()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, 160, "first.pdf", b"%PDF first")?;
+        let second = upload(&world, 161, "second.pdf", b"%PDF second")?;
+        let id = job(
+            &world,
+            160,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let mutation = entry.created.mutation_id;
+        let revisions: Vec<Revision> = world
+            .versions
+            .written()?
+            .into_iter()
+            .map(|(_, revision)| revision)
+            .collect();
+        assert_eq!(revisions.len(), 3);
+        // Every commit was indexed, in order.
+        assert_eq!(world.search.indexed()?, revisions);
+        // And announced as `changed` in the workspace's log, under its own derived mutation,
+        // naming the job and the card it wrote (the pending commit wrote two: none).
+        let scope = EventScope::Workspace(storage_scope()?);
+        let changed: Vec<Announced> = events_of(&world, &EventKind::Changed)?
+            .into_iter()
+            .map(|(log, mutation, event)| {
+                assert_eq!(event.job_id, Some(id));
+                (log, mutation, event.revision, event.item_id)
+            })
+            .collect();
+        let expected: Vec<_> = revisions
+            .iter()
+            .zip([
+                None,
+                Some(derive_item_id(mutation, 0)),
+                Some(derive_item_id(mutation, 1)),
+            ])
+            .zip(0_u32..)
+            .map(|((revision, item), ordinal)| {
+                (
+                    scope.clone(),
+                    Some(derive_commit_mutation_id(mutation, ordinal)),
+                    Some(revision.clone()),
+                    item,
+                )
+            })
+            .collect();
+        assert_eq!(changed, expected);
+        // `imported` once, under the job's own mutation, with the last revision.
+        let imported = events_of(&world, &EventKind::Imported)?;
+        assert_eq!(imported.len(), 1);
+        let (log, imported_mutation, event) = some(imported.first(), "the imported event")?;
+        assert_eq!(
+            (log, *imported_mutation, &event.revision, event.job_id),
+            (&scope, Some(mutation), &revisions.last().cloned(), Some(id))
+        );
+        // `job_updated` for the progress that changed and for the completion, the last event,
+        // never under a mutation.
+        let updated = events_of(&world, &EventKind::JobUpdated)?;
+        assert!(updated.len() >= 2, "{updated:?}");
+        assert!(
+            updated
+                .iter()
+                .all(|(_, mutation, event)| mutation.is_none() && event.job_id == Some(id))
+        );
+        let last = some(world.events.appended()?.last().cloned(), "the last event")?;
+        assert_eq!(last.2.kind, EventKind::JobUpdated);
+
+        // The completion was lost: the attempt that runs again indexes and announces every
+        // replayed commit again, and appends no second `changed` or `imported`.
+        world
+            .records
+            .insert(id, entry.scope.clone(), entry.created.clone())?;
+        assert!(run(&world, id).await?);
+        assert_eq!(world.records.entry(id)?.job.state, JobState::Succeeded);
+        assert_eq!(world.versions.written()?.len(), 3);
+        assert_eq!(world.search.indexed()?.len(), 6);
+        assert_eq!(events_of(&world, &EventKind::Changed)?.len(), 3);
+        assert_eq!(events_of(&world, &EventKind::Imported)?.len(), 1);
+        Ok(())
     }
 
     #[tokio::test]
@@ -466,6 +586,21 @@ mod job_handler {
         )?
         .1;
         assert_eq!(completion.revision.as_ref(), Some(&restored));
+        // The restore's revision is indexed and announced under the job's mutation.
+        assert_eq!(world.search.indexed()?, std::slice::from_ref(&restored));
+        let changed = events_of(&world, &EventKind::Changed)?;
+        assert_eq!(changed.len(), 1);
+        let (log, mutation, event) = some(changed.first(), "the changed event")?;
+        assert_eq!(
+            (log, *mutation, &event.revision, event.item_id, event.job_id),
+            (
+                &EventScope::Workspace(storage_scope()?),
+                Some(entry.created.mutation_id),
+                &Some(restored.clone()),
+                None,
+                Some(id)
+            )
+        );
 
         // Someone edits after the restore, and its completion is lost: the attempt that runs
         // again records the restore's commit, not the later head.
@@ -483,6 +618,8 @@ mod job_handler {
                 .as_ref(),
             Some(&restored)
         );
+        // Announced again, with no second event.
+        assert_eq!(events_of(&world, &EventKind::Changed)?.len(), 1);
         Ok(())
     }
 
@@ -539,6 +676,9 @@ mod job_handler {
             "{} renewals",
             world.records.renewals()
         );
+        // Renewals that changed neither progress nor state announced nothing: the only
+        // `job_updated` is the completion's.
+        assert_eq!(events_of(&world, &EventKind::JobUpdated)?.len(), 1);
         Ok(())
     }
 
@@ -1129,6 +1269,12 @@ mod job_handler {
         assert!(message.contains("collides"), "{message}");
         assert!(!retryable);
         assert_eq!(entry.failures.len(), 1);
+        // The failure it wrote is announced.
+        let last = some(world.events.appended()?.last().cloned(), "the last event")?;
+        assert_eq!(
+            (last.2.kind, last.2.job_id),
+            (EventKind::JobUpdated, Some(id))
+        );
         // Nothing of the import was written, and the job is not delivered again.
         assert_eq!(world.versions.written()?.len(), 1);
         assert!(

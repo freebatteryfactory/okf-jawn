@@ -5,7 +5,8 @@
 //! returns `None` (already claimed, finished or cancelled) is dropped without effect. The
 //! handler runs only under the lease `claim_job` returned, and writes completion through it. A
 //! handler that returns `Err` is at fault as a worker, and the runtime records the failure
-//! through the same lease, as retryable.
+//! through the same lease, as retryable, then announces it as a `job_updated` event (the
+//! failure is a durable job write ingest makes).
 //!
 //! Reconciliation runs at start and then on every sweep: `expire_leases()` releases the claims
 //! of attempts that died, and `pending_jobs()` re-delivers every unfinished job. A job already
@@ -21,11 +22,14 @@ use std::time::Duration;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::JobId;
+use okf_jawn_core::events::EventLog;
 use okf_jawn_core::jobs::{JobHandler, JobQueue, JobScope, RecordStore};
 use okf_jawn_core::ports::PortFuture;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+
+use crate::handler::announce_job;
 
 /// One delivery: a durable job identity to try to claim.
 type Delivery = (JobScope, JobId);
@@ -71,6 +75,7 @@ impl JobRuntime {
     #[must_use]
     pub fn start(
         records: &Arc<dyn RecordStore>,
+        events: &Arc<dyn EventLog>,
         handler: &Arc<dyn JobHandler>,
         config: RuntimeConfig,
     ) -> (Self, TokioJobQueue) {
@@ -82,6 +87,7 @@ impl JobRuntime {
         for _ in 0..config.workers.max(1) {
             tasks.spawn(work(
                 Arc::clone(records),
+                Arc::clone(events),
                 Arc::clone(handler),
                 Arc::clone(&receiver),
                 Arc::clone(&waiting),
@@ -162,10 +168,12 @@ pub async fn reconcile(records: &dyn RecordStore, queue: &dyn JobQueue) -> Resul
 /// Claim and run one delivered job.
 ///
 /// # Errors
-/// Returns the record store's error from the claim or from recording a failure. A handler's
-/// own error is recorded as the job's failure, not returned.
+/// Returns the record store's error from the claim or from recording a failure, or the event
+/// log's error from announcing that failure (the failure stays recorded). A handler's own error
+/// is recorded as the job's failure, not returned.
 pub async fn run_one(
     records: &dyn RecordStore,
+    events: &dyn EventLog,
     handler: &dyn JobHandler,
     job: JobId,
 ) -> Result<bool, ApiError> {
@@ -183,6 +191,7 @@ pub async fn run_one(
         let _failed = records
             .fail_job(claimed.lease.clone(), error.message, retryable)
             .await?;
+        announce_job(events, &claimed).await?;
     }
     Ok(true)
 }
@@ -190,6 +199,7 @@ pub async fn run_one(
 /// One worker: take deliveries until cancelled.
 async fn work(
     records: Arc<dyn RecordStore>,
+    events: Arc<dyn EventLog>,
     handler: Arc<dyn JobHandler>,
     receiver: Arc<Mutex<mpsc::UnboundedReceiver<Delivery>>>,
     waiting: Arc<std::sync::Mutex<Waiting>>,
@@ -216,7 +226,7 @@ async fn work(
         // it if it is still unfinished.
         let _ran = tokio::select! {
             () = cancel.cancelled() => return,
-            ran = run_one(records.as_ref(), handler.as_ref(), job) => ran,
+            ran = run_one(records.as_ref(), events.as_ref(), handler.as_ref(), job) => ran,
         };
     }
 }

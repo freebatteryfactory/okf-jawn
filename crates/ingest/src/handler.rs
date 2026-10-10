@@ -14,23 +14,38 @@
 //! must not be abandoned mid-call, so the cancellation is observed after it returns, and the job
 //! then stops without a completion. A purge's own record still states what the purge removed.
 //!
+//! What a job commits is announced as core's `announce` does for a request (core
+//! `application::shared::commit`): every revision an ingest job lands (each import commit, the
+//! redigest commit, the revision a restore produces), written now or replayed, is first indexed
+//! (`SearchIndex::index_revision`) and then announced as a `changed` event under that commit's
+//! own mutation identity. An import that completes having produced items appends `imported`
+//! once, under the job's mutation. Both are idempotent, so an attempt that runs again announces
+//! again with no second effect; an index or event failure is a worker error, and the job is
+//! retried. Each durable job write ingest makes (a progress value that changed, completion,
+//! failure) is followed by a `job_updated` event with no mutation identity; a renewal that only
+//! keeps the lease, changing neither progress nor state, appends nothing (`Attempt`). A tenant
+//! job's `job_updated` goes to the tenant log: it has no workspace.
+//!
 //! Built: import and redigest (`import`), index rebuild, both backups, restore, both purges.
 //! Construction limitations, stated rather than hidden: a portable export and a View export
 //! fail as `NotImplemented`, which the runtime records as a non-retryable failure (requests
 //! R-I6 and R-I7 in the lane report). Nothing is reported as done that was not done.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::identity::{
     ArtifactId, Digest, ItemId, MutationId, PurgeId, Revision, TenantId, UploadId, WorkspaceId,
 };
-use okf_jawn_contract::import::JobState;
+use okf_jawn_contract::import::{Job, JobState};
 use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
 use okf_jawn_contract::workspace::RestoreReport;
 use okf_jawn_core::conversion::Converter;
+use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 use okf_jawn_core::jobs::{
     ArtifactKind, ClaimedJob, JobCompletion, JobHandler, JobScope, JobSpec, NewArtifact,
     RecordStore,
@@ -55,6 +70,8 @@ pub struct HandlerPorts {
     pub versions: Arc<dyn VersionStore>,
     /// The derived search and link index.
     pub search: Arc<dyn SearchIndex>,
+    /// The live notifications a job's commits and job writes are announced on.
+    pub events: Arc<dyn EventLog>,
     /// Workspace and installation archives.
     pub backups: Arc<dyn Backups>,
     /// Purge execution.
@@ -108,6 +125,16 @@ pub struct IngestHandler {
     ports: HandlerPorts,
 }
 
+/// One attempt at a claimed job: the claim it runs under, and the progress the job's record
+/// holds as this attempt last wrote it, so a write that changes the progress is announced and
+/// a renewal that does not change it is not.
+pub(crate) struct Attempt<'a> {
+    /// The claim.
+    pub(crate) claimed: &'a ClaimedJob,
+    /// The progress the job's record holds.
+    progress: AtomicU8,
+}
+
 /// How a long storage call under the heartbeat ended.
 enum Renewed<T> {
     /// It returned, and the job is still running.
@@ -130,9 +157,10 @@ impl IngestHandler {
         Self { ports }
     }
 
-    /// Run one claimed job to its completion.
+    /// Run one claimed job to its completion, and announce the completion or failure it wrote.
     async fn run(&self, claimed: &ClaimedJob) -> Result<(), ApiError> {
-        let done = self.dispatch(claimed).await?;
+        let attempt = Attempt::new(claimed);
+        let done = self.dispatch(&attempt).await?;
         if done.cancelled {
             return Ok(());
         }
@@ -142,7 +170,7 @@ impl IngestHandler {
                 .records
                 .fail_job(claimed.lease.clone(), refusal.message, false)
                 .await?;
-            return Ok(());
+            return announce_job(self.ports.events.as_ref(), claimed).await;
         }
         let _job = self
             .ports
@@ -157,12 +185,13 @@ impl IngestHandler {
                 warnings: done.warnings,
             })
             .await?;
-        Ok(())
+        announce_job(self.ports.events.as_ref(), claimed).await
     }
 
     /// Do the work the claim's specification names.
-    async fn dispatch(&self, claimed: &ClaimedJob) -> Result<Done, ApiError> {
+    async fn dispatch(&self, attempt: &Attempt<'_>) -> Result<Done, ApiError> {
         let ports = &self.ports;
+        let claimed = attempt.claimed;
         match (&claimed.spec, &claimed.scope) {
             (
                 JobSpec::Import {
@@ -181,7 +210,7 @@ impl IngestHandler {
                     apply_naming_rules: *apply_naming_rules,
                     settings,
                 };
-                import(ports, claimed, scope, request).await
+                import(ports, attempt, scope, request).await
             }
             (
                 JobSpec::Redigest {
@@ -194,7 +223,7 @@ impl IngestHandler {
             ) => {
                 redigest(
                     ports,
-                    claimed,
+                    attempt,
                     scope,
                     *item_id,
                     base_revision,
@@ -204,13 +233,13 @@ impl IngestHandler {
                 .await
             }
             (JobSpec::RebuildIndex, JobScope::Workspace(scope)) => {
-                self.rebuild(claimed, scope).await
+                self.rebuild(attempt, scope).await
             }
             (JobSpec::BackupWorkspace, JobScope::Workspace(scope)) => {
                 let written = ports
                     .backups
                     .write_workspace_archive(scope, claimed.mutation_id);
-                self.backup(claimed, ArtifactKind::WorkspaceBackup, written)
+                self.backup(attempt, ArtifactKind::WorkspaceBackup, written)
                     .await
             }
             (
@@ -221,20 +250,20 @@ impl IngestHandler {
                 },
                 JobScope::Workspace(scope),
             ) => {
-                self.restore(claimed, scope, *upload_id, archive, editors)
+                self.restore(attempt, scope, *upload_id, archive, editors)
                     .await
             }
             (JobSpec::BackupInstallation, JobScope::Tenant(tenant)) => {
                 let written = ports
                     .backups
                     .write_installation_archive(tenant, claimed.mutation_id);
-                self.backup(claimed, ArtifactKind::InstallationBackup, written)
+                self.backup(attempt, ArtifactKind::InstallationBackup, written)
                     .await
             }
             (
                 JobSpec::PurgeWorkspace { .. } | JobSpec::PurgeItem { .. },
                 JobScope::Tenant(tenant),
-            ) => self.purge_job(claimed, tenant).await,
+            ) => self.purge_job(attempt, tenant).await,
             (JobSpec::ExportWorkspace { .. } | JobSpec::ExportView { .. }, _) => {
                 Err(ApiError::new(
                     ErrorCode::NotImplemented,
@@ -265,21 +294,21 @@ impl IngestHandler {
     /// cancelled while it was written records none.
     async fn backup(
         &self,
-        claimed: &ClaimedJob,
+        attempt: &Attempt<'_>,
         kind: ArtifactKind,
         write: impl Future<Output = Result<ObjectInfo, ApiError>>,
     ) -> Result<Done, ApiError> {
-        match renewing(&self.ports, claimed, write).await? {
-            Renewed::Done(object) => self.artifact(claimed, kind, object).await,
+        match renewing(&self.ports, attempt, write).await? {
+            Renewed::Done(object) => self.artifact(attempt.claimed, kind, object).await,
             Renewed::Cancelled(_object) => Ok(Done::stopped()),
         }
     }
 
     /// Rebuild the derived index at the current head.
-    async fn rebuild(&self, claimed: &ClaimedJob, scope: &StorageScope) -> Result<Done, ApiError> {
+    async fn rebuild(&self, attempt: &Attempt<'_>, scope: &StorageScope) -> Result<Done, ApiError> {
         let head = self.ports.versions.head(scope).await?;
         Ok(
-            match renewing(&self.ports, claimed, self.ports.search.rebuild(scope, head)).await? {
+            match renewing(&self.ports, attempt, self.ports.search.rebuild(scope, head)).await? {
                 Renewed::Done(()) => Done::default(),
                 Renewed::Cancelled(()) => Done::stopped(),
             },
@@ -295,20 +324,24 @@ impl IngestHandler {
     /// The completion records the revision the restore wrote (review N9): the commit carrying
     /// the job's mutation, which `restore_import` is idempotent on, and not whatever head stands
     /// after it, which on a resumed attempt can hold later, unrelated commits.
+    ///
+    /// That revision is indexed and announced, written now or replayed, and also when the job
+    /// was found cancelled while the restore ran: the restore landed all the same.
     async fn restore(
         &self,
-        claimed: &ClaimedJob,
+        attempt: &Attempt<'_>,
         scope: &StorageScope,
         upload_id: UploadId,
         archive: &Digest,
         editors: &[String],
     ) -> Result<Done, ApiError> {
         let ports = &self.ports;
+        let claimed = attempt.claimed;
         let before = ports.versions.head(scope).await?;
         // Under the heartbeat, and never dropped: a cancellation is observed once it returns.
         let restored = renewing(
             ports,
-            claimed,
+            attempt,
             ports.backups.restore_import(
                 scope,
                 archive.clone(),
@@ -317,6 +350,12 @@ impl IngestHandler {
             ),
         )
         .await?;
+        let revision = self
+            .restored_revision(scope, claimed.mutation_id, &before)
+            .await?;
+        if let Some(revision) = &revision {
+            announce_commit(ports, claimed, scope, revision, claimed.mutation_id, None).await?;
+        }
         let report = match restored {
             Renewed::Done(report) => report,
             Renewed::Cancelled(_report) => return Ok(Done::stopped()),
@@ -326,9 +365,7 @@ impl IngestHandler {
             .consume(scope, upload_id, claimed.lease.job_id)
             .await?;
         Ok(Done {
-            revision: self
-                .restored_revision(scope, claimed.mutation_id, &before)
-                .await?,
+            revision,
             restore: Some(report),
             ..Done::default()
         })
@@ -406,13 +443,14 @@ impl IngestHandler {
     }
 
     /// Run a purge job of the tenant: a workspace purge or an item purge.
-    async fn purge_job(&self, claimed: &ClaimedJob, tenant: &TenantId) -> Result<Done, ApiError> {
+    async fn purge_job(&self, attempt: &Attempt<'_>, tenant: &TenantId) -> Result<Done, ApiError> {
+        let claimed = attempt.claimed;
         match &claimed.spec {
             JobSpec::PurgeWorkspace {
                 purge_id,
                 workspace_id,
             } => {
-                self.purge(claimed, tenant, *purge_id, |purger| {
+                self.purge(attempt, tenant, *purge_id, |purger| {
                     purger.purge_workspace(tenant, claimed.mutation_id, *purge_id, *workspace_id)
                 })
                 .await
@@ -423,7 +461,7 @@ impl IngestHandler {
                 item_id,
             } => {
                 let scope = item_scope(tenant, *workspace_id);
-                self.purge(claimed, tenant, *purge_id, |purger| async move {
+                self.purge(attempt, tenant, *purge_id, |purger| async move {
                     purger
                         .purge_item(&scope, claimed.mutation_id, *purge_id, *item_id)
                         .await
@@ -450,7 +488,7 @@ impl IngestHandler {
     /// stops without a completion.
     async fn purge<'a, F, Fut>(
         &'a self,
-        claimed: &'a ClaimedJob,
+        attempt: &'a Attempt<'a>,
         tenant: &'a TenantId,
         purge_id: PurgeId,
         remove: F,
@@ -468,7 +506,7 @@ impl IngestHandler {
             purge.completed_at = None;
             purge = records.update_purge(tenant, purge).await?;
             let report =
-                match renewing(&self.ports, claimed, remove(self.ports.purger.as_ref())).await? {
+                match renewing(&self.ports, attempt, remove(self.ports.purger.as_ref())).await? {
                     Renewed::Done(report) => report,
                     Renewed::Cancelled(report) => {
                         done = Done::stopped();
@@ -483,6 +521,38 @@ impl IngestHandler {
             let _stored = records.update_purge(tenant, purge).await?;
         }
         Ok(done)
+    }
+}
+
+impl<'a> Attempt<'a> {
+    /// An attempt at `claimed`, whose record holds the progress the claim returned.
+    fn new(claimed: &'a ClaimedJob) -> Self {
+        Self {
+            claimed,
+            progress: AtomicU8::new(claimed.job.progress),
+        }
+    }
+
+    /// Write `progress` through the lease, which also renews it, and announce it
+    /// (`job_updated`) when it changed what the record held; return the job as stored. A
+    /// cancelled job's progress is not written, so nothing is announced.
+    pub(crate) async fn report(&self, ports: &HandlerPorts, progress: u8) -> Result<Job, ApiError> {
+        let job = ports
+            .records
+            .update_progress(&self.claimed.lease, progress)
+            .await?;
+        if job.state != JobState::Cancelled
+            && self.progress.swap(progress, Ordering::SeqCst) != progress
+        {
+            announce_job(ports.events.as_ref(), self.claimed).await?;
+        }
+        Ok(job)
+    }
+
+    /// Renew the lease, leaving the progress as the record holds it: nothing is announced.
+    pub(crate) async fn renew(&self, ports: &HandlerPorts) -> Result<Job, ApiError> {
+        self.report(ports, self.progress.load(Ordering::SeqCst))
+            .await
     }
 }
 
@@ -511,7 +581,7 @@ impl JobHandler for IngestHandler {
 /// and then that error is returned.
 async fn renewing<T>(
     ports: &HandlerPorts,
-    claimed: &ClaimedJob,
+    attempt: &Attempt<'_>,
     work: impl Future<Output = Result<T, ApiError>>,
 ) -> Result<Renewed<T>, ApiError> {
     let mut work = std::pin::pin!(work);
@@ -532,12 +602,80 @@ async fn renewing<T>(
                 });
             }
             _instant = ticks.tick(), if renewal.is_ok() => {
-                match ports.records.update_progress(&claimed.lease, claimed.job.progress).await {
+                match attempt.renew(ports).await {
                     Ok(job) => cancelled |= job.state == JobState::Cancelled,
                     Err(error) => renewal = Err(error),
                 }
             }
         }
+    }
+}
+
+/// Index `revision`, which the job landed (written now or replayed) under `mutation_id`, and
+/// announce it as a `changed` event of the job, naming `item` when the commit wrote one item.
+/// Both steps are idempotent, so announcing a replayed commit again has no second effect.
+///
+/// # Errors
+/// Returns the index's or the event log's error: a worker error, after which the job is
+/// retried and announces again.
+pub(crate) async fn announce_commit(
+    ports: &HandlerPorts,
+    claimed: &ClaimedJob,
+    scope: &StorageScope,
+    revision: &Revision,
+    mutation_id: MutationId,
+    item: Option<ItemId>,
+) -> Result<(), ApiError> {
+    ports.search.index_revision(scope, revision.clone()).await?;
+    let _event = ports
+        .events
+        .append(
+            &EventScope::Workspace(scope.clone()),
+            Some(mutation_id),
+            job_event(EventKind::Changed, claimed, Some(revision.clone()), item),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Announce that the job's durable record changed (`job_updated`), with no mutation identity:
+/// every such write is a new notification.
+///
+/// # Errors
+/// Returns the event log's error.
+pub(crate) async fn announce_job(
+    events: &dyn EventLog,
+    claimed: &ClaimedJob,
+) -> Result<(), ApiError> {
+    let scope = match &claimed.scope {
+        JobScope::Workspace(scope) => EventScope::Workspace(scope.clone()),
+        JobScope::Tenant(tenant) => EventScope::Tenant(tenant.clone()),
+    };
+    let _event = events
+        .append(
+            &scope,
+            None,
+            job_event(EventKind::JobUpdated, claimed, None, None),
+        )
+        .await?;
+    Ok(())
+}
+
+/// A notification of `kind` about the claimed job.
+pub(crate) fn job_event(
+    kind: EventKind,
+    claimed: &ClaimedJob,
+    revision: Option<Revision>,
+    item_id: Option<ItemId>,
+) -> NewEvent {
+    NewEvent {
+        kind,
+        revision,
+        item_id,
+        job_id: Some(claimed.lease.job_id),
+        connector_id: None,
+        actor: None,
+        operation: None,
     }
 }
 

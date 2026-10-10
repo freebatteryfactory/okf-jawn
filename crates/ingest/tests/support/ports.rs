@@ -151,11 +151,14 @@ pub struct AcceptAll;
 /// A `CandidateCheck` that refuses every tree, as a conformance refusal would.
 pub struct RefuseAll;
 
-/// A `SearchIndex` that records the heads it was rebuilt at.
+/// A `SearchIndex` that records the heads it was rebuilt at and the revisions it was asked to
+/// index (indexing one again is a no-op, so every call is kept).
 #[derive(Default)]
 pub struct FakeSearch {
     /// Heads rebuilt, in order.
     pub rebuilt: Mutex<Vec<Revision>>,
+    /// Revisions `index_revision` was called with, in order.
+    pub indexed: Mutex<Vec<Revision>>,
 }
 
 /// `Backups` that write one archive per mutation id and count the writes. A restore writes one
@@ -201,6 +204,17 @@ impl FakeSearch {
             .lock()
             .map(|heads| heads.clone())
             .map_err(|_| ApiError::new(ErrorCode::Internal, "poisoned"))
+    }
+
+    /// The revisions indexed so far, every call in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn indexed(&self) -> Result<Vec<Revision>, ApiError> {
+        self.indexed
+            .lock()
+            .map(|revisions| revisions.clone())
+            .map_err(|_| poisoned())
     }
 }
 
@@ -741,9 +755,14 @@ impl SearchIndex for FakeSearch {
     fn index_revision<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _revision: Revision,
+        revision: Revision,
     ) -> PortFuture<'a, ()> {
-        unused("index_revision")
+        let recorded = self
+            .indexed
+            .lock()
+            .map(|mut revisions| revisions.push(revision))
+            .map_err(|_| poisoned());
+        Box::pin(async move { recorded })
     }
     fn search<'a>(
         &'a self,
