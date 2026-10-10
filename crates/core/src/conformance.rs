@@ -12,7 +12,9 @@
 //!
 //! Lint is not conformance and never refuses: an edit's check (`EditCheck`) adds okf-validator's
 //! lint findings about the files the edit touched as warnings, and an import's
-//! (`portable::ImportCheck`) adds those of the imported files.
+//! (`portable::ImportCheck`) adds those of the imported files. An edit's check also reports the
+//! validator's own warnings and infos only for the files it touched; its refusal stands whatever
+//! file it names.
 //!
 //! Startup hands this same check to ingest's handler, so every commit of the application is
 //! judged by one policy.
@@ -34,14 +36,16 @@ use crate::storage::CandidateCheck;
 pub struct OkfConformance;
 
 /// The check of an edit (a create, move, status change, delete, folder or type): conformance
-/// first, whose refusal stands, then okf-validator's lint, whose findings come back as warnings
-/// and never refuse (SPEC: validation and lint apply at edit).
+/// first, then okf-validator's lint, whose findings come back as warnings and never refuse
+/// (SPEC: validation and lint apply at edit).
 ///
-/// The whole candidate is loaded and linted, because a lint rule can read across files, but
-/// only the findings about files the edit touched are reported, as `portable::ImportCheck`
-/// reports only the imported files': the paths it wrote, moved (old and new) or deleted, and for
-/// a type change the concepts of that type in the candidate. An edit never surfaces a warning
-/// about a file it did not touch, and a finding that names no file is not reported.
+/// The whole candidate is validated and linted, because a rule can read across files. A
+/// validation refusal stands whatever file it names, because a non-conformant candidate is never
+/// committed. Every other finding, the validator's warnings and infos and every lint finding, is
+/// reported only for the files the edit touched, as `portable::ImportCheck` reports only the
+/// imported files': the paths it wrote, moved (old and new) or deleted, and for a type change
+/// the concepts of that type in the candidate. So an edit reports no warning about a file it did
+/// not touch, and a warning that names no file is not reported.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditCheck {
     /// Workspace-relative paths the edit wrote, moved from or to, or deleted.
@@ -76,7 +80,8 @@ impl EditCheck {
 impl CandidateCheck for EditCheck {
     fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
         let bundle = load(root)?;
-        let mut warnings = conformance(root, &bundle)?;
+        // A refusal stands whatever file it names: a non-conformant candidate is never committed.
+        let validated = conformance(root, &bundle)?;
         let mut reported = self.touched.clone();
         if let Some(type_name) = self.of_type.as_deref() {
             reported.extend(
@@ -85,6 +90,15 @@ impl CandidateCheck for EditCheck {
                     .filter_map(|concept| relative_path(root, &concept.path)),
             );
         }
+        let mut warnings: Vec<Warning> = validated
+            .into_iter()
+            .filter(|warning| {
+                warning
+                    .location
+                    .as_ref()
+                    .is_some_and(|location| reported.contains(location))
+            })
+            .collect();
         warnings.extend(
             okf_validator::lint_bundle(&bundle)
                 .diagnostics

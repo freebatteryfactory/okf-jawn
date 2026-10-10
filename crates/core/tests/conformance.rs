@@ -152,5 +152,55 @@ fn candidate_check_of_an_edit_reports_lint_only_for_the_files_it_touched() -> Te
     assert_eq!(refused.code, ErrorCode::InvalidInput);
     Ok(())
 }
+#[test]
+fn candidate_check_of_an_edit_reports_validator_warnings_only_for_the_files_it_touched()
+-> TestResult {
+    let staged = Staged::new()?;
+    staged.write(
+        "notes/plan.md",
+        "---\ntype: Note\ntitle: Plan\ndescription: The plan.\n---\n# Plan\n",
+    )?;
+    // `status` outside OKF's words is a producer deviation the validator only warns about.
+    staged.write(
+        "notes/odd.md",
+        "---\ntype: Note\ntitle: Odd\ndescription: Odd.\nstatus: shelved\n---\n# Odd\n",
+    )?;
+    let validator = |warnings: &[Warning]| -> Vec<Option<String>> {
+        warnings
+            .iter()
+            .filter(|warning| warning.code.starts_with("okf_validator_"))
+            .map(|warning| warning.location.clone())
+            .collect()
+    };
+    let odd = Some("notes/odd.md".to_owned());
+    // The whole-bundle check reports the warning about the odd file.
+    assert!(validator(&OkfConformance.check(&staged.0)?).contains(&odd));
+    // An edit of the plan reports nothing about the file it did not touch, nor any warning
+    // that names no file.
+    let plan = EditCheck::new(
+        &[WorkspacePath::try_from("notes/plan.md".to_owned())?],
+        None,
+    );
+    let edit = validator(&plan.check(&staged.0)?);
+    assert!(
+        edit.iter()
+            .all(|location| location.as_deref() == Some("notes/plan.md")),
+        "{edit:?}"
+    );
+    // An edit of the odd file reports its warning.
+    let touched_odd = EditCheck::new(&[WorkspacePath::try_from("notes/odd.md".to_owned())?], None);
+    assert!(validator(&touched_odd.check(&staged.0)?).contains(&odd));
+    // A refusal stands whatever file it names: the untyped file is not the one edited.
+    staged.write("notes/untyped.md", "---\ntitle: No type\n---\nBody\n")?;
+    let refused = err_of(plan.check(&staged.0))?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert!(
+        refused.message.contains("notes/untyped.md"),
+        "{}",
+        refused.message
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

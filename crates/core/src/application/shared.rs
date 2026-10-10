@@ -3,9 +3,9 @@
 //!
 //! A content write is one path: the request's base revision is checked against the revision
 //! map first (`reading::check_revision`), the edits are committed on top of it with the edit
-//! check (`conformance::EditCheck`: OKF conformance refuses, OKF lint of the files the write
-//! touched comes back as warnings), the new revision is indexed, a `changed` event is appended,
-//! and, for a `MutationResult`, a receipt is recorded. Every step after the commit is
+//! check (`conformance::EditCheck`: OKF conformance refuses; the validator's warnings and OKF
+//! lint about the files the write touched come back as warnings), the new revision is
+//! indexed, a `changed` event is appended, and, for a `MutationResult`, a receipt is recorded. Every step after the commit is
 //! idempotent on the mutation identity (the commit replays, indexing a revision again is a
 //! no-op, the event and the receipt are unique on the mutation), so a failure at any step
 //! fails the request and a retry under the same idempotency key completes it without a
@@ -43,11 +43,11 @@ pub(super) struct Write {
     pub(super) edits: Vec<TreeEdit>,
     /// The item the write changes, for the `changed` event.
     pub(super) item: Option<ItemId>,
-    /// The files the write touches, whose lint findings it reports.
+    /// The files the write touches, whose warnings it reports.
     pub(super) touched: Touched,
 }
 
-/// The files one write touches, for the lint it reports (`conformance::EditCheck`).
+/// The files one write touches, for the warnings it reports (`conformance::EditCheck`).
 #[derive(Default)]
 pub(super) struct Touched {
     /// Paths it writes or creates.

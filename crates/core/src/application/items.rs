@@ -8,7 +8,8 @@
 //! returned `ItemDocument` carries the server's content digest. Writes refuse a caller's
 //! application header before any port is touched (`items::refuse_supplied_header`,
 //! `items::refuse_header_in_type`) and commit through `shared::commit` with the edit check:
-//! OKF conformance refuses, and OKF lint comes back as warnings.
+//! OKF conformance refuses, and the validator's warnings and OKF lint about the files the write
+//! touched come back as warnings.
 
 use okf_jawn_contract::common::MutationResult;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
