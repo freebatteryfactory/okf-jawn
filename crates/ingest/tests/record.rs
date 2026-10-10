@@ -11,6 +11,8 @@ mod outline_sections {
     use okf_jawn_contract::read::{OutlineEntryKind, Selection};
     use okf_jawn_ingest::outline::{line_count, outline_of};
 
+    use crate::check::{TestResult, some};
+
     fn spans(markdown: &str) -> Vec<(String, u16, u32, u32)> {
         outline_of(markdown)
             .into_iter()
@@ -28,9 +30,11 @@ mod outline_sections {
     }
 
     #[test]
-    fn a_heading_selects_lines_up_to_the_next_heading_of_the_same_or_a_higher_level() {
+    fn a_heading_selects_lines_up_to_the_next_heading_of_the_same_or_a_higher_level() -> TestResult
+    {
         let markdown = "# One\n\ntext\n\n## One.a\n\nmore\n\n### One.a.i\n\n## One.b\n\nlast\n\n# Two\n\nend\n";
         assert_eq!(line_count(markdown), 17);
+        assert_eq!(some(spans(markdown).last(), "the last heading")?.3, 17);
         assert_eq!(
             spans(markdown),
             [
@@ -41,13 +45,16 @@ mod outline_sections {
                 ("Two".to_owned(), 1, 15, 17),
             ]
         );
+        Ok(())
     }
 
     #[test]
-    fn code_and_text_that_only_looks_like_a_heading_is_not_one() {
+    fn code_and_text_that_only_looks_like_a_heading_is_not_one() -> TestResult {
         let markdown = "```sql\n# not a heading\n```\n#hashtag\n####### seven\n    # indented code\n## Real ##\n";
         assert_eq!(spans(markdown), [("Real".to_owned(), 2, 7, 7)]);
+        assert_eq!(some(spans(markdown).first(), "the real heading")?.0, "Real");
         assert_eq!(outline_of("").len(), 0);
+        Ok(())
     }
 }
 
@@ -138,8 +145,12 @@ mod assembled_records {
     }
 
     #[test]
-    fn a_document_is_cut_into_windows_of_the_configured_size() {
+    fn a_document_is_cut_into_windows_of_the_configured_size() -> TestResult {
         assert_eq!(windows_of(9, 4), [pages(1, 4), pages(5, 8), pages(9, 9)]);
+        assert_eq!(
+            some(windows_of(9, 4).last(), "the last window")?,
+            &pages(9, 9)
+        );
         assert_eq!(windows_of(4, 4), [pages(1, 4)]);
         assert_eq!(
             windows_within(&[pages(2, 3), pages(7, 12)], 4),
@@ -149,6 +160,7 @@ mod assembled_records {
             windows_within(&[pages(0, 3), pages(5, 4)], 4),
             Vec::<PageRange>::new()
         );
+        Ok(())
     }
 
     #[test]

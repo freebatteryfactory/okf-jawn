@@ -21,14 +21,20 @@ mod flags_undecodable_text {
     use okf_jawn_ingest::locate::locate_items;
     use serde_json::{Value, json};
 
-    use crate::check::{TestResult, some};
+    use crate::check::{TestResult, err_of, some};
 
     #[test]
-    fn a_placeholder_name_is_what_the_library_rule_accepts() {
+    fn a_placeholder_name_is_what_the_library_rule_accepts() -> TestResult {
         for name in [
             "g115", "g3", "G12", "cid42", "CID7", "glyph7", "index9", "SM590000", "a123", "abc1234",
         ] {
             assert!(is_placeholder_glyph_name(name), "{name}");
+            // The detector finds every accepted name where the library prints it, after a slash.
+            let token = format!("/{name}");
+            assert_eq!(
+                some(placeholder_glyph_tokens(&token).first(), name)?,
+                &token.as_str()
+            );
         }
         for name in [
             "",
@@ -51,10 +57,11 @@ mod flags_undecodable_text {
         ] {
             assert!(!is_placeholder_glyph_name(name), "{name}");
         }
+        Ok(())
     }
 
     #[test]
-    fn the_two_shapes_the_library_prints_are_found() {
+    fn the_two_shapes_the_library_prints_are_found() -> TestResult {
         assert_eq!(
             placeholder_glyph_tokens("/SM590000 Work Function Usage ( WRKFCNUSG )"),
             ["/SM590000"]
@@ -63,16 +70,20 @@ mod flags_undecodable_text {
             placeholder_glyph_tokens("/g115/g3 /g40/g81/g75"),
             ["/g115", "/g3", "/g40", "/g81", "/g75"]
         );
-        assert_eq!(placeholder_glyph_tokens("/g115A"), ["/g115"]);
+        assert_eq!(
+            some(placeholder_glyph_tokens("/g115A").first(), "the token")?,
+            &"/g115"
+        );
         assert_eq!(
             placeholder_glyph_tokens("\t/cid42\n/glyph7"),
             ["/cid42", "/glyph7"]
         );
         assert_eq!(placeholder_glyph_tokens(""), Vec::<&str>::new());
+        Ok(())
     }
 
     #[test]
-    fn the_two_known_limits_of_the_detector_are_as_stated() {
+    fn the_two_known_limits_of_the_detector_are_as_stated() -> TestResult {
         for (text, flagged) in [
             ("/A380", vec!["/A380"]),
             ("Boeing 747/A380 and /B747", vec!["/B747"]),
@@ -82,13 +93,15 @@ mod flags_undecodable_text {
             assert_eq!(placeholder_glyph_tokens(text), flagged, "{text}");
         }
         for text in ["x/g12", "(/SM590000)", "Usage/SM590000 next"] {
-            assert!(placeholder_glyph_tokens(text).is_empty(), "{text}");
+            let missed = err_of(some(placeholder_glyph_tokens(text).first(), text))?;
+            assert!(missed.contains(text), "{missed}");
         }
         assert!(GLYPH_RULE.contains("Two known limits"));
+        Ok(())
     }
 
     #[test]
-    fn ordinary_text_with_slashes_is_not_flagged() {
+    fn ordinary_text_with_slashes_is_not_flagged() -> TestResult {
         for text in [
             "/usr/bin",
             "and/or",
@@ -103,13 +116,15 @@ mod flags_undecodable_text {
             "/a12",
             "a / b",
         ] {
-            assert!(placeholder_glyph_tokens(text).is_empty(), "{text}");
+            let unflagged = err_of(some(placeholder_glyph_tokens(text).first(), text))?;
+            assert!(unflagged.contains(text), "{unflagged}");
             assert_eq!(scrub_placeholders(text), (text.to_owned(), 0), "{text}");
         }
+        Ok(())
     }
 
     #[test]
-    fn a_placeholder_is_never_shown_or_indexed_as_a_word() {
+    fn a_placeholder_is_never_shown_or_indexed_as_a_word() -> TestResult {
         let (shown, replaced) =
             scrub_placeholders("- /SM590000 A bullet\n| /g115/g3 /g40 | and/or é /B747 |\n");
         assert_eq!(replaced, 5);
@@ -125,11 +140,18 @@ mod flags_undecodable_text {
             .filter(|word| !word.is_empty())
             .collect();
         assert_eq!(words, ["A", "bullet", "and", "or", "é"]);
+        assert_eq!(
+            some(shown.lines().nth(1), "the table row")?
+                .matches(UNDECODED)
+                .count(),
+            4
+        );
         assert!(!UNDECODED.is_alphanumeric());
+        Ok(())
     }
 
     #[test]
-    fn placeholders_are_counted_by_page_in_text_items_and_table_cells() {
+    fn placeholders_are_counted_by_page_in_text_items_and_table_cells() -> TestResult {
         let prov = |page: u64| json!([{ "page_no": page, "bbox": { "l": 10.0, "t": 50.0, "r": 90.0, "b": 40.0, "coord_origin": "BOTTOMLEFT" } }]);
         let export = json!({
             "pages": { "3": { "page_no": 3, "size": { "width": 612.0, "height": 792.0 } }, "8": { "page_no": 8, "size": { "width": 612.0, "height": 792.0 } } },
@@ -157,6 +179,7 @@ mod flags_undecodable_text {
         let found = undecoded_glyphs(&export, |item| locations.page_of(item));
         assert_eq!((found.tokens, found.unlocated_tokens), (9, 1));
         assert_eq!(found.pages, BTreeMap::from([(3, 4), (8, 4)]));
+        assert_eq!(some(found.pages.get(&8), "page 8")?, &4);
         assert_eq!(
             found.warning(),
             Some(ExtractionWarning::UndecodableGlyphs {
@@ -180,6 +203,7 @@ mod flags_undecodable_text {
             (none.tokens, none.pages.len(), none.warning()),
             (0, 0, None)
         );
+        Ok(())
     }
 
     #[test]

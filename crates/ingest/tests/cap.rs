@@ -236,7 +236,7 @@ mod memory_cap_classification {
         watchdog_threshold,
     };
 
-    use crate::check::TestResult;
+    use crate::check::{TestResult, err_of};
 
     const CAP: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -246,23 +246,38 @@ mod memory_cap_classification {
         })
     }
 
+    /// The reason a verdict fails the window for; an error when the child reported.
+    fn reason_of(verdict: ChildVerdict) -> Result<FailureReason, String> {
+        match verdict {
+            ChildVerdict::Failed(reason) => Ok(reason),
+            ChildVerdict::Reported => Err("the child reported".to_owned()),
+        }
+    }
+
     #[test]
-    fn a_child_that_reported_is_read_whatever_else_happened() {
+    fn a_child_that_reported_is_read_whatever_else_happened() -> TestResult {
         let end = ChildEnd {
             reported: true,
             stderr_tail: "memory allocation of 8 bytes failed".to_owned(),
             ..ChildEnd::default()
         };
-        assert_eq!(classify(&end, CAP, 600), ChildVerdict::Reported);
+        assert_eq!(
+            err_of(reason_of(classify(&end, CAP, 600)))?,
+            "the child reported"
+        );
+        Ok(())
     }
 
     #[test]
-    fn the_watchdog_kill_and_an_allocation_failure_are_the_cap() {
+    fn the_watchdog_kill_and_an_allocation_failure_are_the_cap() -> TestResult {
         let killed = ChildEnd {
             killed_at_cap: true,
             ..ChildEnd::default()
         };
-        assert_eq!(classify(&killed, CAP, 600), memory());
+        assert_eq!(
+            ChildVerdict::Failed(reason_of(classify(&killed, CAP, 600))?),
+            memory()
+        );
         for words in [
             "memory allocation of 1073741824 bytes failed\n".to_owned(),
             format!(
@@ -275,10 +290,11 @@ mod memory_cap_classification {
             };
             assert_eq!(classify(&aborted, CAP, 600), memory(), "{words}");
         }
+        Ok(())
     }
 
     #[test]
-    fn free_text_about_memory_is_never_the_cap() {
+    fn free_text_about_memory_is_never_the_cap() -> TestResult {
         // Only the child's own marker or Rust's exact message, as the last line, is evidence.
         // Words about memory anywhere else (a library log, a panic quoting document text) are
         // a crash.
@@ -296,11 +312,12 @@ mod memory_cap_classification {
                 ..ChildEnd::default()
             };
             assert_eq!(
-                classify(&crashed, CAP, 600),
-                ChildVerdict::Failed(FailureReason::ConverterCrashed),
+                reason_of(classify(&crashed, CAP, 600))?,
+                FailureReason::ConverterCrashed,
                 "{words}"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -334,7 +351,7 @@ mod memory_cap_classification {
     }
 
     #[test]
-    fn a_peak_commit_at_the_cap_is_the_cap_and_one_well_below_is_a_crash() {
+    fn a_peak_commit_at_the_cap_is_the_cap_and_one_well_below_is_a_crash() -> TestResult {
         assert_eq!(cap_margin(CAP), CAP / 16);
         assert!(cap_margin(CAP) >= CAP_MARGIN_MIN_BYTES);
         let at = ChildEnd {
@@ -347,18 +364,20 @@ mod memory_cap_classification {
             ..ChildEnd::default()
         };
         assert_eq!(
-            classify(&below, CAP, 600),
-            ChildVerdict::Failed(FailureReason::ConverterCrashed)
+            reason_of(classify(&below, CAP, 600))?,
+            FailureReason::ConverterCrashed
         );
+        Ok(())
     }
 
     #[test]
-    fn the_watchdog_kills_at_the_cap_minus_the_greater_headroom() {
+    fn the_watchdog_kills_at_the_cap_minus_the_greater_headroom() -> TestResult {
         const MIB: u64 = 1024 * 1024;
         // Two 75 ms samples at 512 MiB/s is 76.8 MiB; 5% of 2 GiB is 102.4 MiB, the greater.
+        let two_gib = MIB.checked_mul(2048).ok_or("2 GiB in bytes")?;
         assert_eq!(
-            watchdog_threshold(2048 * MIB, 75, 512 * MIB),
-            2048 * MIB - 2048 * MIB / 20
+            watchdog_threshold(two_gib, 75, 512 * MIB),
+            two_gib.checked_sub(two_gib / 20).ok_or("the threshold")?
         );
         // At 2 GiB/s growth dominates: 2 x 75 ms x 2 GiB/s = 307.2 MiB.
         assert_eq!(
@@ -375,17 +394,18 @@ mod memory_cap_classification {
             ),
             2048 * MIB - 2048 * MIB / 20
         );
+        Ok(())
     }
 
     #[test]
-    fn the_time_bound_and_a_silent_death_are_told_apart_from_the_cap() {
+    fn the_time_bound_and_a_silent_death_are_told_apart_from_the_cap() -> TestResult {
         let timed_out = ChildEnd {
             killed_at_time_limit: true,
             ..ChildEnd::default()
         };
         assert_eq!(
-            classify(&timed_out, CAP, 600),
-            ChildVerdict::Failed(FailureReason::TimeLimit { limit_seconds: 600 })
+            reason_of(classify(&timed_out, CAP, 600))?,
+            FailureReason::TimeLimit { limit_seconds: 600 }
         );
         let panicked = ChildEnd {
             stderr_tail: "thread 'main' panicked at src/lib.rs:1:1".to_owned(),
@@ -395,5 +415,6 @@ mod memory_cap_classification {
             classify(&panicked, CAP, 600),
             ChildVerdict::Failed(FailureReason::ConverterCrashed)
         );
+        Ok(())
     }
 }

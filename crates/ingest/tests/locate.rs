@@ -461,7 +461,7 @@ mod locates_unlocated_items {
     }
 
     #[test]
-    fn the_distance_between_two_boxes_is_the_gap_between_their_nearest_edges() {
+    fn the_distance_between_two_boxes_is_the_gap_between_their_nearest_edges() -> TestResult {
         let bottom_left = |left: f64, top: f64, right: f64, bottom: f64| json!({ "l": left, "t": top, "r": right, "b": bottom, "coord_origin": "BOTTOMLEFT" });
         let anchor = bottom_left(100.0, 200.0, 300.0, 100.0);
         let distance = |other: &Value| box_distance(&anchor, other, 792.0);
@@ -475,5 +475,8 @@ mod locates_unlocated_items {
             json!({ "l": 100.0, "t": 592.0, "r": 300.0, "b": 692.0, "coord_origin": "TOPLEFT" });
         assert_eq!(distance(&top_left), Some(0.0));
         assert_eq!(distance(&json!(null)), None);
+        let apart = some(distance(&bottom_left(100.0, 95.5, 300.0, 80.0)), "the gap")?;
+        assert!((apart - 4.5).abs() < 0.001, "{apart}");
+        Ok(())
     }
 }
