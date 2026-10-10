@@ -237,6 +237,49 @@ mod job_runtime {
         Ok(())
     }
 
+    /// A handler that never finishes: every worker that takes a job stays busy with it.
+    struct BusyHandler;
+
+    impl JobHandler for BusyHandler {
+        fn handle<'a>(&'a self, _claimed: &'a ClaimedJob) -> PortFuture<'a, ()> {
+            Box::pin(async move {
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn sweeps_while_every_worker_is_busy_queue_each_pending_job_at_most_once() -> TestResult {
+        const PENDING: u128 = 4;
+        let (records, _handler, first) = setup(|_| Action::Complete)?;
+        let entry = records.entry(first)?;
+        for number in 2..=PENDING {
+            records.insert(job_id(number)?, entry.scope.clone(), entry.created.clone())?;
+        }
+        // One worker, which takes the first job and stays busy with it; the sweep runs every
+        // 5 ms, re-delivering every unfinished job, the running one included.
+        let (runtime, queue) = JobRuntime::start(
+            &(Arc::clone(&records) as Arc<dyn RecordStore>),
+            &(Arc::new(BusyHandler) as Arc<dyn JobHandler>),
+            RuntimeConfig {
+                workers: 1,
+                sweep_interval: Duration::from_millis(5),
+            },
+        );
+        until_state(&records, first, JobState::Running).await?;
+        // Dozens of sweeps.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let waiting = queue.waiting()?;
+        runtime.shutdown().await;
+        assert!(waiting >= 1, "no sweep delivered anything");
+        assert!(
+            waiting <= usize::try_from(PENDING)?,
+            "{waiting} deliveries wait for {PENDING} pending jobs"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_stopped_runtime_refuses_deliveries_and_the_job_stays_queued() -> TestResult {
         let (records, handler, id) = setup(|_| Action::Complete)?;

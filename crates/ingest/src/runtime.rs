@@ -8,10 +8,14 @@
 //! through the same lease, as retryable.
 //!
 //! Reconciliation runs at start and then on every sweep: `expire_leases()` releases the claims
-//! of attempts that died, and `pending_jobs()` re-delivers every unfinished job. So a job whose
+//! of attempts that died, and `pending_jobs()` re-delivers every unfinished job. A job already
+//! waiting in the queue is not delivered again: the queue keeps the ids of the deliveries no
+//! worker has taken yet, and a worker removes a job's id as it takes it. So however many sweeps
+//! pass while every worker is busy, at most one delivery per pending job waits. So a job whose
 //! process was killed is retried at the next start, and an attempt that died without a restart
 //! is retried after its lease expires. No external job engine or queue service is involved.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,6 +51,16 @@ pub struct JobRuntime {
 #[derive(Debug, Clone)]
 pub struct TokioJobQueue {
     sender: mpsc::UnboundedSender<Delivery>,
+    waiting: Arc<std::sync::Mutex<Waiting>>,
+}
+
+/// The deliveries sent and not yet taken by a worker.
+#[derive(Debug, Default)]
+struct Waiting {
+    /// Their jobs; a job is delivered again only once a worker has taken it.
+    jobs: BTreeSet<JobId>,
+    /// How many deliveries are in the channel.
+    deliveries: usize,
 }
 
 impl JobRuntime {
@@ -62,6 +76,7 @@ impl JobRuntime {
     ) -> (Self, TokioJobQueue) {
         let (sender, receiver) = mpsc::unbounded_channel();
         let receiver = Arc::new(Mutex::new(receiver));
+        let waiting = Arc::new(std::sync::Mutex::new(Waiting::default()));
         let cancel = CancellationToken::new();
         let mut tasks = JoinSet::new();
         for _ in 0..config.workers.max(1) {
@@ -69,10 +84,11 @@ impl JobRuntime {
                 Arc::clone(records),
                 Arc::clone(handler),
                 Arc::clone(&receiver),
+                Arc::clone(&waiting),
                 cancel.clone(),
             ));
         }
-        let queue = TokioJobQueue { sender };
+        let queue = TokioJobQueue { sender, waiting };
         tasks.spawn(sweep(
             Arc::clone(records),
             queue.clone(),
@@ -96,14 +112,34 @@ impl Drop for JobRuntime {
     }
 }
 
+impl TokioJobQueue {
+    /// How many deliveries wait for a worker.
+    ///
+    /// # Errors
+    /// Returns `Internal` when the queue's bookkeeping lock is poisoned.
+    pub fn waiting(&self) -> Result<usize, ApiError> {
+        Ok(lock(&self.waiting)?.deliveries)
+    }
+
+    /// Send one delivery, unless one for the same job already waits.
+    fn deliver(&self, scope: JobScope, job: JobId) -> Result<(), ApiError> {
+        if self.sender.is_closed() {
+            return Err(stopped());
+        }
+        let mut waiting = lock(&self.waiting)?;
+        if waiting.jobs.contains(&job) {
+            return Ok(());
+        }
+        self.sender.send((scope, job)).map_err(|_| stopped())?;
+        let _new = waiting.jobs.insert(job);
+        waiting.deliveries = waiting.deliveries.saturating_add(1);
+        Ok(())
+    }
+}
+
 impl JobQueue for TokioJobQueue {
     fn enqueue(&self, scope: JobScope, job: JobId) -> PortFuture<'_, ()> {
-        let sent = self.sender.send((scope, job)).map_err(|_| {
-            ApiError::new(
-                ErrorCode::Unavailable,
-                "the job runtime has stopped; the job stays queued in the record store",
-            )
-        });
+        let sent = self.deliver(scope, job);
         Box::pin(async move { sent })
     }
 }
@@ -156,6 +192,7 @@ async fn work(
     records: Arc<dyn RecordStore>,
     handler: Arc<dyn JobHandler>,
     receiver: Arc<Mutex<mpsc::UnboundedReceiver<Delivery>>>,
+    waiting: Arc<std::sync::Mutex<Waiting>>,
     cancel: CancellationToken,
 ) {
     loop {
@@ -169,6 +206,12 @@ async fn work(
         let Some((_scope, job)) = delivery else {
             return;
         };
+        // Taken: a sweep may deliver the job again from now on. A poisoned lock only means the
+        // bookkeeping is lost; the delivery still runs, as a repeated delivery is harmless.
+        if let Ok(mut waiting) = waiting.lock() {
+            let _was_waiting = waiting.jobs.remove(&job);
+            waiting.deliveries = waiting.deliveries.saturating_sub(1);
+        }
         // A store error here leaves the job as the store has it; the next sweep re-delivers
         // it if it is still unfinished.
         let _ran = tokio::select! {
@@ -194,4 +237,24 @@ async fn sweep(
         // A failed sweep is retried at the next tick; nothing is lost, the store keeps the jobs.
         let _delivered = reconcile(records.as_ref(), &queue).await;
     }
+}
+
+/// The queue's bookkeeping, locked.
+fn lock(
+    waiting: &std::sync::Mutex<Waiting>,
+) -> Result<std::sync::MutexGuard<'_, Waiting>, ApiError> {
+    waiting.lock().map_err(|_| {
+        ApiError::new(
+            ErrorCode::Internal,
+            "the job queue's bookkeeping lock is poisoned",
+        )
+    })
+}
+
+/// The error of a delivery to a runtime that has stopped.
+fn stopped() -> ApiError {
+    ApiError::new(
+        ErrorCode::Unavailable,
+        "the job runtime has stopped; the job stays queued in the record store",
+    )
 }
