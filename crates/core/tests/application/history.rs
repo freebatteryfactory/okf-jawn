@@ -628,6 +628,27 @@ async fn commit_items_is_blocked_when_the_commit_landing_mid_snapshot_changed_it
     Ok(())
 }
 
+/// The reviewer's probe, kept: two unrelated commits land, and the Snapshot commits on the third
+/// head it reads, so the bound is at least 3 heads.
+#[tokio::test]
+async fn rr_snapshot_commits_on_the_third_head() -> TestResult {
+    let world = landing_mid_snapshot(&['c', 'e'])?;
+    let result = world
+        .service
+        .commit_items(
+            &alice(OperationName::CommitItems, Some(mutation(1)))?,
+            snapshot(&[NOTE])?,
+        )
+        .await?;
+    assert_eq!(result.revision, revision('d')?);
+    let commits = world.versions.commits()?;
+    assert_eq!(commits.len(), 1);
+    assert_eq!(
+        some(commits.first(), "commit")?.expected_head,
+        revision('e')?
+    );
+    Ok(())
+}
 #[tokio::test]
 async fn commit_items_gives_up_after_three_heads_moved_mid_snapshot() -> TestResult {
     let world = landing_mid_snapshot(&['c', 'e', 'f'])?;
