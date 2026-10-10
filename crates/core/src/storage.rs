@@ -244,8 +244,14 @@ pub enum TreeEdit {
     /// correction of a source item. Storage owns where those files are. An item absent at
     /// `from` is removed with its companions; an item absent both at `from` and in the tree the
     /// edit is applied to fails the commit with `NotFound`, and restoring the item's file over
-    /// another item's path fails it with `Conflict`, as for every edit. A Rewind of several
-    /// items is one `RestoreItem` per item in one commit.
+    /// another item's path fails it with `Conflict`, as for every edit.
+    ///
+    /// A Rewind of several items is one `RestoreItem` per item in one commit. Consecutive
+    /// `RestoreItem` edits apply as one group: every listed item is looked up first, then every
+    /// listed item's current file is removed, and only then is each written back with its
+    /// companions, in order; so two items that swapped paths since `from` are rewound together,
+    /// and an item listed twice is restored as its last listing says. A `RestoreItem` separated
+    /// from the others by a different edit is not part of their group.
     RestoreItem {
         /// Item to restore.
         item_id: ItemId,
@@ -505,7 +511,8 @@ pub trait VersionStore: Send + Sync {
     /// (`items::refuse_header_change`): `CreateItem` and `EditItem` properties, a `SetType`
     /// definition (`items::refuse_header_in_type`), or a draft. The server's own header
     /// updates are allowed: `SetStatus`, `WriteSourceCard`, `CorrectDigest` and
-    /// `SupplyExtraction`.
+    /// `SupplyExtraction`, and the server's restores, which write each restored item's header
+    /// as the earlier revision holds it: `RestorePaths`, `RestoreItem` and `RestoreWorkspace`.
     fn commit<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -514,9 +521,13 @@ pub trait VersionStore: Send + Sync {
     ) -> PortFuture<'a, Committed>;
     /// Find the commit on the head's history that carries `mutation_id`.
     ///
-    /// `Some(since)` searches only the commits after `since`. `None` searches the accepted line
-    /// back from the head, newest first; the implementation may stop at the mutation retention
-    /// bound of SPEC section 8 (seven days), past which a mutation is no longer resumed.
+    /// `Some(since)` searches only the commits after `since`; a `since` the repository does not
+    /// hold is the caller's error and answers `NotFound` (never `Unavailable`, which a caller
+    /// would retry). `None` searches the accepted line back from the head, newest first,
+    /// following first parents, and reads no other reference, so a proposal candidate is never
+    /// found. It stops at the mutation retention bound of SPEC section 8: the first commit,
+    /// newest first, whose committer time is more than seven days old, and every older one, is
+    /// not examined, since a mutation that old is no longer resumed.
     ///
     /// Only a writer whose expected head is not stable across attempts needs this before it
     /// calls `commit`: a Snapshot reads the current head, so on a resumed attempt it asks first,

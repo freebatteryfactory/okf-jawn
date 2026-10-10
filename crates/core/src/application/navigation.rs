@@ -8,7 +8,9 @@
 //!
 //! - A workspace builds at most one index at a time: the build holds the workspace's gate
 //!   (`ApplicationService::index_gate`), and a request that waited on it asks the index again
-//!   before building, so concurrent requests for one revision share one build.
+//!   before building, so concurrent requests for one revision share one build. The build runs
+//!   in its own task, which owns the gate until the build ends, so a request cancelled
+//!   mid-build never frees the gate while the store is still building.
 //! - Only a revision inside the retained window is built: one of the first `INDEX_WINDOW`
 //!   commits of the accepted line's history from the head, the head included
 //!   (`VersionStore::log` from the head), after the purge check `shared::resolve` already
@@ -26,6 +28,7 @@
 //! of content is.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{Revision, WorkspacePath};
@@ -33,6 +36,7 @@ use okf_jawn_contract::search::{
     GetGraphRequest, GetGraphResponse, GetLinksRequest, GetLinksResponse, SearchRequest,
     SearchResponse,
 };
+use tokio::sync::OwnedMutexGuard;
 
 use super::ApplicationService;
 use super::shared::{invalid, record_receipt, resolve, workspace_scope};
@@ -170,19 +174,14 @@ where
 {
     match query().await {
         Err(error) if error.code == ErrorCode::Unavailable => {
-            let gate = service.index_gate(scope)?;
-            let _building = gate.lock().await;
+            let building = service.index_gate(scope)?.lock_owned().await;
             // A build another request ran while this one waited may have built it.
             match query().await {
                 Err(unavailable) if unavailable.code == ErrorCode::Unavailable => {
                     if !in_window(service, scope, revision).await? {
                         return Err(unavailable);
                     }
-                    service
-                        .ports()
-                        .search
-                        .index_revision(scope, revision.clone())
-                        .await?;
+                    build(service, scope, revision, building).await?;
                     query().await
                 }
                 answer => answer,
@@ -190,6 +189,38 @@ where
         }
         answer => answer,
     }
+}
+
+/// Build `revision`'s index in a task that owns the workspace's gate (`building`) until the build
+/// ends, and wait for it.
+///
+/// A store builds off the request's task (storage reads the tree on the blocking pool), so a
+/// dropped request does not stop a build. The gate therefore belongs to the build, not to the
+/// request: a request cancelled mid-build leaves the task to finish and only then free the gate.
+///
+/// # Errors
+/// Returns the build's error, or `Internal` when the build task panicked.
+async fn build(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    building: OwnedMutexGuard<()>,
+) -> Result<(), ApiError> {
+    let search = Arc::clone(&service.ports().search);
+    let scope = scope.clone();
+    let revision = revision.clone();
+    tokio::spawn(async move {
+        let built = search.index_revision(&scope, revision).await;
+        drop(building);
+        built
+    })
+    .await
+    .map_err(|error| {
+        ApiError::new(
+            ErrorCode::Internal,
+            format!("the index build stopped: {error}"),
+        )
+    })?
 }
 
 /// Whether `revision` is one of the first `INDEX_WINDOW` commits of the accepted line's history

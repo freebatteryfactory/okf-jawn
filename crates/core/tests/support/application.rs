@@ -18,12 +18,15 @@
 //! mutation is not recorded twice), and a test may make the next call of one of them fail
 //! (`fail_next`, `fail_next_receipt`), as any port may, to show what a retry does.
 //!
-//! History is scripted too (`put_log`, `put_diff`, `put_blame`): a comparison nobody scripted
+//! History is scripted too (`put_log`, `put_diff`, `put_blame`); `log` pages a scripted history as
+//! storage does when a test asks (`page_log`). A comparison nobody scripted
 //! between two known revisions lists no change, and an unknown revision is `NotFound`. The
 //! fake's history is one line: the commits it wrote, and the heads a test moves with `set_head`,
 //! each an unrelated commit on top of the head before it. A commit replays, and `find_commit`
-//! with `since` finds it, only when it lies after the revision asked about; `find_commit`
-//! without `since` searches that line back from the head, as the port documents. The search
+//! with `since` finds it, only when it lies after the revision asked about, and an unknown
+//! `since` is `NotFound`; `find_commit` without `since` searches that line back from the head,
+//! as the port documents (the fake keeps no commit times: every commit it holds is younger than
+//! the seven-day retention). The search
 //! index
 //! answers `Unavailable` for a revision it has not indexed, as its port documents, and applies
 //! the query's filters to the entries a test scripted (`put_entry`, `put_link`): the archived
@@ -144,6 +147,7 @@ struct VersionState {
     commits: Vec<(CommitChanges, Revision)>,
     landed: Vec<(Revision, Revision)>,
     landing: Vec<Revision>,
+    log_page: Option<usize>,
     logs: Vec<(Revision, Option<ItemId>, LogResponse)>,
     diffs: Vec<(Revision, Revision, Option<ItemId>, Vec<FileChange>)>,
     blames: Vec<(Revision, ItemId, Vec<BlameLine>)>,
@@ -174,6 +178,7 @@ pub struct FakeRecords {
 #[derive(Default)]
 pub struct FakeSearch {
     indexed: Mutex<Vec<Revision>>,
+    conflict_next: AtomicBool,
     builds: AtomicUsize,
     building: AtomicUsize,
     most_at_once: AtomicUsize,
@@ -208,6 +213,7 @@ pub struct FakeDrafts {
     discarded: Mutex<Vec<(MutationId, Draft)>>,
     gets: AtomicUsize,
     saved_before_discard: Mutex<Option<DraftWrite>>,
+    fail_next_discard: AtomicBool,
 }
 
 /// `SandboxCapabilityStore` that keeps every mint.
@@ -464,6 +470,18 @@ impl FakeVersions {
         Ok(())
     }
 
+    /// Page `log` as storage does: a scripted history is answered `size` commits at a time (or
+    /// fewer when the query asks for fewer), from the offset its decimal cursor names, with the
+    /// next offset as the cursor while commits remain. Without it, `log` answers the scripted
+    /// response whole.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn page_log(&self, size: usize) -> Built<()> {
+        lock(&self.state)?.log_page = Some(size);
+        Ok(())
+    }
+
     /// Every `log` query, in order.
     ///
     /// # Errors
@@ -536,9 +554,12 @@ impl VersionState {
 
     /// The documents each `TreeEdit::RestoreItem` of `changes` restores, as its port documents
     /// it: the item as `from` holds it, its source appearance (the companion files) included;
-    /// nothing for an item absent at `from`, which is removed. `NotFound` for an item absent
-    /// both at `from` and at the expected head; `Conflict` when another item holds the restored
-    /// path at the expected head.
+    /// nothing for an item absent at `from`, which is removed. Consecutive `RestoreItem` edits
+    /// are one group: every item of the group is looked up first (`NotFound` for one absent both
+    /// at `from` and at the expected head), and the group's items have left their current paths
+    /// before any is written back, so only an item outside the group holding a restored path at
+    /// the expected head is a `Conflict`. A later listing of an item wins (`show` reads the
+    /// newest document first).
     fn restored_items(&self, changes: &CommitChanges) -> Result<Vec<ItemDocument>, ApiError> {
         let at = |revision: &Revision, item: ItemId| {
             self.documents
@@ -547,31 +568,43 @@ impl VersionState {
                 .map(|(_, document)| document.clone())
         };
         let mut restored = Vec::new();
-        for edit in &changes.edits {
-            let TreeEdit::RestoreItem { item_id, from } = edit else {
-                continue;
-            };
-            let Some(document) = at(from, *item_id) else {
-                if at(&changes.expected_head, *item_id).is_none() {
+        for group in changes
+            .edits
+            .split(|edit| !matches!(edit, TreeEdit::RestoreItem { .. }))
+        {
+            let listed: Vec<(ItemId, &Revision)> = group
+                .iter()
+                .filter_map(|edit| match edit {
+                    TreeEdit::RestoreItem { item_id, from } => Some((*item_id, from)),
+                    _ => None,
+                })
+                .collect();
+            for (item_id, from) in &listed {
+                if at(from, *item_id).is_none() && at(&changes.expected_head, *item_id).is_none() {
                     return Err(ApiError::new(ErrorCode::NotFound, "no such item"));
                 }
-                continue;
-            };
-            if self.documents.iter().any(|(held, other)| {
-                *held == changes.expected_head
-                    && other.summary.id != *item_id
-                    && other.summary.path == document.summary.path
-            }) {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
-                    "another item holds the restored path",
-                ));
             }
-            restored.push(document);
+            for (item_id, from) in &listed {
+                let Some(document) = at(from, *item_id) else {
+                    continue;
+                };
+                if self.documents.iter().any(|(held, other)| {
+                    *held == changes.expected_head
+                        && other.summary.path == document.summary.path
+                        && listed
+                            .iter()
+                            .all(|(grouped, _)| *grouped != other.summary.id)
+                }) {
+                    return Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "another item holds the restored path",
+                    ));
+                }
+                restored.push(document);
+            }
         }
         Ok(restored)
     }
-
     /// The commit before `revision` on the line: the head a written commit was based on, or the
     /// head a test moved away from.
     fn parent_of(&self, revision: &Revision) -> Option<&Revision> {
@@ -683,6 +716,12 @@ impl FakeSearch {
     #[must_use]
     pub fn most_at_once(&self) -> usize {
         self.most_at_once.load(Ordering::SeqCst)
+    }
+
+    /// Make the next `index_revision` answer `Conflict`, indexing nothing, as a port that
+    /// refuses after a write was committed would.
+    pub fn conflict_next(&self) {
+        self.conflict_next.store(true, Ordering::SeqCst);
     }
 
     /// Make the next `index_revision` fail, indexing nothing.
@@ -828,6 +867,11 @@ impl FakeDrafts {
     pub fn save_before_next_discard(&self, write: DraftWrite) -> Built<()> {
         *lock(&self.saved_before_discard)? = Some(write);
         Ok(())
+    }
+
+    /// Make the next `discard` fail with a store fault (`Internal`), removing nothing.
+    pub fn fail_next_discard(&self) {
+        self.fail_next_discard.store(true, Ordering::SeqCst);
     }
 
     /// Every draft held now, most recently saved first.
@@ -1038,7 +1082,7 @@ impl VersionStore for FakeVersions {
             let mut state = lock_api(&self.state)?;
             state.log_queries.push(query.clone());
             state.require_known(&query.tip)?;
-            Ok(state
+            let scripted = state
                 .logs
                 .iter()
                 .find(|(tip, item, _)| *tip == query.tip && *item == query.item_id)
@@ -1048,7 +1092,23 @@ impl VersionStore for FakeVersions {
                         next_cursor: None,
                     },
                     |(_, _, response)| response.clone(),
-                ))
+                );
+            let Some(size) = state.log_page else {
+                return Ok(scripted);
+            };
+            let skip = match query.page.cursor.as_deref() {
+                None => 0,
+                Some(cursor) => cursor
+                    .parse::<usize>()
+                    .map_err(|_| ApiError::new(ErrorCode::InvalidInput, "not a log cursor"))?,
+            };
+            let limit = size.min(usize::from(query.page.limit)).max(1);
+            let commits: Vec<_> = scripted.commits.into_iter().skip(skip).collect();
+            let more = commits.len() > limit;
+            Ok(LogResponse {
+                commits: commits.into_iter().take(limit).collect(),
+                next_cursor: more.then(|| skip.saturating_add(limit).to_string()),
+            })
         })
     }
     fn diff<'a>(
@@ -1345,6 +1405,9 @@ impl SearchIndex for FakeSearch {
     ) -> PortFuture<'a, ()> {
         Box::pin(async move {
             injected(&self.fail_next)?;
+            if self.conflict_next.swap(false, Ordering::SeqCst) {
+                return Err(ApiError::new(ErrorCode::Conflict, "injected conflict"));
+            }
             self.builds.fetch_add(1, Ordering::SeqCst);
             let running = self
                 .building
@@ -1599,6 +1662,7 @@ impl DraftStore for FakeDrafts {
         expected: Option<Digest>,
     ) -> PortFuture<'a, Draft> {
         Box::pin(async move {
+            injected(&self.fail_next_discard)?;
             let landing = lock_api(&self.saved_before_discard)?.take();
             if let Some(write) = landing {
                 self.save(scope, mutation(0xdead), write).await?;

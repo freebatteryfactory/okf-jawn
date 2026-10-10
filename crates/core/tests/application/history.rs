@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::{PageRequest, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::EventKind;
@@ -20,7 +21,7 @@ use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::jobs::RevisionMapping;
 use okf_jawn_core::portable::content_digest;
 use okf_jawn_core::ports::Application;
-use okf_jawn_core::storage::{TreeEdit, VersionStore};
+use okf_jawn_core::storage::{CommitChanges, Provenance, TreeEdit, VersionStore};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -628,6 +629,63 @@ async fn commit_items_is_blocked_when_the_commit_landing_mid_snapshot_changed_it
     Ok(())
 }
 
+/// The reviewer's probe, kept: two unrelated commits land, and the Snapshot commits on the third
+/// head it reads, so the bound is at least 3 heads.
+#[tokio::test]
+async fn rr_snapshot_commits_on_the_third_head() -> TestResult {
+    let world = landing_mid_snapshot(&['c', 'e'])?;
+    let result = world
+        .service
+        .commit_items(
+            &alice(OperationName::CommitItems, Some(mutation(1)))?,
+            snapshot(&[NOTE])?,
+        )
+        .await?;
+    assert_eq!(result.revision, revision('d')?);
+    let commits = world.versions.commits()?;
+    assert_eq!(commits.len(), 1);
+    assert_eq!(
+        some(commits.first(), "commit")?.expected_head,
+        revision('e')?
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn a_conflict_after_the_snapshot_committed_never_leads_to_a_second_commit() -> TestResult {
+    let world = World::new()?;
+    note_at(&world, NOTE, "notes/plan.md", &['a'])?;
+    world
+        .drafts
+        .put_draft(draft_of(NOTE, ALICE, &revision('a')?, "# Mine\n")?)?;
+    world.versions.queue_revision(revision('b')?)?;
+    world.versions.queue_revision(revision('d')?)?;
+    // The store commits `b`; indexing it then answers `Conflict`.
+    world.search.conflict_next();
+    let mut caller = alice(OperationName::CommitItems, Some(mutation(1)))?;
+    let refused = err_of(
+        world
+            .service
+            .commit_items(&caller, snapshot(&[NOTE])?)
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    assert!(
+        refused.detail.is_none(),
+        "not a draft conflict: {refused:?}"
+    );
+    let commits = world.versions.commits()?;
+    assert_eq!(commits.len(), 1, "exactly one commit: {commits:?}");
+    // A resumed attempt completes the commit it already wrote.
+    caller.attempt = Attempt::Resumed;
+    let retried = world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE])?)
+        .await?;
+    assert_eq!(retried.revision, revision('b')?);
+    assert_eq!(world.versions.commits()?.len(), 1);
+    assert_eq!(world.search.indexed()?, vec![revision('b')?]);
+    Ok(())
+}
 #[tokio::test]
 async fn commit_items_gives_up_after_three_heads_moved_mid_snapshot() -> TestResult {
     let world = landing_mid_snapshot(&['c', 'e', 'f'])?;
@@ -949,6 +1007,47 @@ async fn a_resumed_snapshot_completes_when_the_editor_discarded_a_draft_meanwhil
     Ok(())
 }
 #[tokio::test]
+async fn a_store_fault_while_removing_a_draft_fails_the_snapshot() -> TestResult {
+    // On the found-commit path.
+    let world = resumable()?;
+    let caller = first_attempt_fails_after_its_commit(&world).await?;
+    world.drafts.fail_next_discard();
+    let fault = err_of(
+        world
+            .service
+            .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+            .await,
+    )?;
+    assert_eq!(fault.code, ErrorCode::Internal);
+    assert_eq!(
+        world.records.receipts()?.len(),
+        0,
+        "the Snapshot did not complete"
+    );
+    // A later resume completes it.
+    world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+        .await?;
+    assert_eq!(world.drafts.held()?.len(), 0);
+    assert_eq!(world.versions.commits()?.len(), 1);
+    // On a first attempt.
+    let world = resumable()?;
+    world.drafts.fail_next_discard();
+    let fault = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(1)))?,
+                snapshot(&[NOTE, OTHER])?,
+            )
+            .await,
+    )?;
+    assert_eq!(fault.code, ErrorCode::Internal);
+    assert_eq!(world.records.receipts()?.len(), 0);
+    Ok(())
+}
+#[tokio::test]
 async fn commit_items_reports_lint_only_for_the_items_it_snapshots() -> TestResult {
     let world = World::new()?;
     let base = revision('a')?;
@@ -1040,6 +1139,86 @@ async fn restore_items_restores_one_item_from_the_target_in_a_new_commit() -> Te
     Ok(())
 }
 
+/// The version fake encodes the port's grouping of consecutive `RestoreItem` edits: two items
+/// that swapped paths are rewound together, but not when another edit separates them.
+#[tokio::test]
+async fn the_version_fake_restores_consecutive_restore_items_as_one_group() -> TestResult {
+    let restore = |id: u128| -> Built<TreeEdit> {
+        Ok(TreeEdit::RestoreItem {
+            item_id: item(id),
+            from: revision('a')?,
+        })
+    };
+    let changes = |edits: Vec<TreeEdit>| -> Built<CommitChanges> {
+        Ok(CommitChanges {
+            mutation_id: mutation(1),
+            expected_head: revision('b')?,
+            author: Provenance {
+                subject: ALICE.to_owned(),
+                route: AccessRoute::LocalOwner,
+                client_id: None,
+            },
+            message: "Rewind".to_owned(),
+            edits,
+        })
+    };
+    let swapped = || -> Built<World> {
+        let world = World::new()?;
+        world.versions.set_head(revision('b')?)?;
+        note_at(&world, NOTE, "notes/x.md", &['a'])?;
+        note_at(&world, OTHER, "notes/y.md", &['a'])?;
+        note_at(&world, NOTE, "notes/y.md", &['b'])?;
+        note_at(&world, OTHER, "notes/x.md", &['b'])?;
+        note_at(&world, THIRD, "notes/third.md", &['b'])?;
+        world.versions.queue_revision(revision('c')?)?;
+        Ok(world)
+    };
+    let world = swapped()?;
+    world
+        .versions
+        .commit(
+            &scope()?,
+            changes(vec![restore(NOTE)?, restore(OTHER)?])?,
+            world.service.conformance(),
+        )
+        .await?;
+    let rewound = revision('c')?;
+    let note = world.versions.show(&scope()?, &rewound, item(NOTE)).await?;
+    let other = world
+        .versions
+        .show(&scope()?, &rewound, item(OTHER))
+        .await?;
+    assert_eq!(note.summary.path.as_str(), "notes/x.md");
+    assert_eq!(other.summary.path.as_str(), "notes/y.md");
+    // Separated by another edit, the first restore collides with the other item's current path.
+    let world = swapped()?;
+    let separated = err_of(
+        world
+            .versions
+            .commit(
+                &scope()?,
+                changes(vec![
+                    restore(NOTE)?,
+                    TreeEdit::DeleteItem {
+                        item_id: item(THIRD),
+                    },
+                    restore(OTHER)?,
+                ])?,
+                world.service.conformance(),
+            )
+            .await,
+    )?;
+    assert_eq!(separated.code, ErrorCode::Conflict);
+    // An unknown `since` is the caller's error.
+    let unknown = err_of(
+        world
+            .versions
+            .find_commit(&scope()?, mutation(1), Some(&revision('e')?))
+            .await,
+    )?;
+    assert_eq!(unknown.code, ErrorCode::NotFound);
+    Ok(())
+}
 #[tokio::test]
 async fn restore_items_restores_the_whole_workspace_in_a_new_commit_on_its_base() -> TestResult {
     let world = World::new()?;
