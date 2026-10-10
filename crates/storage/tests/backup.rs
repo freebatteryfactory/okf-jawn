@@ -733,12 +733,7 @@ async fn backup_an_import_refuses_an_archive_of_a_live_or_purged_workspace() -> 
     assert_eq!(uploaded.digest, archive.digest);
     let error = err_of(
         backups
-            .restore_import(
-                &blank,
-                uploaded.digest,
-                uuid!(73)?,
-                vec!["ana".to_owned()],
-            )
+            .restore_import(&blank, uploaded.digest, uuid!(73)?, vec!["ana".to_owned()])
             .await,
     )?;
     assert_eq!(
@@ -847,6 +842,84 @@ async fn backup_an_import_fills_a_blank_workspace_and_keeps_unknown_editors_draf
         .blobs()
         .open(&target, &fixture.original, 0, 1)
         .await?;
+    Ok(())
+}
+
+/// Review probe R5: a stop between the imported rows and the import's own record. The record
+/// insert is made to fail (a trigger on `restores`, as a crash at that point); the stopped
+/// import must leave no row, and the retry under the same mutation completes.
+#[tokio::test]
+async fn backup_an_import_stopped_before_its_record_leaves_nothing_and_completes_on_retry()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let backups = storage.backups();
+    let archive = backups
+        .write_workspace_archive(&fixture.workspace, uuid!(40)?)
+        .await?;
+    let (target, _) = create(storage, "elsewhere", 80, "Copy").await?;
+    let bytes = std::fs::read(
+        storage
+            .data()
+            .objects_path()
+            .join("local")
+            .join(archive.digest.as_str().get(..2).unwrap_or_default())
+            .join(archive.digest.as_str()),
+    )?;
+    let uploaded = storage
+        .blobs()
+        .put(
+            &target,
+            Box::pin(std::io::Cursor::new(bytes)),
+            1 << 30,
+            None,
+        )
+        .await?;
+    let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+    records.execute_batch(
+        "CREATE TRIGGER stop_restore BEFORE INSERT ON restores
+         BEGIN SELECT RAISE(ABORT, 'stopped before the import record'); END;",
+    )?;
+    let stopped = err_of(
+        backups
+            .restore_import(
+                &target,
+                uploaded.digest.clone(),
+                uuid!(84)?,
+                vec!["ana".to_owned()],
+            )
+            .await,
+    )?;
+    assert!(
+        storage
+            .drafts()
+            .get(&target, uuid!(10)?, "ana")
+            .await?
+            .is_none(),
+        "no imported row outlives the stopped import: {stopped}"
+    );
+    records.execute_batch("DROP TRIGGER stop_restore;")?;
+    let report = backups
+        .restore_import(
+            &target,
+            uploaded.digest.clone(),
+            uuid!(84)?,
+            vec!["ana".to_owned()],
+        )
+        .await?;
+    assert_eq!(
+        (
+            report.items,
+            report.drafts_restored,
+            report.drafts_unassigned
+        ),
+        (2, 1, 1)
+    );
+    let repeated = backups
+        .restore_import(&target, uploaded.digest, uuid!(84)?, vec!["ana".to_owned()])
+        .await?;
+    assert_eq!(repeated, report, "the record replays the report");
     Ok(())
 }
 

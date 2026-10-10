@@ -315,27 +315,13 @@ impl StorageBackups {
                     scope,
                     &path,
                     &staging.path,
-                    &Mode::Import(editors),
+                    &Mode::Import(editors, mutation),
                 )
                 .map(|(report, _)| report)
             })
         })
         .await
         .map_err(|error| internal(format!("a restore task stopped: {error}")))??;
-        let (tenant, workspace) = crate::db::scope_key(scope);
-        let text = serde_json::to_string(&report).map_err(|error| json(&error))?;
-        self.storage
-            .records
-            .transaction(move |transaction| {
-                transaction
-                    .execute(
-                        "INSERT INTO restores (mutation_id, tenant_id, workspace_id, report)
-                         VALUES (?1, ?2, ?3, ?4) ON CONFLICT (mutation_id) DO NOTHING",
-                        params![mutation.0.to_string(), tenant, workspace, text],
-                    )
-                    .map_err(|error| sql(&error))
-            })
-            .await?;
         Ok(report)
     }
 

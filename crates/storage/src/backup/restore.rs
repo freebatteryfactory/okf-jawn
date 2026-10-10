@@ -4,7 +4,8 @@
 //! In both, the objects are put back first (each checked against its digest), then the Git
 //! history (the pack is indexed and every reference set), then the records in one transaction.
 //! A resumed import finds the accepted head already at the archive's and skips the Git step;
-//! the records step, with the restore's own record, is all or nothing.
+//! the records step and the import's own record (`restores`) commit in one transaction, so it
+//! is all or nothing.
 //!
 //! - **Import** keeps item identities and revisions, rewrites the workspace identity in every
 //!   imported row (and inside its stored JSON), and gives back only the drafts whose editor is
@@ -24,6 +25,7 @@ use std::path::Path;
 
 use git2::Repository;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::MutationId;
 use okf_jawn_contract::workspace::RestoreReport;
 use okf_jawn_core::storage::StorageScope;
 use rusqlite::{Connection, params};
@@ -39,10 +41,18 @@ use crate::storage::Storage;
 
 /// How an archive is restored.
 pub(crate) enum Mode {
-    /// Into a blank workspace of this installation, for these editors.
-    Import(Vec<String>),
+    /// Into a blank workspace of this installation, for these editors, under this mutation.
+    Import(Vec<String>, MutationId),
     /// Under its own identity, after the installation archive.
     Replace,
+}
+
+/// Where archived rows go: the target tenant and workspace, and the archive's own workspace
+/// identity, which an import rewrites.
+struct Target {
+    tenant: String,
+    workspace: String,
+    original: String,
 }
 
 /// Tables an import copies into the target workspace.
@@ -97,36 +107,35 @@ pub(crate) fn restore(
             ))
         })?;
     drop(archived);
-    let (drafts_restored, drafts_unassigned) = {
+    let report = {
         let path = text(&records)?.to_owned();
-        let tenant = scope.tenant_id.as_str().to_owned();
-        let workspace = scope.workspace_id.0.to_string();
-        let original = manifest.workspace_id.0.to_string();
+        let target = Target {
+            tenant: scope.tenant_id.as_str().to_owned(),
+            workspace: scope.workspace_id.0.to_string(),
+            original: manifest.workspace_id.0.to_string(),
+        };
         let editors = match mode {
-            Mode::Import(editors) => {
+            Mode::Import(editors, _) => {
                 Some(serde_json::to_string(editors).map_err(|error| crate::db::json(&error))?)
             }
+            Mode::Replace => None,
+        };
+        let mutation = match mode {
+            Mode::Import(_, mutation) => Some(*mutation),
             Mode::Replace => None,
         };
         runtime.block_on(storage.records.call(move |connection| {
             copy_rows(
                 connection,
                 &path,
-                &tenant,
-                &workspace,
-                &original,
+                &target,
                 editors.as_deref(),
+                items,
+                mutation,
             )
         }))?
     };
-    Ok((
-        RestoreReport {
-            items,
-            drafts_restored,
-            drafts_unassigned,
-        },
-        manifest,
-    ))
+    Ok((report, manifest))
 }
 
 /// Refuse an archive the mode may not restore into `scope`.
@@ -160,7 +169,7 @@ fn refuse(
         Ok((exists, purged, completed))
     }))?;
     match mode {
-        Mode::Import(_) => {
+        Mode::Import(..) => {
             if manifest.tenant_id == scope.tenant_id && (exists || purged) {
                 return Err(conflict(
                     "an archive of a workspace this installation still holds or purged is not \
@@ -203,7 +212,7 @@ fn history(
         .transpose()?
         .ok_or_else(|| invalid("it has no accepted head"))?;
     let repository = match mode {
-        Mode::Import(_) => storage.repositories.open_durable(scope)?,
+        Mode::Import(..) => storage.repositories.open_durable(scope)?,
         Mode::Replace => storage.repositories.create(scope)?,
     };
     let current = crate::git::repo::reference_target(&repository, HEAD_REF)?;
@@ -253,20 +262,22 @@ fn refuse_unless_blank(repository: &Repository, current: git2::Oid) -> Result<()
     }
 }
 
-/// Copy the archived rows into the live database in one transaction; (drafts given back,
-/// drafts left in the archive). With `editors` this is an import into `workspace`.
+/// Copy the archived rows into the live database in one transaction and return the report.
+/// With `editors` this is an import into the target workspace, and the import's own record
+/// (`restores`, under `mutation`) is written in the same transaction: a stop anywhere leaves
+/// either nothing or the whole import with its record, so a retry completes or replays.
 fn copy_rows(
     connection: &mut Connection,
     archive: &str,
-    tenant: &str,
-    workspace: &str,
-    original: &str,
+    target: &Target,
     editors: Option<&str>,
-) -> Result<(u32, u32), ApiError> {
+    items: u32,
+    mutation: Option<MutationId>,
+) -> Result<RestoreReport, ApiError> {
     connection
         .execute("ATTACH DATABASE ?1 AS archive", [archive])
         .map_err(|error| sql(&error))?;
-    let copied = copy_tables(connection, tenant, workspace, original, editors);
+    let copied = copy_tables(connection, target, editors, items, mutation);
     connection
         .execute("DETACH DATABASE archive", [])
         .map_err(|error| sql(&error))?;
@@ -276,19 +287,39 @@ fn copy_rows(
 /// The transaction of `copy_rows`, on an attached archive.
 fn copy_tables(
     connection: &mut Connection,
-    tenant: &str,
-    workspace: &str,
-    original: &str,
+    target: &Target,
     editors: Option<&str>,
-) -> Result<(u32, u32), ApiError> {
+    items: u32,
+    mutation: Option<MutationId>,
+) -> Result<RestoreReport, ApiError> {
     let transaction = connection.transaction().map_err(|error| sql(&error))?;
+    match write_tables(&transaction, target, editors, items, mutation) {
+        Ok(report) => {
+            transaction.commit().map_err(|error| sql(&error))?;
+            Ok(report)
+        }
+        Err(error) => {
+            transaction.rollback().map_err(|failure| sql(&failure))?;
+            Err(error)
+        }
+    }
+}
+
+/// The writes of `copy_tables`, inside its transaction.
+fn write_tables(
+    transaction: &rusqlite::Transaction<'_>,
+    target: &Target,
+    editors: Option<&str>,
+    items: u32,
+    mutation: Option<MutationId>,
+) -> Result<RestoreReport, ApiError> {
     let tables: &[&str] = if editors.is_some() {
         IMPORTED
     } else {
         WORKSPACE_TABLES
     };
     for table in tables {
-        insert(&transaction, table, tenant, workspace, original, editors)?;
+        insert(transaction, table, target, editors)?;
     }
     let total: i64 = transaction
         .query_row("SELECT count(*) FROM archive.drafts", [], |row| row.get(0))
@@ -296,25 +327,43 @@ fn copy_tables(
     let restored: i64 = transaction
         .query_row(
             "SELECT count(*) FROM drafts WHERE tenant_id = ?1 AND workspace_id = ?2",
-            params![tenant, workspace],
+            params![target.tenant, target.workspace],
             |row| row.get(0),
         )
         .map_err(|error| sql(&error))?;
-    transaction.commit().map_err(|error| sql(&error))?;
     let count =
         |value: i64| u32::try_from(value).map_err(|_| internal("a draft count is out of range"));
-    Ok((count(restored)?, count(total.saturating_sub(restored))?))
+    let report = RestoreReport {
+        items,
+        drafts_restored: count(restored)?,
+        drafts_unassigned: count(total.saturating_sub(restored))?,
+    };
+    if let Some(mutation) = mutation {
+        let text = serde_json::to_string(&report).map_err(|error| crate::db::json(&error))?;
+        transaction
+            .execute(
+                "INSERT INTO restores (mutation_id, tenant_id, workspace_id, report)
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT (mutation_id) DO NOTHING",
+                params![
+                    mutation.0.to_string(),
+                    target.tenant,
+                    target.workspace,
+                    text
+                ],
+            )
+            .map_err(|error| sql(&error))?;
+    }
+    Ok(report)
 }
 
 /// Copy one table; an import rewrites the workspace identity, also inside stored JSON.
 fn insert(
     connection: &Connection,
     table: &str,
-    tenant: &str,
-    workspace: &str,
-    original: &str,
+    target: &Target,
     editors: Option<&str>,
 ) -> Result<(), ApiError> {
+    let (tenant, workspace, original) = (&target.tenant, &target.workspace, &target.original);
     let columns: Vec<String> = {
         let mut statement = connection
             .prepare("SELECT name FROM pragma_table_info(?1)")
