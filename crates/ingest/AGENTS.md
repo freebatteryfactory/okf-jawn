@@ -14,7 +14,9 @@ This lane's directories and gate command are in the root AGENTS.md table, and it
 
 ## Ports to call (implemented by storage)
 
-`RecordStore::{claim_job, update_progress, record_artifact, get_artifact, complete_job, fail_job, pending_jobs, expire_leases}`, `UploadStore::get`, `BlobStore::{put, open, materialize}`, `VersionStore::{head, show, commit}`, `SearchIndex::{index_revision, rebuild}`, `EventLog::append`.
+`RecordStore::{claim_job, update_progress, record_artifact, get_artifact, complete_job, fail_job, pending_jobs, expire_leases, get_purge, update_purge, list_reviews}`, `UploadStore::{get, consume}`, `BlobStore::{put, open, materialize}`, `VersionStore::{head, list, show, commit, write_history}`, `SearchIndex::{index_revision, rebuild}`, `Backups::{write_workspace_archive, write_installation_archive, restore_import}`, `Purger::{purge_workspace, purge_item}`, `EventLog::append`.
+
+Core functions to call, never re-implemented here: `storage::derive_item_id`; `conventions::source_card_name`; `portable::{ImportCheck, imported_verification, exported_verified, item_content_digest}`; `views::materialize`; `reading::read_conversion_record`; the `CandidateCheck` composition injects (core-cli's production check), wrapped in `portable::ImportCheck` for an import commit. The restore handler passes `JobSpec::RestoreWorkspace.editors` to `Backups::restore_import` and never consults `AccessControl`.
 
 ## Rules
 
