@@ -18,7 +18,9 @@
 //! `derive_commit_mutation_id(job, n)`, and new cards are named with `derive_item_id`. Before
 //! it writes, an import commit asks `VersionStore::find_commit` whether an earlier attempt
 //! already wrote it after the job's base revision; if so it is replayed and nothing is written
-//! again, whatever order the store searches in.
+//! again, whatever order the store searches in. A replayed commit keeps the warnings its check
+//! returned: storage gives none back on a replay, so the same check runs again over the
+//! replayed commit's tree, and the completion does not depend on where an attempt died.
 //!
 //! An import does not conflict with unrelated edits (SPEC: "Create, move, delete, import ...
 //! remain immediate commits"; integration-owner ruling R-I8). Each commit is written on the
@@ -34,6 +36,12 @@
 //! the pending commit wrote. If a person changed or deleted it, that card is not written and
 //! not retried, and the completion says which card and why (`CARD_NOT_WRITTEN`): the person's
 //! edit is never overwritten. Otherwise the card is written onto the head's version.
+//!
+//! A commit an earlier attempt wrote is found before its source is converted: a resumed
+//! import converts no card it already committed, and a resumed redigest converts nothing. The
+//! completion then lists the outputs the committed card's extraction references (its record's
+//! window exports and assets, and the record), the same list a first conversion gives, read from
+//! the same record, so every retained output a card references stays listed.
 //!
 //! A redigest writes one commit, under ordinal 0, by the same rule against its base revision
 //! (R-I8 extended): replayed when an earlier attempt wrote it, refused (not retried) only when
@@ -69,7 +77,9 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, UploadId, WorkspaceP
 use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::source::{SourceAppearance, SourceName};
-use okf_jawn_core::conversion::{Conversion, ConversionInput, ConvertedDocument, RetainedAsset};
+use okf_jawn_core::conversion::{
+    Conversion, ConversionInput, ConversionRecord, ConvertedDocument, RetainedAsset,
+};
 use okf_jawn_core::items::without_header;
 use okf_jawn_core::jobs::ClaimedJob;
 use okf_jawn_core::portable::ImportCheck;
@@ -109,7 +119,7 @@ struct Converted {
     page_count: Option<u32>,
     /// Digest of the retained record, when a document was produced.
     record: Option<Digest>,
-    /// Every object retained on the way.
+    /// The retained objects the record references, and the record (`outputs_of`).
     outputs: Vec<Digest>,
 }
 
@@ -161,6 +171,12 @@ pub const CARD_NOT_WRITTEN: &str = "import_card_not_written";
 
 /// How many entries one folder listing asks for.
 const LIST_PAGE: u16 = 500;
+
+/// The file name of a folder's maintained index, a Markdown file of the bundle.
+const MAINTAINED_INDEX: &str = "index.md";
+
+/// The workspace's change log at the root, a Markdown file of the bundle.
+const CHANGE_LOG: &str = "log.md";
 
 /// How many times one import commit reads the head again after it moved under the write,
 /// before the attempt gives up as retryable.
@@ -219,43 +235,50 @@ pub(crate) async fn import(
             .first()
             .map(|name| name.filename.clone())
             .unwrap_or_default();
-        let Some(converted) =
-            convert_document(ports, claimed, scope, &local, &file_name, request.settings).await?
-        else {
-            done.cancelled = true;
-            return Ok(done);
-        };
-        card.body.clone_from(&converted.assembled.markdown);
-        card.appearance.extraction = extraction_of(&converted, None);
-        let message = format!("Import {}: {}", card.title, outcome_word(&converted));
-        let writes = Writes::Card {
-            card: &card,
-            since: &pending_revision,
-            rule: Blocked::AnyChange,
-        };
-        match commit(
-            ports,
-            claimed,
-            scope,
-            (base, ordinal),
-            message,
-            writes,
-            Arc::clone(&check),
-        )
-        .await?
-        {
-            Landed::Committed(committed) => {
-                done.revision = Some(committed.revision);
-                done.warnings.extend(committed.warnings);
-                done.outputs.extend(converted.outputs);
+        // A card an earlier attempt already committed is not converted again: the completion
+        // takes its commit and the outputs its committed extraction references.
+        if let Some(committed) = replayed(ports, claimed, scope, (base, ordinal), &check).await? {
+            take_committed(ports, scope, card.item_id, committed, Vec::new(), &mut done).await?;
+        } else {
+            let Some(converted) =
+                convert_document(ports, claimed, scope, &local, &file_name, request.settings)
+                    .await?
+            else {
+                done.cancelled = true;
+                return Ok(done);
+            };
+            card.body.clone_from(&converted.assembled.markdown);
+            card.appearance.extraction = extraction_of(&converted, None);
+            let message = format!("Import {}: {}", card.title, outcome_word(&converted));
+            let writes = Writes::Card {
+                card: &card,
+                since: &pending_revision,
+                rule: Blocked::AnyChange,
+            };
+            match commit(
+                ports,
+                claimed,
+                scope,
+                (base, ordinal),
+                message,
+                writes,
+                Arc::clone(&check),
+            )
+            .await?
+            {
+                Landed::Committed(committed) => {
+                    let outputs = converted.outputs;
+                    take_committed(ports, scope, card.item_id, committed, outputs, &mut done)
+                        .await?;
+                }
+                Landed::Refused(error) => return Ok(refused(&error)),
+                // The person's edit stands; this conversion is not written, and not retried.
+                Landed::Kept(why) => done.warnings.push(Warning {
+                    code: CARD_NOT_WRITTEN.to_owned(),
+                    message: format!("the converted card was not written: {why}"),
+                    location: Some(card.path.as_str().to_owned()),
+                }),
             }
-            Landed::Refused(error) => return Ok(refused(&error)),
-            // The person's edit stands; this conversion is not written, and not retried.
-            Landed::Kept(why) => done.warnings.push(Warning {
-                code: CARD_NOT_WRITTEN.to_owned(),
-                message: format!("the converted card was not written: {why}"),
-                location: Some(card.path.as_str().to_owned()),
-            }),
         }
         done.item_ids.push(card.item_id);
         // Between card commits: a job cancelled now converts no further source.
@@ -265,6 +288,29 @@ pub(crate) async fn import(
         }
     }
     Ok(done)
+}
+
+/// Take a card's commit into the completion: its revision and warnings, and its outputs. A
+/// commit written now lists `converted`, the outputs of the conversion it wrote; a replayed one
+/// (an earlier or a concurrent attempt wrote it) lists the outputs its committed extraction
+/// references, which are that attempt's.
+async fn take_committed(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    item_id: ItemId,
+    committed: Committed,
+    converted: Vec<Digest>,
+    done: &mut Done,
+) -> Result<(), ApiError> {
+    if committed.replayed {
+        done.outputs
+            .extend(committed_outputs(ports, scope, &committed.revision, item_id).await?);
+    } else {
+        done.outputs.extend(converted);
+    }
+    done.revision = Some(committed.revision);
+    done.warnings.extend(committed.warnings);
+    Ok(())
 }
 
 /// Report progress after `done` of `total` cards, and say whether the job is now cancelled.
@@ -373,6 +419,18 @@ pub(crate) async fn redigest(
             "a redigest of only the unconverted pages waits for the record to keep each window's text (request R-I5); redigest the whole source",
         ));
     }
+    // A redigest an earlier attempt already committed is not converted again.
+    if let Some(committed) =
+        replayed(ports, claimed, scope, (base_revision, 0), &ports.check).await?
+    {
+        return Ok(Done {
+            outputs: committed_outputs(ports, scope, &committed.revision, item_id).await?,
+            revision: Some(committed.revision),
+            item_ids: vec![item_id],
+            warnings: committed.warnings,
+            ..Done::default()
+        });
+    }
     let document = ports.versions.show(scope, base_revision, item_id).await?;
     let appearance = document.source.clone().ok_or_else(|| {
         ApiError::new(
@@ -429,9 +487,13 @@ pub(crate) async fn redigest(
     };
     Ok(match landed {
         Landed::Committed(committed) => Done {
+            outputs: if committed.replayed {
+                committed_outputs(ports, scope, &committed.revision, item_id).await?
+            } else {
+                converted.outputs
+            },
             revision: Some(committed.revision),
             item_ids: vec![item_id],
-            outputs: converted.outputs,
             warnings: committed.warnings,
             ..Done::default()
         },
@@ -477,7 +539,6 @@ async fn convert_document(
     let total = windows.len();
     let mut outcomes = Vec::new();
     let mut identity: Option<ConverterIdentity> = None;
-    let mut outputs = Vec::new();
     for (index, window) in windows.into_iter().enumerate() {
         let directory = tempfile::tempdir()
             .map_err(|error| fault(&format!("a window directory was refused: {error}")))?;
@@ -498,7 +559,7 @@ async fn convert_document(
         if identity.is_none() {
             identity = Some(conversion.converter.clone());
         }
-        outcomes.push(window_outcome(ports, scope, window, conversion, &mut outputs).await?);
+        outcomes.push(window_outcome(ports, scope, window, conversion).await?);
         let job = ports
             .records
             .update_progress(&claimed.lease, percent(index.saturating_add(1), total))
@@ -509,16 +570,15 @@ async fn convert_document(
     }
     let identity = identity.ok_or_else(|| fault("a conversion ran at least one window"))?;
     let assembled = assemble(identity.clone(), page_count, outcomes)?;
-    let record = match &assembled.record {
+    let (record, outputs) = match &assembled.record {
         Some(record) => {
             let bytes = serde_json::to_vec(record).map_err(|error| {
                 fault(&format!("a conversion record did not serialize: {error}"))
             })?;
             let digest = retain(ports, scope, bytes).await?;
-            outputs.push(digest.clone());
-            Some(digest)
+            (Some(digest.clone()), outputs_of(record, digest))
         }
-        None => None,
+        None => (None, Vec::new()),
     };
     let converter = (assembled.outcome != ConversionOutcome::Unsupported).then_some(identity);
     Ok(Some(Converted {
@@ -561,10 +621,9 @@ async fn window_outcome(
     scope: &StorageScope,
     window: Option<PageRange>,
     conversion: Conversion,
-    outputs: &mut Vec<Digest>,
 ) -> Result<WindowOutcome, ApiError> {
     let converted = match conversion.document {
-        Some(document) => Some(retain_window(ports, scope, document, outputs).await?),
+        Some(document) => Some(retain_window(ports, scope, document).await?),
         None => None,
     };
     Ok(WindowOutcome {
@@ -581,14 +640,11 @@ async fn retain_window(
     ports: &HandlerPorts,
     scope: &StorageScope,
     document: ConvertedDocument,
-    outputs: &mut Vec<Digest>,
 ) -> Result<ConvertedWindow, ApiError> {
     let export = retain(ports, scope, read_output(&document.structured).await?).await?;
-    outputs.push(export.clone());
     let mut assets = Vec::new();
     for asset in document.assets {
         let digest = retain(ports, scope, read_output(&asset.path).await?).await?;
-        outputs.push(digest.clone());
         assets.push(RetainedAsset {
             digest,
             media_type: asset.media_type,
@@ -606,6 +662,40 @@ async fn retain_window(
         assets,
         warnings: document.warnings,
     })
+}
+
+/// The retained outputs of a conversion whose record is retained under `digest`: every window
+/// export and asset the record references, then the record. A first conversion and a replay of
+/// its commit name the same list, read from the same record.
+fn outputs_of(record: &ConversionRecord, digest: Digest) -> Vec<Digest> {
+    record
+        .structured
+        .iter()
+        .map(|export| export.digest.clone())
+        .chain(record.assets.iter().map(|asset| asset.digest.clone()))
+        .chain(std::iter::once(digest))
+        .collect()
+}
+
+/// The retained outputs a committed card references: those of the conversion record its
+/// extraction names at `revision` (`outputs_of`), or none when it names no record.
+async fn committed_outputs(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    revision: &Revision,
+    item_id: ItemId,
+) -> Result<Vec<Digest>, ApiError> {
+    let document = ports.versions.show(scope, revision, item_id).await?;
+    let Some(digest) = document
+        .source
+        .and_then(|appearance| appearance.extraction.digest)
+    else {
+        return Ok(Vec::new());
+    };
+    let local = ports.blobs.materialize(scope, &digest).await?;
+    let record: ConversionRecord = serde_json::from_slice(&read_output(&local.path).await?)
+        .map_err(|error| fault(&format!("a retained conversion record is not one: {error}")))?;
+    Ok(outputs_of(&record, digest))
 }
 
 /// Store bytes in the blob store under their digest.
@@ -645,13 +735,8 @@ async fn commit(
     writes: Writes<'_>,
     check: Arc<dyn CandidateCheck>,
 ) -> Result<Landed, ApiError> {
-    let mutation_id = derive_commit_mutation_id(claimed.mutation_id, ordinal);
-    if let Some(revision) = ports.versions.find_commit(scope, mutation_id, base).await? {
-        return Ok(Landed::Committed(Committed {
-            revision,
-            replayed: true,
-            warnings: Vec::new(),
-        }));
+    if let Some(committed) = replayed(ports, claimed, scope, (base, ordinal), &check).await? {
+        return Ok(Landed::Committed(committed));
     }
     for _race in 0..HEAD_RACES {
         let head = ports.versions.head(scope).await?;
@@ -688,6 +773,119 @@ async fn commit(
         ErrorCode::Conflict,
         "the workspace head kept moving under the import's commit; the job is retried",
     ))
+}
+
+/// The `ordinal`-th commit of the job when an earlier attempt already wrote it after `base`,
+/// with the warnings its check returned then. Storage returns no warnings on a replay, so the
+/// same check is run again over the replayed commit's tree (`checked_again`): the completion's
+/// warnings do not depend on where an attempt died.
+async fn replayed(
+    ports: &HandlerPorts,
+    claimed: &ClaimedJob,
+    scope: &StorageScope,
+    (base, ordinal): (&Revision, u32),
+    check: &Arc<dyn CandidateCheck>,
+) -> Result<Option<Committed>, ApiError> {
+    let mutation_id = derive_commit_mutation_id(claimed.mutation_id, ordinal);
+    let Some(revision) = ports.versions.find_commit(scope, mutation_id, base).await? else {
+        return Ok(None);
+    };
+    let warnings = checked_again(ports, scope, &revision, Arc::clone(check)).await?;
+    Ok(Some(Committed {
+        revision,
+        replayed: true,
+        warnings,
+    }))
+}
+
+/// Run `check` over the tree of `revision`, materialized from the store in a temporary
+/// directory: every item file, each folder's maintained `index.md` and the root `log.md`,
+/// which are the Markdown files of the bundle the check reads (storage's side records under
+/// `.okf/` are not Markdown and no OKF check reads them). This is the candidate tree the
+/// check saw when storage wrote that commit.
+async fn checked_again(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    revision: &Revision,
+    check: Arc<dyn CandidateCheck>,
+) -> Result<Vec<Warning>, ApiError> {
+    let staging = tempfile::tempdir()
+        .map_err(|error| fault(&format!("a staging directory was refused: {error}")))?;
+    let mut folders: Vec<Option<WorkspacePath>> = vec![None];
+    while let Some(folder) = folders.pop() {
+        let mut cursor = None;
+        loop {
+            let listing = ports
+                .versions
+                .list(
+                    scope,
+                    revision,
+                    folder.as_ref(),
+                    Page {
+                        cursor: cursor.take(),
+                        limit: LIST_PAGE,
+                    },
+                )
+                .await?;
+            for item in &listing.items {
+                let bytes = ports
+                    .versions
+                    .read_file(scope, revision, &item.path)
+                    .await?;
+                stage(staging.path(), &item.path, &bytes)?;
+            }
+            folders.extend(listing.folders.into_iter().map(Some));
+            match listing.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        let index = match &folder {
+            Some(folder) => format!("{}/{MAINTAINED_INDEX}", folder.as_str()),
+            None => MAINTAINED_INDEX.to_owned(),
+        };
+        stage_if_present(ports, scope, revision, staging.path(), index).await?;
+    }
+    stage_if_present(
+        ports,
+        scope,
+        revision,
+        staging.path(),
+        CHANGE_LOG.to_owned(),
+    )
+    .await?;
+    tokio::task::spawn_blocking(move || check.check(staging.path()))
+        .await
+        .map_err(|error| fault(&format!("the replayed commit's check stopped: {error}")))?
+}
+
+/// Stage the versioned file at `path` of `revision`, when the tree holds one.
+async fn stage_if_present(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    revision: &Revision,
+    root: &Path,
+    path: String,
+) -> Result<(), ApiError> {
+    let path = WorkspacePath::try_from(path)
+        .map_err(|error| fault(&format!("a maintained file has no workspace path: {error}")))?;
+    match ports.versions.read_file(scope, revision, &path).await {
+        Ok(bytes) => stage(root, &path, &bytes),
+        Err(error) if error.code == ErrorCode::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Write one file of a staged tree; small files, written in place (the workspace tokio has no
+/// `fs` feature).
+fn stage(root: &Path, path: &WorkspacePath, bytes: &[u8]) -> Result<(), ApiError> {
+    let file = root.join(path.as_str());
+    let unwritable =
+        |error: std::io::Error| fault(&format!("{} could not be staged: {error}", path.as_str()));
+    if let Some(folder) = file.parent() {
+        std::fs::create_dir_all(folder).map_err(unwritable)?;
+    }
+    std::fs::write(&file, bytes).map_err(unwritable)
 }
 
 /// `card` written onto the head's version of its item, or why it must not be written: the item

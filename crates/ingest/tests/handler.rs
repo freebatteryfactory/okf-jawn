@@ -18,7 +18,9 @@ mod job_handler {
 
     use okf_jawn_contract::access::AccessRoute;
     use okf_jawn_contract::common::PageRange;
-    use okf_jawn_contract::extraction::{ConversionOutcome, ConversionSettings, TextOrigin};
+    use okf_jawn_contract::extraction::{
+        ConversionOutcome, ConversionSettings, FailureReason, TextOrigin,
+    };
     use okf_jawn_contract::identity::{
         Digest, ItemId, MutationId, PurgeId, Revision, TenantId, Timestamp, UploadId, WorkspaceId,
         WorkspacePath,
@@ -114,6 +116,7 @@ mod job_handler {
             writes: AtomicUsize::new(0),
             restored: Mutex::new(Vec::new()),
             versions: Arc::clone(&versions),
+            restore_hold: Mutex::new(None),
         });
         let purger = Arc::new(FakePurger {
             report: report()?,
@@ -132,6 +135,8 @@ mod job_handler {
             on_window: Mutex::new(None),
             on_page_count: Mutex::new(None),
             dropped: Arc::new(AtomicUsize::new(0)),
+            count_failed: Mutex::new(None),
+            runs: AtomicUsize::new(0),
         });
         let handler = IngestHandler::new(HandlerPorts {
             records: Arc::clone(&records) as Arc<dyn RecordStore>,
@@ -456,6 +461,101 @@ mod job_handler {
         Ok(())
     }
 
+    /// A restore job of `world` under the job number `number`.
+    fn restore_job(world: &World, number: u128) -> Built<okf_jawn_contract::identity::JobId> {
+        let upload_id = upload(world, number, "backup.zip", b"archive bytes")?;
+        job(
+            world,
+            number,
+            workspace_scope()?,
+            JobSpec::RestoreWorkspace {
+                upload_id,
+                archive: Digest::try_from("cd".repeat(32))?,
+                editors: vec!["alice".to_owned()],
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_restore_that_outlasts_several_lease_intervals_keeps_its_lease() -> TestResult {
+        // A heartbeat of 10 ms; a lease that lapses when 50 ms pass without a renewal; a
+        // restore that takes six of those intervals.
+        let world = world_full(
+            Some(6),
+            Vec::new(),
+            Arc::new(AcceptAll),
+            Duration::from_millis(10),
+        )?;
+        let id = restore_job(&world, 120)?;
+        let records = Arc::clone(&world.records);
+        *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
+            let records = Arc::clone(&records);
+            Box::pin(async move {
+                for _interval in 0..6 {
+                    let before = records.renewals();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if records.renewals() == before {
+                        let _lapsed = records.expire_running();
+                    }
+                }
+            })
+        }));
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        // Completed under its own lease, the first attempt's.
+        let completion = some(entry.completions.first(), "the completion")?;
+        assert_eq!(
+            (completion.lease.attempt, completion.lease.token.as_str()),
+            (1, "lease-1")
+        );
+        assert!(
+            world.records.renewals() >= 6,
+            "{} renewals",
+            world.records.renewals()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_restore_cancelled_while_it_runs_is_not_abandoned_and_writes_no_completion()
+    -> TestResult {
+        let world = world_full(
+            Some(6),
+            Vec::new(),
+            Arc::new(AcceptAll),
+            Duration::from_millis(10),
+        )?;
+        let id = restore_job(&world, 121)?;
+        let records = Arc::clone(&world.records);
+        *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
+            let records = Arc::clone(&records);
+            Box::pin(async move {
+                let _cancelled = records.cancel(id);
+                // Long enough for several renewals to see the cancellation.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            })
+        }));
+        assert!(tokio::time::timeout(Duration::from_secs(20), run(&world, id)).await??);
+        // The restore ran to its end: its commit is written and its editors were passed on.
+        let mutation = world.records.entry(id)?.created.mutation_id;
+        assert!(
+            world
+                .versions
+                .written()?
+                .iter()
+                .any(|(changes, _)| changes.mutation_id == mutation)
+        );
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            1
+        );
+        // The cancellation is observed after it returned: no completion, no failure.
+        assert_stopped(&world, id)?;
+        assert_eq!(world.uploads.consumed()?, Vec::new());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn an_import_commits_pending_cards_then_each_converted_card() -> TestResult {
         // Six pages in windows of four; the second window hits the cap.
@@ -647,6 +747,145 @@ mod job_handler {
             completion.item_ids,
             [derive_item_id(mutation, 0), derive_item_id(mutation, 1)]
         );
+        Ok(())
+    }
+
+    /// The warnings an import of two sources completes with, after its first attempt died right
+    /// after writing `died` commits, when it did.
+    async fn completed_warnings(
+        died: Option<usize>,
+        number: u128,
+    ) -> Built<Vec<(String, String, Option<String>)>> {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, number, "first.pdf", b"%PDF first")?;
+        let second = upload(
+            &world,
+            number.saturating_add(1),
+            "second.pdf",
+            b"%PDF second",
+        )?;
+        let id = job(
+            &world,
+            number,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        if let Some(count) = died {
+            world.versions.die_after(count)?;
+            assert!(run(&world, id).await?);
+            let entry = world.records.entry(id)?;
+            assert_eq!(entry.job.state, JobState::Failed);
+            world.records.insert(id, entry.scope, entry.created)?;
+        }
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(world.versions.written()?.len(), 3);
+        Ok(some(entry.completions.first(), "the completion")?
+            .warnings
+            .iter()
+            .map(|warning| {
+                (
+                    warning.code.clone(),
+                    warning.message.clone(),
+                    warning.location.clone(),
+                )
+            })
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn a_resumed_import_completes_with_the_warnings_of_the_commits_it_replays() -> TestResult
+    {
+        let whole = completed_warnings(None, 130).await?;
+        // OKF lint of the pending cards (no top-level heading) reached the completion.
+        assert!(
+            whole.iter().any(|(code, _, location)| {
+                code.starts_with("okf_lint") && location.as_deref() == Some("inbox/second-pdf.md")
+            }),
+            "{whole:?}"
+        );
+        // Died after the pending commit, and after the first card's commit: the same warnings.
+        assert_eq!(completed_warnings(Some(1), 132).await?, whole);
+        assert_eq!(completed_warnings(Some(2), 134).await?, whole);
+        Ok(())
+    }
+
+    /// The retained outputs the cards at `revision` reference: each card's record, its window
+    /// exports and assets.
+    fn referenced_outputs(world: &World, revision: &Revision) -> Built<Vec<Digest>> {
+        let mut outputs = Vec::new();
+        for card in world.versions.items_at(revision)? {
+            let Some(digest) = card.appearance.extraction.digest else {
+                continue;
+            };
+            let record: ConversionRecord = serde_json::from_slice(&world.blobs.bytes(&digest)?)?;
+            outputs.extend(record.structured.into_iter().map(|export| export.digest));
+            outputs.extend(record.assets.into_iter().map(|asset| asset.digest));
+            outputs.push(digest);
+        }
+        outputs.sort();
+        Ok(outputs)
+    }
+
+    #[tokio::test]
+    async fn a_resumed_import_converts_no_committed_card_and_lists_its_committed_outputs()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, 140, "first.pdf", b"%PDF first")?;
+        let second = upload(&world, 141, "second.pdf", b"%PDF second")?;
+        let id = job(
+            &world,
+            140,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        // The first card is converted and committed; the process dies as that commit returns.
+        world.versions.die_after(2)?;
+        assert!(run(&world, id).await?);
+        let died = world.records.entry(id)?;
+        assert_eq!(died.job.state, JobState::Failed);
+        assert_eq!(windows(&world)?.len(), 1);
+        world
+            .records
+            .insert(id, died.scope.clone(), died.created.clone())?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        // Only the second source was converted again.
+        assert_eq!(windows(&world)?.len(), 2);
+        // The completion lists exactly what the committed cards reference, the first card's
+        // outputs being those of the first attempt's conversion.
+        let completion = some(entry.completions.first(), "the completion")?;
+        let head = some(completion.revision.as_ref(), "the completion's revision")?;
+        let mut listed = completion.outputs.clone();
+        listed.sort();
+        assert_eq!(listed, referenced_outputs(&world, head)?);
+        assert_eq!(listed.len(), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_resumed_redigest_converts_nothing_and_lists_its_committed_outputs() -> TestResult {
+        let (world, id, _item_id) = redigest_world(33)?;
+        world.versions.die_after(1)?;
+        assert!(run(&world, id).await?);
+        let died = world.records.entry(id)?;
+        assert_eq!(died.job.state, JobState::Failed);
+        assert_eq!(windows(&world)?.len(), 1);
+        world
+            .records
+            .insert(id, died.scope.clone(), died.created.clone())?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(windows(&world)?.len(), 1);
+        let completion = some(entry.completions.first(), "the completion")?;
+        let head = some(completion.revision.as_ref(), "the completion's revision")?;
+        let mut listed = completion.outputs.clone();
+        listed.sort();
+        assert_eq!(listed, referenced_outputs(&world, head)?);
+        assert_eq!(listed.len(), 2);
         Ok(())
     }
 
@@ -1046,6 +1285,47 @@ mod job_handler {
             ConversionOutcome::Completed
         );
         assert_eq!(card.appearance.media_type, "text/markdown");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_page_count_that_reached_its_time_bound_fails_the_document_not_the_job() -> TestResult
+    {
+        let world = world_with(Some(6), Vec::new())?;
+        *world
+            .converter
+            .count_failed
+            .lock()
+            .map_err(|_| "poisoned")? = Some(FailureReason::TimeLimit { limit_seconds: 120 });
+        let report = upload(&world, 113, "report.pdf", b"%PDF slow report")?;
+        let id = job(
+            &world,
+            24,
+            workspace_scope()?,
+            import_spec(vec![report], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        // The job completes; it is not a worker fault to retry.
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(entry.failures, Vec::new());
+        // The pending card is replaced with the document's failure, and nothing is converted.
+        let cards = cards(&world)?;
+        assert_eq!(cards.len(), 2);
+        let card = some(cards.last(), "the converted card")?;
+        let ConversionOutcome::Failed { reason, issues } = &card.appearance.extraction.outcome
+        else {
+            return Err(format!(
+                "expected a failed outcome, got {:?}",
+                card.appearance.extraction.outcome
+            )
+            .into());
+        };
+        assert_eq!(*reason, FailureReason::TimeLimit { limit_seconds: 120 });
+        assert_ne!(*issues, Vec::new());
+        assert_eq!(card.appearance.extraction.page_count, None);
+        assert_eq!(card.appearance.extraction.text_origin, TextOrigin::None);
+        assert_eq!(windows(&world)?, [None]);
         Ok(())
     }
 

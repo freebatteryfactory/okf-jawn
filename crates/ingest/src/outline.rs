@@ -6,7 +6,9 @@
 //! Markdown as `str::lines` splits them, so a final newline does not add a line.
 //!
 //! A heading is an ATX heading, which is the only form docling's Markdown export writes: one to
-//! six `#` at the start of a line, then a space or the end of the line. A `#` line inside a
+//! six `#` at the start of a line, then a space or the end of the line. Its label drops the
+//! `CommonMark` closing sequence: a trailing `#` run only when whitespace precedes it or it is the
+//! whole content, so a `#` that ends a word (`C#`) stays. A `#` line inside a
 //! fenced code block is code, not a heading. The outline of a windowed conversion is computed
 //! again over the joined Markdown, so a section that runs over a window boundary ends where the
 //! whole document says it ends.
@@ -88,7 +90,7 @@ fn headings(markdown: &str) -> Vec<(u32, u8, String)> {
         if !(rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t')) {
             continue;
         }
-        let label = rest.trim().trim_end_matches('#').trim_end().to_owned();
+        let label = label_of(rest).to_owned();
         let (Ok(line), Ok(level)) = (u32::try_from(index.saturating_add(1)), u8::try_from(level))
         else {
             continue;
@@ -96,6 +98,22 @@ fn headings(markdown: &str) -> Vec<(u32, u8, String)> {
         found.push((line, level, label));
     }
     found
+}
+
+/// The label of an ATX heading from what follows its opening `#` run: the content without its
+/// surrounding whitespace and without the `CommonMark` closing sequence. A trailing `#` run is a
+/// closing sequence only when a space or tab comes before it, or when it is the whole content;
+/// otherwise it is text (`# C#` is `C#`, `## F# ##` is `F#`, `# #` is empty).
+fn label_of(rest: &str) -> &str {
+    let content = rest.trim();
+    let open = content.trim_end_matches('#');
+    if open.is_empty() {
+        open
+    } else if open.ends_with([' ', '\t']) {
+        open.trim_end()
+    } else {
+        content
+    }
 }
 
 /// The fence a line opens or closes: its character and how many it repeats.

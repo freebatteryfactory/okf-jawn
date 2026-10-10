@@ -8,6 +8,16 @@
 //! crash), whose pages the import then records as not converted. Dropping the future kills the
 //! child. A missing model or native library is a worker fault, found before any child starts.
 //!
+//! The page count runs in a capped child too. One that ends without a reply is classified as a
+//! window's child is (the cap, the time bound, a crash), and that is a property of the
+//! document, not a worker fault: `page_count` answers `None` (the `Converter` contract's
+//! "converted whole"), and the whole conversion of that original that follows returns the same
+//! `Failure(reason)` without starting a child, so the import records it in the card and the
+//! cost that ended the count is not paid again. Only the supervisor's own faults (a temporary
+//! directory refused, a child that cannot be started) are errors. The verdict is kept per
+//! original and file name until that conversion takes it; a later count of the same original
+//! replaces or clears it.
+//!
 //! `read_window` is pure over the child's files, so it is tested without models:
 //! - the window's coverage lists exactly the pages it converted: a page missing from the
 //!   export's `pages` (the time budget ran out before it, `PartialSuccess`, or the converter
@@ -31,7 +41,7 @@
 //! run is not yet paired with its export item's box), and no page render or picture asset is
 //! retained yet (`ConvertedDocument::assets` is empty).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -41,8 +51,9 @@ use docling::InputFormat;
 use okf_jawn_contract::common::PageRange;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{
-    ConverterIdentity, ConverterIssue, ConverterPackage, ModelIdentity,
+    ConverterIdentity, ConverterIssue, ConverterPackage, FailureReason, ModelIdentity,
 };
+use okf_jawn_contract::identity::Digest;
 use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
 use okf_jawn_core::conversion::{
     Conversion, ConversionInput, ConversionStatus, ConvertedCell, ConvertedDocument,
@@ -80,6 +91,21 @@ pub struct DoclingConverter {
     config: ConverterConfig,
     /// The hashed models and native libraries, read once.
     models: OnceCell<Vec<ModelIdentity>>,
+    /// Page counts that ended without a reply, by original and file name, until the whole
+    /// conversion that follows takes them.
+    failed_counts: std::sync::Mutex<BTreeMap<CountKey, FailedCount>>,
+}
+
+/// An original's digest and the file name it is converted under.
+type CountKey = (String, String);
+
+/// How a page-count child ended without a reply.
+#[derive(Debug, Clone)]
+struct FailedCount {
+    /// The verdict, classified as a window's.
+    reason: FailureReason,
+    /// The child's last stderr line.
+    message: String,
 }
 
 /// The pinned conversion packages, generated from the lockfile.
@@ -128,6 +154,7 @@ impl DoclingConverter {
         Self {
             config,
             models: OnceCell::const_new(),
+            failed_counts: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -202,6 +229,20 @@ impl DoclingConverter {
     /// Convert one window: identity, child, and the window read back.
     async fn convert_window(&self, input: ConversionInput) -> Result<Conversion, ApiError> {
         let converter = self.identity(&input).await?;
+        let source_digest = input.source.object.digest.clone();
+        if input.window.is_none()
+            && let Some(failed) =
+                self.take_failed_count(&count_key(&input.source, &input.file_name))?
+        {
+            // The count already ended at the cap, the time bound or a crash: converting the
+            // whole document would only pay that cost again.
+            return Ok(failed_conversion(
+                source_digest,
+                converter,
+                failed.reason,
+                failed.message,
+            ));
+        }
         let request = Request {
             task: Task::Convert,
             source: input.source.path.clone(),
@@ -214,23 +255,16 @@ impl DoclingConverter {
         let (verdict, reply, stderr) = self
             .run_child(&input.output_directory, &request, time_limit)
             .await?;
-        let source_digest = input.source.object.digest.clone();
         let Some(reply) = reply else {
             let ChildVerdict::Failed(reason) = verdict else {
                 return Err(fault("a child that reported left no reply"));
             };
-            return Ok(Conversion {
+            return Ok(failed_conversion(
                 source_digest,
                 converter,
-                status: ConversionStatus::Failure(reason),
-                document: None,
-                coverage: None,
-                issues: vec![ConverterIssue {
-                    component_type: "worker".to_owned(),
-                    module_name: "okf-jawn-convert".to_owned(),
-                    error_message: last_line(&stderr),
-                }],
-            });
+                reason,
+                last_line(&stderr),
+            ));
         };
         let produced = matches!(
             reply.status,
@@ -272,15 +306,46 @@ impl DoclingConverter {
         let (verdict, reply, stderr) = self
             .run_child(directory.path(), &request, PAGE_COUNT_TIME_LIMIT)
             .await?;
+        let key = count_key(source, file_name);
+        let mut failed_counts = self.failed_counts()?;
         match (verdict, reply) {
             // A count that failed (a damaged PDF) converts the document whole, where the
             // converter records why it cannot be read.
-            (_, Some(reply)) => Ok(reply.page_count),
-            (ChildVerdict::Reported | ChildVerdict::Failed(_), None) => Err(fault(&format!(
+            (_, Some(reply)) => {
+                let _earlier = failed_counts.remove(&key);
+                Ok(reply.page_count)
+            }
+            // The count ended at the cap, the time bound or a crash: the whole conversion that
+            // follows records that failure without starting a child.
+            (ChildVerdict::Failed(reason), None) => {
+                let _earlier = failed_counts.insert(
+                    key,
+                    FailedCount {
+                        reason,
+                        message: last_line(&stderr),
+                    },
+                );
+                Ok(None)
+            }
+            (ChildVerdict::Reported, None) => Err(fault(&format!(
                 "the page count child ended without a reply: {}",
                 last_line(&stderr)
             ))),
         }
+    }
+
+    /// The page counts that ended without a reply.
+    fn failed_counts(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<CountKey, FailedCount>>, ApiError> {
+        self.failed_counts
+            .lock()
+            .map_err(|_| fault("the failed page counts lock is poisoned"))
+    }
+
+    /// Take how the page count of an original ended, when it ended without a reply.
+    fn take_failed_count(&self, key: &CountKey) -> Result<Option<FailedCount>, ApiError> {
+        Ok(self.failed_counts()?.remove(key))
     }
 }
 
@@ -382,6 +447,35 @@ pub fn read_window(
         warnings,
     };
     Ok((document, coverage))
+}
+
+/// The key a page count's verdict is kept under: the original's digest and its file name.
+fn count_key(source: &LocalSource, file_name: &str) -> CountKey {
+    (
+        source.object.digest.as_str().to_owned(),
+        file_name.to_owned(),
+    )
+}
+
+/// A window, or a whole document, whose child ended without a reply, for `reason`.
+fn failed_conversion(
+    source_digest: Digest,
+    converter: ConverterIdentity,
+    reason: FailureReason,
+    message: String,
+) -> Conversion {
+    Conversion {
+        source_digest,
+        converter,
+        status: ConversionStatus::Failure(reason),
+        document: None,
+        coverage: None,
+        issues: vec![ConverterIssue {
+            component_type: "worker".to_owned(),
+            module_name: "okf-jawn-convert".to_owned(),
+            error_message: message,
+        }],
+    }
 }
 
 /// The pinned packages, from the generated `packages.json`.
