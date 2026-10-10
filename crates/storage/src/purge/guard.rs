@@ -9,15 +9,17 @@
 //! workspace is gone, and a stale writer must not leave a row or an object naming it.
 //!
 //! Where a write is one SQLite transaction the check runs inside it, so the purge record and
-//! the write are ordered by the database: drafts (save, discard), upload slots, upload content
-//! (which then removes the part file it appended to), upload completions, artifacts, job
-//! completions, derived objects, receipts, reviews, proposals (insert, update), comments,
-//! confirmations (create, consume), sandbox capabilities and the catalog (update, archive,
-//! unarchive). Commits, candidates and promotions check under the workspace's write lock,
-//! under which the purge's plan reads the workspace. An object put checks before it receives
-//! the body and again after it pinned the object (`LocalBlobs::put_pinned`), so a put that
+//! the write are ordered by the database: new jobs, drafts (save, discard), upload slots,
+//! upload content (which then removes the part file it appended to), upload completions (also
+//! checked before anything is read, so one after the purge is refused, not answered
+//! `NotFound`), artifacts, job completions, derived objects, receipts, reviews, proposals
+//! (insert, update), comments, confirmations (create, consume), sandbox capabilities and the
+//! catalog (update, archive, unarchive). Commits, candidates and promotions check under the
+//! workspace's write lock, under which the purge's plan reads the workspace. An object put
+//! checks before it receives the body and again after it pinned the object, in the
+//! transaction that records its pending put (`LocalBlobs::put_pinned`, `puts`), so a put that
 //! passed the first check before the purge was recorded either is waited for by the purge's
-//! object step or stores nothing. Written histories and workspace archives check before they
+//! objects step or records and stores nothing. Written histories and workspace archives check before they
 //! take the workspace's lock only, and an import puts its objects that way but copies its rows
 //! without the check; they are job work, which core drains before it calls the purger.
 //!

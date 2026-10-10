@@ -34,10 +34,11 @@
 //!    entries an indexing that read the repository before it went stored after step 4 (an
 //!    indexing reads and stores under the same lock).
 //! 6. **Objects**: a sweep of the in-flight pins begins (`pins`), then what every surviving
-//!    workspace and tenant record references is read; the step waits for the target's running
-//!    writes, adds the objects its pins name, and deletes each planned object that no surviving
-//!    reference names and no other workspace pinned since the sweep began; the others are
-//!    counted as kept.
+//!    workspace and tenant record references is read, other workspaces' pending puts included
+//!    (`puts`); the step waits for the target's running writes, adds the objects the target's
+//!    pending puts name, deletes each planned object that no surviving reference names and no
+//!    other workspace pinned since the sweep began, and clears the target's pending puts; the
+//!    others are counted as kept.
 //! 7. **Vacuum**: both databases are rebuilt without free pages and their write-ahead logs folded
 //!    back, so removed rows leave no bytes behind; then the report is recorded.
 //!
@@ -47,17 +48,19 @@
 //!
 //! What a write in flight can and cannot leave behind (the `Purger` contract in core):
 //!
-//! - Storage refuses every write to the workspace that the `guard` header lists, from the
-//!   moment the purge is recorded; a Git write checks under the workspace's lock, under which
-//!   step 1 reads; an object put pins before it retains and checks again after pinning; step 6
-//!   waits for the target's running writes and deletes the bytes their pins name.
-//! - Another workspace's object is deleted only when no reference step 6 read names it and
-//!   no workspace-scoped put of another workspace pinned it since step 6 began (`pins`).
-//! - Known limits: job work core did not drain before calling the purger can still store
-//!   what the plan does not name (a workspace archive and a written history put their objects
-//!   without a pin, and an import copies its rows without the refusal); bytes a write
-//!   retained just before a crash, whose record never landed, are named by nothing and stay
-//!   in the object store, unreferenced.
+//! - Storage refuses every write to the workspace that the `guard` header lists, new jobs
+//!   included, from the moment the purge is recorded; a Git write checks under the workspace's
+//!   lock, under which step 1 reads. An object put pins, then records a durable pending put
+//!   (`puts`) in the transaction of its second refusal check, before it retains. Step 6 waits
+//!   for the target's running writes (at most ten minutes, then `Unavailable`; repeating the
+//!   purge resumes it) and deletes the objects the target's pending puts name, the bytes of a
+//!   refused, failed or crashed write among them; pending puts have no lifetime.
+//! - Another workspace's object is deleted only when no reference step 6 read names it (that
+//!   workspace's pending puts included) and no write of another workspace pinned it since
+//!   step 6 began (`pins`).
+//! - Known limit: job work core did not drain before calling the purger can still store what
+//!   the plan does not name: a workspace archive and a written history put their objects
+//!   without a pending put, and an import copies its rows without the refusal.
 
 use std::collections::BTreeSet;
 
