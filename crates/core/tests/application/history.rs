@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::{PageRequest, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::EventKind;
@@ -20,7 +21,7 @@ use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::jobs::RevisionMapping;
 use okf_jawn_core::portable::content_digest;
 use okf_jawn_core::ports::Application;
-use okf_jawn_core::storage::{TreeEdit, VersionStore};
+use okf_jawn_core::storage::{CommitChanges, Provenance, TreeEdit, VersionStore};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -1102,6 +1103,86 @@ async fn restore_items_restores_one_item_from_the_target_in_a_new_commit() -> Te
     Ok(())
 }
 
+/// The version fake encodes the port's grouping of consecutive `RestoreItem` edits: two items
+/// that swapped paths are rewound together, but not when another edit separates them.
+#[tokio::test]
+async fn the_version_fake_restores_consecutive_restore_items_as_one_group() -> TestResult {
+    let restore = |id: u128| -> Built<TreeEdit> {
+        Ok(TreeEdit::RestoreItem {
+            item_id: item(id),
+            from: revision('a')?,
+        })
+    };
+    let changes = |edits: Vec<TreeEdit>| -> Built<CommitChanges> {
+        Ok(CommitChanges {
+            mutation_id: mutation(1),
+            expected_head: revision('b')?,
+            author: Provenance {
+                subject: ALICE.to_owned(),
+                route: AccessRoute::LocalOwner,
+                client_id: None,
+            },
+            message: "Rewind".to_owned(),
+            edits,
+        })
+    };
+    let swapped = || -> Built<World> {
+        let world = World::new()?;
+        world.versions.set_head(revision('b')?)?;
+        note_at(&world, NOTE, "notes/x.md", &['a'])?;
+        note_at(&world, OTHER, "notes/y.md", &['a'])?;
+        note_at(&world, NOTE, "notes/y.md", &['b'])?;
+        note_at(&world, OTHER, "notes/x.md", &['b'])?;
+        note_at(&world, THIRD, "notes/third.md", &['b'])?;
+        world.versions.queue_revision(revision('c')?)?;
+        Ok(world)
+    };
+    let world = swapped()?;
+    world
+        .versions
+        .commit(
+            &scope()?,
+            changes(vec![restore(NOTE)?, restore(OTHER)?])?,
+            world.service.conformance(),
+        )
+        .await?;
+    let rewound = revision('c')?;
+    let note = world.versions.show(&scope()?, &rewound, item(NOTE)).await?;
+    let other = world
+        .versions
+        .show(&scope()?, &rewound, item(OTHER))
+        .await?;
+    assert_eq!(note.summary.path.as_str(), "notes/x.md");
+    assert_eq!(other.summary.path.as_str(), "notes/y.md");
+    // Separated by another edit, the first restore collides with the other item's current path.
+    let world = swapped()?;
+    let separated = err_of(
+        world
+            .versions
+            .commit(
+                &scope()?,
+                changes(vec![
+                    restore(NOTE)?,
+                    TreeEdit::DeleteItem {
+                        item_id: item(THIRD),
+                    },
+                    restore(OTHER)?,
+                ])?,
+                world.service.conformance(),
+            )
+            .await,
+    )?;
+    assert_eq!(separated.code, ErrorCode::Conflict);
+    // An unknown `since` is the caller's error.
+    let unknown = err_of(
+        world
+            .versions
+            .find_commit(&scope()?, mutation(1), Some(&revision('e')?))
+            .await,
+    )?;
+    assert_eq!(unknown.code, ErrorCode::NotFound);
+    Ok(())
+}
 #[tokio::test]
 async fn restore_items_restores_the_whole_workspace_in_a_new_commit_on_its_base() -> TestResult {
     let world = World::new()?;

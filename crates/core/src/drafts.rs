@@ -53,8 +53,9 @@ pub trait DraftStore: Send + Sync {
     /// Remove the editor's own draft of one item and return its metadata.
     ///
     /// With `expected` set to `Some(digest)`, the held draft is removed only when its
-    /// `content_digest` equals `digest`; otherwise nothing is removed, that draft stays in
-    /// place, and the call answers `Conflict`. A Snapshot passes the digest of the content it
+    /// `content_digest` equals `digest`; otherwise nothing is removed, nothing is remembered
+    /// under the mutation, that draft stays in place, and the call answers `Conflict`. A
+    /// Snapshot passes the digest of the content it
     /// committed, so a draft saved again after that content was read is never lost. `None`
     /// removes whatever draft the editor holds.
     ///

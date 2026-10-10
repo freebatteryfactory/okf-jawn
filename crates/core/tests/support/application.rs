@@ -23,8 +23,10 @@
 //! between two known revisions lists no change, and an unknown revision is `NotFound`. The
 //! fake's history is one line: the commits it wrote, and the heads a test moves with `set_head`,
 //! each an unrelated commit on top of the head before it. A commit replays, and `find_commit`
-//! with `since` finds it, only when it lies after the revision asked about; `find_commit`
-//! without `since` searches that line back from the head, as the port documents. The search
+//! with `since` finds it, only when it lies after the revision asked about, and an unknown
+//! `since` is `NotFound`; `find_commit` without `since` searches that line back from the head,
+//! as the port documents (the fake keeps no commit times: every commit it holds is younger than
+//! the seven-day retention). The search
 //! index
 //! answers `Unavailable` for a revision it has not indexed, as its port documents, and applies
 //! the query's filters to the entries a test scripted (`put_entry`, `put_link`): the archived
@@ -551,9 +553,12 @@ impl VersionState {
 
     /// The documents each `TreeEdit::RestoreItem` of `changes` restores, as its port documents
     /// it: the item as `from` holds it, its source appearance (the companion files) included;
-    /// nothing for an item absent at `from`, which is removed. `NotFound` for an item absent
-    /// both at `from` and at the expected head; `Conflict` when another item holds the restored
-    /// path at the expected head.
+    /// nothing for an item absent at `from`, which is removed. Consecutive `RestoreItem` edits
+    /// are one group: every item of the group is looked up first (`NotFound` for one absent both
+    /// at `from` and at the expected head), and the group's items have left their current paths
+    /// before any is written back, so only an item outside the group holding a restored path at
+    /// the expected head is a `Conflict`. A later listing of an item wins (`show` reads the
+    /// newest document first).
     fn restored_items(&self, changes: &CommitChanges) -> Result<Vec<ItemDocument>, ApiError> {
         let at = |revision: &Revision, item: ItemId| {
             self.documents
@@ -562,31 +567,43 @@ impl VersionState {
                 .map(|(_, document)| document.clone())
         };
         let mut restored = Vec::new();
-        for edit in &changes.edits {
-            let TreeEdit::RestoreItem { item_id, from } = edit else {
-                continue;
-            };
-            let Some(document) = at(from, *item_id) else {
-                if at(&changes.expected_head, *item_id).is_none() {
+        for group in changes
+            .edits
+            .split(|edit| !matches!(edit, TreeEdit::RestoreItem { .. }))
+        {
+            let listed: Vec<(ItemId, &Revision)> = group
+                .iter()
+                .filter_map(|edit| match edit {
+                    TreeEdit::RestoreItem { item_id, from } => Some((*item_id, from)),
+                    _ => None,
+                })
+                .collect();
+            for (item_id, from) in &listed {
+                if at(from, *item_id).is_none() && at(&changes.expected_head, *item_id).is_none() {
                     return Err(ApiError::new(ErrorCode::NotFound, "no such item"));
                 }
-                continue;
-            };
-            if self.documents.iter().any(|(held, other)| {
-                *held == changes.expected_head
-                    && other.summary.id != *item_id
-                    && other.summary.path == document.summary.path
-            }) {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
-                    "another item holds the restored path",
-                ));
             }
-            restored.push(document);
+            for (item_id, from) in &listed {
+                let Some(document) = at(from, *item_id) else {
+                    continue;
+                };
+                if self.documents.iter().any(|(held, other)| {
+                    *held == changes.expected_head
+                        && other.summary.path == document.summary.path
+                        && listed
+                            .iter()
+                            .all(|(grouped, _)| *grouped != other.summary.id)
+                }) {
+                    return Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "another item holds the restored path",
+                    ));
+                }
+                restored.push(document);
+            }
         }
         Ok(restored)
     }
-
     /// The commit before `revision` on the line: the head a written commit was based on, or the
     /// head a test moved away from.
     fn parent_of(&self, revision: &Revision) -> Option<&Revision> {
