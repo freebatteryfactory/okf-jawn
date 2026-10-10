@@ -208,6 +208,7 @@ pub struct FakeDrafts {
     discarded: Mutex<Vec<(MutationId, Draft)>>,
     gets: AtomicUsize,
     saved_before_discard: Mutex<Option<DraftWrite>>,
+    fail_next_discard: AtomicBool,
 }
 
 /// `SandboxCapabilityStore` that keeps every mint.
@@ -828,6 +829,11 @@ impl FakeDrafts {
     pub fn save_before_next_discard(&self, write: DraftWrite) -> Built<()> {
         *lock(&self.saved_before_discard)? = Some(write);
         Ok(())
+    }
+
+    /// Make the next `discard` fail with a store fault (`Internal`), removing nothing.
+    pub fn fail_next_discard(&self) {
+        self.fail_next_discard.store(true, Ordering::SeqCst);
     }
 
     /// Every draft held now, most recently saved first.
@@ -1599,6 +1605,7 @@ impl DraftStore for FakeDrafts {
         expected: Option<Digest>,
     ) -> PortFuture<'a, Draft> {
         Box::pin(async move {
+            injected(&self.fail_next_discard)?;
             let landing = lock_api(&self.saved_before_discard)?.take();
             if let Some(write) = landing {
                 self.save(scope, mutation(0xdead), write).await?;

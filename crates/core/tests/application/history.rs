@@ -970,6 +970,47 @@ async fn a_resumed_snapshot_completes_when_the_editor_discarded_a_draft_meanwhil
     Ok(())
 }
 #[tokio::test]
+async fn a_store_fault_while_removing_a_draft_fails_the_snapshot() -> TestResult {
+    // On the found-commit path.
+    let world = resumable()?;
+    let caller = first_attempt_fails_after_its_commit(&world).await?;
+    world.drafts.fail_next_discard();
+    let fault = err_of(
+        world
+            .service
+            .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+            .await,
+    )?;
+    assert_eq!(fault.code, ErrorCode::Internal);
+    assert_eq!(
+        world.records.receipts()?.len(),
+        0,
+        "the Snapshot did not complete"
+    );
+    // A later resume completes it.
+    world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+        .await?;
+    assert_eq!(world.drafts.held()?.len(), 0);
+    assert_eq!(world.versions.commits()?.len(), 1);
+    // On a first attempt.
+    let world = resumable()?;
+    world.drafts.fail_next_discard();
+    let fault = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(1)))?,
+                snapshot(&[NOTE, OTHER])?,
+            )
+            .await,
+    )?;
+    assert_eq!(fault.code, ErrorCode::Internal);
+    assert_eq!(world.records.receipts()?.len(), 0);
+    Ok(())
+}
+#[tokio::test]
 async fn commit_items_reports_lint_only_for_the_items_it_snapshots() -> TestResult {
     let world = World::new()?;
     let base = revision('a')?;
