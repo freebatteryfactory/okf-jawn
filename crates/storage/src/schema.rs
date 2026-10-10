@@ -12,7 +12,10 @@ pub const RECORDS: Migrations<'static> = Migrations::from_slice(RECORDS_STEPS);
 /// Every released step of the index database, oldest first.
 pub const INDEX: Migrations<'static> = Migrations::from_slice(INDEX_STEPS);
 
-const RECORDS_STEPS: &[M<'static>] = &[M::up(RECORDS_V1).foreign_key_check()];
+const RECORDS_STEPS: &[M<'static>] = &[
+    M::up(RECORDS_V1).foreign_key_check(),
+    M::up(RECORDS_V2).foreign_key_check(),
+];
 
 const INDEX_STEPS: &[M<'static>] = &[M::up(INDEX_V1)];
 
@@ -273,6 +276,22 @@ CREATE TABLE sessions (
     principal TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     revoked INTEGER NOT NULL DEFAULT 0
+) STRICT;
+";
+
+/// Records schema, version 2: the progress of each purge, so a purge resumes by repeating.
+///
+/// `plan` is written once, before anything is removed: what the target references cannot be
+/// read again after its repository and rows are gone. It holds identities and counts, never
+/// content. `step` is the last step completed; `report` is present once the purge is done.
+const RECORDS_V2: &str = r"
+CREATE TABLE purge_progress (
+    purge_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    mutation_id TEXT NOT NULL,
+    plan TEXT NOT NULL,
+    step INTEGER NOT NULL,
+    report TEXT
 ) STRICT;
 ";
 

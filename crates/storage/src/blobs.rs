@@ -124,6 +124,41 @@ impl LocalBlobs {
         }
     }
 
+    /// Where `tenant`'s object lies on disk, whether or not it is held; for a blocking reader
+    /// that must not go through the async store.
+    pub(crate) fn local_path(
+        &self,
+        tenant: &TenantId,
+        digest: &Digest,
+    ) -> Result<PathBuf, ApiError> {
+        self.store
+            .path_to_filesystem(&location(tenant, digest))
+            .map_err(|error| store_error(&error))
+    }
+
+    /// Delete `tenant`'s object durably; `true` when it was held. Only a purge calls this,
+    /// after it has established that nothing surviving references the object.
+    ///
+    /// The file is removed with std and, on Unix, its directory is synced, so a power loss
+    /// after the purge completes cannot bring the bytes back (`object_store`'s own delete does
+    /// not sync). On Windows NTFS journals the removal, as for `write_format`. Blocking.
+    pub(crate) fn remove_for(&self, tenant: &TenantId, digest: &Digest) -> Result<bool, ApiError> {
+        let path = self.local_path(tenant, digest)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(io_error("remove", &path, &error)),
+        }
+        if cfg!(unix)
+            && let Some(parent) = path.parent()
+        {
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| io_error("sync", parent, &error))?;
+        }
+        Ok(true)
+    }
+
     async fn size(&self, location: &ObjectPath) -> Result<u64, ApiError> {
         self.store
             .get_opts(location, GetOptions::new().with_head(true))

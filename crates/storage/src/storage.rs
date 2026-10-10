@@ -24,6 +24,7 @@ use crate::git::GitVersions;
 use crate::git::repo::Repositories;
 use crate::mutations::SqliteMutations;
 use crate::proposals::SqliteProposals;
+use crate::purge::StoragePurger;
 use crate::readiness::StorageReadiness;
 use crate::records::SqliteRecords;
 use crate::sandbox::SqliteSandbox;
@@ -178,6 +179,12 @@ impl Storage {
     #[must_use]
     pub fn search(&self) -> SqliteSearch {
         SqliteSearch::new(self.index.clone(), self.repositories.clone())
+    }
+
+    /// Purge of a workspace or an item from every store above.
+    #[must_use]
+    pub fn purger(&self) -> StoragePurger {
+        StoragePurger::new(self.clone())
     }
 
     /// Readiness of these stores.

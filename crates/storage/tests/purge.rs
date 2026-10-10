@@ -1,0 +1,774 @@
+//! Workspace purge against real Git, SQLite and the object store: the receipt of
+//! `storage-purge-workspace` (`cargo test -p okf-jawn-storage --features runtime -- purge`).
+//!
+//! The target workspace's content carries the marker `zanzibar` (in a note's path and body, a
+//! draft, original bytes, a conversion record's asset, retained archives and exports, an
+//! upload's part file); nothing that survives carries it. After the purge no file anywhere
+//! under the data directory may contain the marker, which reaches the SQLite files' free pages
+//! and write-ahead logs, the index, the object store and the pre-migration backups.
+#![cfg(feature = "runtime")]
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use okf_jawn_contract::access::AccessRoute;
+use okf_jawn_contract::common::Warning;
+use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::events::Receipt;
+use okf_jawn_contract::identity::{
+    Digest, ItemId, MutationId, PurgeId, Revision, TenantId, WorkspacePath,
+};
+use okf_jawn_contract::item::ItemKind;
+use okf_jawn_contract::purge::{PurgeReport, PurgeTarget};
+use okf_jawn_contract::workspace::ArtifactKind;
+use okf_jawn_core::credentials::{ConnectorIssue, CredentialStore, NewConnector};
+use okf_jawn_core::drafts::{DraftStore, DraftWrite};
+use okf_jawn_core::jobs::{JobScope, JobSpec, NewArtifact, NewJob, NewPurge, RecordStore};
+use okf_jawn_core::search::SearchIndex;
+use okf_jawn_core::storage::{
+    BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, ObjectInfo,
+    Provenance, Purger, SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
+};
+use okf_jawn_core::uploads::{NewUpload, UploadStore};
+use okf_jawn_storage::Storage;
+use serde_json::json;
+
+use check::{TestResult, err_of, some};
+
+/// The identity numbered `n`, of the type the context names.
+macro_rules! uuid {
+    ($n:expr) => {
+        serde_json::from_value(json!(uuid_text($n)))
+    };
+}
+
+type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// Accepts every candidate.
+struct Accept;
+
+/// Two workspaces of one tenant: the purge target and a survivor.
+struct Fixture {
+    storage: Storage,
+    target: StorageScope,
+    survivor: StorageScope,
+    /// Every revision of the target, proposal candidate included.
+    revisions: Vec<Revision>,
+    /// An object both workspaces' cards reference.
+    shared: Digest,
+    /// Objects only the target references.
+    only_target: Vec<Digest>,
+    /// The target's workspace archive, which the survivor holds in an upload slot.
+    archive: Digest,
+}
+
+/// What `seed_git` wrote.
+struct Seeded {
+    revisions: Vec<Revision>,
+    shared: Digest,
+    objects: Vec<Digest>,
+}
+
+/// The marker of the target's content.
+const MARKER: &[u8] = b"zanzibar";
+
+impl CandidateCheck for Accept {
+    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+        Ok(Vec::new())
+    }
+}
+
+/// A fixed UUID spelling numbered `n`.
+fn uuid_text(n: u32) -> String {
+    format!("00000000-0000-4000-8000-{n:012}")
+}
+
+fn person(subject: &str) -> Provenance {
+    Provenance {
+        subject: subject.to_owned(),
+        route: AccessRoute::LocalOwner,
+        client_id: None,
+    }
+}
+
+fn tenant() -> Fallible<TenantId> {
+    Ok(TenantId::try_from("local".to_owned())?)
+}
+
+fn note(item: ItemId, at: &str, body: &str) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::CreateItem {
+        item_id: item,
+        path: WorkspacePath::try_from(at.to_owned())?,
+        title: Some("Plans".to_owned()),
+        type_name: "Note".to_owned(),
+        kind: ItemKind::Note,
+        body: body.to_owned(),
+        properties: BTreeMap::new(),
+    })
+}
+
+/// A source card for `object` whose extraction names the conversion record `record`.
+fn card(item: ItemId, at: &str, object: &Digest, record: Option<&Digest>) -> Fallible<TreeEdit> {
+    let mut extraction = json!({
+        "outcome": { "status": "unsupported" },
+        "text_origin": "none",
+        "corrected": false,
+        "warnings": []
+    });
+    if let (Some(record), Some(fields)) = (record, extraction.as_object_mut()) {
+        fields.insert("digest".to_owned(), json!(record.as_str()));
+    }
+    Ok(TreeEdit::WriteSourceCard(Box::new(SourceCard {
+        item_id: item,
+        path: WorkspacePath::try_from(at.to_owned())?,
+        title: "scan.pdf".to_owned(),
+        type_name: "Source".to_owned(),
+        body: String::new(),
+        properties: BTreeMap::new(),
+        appearance: serde_json::from_value(json!({
+            "object": object.as_str(),
+            "names": [{
+                "filename": "scan.pdf",
+                "folder": "",
+                "observed_at": "2026-10-09T12:00:00.000Z",
+                "supplied_by": "ana"
+            }],
+            "media_type": "application/pdf",
+            "size": "10",
+            "metadata": {},
+            "extraction": extraction
+        }))?,
+    })))
+}
+
+async fn put(storage: &Storage, scope: &StorageScope, bytes: &[u8]) -> Fallible<ObjectInfo> {
+    Ok(storage
+        .blobs()
+        .put(
+            scope,
+            Box::pin(std::io::Cursor::new(bytes.to_vec())),
+            1 << 20,
+            None,
+        )
+        .await?)
+}
+
+async fn create(
+    storage: &Storage,
+    mutation: u32,
+    name: &str,
+) -> Fallible<(StorageScope, Revision)> {
+    let created = storage
+        .catalog()
+        .create(
+            &tenant()?,
+            uuid!(mutation)?,
+            NewWorkspace {
+                name: name.to_owned(),
+                description: String::new(),
+                creator: person("ana"),
+            },
+        )
+        .await?;
+    Ok((
+        StorageScope {
+            tenant_id: tenant()?,
+            workspace_id: created.id,
+        },
+        created.head,
+    ))
+}
+
+async fn commit(
+    storage: &Storage,
+    scope: &StorageScope,
+    mutation: u32,
+    head: &Revision,
+    edits: Vec<TreeEdit>,
+) -> Fallible<Revision> {
+    Ok(storage
+        .versions()
+        .commit(
+            scope,
+            CommitChanges {
+                mutation_id: uuid!(mutation)?,
+                expected_head: head.clone(),
+                author: person("ana"),
+                message: "Seed".to_owned(),
+                edits,
+            },
+            Arc::new(Accept),
+        )
+        .await?
+        .revision)
+}
+
+/// Record a retained artifact of `kind` over `bytes` in the workspace.
+async fn artifact(
+    storage: &Storage,
+    scope: &StorageScope,
+    mutation: u32,
+    kind: ArtifactKind,
+    bytes: &[u8],
+) -> Fallible<Digest> {
+    let object = put(storage, scope, bytes).await?;
+    let job_scope = JobScope::Workspace(scope.clone());
+    let job = storage
+        .records()
+        .create_job(
+            &job_scope,
+            NewJob {
+                mutation_id: uuid!(mutation)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    storage
+        .records()
+        .record_artifact(
+            &job_scope,
+            uuid!(mutation.saturating_add(1))?,
+            NewArtifact {
+                kind,
+                object: object.clone(),
+                media_type: "application/zip".to_owned(),
+                created_by_job: job.id,
+            },
+        )
+        .await?;
+    Ok(object.digest)
+}
+
+/// Open an upload slot in `scope` and write `bytes` to it, completing it when asked.
+async fn upload(
+    storage: &Storage,
+    scope: &StorageScope,
+    mutation: u32,
+    bytes: &[u8],
+    complete: bool,
+) -> Fallible<okf_jawn_contract::identity::UploadId> {
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            scope,
+            uuid!(mutation)?,
+            NewUpload {
+                filename: "archive.zip".to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(bytes.len())?,
+                expected_sha256: None,
+                supplied_by: person("ana"),
+            },
+        )
+        .await?;
+    if !bytes.is_empty() {
+        uploads
+            .put_content(
+                scope,
+                slot.id,
+                Box::pin(std::io::Cursor::new(bytes.to_vec())),
+                1 << 20,
+            )
+            .await?;
+    }
+    if complete {
+        let digest = Digest::try_from(sha256(bytes))?;
+        uploads.complete(scope, slot.id, digest).await?;
+    }
+    Ok(slot.id)
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        })
+}
+
+/// The target's Git content (a note, two cards, a proposal candidate) and the survivor's
+/// card that shares one of the target's objects.
+async fn seed_git(
+    storage: &Storage,
+    target: &StorageScope,
+    survivor: &StorageScope,
+    heads: (Revision, Revision),
+) -> Fallible<Seeded> {
+    let (created, survivor_head) = heads;
+    let original = put(storage, target, b"zanzibar original bytes").await?;
+    let asset = put(storage, target, b"zanzibar page image").await?;
+    let record = json!({ "assets": [{ "digest": asset.digest.as_str() }] }).to_string();
+    let record = put(storage, target, record.as_bytes()).await?;
+    let shared = put(storage, target, b"commonplace shared bytes").await?;
+    let edits = vec![
+        note(
+            uuid!(10)?,
+            "notes/zanzibar-plans.md",
+            "Ferry to zanzibar at dawn.",
+        )?,
+        card(
+            uuid!(11)?,
+            "sources/scan.md",
+            &original.digest,
+            Some(&record.digest),
+        )?,
+        card(uuid!(12)?, "sources/common.md", &shared.digest, None)?,
+    ];
+    let seeded = commit(storage, target, 3, &created, edits).await?;
+    let candidate = storage
+        .versions()
+        .create_candidate(
+            target,
+            uuid!(20)?,
+            CandidateChanges {
+                mutation_id: uuid!(4)?,
+                base: seeded.clone(),
+                author: person("ana"),
+                message: "Propose".to_owned(),
+                edits: vec![note(uuid!(13)?, "notes/other.md", "More zanzibar notes.")?],
+            },
+            Arc::new(Accept),
+        )
+        .await?;
+    let shared_card = card(uuid!(14)?, "sources/common.md", &shared.digest, None)?;
+    commit(storage, survivor, 5, &survivor_head, vec![shared_card]).await?;
+    Ok(Seeded {
+        revisions: vec![created, seeded, candidate],
+        shared: shared.digest,
+        objects: vec![original.digest, asset.digest, record.digest],
+    })
+}
+
+/// A receipt of the survivor citing the target's note.
+async fn cite(
+    storage: &Storage,
+    survivor: &StorageScope,
+    target: &StorageScope,
+    revision: &Revision,
+) -> Fallible<()> {
+    let receipt: Receipt = serde_json::from_value(json!({
+        "id": uuid_text(40),
+        "workspace_id": survivor.workspace_id,
+        "operation_id": "search_items",
+        "principal_subject": "ana",
+        "route": "local_owner",
+        "sources": [{
+            "workspace_id": target.workspace_id,
+            "item_id": uuid_text(10),
+            "path": "notes/zanzibar-plans.md",
+            "revision": revision.as_str(),
+            "selection": { "kind": "all" }
+        }],
+        "returned_at": "2026-10-09T12:00:00.000Z",
+        "audience": "human_display"
+    }))?;
+    storage
+        .records()
+        .insert_receipt(survivor, None, receipt)
+        .await?;
+    Ok(())
+}
+
+/// A connector that lists both workspaces.
+async fn connect(
+    storage: &Storage,
+    workspaces: Vec<okf_jawn_contract::identity::WorkspaceId>,
+) -> Fallible<()> {
+    let issued = storage
+        .credentials()
+        .create_connector(
+            uuid!(41)?,
+            NewConnector {
+                label: "Desk".to_owned(),
+                workspace_ids: workspaces,
+                allow_propose: false,
+            },
+        )
+        .await?;
+    match issued {
+        ConnectorIssue::Issued(_) => Ok(()),
+        ConnectorIssue::Existing(_) => Err("expected a new connector".into()),
+    }
+}
+
+/// The target with everything a purge must reach, and a survivor that shares one object,
+/// holds the target's archive in an upload slot and cites the target in a receipt.
+async fn fixture(directory: &Path) -> Fallible<Fixture> {
+    let storage = Storage::open(directory)?;
+    let (target, created) = create(&storage, 1, "Zanzibar trip").await?;
+    let (survivor, survivor_head) = create(&storage, 2, "Garden").await?;
+    let seeded = seed_git(&storage, &target, &survivor, (created, survivor_head)).await?;
+    let base = some(seeded.revisions.get(1), "the seeded revision")?.clone();
+    storage
+        .drafts()
+        .save(
+            &target,
+            uuid!(6)?,
+            DraftWrite {
+                item_id: uuid!(10)?,
+                editor: "ana".to_owned(),
+                base_revision: base.clone(),
+                body: "Draft: zanzibar spice market".to_owned(),
+                properties: BTreeMap::new(),
+                content_digest: Digest::try_from("e".repeat(64))?,
+            },
+        )
+        .await?;
+    storage
+        .search()
+        .index_revision(&target, base.clone())
+        .await?;
+    let archive = b"zanzibar workspace archive";
+    let archive = artifact(
+        &storage,
+        &target,
+        30,
+        ArtifactKind::WorkspaceBackup,
+        archive,
+    )
+    .await?;
+    let export = artifact(
+        &storage,
+        &target,
+        32,
+        ArtifactKind::Export,
+        b"zanzibar export",
+    )
+    .await?;
+    let history = storage
+        .versions()
+        .write_history(&target, &base, uuid!(7)?)
+        .await?;
+    upload(&storage, &target, 8, b"zanzibar upload part", false).await?;
+    upload(&storage, &survivor, 9, b"zanzibar workspace archive", true).await?;
+    cite(&storage, &survivor, &target, &base).await?;
+    connect(&storage, vec![target.workspace_id, survivor.workspace_id]).await?;
+    let mut only_target = seeded.objects;
+    only_target.extend([export, history.digest, archive.clone()]);
+    Ok(Fixture {
+        storage,
+        target,
+        survivor,
+        revisions: seeded.revisions,
+        shared: seeded.shared,
+        only_target,
+        archive,
+    })
+}
+
+/// Copy a live database into the pre-migration directory as `migrate_database` does.
+fn pre_migration_copy(data: &Path, file: &str, name: &str) -> Fallible<()> {
+    let directory = data.join("backups").join("pre-migration");
+    std::fs::create_dir_all(&directory)?;
+    let target = directory.join(name);
+    let connection = rusqlite::Connection::open(data.join(file))?;
+    connection.execute("VACUUM INTO ?1", [some(target.to_str(), "a UTF-8 path")?])?;
+    Ok(())
+}
+
+/// A pre-migration backup set holding a workspace archive of each workspace.
+fn pre_migration_set(data: &Path, fixture: &Fixture) -> Fallible<()> {
+    let directory = data
+        .join("backups")
+        .join("pre-migration")
+        .join("set-1")
+        .join("workspaces")
+        .join("local");
+    std::fs::create_dir_all(&directory)?;
+    std::fs::write(
+        directory.join(format!("{}.zip", fixture.target.workspace_id.0)),
+        b"zanzibar pre-migration archive",
+    )?;
+    std::fs::write(
+        directory.join(format!("{}.zip", fixture.survivor.workspace_id.0)),
+        b"garden pre-migration archive",
+    )?;
+    Ok(())
+}
+
+/// Every file under `directory` whose bytes contain the marker.
+fn marked_files(directory: &Path) -> Fallible<Vec<String>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.file_name().is_some_and(|name| name == "okf-jawn.lock") {
+            // Locked by this process on Windows, and empty.
+            continue;
+        }
+        if path.is_dir() {
+            found.extend(marked_files(&path)?);
+        } else if std::fs::read(&path)?
+            .windows(MARKER.len())
+            .any(|window| window == MARKER)
+        {
+            found.push(path.display().to_string());
+        }
+    }
+    Ok(found)
+}
+
+async fn record_purge(storage: &Storage, fixture: &Fixture, purge: PurgeId) -> Fallible<()> {
+    storage
+        .records()
+        .create_purge(
+            &tenant()?,
+            uuid!(50)?,
+            NewPurge {
+                id: purge,
+                target: PurgeTarget::Workspace {
+                    workspace_id: fixture.target.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Whether the tenant's object store still holds `digest`.
+async fn held(storage: &Storage, scope: &StorageScope, digest: &Digest) -> Fallible<bool> {
+    match storage.blobs().open(scope, digest, 0, 1).await {
+        Ok(_) => Ok(true),
+        Err(error) if error.code == ErrorCode::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// What the purge removed and kept, and what it reported.
+async fn assert_removed(fixture: &Fixture, report: &PurgeReport) -> TestResult {
+    let storage = &fixture.storage;
+    let repository = storage
+        .data()
+        .repositories_path()
+        .join("local")
+        .join(format!("{}.git", fixture.target.workspace_id.0));
+    assert!(!repository.exists(), "the repository is deleted");
+    assert_eq!(
+        report.objects_removed,
+        fixture.only_target.len().to_string()
+    );
+    assert_eq!(report.objects_kept_shared, "1");
+    assert_eq!(
+        report.backups_removed, 3,
+        "its archive artifact, the index copy, the set's archive"
+    );
+    assert_eq!(report.backups_rewritten, 1, "the records copy");
+    assert_eq!(report.exports_removed, 1);
+    assert_eq!(report.drafts_removed, 1);
+    assert_eq!(report.revisions_invalidated, 3);
+    assert_eq!(report.citations_invalidated, 1);
+    for digest in &fixture.only_target {
+        assert!(
+            !held(storage, &fixture.survivor, digest).await?,
+            "{} is removed",
+            digest.as_str()
+        );
+    }
+    assert!(
+        !held(storage, &fixture.survivor, &fixture.archive).await?,
+        "an upload slot holding the target's archive is no surviving reference"
+    );
+    assert!(
+        held(storage, &fixture.survivor, &fixture.shared).await?,
+        "an object the survivor references stays"
+    );
+    let survivor_head = storage.versions().head(&fixture.survivor).await?;
+    storage
+        .versions()
+        .show(&fixture.survivor, &survivor_head, uuid!(14)?)
+        .await?;
+    let error = err_of(storage.catalog().open(&fixture.target).await)?;
+    assert_eq!(error.code, ErrorCode::NotFound);
+    Ok(())
+}
+
+/// What the purge marked invalidated, scrubbed and left in place.
+async fn assert_scrubbed(fixture: &Fixture, data: &Path, purge: PurgeId) -> TestResult {
+    let storage = &fixture.storage;
+    for revision in &fixture.revisions {
+        let mapping = storage
+            .records()
+            .revision_mapping(&fixture.target, revision)
+            .await?;
+        let mapping = some(mapping, "the revision map entry")?;
+        assert_eq!(mapping.purge_id, purge);
+        assert!(
+            mapping.replacement.is_none(),
+            "nothing replaces a purged workspace"
+        );
+    }
+    let receipt = storage
+        .records()
+        .get_receipt(&fixture.survivor, uuid!(40)?)
+        .await?;
+    assert_eq!(receipt.invalidated_by, Some(purge));
+    let cited = some(receipt.sources.first(), "the cited source")?;
+    assert_eq!(cited.path.as_str(), format!("purged/{}", uuid_text(10)));
+    let connectors = storage.credentials().list_connectors(true).await?;
+    let listed = some(connectors.first(), "the connector")?;
+    assert_eq!(listed.workspace_ids, vec![fixture.survivor.workspace_id]);
+    let kept = data
+        .join("backups/pre-migration/set-1/workspaces/local")
+        .join(format!("{}.zip", fixture.survivor.workspace_id.0));
+    assert!(kept.is_file(), "the survivor's archive stays");
+    let stored = storage.records().get_purge(&tenant()?, purge).await?;
+    assert_eq!(
+        stored.requested_by, "ana",
+        "the purge record outlives the workspace"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn purge_workspace_leaves_no_copy_the_application_manages() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    pre_migration_copy(directory.path(), "records.sqlite", "records-v1-1.sqlite")?;
+    pre_migration_copy(directory.path(), "index.sqlite", "index-v1-1.sqlite")?;
+    pre_migration_set(directory.path(), &fixture)?;
+    assert!(
+        !marked_files(directory.path())?.is_empty(),
+        "the fixture writes the marker"
+    );
+    let purge: PurgeId = uuid!(60)?;
+    record_purge(storage, &fixture, purge).await?;
+    let mutation: MutationId = uuid!(61)?;
+    let report = storage
+        .purger()
+        .purge_workspace(&tenant()?, mutation, purge, fixture.target.workspace_id)
+        .await?;
+    assert_eq!(
+        marked_files(directory.path())?,
+        Vec::<String>::new(),
+        "no file under the data directory holds the target's content"
+    );
+    assert_removed(&fixture, &report).await?;
+    assert_scrubbed(&fixture, directory.path(), purge).await?;
+    let repeated = storage
+        .purger()
+        .purge_workspace(&tenant()?, mutation, purge, fixture.target.workspace_id)
+        .await?;
+    assert_eq!(
+        repeated, report,
+        "repeating a finished purge changes nothing"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn purge_workspace_resumes_by_repeating_after_a_failure() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let (survivor, _) = create(&storage, 2, "Garden").await?;
+    let export = artifact(
+        &storage,
+        &target,
+        30,
+        ArtifactKind::Export,
+        b"zanzibar export",
+    )
+    .await?;
+    let slot = upload(&storage, &target, 8, b"", false).await?;
+    // A directory where the upload's part file would be: removing it fails, after the rows
+    // step has removed the workspace's rows and before the purge can go on.
+    let obstacle = directory
+        .path()
+        .join("uploads")
+        .join(format!("{}.part", slot.0));
+    std::fs::create_dir_all(obstacle.join("inside"))?;
+    let purge: PurgeId = uuid!(60)?;
+    let tenant = tenant()?;
+    err_of(
+        storage
+            .purger()
+            .purge_workspace(&tenant, uuid!(61)?, purge, target.workspace_id)
+            .await,
+    )?;
+    let error = err_of(storage.catalog().open(&target).await)?;
+    assert_eq!(
+        error.code,
+        ErrorCode::NotFound,
+        "the rows step ran before the failure"
+    );
+    std::fs::remove_dir_all(&obstacle)?;
+    let report = storage
+        .purger()
+        .purge_workspace(&tenant, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    assert_eq!(
+        report.exports_removed, 1,
+        "the report counts what the plan found"
+    );
+    assert_eq!(report.objects_removed, "1");
+    let error = err_of(
+        storage
+            .blobs()
+            .open(&survivor, &export, 0, 1)
+            .await
+            .map(|read| read.object),
+    )?;
+    assert_eq!(
+        error.code,
+        ErrorCode::NotFound,
+        "the resumed purge removes what the plan found before the rows went"
+    );
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_purged_workspace_identity_is_never_created_again() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let purge: PurgeId = uuid!(60)?;
+    storage
+        .records()
+        .create_purge(
+            &tenant()?,
+            uuid!(50)?,
+            NewPurge {
+                id: purge,
+                target: PurgeTarget::Workspace {
+                    workspace_id: target.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    let error = err_of(create(&storage, 1, "Trip").await)?;
+    assert!(
+        error.to_string().contains("purged"),
+        "a retried creation does not revive the purged identity: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn item_purge_is_declared_and_not_built_yet() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let error = err_of(
+        storage
+            .purger()
+            .purge_item(&target, uuid!(61)?, uuid!(60)?, uuid!(10)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::NotImplemented);
+    Ok(())
+}
+
+#[path = "../../../tests/support/check.rs"]
+mod check;

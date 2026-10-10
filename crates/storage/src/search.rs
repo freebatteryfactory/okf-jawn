@@ -402,7 +402,11 @@ fn store(
     Ok(())
 }
 
-fn discard(transaction: &Transaction<'_>, tenant: &str, workspace: &str) -> Result<(), ApiError> {
+pub(crate) fn discard(
+    transaction: &Transaction<'_>,
+    tenant: &str,
+    workspace: &str,
+) -> Result<(), ApiError> {
     transaction
         .execute(
             "DELETE FROM index_text WHERE rowid IN

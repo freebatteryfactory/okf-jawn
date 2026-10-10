@@ -67,7 +67,8 @@ fn migrations_bring_a_new_directory_to_the_latest_schema() -> TestResult {
     let records = storage.data().records_path();
     let index = storage.data().index_path();
     drop(storage);
-    assert_eq!(user_version(&records)?, 1);
+    // Records schema 2 adds purge progress; the index schema is still at 1.
+    assert_eq!(user_version(&records)?, 2);
     assert_eq!(user_version(&index)?, 1);
     let marker: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
         directory.path().join(FORMAT_FILE),
@@ -82,7 +83,7 @@ fn migrations_bring_a_new_directory_to_the_latest_schema() -> TestResult {
     );
     // Opening again finds nothing pending.
     drop(Storage::open(directory.path())?);
-    assert_eq!(user_version(&records)?, 1);
+    assert_eq!(user_version(&records)?, 2);
     Ok(())
 }
 

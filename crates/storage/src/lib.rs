@@ -18,6 +18,8 @@ mod macros;
 #[cfg(feature = "runtime")]
 pub mod access;
 #[cfg(feature = "runtime")]
+mod backup;
+#[cfg(feature = "runtime")]
 pub mod blobs;
 #[cfg(feature = "runtime")]
 pub mod catalog;
@@ -41,6 +43,8 @@ mod git;
 pub mod mutations;
 #[cfg(feature = "runtime")]
 pub mod proposals;
+#[cfg(feature = "runtime")]
+pub mod purge;
 #[cfg(feature = "runtime")]
 pub mod readiness;
 #[cfg(feature = "runtime")]

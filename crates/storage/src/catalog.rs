@@ -162,6 +162,7 @@ impl WorkspaceCatalog for GitCatalog {
         let repositories = self.repositories.clone();
         Box::pin(self.db.transaction(move |transaction| {
             let id: WorkspaceId = derive_workspace_id(mutation_id);
+            refuse_purged(transaction, &tenant, id)?;
             transaction
                 .execute(
                     "INSERT INTO workspaces (tenant_id, workspace_id, mutation_id, name,
@@ -323,6 +324,29 @@ fn read(
         archived_at: archived_at.map(|at| from_text!(at.as_str())).transpose()?,
         permissions: Vec::new(),
     })
+}
+
+/// Refuse to create a workspace whose identity a purge names: a retried creation must never
+/// bring a purged workspace back under its old identity.
+fn refuse_purged(
+    connection: &Connection,
+    tenant: &TenantId,
+    workspace: WorkspaceId,
+) -> Result<(), ApiError> {
+    let purged: Option<i64> = connection
+        .query_row(
+            "SELECT 1 FROM purges WHERE tenant_id = ?1 AND target_key = ?2",
+            params![tenant.as_str(), format!("workspace/{}", workspace.0)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sql(&error))?;
+    if purged.is_some() {
+        return Err(conflict(
+            "this workspace identity was purged; it is never created again",
+        ));
+    }
+    Ok(())
 }
 
 fn prior(
