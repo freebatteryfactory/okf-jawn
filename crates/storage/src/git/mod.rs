@@ -81,25 +81,28 @@ impl GitVersions {
             return Ok(object);
         }
         let wanted = revision.clone();
-        let (staging, size) = self
+        let blobs = self.blobs.clone();
+        let runtime = tokio::runtime::Handle::current();
+        // The staging directory is made, written, retained and removed under the workspace's
+        // write lock, like every other staged write, so no write or purge of the workspace
+        // runs while it exists.
+        let object = self
             .blocking(scope, move |repositories, scope| {
-                let staging = repositories.stage(scope, mutation_id)?;
-                let bundle = staging.path.join(export::BUNDLE_FILE);
-                let size = export::write_bundle(&repositories.open(scope)?, &wanted, &bundle)?;
-                Ok((staging, size))
+                repositories.locked(scope, || {
+                    let staging = repositories.stage(scope, mutation_id)?;
+                    let bundle = staging.path.join(export::BUNDLE_FILE);
+                    let size = export::write_bundle(&repositories.open(scope)?, &wanted, &bundle)?;
+                    let object = runtime.block_on(blobs.put_for(
+                        &scope.tenant_id,
+                        file_reader(Some(bundle), 0, size),
+                        size,
+                        None,
+                    ))?;
+                    drop(staging);
+                    Ok(object)
+                })
             })
             .await?;
-        let bundle = staging.path.join(export::BUNDLE_FILE);
-        let object = self
-            .blobs
-            .put_for(
-                &scope.tenant_id,
-                file_reader(Some(bundle), 0, size),
-                size,
-                None,
-            )
-            .await?;
-        drop(staging);
         export::record(&self.records, scope, mutation_id, revision, object).await
     }
 
@@ -520,3 +523,93 @@ mod history;
 mod item;
 mod read;
 pub(crate) mod repo;
+
+/// Unit tests here, not in `tests/`: they hold a workspace's write lock, which is private.
+/// They return `ApiError` like core's unit tests.
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use okf_jawn_contract::access::AccessRoute;
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
+    use okf_jawn_contract::identity::{MutationId, TenantId};
+    use okf_jawn_core::storage::{
+        NewWorkspace, Provenance, StorageScope, VersionStore, WorkspaceCatalog,
+    };
+
+    use crate::storage::Storage;
+
+    fn fault(message: &dyn std::fmt::Display) -> ApiError {
+        ApiError::new(ErrorCode::Internal, message.to_string())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_written_history_is_staged_only_under_the_workspace_lock() -> Result<(), ApiError> {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let tenant = TenantId::try_from("local".to_owned()).map_err(|error| fault(&error))?;
+        let mutation = |n: u128| MutationId(uuid::Uuid::from_u128(n));
+        let created = storage
+            .catalog()
+            .create(
+                &tenant,
+                mutation(1),
+                NewWorkspace {
+                    name: "Notes".to_owned(),
+                    description: String::new(),
+                    creator: Provenance {
+                        subject: "ana".to_owned(),
+                        route: AccessRoute::LocalOwner,
+                        client_id: None,
+                    },
+                },
+            )
+            .await?;
+        let scope = StorageScope {
+            tenant_id: tenant,
+            workspace_id: created.id,
+        };
+        let staging = storage
+            .data()
+            .staging_path()
+            .join("local")
+            .join(created.id.0.to_string())
+            .join(mutation(2).0.to_string());
+        let (held, release) = (mpsc::channel(), mpsc::channel::<()>());
+        let holder = {
+            let repositories = storage.repositories.clone();
+            let scope = scope.clone();
+            std::thread::spawn(move || {
+                repositories.locked(&scope, || {
+                    held.0.send(()).map_err(|error| fault(&error))?;
+                    release.1.recv().map_err(|error| fault(&error))
+                })
+            })
+        };
+        held.1.recv().map_err(|error| fault(&error))?;
+        let versions = storage.versions();
+        let writer = {
+            let scope = scope.clone();
+            let revision = created.head.clone();
+            tokio::spawn(
+                async move { versions.write_history(&scope, &revision, mutation(2)).await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !staging.exists() && !writer.is_finished(),
+            "nothing is staged while another write holds the workspace"
+        );
+        release.0.send(()).map_err(|error| fault(&error))?;
+        holder
+            .join()
+            .map_err(|_| fault(&"the lock holder stopped"))??;
+        writer.await.map_err(|error| fault(&error))??;
+        assert!(
+            !staging.exists(),
+            "the staging directory is removed afterwards"
+        );
+        Ok(())
+    }
+}
