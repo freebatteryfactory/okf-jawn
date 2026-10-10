@@ -34,7 +34,12 @@ use crate::storage::{TreeEdit, derive_item_id};
 /// List one folder at one resolved revision; with the `unprocessed` filter, only the sources
 /// among its items whose conversion is partial, failed or unsupported.
 ///
-/// The filter applies to the page the store returned, so a filtered page may hold fewer items
+/// A listing at the current head (`latest`, or a named revision that is the head now) leaves
+/// archived items out: the contract hides them "from ordinary current listings". A listing at
+/// a historical revision keeps them, flagged `archived` as they were. Archived items stay
+/// findable through search with `include_archived`.
+///
+/// The filters apply to the page the store returned, so a filtered page may hold fewer items
 /// than asked; its continuation is the store's. Child folders are listed either way.
 ///
 /// # Errors
@@ -52,17 +57,26 @@ pub(super) async fn list_items(
         Some(WorkspacePath::try_from(request.folder).map_err(|error| invalid(error.0, "/folder"))?)
     };
     let revision = resolve(service, &scope, &request.at).await?;
-    let listing = service
-        .ports()
+    let ports = service.ports();
+    // `latest` is the head by resolution; a named revision is current when it is the head now.
+    let current = match &request.at {
+        At::Latest => true,
+        At::Revision { .. } => ports.versions.head(&scope).await? == revision,
+    };
+    let listing = ports
         .versions
         .list(&scope, &revision, folder.as_ref(), request.page.into())
         .await?;
-    let items = match request.extraction {
-        None => listing.items,
-        Some(ExtractionFilter::Unprocessed) => {
-            listing.items.into_iter().filter(is_unprocessed).collect()
-        }
-    };
+    let items = listing
+        .items
+        .into_iter()
+        // An archived item is hidden from an ordinary current listing (`ItemSummary::archived`).
+        .filter(|item| !(current && item.archived))
+        .filter(|item| match request.extraction {
+            None => true,
+            Some(ExtractionFilter::Unprocessed) => is_unprocessed(item),
+        })
+        .collect();
     Ok(ListItemsResponse {
         revision,
         items,

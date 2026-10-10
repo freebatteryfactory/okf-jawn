@@ -140,6 +140,67 @@ async fn list_items_lists_one_folder_at_the_head_resolved_once() -> TestResult {
 }
 
 #[tokio::test]
+async fn list_items_hides_archived_items_at_the_current_head_and_keeps_them_in_history()
+-> TestResult {
+    let world = World::new()?;
+    let mut archived = listed(2, None)?;
+    archived.archived = true;
+    world.versions.put_listing(
+        &revision('a')?,
+        Some(path("notes")?),
+        FolderListing {
+            items: vec![listed(1, None)?, archived],
+            folders: Vec::new(),
+            next_cursor: None,
+        },
+    )?;
+    let caller = alice(OperationName::ListItems, None)?;
+    let request = |at: At| -> Built<ListItemsRequest> {
+        Ok(ListItemsRequest {
+            workspace_id: scope()?.workspace_id,
+            at,
+            folder: "notes".to_owned(),
+            extraction: None,
+            page: PageRequest {
+                cursor: None,
+                limit: 50,
+            },
+        })
+    };
+    let listed_ids = |items: &[okf_jawn_contract::item::ItemSummary]| -> Vec<(ItemId, bool)> {
+        items.iter().map(|item| (item.id, item.archived)).collect()
+    };
+    let live = ItemId(Uuid::from_u128(1));
+    let shelved = ItemId(Uuid::from_u128(2));
+    // `a` is the head: latest, and `a` named, are current listings.
+    for at in [
+        At::Latest,
+        At::Revision {
+            revision: revision('a')?,
+        },
+    ] {
+        let current = world.service.list_items(&caller, request(at)?).await?;
+        assert_eq!(listed_ids(&current.items), vec![(live, false)]);
+    }
+    // Once the head has moved on, `a` is history and keeps the archived item, flagged.
+    world.versions.set_head(revision('b')?)?;
+    let history = world
+        .service
+        .list_items(
+            &caller,
+            request(At::Revision {
+                revision: revision('a')?,
+            })?,
+        )
+        .await?;
+    assert_eq!(
+        listed_ids(&history.items),
+        vec![(live, false), (shelved, true)]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn list_items_unprocessed_lists_only_partial_failed_or_unsupported_sources() -> TestResult {
     let world = World::new()?;
     world.versions.put_listing(

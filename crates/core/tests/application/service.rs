@@ -92,6 +92,30 @@ fn the_sandbox_origin_port_lies_in_one_to_65535() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn an_ipv6_sandbox_host_must_be_an_ipv6_address() -> TestResult {
+    let check = |origin: &str| {
+        ApplicationConfig {
+            sandbox_origin: origin.to_owned(),
+            ..config()
+        }
+        .check()
+    };
+    check("https://[::1]:8443")?;
+    check("http://[2001:db8::7]")?;
+    for origin in [
+        "https://[:::]",
+        "http://[:]",
+        "https://[1:2:3]",
+        "https://[::g]",
+    ] {
+        let refused = err_of(check(origin))?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput, "{origin}");
+        assert_eq!(refused.field.as_deref(), Some("sandbox_origin"), "{origin}");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_operation_of_a_later_part_answers_not_implemented() -> TestResult {
     let world = World::new()?;
