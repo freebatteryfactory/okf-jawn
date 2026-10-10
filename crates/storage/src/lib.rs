@@ -18,7 +18,7 @@ mod macros;
 #[cfg(feature = "runtime")]
 pub mod access;
 #[cfg(feature = "runtime")]
-mod backup;
+pub mod backup;
 #[cfg(feature = "runtime")]
 pub mod blobs;
 #[cfg(feature = "runtime")]

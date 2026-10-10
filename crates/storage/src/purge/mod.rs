@@ -602,5 +602,5 @@ where
 }
 
 mod copies;
-mod references;
+pub(crate) mod references;
 mod rows;

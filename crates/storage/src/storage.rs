@@ -11,6 +11,7 @@ use std::sync::Arc;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 
 use crate::access::LocalAccess;
+use crate::backup::{StorageBackups, write_pre_migration_set};
 use crate::blobs::LocalBlobs;
 use crate::catalog::GitCatalog;
 use crate::confirmations::SqliteConfirmations;
@@ -19,7 +20,7 @@ use crate::data::{DataDir, FormatState, INDEX_FILE, RECORDS_FILE};
 use crate::db::Db;
 use crate::drafts::SqliteDrafts;
 use crate::events::SqliteEvents;
-use crate::format::{migrate_database, refuse_newer};
+use crate::format::{migrate_database, needs_upgrade, refuse_newer};
 use crate::git::GitVersions;
 use crate::git::repo::Repositories;
 use crate::mutations::SqliteMutations;
@@ -75,6 +76,9 @@ impl Storage {
         for directory in [data.objects_path(), data.repositories_path()] {
             std::fs::create_dir_all(&directory)
                 .map_err(|error| crate::data::io_error("create", &directory, &error))?;
+        }
+        if data.records_path().exists() && needs_upgrade(&data.records_path(), &schema::RECORDS)? {
+            write_pre_migration_set(&data)?;
         }
         let records = migrate_database(&data, RECORDS_FILE, &schema::RECORDS)?;
         let index = migrate_database(&data, INDEX_FILE, &schema::INDEX)?;
@@ -179,6 +183,12 @@ impl Storage {
     #[must_use]
     pub fn search(&self) -> SqliteSearch {
         SqliteSearch::new(self.index.clone(), self.repositories.clone())
+    }
+
+    /// Workspace and installation archives, restore, and the offline backup functions.
+    #[must_use]
+    pub fn backups(&self) -> StorageBackups {
+        StorageBackups::new(self.clone())
     }
 
     /// Purge of a workspace or an item from every store above.

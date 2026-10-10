@@ -120,6 +120,26 @@ pub fn migrate_database<'data>(
     })
 }
 
+/// Whether an existing database holds a schema that `migrations` would upgrade.
+///
+/// # Errors
+/// Returns `Unavailable` or `Internal` when its version cannot be read. Nothing is written.
+pub fn needs_upgrade(path: &Path, migrations: &Migrations<'_>) -> Result<bool, ApiError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| open_error(path, &error))?;
+    let from: usize = migrations
+        .current_version(&connection)
+        .map_err(|error| migration_error(path, &error))?
+        .into();
+    let pending = migrations
+        .pending_migrations(&connection)
+        .map_err(|error| migration_error(path, &error))?;
+    Ok(from > 0 && pending > 0)
+}
+
 /// Refuse, through a read-only connection, a database newer than `migrations`.
 ///
 /// # Errors

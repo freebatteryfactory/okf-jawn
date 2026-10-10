@@ -279,7 +279,8 @@ CREATE TABLE sessions (
 ) STRICT;
 ";
 
-/// Records schema, version 2: the progress of each purge, so a purge resumes by repeating.
+/// Records schema, version 2: the progress of each purge, so a purge resumes by repeating;
+/// the archive each backup mutation wrote; and the report of each restore mutation.
 ///
 /// `plan` is written once, before anything is removed: what the target references cannot be
 /// read again after its repository and rows are gone. It holds identities and counts, never
@@ -292,6 +293,21 @@ CREATE TABLE purge_progress (
     plan TEXT NOT NULL,
     step INTEGER NOT NULL,
     report TEXT
+) STRICT;
+
+CREATE TABLE backup_archives (
+    mutation_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT,
+    digest TEXT NOT NULL,
+    size INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE restores (
+    mutation_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    report TEXT NOT NULL
 ) STRICT;
 ";
 
