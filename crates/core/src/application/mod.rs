@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use time::OffsetDateTime;
 
 use crate::access::AccessControl;
 use crate::confirmations::ConfirmationStore;
@@ -165,11 +166,17 @@ pub struct ApplicationConfig {
     pub sandbox_ttl: Duration,
 }
 
+/// Where the service reads the current instant: the system clock unless a test fixes it
+/// (`ApplicationService::with_clock`). A sandbox capability expires at this instant plus the
+/// configured ttl, and a receipt records it as the time content was returned.
+pub type Clock = fn() -> OffsetDateTime;
+
 /// Coordinates authorization, revision resolution, and port calls for every declared operation.
 pub struct ApplicationService {
     ports: Ports,
     config: ApplicationConfig,
     conformance: Arc<dyn CandidateCheck>,
+    clock: Clock,
 }
 
 impl ApplicationConfig {
@@ -209,7 +216,20 @@ impl ApplicationService {
             ports,
             config,
             conformance: Arc::new(OkfConformance),
+            clock: OffsetDateTime::now_utc,
         })
+    }
+
+    /// The same service reading the current instant from `clock` instead of the system clock.
+    #[must_use]
+    pub fn with_clock(self, clock: Clock) -> Self {
+        Self { clock, ..self }
+    }
+
+    /// The current instant, from the service's clock.
+    #[must_use]
+    pub fn now(&self) -> OffsetDateTime {
+        (self.clock)()
     }
 
     /// The injected adapters, for operation modules within this service.

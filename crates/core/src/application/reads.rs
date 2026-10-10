@@ -234,7 +234,7 @@ pub(super) async fn create_sandbox_capability(
     )
     .await?;
     let config = service.config();
-    let expires_at = expiry(config.sandbox_ttl)?;
+    let expires_at = expiry(service.now(), config.sandbox_ttl)?;
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     service
         .ports()
@@ -679,8 +679,8 @@ fn top_left_box(region: &PageRegion) -> (f64, f64, f64, f64) {
     )
 }
 
-/// When a capability minted now with `ttl` stops resolving.
-fn expiry(ttl: std::time::Duration) -> Result<Timestamp, ApiError> {
+/// When a capability issued at `issued` with `ttl` stops resolving: exactly `issued + ttl`.
+fn expiry(issued: OffsetDateTime, ttl: std::time::Duration) -> Result<Timestamp, ApiError> {
     let unrepresentable = || {
         ApiError::new(
             ErrorCode::Internal,
@@ -688,9 +688,7 @@ fn expiry(ttl: std::time::Duration) -> Result<Timestamp, ApiError> {
         )
     };
     let ttl = time::Duration::try_from(ttl).map_err(|_| unrepresentable())?;
-    let instant = OffsetDateTime::now_utc()
-        .checked_add(ttl)
-        .ok_or_else(unrepresentable)?;
+    let instant = issued.checked_add(ttl).ok_or_else(unrepresentable)?;
     Timestamp::from_utc(instant).map_err(|_| unrepresentable())
 }
 

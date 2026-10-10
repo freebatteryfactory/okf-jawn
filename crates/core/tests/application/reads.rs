@@ -45,6 +45,11 @@ fn read(item: u128, view: ReadView, selection: Selection) -> Built<ReadItemReque
     })
 }
 
+/// The fixed instant a test's clock answers: one billion seconds after the Unix epoch.
+fn issue_time() -> OffsetDateTime {
+    OffsetDateTime::UNIX_EPOCH.saturating_add(time::Duration::seconds(1_000_000_000))
+}
+
 /// Forty numbered lines, long enough for a 256-byte budget to need several blocks.
 fn forty_lines() -> Built<String> {
     let mut body = String::new();
@@ -301,6 +306,31 @@ async fn a_cursor_minted_before_a_purge_does_not_read_the_purged_revision() -> T
 }
 
 #[tokio::test]
+async fn a_sandbox_capability_expires_exactly_its_ttl_after_it_is_issued() -> TestResult {
+    let mut world = card_world(Vec::new())?;
+    world.service = world.service.with_clock(issue_time);
+    let capability = world
+        .service
+        .create_sandbox_capability(
+            &alice(OperationName::CreateSandboxCapability, None)?,
+            CreateSandboxCapabilityRequest {
+                workspace_id: scope()?.workspace_id,
+                item_id: ItemId(Uuid::from_u128(CARD)),
+                revision: revision('a')?,
+                object: digest('a')?,
+            },
+        )
+        .await?;
+    // Issued at 2001-09-09T01:46:40Z with the fixture's ttl of 300 seconds.
+    let expected = Timestamp::try_from("2001-09-09T01:51:40.000Z".to_owned())?;
+    assert_eq!(capability.expires_at, expected);
+    let mints = world.sandbox.mints()?;
+    let (_, mint) = some(mints.first(), "the mint")?;
+    assert_eq!(mint.expires_at, expected);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_sandbox_capability_checks_its_revision_against_the_purge_map_first() -> TestResult {
     let world = card_world(Vec::new())?;
     let purge_id = PurgeId(Uuid::from_u128(5));
@@ -333,7 +363,7 @@ async fn a_sandbox_capability_checks_its_revision_against_the_purge_map_first() 
         })
     );
     assert_eq!(world.versions.shows(), 0);
-    assert!(world.sandbox.mints()?.is_empty());
+    assert_eq!(world.sandbox.mints()?.len(), 0);
     Ok(())
 }
 

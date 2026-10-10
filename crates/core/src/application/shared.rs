@@ -22,7 +22,6 @@ use okf_jawn_contract::identity::{
 };
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::source::SourceReference;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::ApplicationService;
@@ -232,7 +231,7 @@ pub(super) async fn record_receipt(
         principal_subject: context.principal.subject.clone(),
         route: context.principal.route.clone(),
         sources,
-        returned_at: now()?,
+        returned_at: now(service)?,
         trace_id: None,
         audience: audience(&context.principal),
         invalidated_by: None,
@@ -255,13 +254,12 @@ pub(super) const fn audience(principal: &Principal) -> ReceiptAudience {
     }
 }
 
-/// The current instant in the canonical spelling.
+/// The service's current instant in the canonical spelling.
 ///
 /// # Errors
 /// Returns `Internal` when the clock lies outside what a `Timestamp` writes.
-pub(super) fn now() -> Result<Timestamp, ApiError> {
-    Timestamp::from_utc(OffsetDateTime::now_utc())
-        .map_err(|error| ApiError::new(ErrorCode::Internal, error.0))
+pub(super) fn now(service: &ApplicationService) -> Result<Timestamp, ApiError> {
+    Timestamp::from_utc(service.now()).map_err(|error| ApiError::new(ErrorCode::Internal, error.0))
 }
 
 /// The document with the server's content digest, whatever the store put there.
