@@ -5,6 +5,10 @@
 //!
 //! The child is this test binary run again (`--exact`, with `CHILD_ENV` set). It loads no
 //! model, so CI runs it. Select it with `-- memory_cap_mechanism`.
+//!
+//! `child_supervision` drops the supervision of a running child and checks the child stops:
+//! `kill_on_drop` kills it. On Windows closing the job object kills it as well, so there the
+//! test passes by either mechanism; Linux and macOS rely on `kill_on_drop` alone.
 #![cfg(feature = "runtime")]
 
 #[path = "../../../tests/support/check.rs"]
@@ -143,6 +147,78 @@ mod memory_cap_mechanism {
         let coverage = some(coverage, "the joined coverage")?;
         assert_eq!(coverage.converted, vec![pages(1, 4)]);
         assert_eq!(coverage.not_converted, vec![pages(5, 8)]);
+        Ok(())
+    }
+}
+
+mod child_supervision {
+    use std::io::Write as _;
+    use std::time::Duration;
+
+    use okf_jawn_ingest::cap::{spawn_capped, supervise};
+
+    use crate::check::TestResult;
+
+    /// Set in the child, naming the file it keeps writing to.
+    const CHILD_ENV: &str = "OKF_JAWN_INGEST_SUPERVISION_TEST_CHILD";
+    /// This test's name, as `--exact` selects it.
+    const THIS_TEST: &str = "child_supervision::dropping_the_supervision_kills_the_child";
+    /// A cap the child never comes near: 1 GiB.
+    const CAP: u64 = 1024 * 1024 * 1024;
+
+    /// In the child: append a byte to the file every 20 ms for a minute, far longer than the
+    /// test waits, so a child left running keeps the file growing.
+    fn keep_writing(path: &std::ffi::OsStr) -> TestResult {
+        for _tick in 0..3000 {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            file.write_all(b".")?;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    }
+
+    fn size(path: &std::path::Path) -> u64 {
+        std::fs::metadata(path).map_or(0, |metadata| metadata.len())
+    }
+
+    #[test]
+    fn dropping_the_supervision_kills_the_child() -> TestResult {
+        if let Some(path) = std::env::var_os(CHILD_ENV) {
+            return keep_writing(&path);
+        }
+        let directory = tempfile::tempdir()?;
+        let beat = directory.path().join("beat");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let mut command = tokio::process::Command::new(std::env::current_exe()?);
+            let _configured = command
+                .args(["--exact", THIS_TEST, "--nocapture", "--test-threads=1"])
+                .env(CHILD_ENV, &beat);
+            let child = spawn_capped(command, CAP)?;
+            // The supervision is dropped long before its own time bound, as a cancelled job
+            // drops its conversion.
+            let supervised = tokio::time::timeout(
+                Duration::from_secs(3),
+                supervise(child, CAP, Duration::from_secs(600)),
+            )
+            .await;
+            assert!(supervised.is_err(), "the child ended by itself");
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })?;
+        assert!(size(&beat) > 0, "the child never ran");
+        std::thread::sleep(Duration::from_millis(500));
+        let settled = size(&beat);
+        std::thread::sleep(Duration::from_millis(1000));
+        assert_eq!(
+            size(&beat),
+            settled,
+            "the child kept running after the drop"
+        );
         Ok(())
     }
 }
