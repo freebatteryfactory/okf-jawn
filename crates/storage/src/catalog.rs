@@ -26,6 +26,7 @@ use crate::git::repo::{
     HEAD_REF, Repositories, durable, git, head, message_with_trailer, reference_target,
     revision_of, signature, staged_tree, sync_directories,
 };
+use crate::purge::guard;
 use crate::seam;
 
 /// `WorkspaceCatalog` over the records database and the repositories.
@@ -65,6 +66,8 @@ impl GitCatalog {
                 if let Some(prior) = prior(transaction, mutation_id)? {
                     return Ok(prior);
                 }
+                let (tenant, id) = scope_key(&scope);
+                guard::refuse(transaction, &tenant, &id)?;
                 let mut workspace = read(transaction, &repositories, &scope)?;
                 if let Some(expected) = expected
                     && workspace.head != expected

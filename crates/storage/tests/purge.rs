@@ -17,7 +17,7 @@ use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::Receipt;
 use okf_jawn_contract::identity::{
-    Digest, ItemId, MutationId, PurgeId, Revision, TenantId, WorkspacePath,
+    Digest, ItemId, MutationId, PurgeId, Revision, TenantId, UploadId, WorkspacePath,
 };
 use okf_jawn_contract::item::ItemKind;
 use okf_jawn_contract::metadata::OperationName;
@@ -25,7 +25,10 @@ use okf_jawn_contract::purge::{PurgeReport, PurgeTarget};
 use okf_jawn_contract::workspace::ArtifactKind;
 use okf_jawn_core::credentials::{ConnectorIssue, CredentialStore, NewConnector};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
-use okf_jawn_core::jobs::{JobScope, JobSpec, NewArtifact, NewJob, NewPurge, RecordStore};
+use okf_jawn_core::jobs::{
+    ClaimedJob, DerivedKind, DerivedObject, JobCompletion, JobScope, JobSpec, NewArtifact, NewJob,
+    NewPurge, RecordStore,
+};
 use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationStore};
 use okf_jawn_core::search::SearchIndex;
 use okf_jawn_core::storage::{
@@ -543,6 +546,25 @@ fn marked_files(directory: &Path) -> Fallible<Vec<String>> {
     Ok(found)
 }
 
+/// Record purge `purge` of `target`, as core does before it calls the purger.
+async fn record_purge_of(storage: &Storage, target: &StorageScope, purge: PurgeId) -> Fallible<()> {
+    storage
+        .records()
+        .create_purge(
+            &tenant()?,
+            uuid!(50)?,
+            NewPurge {
+                id: purge,
+                target: PurgeTarget::Workspace {
+                    workspace_id: target.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 async fn record_purge(storage: &Storage, fixture: &Fixture, purge: PurgeId) -> Fallible<()> {
     storage
         .records()
@@ -860,6 +882,266 @@ async fn purge_reaches_a_pre_migration_set_written_after_a_failed_attempt() -> T
     Ok(())
 }
 
+/// Assert that `result` is the refusal of a write to a workspace purge 60 names.
+fn refused<T: std::fmt::Debug>(result: Result<T, ApiError>, what: &str) -> TestResult {
+    let error = err_of(result)?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{what}: {error}");
+    assert!(
+        error.message.contains(&uuid_text(60)),
+        "{what}: the refusal names the purge: {error}"
+    );
+    Ok(())
+}
+
+/// The upload writes of the refusal test: each refused.
+async fn refuse_uploads(storage: &Storage, target: &StorageScope, slot: UploadId) -> TestResult {
+    let uploads = storage.uploads();
+    refused(
+        uploads
+            .create(
+                target,
+                uuid!(9)?,
+                NewUpload {
+                    filename: "a.zip".to_owned(),
+                    relative_path: String::new(),
+                    expected_size: 1,
+                    expected_sha256: None,
+                    supplied_by: person("ana"),
+                },
+            )
+            .await,
+        "an upload slot",
+    )?;
+    refused(
+        uploads
+            .put_content(target, slot, Box::pin(std::io::Cursor::new(Vec::new())), 1)
+            .await,
+        "upload content",
+    )?;
+    refused(
+        uploads
+            .complete(target, slot, Digest::try_from(sha256(b""))?)
+            .await,
+        "an upload completion",
+    )?;
+    Ok(())
+}
+
+/// The record writes of the refusal test: each refused.
+async fn refuse_records(
+    storage: &Storage,
+    target: &StorageScope,
+    head: &Revision,
+    claimed: ClaimedJob,
+    object: &ObjectInfo,
+) -> TestResult {
+    let records = storage.records();
+    let job_scope = JobScope::Workspace(target.clone());
+    refused(
+        records
+            .record_artifact(
+                &job_scope,
+                uuid!(31)?,
+                NewArtifact {
+                    kind: ArtifactKind::Export,
+                    object: object.clone(),
+                    media_type: "application/zip".to_owned(),
+                    created_by_job: claimed.job.id,
+                },
+            )
+            .await,
+        "an artifact",
+    )?;
+    refused(
+        records
+            .complete_job(JobCompletion {
+                lease: claimed.lease.clone(),
+                revision: None,
+                item_ids: Vec::new(),
+                artifact: None,
+                restore: None,
+                outputs: vec![object.digest.clone()],
+                warnings: Vec::new(),
+            })
+            .await,
+        "a job completion",
+    )?;
+    refused(
+        records
+            .record_derived_object(
+                target,
+                DerivedObject {
+                    item_id: uuid!(10)?,
+                    revision: head.clone(),
+                    digest: object.digest.clone(),
+                    kind: DerivedKind::Dataset,
+                    media_type: "text/csv".to_owned(),
+                },
+            )
+            .await,
+        "a derived object",
+    )?;
+    refused(
+        storage
+            .backups()
+            .write_workspace_archive(target, uuid!(32)?)
+            .await,
+        "a workspace archive",
+    )?;
+    Ok(())
+}
+
+/// Review B6, window 1: from the moment the purge is recorded, storage refuses every write to
+/// the workspace it names; the other workspace goes on.
+#[tokio::test]
+async fn purge_refuses_every_write_to_the_workspace_it_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, 1, "Trip").await?;
+    let (survivor, _) = create(&storage, 2, "Garden").await?;
+    let job_scope = JobScope::Workspace(target.clone());
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &job_scope,
+            NewJob {
+                mutation_id: uuid!(30)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+    let slot = upload(&storage, &target, 8, b"", false).await?;
+    let object = put(&storage, &target, b"before the purge").await?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+
+    refused(
+        storage
+            .blobs()
+            .put(
+                &target,
+                Box::pin(std::io::Cursor::new(b"after".to_vec())),
+                1 << 20,
+                None,
+            )
+            .await,
+        "an object put",
+    )?;
+    refused(
+        storage
+            .versions()
+            .commit(
+                &target,
+                CommitChanges {
+                    mutation_id: uuid!(3)?,
+                    expected_head: head.clone(),
+                    author: person("ana"),
+                    message: "Seed".to_owned(),
+                    edits: vec![note(uuid!(10)?, "a.md", "x")?],
+                },
+                Arc::new(Accept),
+            )
+            .await,
+        "a commit",
+    )?;
+    refused(
+        storage
+            .versions()
+            .create_candidate(
+                &target,
+                uuid!(20)?,
+                CandidateChanges {
+                    mutation_id: uuid!(4)?,
+                    base: head.clone(),
+                    author: person("ana"),
+                    message: "Propose".to_owned(),
+                    edits: vec![note(uuid!(11)?, "b.md", "y")?],
+                },
+                Arc::new(Accept),
+            )
+            .await,
+        "a candidate",
+    )?;
+    refused(
+        storage
+            .drafts()
+            .save(
+                &target,
+                uuid!(6)?,
+                DraftWrite {
+                    item_id: uuid!(10)?,
+                    editor: "ana".to_owned(),
+                    base_revision: head.clone(),
+                    body: "Draft".to_owned(),
+                    properties: BTreeMap::new(),
+                    content_digest: Digest::try_from("e".repeat(64))?,
+                },
+            )
+            .await,
+        "a draft",
+    )?;
+    refuse_uploads(&storage, &target, slot).await?;
+    refuse_records(&storage, &target, &head, claimed, &object).await?;
+    put(&storage, &survivor, b"the other workspace goes on").await?;
+    Ok(())
+}
+
+/// Review B6, window 2, exactly: another workspace's import stores an object identical to one
+/// of the target's before the objects step and lands its record after it. That object stays.
+/// And an object the target itself stored without a record yet goes with the target.
+#[tokio::test]
+async fn purge_keeps_an_object_another_workspace_stores_before_and_references_after() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, 1, "Trip").await?;
+    let (survivor, survivor_head) = create(&storage, 2, "Garden").await?;
+    let original = put(&storage, &target, b"zanzibar original bytes").await?;
+    commit(
+        &storage,
+        &target,
+        3,
+        &head,
+        vec![card(uuid!(11)?, "sources/scan.md", &original.digest, None)?],
+    )
+    .await?;
+    let orphan = put(&storage, &target, b"zanzibar stored, never referenced").await?;
+    // The survivor's import job stores the same bytes; its card lands only later.
+    let imported = put(&storage, &survivor, b"zanzibar original bytes").await?;
+    assert_eq!(imported.digest, original.digest);
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+
+    let report = storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    assert!(
+        held(&storage, &survivor, &original.digest).await?,
+        "the survivor's in-flight object stays"
+    );
+    assert!(
+        !held(&storage, &survivor, &orphan.digest).await?,
+        "the target's own unreferenced object goes"
+    );
+    assert_eq!(report.objects_kept_shared, "1");
+    commit(
+        &storage,
+        &survivor,
+        4,
+        &survivor_head,
+        vec![card(uuid!(12)?, "sources/scan.md", &imported.digest, None)?],
+    )
+    .await?;
+    storage
+        .blobs()
+        .open(&survivor, &imported.digest, 0, 1)
+        .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn purge_workspace_resumes_by_repeating_after_a_failure() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -928,20 +1210,8 @@ async fn a_purged_workspace_identity_is_never_created_again() -> TestResult {
     let storage = Storage::open(directory.path())?;
     let (target, _) = create(&storage, 1, "Trip").await?;
     let purge: PurgeId = uuid!(60)?;
-    storage
-        .records()
-        .create_purge(
-            &tenant()?,
-            uuid!(50)?,
-            NewPurge {
-                id: purge,
-                target: PurgeTarget::Workspace {
-                    workspace_id: target.workspace_id,
-                },
-                initiator: person("ana"),
-            },
-        )
-        .await?;
+    record_purge_of(&storage, &target, purge).await?;
+
     storage
         .purger()
         .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)

@@ -29,6 +29,7 @@ use tokio::io::AsyncReadExt as _;
 use crate::blobs::{LocalBlobs, file_reader};
 use crate::data::io_error;
 use crate::db::{Db, conflict, json, not_found, scope_key, sql, to_i64, to_u64};
+use crate::purge::guard;
 use crate::seam;
 
 /// `UploadStore` over the records database and the blob store.
@@ -176,6 +177,7 @@ impl SqliteUploads {
         mut body: ByteReader,
         limit: u64,
     ) -> Result<UploadRecord, ApiError> {
+        guard::refuse_scope(&self.db, scope).await?;
         let _writing = self.writers.claim(upload)?;
         let record = self.reconciled(scope, upload).await?;
         if record.object.is_some() {
@@ -234,6 +236,7 @@ impl SqliteUploads {
         upload: UploadId,
         sha256: Digest,
     ) -> Result<UploadRecord, ApiError> {
+        guard::refuse_scope(&self.db, scope).await?;
         let _writing = self.writers.claim(upload)?;
         let record = self.reconciled(scope, upload).await?;
         if let Some(object) = &record.object {
@@ -263,11 +266,13 @@ impl SqliteUploads {
         } else {
             file_reader(Some(part.clone()), 0, record.expected_size)
         };
+        // Pinned from before the object is retained until the upload's record names it.
         let object = self
             .blobs
-            .put_for(&scope.tenant_id, body, record.expected_size, Some(sha256))
+            .put_pinned(scope, body, record.expected_size, Some(sha256))
             .await?;
         let (tenant, workspace) = scope_key(scope);
+        let released = (workspace.clone(), object.digest.clone());
         let stored = self
             .db
             .transaction(move |transaction| {
@@ -284,7 +289,9 @@ impl SqliteUploads {
                     .map_err(|error| sql(&error))?;
                 read(transaction, &tenant, &workspace, upload)?.ok_or_else(|| not_found("upload"))
             })
-            .await?;
+            .await;
+        self.blobs.pins().release(&released.0, [&released.1])?;
+        let stored = stored?;
         let _ = std::fs::remove_file(&part);
         Ok(stored)
     }
@@ -299,6 +306,7 @@ impl UploadStore for SqliteUploads {
     ) -> PortFuture<'a, UploadRecord> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let id: UploadId = new_id!()?;
             transaction
                 .execute(

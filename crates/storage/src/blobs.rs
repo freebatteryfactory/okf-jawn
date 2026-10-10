@@ -28,6 +28,9 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, ReadBuf};
 use tokio::sync::mpsc;
 
 use crate::data::{DataDir, io_error};
+use crate::db::{Db, scope_key};
+use crate::pins::Pins;
+use crate::purge::guard;
 use crate::seam;
 
 /// `BlobStore` over the data directory's object store.
@@ -35,6 +38,11 @@ use crate::seam;
 pub struct LocalBlobs {
     store: Arc<LocalFileSystem>,
     incoming: PathBuf,
+    /// The records database whose purge records refuse a workspace-scoped put (`purge::guard`);
+    /// none for the offline writer of a pre-migration set, which stores nothing.
+    records: Option<Db>,
+    /// The in-flight pins of this process (`pins`).
+    pins: Pins,
     /// The data directory's single-writer lock, held while any copy of this value lives.
     _lock: Arc<DataDir>,
 }
@@ -59,8 +67,46 @@ impl LocalBlobs {
         Ok(Self {
             store: Arc::new(store),
             incoming: data.staging_path().join("incoming"),
+            records: None,
+            pins: Pins::default(),
             _lock: data,
         })
+    }
+
+    /// This store with the write refusal of a purged workspace and the shared pins.
+    pub(crate) fn guarded(mut self, records: Db, pins: Pins) -> Self {
+        self.records = Some(records);
+        self.pins = pins;
+        self
+    }
+
+    /// The in-flight pins this store records.
+    pub(crate) const fn pins(&self) -> &Pins {
+        &self.pins
+    }
+
+    /// `BlobStore::put` for a write in `scope`: refused while a purge names the workspace, and
+    /// pinned (`pins`) from before the object is retained until the caller's referencing record
+    /// lands and releases it.
+    pub(crate) async fn put_pinned(
+        &self,
+        scope: &StorageScope,
+        body: ByteReader,
+        limit: u64,
+        expected: Option<Digest>,
+    ) -> Result<ObjectInfo, ApiError> {
+        if let Some(records) = &self.records {
+            guard::refuse_scope(records, scope).await?;
+        }
+        let (tenant, workspace) = scope_key(scope);
+        self.store_staged(
+            &scope.tenant_id,
+            body,
+            limit,
+            expected,
+            Some((&tenant, &workspace)),
+        )
+        .await
     }
 
     /// Store a bounded stream in `tenant`'s objects; see `BlobStore::put`.
@@ -71,12 +117,39 @@ impl LocalBlobs {
         limit: u64,
         expected: Option<Digest>,
     ) -> Result<ObjectInfo, ApiError> {
+        self.store_staged(tenant, body, limit, expected, None).await
+    }
+
+    /// Stage, hash, pin (when `pin` names a workspace) and retain a body.
+    async fn store_staged(
+        &self,
+        tenant: &TenantId,
+        body: ByteReader,
+        limit: u64,
+        expected: Option<Digest>,
+        pin: Option<(&str, &str)>,
+    ) -> Result<ObjectInfo, ApiError> {
         std::fs::create_dir_all(&self.incoming)
             .map_err(|error| io_error("create", &self.incoming, &error))?;
         let staged = self.incoming.join(seam::hex(&seam::random_bytes::<16>()?));
         let received = receive(body, &staged, limit).await;
         let result = match received {
-            Ok((digest, size)) => self.retain(tenant, &staged, digest, size, expected).await,
+            Ok((digest, size)) => {
+                // Pinned before it is retained, so a purge's delete either ran before (and this
+                // stores the object again) or sees the pin (`Pins::delete_unless_pinned`).
+                if let Some((pin_tenant, workspace)) = pin {
+                    self.pins.pin(pin_tenant, workspace, &digest)?;
+                }
+                let retained = self
+                    .retain(tenant, &staged, digest.clone(), size, expected)
+                    .await;
+                if retained.is_err()
+                    && let Some((_, workspace)) = pin
+                {
+                    self.pins.release(workspace, [&digest])?;
+                }
+                retained
+            }
             Err(error) => Err(error),
         };
         // The staged copy is never referenced; a failure to remove it is cleared at startup.
@@ -226,7 +299,7 @@ impl BlobStore for LocalBlobs {
         limit: u64,
         expected: Option<Digest>,
     ) -> PortFuture<'a, ObjectInfo> {
-        Box::pin(self.put_for(&scope.tenant_id, body, limit, expected))
+        Box::pin(self.put_pinned(scope, body, limit, expected))
     }
 
     fn open<'a>(

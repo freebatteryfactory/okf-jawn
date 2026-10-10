@@ -27,12 +27,16 @@ use crate::db::{
     Db, conflict, cursor, internal, job_scope_key, json, not_found, page_limit, paged, scope_key,
     sql, to_i64, to_u64,
 };
+use crate::pins::Pins;
+use crate::purge::guard;
 use crate::seam;
 
 /// `RecordStore` over the records database.
 #[derive(Debug, Clone)]
 pub struct SqliteRecords {
     db: Db,
+    /// In-flight pins, released when a record that references their object lands.
+    pins: Pins,
 }
 
 /// tenant, workspace, record, mutation, initiator, spec, lease expiry: what a claim reads.
@@ -82,8 +86,8 @@ impl LeasedRow {
 }
 
 impl SqliteRecords {
-    pub(crate) const fn new(db: Db) -> Self {
-        Self { db }
+    pub(crate) const fn new(db: Db, pins: Pins) -> Self {
+        Self { db, pins }
     }
 }
 
@@ -180,10 +184,17 @@ impl RecordStore for SqliteRecords {
     }
 
     fn complete_job(&self, completion: JobCompletion) -> PortFuture<'_, Job> {
-        Box::pin(
-            self.db
-                .transaction(move |transaction| complete(transaction, &completion)),
-        )
+        Box::pin(async move {
+            let outputs = completion.outputs.clone();
+            let job = self
+                .db
+                .transaction(move |transaction| complete(transaction, &completion))
+                .await?;
+            if let Some(workspace) = job.workspace_id {
+                self.pins.release(&workspace.0.to_string(), &outputs)?;
+            }
+            Ok(job)
+        })
     }
 
     fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job> {
@@ -244,13 +255,17 @@ impl RecordStore for SqliteRecords {
         artifact: NewArtifact,
     ) -> PortFuture<'a, ArtifactRecord> {
         let scope = scope.clone();
-        Box::pin(self.db.transaction(move |transaction| {
+        let (released, workspace) = (artifact.object.digest.clone(), scope.workspace().copied());
+        let written = self.db.transaction(move |transaction| {
             if artifact.kind.scope() != scope.artifact_scope() {
                 return Err(internal(
                     "an artifact of this kind does not belong in this scope",
                 ));
             }
             let (tenant, workspace) = job_scope_key(&scope);
+            if let Some(workspace) = &workspace {
+                guard::refuse(transaction, &tenant, workspace)?;
+            }
             let artifact_id: ArtifactId = new_id!()?;
             transaction
                 .execute(
@@ -273,7 +288,14 @@ impl RecordStore for SqliteRecords {
                 .map_err(|error| sql(&error))?;
             read_artifact(transaction, "mutation_id", &mutation_id.0.to_string())?
                 .ok_or_else(|| internal("an artifact row vanished after its insert"))
-        }))
+        });
+        Box::pin(async move {
+            let record = written.await?;
+            if let Some(workspace) = workspace {
+                self.pins.release(&workspace.0.to_string(), [&released])?;
+            }
+            Ok(record)
+        })
     }
 
     fn get_artifact<'a>(
@@ -437,7 +459,9 @@ impl RecordStore for SqliteRecords {
         object: DerivedObject,
     ) -> PortFuture<'a, DerivedObject> {
         let (tenant, workspace) = scope_key(scope);
-        Box::pin(self.db.transaction(move |transaction| {
+        let (released, pinned) = (object.digest.clone(), workspace.clone());
+        let written = self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             transaction
                 .execute(
                     "INSERT INTO derived_objects (tenant_id, workspace_id, item_id, revision,
@@ -462,7 +486,12 @@ impl RecordStore for SqliteRecords {
                 &object.digest,
             )?
             .ok_or_else(|| internal("a derived object row vanished after its insert"))
-        }))
+        });
+        Box::pin(async move {
+            let derived = written.await?;
+            self.pins.release(&pinned, [&released])?;
+            Ok(derived)
+        })
     }
 
     fn derived_object<'a>(
@@ -489,6 +518,7 @@ impl RecordStore for SqliteRecords {
     ) -> PortFuture<'a, Review> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let record = serde_json::to_string(&review).map_err(|error| json(&error))?;
             transaction
                 .execute(
@@ -551,6 +581,7 @@ impl RecordStore for SqliteRecords {
     ) -> PortFuture<'a, Receipt> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let record = serde_json::to_string(&receipt).map_err(|error| json(&error))?;
             let mutation = mutation_id.map(|id| id.0.to_string());
             transaction
@@ -717,6 +748,9 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
         || !row.live()
     {
         return Err(lost_claim());
+    }
+    if let Some(workspace) = &row.workspace_id {
+        guard::refuse(transaction, &row.tenant_id, workspace)?;
     }
     let scope = job_scope(&row.tenant_id, row.workspace_id.as_deref())?;
     let mut job = decode_job(&row.record)?;

@@ -42,6 +42,8 @@ mod git;
 #[cfg(feature = "runtime")]
 pub mod mutations;
 #[cfg(feature = "runtime")]
+mod pins;
+#[cfg(feature = "runtime")]
 pub mod proposals;
 #[cfg(feature = "runtime")]
 pub mod purge;

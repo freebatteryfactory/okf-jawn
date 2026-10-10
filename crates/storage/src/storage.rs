@@ -24,6 +24,7 @@ use crate::format::{migrate_database, needs_upgrade, refuse_newer};
 use crate::git::GitVersions;
 use crate::git::repo::Repositories;
 use crate::mutations::SqliteMutations;
+use crate::pins::Pins;
 use crate::proposals::SqliteProposals;
 use crate::purge::StoragePurger;
 use crate::readiness::StorageReadiness;
@@ -82,10 +83,11 @@ impl Storage {
         }
         let records = migrate_database(&data, RECORDS_FILE, &schema::RECORDS)?;
         let index = migrate_database(&data, INDEX_FILE, &schema::INDEX)?;
+        let records = Db::new(records.into_connection(), Arc::clone(&data));
         Ok(Self {
-            records: Db::new(records.into_connection(), Arc::clone(&data)),
+            blobs: LocalBlobs::open(Arc::clone(&data))?.guarded(records.clone(), Pins::default()),
+            records,
             index: Db::new(index.into_connection(), Arc::clone(&data)),
-            blobs: LocalBlobs::open(Arc::clone(&data))?,
             repositories: Repositories::new(Arc::clone(&data)),
             upload_writers: UploadWriters::default(),
             data,
@@ -101,7 +103,7 @@ impl Storage {
     /// Jobs, artifacts, purges, the revision map, derived objects, reviews and receipts.
     #[must_use]
     pub fn records(&self) -> SqliteRecords {
-        SqliteRecords::new(self.records.clone())
+        SqliteRecords::new(self.records.clone(), self.blobs.pins().clone())
     }
 
     /// Per-editor drafts.

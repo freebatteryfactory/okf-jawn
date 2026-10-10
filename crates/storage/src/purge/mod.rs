@@ -514,24 +514,41 @@ impl StoragePurger {
         let repositories = self.storage.repositories.clone();
         let blobs = self.storage.blobs.clone();
         let scope = scope.clone();
-        let planned = plan.objects.clone();
+        let mut planned = plan.objects.clone();
         blocking(move || {
+            let (tenant, target) = scope_key(&scope);
             let mut found = BTreeSet::new();
             for path in repositories.others(&scope.tenant_id, &scope)? {
                 let repository = git2::Repository::open_bare(&path)
                     .map_err(|error| crate::git::repo::git(&error))?;
                 found.extend(references::history(&repository)?.objects);
             }
+            // An object another workspace stored and is about to reference (pinned) is a
+            // surviving reference; one the target itself pinned is removed with it.
+            for (workspace, digest) in blobs.pins().held(&tenant)? {
+                if workspace == target {
+                    if blobs.local_path(&scope.tenant_id, &digest)?.is_file() {
+                        planned.insert(digest);
+                    }
+                } else {
+                    found.insert(digest);
+                }
+            }
             references::follow_records(&blobs, &scope.tenant_id, &mut found)?;
             surviving.extend(found);
             let mut removed = 0_usize;
             let mut kept = 0_usize;
             for digest in &planned {
-                if surviving.contains(digest) {
-                    kept = kept.saturating_add(1);
-                } else {
-                    blobs.remove_for(&scope.tenant_id, digest)?;
+                let deleted = !surviving.contains(digest)
+                    && blobs
+                        .pins()
+                        .delete_unless_pinned(&tenant, &target, digest, || {
+                            blobs.remove_for(&scope.tenant_id, digest)
+                        })?;
+                if deleted {
                     removed = removed.saturating_add(1);
+                } else {
+                    kept = kept.saturating_add(1);
                 }
             }
             Ok((removed, kept))
@@ -843,5 +860,6 @@ where
 }
 
 mod copies;
+pub(crate) mod guard;
 pub(crate) mod references;
 mod rows;

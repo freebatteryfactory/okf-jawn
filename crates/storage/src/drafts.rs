@@ -16,6 +16,7 @@ use okf_jawn_core::storage::StorageScope;
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::db::{Db, internal, json, not_found, scope_key, sql};
+use crate::purge::guard;
 use crate::seam;
 
 /// `DraftStore` over the records database.
@@ -39,6 +40,7 @@ impl DraftStore for SqliteDrafts {
     ) -> PortFuture<'a, Draft> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let saved = Draft {
                 item_id: draft.item_id,
                 editor: draft.editor.clone(),
@@ -149,6 +151,7 @@ impl DraftStore for SqliteDrafts {
         let (tenant, workspace) = scope_key(scope);
         let editor = editor.to_owned();
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let key = params![tenant, workspace, item.0.to_string(), editor];
             let current: Option<String> = transaction
                 .query_row(

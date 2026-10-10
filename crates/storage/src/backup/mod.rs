@@ -158,6 +158,7 @@ impl StorageBackups {
         if let Some(object) = self.recorded(mutation).await? {
             return Ok(object);
         }
+        crate::purge::guard::refuse_scope(&self.storage.records, scope).await?;
         let storage = self.storage.clone();
         let runtime = Handle::current();
         let locked_scope = scope.clone();

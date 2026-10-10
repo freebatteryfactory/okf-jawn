@@ -80,6 +80,7 @@ impl GitVersions {
         if let Some(object) = export::recorded(&self.records, scope, mutation_id).await? {
             return Ok(object);
         }
+        crate::purge::guard::refuse_scope(&self.records, scope).await?;
         let wanted = revision.clone();
         let blobs = self.blobs.clone();
         let runtime = tokio::runtime::Handle::current();
@@ -104,6 +105,22 @@ impl GitVersions {
             })
             .await?;
         export::record(&self.records, scope, mutation_id, revision, object).await
+    }
+
+    /// Run a Git write: refused while a purge names the workspace; on success the pins of the
+    /// objects its cards name are released, since the commit that references them landed.
+    async fn guarded<T>(
+        &self,
+        scope: &StorageScope,
+        named: Vec<Digest>,
+        write: impl std::future::Future<Output = Result<T, ApiError>>,
+    ) -> Result<T, ApiError> {
+        crate::purge::guard::refuse_scope(&self.records, scope).await?;
+        let written = write.await?;
+        self.blobs
+            .pins()
+            .release(&scope.workspace_id.0.to_string(), &named)?;
+        Ok(written)
     }
 
     async fn blocking<T, F>(&self, scope: &StorageScope, work: F) -> Result<T, ApiError>
@@ -226,7 +243,8 @@ impl VersionStore for GitVersions {
         changes: CommitChanges,
         check: Arc<dyn CandidateCheck>,
     ) -> PortFuture<'a, Committed> {
-        Box::pin(self.blocking(scope, move |repositories, scope| {
+        let named = card_objects(&changes.edits);
+        let commit = self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
                 let repository = repositories.open_durable(scope)?;
                 let expected = held_head(&repository, &changes.expected_head)?;
@@ -256,7 +274,8 @@ impl VersionStore for GitVersions {
                     warnings,
                 })
             })
-        }))
+        });
+        Box::pin(self.guarded(scope, named, commit))
     }
 
     fn find_commit<'a>(
@@ -280,7 +299,8 @@ impl VersionStore for GitVersions {
         changes: CandidateChanges,
         check: Arc<dyn CandidateCheck>,
     ) -> PortFuture<'a, Revision> {
-        Box::pin(self.blocking(scope, move |repositories, scope| {
+        let named = card_objects(&changes.edits);
+        let candidate = self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
                 let repository = repositories.open_durable(scope)?;
                 let name = proposal_reference(proposal_id);
@@ -315,7 +335,8 @@ impl VersionStore for GitVersions {
                 )?;
                 revision_of(commit)
             })
-        }))
+        });
+        Box::pin(self.guarded(scope, named, candidate))
     }
 
     fn promote_candidate<'a>(
@@ -323,11 +344,12 @@ impl VersionStore for GitVersions {
         scope: &'a StorageScope,
         promotion: Promotion,
     ) -> PortFuture<'a, Committed> {
-        Box::pin(self.blocking(scope, move |repositories, scope| {
+        let promoted = self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
                 promote(&repositories.open_durable(scope)?, &promotion)
             })
-        }))
+        });
+        Box::pin(self.guarded(scope, Vec::new(), promoted))
     }
 
     fn log<'a>(&'a self, scope: &'a StorageScope, query: LogQuery) -> PortFuture<'a, LogResponse> {
@@ -364,6 +386,19 @@ impl VersionStore for GitVersions {
     ) -> PortFuture<'a, ObjectInfo> {
         Box::pin(self.history(scope, revision, mutation_id))
     }
+}
+
+/// The objects the source cards of `edits` name: every digest token of their appearances.
+fn card_objects(edits: &[TreeEdit]) -> Vec<Digest> {
+    let mut found = std::collections::BTreeSet::new();
+    for edit in edits {
+        if let TreeEdit::WriteSourceCard(card) = edit
+            && let Ok(text) = serde_json::to_vec(&card.appearance)
+        {
+            crate::purge::references::tokens(&text, &mut found);
+        }
+    }
+    found.into_iter().collect()
 }
 
 /// Stage `write.base`, apply the edits, check, and write the commit (no reference moves).

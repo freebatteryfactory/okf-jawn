@@ -79,14 +79,41 @@ pub(crate) fn restore(
     let mut opened = Opened::open(archive)?;
     let manifest = opened.workspace()?;
     refuse(storage, runtime, scope, &manifest, mode)?;
+    // Each object is pinned to the restored workspace until its rows and history landed.
+    let restored = put_back(
+        storage,
+        runtime,
+        scope,
+        &mut opened,
+        &manifest,
+        staging,
+        mode,
+    );
+    storage
+        .blobs
+        .pins()
+        .release(&scope.workspace_id.0.to_string(), &manifest.objects)?;
+    restored
+}
+
+/// Put the archive's objects back (pinned), then its history and rows.
+fn put_back(
+    storage: &Storage,
+    runtime: &Handle,
+    scope: &StorageScope,
+    opened: &mut Opened,
+    manifest: &WorkspaceManifest,
+    staging: &Path,
+    mode: &Mode,
+) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
     for digest in &manifest.objects {
         let file = staging.join(digest.as_str());
         opened.extract(&format!("objects/{}", digest.as_str()), &file)?;
         let size = std::fs::metadata(&file)
             .map_err(|error| io_error("read", &file, &error))?
             .len();
-        runtime.block_on(storage.blobs.put_for(
-            &scope.tenant_id,
+        runtime.block_on(storage.blobs.put_pinned(
+            scope,
             file_reader(Some(file.clone()), 0, size),
             size,
             Some(digest.clone()),
@@ -95,7 +122,7 @@ pub(crate) fn restore(
     }
     let pack = staging.join(PACK);
     opened.extract(PACK, &pack)?;
-    let items = history(storage, scope, &manifest, &pack, mode)?;
+    let items = history(storage, scope, manifest, &pack, mode)?;
     let records = staging.join(RECORDS);
     opened.extract(RECORDS, &records)?;
     let mut archived = Connection::open(&records).map_err(|error| sql(&error))?;
@@ -135,7 +162,7 @@ pub(crate) fn restore(
             )
         }))?
     };
-    Ok((report, manifest))
+    Ok((report, manifest.clone()))
 }
 
 /// Refuse an archive the mode may not restore into `scope`.
