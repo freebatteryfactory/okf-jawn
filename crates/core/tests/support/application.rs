@@ -178,6 +178,7 @@ pub struct FakeRecords {
 #[derive(Default)]
 pub struct FakeSearch {
     indexed: Mutex<Vec<Revision>>,
+    conflict_next: AtomicBool,
     builds: AtomicUsize,
     building: AtomicUsize,
     most_at_once: AtomicUsize,
@@ -715,6 +716,12 @@ impl FakeSearch {
     #[must_use]
     pub fn most_at_once(&self) -> usize {
         self.most_at_once.load(Ordering::SeqCst)
+    }
+
+    /// Make the next `index_revision` answer `Conflict`, indexing nothing, as a port that
+    /// refuses after a write was committed would.
+    pub fn conflict_next(&self) {
+        self.conflict_next.store(true, Ordering::SeqCst);
     }
 
     /// Make the next `index_revision` fail, indexing nothing.
@@ -1398,6 +1405,9 @@ impl SearchIndex for FakeSearch {
     ) -> PortFuture<'a, ()> {
         Box::pin(async move {
             injected(&self.fail_next)?;
+            if self.conflict_next.swap(false, Ordering::SeqCst) {
+                return Err(ApiError::new(ErrorCode::Conflict, "injected conflict"));
+            }
             self.builds.fetch_add(1, Ordering::SeqCst);
             let running = self
                 .building

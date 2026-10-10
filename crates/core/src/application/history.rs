@@ -26,7 +26,9 @@
 //! An unrelated commit that lands between the Snapshot's check and its commit makes the store
 //! answer `Conflict` for the moved head. The Snapshot then reads the head again and evaluates
 //! the item-level rule against it; when no selected item changed, it commits on the new head.
-//! It tries at most `HEAD_ATTEMPTS` heads, then answers `Conflict`.
+//! It tries at most `HEAD_ATTEMPTS` heads, then answers `Conflict`. Only the store's refusal of
+//! the commit is retried: an error after the store committed (indexing, the event), a
+//! `Conflict` included, fails the request and never leads to another commit attempt.
 //!
 //! A Rewind restores the target's state in a new commit on its base and never rewrites history:
 //! one item with every companion file it owns (`TreeEdit::RestoreItem`, so a source card's
@@ -55,8 +57,8 @@ use okf_jawn_contract::source::SourceReference;
 
 use super::ApplicationService;
 use super::shared::{
-    Touched, Write, announce, check_named, commit, commit_with_receipt, invalid, mutation_id,
-    record_receipt, resolve, workspace_scope,
+    Touched, Write, announce, check_named, commit_with_receipt, invalid, mutation_id,
+    record_receipt, resolve, store_commit, workspace_scope,
 };
 use super::sources::{computed_locations, record_of};
 use crate::context::{Attempt, OperationContext};
@@ -349,7 +351,10 @@ async fn commit_on_a_head(
             )
             .with_detail(ErrorDetail::DraftConflict { items: conflicts }));
         }
-        let written = commit(
+        // Only the store's refusal is retried: once it has committed, indexing and the event
+        // follow once, and their errors (a `Conflict` included) fail the request, which a resumed
+        // attempt completes through `find_commit` without a second commit.
+        let written = store_commit(
             service,
             context,
             Write {
@@ -379,7 +384,18 @@ async fn commit_on_a_head(
                 }
                 head = now;
             }
-            answer => return answer,
+            Err(error) => return Err(error),
+            Ok(committed) => {
+                announce(
+                    service,
+                    scope.clone(),
+                    mutation_id(context)?,
+                    &committed.revision,
+                    item,
+                )
+                .await?;
+                return Ok(committed);
+            }
         }
     }
     Err(ApiError::new(

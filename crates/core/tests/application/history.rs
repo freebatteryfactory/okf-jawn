@@ -651,6 +651,42 @@ async fn rr_snapshot_commits_on_the_third_head() -> TestResult {
     Ok(())
 }
 #[tokio::test]
+async fn a_conflict_after_the_snapshot_committed_never_leads_to_a_second_commit() -> TestResult {
+    let world = World::new()?;
+    note_at(&world, NOTE, "notes/plan.md", &['a'])?;
+    world
+        .drafts
+        .put_draft(draft_of(NOTE, ALICE, &revision('a')?, "# Mine\n")?)?;
+    world.versions.queue_revision(revision('b')?)?;
+    world.versions.queue_revision(revision('d')?)?;
+    // The store commits `b`; indexing it then answers `Conflict`.
+    world.search.conflict_next();
+    let mut caller = alice(OperationName::CommitItems, Some(mutation(1)))?;
+    let refused = err_of(
+        world
+            .service
+            .commit_items(&caller, snapshot(&[NOTE])?)
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    assert!(
+        refused.detail.is_none(),
+        "not a draft conflict: {refused:?}"
+    );
+    let commits = world.versions.commits()?;
+    assert_eq!(commits.len(), 1, "exactly one commit: {commits:?}");
+    // A resumed attempt completes the commit it already wrote.
+    caller.attempt = Attempt::Resumed;
+    let retried = world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE])?)
+        .await?;
+    assert_eq!(retried.revision, revision('b')?);
+    assert_eq!(world.versions.commits()?.len(), 1);
+    assert_eq!(world.search.indexed()?, vec![revision('b')?]);
+    Ok(())
+}
+#[tokio::test]
 async fn commit_items_gives_up_after_three_heads_moved_mid_snapshot() -> TestResult {
     let world = landing_mid_snapshot(&['c', 'e', 'f'])?;
     let refused = err_of(

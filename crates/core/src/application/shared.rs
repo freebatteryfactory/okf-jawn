@@ -132,6 +132,31 @@ pub(super) async fn commit(
     context: &OperationContext,
     write: Write,
 ) -> Result<Committed, ApiError> {
+    let item = write.item;
+    let committed = store_commit(service, context, write).await?;
+    announce(
+        service,
+        workspace_scope(context)?,
+        mutation_id(context)?,
+        &committed.revision,
+        item,
+    )
+    .await?;
+    Ok(committed)
+}
+
+/// Commit one write in the store only, without indexing or announcing it: the step whose
+/// `Conflict` alone means the store refused the write (a moved head, a path collision). A writer
+/// that retries on a moved head retries only this step, and announces once it succeeded.
+///
+/// # Errors
+/// Returns the purge check's refusal of the base, the store's refusal, or any port error of
+/// reading the touched items.
+pub(super) async fn store_commit(
+    service: &ApplicationService,
+    context: &OperationContext,
+    write: Write,
+) -> Result<Committed, ApiError> {
     let scope = workspace_scope(context)?;
     let mutation_id = mutation_id(context)?;
     check_named(service, &scope, &write.base).await?;
@@ -148,7 +173,7 @@ pub(super) async fn commit(
         );
     }
     let check = Arc::new(EditCheck::new(&touched, write.touched.of_type));
-    let committed = ports
+    ports
         .versions
         .commit(
             &scope,
@@ -161,9 +186,7 @@ pub(super) async fn commit(
             },
             check,
         )
-        .await?;
-    announce(service, scope, mutation_id, &committed.revision, write.item).await?;
-    Ok(committed)
+        .await
 }
 
 /// Index a revision a write produced and append its `changed` event under the write's
