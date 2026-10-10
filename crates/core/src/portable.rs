@@ -98,9 +98,21 @@ pub const fn claim_coverage(_claim: &ImportedClaim) -> ReviewCoverage {
 /// # Errors
 /// Returns `Internal` when the content cannot be serialized.
 pub fn item_content_digest(document: &ItemDocument) -> Result<Digest, ApiError> {
+    content_digest(&document.body, &document.properties)
+}
+
+/// The same digest of a body and a property map that are not a committed document, such as a
+/// draft's (`DraftWrite::content_digest`), so a draft and the item it would commit compare.
+///
+/// # Errors
+/// Returns `Internal` when the content cannot be serialized.
+pub fn content_digest(
+    body: &str,
+    properties: &BTreeMap<String, Value>,
+) -> Result<Digest, ApiError> {
     request_digest(&ReviewedContent {
-        body: &document.body,
-        properties: without_header(&document.properties),
+        body,
+        properties: without_header(properties),
     })
 }
 
@@ -261,7 +273,7 @@ fn verified_entry(review: &Review) -> Value {
 }
 
 /// The okf-core value of a JSON property, so okf-core's own readers apply to it.
-fn yaml_value(value: &Value) -> YamlValue {
+pub(crate) fn yaml_value(value: &Value) -> YamlValue {
     match value {
         Value::Null => YamlValue::Null,
         Value::Bool(flag) => YamlValue::Bool(*flag),
@@ -286,7 +298,7 @@ fn yaml_value(value: &Value) -> YamlValue {
 }
 
 /// `path` relative to `root`, `/`-separated; `None` when it is not a plain path below `root`.
-fn relative_path(root: &Path, path: &Path) -> Option<String> {
+pub(crate) fn relative_path(root: &Path, path: &Path) -> Option<String> {
     let segments = path
         .strip_prefix(root)
         .ok()?
@@ -303,7 +315,7 @@ fn relative_path(root: &Path, path: &Path) -> Option<String> {
 }
 
 /// The warning code and text of a lint message, which okf-validator writes as `[L1] text`.
-fn lint_code(message: &str) -> (String, String) {
+pub(crate) fn lint_code(message: &str) -> (String, String) {
     message
         .strip_prefix('[')
         .and_then(|rest| rest.split_once("] "))

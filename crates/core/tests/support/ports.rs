@@ -19,7 +19,7 @@ use okf_jawn_contract::{
         TenantId, WorkspacePath,
     },
     import::{Job, ListJobsResponse},
-    item::{ItemDocument, TypeDefinition},
+    item::{ItemDocument, ItemSummary, TypeDefinition},
     purge::Purge,
     review::Review,
 };
@@ -97,6 +97,14 @@ impl VersionStore for FakeVersions {
         _folder: Option<&'a WorkspacePath>,
         _page: Page,
     ) -> PortFuture<'a, FolderListing> {
+        unused()
+    }
+    fn item_at_path<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _revision: &'a Revision,
+        _path: &'a WorkspacePath,
+    ) -> PortFuture<'a, Option<ItemSummary>> {
         unused()
     }
     fn show<'a>(

@@ -1,14 +1,15 @@
 //! Reads of one resolved revision: folder listings, items, files, rules, types, corrections.
 //!
-//! An item is found by the identity in its application header, never by a path the caller
-//! names, so a moved item is found at its new path.
+//! `show` finds an item by the identity in its application header, never by a path the caller
+//! names, so a moved item is found at its new path. `item_at_path` answers what is at one path
+//! of that revision, by direct tree lookup, and summarizes it exactly as `list` does.
 
-use git2::{Repository, Tree};
+use git2::{Oid, Repository, Tree};
 use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{SuppliedText, TextOrigin};
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
-use okf_jawn_contract::item::{ItemDocument, TypeDefinition};
+use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_contract::source::SourceAppearance;
 use okf_jawn_core::portable::item_content_digest;
 use okf_jawn_core::storage::{FolderListing, Page, Provenance};
@@ -25,18 +26,73 @@ pub(crate) fn items(
 ) -> Result<Vec<(WorkspacePath, ItemFile)>, ApiError> {
     let mut found = Vec::new();
     for (path, blob) in files(repository, tree)? {
-        if !is_item_path(&path) {
-            continue;
-        }
-        let text = String::from_utf8(blob_bytes(repository, blob)?)
-            .map_err(|_| internal(format!("{path} is not UTF-8")))?;
-        if let Some(file) = ItemFile::parse(&text)? {
+        if let Some(file) = item_file(repository, &path, blob)? {
             let path = WorkspacePath::try_from(path.clone())
                 .map_err(|error| internal(format!("{path} is not a workspace path: {error}")))?;
             found.push((path, file));
         }
     }
     Ok(found)
+}
+
+/// The item a file at `path` holds: `None` when `path` cannot hold an item (`is_item_path`)
+/// or the text carries no application header. `items`, and so `list`, and `item_at_path`
+/// decide what is an item here and nowhere else.
+fn item_file(repository: &Repository, path: &str, blob: Oid) -> Result<Option<ItemFile>, ApiError> {
+    if !is_item_path(path) {
+        return Ok(None);
+    }
+    let text = String::from_utf8(blob_bytes(repository, blob)?)
+        .map_err(|_| internal(format!("{path} is not UTF-8")))?;
+    ItemFile::parse(&text)
+}
+
+/// The navigation summary of one item at `revision`. `list` and `item_at_path` both summarize
+/// through it, so the two cannot disagree.
+fn summary_of(
+    repository: &Repository,
+    tree: &Tree<'_>,
+    path: &WorkspacePath,
+    file: &ItemFile,
+    revision: &Revision,
+) -> Result<ItemSummary, ApiError> {
+    let appearance = appearance(repository, tree, file.header.item_id)?;
+    Ok(file.summary(path, revision, appearance.as_ref()))
+}
+
+/// The item whose path is exactly `path` at `revision`, summarized as `list` of its folder
+/// summarizes it; `NotFound` only when this repository holds no such commit.
+///
+/// The path is looked up in that commit's tree one entry per segment (`blob_at`): no folder is
+/// listed and no other item file is read, so the cost is the depth of the path, not the size
+/// of the folder or the workspace. A missing or non-folder segment, a folder, and a file that
+/// is not an item (`item_file`: a folder `index.md`, anything under `.okf/`) answer `None`.
+pub(crate) fn item_at_path(
+    repository: &Repository,
+    revision: &Revision,
+    path: &WorkspacePath,
+) -> Result<Option<ItemSummary>, ApiError> {
+    let tree = commit_of(repository, revision)?
+        .tree()
+        .map_err(|error| git(&error))?;
+    let Some(blob) = blob_at(&tree, path.as_str())? else {
+        return Ok(None);
+    };
+    let Some(file) = item_file(repository, path.as_str(), blob)? else {
+        return Ok(None);
+    };
+    summary_of(repository, &tree, path, &file, revision).map(Some)
+}
+
+/// The blob at `path` in `tree`, found one tree entry per segment; `None` when a segment is
+/// missing or not a folder, or the entry is not a file.
+fn blob_at(tree: &Tree<'_>, path: &str) -> Result<Option<Oid>, ApiError> {
+    let entry = match tree.get_path(std::path::Path::new(path)) {
+        Ok(entry) => entry,
+        Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(None),
+        Err(error) => return Err(git(&error)),
+    };
+    Ok((entry.kind() == Some(git2::ObjectType::Blob)).then(|| entry.id()))
 }
 
 /// One item of a tree by identity.
@@ -80,8 +136,7 @@ pub(crate) fn list(
             .strip_prefix(&prefix)
             .is_some_and(|rest| !rest.contains('/'));
         if inside {
-            let appearance = appearance(repository, &tree, file.header.item_id)?;
-            listed.push(file.summary(&path, revision, appearance.as_ref()));
+            listed.push(summary_of(repository, &tree, &path, &file, revision)?);
         }
     }
     let start = page
@@ -169,15 +224,9 @@ pub(crate) fn file(
     let tree = commit_of(repository, revision)?
         .tree()
         .map_err(|error| git(&error))?;
-    let entry = match tree.get_path(std::path::Path::new(path)) {
-        Ok(entry) => entry,
-        Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(None),
-        Err(error) => return Err(git(&error)),
-    };
-    if entry.kind() != Some(git2::ObjectType::Blob) {
-        return Ok(None);
-    }
-    blob_bytes(repository, entry.id()).map(Some)
+    blob_at(&tree, path)?
+        .map(|blob| blob_bytes(repository, blob))
+        .transpose()
 }
 
 pub(crate) fn rules(
