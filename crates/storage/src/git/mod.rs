@@ -20,7 +20,7 @@ use okf_jawn_contract::history::{BlameResponse, DiffResponse, LogResponse};
 use okf_jawn_contract::identity::{
     Digest, ItemId, MutationId, ProposalId, Revision, WorkspacePath,
 };
-use okf_jawn_contract::item::{ItemDocument, TypeDefinition};
+use okf_jawn_contract::item::{ItemDocument, ItemSummary, TypeDefinition};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::{
     BlameQuery, CandidateChanges, CandidateCheck, CommitChanges, Committed, DiffQuery,
@@ -139,6 +139,19 @@ impl VersionStore for GitVersions {
                 folder.as_ref(),
                 &page,
             )
+        }))
+    }
+
+    fn item_at_path<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        path: &'a WorkspacePath,
+    ) -> PortFuture<'a, Option<ItemSummary>> {
+        let revision = revision.clone();
+        let path = path.clone();
+        Box::pin(self.blocking(scope, move |repositories, scope| {
+            read::item_at_path(&repositories.open(scope)?, &revision, &path)
         }))
     }
 

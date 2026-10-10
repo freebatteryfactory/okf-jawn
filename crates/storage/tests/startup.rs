@@ -7,6 +7,8 @@
 use std::fs::File;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use check::{TestResult, err_of, some};
 use okf_jawn_contract::error::ErrorCode;
@@ -25,6 +27,12 @@ const DATABASE: &str = "records.sqlite";
 const PROBE_DIR: &str = "OKF_JAWN_LOCK_PROBE_DIR";
 /// Environment variable naming what the child must observe: `refused` or `opened`.
 const PROBE_EXPECT: &str = "OKF_JAWN_LOCK_PROBE_EXPECT";
+/// Least number of drop-then-reopen rounds the spawning test runs.
+const REOPEN_ROUNDS: u32 = 100;
+/// Least number of child processes spawned during those rounds.
+const SPAWNED_CHILDREN: u32 = 10;
+/// Most rounds the spawning test runs while waiting for the children it needs.
+const ROUND_LIMIT: u32 = 100_000;
 
 fn user_version(path: &Path) -> Result<i64, Box<dyn std::error::Error>> {
     let connection = Connection::open(path)?;
@@ -366,6 +374,65 @@ async fn single_writer_lock_lives_as_long_as_any_store_it_handed_out() -> TestRe
     refused_while_held(directory.path())?;
     drop(blobs);
     drop(Storage::open(directory.path())?);
+    Ok(())
+}
+
+#[test]
+fn single_writer_lock_is_free_once_the_last_store_drops_while_children_spawn() -> TestResult {
+    // A child process holds a duplicate of every descriptor, the lock file's among them, from
+    // its fork until its exec. The lock must be free when the last store drops regardless.
+    let directory = tempfile::tempdir()?;
+    drop(Storage::open(directory.path())?);
+    let stop = Arc::new(AtomicBool::new(false));
+    let children = Arc::new(AtomicU32::new(0));
+    let launcher = {
+        let (stop, children) = (Arc::clone(&stop), Arc::clone(&children));
+        let exe = std::env::current_exe()?;
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                // Without the probe variables the child runs the probe as a no-op and exits.
+                let ran = Command::new(&exe)
+                    .args(["--exact", "lock_probe_child", "--test-threads", "1"])
+                    .env_remove(PROBE_DIR)
+                    .env_remove(PROBE_EXPECT)
+                    .output();
+                if ran.is_err() {
+                    return false;
+                }
+                children.fetch_add(1, Ordering::Relaxed);
+            }
+            true
+        })
+    };
+    let mut rounds = 0_u32;
+    let reopened = loop {
+        if rounds >= REOPEN_ROUNDS && children.load(Ordering::Relaxed) >= SPAWNED_CHILDREN {
+            break Ok(());
+        }
+        if rounds >= ROUND_LIMIT || launcher.is_finished() {
+            break Err(format!(
+                "only {} children were spawned in {rounds} rounds",
+                children.load(Ordering::Relaxed)
+            ));
+        }
+        let storage = match Storage::open(directory.path()) {
+            Ok(storage) => storage,
+            Err(error) => break Err(format!("round {rounds}: {}", error.message)),
+        };
+        let stores = (
+            storage.mutations(),
+            storage.search(),
+            storage.versions(),
+            storage.blobs(),
+        );
+        drop(storage);
+        drop(stores);
+        rounds = rounds.saturating_add(1);
+    };
+    stop.store(true, Ordering::Relaxed);
+    let every_child_ran = launcher.join().map_err(|_| "the spawning thread stopped")?;
+    assert!(every_child_ran, "a child process could not be spawned");
+    reopened?;
     Ok(())
 }
 

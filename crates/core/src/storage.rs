@@ -426,6 +426,17 @@ pub trait VersionStore: Send + Sync {
         folder: Option<&'a WorkspacePath>,
         page: Page,
     ) -> PortFuture<'a, FolderListing>;
+    /// The item whose path is exactly `path` at `revision`, summarized as `list` of its folder
+    /// summarizes it.
+    ///
+    /// `Ok(None)` when no item is at that path at that revision; `NotFound` only when the
+    /// revision itself is unknown.
+    fn item_at_path<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        path: &'a WorkspacePath,
+    ) -> PortFuture<'a, Option<ItemSummary>>;
     /// Read one item's committed content. The returned document never carries a draft.
     fn show<'a>(
         &'a self,

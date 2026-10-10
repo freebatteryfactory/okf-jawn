@@ -12,20 +12,28 @@
 //! locations are computed from the conversion record (`cited_locations`) and filled or
 //! compared (`fill_locations`); a saved View keeps none (`strip_locations`).
 
+use std::collections::BTreeMap;
+
+use okf_core::ResourceKind;
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use tokio::io::AsyncReadExt as _;
 
 use okf_jawn_contract::{
     common::TextRange,
     error::{ApiError, ErrorCode, ErrorDetail},
     extraction::{Extraction, TextOrigin},
-    identity::{Digest, ItemId, Revision},
+    identity::{Digest, ItemId, Revision, WorkspacePath},
     read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection},
-    source::{SourceAppearance, SourceLocation, SourceLocator, SourceReference, UnresolvedReason},
+    source::{
+        SourceAppearance, SourceLocation, SourceLocator, SourceReference, UncitedReason,
+        UnresolvedReason,
+    },
     views::ViewDocument,
 };
 
 use crate::conversion::ConversionRecord;
 use crate::jobs::{DerivedKind, DerivedObject, RecordStore, RevisionMapping};
+use crate::portable::yaml_value;
 use crate::storage::{BlobStore, StorageScope, VersionStore};
 use crate::stored::{ValidatorCell, decode_stored};
 
@@ -59,8 +67,81 @@ pub struct RevisionObjects<'a> {
     pub derived: Option<&'a DerivedObject>,
 }
 
+/// Where one OKF `sources` entry of a note may point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceTarget {
+    /// A path resource: the workspace paths it may name, in the order okf-core tries them
+    /// (relative to the note, then from the workspace root), each with the `.md` an OKF concept
+    /// path implies. The first that names an item at the read revision is the citation.
+    Candidates(Vec<WorkspacePath>),
+    /// An entry that names no item, and why.
+    Uncited(UncitedReason),
+}
+
+/// One OKF `sources` entry of a note, exactly as written, and where it may point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteSource {
+    /// The entry as the note's frontmatter holds it: every field kept (`id`, the footnote
+    /// attribution key, `title`, `author`, `last_modified`, `usage_count`, extensions).
+    pub entry: serde_json::Value,
+    /// Where it may point.
+    pub target: SourceTarget,
+}
+/// Where each line of a text starts: lines are one-based and end at `\n`, and a final `\n`
+/// opens no further line, the counting a `Lines` selection uses.
+#[derive(Debug, Clone)]
+pub struct LineIndex {
+    /// Byte offset of the first byte of each line.
+    starts: Vec<usize>,
+    /// Byte length of the text.
+    len: usize,
+}
+
 /// Most bytes of a conversion record core reads into memory.
 pub const MAX_CONVERSION_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+
+impl LineIndex {
+    /// Index the lines of `text`.
+    #[must_use]
+    pub fn new(text: &str) -> Self {
+        let len = text.len();
+        let mut starts = Vec::new();
+        if len > 0 {
+            starts.push(0);
+        }
+        starts.extend(
+            text.match_indices('\n')
+                .map(|(at, _)| at.saturating_add(1))
+                .filter(|start| *start < len),
+        );
+        Self { starts, len }
+    }
+
+    /// How many lines the text has; 0 for the empty text.
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        u32::try_from(self.starts.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The one-based line holding byte `offset`.
+    #[must_use]
+    pub fn line_of(&self, offset: usize) -> u32 {
+        let line = self.starts.partition_point(|start| *start <= offset);
+        u32::try_from(line).unwrap_or(u32::MAX).max(1)
+    }
+
+    /// The bytes of lines `range.start..=range.end`, through the end of the last one (its `\n`
+    /// included); `None` when the range starts past the last line. An end past the last line
+    /// stops at the end of the text.
+    #[must_use]
+    pub fn span(&self, range: &TextRange) -> Option<std::ops::Range<usize>> {
+        let first = usize::try_from(range.start.checked_sub(1)?).ok()?;
+        let start = *self.starts.get(first)?;
+        let after = usize::try_from(range.end).ok()?;
+        let end = self.starts.get(after).copied().unwrap_or(self.len);
+        Some(start..end.max(start))
+    }
+}
 
 /// What `digest` is to the cited item revision.
 ///
@@ -341,13 +422,14 @@ pub(crate) const fn location_page(location: &SourceLocation) -> Option<u32> {
 /// The lines of the section a heading opens, read from the outline of the shown Markdown: the
 /// `Lines` selection of the one heading entry whose label is exactly `heading`.
 ///
-/// Core parses no Markdown. The outline is what a Markdown parser made of the text the read
-/// serves, the same outline the `outline` view returns: the converter's for converted text and
-/// the selected parser's for an item's own Markdown (`application-operations`), so ATX and
-/// Setext headings, fences and indented code are that parser's call. A heading entry selects
-/// its section: the heading line to the line before the next heading of the same or a higher
-/// level, or to the end. `section_lines` trusts the producer to have applied that rule when it
-/// wrote the entry's `Lines` selection; it does not recompute a section.
+/// Core hand-writes no Markdown scan; it takes outlines from a parser. The outline is what a
+/// Markdown parser made of the text the read serves, the same outline the `outline` view
+/// returns: the converter's for converted text, and pulldown-cmark's for an item's own Markdown
+/// (`markdown_outline`), so ATX and Setext headings, fences and indented code are that
+/// parser's call. A heading entry selects its section: the heading line to the line before the
+/// next heading of the same or a higher level, or to the end. `section_lines` trusts the
+/// producer to have applied that rule when it wrote the entry's `Lines` selection; it does not
+/// recompute a section.
 ///
 /// # Errors
 /// Returns `NotFound` on `/selection/heading` when no heading entry has exactly this label,
@@ -383,6 +465,154 @@ pub fn section_lines(outline: &[OutlineEntry], heading: &str) -> Result<TextRang
             ),
         )
         .with_field("/selection/heading")),
+    }
+}
+
+/// The outline of an item's own Markdown, as pulldown-cmark parses it: one heading entry per
+/// ATX or Setext heading, in order, labelled with the heading's text.
+///
+/// Each entry selects its section as lines, the rule `OutlineEntry::selection` states and the
+/// converter's outline follows: from the heading's first line to the line before the next
+/// heading of the same or a higher level (a level number no greater), or to the last line of
+/// the text. Lines are one-based and counted by `\n`, as a `Lines` selection counts them. A
+/// heading inside a fence or indented code is code to the parser and gets no entry.
+#[must_use]
+pub fn markdown_outline(text: &str) -> Vec<OutlineEntry> {
+    let lines = LineIndex::new(text);
+    let mut headings: Vec<(u32, u16, String)> = Vec::new();
+    let mut open: Option<(u32, u16, String)> = None;
+    for (event, range) in Parser::new_ext(text, Options::empty()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                open = Some((
+                    lines.line_of(range.start),
+                    heading_level(level),
+                    String::new(),
+                ));
+            }
+            Event::Text(text) | Event::Code(text) => {
+                if let Some((_, _, label)) = open.as_mut() {
+                    label.push_str(&text);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some((_, _, label)) = open.as_mut() {
+                    label.push(' ');
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some(heading) = open.take() {
+                    headings.push(heading);
+                }
+            }
+            _ => {}
+        }
+    }
+    let last = lines.count();
+    headings
+        .iter()
+        .enumerate()
+        .map(|(index, (start, level, label))| {
+            let end = headings
+                .iter()
+                .skip(index.saturating_add(1))
+                .find(|(_, next_level, _)| next_level <= level)
+                .map_or(last, |(next_start, _, _)| next_start.saturating_sub(1))
+                .max(*start);
+            OutlineEntry {
+                label: label.trim().to_owned(),
+                level: *level,
+                selection: Selection::Lines {
+                    range: TextRange { start: *start, end },
+                },
+                kind: OutlineEntryKind::Heading,
+            }
+        })
+        .collect()
+}
+
+/// The OKF `sources` entries of the note at `note`, in order, each exactly as written.
+///
+/// The list is read as OKF reads it: a sequence of entries, or a bare mapping as a one-element
+/// list. Every element is kept, a malformed one included, so nothing the file declares is
+/// dropped. A mapping is classified by okf-core (`Source::resource_kind`): a URL is `External`,
+/// prose is a `Scope`, a missing resource is `Malformed`, and a path gives the candidates
+/// okf-core's `field_path_candidates` gives (relative to the note, then from the root), each
+/// with `.md` appended when it lacks it, kept when it is a valid workspace path; a path with no
+/// valid candidate is `NotFound`. An element that is not a mapping, and a `sources` value that
+/// is neither a list nor a mapping, is `Malformed`.
+#[must_use]
+pub fn note_sources(
+    properties: &BTreeMap<String, serde_json::Value>,
+    note: &WorkspacePath,
+) -> Vec<NoteSource> {
+    let entries: Vec<&serde_json::Value> = match properties.get("sources") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(entries)) => entries.iter().collect(),
+        Some(other) => vec![other],
+    };
+    let from = okf_core::links::concept_id_for_path(note.as_str());
+    entries
+        .into_iter()
+        .map(|entry| NoteSource {
+            entry: entry.clone(),
+            target: entry_target(entry, from.as_ref()),
+        })
+        .collect()
+}
+
+/// Where one `sources` element may point.
+fn entry_target(entry: &serde_json::Value, from: Option<&okf_core::ConceptId>) -> SourceTarget {
+    let Some(source) = entry
+        .is_object()
+        .then(|| okf_core::Source::from_value(&yaml_value(entry)))
+        .flatten()
+    else {
+        return SourceTarget::Uncited(UncitedReason::Malformed);
+    };
+    match source.resource_kind() {
+        ResourceKind::Url => SourceTarget::Uncited(UncitedReason::External),
+        ResourceKind::Scope => SourceTarget::Uncited(UncitedReason::Scope),
+        ResourceKind::Missing => SourceTarget::Uncited(UncitedReason::Malformed),
+        ResourceKind::Path => {
+            let resource = source.resource.as_deref().unwrap_or_default().trim();
+            let raw = match from {
+                Some(from) => okf_core::field_path_candidates(resource, from),
+                None => vec![resource.to_owned()],
+            };
+            let mut paths: Vec<WorkspacePath> = Vec::new();
+            for candidate in raw {
+                let file = if std::path::Path::new(&candidate)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                {
+                    candidate
+                } else {
+                    format!("{candidate}.md")
+                };
+                if let Ok(path) = WorkspacePath::try_from(file)
+                    && !paths.contains(&path)
+                {
+                    paths.push(path);
+                }
+            }
+            if paths.is_empty() {
+                SourceTarget::Uncited(UncitedReason::NotFound)
+            } else {
+                SourceTarget::Candidates(paths)
+            }
+        }
+    }
+}
+/// The depth of a heading: 1 for `#` to 6 for `######`.
+const fn heading_level(level: HeadingLevel) -> u16 {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
     }
 }
 
