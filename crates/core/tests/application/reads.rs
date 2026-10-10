@@ -473,6 +473,64 @@ async fn a_section_of_a_note_is_read_through_its_parsed_outline() -> TestResult 
 }
 
 #[tokio::test]
+async fn a_read_returns_only_the_outline_entries_within_what_it_cites() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    // Plan spans lines 1 to 7, Goals 3 to 5, Risks 6 to 7.
+    let body = "# Plan\nintro\n## Goals\none\ntwo\n## Risks\nthree\n";
+    world.versions.put_document(
+        &at,
+        note(NOTE, &at, "notes/plan.md", body, json!({ "type": "Note" }))?,
+    )?;
+    let labels = |response: &ReadItemResponse| -> Vec<String> {
+        response
+            .outline
+            .iter()
+            .map(|entry| entry.label.clone())
+            .collect()
+    };
+    let whole = read_as_alice(&world, read(NOTE, ReadView::Text, Selection::All)?).await?;
+    assert_eq!(whole.outline, markdown_outline(body));
+    let section = read_as_alice(
+        &world,
+        read(
+            NOTE,
+            ReadView::Text,
+            Selection::Section {
+                heading: "Goals".to_owned(),
+            },
+        )?,
+    )
+    .await?;
+    assert_eq!(labels(&section), vec!["Goals".to_owned()]);
+    let lines = read_as_alice(
+        &world,
+        read(
+            NOTE,
+            ReadView::Outline,
+            Selection::Lines {
+                range: TextRange { start: 6, end: 7 },
+            },
+        )?,
+    )
+    .await?;
+    assert_eq!(labels(&lines), vec!["Risks".to_owned()]);
+    let intro = read_as_alice(
+        &world,
+        read(
+            NOTE,
+            ReadView::Text,
+            Selection::Lines {
+                range: TextRange { start: 2, end: 2 },
+            },
+        )?,
+    )
+    .await?;
+    assert_eq!(labels(&intro), Vec::<String>::new());
+    Ok(())
+}
+
+#[tokio::test]
 async fn converter_text_is_read_and_located_through_its_record() -> TestResult {
     let world = card_world(Vec::new())?;
     let section = read_as_alice(
