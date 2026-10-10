@@ -56,6 +56,23 @@ mod outline_sections {
         assert_eq!(outline_of("").len(), 0);
         Ok(())
     }
+
+    #[test]
+    fn a_closing_sequence_is_dropped_only_after_whitespace_or_as_the_whole_heading() -> TestResult {
+        let labels = |markdown: &str| -> Vec<String> {
+            outline_of(markdown)
+                .into_iter()
+                .map(|entry| entry.label)
+                .collect()
+        };
+        assert_eq!(labels("# C#\n"), ["C#"]);
+        assert_eq!(labels("## F# ##\n"), ["F#"]);
+        assert_eq!(labels("# #\n"), [""]);
+        assert_eq!(labels("### Notes\t###  \n"), ["Notes"]);
+        assert_eq!(labels("# Ends in #hash#\n"), ["Ends in #hash#"]);
+        assert_eq!(some(labels("#\n").first(), "the empty heading")?, "");
+        Ok(())
+    }
 }
 
 mod assembled_records {
