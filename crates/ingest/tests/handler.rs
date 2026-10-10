@@ -136,6 +136,7 @@ mod job_handler {
             on_page_count: Mutex::new(None),
             dropped: Arc::new(AtomicUsize::new(0)),
             count_failed: Mutex::new(None),
+            runs: AtomicUsize::new(0),
         });
         let handler = IngestHandler::new(HandlerPorts {
             records: Arc::clone(&records) as Arc<dyn RecordStore>,
@@ -807,6 +808,84 @@ mod job_handler {
         // Died after the pending commit, and after the first card's commit: the same warnings.
         assert_eq!(completed_warnings(Some(1), 132).await?, whole);
         assert_eq!(completed_warnings(Some(2), 134).await?, whole);
+        Ok(())
+    }
+
+    /// The retained outputs the cards at `revision` reference: each card's record, its window
+    /// exports and assets.
+    fn referenced_outputs(world: &World, revision: &Revision) -> Built<Vec<Digest>> {
+        let mut outputs = Vec::new();
+        for card in world.versions.items_at(revision)? {
+            let Some(digest) = card.appearance.extraction.digest else {
+                continue;
+            };
+            let record: ConversionRecord = serde_json::from_slice(&world.blobs.bytes(&digest)?)?;
+            outputs.extend(record.structured.into_iter().map(|export| export.digest));
+            outputs.extend(record.assets.into_iter().map(|asset| asset.digest));
+            outputs.push(digest);
+        }
+        outputs.sort();
+        Ok(outputs)
+    }
+
+    #[tokio::test]
+    async fn a_resumed_import_converts_no_committed_card_and_lists_its_committed_outputs()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, 140, "first.pdf", b"%PDF first")?;
+        let second = upload(&world, 141, "second.pdf", b"%PDF second")?;
+        let id = job(
+            &world,
+            140,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        // The first card is converted and committed; the process dies as that commit returns.
+        world.versions.die_after(2)?;
+        assert!(run(&world, id).await?);
+        let died = world.records.entry(id)?;
+        assert_eq!(died.job.state, JobState::Failed);
+        assert_eq!(windows(&world)?.len(), 1);
+        world
+            .records
+            .insert(id, died.scope.clone(), died.created.clone())?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        // Only the second source was converted again.
+        assert_eq!(windows(&world)?.len(), 2);
+        // The completion lists exactly what the committed cards reference, the first card's
+        // outputs being those of the first attempt's conversion.
+        let completion = some(entry.completions.first(), "the completion")?;
+        let head = some(completion.revision.as_ref(), "the completion's revision")?;
+        let mut listed = completion.outputs.clone();
+        listed.sort();
+        assert_eq!(listed, referenced_outputs(&world, head)?);
+        assert_eq!(listed.len(), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_resumed_redigest_converts_nothing_and_lists_its_committed_outputs() -> TestResult {
+        let (world, id, _item_id) = redigest_world(33)?;
+        world.versions.die_after(1)?;
+        assert!(run(&world, id).await?);
+        let died = world.records.entry(id)?;
+        assert_eq!(died.job.state, JobState::Failed);
+        assert_eq!(windows(&world)?.len(), 1);
+        world
+            .records
+            .insert(id, died.scope.clone(), died.created.clone())?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(windows(&world)?.len(), 1);
+        let completion = some(entry.completions.first(), "the completion")?;
+        let head = some(completion.revision.as_ref(), "the completion's revision")?;
+        let mut listed = completion.outputs.clone();
+        listed.sort();
+        assert_eq!(listed, referenced_outputs(&world, head)?);
+        assert_eq!(listed.len(), 2);
         Ok(())
     }
 

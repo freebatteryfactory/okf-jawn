@@ -37,6 +37,12 @@
 //! not retried, and the completion says which card and why (`CARD_NOT_WRITTEN`): the person's
 //! edit is never overwritten. Otherwise the card is written onto the head's version.
 //!
+//! A commit an earlier attempt wrote is found before its source is converted: a resumed
+//! import converts no card it already committed, and a resumed redigest converts nothing. The
+//! completion then lists the outputs the committed card's extraction references (its record's
+//! window exports and assets, and the record), the same list a first conversion gives, read from
+//! the same record, so every retained output a card references stays listed.
+//!
 //! A redigest writes one commit, under ordinal 0, by the same rule against its base revision
 //! (R-I8 extended): replayed when an earlier attempt wrote it, refused (not retried) only when
 //! the item was deleted or its original changed since the base, and otherwise written onto the
@@ -71,7 +77,9 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, UploadId, WorkspaceP
 use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::source::{SourceAppearance, SourceName};
-use okf_jawn_core::conversion::{Conversion, ConversionInput, ConvertedDocument, RetainedAsset};
+use okf_jawn_core::conversion::{
+    Conversion, ConversionInput, ConversionRecord, ConvertedDocument, RetainedAsset,
+};
 use okf_jawn_core::items::without_header;
 use okf_jawn_core::jobs::ClaimedJob;
 use okf_jawn_core::portable::ImportCheck;
@@ -111,7 +119,7 @@ struct Converted {
     page_count: Option<u32>,
     /// Digest of the retained record, when a document was produced.
     record: Option<Digest>,
-    /// Every object retained on the way.
+    /// The retained objects the record references, and the record (`outputs_of`).
     outputs: Vec<Digest>,
 }
 
@@ -227,6 +235,20 @@ pub(crate) async fn import(
             .first()
             .map(|name| name.filename.clone())
             .unwrap_or_default();
+        // A card an earlier attempt already committed is not converted again: the completion
+        // takes its commit and the outputs its committed extraction references.
+        if let Some(committed) = replayed(ports, claimed, scope, (base, ordinal), &check).await? {
+            done.outputs
+                .extend(committed_outputs(ports, scope, &committed.revision, card.item_id).await?);
+            done.revision = Some(committed.revision);
+            done.warnings.extend(committed.warnings);
+            done.item_ids.push(card.item_id);
+            if ordinal < total && cancelled_after(ports, claimed, ordinal, total).await? {
+                done.cancelled = true;
+                return Ok(done);
+            }
+            continue;
+        }
         let Some(converted) =
             convert_document(ports, claimed, scope, &local, &file_name, request.settings).await?
         else {
@@ -253,9 +275,17 @@ pub(crate) async fn import(
         .await?
         {
             Landed::Committed(committed) => {
+                // Replayed only when another attempt committed the card meanwhile: its
+                // outputs are those of that attempt's conversion, which the card references.
+                if committed.replayed {
+                    done.outputs.extend(
+                        committed_outputs(ports, scope, &committed.revision, card.item_id).await?,
+                    );
+                } else {
+                    done.outputs.extend(converted.outputs);
+                }
                 done.revision = Some(committed.revision);
                 done.warnings.extend(committed.warnings);
-                done.outputs.extend(converted.outputs);
             }
             Landed::Refused(error) => return Ok(refused(&error)),
             // The person's edit stands; this conversion is not written, and not retried.
@@ -381,6 +411,18 @@ pub(crate) async fn redigest(
             "a redigest of only the unconverted pages waits for the record to keep each window's text (request R-I5); redigest the whole source",
         ));
     }
+    // A redigest an earlier attempt already committed is not converted again.
+    if let Some(committed) =
+        replayed(ports, claimed, scope, (base_revision, 0), &ports.check).await?
+    {
+        return Ok(Done {
+            outputs: committed_outputs(ports, scope, &committed.revision, item_id).await?,
+            revision: Some(committed.revision),
+            item_ids: vec![item_id],
+            warnings: committed.warnings,
+            ..Done::default()
+        });
+    }
     let document = ports.versions.show(scope, base_revision, item_id).await?;
     let appearance = document.source.clone().ok_or_else(|| {
         ApiError::new(
@@ -437,9 +479,13 @@ pub(crate) async fn redigest(
     };
     Ok(match landed {
         Landed::Committed(committed) => Done {
+            outputs: if committed.replayed {
+                committed_outputs(ports, scope, &committed.revision, item_id).await?
+            } else {
+                converted.outputs
+            },
             revision: Some(committed.revision),
             item_ids: vec![item_id],
-            outputs: converted.outputs,
             warnings: committed.warnings,
             ..Done::default()
         },
@@ -485,7 +531,6 @@ async fn convert_document(
     let total = windows.len();
     let mut outcomes = Vec::new();
     let mut identity: Option<ConverterIdentity> = None;
-    let mut outputs = Vec::new();
     for (index, window) in windows.into_iter().enumerate() {
         let directory = tempfile::tempdir()
             .map_err(|error| fault(&format!("a window directory was refused: {error}")))?;
@@ -506,7 +551,7 @@ async fn convert_document(
         if identity.is_none() {
             identity = Some(conversion.converter.clone());
         }
-        outcomes.push(window_outcome(ports, scope, window, conversion, &mut outputs).await?);
+        outcomes.push(window_outcome(ports, scope, window, conversion).await?);
         let job = ports
             .records
             .update_progress(&claimed.lease, percent(index.saturating_add(1), total))
@@ -517,16 +562,15 @@ async fn convert_document(
     }
     let identity = identity.ok_or_else(|| fault("a conversion ran at least one window"))?;
     let assembled = assemble(identity.clone(), page_count, outcomes)?;
-    let record = match &assembled.record {
+    let (record, outputs) = match &assembled.record {
         Some(record) => {
             let bytes = serde_json::to_vec(record).map_err(|error| {
                 fault(&format!("a conversion record did not serialize: {error}"))
             })?;
             let digest = retain(ports, scope, bytes).await?;
-            outputs.push(digest.clone());
-            Some(digest)
+            (Some(digest.clone()), outputs_of(record, digest))
         }
-        None => None,
+        None => (None, Vec::new()),
     };
     let converter = (assembled.outcome != ConversionOutcome::Unsupported).then_some(identity);
     Ok(Some(Converted {
@@ -569,10 +613,9 @@ async fn window_outcome(
     scope: &StorageScope,
     window: Option<PageRange>,
     conversion: Conversion,
-    outputs: &mut Vec<Digest>,
 ) -> Result<WindowOutcome, ApiError> {
     let converted = match conversion.document {
-        Some(document) => Some(retain_window(ports, scope, document, outputs).await?),
+        Some(document) => Some(retain_window(ports, scope, document).await?),
         None => None,
     };
     Ok(WindowOutcome {
@@ -589,14 +632,11 @@ async fn retain_window(
     ports: &HandlerPorts,
     scope: &StorageScope,
     document: ConvertedDocument,
-    outputs: &mut Vec<Digest>,
 ) -> Result<ConvertedWindow, ApiError> {
     let export = retain(ports, scope, read_output(&document.structured).await?).await?;
-    outputs.push(export.clone());
     let mut assets = Vec::new();
     for asset in document.assets {
         let digest = retain(ports, scope, read_output(&asset.path).await?).await?;
-        outputs.push(digest.clone());
         assets.push(RetainedAsset {
             digest,
             media_type: asset.media_type,
@@ -614,6 +654,40 @@ async fn retain_window(
         assets,
         warnings: document.warnings,
     })
+}
+
+/// The retained outputs of a conversion whose record is retained under `digest`: every window
+/// export and asset the record references, then the record. A first conversion and a replay of
+/// its commit name the same list, read from the same record.
+fn outputs_of(record: &ConversionRecord, digest: Digest) -> Vec<Digest> {
+    record
+        .structured
+        .iter()
+        .map(|export| export.digest.clone())
+        .chain(record.assets.iter().map(|asset| asset.digest.clone()))
+        .chain(std::iter::once(digest))
+        .collect()
+}
+
+/// The retained outputs a committed card references: those of the conversion record its
+/// extraction names at `revision` (`outputs_of`), or none when it names no record.
+async fn committed_outputs(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    revision: &Revision,
+    item_id: ItemId,
+) -> Result<Vec<Digest>, ApiError> {
+    let document = ports.versions.show(scope, revision, item_id).await?;
+    let Some(digest) = document
+        .source
+        .and_then(|appearance| appearance.extraction.digest)
+    else {
+        return Ok(Vec::new());
+    };
+    let local = ports.blobs.materialize(scope, &digest).await?;
+    let record: ConversionRecord = serde_json::from_slice(&read_output(&local.path).await?)
+        .map_err(|error| fault(&format!("a retained conversion record is not one: {error}")))?;
+    Ok(outputs_of(&record, digest))
 }
 
 /// Store bytes in the blob store under their digest.

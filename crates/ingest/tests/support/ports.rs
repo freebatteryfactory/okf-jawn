@@ -125,6 +125,9 @@ pub struct FakeConverter {
     /// How the page count ended without a reply, as `DoclingConverter` reports it: no pages,
     /// and the whole conversion that follows is that failure.
     pub count_failed: Mutex<Option<FailureReason>>,
+    /// Windows converted so far; each export names its run, so a conversion repeated on a
+    /// later attempt retains different outputs from the first.
+    pub runs: AtomicUsize,
 }
 
 /// What a test runs as a window starts: `true` makes that conversion never end.
@@ -1047,7 +1050,8 @@ impl Converter for FakeConverter {
                 });
             }
             let structured = input.output_directory.join("document.json");
-            std::fs::write(&structured, format!("{{\"window\":{start}}}"))
+            let run = self.runs.fetch_add(1, Ordering::SeqCst);
+            std::fs::write(&structured, format!("{{\"window\":{start},\"run\":{run}}}"))
                 .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
             Ok(Conversion {
                 source_digest,
