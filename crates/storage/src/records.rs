@@ -92,10 +92,15 @@ impl SqliteRecords {
 impl RecordStore for SqliteRecords {
     fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job> {
         let scope = scope.clone();
-        Box::pin(
-            self.db
-                .transaction(move |transaction| insert_job(transaction, &scope, &job)),
-        )
+        // A job of a workspace a purge names is refused inside the transaction that would
+        // record it (`purge::guard`): core cancels and drains the jobs that already exist.
+        Box::pin(self.db.transaction(move |transaction| {
+            let (tenant, workspace) = job_scope_key(&scope);
+            if let Some(workspace) = &workspace {
+                guard::refuse(transaction, &tenant, workspace)?;
+            }
+            insert_job(transaction, &scope, &job)
+        }))
     }
 
     fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job> {

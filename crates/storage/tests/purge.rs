@@ -2312,5 +2312,42 @@ async fn a_failed_retain_keeps_its_pending_put() -> TestResult {
     Ok(())
 }
 
+/// Ruling 3: a job of a workspace a purge names is refused inside its transaction, during the
+/// purge and after it, so core drains only the jobs that already exist.
+#[tokio::test]
+async fn purge_refuses_a_new_job_of_the_workspace_it_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let (survivor, _) = create(&storage, 2, "Garden").await?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    let new_job = |n: u32| -> Fallible<NewJob> {
+        Ok(NewJob {
+            mutation_id: uuid!(n)?,
+            initiator: person("ana"),
+            spec: JobSpec::BackupWorkspace,
+        })
+    };
+    let records = storage.records();
+    let scope = JobScope::Workspace(target.clone());
+    refused(
+        records.create_job(&scope, new_job(30)?).await,
+        "a job during the purge",
+    )?;
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    refused(
+        records.create_job(&scope, new_job(31)?).await,
+        "a job after the purge",
+    )?;
+    records
+        .create_job(&JobScope::Workspace(survivor), new_job(32)?)
+        .await?;
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
