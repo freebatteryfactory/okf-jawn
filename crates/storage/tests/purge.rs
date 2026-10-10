@@ -1926,5 +1926,63 @@ async fn item_purge_is_declared_and_not_built_yet() -> TestResult {
     Ok(())
 }
 
+/// Copy every file under `from` into `to`.
+fn copy_tree(from: &Path, to: &Path) -> Fallible<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let path = entry?.path();
+        let target = to.join(some(path.file_name(), "a file name")?);
+        if path.is_dir() {
+            copy_tree(&path, &target)?;
+        } else {
+            std::fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Ruling 5: a managed backup that appears after the backups step (an upgrade between two
+/// attempts writes a pre-migration set that still holds the workspace) is reached by the
+/// backups pass the purge runs again before it completes. The resumed attempt starts after the
+/// backups step, so only that last pass reaches the set.
+#[tokio::test]
+async fn purge_reaches_a_pre_migration_set_written_after_its_backups_step() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let elsewhere = tempfile::tempdir()?;
+    let set = elsewhere.path().join("set-2");
+    fixture
+        .storage
+        .backups()
+        .write_backup_set(&set, None)
+        .await?;
+    let index = rusqlite::Connection::open(directory.path().join("index.sqlite"))?;
+    index.execute_batch(
+        "CREATE TRIGGER stop_purge BEFORE DELETE ON index_items
+         BEGIN SELECT RAISE(ABORT, 'stopped at the index step'); END;",
+    )?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge(&fixture.storage, &fixture, purge).await?;
+    let purger = fixture.storage.purger();
+    let target = fixture.target.workspace_id;
+    err_of(
+        purger
+            .purge_workspace(&tenant()?, uuid!(61)?, purge, target)
+            .await,
+    )?;
+    copy_tree(&set, &directory.path().join("backups/pre-migration/set-2"))?;
+    index.execute_batch("DROP TRIGGER stop_purge;")?;
+    drop(index);
+    let report = purger
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target)
+        .await?;
+    assert_eq!(
+        marked_files(directory.path())?,
+        Vec::<String>::new(),
+        "the late set is reached: {report:?}"
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
