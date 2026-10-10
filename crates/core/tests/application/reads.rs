@@ -224,6 +224,38 @@ async fn a_cursor_continues_only_its_own_read() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_cursor_is_refused_for_another_item_or_another_view() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    let body = forty_lines()?;
+    // Two notes with the same text, so only the cursor's own check can tell them apart.
+    for id in [NOTE, NOTE + 1] {
+        world.versions.put_document(
+            &at,
+            note(id, &at, "notes/plan.md", &body, json!({ "type": "Note" }))?,
+        )?;
+    }
+    let mut request = read(NOTE, ReadView::Text, Selection::All)?;
+    request.max_bytes = 256;
+    let first = read_as_alice(&world, request.clone()).await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    let caller = alice(OperationName::ReadItem, None)?;
+    let mut other_item = request.clone();
+    other_item.item_id = ItemId(Uuid::from_u128(NOTE + 1));
+    other_item.cursor = Some(cursor.clone());
+    let mut other_view = request;
+    // A note reads in the multimodal view too; only the cursor pins the text view.
+    other_view.view = ReadView::Multimodal;
+    other_view.cursor = Some(cursor);
+    for refused_request in [other_item, other_view] {
+        let refused = err_of(world.service.read_item(&caller, refused_request).await)?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert_eq!(refused.field.as_deref(), Some("/cursor"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_cursor_minted_before_a_purge_does_not_read_the_purged_revision() -> TestResult {
     let world = World::new()?;
     let at = revision('a')?;
