@@ -149,6 +149,16 @@ impl FakeRecords {
         Ok(())
     }
 
+    /// Cancel a running job, as `cancel_job` would: the state is `Cancelled` and the claim is
+    /// left as it was, so the handler learns it from the next `update_progress`.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for an unknown job.
+    pub fn cancel(&self, id: JobId) -> Result<(), ApiError> {
+        self.lock()?.get_mut(&id).ok_or_else(not_found)?.job.state = JobState::Cancelled;
+        Ok(())
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<JobId, Entry>>, ApiError> {
         self.entries
             .lock()
@@ -517,6 +527,8 @@ mod tests {
             "requested_at": "2026-10-09T00:00:00.000Z",
         }))?)?;
         assert!(records.purge(purge).is_ok());
+        records.cancel(id)?;
+        assert_eq!(records.entry(id)?.job.state, JobState::Cancelled);
         Ok(())
     }
 }

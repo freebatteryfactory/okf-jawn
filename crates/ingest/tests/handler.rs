@@ -29,8 +29,8 @@ mod job_handler {
     use okf_jawn_core::conversion::{ConversionRecord, ConverterLimits};
     use okf_jawn_core::jobs::{JobHandler, JobScope, JobSpec, NewJob, RecordStore};
     use okf_jawn_core::storage::{
-        ObjectInfo, Provenance, SourceCard, StorageScope, TreeEdit, derive_commit_mutation_id,
-        derive_item_id,
+        CandidateCheck, ObjectInfo, Provenance, SourceCard, StorageScope, TreeEdit,
+        derive_commit_mutation_id, derive_item_id,
     };
     use okf_jawn_core::uploads::UploadRecord;
     use okf_jawn_ingest::handler::{
@@ -90,6 +90,17 @@ mod job_handler {
     /// A world whose converter reports `pages` and hits the cap on the windows starting at
     /// `capped`, with windows of 4 pages.
     fn world_with(pages: Option<u32>, capped: Vec<u32>) -> Built<World> {
+        world_full(pages, capped, Arc::new(AcceptAll), Duration::from_secs(60))
+    }
+
+    /// A world as `world_with`, with the conformance check composition injects and the
+    /// heartbeat of a converting job.
+    fn world_full(
+        pages: Option<u32>,
+        capped: Vec<u32>,
+        check: Arc<dyn CandidateCheck>,
+        heartbeat: Duration,
+    ) -> Built<World> {
         let records = Arc::new(FakeRecords::default());
         let versions = Arc::new(FakeVersions::at(base()?));
         let search = Arc::new(FakeSearch::default());
@@ -115,6 +126,8 @@ mod job_handler {
                 memory_limit_bytes: 1 << 30,
             },
             windows: Mutex::new(Vec::new()),
+            on_window: Mutex::new(None),
+            dropped: Arc::new(AtomicUsize::new(0)),
         });
         let handler = IngestHandler::new(HandlerPorts {
             records: Arc::clone(&records) as Arc<dyn RecordStore>,
@@ -125,9 +138,9 @@ mod job_handler {
             uploads: Arc::clone(&uploads) as Arc<dyn okf_jawn_core::uploads::UploadStore>,
             blobs: Arc::clone(&blobs) as Arc<dyn okf_jawn_core::storage::BlobStore>,
             converter: Arc::clone(&converter) as Arc<dyn okf_jawn_core::conversion::Converter>,
-            check: Arc::new(AcceptAll),
+            check,
             limits: HandlerLimits {
-                heartbeat: Duration::from_secs(60),
+                heartbeat,
                 window_timeout: Duration::from_secs(600),
             },
         });
@@ -674,6 +687,107 @@ mod job_handler {
                 .any(|(_, pending)| *pending == id)
         );
         assert!(!run(&world, id).await?);
+        Ok(())
+    }
+
+    /// The job's state, what it wrote and the windows converted, after a cancellation.
+    fn assert_stopped(world: &World, id: okf_jawn_contract::identity::JobId) -> TestResult {
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Cancelled);
+        assert!(entry.completions.is_empty(), "{:?}", entry.completions);
+        assert!(entry.failures.is_empty(), "{:?}", entry.failures);
+        Ok(())
+    }
+
+    fn windows(world: &World) -> Built<Vec<Option<PageRange>>> {
+        Ok(world
+            .converter
+            .windows
+            .lock()
+            .map_err(|_| "poisoned")?
+            .clone())
+    }
+
+    #[tokio::test]
+    async fn a_job_cancelled_during_a_window_stops_before_the_next_window() -> TestResult {
+        let world = world_with(Some(6), Vec::new())?;
+        let report = upload(&world, 101, "report.pdf", b"%PDF report")?;
+        let id = job(
+            &world,
+            16,
+            workspace_scope()?,
+            import_spec(vec![report], false)?,
+        )?;
+        let records = Arc::clone(&world.records);
+        *world.converter.on_window.lock().map_err(|_| "poisoned")? =
+            Some(Box::new(move |window: Option<&PageRange>| {
+                if window.is_some_and(|window| window.start == 1) {
+                    let _cancelled = records.cancel(id);
+                }
+                false
+            }));
+        assert!(run(&world, id).await?);
+        assert_stopped(&world, id)?;
+        // The second window is never converted, and no card is replaced.
+        assert_eq!(windows(&world)?, [Some(PageRange { start: 1, end: 4 })]);
+        assert_eq!(world.versions.written()?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_job_cancelled_while_a_window_converts_drops_the_conversion() -> TestResult {
+        let world = world_full(
+            Some(6),
+            Vec::new(),
+            Arc::new(AcceptAll),
+            Duration::from_millis(10),
+        )?;
+        let report = upload(&world, 102, "report.pdf", b"%PDF report")?;
+        let id = job(
+            &world,
+            17,
+            workspace_scope()?,
+            import_spec(vec![report], false)?,
+        )?;
+        let records = Arc::clone(&world.records);
+        // The first window never ends by itself; the heartbeat must find the job cancelled.
+        *world.converter.on_window.lock().map_err(|_| "poisoned")? =
+            Some(Box::new(move |_window: Option<&PageRange>| {
+                let _cancelled = records.cancel(id);
+                true
+            }));
+        // An `Elapsed` error here means the heartbeat never stopped the cancelled job.
+        assert!(tokio::time::timeout(Duration::from_secs(20), run(&world, id)).await??);
+        assert_stopped(&world, id)?;
+        assert_eq!(world.converter.dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(windows(&world)?, [Some(PageRange { start: 1, end: 4 })]);
+        assert_eq!(world.versions.written()?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_job_cancelled_between_card_commits_converts_no_further_source() -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, 103, "first.pdf", b"%PDF first")?;
+        let second = upload(&world, 104, "second.pdf", b"%PDF second")?;
+        let id = job(
+            &world,
+            18,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        let records = Arc::clone(&world.records);
+        // Cancelled as the first card's commit is written (the second commit call).
+        *world.versions.on_commit.lock().map_err(|_| "poisoned")? =
+            Some(Box::new(move |call: usize| {
+                if call == 2 {
+                    let _cancelled = records.cancel(id);
+                }
+            }));
+        assert!(run(&world, id).await?);
+        assert_stopped(&world, id)?;
+        assert_eq!(windows(&world)?, [Some(PageRange { start: 1, end: 3 })]);
+        assert_eq!(world.versions.written()?.len(), 2);
         Ok(())
     }
 

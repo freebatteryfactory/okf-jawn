@@ -30,8 +30,11 @@
 //!
 //! A redigest writes one commit, under ordinal 0, on its base revision.
 //!
-//! While a window converts, `update_progress` is called every `HandlerLimits::heartbeat`; a job
-//! found cancelled stops, and dropping the conversion kills its child.
+//! A job stops when `update_progress` shows it cancelled, and writes no completion: while a
+//! window converts (it is called every `HandlerLimits::heartbeat`, and dropping the conversion
+//! kills its child), between windows, and between card commits. Cards already committed keep
+//! the state they were committed with; a source not yet converted stays `pending`, with no job
+//! left to finish it (review N10), until it is redigested.
 //!
 //! Construction limitations, stated rather than hidden:
 //! - `apply_naming_rules: true` fails as `NotImplemented`: core has no function that names a
@@ -161,6 +164,7 @@ pub(crate) async fn import(
         warnings: pending.warnings,
         ..Done::default()
     };
+    let total = u32::try_from(cards.len()).unwrap_or(u32::MAX);
     for ((mut card, local), ordinal) in cards.into_iter().zip(1_u32..) {
         let file_name = card
             .appearance
@@ -195,6 +199,21 @@ pub(crate) async fn import(
         done.warnings.extend(committed.warnings);
         done.outputs.extend(converted.outputs);
         done.item_ids.push(card.item_id);
+        // Between card commits: a job cancelled now converts no further source.
+        if ordinal < total {
+            let progress = percent(
+                usize::try_from(ordinal).unwrap_or(usize::MAX),
+                usize::try_from(total).unwrap_or(usize::MAX),
+            );
+            let job = ports
+                .records
+                .update_progress(&claimed.lease, progress)
+                .await?;
+            if job.state == JobState::Cancelled {
+                done.cancelled = true;
+                return Ok(done);
+            }
+        }
     }
     Ok(done)
 }

@@ -62,6 +62,8 @@ pub struct FakeVersions {
     pub taken: Mutex<Vec<(String, ItemId)>>,
     /// `commit` calls made so far, and the call numbers (1-based) a foreign commit precedes.
     pub calls: Mutex<(usize, Vec<usize>)>,
+    /// Runs as each `commit` call starts, with its number (a test cancels the job there).
+    pub on_commit: Mutex<Option<CommitHook>>,
 }
 
 /// An `UploadStore` holding complete uploads and recording which job consumed each.
@@ -83,6 +85,10 @@ pub struct FakeBlobs {
 
 /// A `Converter` that converts every window of a paginated original, except the windows that
 /// start on a page in `capped`, which end at the memory cap.
+///
+/// `on_window`, when set, runs as each window starts (a test cancels the job there) and says
+/// whether the conversion then never ends, as a long window would; such a conversion counts in
+/// `dropped` when its future is dropped.
 pub struct FakeConverter {
     /// The page count it reports.
     pub pages: Option<u32>,
@@ -92,7 +98,20 @@ pub struct FakeConverter {
     pub limits: ConverterLimits,
     /// Windows asked for.
     pub windows: Mutex<Vec<Option<PageRange>>>,
+    /// Runs as a window starts; `true` makes that conversion never end.
+    pub on_window: Mutex<Option<WindowHook>>,
+    /// Conversions that never ended whose future was dropped.
+    pub dropped: Arc<AtomicUsize>,
 }
+
+/// What a test runs as a window starts: `true` makes that conversion never end.
+pub type WindowHook = Box<dyn Fn(Option<&PageRange>) -> bool + Send + Sync>;
+
+/// What a test runs as the `n`-th `commit` call (1-based) starts.
+pub type CommitHook = Box<dyn Fn(usize) + Send + Sync>;
+
+/// Counts a never-ending conversion whose future was dropped.
+struct DropCount(Arc<AtomicUsize>);
 
 /// A `CandidateCheck` that accepts every tree.
 pub struct AcceptAll;
@@ -122,6 +141,12 @@ pub struct FakePurger {
     pub calls: AtomicUsize,
 }
 
+impl Drop for DropCount {
+    fn drop(&mut self) {
+        let _previous = self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 impl FakeSearch {
     /// The heads rebuilt so far.
     ///
@@ -145,6 +170,7 @@ impl FakeVersions {
             die_after: Mutex::new(None),
             taken: Mutex::new(Vec::new()),
             calls: Mutex::new((0, Vec::new())),
+            on_commit: Mutex::new(None),
         }
     }
 
@@ -198,12 +224,15 @@ impl FakeVersions {
 
     /// Count one `commit` call and land the foreign commit planned before it, if any.
     fn count_call(&self) -> Result<(), ApiError> {
-        let race = {
+        let (call, race) = {
             let mut calls = self.calls.lock().map_err(|_| poisoned())?;
             calls.0 = calls.0.saturating_add(1);
             let call = calls.0;
-            calls.1.contains(&call)
+            (call, calls.1.contains(&call))
         };
+        if let Some(hook) = self.on_commit.lock().map_err(|_| poisoned())?.as_ref() {
+            hook(call);
+        }
         if race {
             self.edit_elsewhere(None)?;
         }
@@ -735,6 +764,16 @@ impl Converter for FakeConverter {
                 .lock()
                 .map_err(|_| poisoned())?
                 .push(input.window.clone());
+            let hang = self
+                .on_window
+                .lock()
+                .map_err(|_| poisoned())?
+                .as_ref()
+                .is_some_and(|hook| hook(input.window.as_ref()));
+            if hang {
+                let _count = DropCount(Arc::clone(&self.dropped));
+                std::future::pending::<()>().await;
+            }
             let converter = ConverterIdentity {
                 name: "docling".to_owned(),
                 version: "2.3.0".to_owned(),
