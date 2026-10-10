@@ -67,9 +67,16 @@ pub struct Request {
 pub struct Block {
     /// One-based inclusive lines of the window's Markdown.
     pub lines: TextRange,
-    /// The page the node is on, from the converter's own page markers; `None` when the format
-    /// has no pages.
+    /// The page of the node's own provenance, which the converter gave it: a provenance
+    /// wrapper's page, or a location (a location wrapper or the node's own location field) on
+    /// the page of the converter's current page marker, exactly when docling's JSON export gives
+    /// the node's item a `prov`. `None` when the node has no provenance of its own, or the
+    /// format has no pages; a preceding page marker alone never locates a node.
     pub page: Option<u32>,
+    /// For a node on a page that has no provenance of its own: the text of its first item in
+    /// docling's JSON export, so the supervisor can pair the run with that item's result from
+    /// the location rule. `None` otherwise.
+    pub unlocated: Option<String>,
     /// The node is a table.
     pub table: bool,
 }
@@ -190,6 +197,13 @@ impl Reply {
                     "page".to_owned(),
                     block.page.map_or(Value::Null, Value::from),
                 );
+                let _previous = entry.insert(
+                    "unlocated".to_owned(),
+                    block
+                        .unlocated
+                        .as_ref()
+                        .map_or(Value::Null, |text| Value::from(text.clone())),
+                );
                 let _previous = entry.insert("table".to_owned(), Value::from(block.table));
                 Ok(Value::Object(entry))
             })
@@ -236,6 +250,14 @@ impl Reply {
                         .get("page")
                         .and_then(Value::as_u64)
                         .and_then(|page| u32::try_from(page).ok()),
+                    unlocated: match entry.get("unlocated") {
+                        None | Some(Value::Null) => None,
+                        Some(text) => Some(
+                            text.as_str()
+                                .map(str::to_owned)
+                                .ok_or_else(|| shape("unlocated"))?,
+                        ),
+                    },
                     table: entry
                         .get("table")
                         .and_then(Value::as_bool)

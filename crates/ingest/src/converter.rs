@@ -18,7 +18,10 @@
 //!   with one is `partly_extracted`;
 //! - items the converter left unlocated go through the location rule (`locate::locate_items`)
 //!   against the window's text layer, and the counts become warnings;
-//! - each Markdown line run is located on the page of the converter's own page marker;
+//! - each Markdown line run with the converter's own provenance is `Direct` on its page; a run
+//!   without one takes the location rule's result for its item (`Inferred`, or `Unresolved`
+//!   with the reason), so the rule's inferred locations reach the record, and a preceding page
+//!   marker never locates a run;
 //! - tables pair the export's tables with the table line runs, in order, only when both
 //!   counts agree;
 //! - the outline carries the section-span rule (`outline::outline_of`).
@@ -50,9 +53,9 @@ use tokio::sync::OnceCell;
 
 use crate::cap::{ChildVerdict, classify, spawn_capped, supervise};
 use crate::child::format_of;
-use crate::export::region;
+use crate::export::{region, resolve};
 use crate::glyphs::{scrub_placeholders, undecoded_glyphs};
-use crate::locate::{locate_items, pages_by_item};
+use crate::locate::{Locations, locate_items, pages_by_item};
 use crate::outline::outline_of;
 use crate::protocol::{
     Block, EXPORT_FILE, MARKDOWN_FILE, REQUEST_FILE, RESULT_FILE, Reply, Request, TEXT_LAYER_FILE,
@@ -294,7 +297,7 @@ pub fn read_window(
     let export = read_json(&structured)?;
     let (markdown, _scrubbed) = scrub_placeholders(&shown);
     let mut warnings = Vec::new();
-    let page_of = if window.is_some() {
+    let located = if window.is_some() {
         let text_layer = if reply.text_layer {
             Ok(read_json(&directory.join(TEXT_LAYER_FILE))?)
         } else {
@@ -302,10 +305,11 @@ pub fn read_window(
         };
         let located = locate_items(&export, text_layer.as_ref().map_err(|error| *error));
         warnings.extend(located.warnings());
-        pages_by_item(&located)
+        Some(located)
     } else {
-        std::collections::HashMap::new()
+        None
     };
+    let page_of = located.as_ref().map(pages_by_item).unwrap_or_default();
     let glyphs = undecoded_glyphs(&export, |item| page_of.get(item).copied());
     warnings.extend(glyphs.warning());
     let coverage = window.map(|window| {
@@ -330,7 +334,7 @@ pub fn read_window(
     });
     let document = ConvertedDocument {
         outline: outline_of(&markdown),
-        locations: line_locations(&reply.blocks),
+        locations: line_locations(&reply.blocks, &export, located.as_ref()),
         tables: tables(&export, &reply.blocks),
         markdown,
         structured,
@@ -393,16 +397,49 @@ fn file_digest(path: &Path) -> Result<okf_jawn_contract::identity::Digest, ApiEr
         .map_err(|error| fault(&format!("a SHA-256 was not a digest: {error}")))
 }
 
-/// Each line run located on its page, where the converter gave it one.
-fn line_locations(blocks: &[Block]) -> Vec<LineLocation> {
+/// Where each line run is, and which source said so.
+///
+/// A run with the converter's own provenance is `Direct` on its page. A run on a page without
+/// one takes the location rule's result for its item: the next item, in export order, that the
+/// export left unlocated and whose text is the run's (`Inferred` when the text layer found it,
+/// `Unresolved` with the rule's reason when not). A run whose item cannot be paired is
+/// `Unresolved` as not located by the converter. A run in a document with no pages has none.
+fn line_locations(
+    blocks: &[Block],
+    export: &Value,
+    located: Option<&Locations>,
+) -> Vec<LineLocation> {
+    let mut open: Vec<(&str, &SourceLocation)> = located
+        .map(|located| {
+            located
+                .items
+                .iter()
+                .filter(|item| item.lookup.is_some())
+                .filter_map(|item| {
+                    let text = resolve(export, &item.item)?.get("text")?.as_str()?;
+                    Some((text, &item.location))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     blocks
         .iter()
         .filter_map(|block| {
-            block.page.map(|page_no| LineLocation {
-                lines: block.lines.clone(),
-                location: SourceLocation::Direct {
+            let location = match (block.page, block.unlocated.as_deref()) {
+                (Some(page_no), _) => SourceLocation::Direct {
                     locator: SourceLocator::Page { page_no },
                 },
+                (None, Some(text)) => match open.iter().position(|(other, _)| *other == text) {
+                    Some(at) => open.remove(at).1.clone(),
+                    None => SourceLocation::Unresolved {
+                        reason: UnresolvedReason::NotLocatedByConverter,
+                    },
+                },
+                (None, None) => return None,
+            };
+            Some(LineLocation {
+                lines: block.lines.clone(),
+                location,
             })
         })
         .collect()

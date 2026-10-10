@@ -49,11 +49,20 @@ mod conversion_protocol {
                     module_name: "layout".to_owned(),
                     error_message: "slow".to_owned(),
                 }],
-                blocks: vec![Block {
-                    lines: TextRange { start: 1, end: 3 },
-                    page: Some(5),
-                    table: true,
-                }],
+                blocks: vec![
+                    Block {
+                        lines: TextRange { start: 1, end: 3 },
+                        page: Some(5),
+                        unlocated: None,
+                        table: true,
+                    },
+                    Block {
+                        lines: TextRange { start: 5, end: 5 },
+                        page: None,
+                        unlocated: Some("Figure 1 \"quoted\"".to_owned()),
+                        table: false,
+                    },
+                ],
                 text_layer: true,
             };
             assert_eq!(Reply::from_json(&reply.to_json()?)?, reply);
@@ -139,16 +148,19 @@ mod flags_undecodable_text_in_a_window {
                 Block {
                     lines: TextRange { start: 1, end: 1 },
                     page: Some(1),
+                    unlocated: None,
                     table: false,
                 },
                 Block {
                     lines: TextRange { start: 3, end: 5 },
                     page: Some(1),
+                    unlocated: None,
                     table: true,
                 },
                 Block {
                     lines: TextRange { start: 7, end: 7 },
                     page: Some(2),
+                    unlocated: None,
                     table: false,
                 },
             ],
@@ -282,6 +294,178 @@ mod flags_undecodable_text_in_a_window {
         let window = PageRange { start: 1, end: 2 };
         let (document, _coverage) = read_window(directory.path(), Some(&window), &reply)?;
         assert_eq!(document.tables, Vec::new());
+        Ok(())
+    }
+}
+
+mod locates_unlocated_items_in_line_runs {
+    use docling::{DoclingDocument, Node};
+    use okf_jawn_contract::common::{PageRange, TextRange};
+    use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
+    use okf_jawn_core::conversion::ConversionStatus;
+    use okf_jawn_ingest::child::line_blocks;
+    use okf_jawn_ingest::converter::read_window;
+    use okf_jawn_ingest::protocol::{Block, EXPORT_FILE, MARKDOWN_FILE, Reply, TEXT_LAYER_FILE};
+    use serde_json::{Value, json};
+
+    use crate::check::{TestResult, some};
+
+    fn page(page_no: usize) -> Node {
+        Node::PageInfo {
+            page_no,
+            width: 612.0,
+            height: 792.0,
+        }
+    }
+
+    fn paragraph(text: &str) -> Node {
+        Node::Paragraph {
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_line_run_is_on_a_page_only_by_its_own_provenance() -> TestResult {
+        let mut document = DoclingDocument::new("window");
+        document.push(page(1));
+        document.push(Node::Located {
+            location: [40, 40, 300, 60],
+            inner: Box::new(paragraph("Located on one.")),
+        });
+        // No provenance of its own: the page marker before it does not locate it.
+        document.push(paragraph("Left unlocated."));
+        document.push(page(2));
+        document.push(Node::Prov {
+            page_no: 2,
+            bbox: [72.0, 80.0, 300.0, 100.0],
+            charspan: [0, 14],
+            seq: None,
+            inner: Box::new(paragraph("Placed on two.")),
+        });
+        let markdown = document.export_to_markdown();
+        let blocks = line_blocks(&document, &markdown);
+        let seen: Vec<(Option<u32>, Option<&str>)> = blocks
+            .iter()
+            .map(|block| (block.page, block.unlocated.as_deref()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (Some(1), None),
+                (None, Some("Left unlocated.")),
+                (Some(2), None)
+            ],
+            "{markdown}"
+        );
+        assert!(!some(blocks.get(1), "the unlocated run")?.table);
+        // The JSON export agrees: only the unwrapped paragraph has no provenance.
+        let export = document.export_to_json_value();
+        let unlocated: Vec<&str> = export
+            .get("texts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| {
+                item.get("prov")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+            })
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect();
+        assert_eq!(unlocated, ["Left unlocated."]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_run_without_provenance_takes_the_location_rule_result_never_a_page_marker() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let size = json!({ "width": 612.0, "height": 792.0 });
+        let located = json!([{ "page_no": 1, "bbox": { "l": 72.0, "t": 700.0, "r": 300.0, "b": 680.0, "coord_origin": "BOTTOMLEFT" } }]);
+        let found = json!([{ "page_no": 1, "bbox": { "l": 72.0, "t": 600.0, "r": 300.0, "b": 580.0, "coord_origin": "BOTTOMLEFT" } }]);
+        let export = json!({
+            "pages": { "1": { "page_no": 1, "size": size } },
+            "body": { "self_ref": "#/body", "children": [
+                { "$ref": "#/texts/0" }, { "$ref": "#/texts/1" }, { "$ref": "#/texts/2" }
+            ] },
+            "texts": [
+                { "self_ref": "#/texts/0", "label": "text", "text": "Located.", "prov": located, "parent": { "$ref": "#/body" } },
+                { "self_ref": "#/texts/1", "label": "text", "text": "Found by text.", "prov": [], "parent": { "$ref": "#/body" } },
+                { "self_ref": "#/texts/2", "label": "text", "text": "Nowhere.", "prov": [], "parent": { "$ref": "#/body" } },
+            ],
+            "tables": [],
+            "pictures": [],
+        });
+        let layer = json!({
+            "pages": { "1": { "page_no": 1, "size": size } },
+            "texts": [
+                { "self_ref": "#/texts/0", "label": "text", "text": "Found by text.", "prov": found },
+            ],
+        });
+        std::fs::write(
+            directory.path().join(MARKDOWN_FILE),
+            "Located.\n\nFound by text.\n\nNowhere.\n\nNot exported.\n",
+        )?;
+        std::fs::write(directory.path().join(EXPORT_FILE), export.to_string())?;
+        std::fs::write(directory.path().join(TEXT_LAYER_FILE), layer.to_string())?;
+        let run = |line: u32, page: Option<u32>, unlocated: Option<&str>| Block {
+            lines: TextRange {
+                start: line,
+                end: line,
+            },
+            page,
+            unlocated: unlocated.map(str::to_owned),
+            table: false,
+        };
+        let reply = Reply {
+            status: ConversionStatus::Success,
+            page_count: None,
+            issues: Vec::new(),
+            blocks: vec![
+                run(1, Some(1), None),
+                run(3, None, Some("Found by text.")),
+                run(5, None, Some("Nowhere.")),
+                run(7, None, Some("Not exported.")),
+            ],
+            text_layer: true,
+        };
+        let window = PageRange { start: 1, end: 1 };
+        let (document, _coverage) = read_window(directory.path(), Some(&window), &reply)?;
+        let locations: Vec<(u32, &SourceLocation)> = document
+            .locations
+            .iter()
+            .map(|location| (location.lines.start, &location.location))
+            .collect();
+        assert_eq!(locations.len(), 4, "{locations:?}");
+        assert_eq!(
+            some(locations.first(), "line 1")?.1,
+            &SourceLocation::Direct {
+                locator: SourceLocator::Page { page_no: 1 }
+            }
+        );
+        // The rule found it through the text layer: inferred, with the box it found.
+        assert!(
+            matches!(
+                some(locations.get(1), "line 3")?.1,
+                SourceLocation::Inferred {
+                    locator: SourceLocator::Region { region }
+                } if region.page_no == 1
+            ),
+            "{locations:?}"
+        );
+        // The rule did not find it: unresolved with the rule's reason.
+        assert_eq!(
+            some(locations.get(2), "line 5")?.1,
+            &SourceLocation::Unresolved {
+                reason: UnresolvedReason::NoMatch
+            }
+        );
+        // No export item to pair with: not located by the converter.
+        assert_eq!(
+            some(locations.get(3), "line 7")?.1,
+            &SourceLocation::Unresolved {
+                reason: UnresolvedReason::NotLocatedByConverter
+            }
+        );
         Ok(())
     }
 }

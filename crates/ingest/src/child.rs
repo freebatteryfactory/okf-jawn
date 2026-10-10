@@ -10,8 +10,12 @@
 //!   (`docling::pdf_text_layer_pages`, read by the location rule).
 //! - The line runs (`protocol::Block`): each top-level node is rendered on its own with
 //!   `MarkdownStreamer::push`, whose chunks concatenate byte for byte to the Markdown export, so
-//!   each node's lines and the page of the converter's last page marker are known. When the
-//!   streamed text differs from the export the runs are left out rather than guessed.
+//!   each node's lines are known. A run is on a page only by the node's own provenance (a
+//!   provenance wrapper, or a location on the current page marker's page, exactly when the JSON
+//!   export gives the node's item a `prov`); a node on a page without one carries its exported
+//!   text instead, for the supervisor to pair with the location rule's result. A preceding page
+//!   marker alone never locates a node. When the streamed text differs from the export the runs
+//!   are left out rather than guessed.
 //!
 //! A document the converter cannot read is a reply (`Unsupported`, `Failure`), never a failing
 //! exit. A failing exit without a reply is the child at fault, which the supervisor classifies.
@@ -104,12 +108,14 @@ pub fn line_blocks(document: &DoclingDocument, markdown: &str) -> Vec<Block> {
         let start = u32::try_from(before.saturating_add(1)).unwrap_or(u32::MAX);
         let inner =
             u32::try_from(body.trim_end_matches('\n').matches('\n').count()).unwrap_or(u32::MAX);
+        let own = own_page(node, page);
         blocks.push(Block {
             lines: TextRange {
                 start,
                 end: start.saturating_add(inner),
             },
-            page: node_page(node).or(page),
+            page: own,
+            unlocated: (own.is_none() && page.is_some()).then(|| exported_text(node)),
             table: is_table(node),
         });
         streamed.push_str(&chunk);
@@ -279,13 +285,43 @@ fn page_marker(node: &Node) -> Option<u32> {
     }
 }
 
-/// The page a node's own provenance names, looking through location wrappers.
-fn node_page(node: &Node) -> Option<u32> {
+/// The page of a node's own provenance, as docling's JSON export decides it: a provenance
+/// wrapper names its page; a location wrapper, or the location field a list item, formula,
+/// chart or table carries, locates the node on the page of the current page marker. A node
+/// with neither has no provenance (`prov: []` in the export), and the marker alone never gives
+/// it one.
+fn own_page(node: &Node, marker: Option<u32>) -> Option<u32> {
     match node {
         Node::Prov { page_no, .. } if *page_no > 0 => u32::try_from(*page_no).ok(),
-        Node::Located { inner, .. } => node_page(inner),
+        Node::Located { inner, .. } => own_page(inner, marker).or(marker),
+        Node::ListItem {
+            location: Some(_), ..
+        }
+        | Node::Formula {
+            location: Some(_), ..
+        }
+        | Node::Chart {
+            location: Some(_), ..
+        } => marker,
+        Node::Table(table) if table.location.is_some() => marker,
         _ => None,
     }
+}
+
+/// The text of the first item docling's JSON export writes for `node`, read from the export of
+/// that node alone, so the text is exactly what the whole document's export holds for it.
+fn exported_text(node: &Node) -> String {
+    let mut alone = DoclingDocument::new("");
+    alone.push(node.clone());
+    alone
+        .export_to_json_value()
+        .get("texts")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|texts| texts.first())
+        .and_then(|text| text.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Whether a node is a table, looking through location wrappers.
