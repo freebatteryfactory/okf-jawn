@@ -514,28 +514,36 @@ impl StoragePurger {
         let repositories = self.storage.repositories.clone();
         let blobs = self.storage.blobs.clone();
         let scope = scope.clone();
-        let mut planned = plan.objects.clone();
-        blocking(move || {
-            let (tenant, target) = scope_key(&scope);
-            let mut found = BTreeSet::new();
-            for path in repositories.others(&scope.tenant_id, &scope)? {
-                let repository = git2::Repository::open_bare(&path)
-                    .map_err(|error| crate::git::repo::git(&error))?;
-                found.extend(references::history(&repository)?.objects);
-            }
-            // An object another workspace stored and is about to reference (pinned) is a
-            // surviving reference; one the target itself pinned is removed with it.
-            for (workspace, digest) in blobs.pins().held(&tenant)? {
-                if workspace == target {
-                    if blobs.local_path(&scope.tenant_id, &digest)?.is_file() {
-                        planned.insert(digest);
-                    }
-                } else {
-                    found.insert(digest);
+        let surviving = {
+            let (blobs, scope) = (blobs.clone(), scope.clone());
+            blocking(move || {
+                let (tenant, target) = scope_key(&scope);
+                let mut found = BTreeSet::new();
+                for path in repositories.others(&scope.tenant_id, &scope)? {
+                    let repository = git2::Repository::open_bare(&path)
+                        .map_err(|error| crate::git::repo::git(&error))?;
+                    found.extend(references::history(&repository)?.objects);
                 }
+                // An object another workspace stored and is about to reference (pinned) is a
+                // surviving reference.
+                found.extend(blobs.pins().others(&tenant, &target)?);
+                references::follow_records(&blobs, &scope.tenant_id, &mut found)?;
+                surviving.extend(found);
+                Ok(surviving)
+            })
+            .await?
+        };
+        // Every write of the target that pinned before the purge was recorded has ended; one
+        // that pins from now on stores nothing (`LocalBlobs::put_pinned`). The bytes its pins
+        // name, a refused upload completion's among them, go with the target.
+        let (tenant, target) = scope_key(&scope);
+        let mut planned = plan.objects.clone();
+        for digest in blobs.pins().drain(&tenant, &target).await? {
+            if blobs.local_path(&scope.tenant_id, &digest)?.is_file() {
+                planned.insert(digest);
             }
-            references::follow_records(&blobs, &scope.tenant_id, &mut found)?;
-            surviving.extend(found);
+        }
+        blocking(move || {
             let mut removed = 0_usize;
             let mut kept = 0_usize;
             for digest in &planned {
@@ -863,3 +871,5 @@ mod copies;
 pub(crate) mod guard;
 pub(crate) mod references;
 mod rows;
+#[cfg(test)]
+mod tests;

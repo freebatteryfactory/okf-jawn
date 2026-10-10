@@ -28,8 +28,8 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, ReadBuf};
 use tokio::sync::mpsc;
 
 use crate::data::{DataDir, io_error};
-use crate::db::{Db, scope_key};
-use crate::pins::Pins;
+use crate::db::{Db, internal, scope_key};
+use crate::pins::{Pinned, Pins};
 use crate::purge::guard;
 use crate::seam;
 
@@ -86,27 +86,28 @@ impl LocalBlobs {
     }
 
     /// `BlobStore::put` for a write in `scope`: refused while a purge names the workspace, and
-    /// pinned (`pins`) from before the object is retained until the caller's referencing record
-    /// lands and releases it.
+    /// pinned (`pins`) from before the object is retained. The pin is active until the caller
+    /// resolves the returned `Pinned`.
+    ///
+    /// The refusal is checked before the body is received, and again after the pin is taken
+    /// and before anything is retained. So a put that pins after a purge's object step drained
+    /// the workspace (`Pins::drain`, which runs after the purge is recorded) stores nothing,
+    /// and a put that pinned earlier is one the drain waits for.
     pub(crate) async fn put_pinned(
         &self,
         scope: &StorageScope,
         body: ByteReader,
         limit: u64,
         expected: Option<Digest>,
-    ) -> Result<ObjectInfo, ApiError> {
+    ) -> Result<(ObjectInfo, Pinned), ApiError> {
         if let Some(records) = &self.records {
             guard::refuse_scope(records, scope).await?;
         }
-        let (tenant, workspace) = scope_key(scope);
-        self.store_staged(
-            &scope.tenant_id,
-            body,
-            limit,
-            expected,
-            Some((&tenant, &workspace)),
-        )
-        .await
+        let (object, pinned) = self
+            .store_staged(&scope.tenant_id, body, limit, expected, Some(scope))
+            .await?;
+        let pinned = pinned.ok_or_else(|| internal("a scoped put took no pin"))?;
+        Ok((object, pinned))
     }
 
     /// Store a bounded stream in `tenant`'s objects; see `BlobStore::put`.
@@ -117,44 +118,77 @@ impl LocalBlobs {
         limit: u64,
         expected: Option<Digest>,
     ) -> Result<ObjectInfo, ApiError> {
-        self.store_staged(tenant, body, limit, expected, None).await
+        self.store_staged(tenant, body, limit, expected, None)
+            .await
+            .map(|(object, _)| object)
     }
 
-    /// Stage, hash, pin (when `pin` names a workspace) and retain a body.
+    /// Stage, hash, pin (when `scope` names a workspace) and retain a body.
     async fn store_staged(
         &self,
         tenant: &TenantId,
         body: ByteReader,
         limit: u64,
         expected: Option<Digest>,
-        pin: Option<(&str, &str)>,
-    ) -> Result<ObjectInfo, ApiError> {
+        scope: Option<&StorageScope>,
+    ) -> Result<(ObjectInfo, Option<Pinned>), ApiError> {
         std::fs::create_dir_all(&self.incoming)
             .map_err(|error| io_error("create", &self.incoming, &error))?;
         let staged = self.incoming.join(seam::hex(&seam::random_bytes::<16>()?));
-        let received = receive(body, &staged, limit).await;
-        let result = match received {
-            Ok((digest, size)) => {
-                // Pinned before it is retained, so a purge's delete either ran before (and this
-                // stores the object again) or sees the pin (`Pins::delete_unless_pinned`).
-                if let Some((pin_tenant, workspace)) = pin {
-                    self.pins.pin(pin_tenant, workspace, &digest)?;
-                }
-                let retained = self
-                    .retain(tenant, &staged, digest.clone(), size, expected)
-                    .await;
-                if retained.is_err()
-                    && let Some((_, workspace)) = pin
-                {
-                    self.pins.release(workspace, [&digest])?;
-                }
-                retained
-            }
-            Err(error) => Err(error),
-        };
+        let result = self
+            .pin_and_retain(tenant, body, &staged, limit, expected, scope)
+            .await;
         // The staged copy is never referenced; a failure to remove it is cleared at startup.
         let _ = std::fs::remove_file(&staged);
         result
+    }
+
+    /// Receive the body into `staged`, pin it for `scope` unless a purge names the workspace,
+    /// and retain it.
+    async fn pin_and_retain(
+        &self,
+        tenant: &TenantId,
+        body: ByteReader,
+        staged: &std::path::Path,
+        limit: u64,
+        expected: Option<Digest>,
+        scope: Option<&StorageScope>,
+    ) -> Result<(ObjectInfo, Option<Pinned>), ApiError> {
+        let (digest, size) = receive(body, staged, limit).await?;
+        // Pinned before it is retained, and before the object is looked for: a purge's delete
+        // either ran before (and this stores the object again) or sees the pin.
+        let pinned = match scope {
+            Some(scope) => Some(self.pin_unless_purged(scope, &digest).await?),
+            None => None,
+        };
+        match self.retain(tenant, staged, digest, size, expected).await {
+            Ok(object) => Ok((object, pinned)),
+            Err(error) => {
+                // Nothing was retained by this write.
+                if let Some(pinned) = pinned {
+                    pinned.release()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Pin `digest` for `scope`, then check the purge refusal again: a refused put releases
+    /// its pin and stores nothing.
+    async fn pin_unless_purged(
+        &self,
+        scope: &StorageScope,
+        digest: &Digest,
+    ) -> Result<Pinned, ApiError> {
+        let (tenant, workspace) = scope_key(scope);
+        let pinned = self.pins.pin(&tenant, &workspace, digest)?;
+        if let Some(records) = &self.records
+            && let Err(error) = guard::refuse_scope(records, scope).await
+        {
+            pinned.release()?;
+            return Err(error);
+        }
+        Ok(pinned)
     }
 
     /// Open `tenant`'s object; see `BlobStore::open`.
@@ -299,7 +333,13 @@ impl BlobStore for LocalBlobs {
         limit: u64,
         expected: Option<Digest>,
     ) -> PortFuture<'a, ObjectInfo> {
-        Box::pin(self.put_pinned(scope, body, limit, expected))
+        Box::pin(async move {
+            // The put returns here; the record that references the object (a commit, a job
+            // completion, an artifact, a derived object) releases the pin when it lands.
+            let (object, pinned) = self.put_pinned(scope, body, limit, expected).await?;
+            pinned.settle()?;
+            Ok(object)
+        })
     }
 
     fn open<'a>(

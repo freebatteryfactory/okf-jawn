@@ -37,6 +37,7 @@ use crate::blobs::file_reader;
 use crate::data::io_error;
 use crate::db::{conflict, internal, sql};
 use crate::git::repo::{HEAD_REF, git, head, sync_directories};
+use crate::pins::Pinned;
 use crate::storage::Storage;
 
 /// How an archive is restored.
@@ -79,29 +80,34 @@ pub(crate) fn restore(
     let mut opened = Opened::open(archive)?;
     let manifest = opened.workspace()?;
     refuse(storage, runtime, scope, &manifest, mode)?;
-    // Each object is pinned to the restored workspace until its rows and history landed.
+    // Each object is pinned to the restored workspace until its rows and history landed; a
+    // failed import abandons the pins (`pins`), so a purge of the workspace deletes the bytes.
+    let mut pinned = Vec::new();
     let restored = put_back(
         storage,
         runtime,
         scope,
-        &mut opened,
+        (&mut opened, &mut pinned),
         &manifest,
         staging,
         mode,
     );
-    storage
-        .blobs
-        .pins()
-        .release(&scope.workspace_id.0.to_string(), &manifest.objects)?;
+    for pin in pinned {
+        if restored.is_ok() {
+            pin.release()?;
+        } else {
+            pin.abandon()?;
+        }
+    }
     restored
 }
 
-/// Put the archive's objects back (pinned), then its history and rows.
+/// Put the archive's objects back (each pin kept in `pinned`), then its history and rows.
 fn put_back(
     storage: &Storage,
     runtime: &Handle,
     scope: &StorageScope,
-    opened: &mut Opened,
+    (opened, pinned): (&mut Opened, &mut Vec<Pinned>),
     manifest: &WorkspaceManifest,
     staging: &Path,
     mode: &Mode,
@@ -112,12 +118,13 @@ fn put_back(
         let size = std::fs::metadata(&file)
             .map_err(|error| io_error("read", &file, &error))?
             .len();
-        runtime.block_on(storage.blobs.put_pinned(
+        let (_, pin) = runtime.block_on(storage.blobs.put_pinned(
             scope,
             file_reader(Some(file.clone()), 0, size),
             size,
             Some(digest.clone()),
         ))?;
+        pinned.push(pin);
         std::fs::remove_file(&file).map_err(|error| io_error("remove", &file, &error))?;
     }
     let pack = staging.join(PACK);

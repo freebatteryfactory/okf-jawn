@@ -236,7 +236,8 @@ impl SqliteUploads {
         upload: UploadId,
         sha256: Digest,
     ) -> Result<UploadRecord, ApiError> {
-        guard::refuse_scope(&self.db, scope).await?;
+        // The purge refusal is checked by the put before the part is read, after its pin is
+        // taken, and inside the record's transaction.
         let _writing = self.writers.claim(upload)?;
         let record = self.reconciled(scope, upload).await?;
         if let Some(object) = &record.object {
@@ -266,13 +267,14 @@ impl SqliteUploads {
         } else {
             file_reader(Some(part.clone()), 0, record.expected_size)
         };
-        // Pinned from before the object is retained until the upload's record names it.
-        let object = self
+        // Pinned from before the object is retained until the upload's record names it, or
+        // until the record write has failed (then the pin is abandoned, and a purge of the
+        // workspace deletes the bytes).
+        let (object, pinned) = self
             .blobs
             .put_pinned(scope, body, record.expected_size, Some(sha256))
             .await?;
         let (tenant, workspace) = scope_key(scope);
-        let released = (workspace.clone(), object.digest.clone());
         let stored = self
             .db
             .transaction(move |transaction| {
@@ -287,13 +289,24 @@ impl SqliteUploads {
                         ],
                     )
                     .map_err(|error| sql(&error))?;
+                // Last in the transaction, so a purge recorded at any moment before it commits
+                // refuses the record (`purge::guard`).
+                guard::refuse(transaction, &tenant, &workspace)?;
                 read(transaction, &tenant, &workspace, upload)?.ok_or_else(|| not_found("upload"))
             })
             .await;
-        self.blobs.pins().release(&released.0, [&released.1])?;
-        let stored = stored?;
-        let _ = std::fs::remove_file(&part);
-        Ok(stored)
+        // Resolved only now that the transaction has ended, committed or rolled back.
+        match stored {
+            Ok(stored) => {
+                pinned.release()?;
+                let _ = std::fs::remove_file(&part);
+                Ok(stored)
+            }
+            Err(error) => {
+                pinned.abandon()?;
+                Err(error)
+            }
+        }
     }
 }
 

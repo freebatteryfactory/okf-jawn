@@ -1089,6 +1089,156 @@ async fn purge_refuses_every_write_to_the_workspace_it_names() -> TestResult {
     Ok(())
 }
 
+/// The SHA-256 digest of `bytes`.
+fn digest_of(bytes: &[u8]) -> Fallible<Digest> {
+    Ok(Digest::try_from(sha256(bytes))?)
+}
+
+/// Re-review probe Q3 (window 1, an upload completion in flight): the completion passed its
+/// first refusal before the purge was recorded and is still reading the part file when the
+/// purge runs. An upload completion is no job, so no drain covers it. Whichever ends first,
+/// the completion is refused and no byte of the target remains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn purge_leaves_nothing_of_an_upload_completion_in_flight() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let data = directory.path().to_path_buf();
+    let storage = Storage::open(&data)?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let (_survivor, _) = create(&storage, 2, "Garden").await?;
+    let bytes: Vec<u8> = MARKER.repeat(8 << 20);
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            &target,
+            uuid!(8)?,
+            NewUpload {
+                filename: "big.bin".to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(bytes.len())?,
+                expected_sha256: None,
+                supplied_by: person("ana"),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            &target,
+            slot.id,
+            Box::pin(std::io::Cursor::new(bytes.clone())),
+            1 << 28,
+        )
+        .await?;
+    let digest = digest_of(&bytes)?;
+    drop(bytes);
+    let incoming = data.join("staging").join("incoming");
+    let finishing = {
+        let uploads = storage.uploads();
+        let target = target.clone();
+        let id = slot.id;
+        tokio::spawn(async move { uploads.complete(&target, id, digest).await })
+    };
+    // The completion is past its first refusal once its staged copy exists.
+    let started = std::time::Instant::now();
+    while !incoming.exists() || std::fs::read_dir(&incoming)?.next().is_none() {
+        if started.elapsed() > std::time::Duration::from_secs(30) || finishing.is_finished() {
+            return Err("the completion never started staging".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    let report = storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    let finished_before = finishing.is_finished();
+    let completion = finishing.await?;
+    eprintln!("Q3: completion finished before the purge: {finished_before}; report {report:?}");
+    refused(completion, "the completion in flight")?;
+    assert_eq!(
+        marked_files(&data)?,
+        Vec::<String>::new(),
+        "a completed purge leaves none of the target's upload bytes"
+    );
+    Ok(())
+}
+
+/// Ruling 2: an upload completion that stored its bytes and whose record then failed abandons
+/// its pin; the purge of the workspace deletes those bytes, which no record names.
+#[tokio::test]
+async fn purge_removes_the_bytes_of_an_upload_completion_whose_record_failed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let bytes = b"zanzibar upload whose record failed";
+    let slot = upload(&storage, &target, 8, bytes, false).await?;
+    let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+    records.execute_batch(
+        "CREATE TRIGGER stop_upload BEFORE UPDATE OF object_digest ON uploads
+         BEGIN SELECT RAISE(ABORT, 'the record write failed'); END;",
+    )?;
+    let digest = digest_of(bytes)?;
+    err_of(
+        storage
+            .uploads()
+            .complete(&target, slot, digest.clone())
+            .await,
+    )?;
+    records.execute_batch("DROP TRIGGER stop_upload;")?;
+    drop(records);
+    assert!(
+        held(&storage, &target, &digest).await?,
+        "the bytes were stored"
+    );
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    assert!(
+        !held(&storage, &target, &digest).await?,
+        "the purge deletes bytes no record names"
+    );
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
+/// Ruling 2: the purge refusal of an upload completion is checked inside its record's
+/// transaction. A trigger records the purge inside that transaction, as a purge recorded
+/// after the completion's earlier checks and before its record commits.
+#[tokio::test]
+async fn purge_refuses_an_upload_record_inside_its_transaction() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let bytes = b"zanzibar upload recorded late";
+    let slot = upload(&storage, &target, 8, bytes, false).await?;
+    let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+    records.execute(
+        &format!(
+            "CREATE TRIGGER late_purge AFTER UPDATE OF object_digest ON uploads
+             BEGIN INSERT INTO purges (purge_id, tenant_id, target_key, state, mutation_id,
+                 record) VALUES ('{}', 'local', 'workspace/{}', 'running', '{}', '{{}}'); END;",
+            uuid_text(60),
+            target.workspace_id.0,
+            uuid_text(50)
+        ),
+        [],
+    )?;
+    refused(
+        storage
+            .uploads()
+            .complete(&target, slot, digest_of(bytes)?)
+            .await,
+        "an upload record",
+    )?;
+    records.execute_batch("DROP TRIGGER late_purge;")?;
+    let stored = storage.uploads().get(&target, slot).await?;
+    assert!(stored.object.is_none(), "the refused record did not land");
+    Ok(())
+}
+
 /// Review B6, window 2, exactly: another workspace's import stores an object identical to one
 /// of the target's before the objects step and lands its record after it. That object stays.
 /// And an object the target itself stored without a record yet goes with the target.
