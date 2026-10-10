@@ -16,10 +16,10 @@ use okf_jawn_contract::common::{PageRange, Warning};
 use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{ConverterIdentity, FailureReason};
-use okf_jawn_contract::history::{BlameResponse, DiffResponse, LogResponse};
+use okf_jawn_contract::history::{BlameResponse, Commit, DiffResponse, LogResponse};
 use okf_jawn_contract::identity::{
-    Digest, ItemId, JobId, MutationId, PurgeId, Revision, TenantId, UploadId, WorkspaceId,
-    WorkspacePath,
+    Digest, ItemId, JobId, MutationId, PurgeId, Revision, TenantId, Timestamp, UploadId,
+    WorkspaceId, WorkspacePath,
 };
 use okf_jawn_contract::item::{ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition};
 use okf_jawn_contract::purge::PurgeReport;
@@ -143,7 +143,8 @@ pub struct FakeSearch {
     pub rebuilt: Mutex<Vec<Revision>>,
 }
 
-/// `Backups` that write one archive per mutation id and count the writes.
+/// `Backups` that write one archive per mutation id and count the writes. A restore writes one
+/// commit carrying its mutation into `versions`, once per mutation id.
 pub struct FakeBackups {
     /// The archive every write returns.
     pub archive: ObjectInfo,
@@ -151,6 +152,8 @@ pub struct FakeBackups {
     pub writes: AtomicUsize,
     /// The editors each restore was given.
     pub restored: Mutex<Vec<Vec<String>>>,
+    /// Where a restore commits.
+    pub versions: Arc<FakeVersions>,
 }
 
 /// A `Purger` that returns one report and counts the calls.
@@ -234,6 +237,40 @@ impl FakeVersions {
             }
         }
         Ok(items.into_iter().find(|card| card.item_id == item))
+    }
+
+    /// A restore's commit under `mutation_id`, on the head; nothing when one carries it already.
+    ///
+    /// # Errors
+    /// Returns when a lock is poisoned or the revision cannot be made.
+    pub fn restore_commit(&self, mutation_id: MutationId) -> Result<(), ApiError> {
+        let mut commits = self.commits.lock().map_err(|_| poisoned())?;
+        if commits
+            .iter()
+            .any(|(changes, _)| changes.mutation_id == mutation_id)
+        {
+            return Ok(());
+        }
+        let head = commits
+            .last()
+            .map_or_else(|| self.head.clone(), |(_, revision)| revision.clone());
+        let revision = Revision::try_from(format!("{:040x}", commits.len().saturating_add(1)))
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+        commits.push((
+            CommitChanges {
+                mutation_id,
+                expected_head: head,
+                author: okf_jawn_core::storage::Provenance {
+                    subject: "restore".to_owned(),
+                    route: okf_jawn_contract::access::AccessRoute::LocalOwner,
+                    client_id: None,
+                },
+                message: "Restore a workspace archive".to_owned(),
+                edits: Vec::new(),
+            },
+            revision,
+        ));
+        Ok(())
     }
 
     /// A commit by someone else, on the head.
@@ -323,6 +360,58 @@ impl FakeVersions {
             .rev()
             .find(|(earlier, _)| earlier.mutation_id == mutation_id)
             .map(|(_, revision)| revision.clone()))
+    }
+
+    /// The line from `query.tip` back to the base revision, newest first, one page of it; the
+    /// cursor is how many commits were already returned.
+    fn history(&self, query: &LogQuery) -> Result<LogResponse, ApiError> {
+        let commits = self.commits.lock().map_err(|_| poisoned())?;
+        let mut line: Vec<(Revision, String, String)> =
+            vec![(self.head.clone(), "Base".to_owned(), "owner".to_owned())];
+        line.extend(commits.iter().map(|(changes, revision)| {
+            (
+                revision.clone(),
+                changes.message.clone(),
+                changes.author.subject.clone(),
+            )
+        }));
+        let tip = line
+            .iter()
+            .position(|(revision, _, _)| *revision == query.tip)
+            .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such revision"))?;
+        let skip = query
+            .page
+            .cursor
+            .as_deref()
+            .map_or(Ok(0), str::parse::<usize>)
+            .map_err(|error| ApiError::new(ErrorCode::InvalidInput, error.to_string()))?;
+        let at = Timestamp::try_from("2026-10-09T00:00:00.000Z".to_owned())
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+        let newest_first: Vec<Commit> = (0..=tip)
+            .rev()
+            .skip(skip)
+            .take(usize::from(query.page.limit))
+            .filter_map(|index| {
+                let (revision, message, author) = line.get(index)?.clone();
+                let parents = index
+                    .checked_sub(1)
+                    .and_then(|parent| line.get(parent))
+                    .map(|(parent, _, _)| vec![parent.clone()])
+                    .unwrap_or_default();
+                Some(Commit {
+                    revision,
+                    parents,
+                    message,
+                    author,
+                    committed_at: at.clone(),
+                })
+            })
+            .collect();
+        let returned = skip.saturating_add(newest_first.len());
+        Ok(LogResponse {
+            next_cursor: (returned <= tip).then(|| returned.to_string()),
+            commits: newest_first,
+        })
     }
 
     /// Die right after the `count`-th commit is written.
@@ -561,12 +650,9 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, Committed> {
         unused("promote_candidate")
     }
-    fn log<'a>(
-        &'a self,
-        _scope: &'a StorageScope,
-        _query: LogQuery,
-    ) -> PortFuture<'a, LogResponse> {
-        unused("log")
+    fn log<'a>(&'a self, _scope: &'a StorageScope, query: LogQuery) -> PortFuture<'a, LogResponse> {
+        let logged = self.history(&query);
+        Box::pin(async move { logged })
     }
     fn diff<'a>(
         &'a self,
@@ -663,7 +749,7 @@ impl Backups for FakeBackups {
         &'a self,
         _scope: &'a StorageScope,
         _archive: Digest,
-        _mutation_id: MutationId,
+        mutation_id: MutationId,
         editors: Vec<String>,
     ) -> PortFuture<'a, RestoreReport> {
         let recorded = self
@@ -671,6 +757,7 @@ impl Backups for FakeBackups {
             .lock()
             .map(|mut restored| restored.push(editors))
             .map_err(|_| poisoned())
+            .and_then(|()| self.versions.restore_commit(mutation_id))
             .map(|()| RestoreReport {
                 items: 3,
                 drafts_restored: 1,

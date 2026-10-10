@@ -18,7 +18,7 @@ use std::time::Duration;
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{
-    ArtifactId, Digest, ItemId, PurgeId, Revision, TenantId, UploadId, WorkspaceId,
+    ArtifactId, Digest, ItemId, MutationId, PurgeId, Revision, TenantId, UploadId, WorkspaceId,
 };
 use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
 use okf_jawn_contract::workspace::RestoreReport;
@@ -30,7 +30,8 @@ use okf_jawn_core::jobs::{
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::search::SearchIndex;
 use okf_jawn_core::storage::{
-    Backups, BlobStore, CandidateCheck, ObjectInfo, Purger, StorageScope, VersionStore,
+    Backups, BlobStore, CandidateCheck, LogQuery, ObjectInfo, Page, Purger, StorageScope,
+    VersionStore,
 };
 use okf_jawn_core::uploads::UploadStore;
 
@@ -102,6 +103,9 @@ pub struct IngestHandler {
 /// The media type both archives are served with (`download_artifact`,
 /// `download_tenant_artifact`).
 pub const ARCHIVE_MEDIA_TYPE: &str = "application/zip";
+
+/// How many commits one history page asks for while a restore's commit is looked for.
+const HISTORY_PAGE: u16 = 100;
 
 impl IngestHandler {
     /// A handler over storage's ports.
@@ -253,6 +257,10 @@ impl IngestHandler {
     /// The editors were read from `AccessControl` when the request was accepted; the handler
     /// passes them on and never consults `AccessControl` itself. The upload is consumed when
     /// the restore completes (Stage 1b design section 8).
+    ///
+    /// The completion records the revision the restore wrote (review N9): the commit carrying
+    /// the job's mutation, which `restore_import` is idempotent on, and not whatever head stands
+    /// after it, which on a resumed attempt can hold later, unrelated commits.
     async fn restore(
         &self,
         claimed: &ClaimedJob,
@@ -262,6 +270,7 @@ impl IngestHandler {
         editors: &[String],
     ) -> Result<Done, ApiError> {
         let ports = &self.ports;
+        let before = ports.versions.head(scope).await?;
         let report = ports
             .backups
             .restore_import(
@@ -276,10 +285,54 @@ impl IngestHandler {
             .consume(scope, upload_id, claimed.lease.job_id)
             .await?;
         Ok(Done {
-            revision: Some(ports.versions.head(scope).await?),
+            revision: self
+                .restored_revision(scope, claimed.mutation_id, &before)
+                .await?,
             restore: Some(report),
             ..Done::default()
         })
+    }
+
+    /// The commit a restore wrote under `mutation_id`. A fresh restore wrote it after
+    /// `before`, the head read just before `restore_import`; on a resumed attempt an earlier
+    /// attempt wrote it at or before `before`, so the history behind `before` is walked back,
+    /// asking `find_commit` after each earlier commit, until it is found. `None` when the
+    /// restore wrote no commit.
+    async fn restored_revision(
+        &self,
+        scope: &StorageScope,
+        mutation_id: MutationId,
+        before: &Revision,
+    ) -> Result<Option<Revision>, ApiError> {
+        let versions = &self.ports.versions;
+        let mut cursor = None;
+        loop {
+            let page = versions
+                .log(
+                    scope,
+                    LogQuery {
+                        tip: before.clone(),
+                        item_id: None,
+                        page: Page {
+                            cursor: cursor.take(),
+                            limit: HISTORY_PAGE,
+                        },
+                    },
+                )
+                .await?;
+            for commit in &page.commits {
+                if let Some(revision) = versions
+                    .find_commit(scope, mutation_id, &commit.revision)
+                    .await?
+                {
+                    return Ok(Some(revision));
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return Ok(None),
+            }
+        }
     }
 
     /// Record a retained archive as the job's artifact.

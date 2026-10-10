@@ -113,6 +113,7 @@ mod job_handler {
             },
             writes: AtomicUsize::new(0),
             restored: Mutex::new(Vec::new()),
+            versions: Arc::clone(&versions),
         });
         let purger = Arc::new(FakePurger {
             report: report()?,
@@ -424,6 +425,34 @@ mod job_handler {
             [editors]
         );
         assert_eq!(world.uploads.consumed()?, [(upload_id, id)]);
+        // The completion names the commit the restore wrote under the job's mutation.
+        let restored = some(
+            world
+                .versions
+                .written()?
+                .into_iter()
+                .find(|(changes, _)| changes.mutation_id == entry.created.mutation_id),
+            "the restore's commit",
+        )?
+        .1;
+        assert_eq!(completion.revision.as_ref(), Some(&restored));
+
+        // Someone edits after the restore, and its completion is lost: the attempt that runs
+        // again records the restore's commit, not the later head.
+        world.versions.edit_elsewhere(None)?;
+        world
+            .records
+            .insert(id, entry.scope.clone(), entry.created.clone())?;
+        assert!(run(&world, id).await?);
+        let again = world.records.entry(id)?;
+        assert_eq!(again.job.state, JobState::Succeeded, "{:?}", again.failures);
+        assert_eq!(world.versions.written()?.len(), 2);
+        assert_eq!(
+            some(again.completions.first(), "the completion")?
+                .revision
+                .as_ref(),
+            Some(&restored)
+        );
         Ok(())
     }
 
