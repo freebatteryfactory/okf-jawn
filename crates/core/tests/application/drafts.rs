@@ -3,12 +3,13 @@
 
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::PageRequest;
-use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_contract::identity::{IdempotencyKey, ItemId, Revision};
+use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
+use okf_jawn_contract::identity::{IdempotencyKey, ItemId, PurgeId, Revision};
 use okf_jawn_contract::item::{
     APP_HEADER_KEY, DiscardDraftRequest, ListDraftsRequest, SaveDraftRequest,
 };
 use okf_jawn_contract::metadata::OperationName;
+use okf_jawn_core::jobs::RevisionMapping;
 use okf_jawn_core::portable::content_digest;
 use okf_jawn_core::ports::Application;
 use serde_json::json;
@@ -90,6 +91,40 @@ async fn a_first_save_bases_on_the_head_a_later_one_keeps_its_base_until_it_reba
         content_digest(&written.body, &written.properties)?
     );
     assert!(world.versions.commits()?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_save_checks_its_base_against_the_purge_map_first() -> TestResult {
+    let world = World::new()?;
+    stored_at(&world, 'a')?;
+    let purge_id = PurgeId(Uuid::from_u128(5));
+    world.records.put_mapping(
+        revision('a')?,
+        RevisionMapping {
+            purge_id,
+            replacement: None,
+        },
+    )?;
+    let refused = err_of(
+        world
+            .service
+            .save_draft(
+                &alice(OperationName::SaveDraft, Some(mutation(1)))?,
+                save(revision('a')?, json!({ "type": "Note" }))?,
+            )
+            .await,
+    )?;
+    assert_eq!(
+        refused.detail.as_deref(),
+        Some(&ErrorDetail::Invalidated {
+            purge_id,
+            replacement: None
+        })
+    );
+    assert_eq!(world.versions.shows(), 0);
+    assert_eq!(world.drafts.gets(), 0);
+    assert!(world.drafts.saves()?.is_empty());
     Ok(())
 }
 

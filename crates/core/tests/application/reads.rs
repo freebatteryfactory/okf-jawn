@@ -6,16 +6,17 @@ use std::fmt::Write as _;
 
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::{PageRange, TextRange};
-use okf_jawn_contract::error::ErrorCode;
+use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::ReceiptAudience;
 use okf_jawn_contract::identity::Timestamp;
-use okf_jawn_contract::identity::{At, Digest, ItemId};
+use okf_jawn_contract::identity::{At, Digest, ItemId, PurgeId};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::read::{
     AssetRole, CreateSandboxCapabilityRequest, ReadItemRequest, ReadItemResponse, ReadView,
     Selection,
 };
 use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
+use okf_jawn_core::jobs::RevisionMapping;
 use okf_jawn_core::ports::Application;
 use okf_jawn_core::reading::markdown_outline;
 use okf_jawn_core::sandbox::token_hash;
@@ -42,6 +43,15 @@ fn read(item: u128, view: ReadView, selection: Selection) -> Built<ReadItemReque
         max_images: 4,
         cursor: None,
     })
+}
+
+/// Forty numbered lines, long enough for a 256-byte budget to need several blocks.
+fn forty_lines() -> Built<String> {
+    let mut body = String::new();
+    for line in 1..=40 {
+        writeln!(body, "line {line:02} of the plan")?;
+    }
+    Ok(body)
 }
 
 async fn read_as_alice(world: &World, request: ReadItemRequest) -> Built<ReadItemResponse> {
@@ -210,6 +220,88 @@ async fn a_cursor_continues_only_its_own_read() -> TestResult {
     pinned.cursor = Some(cursor);
     let elsewhere = err_of(read_as_alice(&world, pinned).await)?;
     assert!(elsewhere.to_string().contains("cursor"), "{elsewhere}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cursor_minted_before_a_purge_does_not_read_the_purged_revision() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.versions.put_document(
+        &at,
+        note(
+            NOTE,
+            &at,
+            "notes/plan.md",
+            &forty_lines()?,
+            json!({ "type": "Note" }),
+        )?,
+    )?;
+    let mut request = read(NOTE, ReadView::Text, Selection::All)?;
+    request.max_bytes = 256;
+    let first = read_as_alice(&world, request.clone()).await?;
+    request.cursor = Some(some(first.next_cursor, "a continuation")?);
+    let purge_id = PurgeId(Uuid::from_u128(5));
+    world.records.put_mapping(
+        at,
+        RevisionMapping {
+            purge_id,
+            replacement: None,
+        },
+    )?;
+    let shows = world.versions.shows();
+    let refused = err_of(
+        world
+            .service
+            .read_item(&alice(OperationName::ReadItem, None)?, request)
+            .await,
+    )?;
+    assert_eq!(
+        refused.detail.as_deref(),
+        Some(&ErrorDetail::Invalidated {
+            purge_id,
+            replacement: None
+        })
+    );
+    assert_eq!(world.versions.shows(), shows, "nothing is read at it");
+    assert_eq!(world.records.receipts()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sandbox_capability_checks_its_revision_against_the_purge_map_first() -> TestResult {
+    let world = card_world(Vec::new())?;
+    let purge_id = PurgeId(Uuid::from_u128(5));
+    world.records.put_mapping(
+        revision('a')?,
+        RevisionMapping {
+            purge_id,
+            replacement: None,
+        },
+    )?;
+    let refused = err_of(
+        world
+            .service
+            .create_sandbox_capability(
+                &alice(OperationName::CreateSandboxCapability, None)?,
+                CreateSandboxCapabilityRequest {
+                    workspace_id: scope()?.workspace_id,
+                    item_id: ItemId(Uuid::from_u128(CARD)),
+                    revision: revision('a')?,
+                    object: digest('a')?,
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(
+        refused.detail.as_deref(),
+        Some(&ErrorDetail::Invalidated {
+            purge_id,
+            replacement: None
+        })
+    );
+    assert_eq!(world.versions.shows(), 0);
+    assert!(world.sandbox.mints()?.is_empty());
     Ok(())
 }
 
