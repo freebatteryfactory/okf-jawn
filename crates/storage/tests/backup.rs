@@ -23,6 +23,7 @@ use okf_jawn_core::storage::{
     Backups, BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, ObjectInfo,
     Provenance, Purger, SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
 };
+use okf_jawn_core::uploads::{NewUpload, UploadStore};
 use okf_jawn_storage::Storage;
 use serde_json::json;
 
@@ -269,6 +270,33 @@ async fn fixture(directory: &Path) -> Fallible<Fixture> {
     draft(&storage, &workspace, 6, "ana", &head).await?;
     draft(&storage, &workspace, 7, "bea", &head).await?;
     let export = export(&storage, &workspace).await?;
+    // The export uploaded back into the workspace: its slot names the export's object, which an
+    // archive still never holds.
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            &workspace,
+            uuid!(32)?,
+            NewUpload {
+                filename: "export.zip".to_owned(),
+                relative_path: String::new(),
+                expected_size: 17,
+                expected_sha256: None,
+                supplied_by: person("ana"),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            &workspace,
+            slot.id,
+            Box::pin(std::io::Cursor::new(b"an export archive".to_vec())),
+            1 << 20,
+        )
+        .await?;
+    uploads
+        .complete(&workspace, slot.id, export.clone())
+        .await?;
     Ok(Fixture {
         storage,
         workspace,
