@@ -235,6 +235,23 @@ pub enum TreeEdit {
         /// The supplied-text proposal a person adopted as the correction, when it came from one.
         adopts: Option<ProposalId>,
     },
+    /// Restore one item, and every companion file it owns, to its state at an earlier revision.
+    ///
+    /// The item's own file is written as `from` holds it, at the item's path there; when the
+    /// item moved since, its file at the current path is removed. Every companion file the item
+    /// owns is restored with it as `from` holds it, and a companion that did not exist at
+    /// `from` is removed: the source appearance, the accepted supplied text and every recorded
+    /// correction of a source item. Storage owns where those files are. An item absent at
+    /// `from` is removed with its companions; an item absent both at `from` and in the tree the
+    /// edit is applied to fails the commit with `NotFound`, and restoring the item's file over
+    /// another item's path fails it with `Conflict`, as for every edit. A Rewind of several
+    /// items is one `RestoreItem` per item in one commit.
+    RestoreItem {
+        /// Item to restore.
+        item_id: ItemId,
+        /// Revision to restore from.
+        from: Revision,
+    },
     /// Restore the listed paths to their content at an earlier revision.
     ///
     /// A listed path that is absent at `from` is removed.
@@ -495,16 +512,21 @@ pub trait VersionStore: Send + Sync {
         changes: CommitChanges,
         check: Arc<dyn CandidateCheck>,
     ) -> PortFuture<'a, Committed>;
-    /// Find the commit after `since` on the head's history that carries `mutation_id`.
+    /// Find the commit on the head's history that carries `mutation_id`.
+    ///
+    /// `Some(since)` searches only the commits after `since`. `None` searches the accepted line
+    /// back from the head, newest first; the implementation may stop at the mutation retention
+    /// bound of SPEC section 8 (seven days), past which a mutation is no longer resumed.
     ///
     /// Only a writer whose expected head is not stable across attempts needs this before it
-    /// calls `commit`: a Snapshot reads the current head, so on a resumed attempt it must ask
-    /// first, with the base revision of one of its drafts as `since`.
+    /// calls `commit`: a Snapshot reads the current head, so on a resumed attempt it asks first,
+    /// with `None`. It never asks from one draft's base: a draft saved again after the commit
+    /// has a base the commit does not lie after.
     fn find_commit<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
-        since: &'a Revision,
+        since: Option<&'a Revision>,
     ) -> PortFuture<'a, Option<Revision>>;
     /// Write a proposal candidate commit on top of `changes.base` and retain it at
     /// `refs/okf-jawn/proposals/<proposal id>`. The head does not move.

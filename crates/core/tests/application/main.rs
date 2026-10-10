@@ -1,5 +1,6 @@
 //! `ApplicationService` handlers over fakes of their ports: what each operation of the item,
-//! read and source modules asks of the ports, and what it answers.
+//! read, source, history, search, health and session modules asks of the ports, and what it
+//! answers.
 //!
 //! Handlers are called the way dispatch calls them, with the `OperationContext` dispatch
 //! builds; dispatch's own rules (validation, authorization, the human-route refusal of
@@ -8,10 +9,13 @@
 mod drafts;
 #[path = "../support/application.rs"]
 mod fixture;
+mod history;
 mod items;
+mod navigation;
 mod reads;
 mod service;
 mod sources;
+mod status;
 
 #[path = "../../../../tests/support/check.rs"]
 mod check;

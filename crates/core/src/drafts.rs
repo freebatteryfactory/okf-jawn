@@ -52,14 +52,21 @@ pub trait DraftStore: Send + Sync {
     fn list<'a>(&'a self, scope: &'a StorageScope, editor: &'a str) -> PortFuture<'a, Vec<Draft>>;
     /// Remove the editor's own draft of one item and return its metadata.
     ///
+    /// With `expected` set to `Some(digest)`, the held draft is removed only when its
+    /// `content_digest` equals `digest`; otherwise nothing is removed, that draft stays in
+    /// place, and the call answers `Conflict`. A Snapshot passes the digest of the content it
+    /// committed, so a draft saved again after that content was read is never lost. `None`
+    /// removes whatever draft the editor holds.
+    ///
     /// The store remembers what it removed under the `mutation_id` and item: a repeated call
-    /// removes nothing and returns that same metadata. `NotFound` when the editor has no draft
-    /// of the item and this mutation removed none.
+    /// removes nothing and returns that same metadata, whatever `expected` says. `NotFound`
+    /// when the editor has no draft of the item and this mutation removed none.
     fn discard<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
         item: ItemId,
         editor: &'a str,
+        expected: Option<Digest>,
     ) -> PortFuture<'a, Draft>;
 }

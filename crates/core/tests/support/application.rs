@@ -5,9 +5,11 @@
 //! on its expected head, replays a repeated mutation, and runs the check it is handed on a
 //! staged directory; the draft store keeps one draft per (item, editor); the record store
 //! answers revision maps and derived objects for exactly the (item, revision, digest) recorded.
-//! Content is scripted by the test (`put_document`, `put_listing`), never computed from edits,
-//! so what a test asserts is what the application did with the ports. `item_at_path` answers
-//! from the scripted documents as its port documents it: `None` when no item is at the path at
+//! Content is scripted by the test (`put_document`, `put_listing`). Two edits are applied as a
+//! store would, so what `show` reads at the revision a commit produced follows them: an
+//! `EditItem` (the item's document at the commit's base, with the edit's body and properties)
+//! and a `RestoreItem` (the item as `from` holds it, its source appearance included, with the
+//! port's `NotFound` and `Conflict`). `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
 //! a known revision, `NotFound` only for an unknown revision. A port the operations
 //! under test do not call answers `Internal` ("not used by this test").
 //!
@@ -15,6 +17,17 @@
 //! (indexing a revision again is a no-op; an identical event or a receipt under the same
 //! mutation is not recorded twice), and a test may make the next call of one of them fail
 //! (`fail_next`, `fail_next_receipt`), as any port may, to show what a retry does.
+//!
+//! History is scripted too (`put_log`, `put_diff`, `put_blame`): a comparison nobody scripted
+//! between two known revisions lists no change, and an unknown revision is `NotFound`. The
+//! fake's history is one line: the commits it wrote, and the heads a test moves with `set_head`,
+//! each an unrelated commit on top of the head before it. A commit replays, and `find_commit`
+//! with `since` finds it, only when it lies after the revision asked about; `find_commit`
+//! without `since` searches that line back from the head, as the port documents. The search
+//! index
+//! answers `Unavailable` for a revision it has not indexed, as its port documents, and applies
+//! the query's filters to the entries a test scripted (`put_entry`, `put_link`): the archived
+//! flag unless archived items are included, the extraction filter, the folder and the text.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -32,7 +45,7 @@ use okf_jawn_contract::extraction::{
     ConversionOutcome, ConversionSettings, ConverterIdentity, Extraction, TextOrigin,
 };
 use okf_jawn_contract::health::ReadinessResponse;
-use okf_jawn_contract::history::{BlameResponse, DiffResponse, LogResponse};
+use okf_jawn_contract::history::{BlameLine, BlameResponse, DiffResponse, FileChange, LogResponse};
 use okf_jawn_contract::identity::{
     ArtifactId, ConnectorId, Digest, ItemId, JobId, MutationId, ProposalId, PurgeId, ReceiptId,
     Revision, TenantId, Timestamp, UploadId, WorkspaceId, WorkspacePath,
@@ -46,7 +59,10 @@ use okf_jawn_contract::proposal::{Comment, ListProposalsResponse, Proposal};
 use okf_jawn_contract::purge::Purge;
 use okf_jawn_contract::read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection};
 use okf_jawn_contract::review::{Confirmation, Review};
-use okf_jawn_contract::source::{SourceAppearance, SourceLocation, SourceLocator};
+use okf_jawn_contract::search::{
+    GetGraphResponse, GetLinksResponse, Link, LinkDirection, SearchHit, SearchResponse,
+};
+use okf_jawn_contract::source::{SourceAppearance, SourceLocation, SourceLocator, SourceReference};
 use okf_jawn_contract::workspace::Workspace;
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::application::{ApplicationConfig, ApplicationService, Ports};
@@ -66,7 +82,7 @@ use okf_jawn_core::jobs::{
     NewArtifact, NewJob, NewPurge, RecordStore, RevisionMapping,
 };
 use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore};
-use okf_jawn_core::portable::item_content_digest;
+use okf_jawn_core::portable::{content_digest, item_content_digest};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::proposals::{CommentPage, ProposalFilter, ProposalStore};
 use okf_jawn_core::readiness::ReadinessProbe;
@@ -75,8 +91,8 @@ use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
     DiffQuery, FolderListing, LocalSource, LogQuery, NewWorkspace, ObjectInfo, ObjectRead, Page,
-    Promotion, Provenance, StorageScope, VersionStore, WorkspaceArchive, WorkspaceCatalog,
-    WorkspaceUpdate,
+    Promotion, Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
+    WorkspaceCatalog, WorkspaceUpdate,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 use serde_json::Value;
@@ -103,6 +119,8 @@ pub struct World {
     pub drafts: Arc<FakeDrafts>,
     /// Minted sandbox capabilities.
     pub sandbox: Arc<FakeSandbox>,
+    /// Dependency readiness.
+    pub readiness: Arc<FakeReadiness>,
 }
 
 /// A staged candidate directory, removed when dropped.
@@ -124,6 +142,14 @@ struct VersionState {
     types: Vec<TypeDefinition>,
     queued: Vec<Revision>,
     commits: Vec<(CommitChanges, Revision)>,
+    landed: Vec<(Revision, Revision)>,
+    landing: Vec<Revision>,
+    logs: Vec<(Revision, Option<ItemId>, LogResponse)>,
+    diffs: Vec<(Revision, Revision, Option<ItemId>, Vec<FileChange>)>,
+    blames: Vec<(Revision, ItemId, Vec<BlameLine>)>,
+    log_queries: Vec<LogQuery>,
+    diff_queries: Vec<DiffQuery>,
+    blame_queries: Vec<BlameQuery>,
 }
 
 /// `BlobStore` over a map of digests to bytes.
@@ -143,11 +169,27 @@ pub struct FakeRecords {
     fail_next_receipt: AtomicBool,
 }
 
-/// `SearchIndex` that records each revision it indexed once: indexing it again is a no-op.
+/// `SearchIndex` that records each revision it indexed once (indexing it again is a no-op) and
+/// answers queries from scripted entries of an indexed revision.
 #[derive(Default)]
 pub struct FakeSearch {
     indexed: Mutex<Vec<Revision>>,
+    builds: AtomicUsize,
+    building: AtomicUsize,
+    most_at_once: AtomicUsize,
     fail_next: AtomicBool,
+    entries: Mutex<Vec<(Revision, ItemSummary, String)>>,
+    links: Mutex<Vec<(Revision, Link)>>,
+    queries: Mutex<Vec<SearchQuery>>,
+    link_queries: Mutex<Vec<LinkQuery>>,
+    graph_queries: Mutex<Vec<GraphQuery>>,
+}
+
+/// `ReadinessProbe` answering what a test scripted.
+#[derive(Default)]
+pub struct FakeReadiness {
+    answer: Mutex<Option<Result<ReadinessResponse, ApiError>>>,
+    probes: AtomicUsize,
 }
 
 /// `EventLog` that keeps every append, except an identical notification already appended
@@ -165,6 +207,7 @@ pub struct FakeDrafts {
     saves: Mutex<Vec<(MutationId, DraftWrite)>>,
     discarded: Mutex<Vec<(MutationId, Draft)>>,
     gets: AtomicUsize,
+    saved_before_discard: Mutex<Option<DraftWrite>>,
 }
 
 /// `SandboxCapabilityStore` that keeps every mint.
@@ -203,6 +246,7 @@ impl World {
         let events = Arc::new(FakeEvents::default());
         let drafts = Arc::new(FakeDrafts::default());
         let sandbox = Arc::new(FakeSandbox::default());
+        let readiness = Arc::new(FakeReadiness::default());
         let unused = Arc::new(Unused);
         let ports = Ports {
             access: unused.clone(),
@@ -221,7 +265,7 @@ impl World {
             drafts: drafts.clone(),
             confirmations: unused.clone(),
             sandbox: sandbox.clone(),
-            readiness: unused,
+            readiness: readiness.clone(),
         };
         let service = ApplicationService::new(ports, config())?;
         Ok(Self {
@@ -233,6 +277,7 @@ impl World {
             events,
             drafts,
             sandbox,
+            readiness,
         })
     }
 }
@@ -337,7 +382,22 @@ impl FakeVersions {
     /// # Errors
     /// Returns when the lock is poisoned.
     pub fn set_head(&self, revision: Revision) -> Built<()> {
-        lock(&self.state)?.head = Some(revision);
+        let mut state = lock(&self.state)?;
+        if let Some(parent) = state.head.replace(revision.clone())
+            && parent != revision
+        {
+            state.landed.push((revision, parent));
+        }
+        Ok(())
+    }
+
+    /// Before each of the next `commit` calls, move the head to the next of `revisions`, as an
+    /// unrelated commit landing between a writer's check and its commit would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn land_before_next_commits(&self, revisions: Vec<Revision>) -> Built<()> {
+        lock(&self.state)?.landing = revisions;
         Ok(())
     }
 
@@ -364,11 +424,191 @@ impl FakeVersions {
         self.shows.load(Ordering::SeqCst)
     }
 
+    /// Answer `log` from `tip`, optionally of `item`, with `response`.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_log(
+        &self,
+        tip: &Revision,
+        item: Option<ItemId>,
+        response: LogResponse,
+    ) -> Built<()> {
+        lock(&self.state)?.logs.push((tip.clone(), item, response));
+        Ok(())
+    }
+
+    /// Answer `diff` from `from` to `to`, optionally of `item`, with `changes`.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_diff(
+        &self,
+        from: &Revision,
+        to: &Revision,
+        item: Option<ItemId>,
+        changes: Vec<FileChange>,
+    ) -> Built<()> {
+        lock(&self.state)?
+            .diffs
+            .push((from.clone(), to.clone(), item, changes));
+        Ok(())
+    }
+
+    /// Attribute `lines` of `item` at `at`.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_blame(&self, at: &Revision, item: ItemId, lines: Vec<BlameLine>) -> Built<()> {
+        lock(&self.state)?.blames.push((at.clone(), item, lines));
+        Ok(())
+    }
+
+    /// Every `log` query, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn log_queries(&self) -> Built<Vec<LogQuery>> {
+        Ok(lock(&self.state)?.log_queries.clone())
+    }
+
+    /// Every `diff` query, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn diff_queries(&self) -> Built<Vec<DiffQuery>> {
+        Ok(lock(&self.state)?.diff_queries.clone())
+    }
+
+    /// Every `blame` query, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn blame_queries(&self) -> Built<Vec<BlameQuery>> {
+        Ok(lock(&self.state)?.blame_queries.clone())
+    }
+
     fn head_now(&self) -> Result<Revision, ApiError> {
         lock_api(&self.state)?
             .head
             .clone()
             .ok_or_else(|| ApiError::new(ErrorCode::Internal, "no head"))
+    }
+}
+
+impl VersionState {
+    /// The commit `mutation` wrote, when it lies after `revision` on the fake's one line of
+    /// history: `revision` is the head that commit was written on, or a head before that one.
+    fn written_after(&self, mutation: MutationId, revision: &Revision) -> Option<Revision> {
+        let (changes, written) = self
+            .commits
+            .iter()
+            .find(|(changes, _)| changes.mutation_id == mutation)?;
+        let mut base = Some(&changes.expected_head);
+        // Each step moves to an earlier commit; the bound stops a scripted cycle.
+        for _ in 0..=self.line_length() {
+            let at = base?;
+            if at == revision {
+                return Some(written.clone());
+            }
+            base = self.parent_of(at);
+        }
+        None
+    }
+
+    /// The commit `mutation` wrote, when it lies on the line back from the head.
+    fn on_the_line(&self, mutation: MutationId) -> Option<Revision> {
+        let mut at = self.head.as_ref();
+        // Each step moves to an earlier commit; the bound stops a scripted cycle.
+        for _ in 0..=self.line_length() {
+            let revision = at?;
+            if self
+                .commits
+                .iter()
+                .any(|(changes, produced)| produced == revision && changes.mutation_id == mutation)
+            {
+                return Some(revision.clone());
+            }
+            at = self.parent_of(revision);
+        }
+        None
+    }
+
+    /// The documents each `TreeEdit::RestoreItem` of `changes` restores, as its port documents
+    /// it: the item as `from` holds it, its source appearance (the companion files) included;
+    /// nothing for an item absent at `from`, which is removed. `NotFound` for an item absent
+    /// both at `from` and at the expected head; `Conflict` when another item holds the restored
+    /// path at the expected head.
+    fn restored_items(&self, changes: &CommitChanges) -> Result<Vec<ItemDocument>, ApiError> {
+        let at = |revision: &Revision, item: ItemId| {
+            self.documents
+                .iter()
+                .find(|(held, document)| held == revision && document.summary.id == item)
+                .map(|(_, document)| document.clone())
+        };
+        let mut restored = Vec::new();
+        for edit in &changes.edits {
+            let TreeEdit::RestoreItem { item_id, from } = edit else {
+                continue;
+            };
+            let Some(document) = at(from, *item_id) else {
+                if at(&changes.expected_head, *item_id).is_none() {
+                    return Err(ApiError::new(ErrorCode::NotFound, "no such item"));
+                }
+                continue;
+            };
+            if self.documents.iter().any(|(held, other)| {
+                *held == changes.expected_head
+                    && other.summary.id != *item_id
+                    && other.summary.path == document.summary.path
+            }) {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "another item holds the restored path",
+                ));
+            }
+            restored.push(document);
+        }
+        Ok(restored)
+    }
+
+    /// The commit before `revision` on the line: the head a written commit was based on, or the
+    /// head a test moved away from.
+    fn parent_of(&self, revision: &Revision) -> Option<&Revision> {
+        self.commits
+            .iter()
+            .find(|(_, produced)| produced == revision)
+            .map(|(changes, _)| &changes.expected_head)
+            .or_else(|| {
+                self.landed
+                    .iter()
+                    .find(|(produced, _)| produced == revision)
+                    .map(|(_, parent)| parent)
+            })
+    }
+
+    const fn line_length(&self) -> usize {
+        self.commits.len().saturating_add(self.landed.len())
+    }
+
+    /// Refuse an unknown revision with `NotFound`. A revision is known when it is the head, a
+    /// commit produced it, or the test scripted content at it.
+    fn require_known(&self, revision: &Revision) -> Result<(), ApiError> {
+        let known = self.head.as_ref() == Some(revision)
+            || self.commits.iter().any(|(_, at)| at == revision)
+            || self.landed.iter().any(|(at, _)| at == revision)
+            || self.documents.iter().any(|(at, _)| at == revision)
+            || self.listings.iter().any(|(at, _, _)| at == revision)
+            || self.logs.iter().any(|(at, _, _)| at == revision)
+            || self
+                .diffs
+                .iter()
+                .any(|(from, to, _, _)| from == revision || to == revision);
+        if known {
+            Ok(())
+        } else {
+            Err(ApiError::new(ErrorCode::NotFound, "no such revision"))
+        }
     }
 }
 
@@ -433,9 +673,111 @@ impl FakeSearch {
         Ok(lock(&self.indexed)?.clone())
     }
 
+    /// How many times `index_revision` ran, a no-op repeat included.
+    #[must_use]
+    pub fn builds(&self) -> usize {
+        self.builds.load(Ordering::SeqCst)
+    }
+
+    /// The most `index_revision` calls that were running at one time.
+    #[must_use]
+    pub fn most_at_once(&self) -> usize {
+        self.most_at_once.load(Ordering::SeqCst)
+    }
+
     /// Make the next `index_revision` fail, indexing nothing.
     pub fn fail_next(&self) {
         self.fail_next.store(true, Ordering::SeqCst);
+    }
+
+    /// Hold `summary` with its indexed `text` in the index of `at`; it is answered only once
+    /// `at` is indexed.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_entry(&self, at: &Revision, summary: ItemSummary, text: &str) -> Built<()> {
+        lock(&self.entries)?.push((at.clone(), summary, text.to_owned()));
+        Ok(())
+    }
+
+    /// Hold `link` in the index of `at`.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn put_link(&self, at: &Revision, link: Link) -> Built<()> {
+        lock(&self.links)?.push((at.clone(), link));
+        Ok(())
+    }
+
+    /// Mark `at` indexed, as an earlier write would have.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn mark_indexed(&self, at: &Revision) -> Built<()> {
+        lock(&self.indexed)?.push(at.clone());
+        Ok(())
+    }
+
+    /// Every search query, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn queries(&self) -> Built<Vec<SearchQuery>> {
+        Ok(lock(&self.queries)?.clone())
+    }
+
+    /// Every link query, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn link_queries(&self) -> Built<Vec<LinkQuery>> {
+        Ok(lock(&self.link_queries)?.clone())
+    }
+
+    /// Every graph query, in order.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn graph_queries(&self) -> Built<Vec<GraphQuery>> {
+        Ok(lock(&self.graph_queries)?.clone())
+    }
+
+    /// Whether `at` is indexed; a query at any other revision is `Unavailable`.
+    fn require_indexed(&self, at: &Revision) -> Result<(), ApiError> {
+        if lock_api(&self.indexed)?.contains(at) {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                ErrorCode::Unavailable,
+                "that revision is not indexed",
+            ))
+        }
+    }
+}
+
+impl FakeReadiness {
+    /// Answer every probe with `response`.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn answer(&self, response: ReadinessResponse) -> Built<()> {
+        *lock(&self.answer)? = Some(Ok(response));
+        Ok(())
+    }
+
+    /// Fail every probe with `error`.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail(&self, error: ApiError) -> Built<()> {
+        *lock(&self.answer)? = Some(Err(error));
+        Ok(())
+    }
+
+    /// How many probes ran.
+    #[must_use]
+    pub fn probes(&self) -> usize {
+        self.probes.load(Ordering::SeqCst)
     }
 }
 
@@ -476,6 +818,24 @@ impl FakeDrafts {
     #[must_use]
     pub fn gets(&self) -> usize {
         self.gets.load(Ordering::SeqCst)
+    }
+
+    /// Save `write` as its editor's draft just before the next `discard` runs, as an autosave
+    /// landing between a Snapshot's read and its removal would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn save_before_next_discard(&self, write: DraftWrite) -> Built<()> {
+        *lock(&self.saved_before_discard)? = Some(write);
+        Ok(())
+    }
+
+    /// Every draft held now, most recently saved first.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn held(&self) -> Built<Vec<DraftContent>> {
+        Ok(lock(&self.drafts)?.clone())
     }
 }
 
@@ -520,15 +880,7 @@ impl VersionStore for FakeVersions {
                 return Err(ApiError::new(ErrorCode::NotFound, "no such revision"));
             }
             let state = lock_api(&self.state)?;
-            // A revision is known when it is the head, a commit produced it, or the test
-            // scripted content at it; only an unknown revision is `NotFound`.
-            let known = state.head.as_ref() == Some(revision)
-                || state.commits.iter().any(|(_, at)| at == revision)
-                || state.documents.iter().any(|(at, _)| at == revision)
-                || state.listings.iter().any(|(at, _, _)| at == revision);
-            if !known {
-                return Err(ApiError::new(ErrorCode::NotFound, "no such revision"));
-            }
+            state.require_known(revision)?;
             Ok(state
                 .documents
                 .iter()
@@ -591,13 +943,16 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, Committed> {
         Box::pin(async move {
             let mut state = lock_api(&self.state)?;
-            if let Some((_, revision)) = state
-                .commits
-                .iter()
-                .find(|(prior, _)| prior.mutation_id == changes.mutation_id)
+            if !state.landing.is_empty() {
+                let landed = state.landing.remove(0);
+                if let Some(parent) = state.head.replace(landed.clone()) {
+                    state.landed.push((landed, parent));
+                }
+            }
+            if let Some(revision) = state.written_after(changes.mutation_id, &changes.expected_head)
             {
                 return Ok(Committed {
-                    revision: revision.clone(),
+                    revision,
                     replayed: true,
                     warnings: Vec::new(),
                 });
@@ -605,11 +960,37 @@ impl VersionStore for FakeVersions {
             if state.head.as_ref() != Some(&changes.expected_head) {
                 return Err(ApiError::new(ErrorCode::Conflict, "the head moved"));
             }
+            let restored = state.restored_items(&changes)?;
             let warnings = check.check(&self.stage.0)?;
             if state.queued.is_empty() {
                 return Err(ApiError::new(ErrorCode::Internal, "no revision queued"));
             }
             let revision = state.queued.remove(0);
+            // What `show` reads of each edited item at the new revision.
+            for edit in &changes.edits {
+                if let TreeEdit::EditItem {
+                    item_id,
+                    body,
+                    properties,
+                } = edit
+                    && let Some(mut edited) = state
+                        .documents
+                        .iter()
+                        .find(|(at, document)| {
+                            *at == changes.expected_head && document.summary.id == *item_id
+                        })
+                        .map(|(_, document)| document.clone())
+                {
+                    edited.summary.revision = revision.clone();
+                    edited.body.clone_from(body);
+                    edited.properties.clone_from(properties);
+                    state.documents.insert(0, (revision.clone(), edited));
+                }
+            }
+            for mut document in restored {
+                document.summary.revision = revision.clone();
+                state.documents.insert(0, (revision.clone(), document));
+            }
             state.head = Some(revision.clone());
             state.commits.push((changes, revision.clone()));
             Ok(Committed {
@@ -622,10 +1003,19 @@ impl VersionStore for FakeVersions {
     fn find_commit<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _mutation_id: MutationId,
-        _since: &'a Revision,
+        mutation_id: MutationId,
+        since: Option<&'a Revision>,
     ) -> PortFuture<'a, Option<Revision>> {
-        unused()
+        Box::pin(async move {
+            let state = lock_api(&self.state)?;
+            match since {
+                Some(since) => {
+                    state.require_known(since)?;
+                    Ok(state.written_after(mutation_id, since))
+                }
+                None => Ok(state.on_the_line(mutation_id)),
+            }
+        })
     }
     fn create_candidate<'a>(
         &'a self,
@@ -643,26 +1033,91 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, Committed> {
         unused()
     }
-    fn log<'a>(
-        &'a self,
-        _scope: &'a StorageScope,
-        _query: LogQuery,
-    ) -> PortFuture<'a, LogResponse> {
-        unused()
+    fn log<'a>(&'a self, _scope: &'a StorageScope, query: LogQuery) -> PortFuture<'a, LogResponse> {
+        Box::pin(async move {
+            let mut state = lock_api(&self.state)?;
+            state.log_queries.push(query.clone());
+            state.require_known(&query.tip)?;
+            Ok(state
+                .logs
+                .iter()
+                .find(|(tip, item, _)| *tip == query.tip && *item == query.item_id)
+                .map_or_else(
+                    || LogResponse {
+                        commits: Vec::new(),
+                        next_cursor: None,
+                    },
+                    |(_, _, response)| response.clone(),
+                ))
+        })
     }
     fn diff<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _query: DiffQuery,
+        query: DiffQuery,
     ) -> PortFuture<'a, DiffResponse> {
-        unused()
+        Box::pin(async move {
+            let mut state = lock_api(&self.state)?;
+            state.diff_queries.push(query.clone());
+            state.require_known(&query.from)?;
+            state.require_known(&query.to)?;
+            let changes = state
+                .diffs
+                .iter()
+                .find(|(from, to, item, _)| {
+                    *from == query.from && *to == query.to && *item == query.item_id
+                })
+                .map(|(_, _, _, changes)| changes.clone())
+                .unwrap_or_default();
+            Ok(DiffResponse {
+                from: query.from,
+                to: query.to,
+                changes,
+                warnings: Vec::new(),
+            })
+        })
     }
     fn blame<'a>(
         &'a self,
-        _scope: &'a StorageScope,
-        _query: BlameQuery,
+        scope: &'a StorageScope,
+        query: BlameQuery,
     ) -> PortFuture<'a, BlameResponse> {
-        unused()
+        Box::pin(async move {
+            let mut state = lock_api(&self.state)?;
+            state.blame_queries.push(query.clone());
+            let (path, lines) = {
+                let document = state
+                    .documents
+                    .iter()
+                    .find(|(at, document)| {
+                        *at == query.revision && document.summary.id == query.item_id
+                    })
+                    .map(|(_, document)| document)
+                    .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such item"))?;
+                let lines: Vec<BlameLine> = state
+                    .blames
+                    .iter()
+                    .filter(|(at, item, _)| *at == query.revision && *item == query.item_id)
+                    .flat_map(|(_, _, lines)| lines.iter())
+                    .filter(|line| line.line >= query.lines.start && line.line <= query.lines.end)
+                    .cloned()
+                    .collect();
+                (document.summary.path.clone(), lines)
+            };
+            // What a store may put in the citation; the application replaces it.
+            Ok(BlameResponse {
+                source: SourceReference {
+                    workspace_id: scope.workspace_id,
+                    item_id: query.item_id,
+                    path,
+                    revision: query.revision,
+                    digest: None,
+                    selection: Selection::Lines { range: query.lines },
+                    locations: Vec::new(),
+                },
+                lines,
+            })
+        })
     }
     fn write_history<'a>(
         &'a self,
@@ -890,6 +1345,15 @@ impl SearchIndex for FakeSearch {
     ) -> PortFuture<'a, ()> {
         Box::pin(async move {
             injected(&self.fail_next)?;
+            self.builds.fetch_add(1, Ordering::SeqCst);
+            let running = self
+                .building
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
+            self.most_at_once.fetch_max(running, Ordering::SeqCst);
+            // A build takes time: let another request run meanwhile.
+            tokio::task::yield_now().await;
+            self.building.fetch_sub(1, Ordering::SeqCst);
             let mut indexed = lock_api(&self.indexed)?;
             if !indexed.contains(&revision) {
                 indexed.push(revision);
@@ -899,24 +1363,124 @@ impl SearchIndex for FakeSearch {
     }
     fn search<'a>(
         &'a self,
-        _scope: &'a StorageScope,
-        _query: SearchQuery,
-    ) -> PortFuture<'a, okf_jawn_contract::search::SearchResponse> {
-        unused()
+        scope: &'a StorageScope,
+        query: SearchQuery,
+    ) -> PortFuture<'a, SearchResponse> {
+        Box::pin(async move {
+            lock_api(&self.queries)?.push(query.clone());
+            query.check()?;
+            self.require_indexed(&query.revision)?;
+            let text = query.text.trim().to_lowercase();
+            let matching: Vec<SearchHit> = lock_api(&self.entries)?
+                .iter()
+                .filter(|(at, _, _)| *at == query.revision)
+                .filter(|(_, summary, _)| query.include_archived || !summary.archived)
+                .filter(|(_, summary, _)| {
+                    query.extraction.is_none()
+                        || summary
+                            .extraction
+                            .as_ref()
+                            .is_some_and(|extraction| extraction.status.is_unprocessed())
+                })
+                .filter(|(_, summary, _)| within(summary, query.folder.as_ref()))
+                .filter(|(_, _, indexed)| text.is_empty() || indexed.to_lowercase().contains(&text))
+                .map(|(_, summary, indexed)| SearchHit {
+                    source: SourceReference {
+                        workspace_id: scope.workspace_id,
+                        item_id: summary.id,
+                        path: summary.path.clone(),
+                        revision: query.revision.clone(),
+                        digest: None,
+                        selection: Selection::All,
+                        locations: Vec::new(),
+                    },
+                    title: summary.title.clone(),
+                    snippet: indexed.clone(),
+                    score: 1.0,
+                    extraction: summary.extraction.clone(),
+                })
+                .collect();
+            let start = query
+                .page
+                .cursor
+                .as_deref()
+                .map_or(Ok(0), str::parse::<usize>)
+                .map_err(internal)?;
+            let limit = usize::from(query.page.limit.max(1));
+            let end = start.saturating_add(limit);
+            Ok(SearchResponse {
+                revision: query.revision,
+                next_cursor: (end < matching.len()).then(|| end.to_string()),
+                hits: matching.into_iter().skip(start).take(limit).collect(),
+            })
+        })
     }
     fn links<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _query: LinkQuery,
-    ) -> PortFuture<'a, okf_jawn_contract::search::GetLinksResponse> {
-        unused()
+        query: LinkQuery,
+    ) -> PortFuture<'a, GetLinksResponse> {
+        Box::pin(async move {
+            lock_api(&self.link_queries)?.push(query.clone());
+            self.require_indexed(&query.revision)?;
+            let links = lock_api(&self.links)?
+                .iter()
+                .filter(|(at, _)| *at == query.revision)
+                .map(|(_, link)| link)
+                .filter(|link| {
+                    let outgoing = link.from == query.item_id;
+                    let incoming = link.to == Some(query.item_id);
+                    match query.direction {
+                        LinkDirection::Outgoing => outgoing,
+                        LinkDirection::Incoming => incoming,
+                        LinkDirection::Both => outgoing || incoming,
+                    }
+                })
+                .take(usize::from(query.page.limit.max(1)))
+                .cloned()
+                .collect();
+            Ok(GetLinksResponse {
+                revision: query.revision,
+                links,
+                next_cursor: None,
+            })
+        })
     }
     fn graph<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _query: GraphQuery,
-    ) -> PortFuture<'a, okf_jawn_contract::search::GetGraphResponse> {
-        unused()
+        query: GraphQuery,
+    ) -> PortFuture<'a, GetGraphResponse> {
+        Box::pin(async move {
+            lock_api(&self.graph_queries)?.push(query.clone());
+            self.require_indexed(&query.revision)?;
+            let all: Vec<ItemSummary> = lock_api(&self.entries)?
+                .iter()
+                .filter(|(at, summary, _)| {
+                    *at == query.revision && within(summary, query.folder.as_ref())
+                })
+                .map(|(_, summary, _)| summary.clone())
+                .collect();
+            let limit = usize::try_from(query.max_nodes).unwrap_or(usize::MAX);
+            let truncated = all.len() > limit;
+            let nodes: Vec<ItemSummary> = all.into_iter().take(limit).collect();
+            let edges = lock_api(&self.links)?
+                .iter()
+                .filter(|(at, _)| *at == query.revision)
+                .map(|(_, link)| link)
+                .filter(|link| {
+                    nodes.iter().any(|node| node.id == link.from)
+                        && nodes.iter().any(|node| Some(node.id) == link.to)
+                })
+                .cloned()
+                .collect();
+            Ok(GetGraphResponse {
+                revision: query.revision,
+                nodes,
+                edges,
+                truncated,
+            })
+        })
     }
     fn rebuild<'a>(&'a self, _scope: &'a StorageScope, _head: Revision) -> PortFuture<'a, ()> {
         unused()
@@ -1028,12 +1592,17 @@ impl DraftStore for FakeDrafts {
     }
     fn discard<'a>(
         &'a self,
-        _scope: &'a StorageScope,
+        scope: &'a StorageScope,
         mutation_id: MutationId,
         item: ItemId,
         editor: &'a str,
+        expected: Option<Digest>,
     ) -> PortFuture<'a, Draft> {
         Box::pin(async move {
+            let landing = lock_api(&self.saved_before_discard)?.take();
+            if let Some(write) = landing {
+                self.save(scope, mutation(0xdead), write).await?;
+            }
             let mut discarded = lock_api(&self.discarded)?;
             if let Some((_, prior)) = discarded
                 .iter()
@@ -1046,6 +1615,16 @@ impl DraftStore for FakeDrafts {
                 .iter()
                 .position(|held| held.draft.item_id == item && held.draft.editor == editor)
                 .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no draft"))?;
+            if let Some(expected) = expected
+                && drafts
+                    .get(position)
+                    .is_some_and(|held| held.draft.content_digest != expected)
+            {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "the held draft is not the expected one",
+                ));
+            }
             let removed = drafts.remove(position).draft;
             discarded.push((mutation_id, removed.clone()));
             Ok(removed)
@@ -1333,9 +1912,14 @@ impl ConfirmationStore for Unused {
     }
 }
 
-impl ReadinessProbe for Unused {
+impl ReadinessProbe for FakeReadiness {
     fn probe(&self) -> PortFuture<'_, ReadinessResponse> {
-        unused()
+        self.probes.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            lock_api(&self.answer)?
+                .clone()
+                .unwrap_or_else(|| Err(ApiError::new(ErrorCode::Internal, "not scripted")))
+        })
     }
 }
 
@@ -1595,7 +2179,7 @@ pub fn served_digest(document: &ItemDocument) -> Built<Digest> {
     Ok(item_content_digest(document)?)
 }
 
-/// A draft of `item` by `editor`.
+/// A draft of `item` by `editor`, with no properties, digested as the item it would commit.
 ///
 /// # Errors
 /// Returns when a fixture value does not parse.
@@ -1605,7 +2189,7 @@ pub fn draft_of(item: u128, editor: &str, base: &Revision, body: &str) -> Built<
             item_id: ItemId(Uuid::from_u128(item)),
             editor: editor.to_owned(),
             base_revision: base.clone(),
-            content_digest: digest('9')?,
+            content_digest: content_digest(body, &BTreeMap::new())?,
             saved_at: instant()?,
         },
         body: body.to_owned(),
@@ -1629,6 +2213,16 @@ fn metadata(write: &DraftWrite) -> Result<Draft, okf_jawn_contract::identity::Id
         base_revision: write.base_revision.clone(),
         content_digest: write.content_digest.clone(),
         saved_at: instant()?,
+    })
+}
+
+/// Whether an item lies in `folder` or a folder beneath it; every item lies in no folder.
+fn within(summary: &ItemSummary, folder: Option<&WorkspacePath>) -> bool {
+    folder.is_none_or(|folder| {
+        summary
+            .path
+            .as_str()
+            .starts_with(&format!("{}/", folder.as_str()))
     })
 }
 

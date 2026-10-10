@@ -159,7 +159,7 @@ impl VersionStore for FakeVersions {
         &'a self,
         _scope: &'a StorageScope,
         _mutation_id: MutationId,
-        _since: &'a Revision,
+        _since: Option<&'a Revision>,
     ) -> PortFuture<'a, Option<Revision>> {
         unused()
     }
