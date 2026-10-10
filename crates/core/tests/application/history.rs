@@ -511,6 +511,46 @@ async fn commit_items_conflict_lists_every_changed_or_deleted_item_and_commits_n
 }
 
 #[tokio::test]
+async fn commit_items_conflict_of_a_moved_and_rewritten_item_is_not_a_deletion() -> TestResult {
+    let world = World::new()?;
+    let base = revision('a')?;
+    let head = revision('c')?;
+    note_at(&world, NOTE, "notes/plan.md", &['a'])?;
+    note_at(&world, NOTE, "archive/plan.md", &['c'])?;
+    world.versions.set_head(head.clone())?;
+    world
+        .drafts
+        .put_draft(draft_of(NOTE, ALICE, &base, "# Mine\n")?)?;
+    // A move with a heavy rewrite, which rename detection reports as a removal and an addition:
+    // the item still exists at the head.
+    let moved = vec![
+        change(FileChangeKind::Removed, Some("notes/plan.md"), None),
+        change(FileChangeKind::Added, None, Some("archive/plan.md")),
+    ];
+    world
+        .versions
+        .put_diff(&base, &head, Some(item(NOTE)), moved.clone())?;
+    world.versions.queue_revision(revision('d')?)?;
+    let refused = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(1)))?,
+                snapshot(&[NOTE])?,
+            )
+            .await,
+    )?;
+    let Some(ErrorDetail::DraftConflict { items }) = refused.detail.as_deref() else {
+        return Err(format!("not a draft conflict: {refused:?}").into());
+    };
+    let only = some(items.first(), "the moved item")?;
+    assert_eq!(items.len(), 1);
+    assert!(!only.deleted, "a moved item is not deleted: {only:?}");
+    assert_eq!(only.changes, moved);
+    assert_eq!(world.versions.commits()?.len(), 0);
+    Ok(())
+}
+#[tokio::test]
 async fn commit_items_checks_every_draft_base_against_the_purge_map_first() -> TestResult {
     let world = World::new()?;
     note_at(&world, NOTE, "notes/plan.md", &['a'])?;
