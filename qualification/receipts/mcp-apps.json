@@ -1,5 +1,5 @@
 {
-  "git_sha": "11c53916cb7ae63bc9b85a144399b7b37287cc24",
+  "git_sha": "4bce816ac715609e1a9ab964a5d19fd35c93dcb5",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-09T22:05:18.398Z",
+  "produced_at": "2026-10-10T03:19:48.628Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-09T22:06:49.006Z",
+  "finished_at": "2026-10-10T03:31:47.260Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -286,7 +286,7 @@
   "harness_binary": {
     "path": "<abs>/release/okf-qualify-mcp-apps.exe",
     "bytes": 5308416,
-    "sha256": "72e4937aba414a8ec0f30c44e06b78e9e3ec081d0d335b80c38cc3eb0731477e",
+    "sha256": "029db084cba7df2f2b056f795e79d36e220763fc6cfe34b0ba0ce7dbce3a8614",
     "args": [
       "--http",
       "127.0.0.1:18765"
@@ -541,11 +541,11 @@
   "basic_host": {
     "status": "passed",
     "source": {
-      "status": "cached",
+      "status": "fetched",
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
-      "commit_resolved_at": "2026-10-09T20:58:53.084Z",
+      "commit_resolved_at": "2026-10-10T03:24:50.545Z",
       "files_verified": 14,
       "files_expected": 14,
       "package": {
@@ -858,7 +858,7 @@
   },
   "host_render": {
     "status": "not_run",
-    "meaning": "hosts/ directory exists but is empty. Place screenshots or notes from claude.ai / ChatGPT before claiming an observed host render.",
+    "meaning": "No files under .artifacts/qualification/mcp-apps/hosts/. Host render for claude.ai / ChatGPT remains not_run until screenshots or notes are placed there. This receipt does not invent PASS.",
     "gate": "mcp-apps-web-hosts"
   },
   "static_bundle_smoke": {
