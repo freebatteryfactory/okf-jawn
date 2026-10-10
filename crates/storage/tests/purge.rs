@@ -1984,5 +1984,60 @@ async fn purge_reaches_a_pre_migration_set_written_after_its_backups_step() -> T
     Ok(())
 }
 
+/// Upload content arrives in no job: the purge refusal of its byte count is checked inside the
+/// count's transaction, and a refused call removes the part file it appended to (it may have
+/// recreated it after the purge removed the workspace's upload files). A trigger records the
+/// purge inside that transaction, as a purge recorded while the body arrived.
+#[tokio::test]
+async fn purge_refuses_upload_content_inside_its_transaction_and_keeps_no_part() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let bytes = b"zanzibar content arriving late";
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            &target,
+            uuid!(8)?,
+            NewUpload {
+                filename: "late.bin".to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(bytes.len())?,
+                expected_sha256: None,
+                supplied_by: person("ana"),
+            },
+        )
+        .await?;
+    let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+    records.execute(
+        &format!(
+            "CREATE TRIGGER late_purge AFTER UPDATE OF received_bytes ON uploads
+             BEGIN INSERT INTO purges (purge_id, tenant_id, target_key, state, mutation_id,
+                 record) VALUES ('{}', 'local', 'workspace/{}', 'running', '{}', '{{}}'); END;",
+            uuid_text(60),
+            target.workspace_id.0,
+            uuid_text(50)
+        ),
+        [],
+    )?;
+    let refusal = uploads
+        .put_content(
+            &target,
+            slot.id,
+            Box::pin(std::io::Cursor::new(bytes.to_vec())),
+            1 << 20,
+        )
+        .await;
+    records.execute_batch("DROP TRIGGER late_purge;")?;
+    drop(records);
+    refused(refusal, "upload content")?;
+    assert_eq!(
+        marked_files(&directory.path().join("uploads"))?,
+        Vec::<String>::new(),
+        "a refused transfer keeps no part file"
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

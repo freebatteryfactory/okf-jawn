@@ -21,11 +21,14 @@
 //! connector, actor and operation), and one appended after the rows step is tenant-level data
 //! of the same kind as the revision map and the purge record, which the purge keeps.
 
-use okf_jawn_contract::error::ApiError;
+use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_core::storage::StorageScope;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::{Db, conflict, scope_key, sql};
+
+/// How every refusal's message ends (`is_refusal`).
+const REFUSED: &str = "; nothing is written to it";
 
 /// Refuse a write to `workspace` when a purge names it.
 pub(crate) fn refuse(
@@ -44,10 +47,16 @@ pub(crate) fn refuse(
         .map_err(|error| sql(&error))?;
     match found {
         Some((purge, state)) => Err(conflict(format!(
-            "workspace {workspace} is purged by purge {purge} ({state}); nothing is written to it"
+            "workspace {workspace} is purged by purge {purge} ({state}){REFUSED}"
         ))),
         None => Ok(()),
     }
+}
+
+/// Whether `error` is a refusal `refuse` made, so a write can undo what it did outside its
+/// transaction before the refusal.
+pub(crate) fn is_refusal(error: &ApiError) -> bool {
+    error.code == ErrorCode::Conflict && error.message.ends_with(REFUSED)
 }
 
 /// `refuse` for `scope`, in its own read.

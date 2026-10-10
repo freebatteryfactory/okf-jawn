@@ -214,10 +214,12 @@ impl SqliteUploads {
                 .map_err(|error| io_error("write", &incoming, &error))?;
         }
         drop(file);
-        append_file(&incoming, &self.part(upload))?;
+        let part = self.part(upload);
+        append_file(&incoming, &part)?;
         let _ = std::fs::remove_file(&incoming);
         let (tenant, workspace) = scope_key(scope);
-        self.db
+        let recorded = self
+            .db
             .transaction(move |transaction| {
                 transaction
                     .execute(
@@ -225,9 +227,28 @@ impl SqliteUploads {
                         params![to_i64(total)?, upload.0.to_string()],
                     )
                     .map_err(|error| sql(&error))?;
+                guard::refuse(transaction, &tenant, &workspace)?;
                 read(transaction, &tenant, &workspace, upload)?.ok_or_else(|| not_found("upload"))
             })
-            .await
+            .await;
+        // A purge recorded while the body arrived refuses the count; the part file this call
+        // appended to may have been recreated after the purge removed the workspace's upload
+        // files, so it is removed here. Any other failure keeps it: a resumed transfer
+        // reconciles the count from the file.
+        if let Err(error) = &recorded
+            && guard::is_refusal(error)
+        {
+            std::fs::remove_file(&part)
+                .or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|error| io_error("remove", &part, &error))?;
+        }
+        recorded
     }
 
     async fn finish(
