@@ -59,12 +59,24 @@ pub struct Block {
     /// the node's item a `prov`. `None` when the node has no provenance of its own, or the
     /// format has no pages; a preceding page marker alone never locates a node.
     pub page: Option<u32>,
-    /// For a node on a page that has no provenance of its own: the text of its first item in
-    /// docling's JSON export, so the supervisor can pair the run with that item's result from
-    /// the location rule. `None` otherwise.
-    pub unlocated: Option<String>,
+    /// For a node on a page that has no provenance of its own: its own item in docling's JSON
+    /// export, so the supervisor can give the run that item's result from the location rule
+    /// and no other item's. `None` otherwise.
+    pub unlocated: Option<Unlocated>,
     /// The node is a table.
     pub table: bool,
+}
+
+/// The own item of a line run that has no provenance of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Unlocated {
+    /// The item's `self_ref` in the window's JSON export (`#/texts/7`). `None` when the node's
+    /// own item cannot be named: a group, or a node that places several items in the body.
+    pub item: Option<String>,
+    /// The item's text in the export, which the supervisor checks the item still has; empty
+    /// for a table or a picture.
+    pub text: String,
 }
 
 /// What the child reports in `RESULT_FILE`.

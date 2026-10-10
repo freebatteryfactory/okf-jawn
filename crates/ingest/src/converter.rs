@@ -19,9 +19,10 @@
 //! - items the converter left unlocated go through the location rule (`locate::locate_items`)
 //!   against the window's text layer, and the counts become warnings;
 //! - each Markdown line run with the converter's own provenance is `Direct` on its page; a run
-//!   without one takes the location rule's result for its item (`Inferred`, or `Unresolved`
-//!   with the reason), so the rule's inferred locations reach the record, and a preceding page
-//!   marker never locates a run;
+//!   without one takes the location rule's result for its own item, which the child names by
+//!   reference (`Inferred`, or `Unresolved` with the reason), so the rule's inferred locations
+//!   reach the record, no run takes another item's location, and a preceding page marker never
+//!   locates a run;
 //! - tables pair the export's tables with the table line runs, in order, only when both
 //!   counts agree;
 //! - the outline carries the section-span rule (`outline::outline_of`).
@@ -53,13 +54,13 @@ use tokio::sync::OnceCell;
 
 use crate::cap::{ChildVerdict, classify, spawn_capped, supervise};
 use crate::child::format_of;
-use crate::export::{region, resolve};
+use crate::export::{provenance, region, resolve};
 use crate::glyphs::{scrub_placeholders, undecoded_glyphs};
 use crate::locate::{Locations, locate_items, pages_by_item};
 use crate::outline::outline_of;
 use crate::protocol::{
     Block, EXPORT_FILE, MARKDOWN_FILE, REQUEST_FILE, RESULT_FILE, Reply, Request, TEXT_LAYER_FILE,
-    Task,
+    Task, Unlocated,
 };
 
 /// How the production converter runs its child.
@@ -396,41 +397,28 @@ fn file_digest(path: &Path) -> Result<okf_jawn_contract::identity::Digest, ApiEr
 /// Where each line run is, and which source said so.
 ///
 /// A run with the converter's own provenance is `Direct` on its page. A run on a page without
-/// one takes the location rule's result for its item: the next item, in export order, that the
-/// export left unlocated and whose text is the run's (`Inferred` when the text layer found it,
-/// `Unresolved` with the rule's reason when not). A run whose item cannot be paired is
-/// `Unresolved` as not located by the converter. A run in a document with no pages has none.
+/// one takes the location rule's result for its own item, the one the child named by
+/// reference: `Inferred` when the text layer found it, `Unresolved` with the rule's reason
+/// when not. Another item never lends a run its location, however many items share the run's
+/// text. A run whose own item cannot be confirmed is `Unresolved` as not located by the
+/// converter. A run in a document with no pages has none.
 fn line_locations(
     blocks: &[Block],
     export: &Value,
     located: Option<&Locations>,
 ) -> Vec<LineLocation> {
-    let mut open: Vec<(&str, &SourceLocation)> = located
-        .map(|located| {
-            located
-                .items
-                .iter()
-                .filter(|item| item.lookup.is_some())
-                .filter_map(|item| {
-                    let text = resolve(export, &item.item)?.get("text")?.as_str()?;
-                    Some((text, &item.location))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     blocks
         .iter()
         .filter_map(|block| {
-            let location = match (block.page, block.unlocated.as_deref()) {
+            let location = match (block.page, block.unlocated.as_ref()) {
                 (Some(page_no), _) => SourceLocation::Direct {
                     locator: SourceLocator::Page { page_no },
                 },
-                (None, Some(text)) => match open.iter().position(|(other, _)| *other == text) {
-                    Some(at) => open.remove(at).1.clone(),
-                    None => SourceLocation::Unresolved {
+                (None, Some(unlocated)) => {
+                    own_location(unlocated, export, located).unwrap_or(SourceLocation::Unresolved {
                         reason: UnresolvedReason::NotLocatedByConverter,
-                    },
-                },
+                    })
+                }
                 (None, None) => return None,
             };
             Some(LineLocation {
@@ -439,6 +427,24 @@ fn line_locations(
             })
         })
         .collect()
+}
+
+/// The location rule's result for a run's own item, when the export confirms the item the
+/// child named: it exists, hangs directly off the body (never a caption or another item's
+/// child), has no provenance of its own, and has the text the child saw.
+fn own_location(
+    unlocated: &Unlocated,
+    export: &Value,
+    located: Option<&Locations>,
+) -> Option<SourceLocation> {
+    let reference = unlocated.item.as_deref()?;
+    let item = resolve(export, reference)?;
+    let parent = item.get("parent")?.get("$ref")?.as_str()?;
+    let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
+    let confirmed = parent == "#/body" && provenance(item).is_empty() && text == unlocated.text;
+    confirmed
+        .then(|| located?.location_of(reference).cloned())
+        .flatten()
 }
 
 /// The export's tables, paired in order with the table line runs; none when the counts differ.

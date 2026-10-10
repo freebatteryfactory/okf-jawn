@@ -12,10 +12,13 @@
 //!   `MarkdownStreamer::push`, whose chunks concatenate byte for byte to the Markdown export, so
 //!   each node's lines are known. A run is on a page only by the node's own provenance (a
 //!   provenance wrapper, or a location on the current page marker's page, exactly when the JSON
-//!   export gives the node's item a `prov`); a node on a page without one carries its exported
-//!   text instead, for the supervisor to pair with the location rule's result. A preceding page
-//!   marker alone never locates a node. When the streamed text differs from the export the runs
-//!   are left out rather than guessed.
+//!   export gives the node's item a `prov`); a node on a page without one names its own item
+//!   instead (`protocol::Unlocated`: the item's `self_ref` in the whole export, and its text),
+//!   so the supervisor gives the run that item's result from the location rule and never
+//!   another item's, however many items share its text. The reference is the one item the
+//!   node's export alone places in the body, numbered after the items the nodes before it
+//!   wrote. A preceding page marker alone never locates a node. When the streamed text differs
+//!   from the export the runs are left out rather than guessed.
 //!
 //! A document the converter cannot read is a reply (`Unsupported`, `Failure`), never a failing
 //! exit. A failing exit without a reply is the child at fault, which the supervisor classifies.
@@ -33,9 +36,46 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{ConverterIssue, FailureReason, OcrPolicy};
 use okf_jawn_core::conversion::ConversionStatus;
 
+use serde_json::Value;
+
 use crate::protocol::{
-    Block, EXPORT_FILE, MARKDOWN_FILE, Reply, Request, TEXT_LAYER_FILE, Task, write_reply,
+    Block, EXPORT_FILE, MARKDOWN_FILE, Reply, Request, TEXT_LAYER_FILE, Task, Unlocated,
+    write_reply,
 };
+
+/// How many items of the arrays a line run's own item can be in the export has written.
+#[derive(Debug, Clone, Copy, Default)]
+struct ItemCounts {
+    texts: usize,
+    tables: usize,
+    pictures: usize,
+}
+
+impl ItemCounts {
+    /// Count the items one node's export alone wrote. In the whole document's export each
+    /// node's items follow the items of the nodes before it, in the same arrays.
+    fn add(&mut self, alone: &Value) {
+        let count = |array: &str| {
+            alone
+                .get(array)
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        };
+        self.texts = self.texts.saturating_add(count("texts"));
+        self.tables = self.tables.saturating_add(count("tables"));
+        self.pictures = self.pictures.saturating_add(count("pictures"));
+    }
+
+    /// The count of one array, by its name in the export.
+    fn of(&self, array: &str) -> Option<usize> {
+        match array {
+            "texts" => Some(self.texts),
+            "tables" => Some(self.tables),
+            "pictures" => Some(self.pictures),
+            _ => None,
+        }
+    }
+}
 
 /// Run the request whose path is the first argument. Call after `cap::limit_self`.
 #[must_use]
@@ -89,10 +129,15 @@ pub fn line_blocks(document: &DoclingDocument, markdown: &str) -> Vec<Block> {
     let mut streamed = String::new();
     let mut blocks = Vec::new();
     let mut page: Option<u32> = None;
+    // How many items of each array the nodes before this one wrote into the export.
+    let mut written = ItemCounts::default();
     for node in &document.nodes {
         if let Some(marked) = page_marker(node) {
             page = Some(marked);
         }
+        let alone = export_alone(node);
+        let own_item = own_item(&alone, &written);
+        written.add(&alone);
         let chunk = renderer.push(std::slice::from_ref(node), &[]);
         if chunk.is_empty() {
             continue;
@@ -113,7 +158,13 @@ pub fn line_blocks(document: &DoclingDocument, markdown: &str) -> Vec<Block> {
                 end: start.saturating_add(inner),
             },
             page: own,
-            unlocated: (own.is_none() && page.is_some()).then(|| exported_text(node)),
+            unlocated: (own.is_none() && page.is_some()).then(|| Unlocated {
+                text: own_item
+                    .as_ref()
+                    .and_then(|(_, text)| text.clone())
+                    .unwrap_or_default(),
+                item: own_item.map(|(item, _)| item),
+            }),
             table: is_table(node),
         });
         streamed.push_str(&chunk);
@@ -306,20 +357,48 @@ fn own_page(node: &Node, marker: Option<u32>) -> Option<u32> {
     }
 }
 
-/// The text of the first item docling's JSON export writes for `node`, read from the export of
-/// that node alone, so the text is exactly what the whole document's export holds for it.
-fn exported_text(node: &Node) -> String {
+/// docling's JSON export of `node` alone.
+fn export_alone(node: &Node) -> Value {
     let mut alone = DoclingDocument::new("");
     alone.push(node.clone());
-    alone
-        .export_to_json_value()
-        .get("texts")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|texts| texts.first())
-        .and_then(|text| text.get("text"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
+    alone.export_to_json_value()
+}
+
+/// The node's own item in the whole document's export, with its text when it is a text item:
+/// the one item other than a caption that the node's export alone places among the body's
+/// children (a picture's or table's caption may hang off the body beside it), numbered after
+/// the items the nodes before it wrote. `None` when that is not one text, table or picture (a
+/// group, whose numbering a list of several items changes, or a node that places several items
+/// in the body): such a run cannot be paired with an item and stays unlocated.
+fn own_item(alone: &Value, written: &ItemCounts) -> Option<(String, Option<String>)> {
+    let children = alone.get("body")?.get("children")?.as_array()?;
+    let own: Vec<&str> = children
+        .iter()
+        .filter_map(|child| child.get("$ref").and_then(Value::as_str))
+        .filter(|reference| {
+            crate::export::resolve(alone, reference)
+                .and_then(|item| item.get("label"))
+                .and_then(Value::as_str)
+                != Some("caption")
+        })
+        .collect();
+    let [reference] = own.as_slice() else {
+        return None;
+    };
+    let (array, index) = reference.strip_prefix("#/")?.split_once('/')?;
+    let index = index.parse::<usize>().ok()?;
+    let before = written.of(array)?;
+    let text = (array == "texts")
+        .then(|| {
+            alone
+                .get("texts")?
+                .get(index)?
+                .get("text")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .flatten();
+    Some((format!("#/{array}/{}", before.checked_add(index)?), text))
 }
 
 /// Whether a node is a table, looking through location wrappers.

@@ -20,7 +20,7 @@ mod conversion_protocol {
     use okf_jawn_contract::extraction::{ConversionSettings, ConverterIssue, FailureReason};
     use okf_jawn_core::conversion::ConversionStatus;
     use okf_jawn_ingest::protocol::{
-        Block, PARTIAL_RESULT_FILE, RESULT_FILE, Reply, Request, Task, write_reply,
+        Block, PARTIAL_RESULT_FILE, RESULT_FILE, Reply, Request, Task, Unlocated, write_reply,
     };
     use serde_json::json;
 
@@ -61,7 +61,10 @@ mod conversion_protocol {
                     Block {
                         lines: TextRange { start: 5, end: 5 },
                         page: None,
-                        unlocated: Some("Figure 1 \"quoted\"".to_owned()),
+                        unlocated: Some(Unlocated {
+                            item: Some("#/texts/3".to_owned()),
+                            text: "Figure 1 \"quoted\"".to_owned(),
+                        }),
                         table: false,
                     },
                 ],
@@ -390,13 +393,15 @@ mod flags_undecodable_text_in_a_window {
 }
 
 mod locates_unlocated_items_in_line_runs {
-    use docling::{DoclingDocument, Node};
+    use docling::{DoclingDocument, Node, Table};
     use okf_jawn_contract::common::{PageRange, TextRange};
     use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
     use okf_jawn_core::conversion::ConversionStatus;
     use okf_jawn_ingest::child::line_blocks;
     use okf_jawn_ingest::converter::read_window;
-    use okf_jawn_ingest::protocol::{Block, EXPORT_FILE, MARKDOWN_FILE, Reply, TEXT_LAYER_FILE};
+    use okf_jawn_ingest::protocol::{
+        Block, EXPORT_FILE, MARKDOWN_FILE, Reply, TEXT_LAYER_FILE, Unlocated,
+    };
     use serde_json::{Value, json};
 
     use crate::check::{TestResult, some};
@@ -437,7 +442,15 @@ mod locates_unlocated_items_in_line_runs {
         let blocks = line_blocks(&document, &markdown);
         let seen: Vec<(Option<u32>, Option<&str>)> = blocks
             .iter()
-            .map(|block| (block.page, block.unlocated.as_deref()))
+            .map(|block| {
+                (
+                    block.page,
+                    block
+                        .unlocated
+                        .as_ref()
+                        .map(|unlocated| unlocated.text.as_str()),
+                )
+            })
             .collect();
         assert_eq!(
             seen,
@@ -498,13 +511,16 @@ mod locates_unlocated_items_in_line_runs {
         )?;
         std::fs::write(directory.path().join(EXPORT_FILE), export.to_string())?;
         std::fs::write(directory.path().join(TEXT_LAYER_FILE), layer.to_string())?;
-        let run = |line: u32, page: Option<u32>, unlocated: Option<&str>| Block {
+        let run = |line: u32, page: Option<u32>, unlocated: Option<(&str, &str)>| Block {
             lines: TextRange {
                 start: line,
                 end: line,
             },
             page,
-            unlocated: unlocated.map(str::to_owned),
+            unlocated: unlocated.map(|(item, text)| Unlocated {
+                item: Some(item.to_owned()),
+                text: text.to_owned(),
+            }),
             table: false,
         };
         let reply = Reply {
@@ -513,9 +529,9 @@ mod locates_unlocated_items_in_line_runs {
             issues: Vec::new(),
             blocks: vec![
                 run(1, Some(1), None),
-                run(3, None, Some("Found by text.")),
-                run(5, None, Some("Nowhere.")),
-                run(7, None, Some("Not exported.")),
+                run(3, None, Some(("#/texts/1", "Found by text."))),
+                run(5, None, Some(("#/texts/2", "Nowhere."))),
+                run(7, None, Some(("#/texts/3", "Not exported."))),
             ],
             text_layer: true,
         };
@@ -556,6 +572,181 @@ mod locates_unlocated_items_in_line_runs {
             &SourceLocation::Unresolved {
                 reason: UnresolvedReason::NotLocatedByConverter
             }
+        );
+        Ok(())
+    }
+
+    /// The re-review's probe (R1): a picture on page 1 whose caption "Figure 1" the converter
+    /// left unlocated, a paragraph on page 3, and a later paragraph "Figure 1" under the body,
+    /// also unlocated. The text layer has "Figure 1" on page 1 only.
+    fn write_repeated_text(directory: &std::path::Path) -> TestResult {
+        let size = json!({ "width": 612.0, "height": 792.0 });
+        let at = |page: u64, top: f64| json!([{ "page_no": page, "bbox": { "l": 72.0, "t": top, "r": 300.0, "b": top - 20.0, "coord_origin": "BOTTOMLEFT" } }]);
+        let export = json!({
+            "pages": {
+                "1": { "page_no": 1, "size": size },
+                "2": { "page_no": 2, "size": size },
+                "3": { "page_no": 3, "size": size },
+            },
+            "body": { "self_ref": "#/body", "children": [
+                { "$ref": "#/pictures/0" }, { "$ref": "#/texts/1" }, { "$ref": "#/texts/2" }
+            ] },
+            "texts": [
+                { "self_ref": "#/texts/0", "label": "caption", "text": "Figure 1", "prov": [], "parent": { "$ref": "#/pictures/0" } },
+                { "self_ref": "#/texts/1", "label": "text", "text": "Para", "prov": at(3, 700.0), "parent": { "$ref": "#/body" } },
+                { "self_ref": "#/texts/2", "label": "text", "text": "Figure 1", "prov": [], "parent": { "$ref": "#/body" } },
+            ],
+            "tables": [],
+            "pictures": [
+                { "self_ref": "#/pictures/0", "label": "picture", "prov": at(1, 700.0), "parent": { "$ref": "#/body" }, "children": [{ "$ref": "#/texts/0" }] },
+            ],
+        });
+        let layer = json!({
+            "pages": { "1": { "page_no": 1, "size": size } },
+            "texts": [
+                { "self_ref": "#/texts/0", "label": "text", "text": "Figure 1", "prov": at(1, 480.0) },
+            ],
+        });
+        std::fs::write(
+            directory.join(MARKDOWN_FILE),
+            "<!-- image -->\n\nFigure 1\n\nPara\n\nFigure 1\n",
+        )?;
+        std::fs::write(directory.join(EXPORT_FILE), export.to_string())?;
+        std::fs::write(directory.join(TEXT_LAYER_FILE), layer.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_run_never_takes_the_location_of_another_item_with_the_same_text() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        write_repeated_text(directory.path())?;
+        let run = |start: u32, end: u32, page: Option<u32>, unlocated: Option<Unlocated>| Block {
+            lines: TextRange { start, end },
+            page,
+            unlocated,
+            table: false,
+        };
+        let reply = Reply {
+            status: ConversionStatus::Success,
+            page_count: None,
+            issues: Vec::new(),
+            blocks: vec![
+                run(1, 3, Some(1), None),
+                run(5, 5, Some(3), None),
+                run(
+                    7,
+                    7,
+                    None,
+                    Some(Unlocated {
+                        item: Some("#/texts/2".to_owned()),
+                        text: "Figure 1".to_owned(),
+                    }),
+                ),
+            ],
+            text_layer: true,
+        };
+        let window = PageRange { start: 1, end: 3 };
+        let (document, _coverage) = read_window(directory.path(), Some(&window), &reply)?;
+        // The caption was found on page 1; the paragraph, searched on page 3, was not. The
+        // paragraph's run keeps its own item's result and never takes the caption's box.
+        let last = some(document.locations.last(), "the paragraph's run")?;
+        assert_eq!(last.lines, TextRange { start: 7, end: 7 });
+        assert_eq!(
+            last.location,
+            SourceLocation::Unresolved {
+                reason: UnresolvedReason::NoMatch
+            },
+            "{:?}",
+            document.locations
+        );
+        assert!(
+            document.warnings.contains(
+                &okf_jawn_contract::extraction::ExtractionWarning::InferredLocations { items: 1 }
+            ),
+            "{:?}",
+            document.warnings
+        );
+
+        // A run that names a nested item (the caption) is never given its location either.
+        let mut nested = reply.clone();
+        if let Some(block) = nested.blocks.last_mut() {
+            block.unlocated = Some(Unlocated {
+                item: Some("#/texts/0".to_owned()),
+                text: "Figure 1".to_owned(),
+            });
+        }
+        let (document, _coverage) = read_window(directory.path(), Some(&window), &nested)?;
+        assert_eq!(
+            some(document.locations.last(), "the paragraph's run")?.location,
+            SourceLocation::Unresolved {
+                reason: UnresolvedReason::NotLocatedByConverter
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_child_names_each_unlocated_run_by_its_own_item() -> TestResult {
+        let mut document = DoclingDocument::new("window");
+        document.push(page(1));
+        document.push(Node::Table(Table {
+            rows: vec![
+                vec!["Name".to_owned(), "Value".to_owned()],
+                vec!["limit".to_owned(), "4".to_owned()],
+            ],
+            caption: Some("Figure 1".to_owned()),
+            ..Table::default()
+        }));
+        document.push(page(3));
+        document.push(Node::Prov {
+            page_no: 3,
+            bbox: [72.0, 80.0, 300.0, 100.0],
+            charspan: [0, 4],
+            seq: None,
+            inner: Box::new(paragraph("Para")),
+        });
+        document.push(paragraph("Figure 1"));
+        let markdown = document.export_to_markdown();
+        let blocks = line_blocks(&document, &markdown);
+        let named: Vec<Option<Unlocated>> =
+            blocks.iter().map(|block| block.unlocated.clone()).collect();
+        assert_eq!(
+            named,
+            [
+                // The table's own item is the table, not its caption.
+                Some(Unlocated {
+                    item: Some("#/tables/0".to_owned()),
+                    text: String::new(),
+                }),
+                None,
+                Some(Unlocated {
+                    item: Some("#/texts/2".to_owned()),
+                    text: "Figure 1".to_owned(),
+                }),
+            ],
+            "{markdown}"
+        );
+        // The whole document's export agrees: the named item is the later paragraph, under the
+        // body. The table's caption with the same text is another item, also unlocated and
+        // (by docling's default caption placement) also under the body; only the reference
+        // tells the two apart.
+        let export = document.export_to_json_value();
+        let item = some(
+            export.get("texts").and_then(|texts| texts.get(2)),
+            "texts/2",
+        )?;
+        assert_eq!(item.get("text"), Some(&json!("Figure 1")));
+        assert_eq!(
+            item.get("parent").and_then(|parent| parent.get("$ref")),
+            Some(&json!("#/body"))
+        );
+        let caption = some(
+            export.get("texts").and_then(|texts| texts.get(0)),
+            "texts/0",
+        )?;
+        assert_eq!(
+            (caption.get("label"), caption.get("text")),
+            (Some(&json!("caption")), Some(&json!("Figure 1")))
         );
         Ok(())
     }
