@@ -724,11 +724,11 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
         .artifact
         .map(|artifact| {
             read_artifact(transaction, "artifact_id", &artifact.0.to_string())?
-                .filter(|record| record.scope == scope)
-                .map(|record| record.download())
-                .ok_or_else(|| {
-                    internal("a completion names an artifact this job's scope does not hold")
+                .filter(|record| {
+                    record.scope == scope && record.created_by_job == completion.lease.job_id
                 })
+                .map(|record| record.download())
+                .ok_or_else(|| internal("a completion names an artifact this job did not create"))
         })
         .transpose()?;
     job.state = JobState::Succeeded;

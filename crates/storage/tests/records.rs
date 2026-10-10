@@ -365,6 +365,47 @@ async fn an_artifact_is_recorded_once_and_shown_on_its_job() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_completion_attaches_only_an_artifact_its_own_job_created() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let scope = workspace_scope()?;
+    let other = records
+        .create_job(&scope, new_job(4, JobSpec::BackupWorkspace)?)
+        .await?;
+    let foreign = records
+        .record_artifact(
+            &scope,
+            uuid!(6)?,
+            NewArtifact {
+                kind: ArtifactKind::WorkspaceBackup,
+                object: ObjectInfo {
+                    digest: digest('c')?,
+                    size: 7,
+                },
+                media_type: "application/zip".to_owned(),
+                created_by_job: other.id,
+            },
+        )
+        .await?;
+    let job = records
+        .create_job(&scope, new_job(5, JobSpec::BackupWorkspace)?)
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "a claim")?;
+    let mut done = completion(claimed.lease.clone());
+    done.artifact = Some(foreign.id);
+    let error = err_of(records.complete_job(done).await)?;
+    assert_eq!(error.code, ErrorCode::Internal, "{}", error.message);
+    let unchanged = records.get_job(&scope, job.id).await?;
+    assert_eq!(unchanged.state, JobState::Running);
+    assert!(
+        unchanged.artifact.is_none(),
+        "another job's artifact is not attached"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_removal_record_is_unique_while_unfinished_and_carries_a_tenant_job() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
