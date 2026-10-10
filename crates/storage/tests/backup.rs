@@ -657,6 +657,14 @@ async fn backup_an_import_refuses_an_archive_of_a_live_or_purged_workspace() -> 
     let archive = backups
         .write_workspace_archive(&fixture.workspace, uuid!(40)?)
         .await?;
+    let downloaded = std::fs::read(
+        storage
+            .data()
+            .objects_path()
+            .join("local")
+            .join(archive.digest.as_str().get(..2).unwrap_or_default())
+            .join(archive.digest.as_str()),
+    )?;
     let (blank, _) = create(storage, "local", 70, "Blank").await?;
     let error = err_of(
         backups
@@ -703,6 +711,32 @@ async fn backup_an_import_refuses_an_archive_of_a_live_or_purged_workspace() -> 
                 &blank,
                 archive.digest.clone(),
                 uuid!(72)?,
+                vec!["ana".to_owned()],
+            )
+            .await,
+    )?;
+    assert_eq!(
+        error.code,
+        ErrorCode::NotFound,
+        "the purge removed the archive it wrote"
+    );
+    // A copy downloaded before the purge, uploaded again: the same bytes are refused.
+    let uploaded = storage
+        .blobs()
+        .put(
+            &blank,
+            Box::pin(std::io::Cursor::new(downloaded)),
+            1 << 30,
+            None,
+        )
+        .await?;
+    assert_eq!(uploaded.digest, archive.digest);
+    let error = err_of(
+        backups
+            .restore_import(
+                &blank,
+                uploaded.digest,
+                uuid!(73)?,
                 vec!["ana".to_owned()],
             )
             .await,
