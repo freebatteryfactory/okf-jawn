@@ -31,6 +31,7 @@ use crate::data::{DataDir, io_error};
 use crate::db::{Db, internal, scope_key};
 use crate::pins::{Pinned, Pins};
 use crate::purge::guard;
+use crate::puts;
 use crate::seam;
 
 /// `BlobStore` over the data directory's object store.
@@ -85,14 +86,17 @@ impl LocalBlobs {
         &self.pins
     }
 
-    /// `BlobStore::put` for a write in `scope`: refused while a purge names the workspace, and
-    /// pinned (`pins`) from before the object is retained. The pin is active until the caller
-    /// resolves the returned `Pinned`.
+    /// `BlobStore::put` for a write in `scope`: refused while a purge names the workspace,
+    /// pinned (`pins`) for as long as the caller holds the returned `Pinned`, and recorded as a
+    /// pending put (`puts`) until the caller's referencing record lands.
     ///
-    /// The refusal is checked before the body is received, and again after the pin is taken
-    /// and before anything is retained. So a put that pins after a purge's object step drained
-    /// the workspace (`Pins::drain`, which runs after the purge is recorded) stores nothing,
-    /// and a put that pinned earlier is one the drain waits for.
+    /// The refusal is checked before the body is received, and again after the pin is taken,
+    /// in the transaction that records the pending put, before anything is retained. So a put
+    /// that pins after a purge's objects step drained the workspace (`Sweep::drain`, which
+    /// runs after the purge is recorded) records and stores nothing, and a put that pinned
+    /// earlier is one the drain waits for. A put whose retain fails keeps its pending put: the
+    /// object may be in the store (the rename can precede the failure), and the row lets a
+    /// purge of the workspace find it.
     pub(crate) async fn put_pinned(
         &self,
         scope: &StorageScope,
@@ -123,7 +127,7 @@ impl LocalBlobs {
             .map(|(object, _)| object)
     }
 
-    /// Stage, hash, pin (when `scope` names a workspace) and retain a body.
+    /// Stage, hash, pin and record (when `scope` names a workspace) and retain a body.
     async fn store_staged(
         &self,
         tenant: &TenantId,
@@ -143,8 +147,8 @@ impl LocalBlobs {
         result
     }
 
-    /// Receive the body into `staged`, pin it for `scope` unless a purge names the workspace,
-    /// and retain it.
+    /// Receive the body into `staged`, pin it for `scope` and record its pending put unless a
+    /// purge names the workspace, and retain it.
     async fn pin_and_retain(
         &self,
         tenant: &TenantId,
@@ -161,20 +165,13 @@ impl LocalBlobs {
             Some(scope) => Some(self.pin_unless_purged(scope, &digest).await?),
             None => None,
         };
-        match self.retain(tenant, staged, digest, size, expected).await {
-            Ok(object) => Ok((object, pinned)),
-            Err(error) => {
-                // Nothing was retained by this write.
-                if let Some(pinned) = pinned {
-                    pinned.release()?;
-                }
-                Err(error)
-            }
-        }
+        // On a failed retain the pin ends with the write (dropped) and the pending put stays.
+        let object = self.retain(tenant, staged, digest, size, expected).await?;
+        Ok((object, pinned))
     }
 
-    /// Pin `digest` for `scope`, then check the purge refusal again: a refused put releases
-    /// its pin and stores nothing.
+    /// Pin `digest` for `scope`, then, in one transaction, check the purge refusal again and
+    /// record the pending put: a refused put ends its pin and records and stores nothing.
     async fn pin_unless_purged(
         &self,
         scope: &StorageScope,
@@ -182,11 +179,18 @@ impl LocalBlobs {
     ) -> Result<Pinned, ApiError> {
         let (tenant, workspace) = scope_key(scope);
         let pinned = self.pins.pin(&tenant, &workspace, digest)?;
-        if let Some(records) = &self.records
-            && let Err(error) = guard::refuse_scope(records, scope).await
-        {
-            pinned.release()?;
-            return Err(error);
+        if let Some(records) = &self.records {
+            let digest = digest.clone();
+            let recorded = records
+                .transaction(move |transaction| {
+                    guard::refuse(transaction, &tenant, &workspace)?;
+                    puts::record(transaction, &tenant, &workspace, &digest)
+                })
+                .await;
+            if let Err(error) = recorded {
+                pinned.end()?;
+                return Err(error);
+            }
         }
         Ok(pinned)
     }
@@ -334,10 +338,10 @@ impl BlobStore for LocalBlobs {
         expected: Option<Digest>,
     ) -> PortFuture<'a, ObjectInfo> {
         Box::pin(async move {
-            // The put returns here; the record that references the object (a commit, a job
-            // completion, an artifact, a derived object) releases the pin when it lands.
+            // The write ends here; its pending put stays until the record that references the
+            // object (a commit, a job completion, an artifact, a derived object) lands.
             let (object, pinned) = self.put_pinned(scope, body, limit, expected).await?;
-            pinned.settle()?;
+            pinned.end()?;
             Ok(object)
         })
     }

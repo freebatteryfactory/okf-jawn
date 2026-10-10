@@ -280,7 +280,8 @@ CREATE TABLE sessions (
 ";
 
 /// Records schema, version 2: the progress of each purge, so a purge resumes by repeating;
-/// the archive each backup mutation wrote; and the report of each restore mutation.
+/// the archive each backup mutation wrote; the report of each restore mutation; and the
+/// object puts of a workspace whose referencing record has not landed yet (`puts`).
 ///
 /// `plan` is written once, before anything is removed: what the target references cannot be
 /// read again after its repository and rows are gone. It holds identities and counts, never
@@ -309,6 +310,15 @@ CREATE TABLE restores (
     workspace_id TEXT NOT NULL,
     report TEXT NOT NULL
 ) STRICT;
+
+CREATE TABLE pending_puts (
+    put_id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX pending_puts_by_object ON pending_puts (tenant_id, workspace_id, digest);
 ";
 
 /// Index schema, version 1: one copy of each indexed revision's searchable projection.

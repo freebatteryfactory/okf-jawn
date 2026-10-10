@@ -25,7 +25,7 @@ use std::path::Path;
 
 use git2::Repository;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::MutationId;
+use okf_jawn_contract::identity::{Digest, MutationId};
 use okf_jawn_contract::workspace::RestoreReport;
 use okf_jawn_core::storage::StorageScope;
 use rusqlite::{Connection, params};
@@ -38,6 +38,7 @@ use crate::data::io_error;
 use crate::db::{conflict, internal, sql};
 use crate::git::repo::{HEAD_REF, git, head, sync_directories};
 use crate::pins::Pinned;
+use crate::puts;
 use crate::storage::Storage;
 
 /// How an archive is restored.
@@ -54,6 +55,8 @@ struct Target {
     tenant: String,
     workspace: String,
     original: String,
+    /// The archive's objects, put back before the rows.
+    objects: Vec<Digest>,
 }
 
 /// Tables an import copies into the target workspace.
@@ -80,8 +83,8 @@ pub(crate) fn restore(
     let mut opened = Opened::open(archive)?;
     let manifest = opened.workspace()?;
     refuse(storage, runtime, scope, &manifest, mode)?;
-    // Each object is pinned to the restored workspace until its rows and history landed; a
-    // failed import abandons the pins (`pins`), so a purge of the workspace deletes the bytes.
+    // Each object is pinned to the restored workspace while the import runs, and recorded as a
+    // pending put (`puts`) until the import's rows land.
     let mut pinned = Vec::new();
     let restored = put_back(
         storage,
@@ -93,11 +96,7 @@ pub(crate) fn restore(
         mode,
     );
     for pin in pinned {
-        if restored.is_ok() {
-            pin.release()?;
-        } else {
-            pin.abandon()?;
-        }
+        pin.end()?;
     }
     restored
 }
@@ -147,6 +146,7 @@ fn put_back(
             tenant: scope.tenant_id.as_str().to_owned(),
             workspace: scope.workspace_id.0.to_string(),
             original: manifest.workspace_id.0.to_string(),
+            objects: manifest.objects.clone(),
         };
         let editors = match mode {
             Mode::Import(editors, _) => {
@@ -387,6 +387,15 @@ fn write_tables(
             )
             .map_err(|error| sql(&error))?;
     }
+    // The archive's objects are referenced now: their pending puts land with the rows. A
+    // failed import rolls this back with the rows, so its pending puts stay and a purge of
+    // the workspace deletes the bytes.
+    puts::land(
+        transaction,
+        &target.tenant,
+        &target.workspace,
+        &target.objects,
+    )?;
     Ok(report)
 }
 

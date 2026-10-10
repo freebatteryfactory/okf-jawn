@@ -11,6 +11,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::db::{Db, conflict, scope_key, sql};
 use crate::purge::guard;
+use crate::puts;
 use crate::seam;
 
 /// `SandboxCapabilityStore` over the records database.
@@ -58,7 +59,7 @@ impl SandboxCapabilityStore for SqliteSandbox {
             if inserted == 0 {
                 return Err(conflict("a capability with this token hash already exists"));
             }
-            Ok(())
+            puts::land(transaction, &tenant, &workspace, [&mint.object])
         }))
     }
 

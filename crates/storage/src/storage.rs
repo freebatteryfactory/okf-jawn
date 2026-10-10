@@ -103,7 +103,7 @@ impl Storage {
     /// Jobs, artifacts, purges, the revision map, derived objects, reviews and receipts.
     #[must_use]
     pub fn records(&self) -> SqliteRecords {
-        SqliteRecords::new(self.records.clone(), self.blobs.pins().clone())
+        SqliteRecords::new(self.records.clone())
     }
 
     /// Per-editor drafts.

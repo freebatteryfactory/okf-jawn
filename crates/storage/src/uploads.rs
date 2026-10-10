@@ -30,6 +30,7 @@ use crate::blobs::{LocalBlobs, file_reader};
 use crate::data::io_error;
 use crate::db::{Db, conflict, json, not_found, scope_key, sql, to_i64, to_u64};
 use crate::purge::guard;
+use crate::puts;
 use crate::seam;
 
 /// `UploadStore` over the records database and the blob store.
@@ -290,9 +291,9 @@ impl SqliteUploads {
         } else {
             file_reader(Some(part.clone()), 0, record.expected_size)
         };
-        // Pinned from before the object is retained until the upload's record names it, or
-        // until the record write has failed (then the pin is abandoned, and a purge of the
-        // workspace deletes the bytes).
+        // Pinned until this write ends, and recorded as a pending put until the upload's record
+        // names the object; a failed record write leaves the pending put, so a purge of the
+        // workspace deletes the bytes.
         let (object, pinned) = self
             .blobs
             .put_pinned(scope, body, record.expected_size, Some(sha256))
@@ -312,24 +313,18 @@ impl SqliteUploads {
                         ],
                     )
                     .map_err(|error| sql(&error))?;
+                puts::land(transaction, &tenant, &workspace, [&object.digest])?;
                 // Last in the transaction, so a purge recorded at any moment before it commits
                 // refuses the record (`purge::guard`).
                 guard::refuse(transaction, &tenant, &workspace)?;
                 read(transaction, &tenant, &workspace, upload)?.ok_or_else(|| not_found("upload"))
             })
             .await;
-        // Resolved only now that the transaction has ended, committed or rolled back.
-        match stored {
-            Ok(stored) => {
-                pinned.release()?;
-                let _ = std::fs::remove_file(&part);
-                Ok(stored)
-            }
-            Err(error) => {
-                pinned.abandon()?;
-                Err(error)
-            }
-        }
+        // The write ends only now that the transaction has ended, committed or rolled back.
+        pinned.end()?;
+        let stored = stored?;
+        let _ = std::fs::remove_file(&part);
+        Ok(stored)
     }
 }
 

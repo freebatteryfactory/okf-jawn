@@ -109,8 +109,9 @@ impl GitVersions {
 
     /// Run a Git write: refused while a purge names the workspace (checked here, before the
     /// write is staged, and again by the write under the workspace's lock, `refuse_locked`);
-    /// on success the pins of the objects its cards name are released, since the commit that
-    /// references them landed.
+    /// on success the pending puts of the objects its cards name land (`puts`), since the
+    /// commit that references them is durable. A crash between the two leaves pending puts of
+    /// referenced objects, which cost nothing.
     async fn guarded<T>(
         &self,
         scope: &StorageScope,
@@ -119,9 +120,14 @@ impl GitVersions {
     ) -> Result<T, ApiError> {
         crate::purge::guard::refuse_scope(&self.records, scope).await?;
         let written = write.await?;
-        self.blobs
-            .pins()
-            .release(&scope.workspace_id.0.to_string(), &named)?;
+        if !named.is_empty() {
+            let (tenant, workspace) = crate::db::scope_key(scope);
+            self.records
+                .transaction(move |transaction| {
+                    crate::puts::land(transaction, &tenant, &workspace, &named)
+                })
+                .await?;
+        }
         Ok(written)
     }
 

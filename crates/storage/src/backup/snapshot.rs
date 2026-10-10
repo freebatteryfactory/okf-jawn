@@ -46,8 +46,9 @@ pub(crate) const WORKSPACE_TABLES: &[&str] = &[
 
 /// Records tables a workspace archive leaves empty: tenant and installation records (the
 /// installation archive carries them); retry records, which mean something only to the live
-/// ledger; short-lived capabilities and challenges; and the records of export and backup
-/// archives and restores, whose bytes an archive never holds.
+/// ledger; short-lived capabilities and challenges; the records of export and backup archives
+/// and restores, whose bytes an archive never holds; and pending puts, which belong to writes
+/// of this installation.
 pub(crate) const NOT_IN_WORKSPACE_ARCHIVE: &[&str] = &[
     "artifacts",
     "backup_archives",
@@ -57,6 +58,7 @@ pub(crate) const NOT_IN_WORKSPACE_ARCHIVE: &[&str] = &[
     "history_exports",
     "installation",
     "mutations",
+    "pending_puts",
     "purge_progress",
     "purges",
     "restores",

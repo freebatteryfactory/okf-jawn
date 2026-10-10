@@ -48,6 +48,8 @@ pub mod proposals;
 #[cfg(feature = "runtime")]
 pub mod purge;
 #[cfg(feature = "runtime")]
+mod puts;
+#[cfg(feature = "runtime")]
 pub mod readiness;
 #[cfg(feature = "runtime")]
 pub mod records;

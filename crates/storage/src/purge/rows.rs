@@ -34,8 +34,10 @@ struct Table {
     columns: Vec<String>,
 }
 
-/// Tables that outlive a purged workspace: they hold identities, never content.
-const KEPT: &[&str] = &["purges", "purge_progress", "revision_map"];
+/// Tables that outlive a purged workspace: they hold identities, never content. The pending
+/// puts of the workspace stay until the objects step, which deletes the bytes they name and
+/// then clears them (`puts`).
+const KEPT: &[&str] = &["pending_puts", "purges", "purge_progress", "revision_map"];
 
 /// Tables whose records of one workspace can cite another, with their key column: a receipt's
 /// `sources` and a review's `source`.

@@ -289,7 +289,7 @@ async fn target_with(
 
 /// Ruling 2 (window 1): a write of the target that pinned before the purge was recorded and
 /// stores its bytes only later (an upload completion still retaining) is waited for, and its
-/// bytes go with the target once its record write has failed.
+/// bytes, named by its pending put, go with the target once its record write has failed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_object_step_waits_for_a_write_of_the_target_that_began_before_the_purge()
 -> Result<(), ApiError> {
@@ -303,6 +303,16 @@ async fn the_object_step_waits_for_a_write_of_the_target_that_began_before_the_p
         .blobs
         .pins()
         .pin(&tenant_key, &workspace_key, &digest)?;
+    // It passed its second refusal check, which recorded its pending put.
+    {
+        let digest = digest.clone();
+        storage
+            .records
+            .transaction(move |transaction| {
+                crate::puts::record(transaction, &tenant_key, &workspace_key, &digest)
+            })
+            .await?;
+    }
     record_purge(&storage, &target).await?;
     let purging = spawn_purge(&storage, &target);
     until_step(&storage, 5).await?;
@@ -311,7 +321,7 @@ async fn the_object_step_waits_for_a_write_of_the_target_that_began_before_the_p
         !purging.is_finished(),
         "the purge does not delete the target's objects while its write runs"
     );
-    // The write retains its bytes, then its record is refused: the pin is abandoned.
+    // The write retains its bytes, then its record is refused, and the write ends.
     storage
         .blobs
         .put_for(
@@ -321,7 +331,7 @@ async fn the_object_step_waits_for_a_write_of_the_target_that_began_before_the_p
             None,
         )
         .await?;
-    running.abandon()?;
+    running.end()?;
     let report = purging.await.map_err(|error| fault(&error))??;
     assert!(
         !held(&storage, &target, &digest).await?,
@@ -354,7 +364,7 @@ async fn a_put_that_pins_and_releases_between_the_reference_read_and_the_delete_
         vec![card(item(12), "sources/b.md", &stored)?],
     )
     .await?;
-    holding.release()?;
+    holding.end()?;
     let report = purging.await.map_err(|error| fault(&error))??;
     assert!(
         held(&storage, &survivor, &digest).await?,
@@ -418,7 +428,7 @@ async fn an_import_of_another_workspace_inside_the_object_step_keeps_its_objects
             vec!["ana".to_owned()],
         )
         .await?;
-    holding.release()?;
+    holding.end()?;
     purging.await.map_err(|error| fault(&error))??;
     assert!(
         held(&storage, &survivor, &digest).await?,
@@ -467,7 +477,7 @@ async fn an_upload_completion_of_another_workspace_inside_the_object_step_keeps_
     until_held(&storage, &target).await?;
     let completed = uploads.complete(&survivor, slot.id, digest.clone()).await?;
     assert!(completed.object.is_some(), "the upload's record landed");
-    holding.release()?;
+    holding.end()?;
     purging.await.map_err(|error| fault(&error))??;
     assert!(
         held(&storage, &survivor, &digest).await?,
@@ -572,5 +582,88 @@ async fn the_plan_waits_for_a_write_that_holds_the_workspace_lock() -> Result<()
         .join()
         .map_err(|_| fault(&"the lock holder stopped"))??;
     purging.await.map_err(|error| fault(&error))??;
+    Ok(())
+}
+
+/// Ruling 4 (M8): an import that fails after it put its objects back leaves their pending
+/// puts, so a purge of the workspace deletes the bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_import_leaves_pending_puts_a_purge_deletes() -> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let imported = b"zanzibar imported bytes";
+    let (source, source_head) = create(&storage, "local", 70, "Source").await?;
+    let original = put(&storage, &source, imported).await?;
+    commit(
+        &storage,
+        &source,
+        71,
+        &source_head,
+        vec![card(item(13), "sources/c.md", &original)?],
+    )
+    .await?;
+    let archive = storage
+        .backups()
+        .write_workspace_archive(&source, mutation(72))
+        .await?;
+    let bytes = std::fs::read(
+        storage
+            .blobs
+            .local_path(&source.tenant_id, &archive.digest)?,
+    )
+    .map_err(|error| fault(&error))?;
+    let (target, _) = create(&storage, "elsewhere", 1, "Copy").await?;
+    let uploaded = storage
+        .blobs()
+        .put(
+            &target,
+            Box::pin(std::io::Cursor::new(bytes)),
+            1 << 30,
+            None,
+        )
+        .await?;
+    storage
+        .records
+        .call(|connection| {
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER stop_restore BEFORE INSERT ON restores
+                     BEGIN SELECT RAISE(ABORT, 'stopped before the import record'); END;",
+                )
+                .map_err(|error| fault(&error))
+        })
+        .await?;
+    let failed = storage
+        .backups()
+        .restore_import(
+            &target,
+            uploaded.digest,
+            mutation(73),
+            vec!["ana".to_owned()],
+        )
+        .await;
+    storage
+        .records
+        .call(|connection| {
+            connection
+                .execute_batch("DROP TRIGGER stop_restore;")
+                .map_err(|error| fault(&error))
+        })
+        .await?;
+    if failed.is_ok() {
+        return Err(fault(&"the import was meant to fail"));
+    }
+    assert!(
+        held(&storage, &target, &original).await?,
+        "the object was put back"
+    );
+    record_purge(&storage, &target).await?;
+    let report = spawn_purge(&storage, &target)
+        .await
+        .map_err(|error| fault(&error))??;
+    assert!(
+        !held(&storage, &target, &original).await?,
+        "the failed import's bytes go with the workspace: {report:?}"
+    );
     Ok(())
 }

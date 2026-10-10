@@ -74,6 +74,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::io_error;
 use crate::db::{internal, json, scope_key, sql};
+use crate::puts;
 use crate::storage::Storage;
 use references::Rows;
 
@@ -519,10 +520,12 @@ impl StoragePurger {
 
     /// Step 6: delete each planned object no survivor references; (removed, kept).
     ///
-    /// The sweep (`pins`) begins before any surviving reference is read, so an object is
-    /// deleted only when no durable reference the step read names it and no other workspace
-    /// pinned it at any moment from the start of that read until the delete, which runs under
-    /// the pin table's lock.
+    /// The sweep (`pins`) begins before any surviving reference is read. An object is deleted
+    /// only when no durable reference the step read names it (another workspace's pending puts
+    /// included, `puts`) and no other workspace's write pinned it at any moment from the start
+    /// of that read until the delete, which runs under the pin table's lock. The target's own
+    /// pending puts, read once its running writes have ended, name bytes no record of it names:
+    /// they are deleted with it, and the rows are cleared.
     async fn objects(
         &self,
         scope: &StorageScope,
@@ -532,13 +535,22 @@ impl StoragePurger {
         let blobs = self.storage.blobs.clone();
         let (sweep, pinned) = blobs.pins().sweep(&tenant, &workspace)?;
         let archives = plan.archives.clone();
-        let mut surviving = self
-            .storage
-            .records
-            .call(move |connection| {
-                references::records(connection, &tenant, &workspace, Rows::Survivors, &archives)
-            })
-            .await?;
+        let (mut surviving, pending) = {
+            let (tenant, workspace) = (tenant.clone(), workspace.clone());
+            self.storage
+                .records
+                .call(move |connection| {
+                    let surviving = references::records(
+                        connection,
+                        &tenant,
+                        &workspace,
+                        Rows::Survivors,
+                        &archives,
+                    )?;
+                    Ok((surviving, puts::others(connection, &tenant, &workspace)?))
+                })
+                .await?
+        };
         let repositories = self.storage.repositories.clone();
         let scope = scope.clone();
         let surviving = {
@@ -550,9 +562,11 @@ impl StoragePurger {
                         .map_err(|error| crate::git::repo::git(&error))?;
                     found.extend(references::history(&repository)?.objects);
                 }
-                // The objects other workspaces had pinned when the sweep began are about to be
-                // referenced: the assets their conversion records name are kept too.
+                // The objects other workspaces were putting when the sweep began, and those of
+                // their pending puts, are about to be referenced: the assets their conversion
+                // records name are kept too.
                 found.extend(pinned);
+                found.extend(pending);
                 references::follow_records(&blobs, &scope.tenant_id, &mut found)?;
                 surviving.extend(found);
                 Ok(surviving)
@@ -560,15 +574,24 @@ impl StoragePurger {
             .await?
         };
         // Every write of the target that pinned before the purge was recorded has ended; one
-        // that pins from now on stores nothing (`LocalBlobs::put_pinned`). The bytes its pins
-        // name, a refused upload completion's among them, go with the target.
+        // that pins from now on records and stores nothing (`LocalBlobs::put_pinned`). The
+        // bytes its pending puts name, a refused upload completion's and a crashed write's
+        // among them, go with the target.
+        sweep.drain().await?;
+        let held = {
+            let (tenant, workspace) = (tenant.clone(), workspace.clone());
+            self.storage
+                .records
+                .call(move |connection| puts::of(connection, &tenant, &workspace))
+                .await?
+        };
         let mut planned = plan.objects.clone();
-        for digest in sweep.drain().await? {
+        for digest in held {
             if blobs.local_path(&scope.tenant_id, &digest)?.is_file() {
                 planned.insert(digest);
             }
         }
-        blocking(move || {
+        let (removed, kept) = blocking(move || {
             let mut removed = 0_usize;
             let mut kept = 0_usize;
             for digest in &planned {
@@ -584,7 +607,12 @@ impl StoragePurger {
             }
             Ok((removed, kept))
         })
-        .await
+        .await?;
+        self.storage
+            .records
+            .transaction(move |transaction| puts::clear(transaction, &tenant, &workspace))
+            .await?;
+        Ok((removed, kept))
     }
 
     /// Record `step` as done (and the plan, when it changed); returns `step`.

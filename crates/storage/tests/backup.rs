@@ -1072,7 +1072,7 @@ async fn migrations_take_a_pre_migration_backup_set_before_an_upgrade() -> TestR
         let connection = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
         connection.execute_batch(
             "DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
-             PRAGMA user_version = 1;",
+             DROP TABLE pending_puts; PRAGMA user_version = 1;",
         )?;
     }
     let storage = Storage::open(directory.path())?;

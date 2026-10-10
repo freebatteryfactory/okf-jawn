@@ -2146,5 +2146,171 @@ async fn purge_refuses_an_upload_completion_after_it_completes_naming_the_purge(
     Ok(())
 }
 
+/// Record purge `purge` of `target` under mutation `mutation`.
+async fn record_purge_under(
+    storage: &Storage,
+    target: &StorageScope,
+    purge: u32,
+    mutation: u32,
+) -> Fallible<()> {
+    storage
+        .records()
+        .create_purge(
+            &tenant()?,
+            uuid!(mutation)?,
+            NewPurge {
+                id: uuid!(purge)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: target.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+/// The pending puts the records database holds for `workspace`.
+fn pending_puts(data: &Path, workspace: &StorageScope) -> Fallible<i64> {
+    let records = rusqlite::Connection::open(data.join("records.sqlite"))?;
+    Ok(records.query_row(
+        "SELECT count(*) FROM pending_puts WHERE workspace_id = ?1",
+        [workspace.workspace_id.0.to_string()],
+        |row| row.get(0),
+    )?)
+}
+
+/// Re-review B2 (the 25 h probe): a job of the target stored a derivative and failed more than
+/// a day before the purge. Its pending put has no lifetime, so the purge deletes the bytes.
+#[tokio::test]
+async fn purge_deletes_the_bytes_of_a_put_whose_record_never_landed_a_day_earlier() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let derivative = put(
+        &storage,
+        &target,
+        b"zanzibar page text of a failed conversion",
+    )
+    .await?;
+    let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+    records.execute(
+        "UPDATE pending_puts SET created_at = '2026-10-08T00:00:00.000Z'",
+        [],
+    )?;
+    drop(records);
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    let report = storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    assert!(
+        !held(&storage, &target, &derivative.digest).await?,
+        "a completed purge leaves none of the target's derivative bytes: {report:?}"
+    );
+    assert_eq!(
+        pending_puts(directory.path(), &target)?,
+        0,
+        "its rows are cleared"
+    );
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
+/// Ruling B2: a write that retained its object and crashed before its record leaves its
+/// pending put; after the restart, the purge of the workspace deletes the bytes.
+#[tokio::test]
+async fn purge_deletes_bytes_a_write_retained_just_before_a_crash() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (target, stored) = {
+        let storage = Storage::open(directory.path())?;
+        let (target, _) = create(&storage, 1, "Trip").await?;
+        let stored = put(&storage, &target, b"zanzibar output of a crashed job").await?;
+        // The process stops here: the job's completion never lands.
+        (target, stored)
+    };
+    let storage = Storage::open(directory.path())?;
+    assert!(held(&storage, &target, &stored.digest).await?);
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    assert!(
+        !held(&storage, &target, &stored.digest).await?,
+        "the crashed write's bytes go with the workspace"
+    );
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
+/// Ruling B2, the rule for leftover rows: a pending put that never gets a record is garbage of
+/// its workspace. Until the next purge of that workspace it keeps an identical object of another
+/// purge (counted as kept); that purge deletes the bytes and clears the rows.
+#[tokio::test]
+async fn a_leftover_pending_put_is_collected_by_the_next_purge_of_its_workspace() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, 1, "Trip").await?;
+    let (survivor, _) = create(&storage, 2, "Garden").await?;
+    let bytes = b"commonplace bytes of a failed job";
+    let original = put(&storage, &target, bytes).await?;
+    commit(
+        &storage,
+        &target,
+        3,
+        &head,
+        vec![card(uuid!(11)?, "sources/scan.md", &original.digest, None)?],
+    )
+    .await?;
+    // The survivor's job stores the same bytes and fails: no record ever names them.
+    put(&storage, &survivor, bytes).await?;
+    record_purge_under(&storage, &target, 60, 50).await?;
+    let report = storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, uuid!(60)?, target.workspace_id)
+        .await?;
+    assert!(
+        held(&storage, &survivor, &original.digest).await?,
+        "another workspace's pending put keeps the object"
+    );
+    assert_eq!(report.objects_kept_shared, "1");
+    assert_eq!(pending_puts(directory.path(), &survivor)?, 1);
+    record_purge_under(&storage, &survivor, 62, 52).await?;
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(63)?, uuid!(62)?, survivor.workspace_id)
+        .await?;
+    assert!(
+        !held(&storage, &survivor, &original.digest).await?,
+        "the next purge of its workspace collects the leftover"
+    );
+    assert_eq!(pending_puts(directory.path(), &survivor)?, 0);
+    Ok(())
+}
+
+/// Ruling B2 (the re-review's `blobs.rs` note): a put whose retain fails keeps its pending put.
+#[tokio::test]
+async fn a_failed_retain_keeps_its_pending_put() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    err_of(
+        storage
+            .blobs()
+            .put(
+                &target,
+                Box::pin(std::io::Cursor::new(b"zanzibar".to_vec())),
+                1 << 20,
+                Some(Digest::try_from("e".repeat(64))?),
+            )
+            .await,
+    )?;
+    assert_eq!(pending_puts(directory.path(), &target)?, 1);
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
