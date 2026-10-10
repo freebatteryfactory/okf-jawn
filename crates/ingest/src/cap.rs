@@ -18,15 +18,21 @@
 //!
 //! Only the watchdog kills. Under the other two facilities an allocation fails inside the
 //! child, which then aborts or reports an error. So whether the cap fired is classified, not
-//! signalled (integration-owner ruling on concern C2). The classification:
+//! signalled (integration-owner ruling on concern C2), and only from evidence, never from free
+//! text such as "out of memory" anywhere in stderr (fix-2 ruling 4). The classification:
 //!
 //! 1. A child that wrote its result reported for itself, whatever its exit.
-//! 2. A child the watchdog killed hit the cap.
-//! 3. A child whose last words name an allocation failure hit the cap.
-//! 4. On Windows, a child whose peak committed memory reached the cap hit it. "Reached" means
-//!    within `CAP_MARGIN_DIVISOR`'s share of the cap, at least `CAP_MARGIN_MIN_BYTES`, because
-//!    the allocation that failed was never committed.
-//! 5. Any other end without a result is a crash.
+//! 2. A child the supervisor killed at the time bound ran out of time.
+//! 3. On Windows, a child whose job's peak committed memory reached the cap hit it. "Reached"
+//!    means within `cap_margin` of the cap, because the allocation that failed was never
+//!    committed; the margin scales with the cap, so a small cap is not reached by any peak.
+//! 4. A child whose last stderr line is the explicit marker it writes when an allocation fails
+//!    (`ALLOCATION_FAILURE_MARKER`; Rust has no stable allocation-error hook, so the child
+//!    writes it where an allocation failure reaches it as a typed error), or exactly the
+//!    message Rust's runtime prints before it aborts on one (`memory allocation of N bytes
+//!    failed`), hit the cap.
+//! 5. A child the macOS watchdog killed hit the cap.
+//! 6. Any other end without a result is a crash.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -90,21 +96,23 @@ pub const STDERR_TAIL_BYTES: usize = 8 * 1024;
 /// The share of the cap, as a divisor, within which a peak counts as having reached it.
 pub const CAP_MARGIN_DIVISOR: u64 = 16;
 
-/// The least margin below the cap that a peak counts as having reached it: 64 MiB.
+/// The margin a large cap is given at least: 64 MiB.
 pub const CAP_MARGIN_MIN_BYTES: u64 = 64 * 1024 * 1024;
 
-/// What a process writes to stderr when an allocation fails: Rust's default handler, the C++
-/// runtime ONNX Runtime throws through, ONNX Runtime's own allocator, and the text of
-/// `std::io::ErrorKind::OutOfMemory`, which a fallible std allocation reports instead of
-/// aborting (`std::fs::read` reserves its buffer with `try_reserve`; observed on Linux under
-/// `RLIMIT_DATA`, where the child then says "... could not be read: out of memory").
-pub const ALLOCATION_FAILURE_MARKERS: [&str; 5] = [
-    "memory allocation of",
-    "std::bad_alloc",
-    "bad allocation",
-    "Failed to allocate memory",
-    "out of memory",
-];
+/// The floor never exceeds this share of the cap, as a divisor: an eighth, so a small cap
+/// (a test's 16 MiB) is not reached by every peak.
+pub const CAP_MARGIN_FLOOR_DIVISOR: u64 = 8;
+
+/// The last line the conversion child writes to stderr when an allocation fails and reaches it
+/// as a typed error (`std::io::ErrorKind::OutOfMemory`: `std::fs::read` reserves its buffer
+/// fallibly, so under `RLIMIT_DATA` or a job memory limit it returns that error instead of
+/// aborting).
+pub const ALLOCATION_FAILURE_MARKER: &str =
+    "okf-jawn-convert: an allocation failed at the memory cap";
+
+/// What Rust's runtime prints, as a whole line, before it aborts on a failed allocation:
+/// `memory allocation of N bytes failed` (std's default allocation-error handler).
+const RUST_ALLOCATION_FAILURE: (&str, &str) = ("memory allocation of ", " bytes failed");
 
 /// How often the macOS watchdog samples the child, within the 50 to 100 ms the plan allows.
 pub const WATCHDOG_SAMPLE_PERIOD_MS: u64 = 75;
@@ -138,33 +146,44 @@ pub fn watchdog_threshold(
     limit_bytes.saturating_sub(growth.max(share))
 }
 
-/// Read a child's end against its cap and time bound.
+/// How close to the cap a job's peak commit counts as having reached it: a sixteenth of the
+/// cap, or `CAP_MARGIN_MIN_BYTES` when that is more, but never more than an eighth of the cap.
+#[must_use]
+pub fn cap_margin(limit_bytes: u64) -> u64 {
+    let share = limit_bytes.checked_div(CAP_MARGIN_DIVISOR).unwrap_or(0);
+    let floor = CAP_MARGIN_MIN_BYTES.min(
+        limit_bytes
+            .checked_div(CAP_MARGIN_FLOOR_DIVISOR)
+            .unwrap_or(0),
+    );
+    share.max(floor)
+}
+
+/// Read a child's end against its cap and time bound, from evidence only.
 #[must_use]
 pub fn classify(end: &ChildEnd, limit_bytes: u64, limit_seconds: u32) -> ChildVerdict {
     if end.reported {
         return ChildVerdict::Reported;
     }
-    let memory = || FailureReason::MemoryLimit {
-        limit_bytes: limit_bytes.to_string(),
-    };
-    if end.killed_at_cap {
-        return ChildVerdict::Failed(memory());
-    }
     if end.killed_at_time_limit {
         return ChildVerdict::Failed(FailureReason::TimeLimit { limit_seconds });
     }
-    if ALLOCATION_FAILURE_MARKERS
-        .iter()
-        .any(|marker| end.stderr_tail.contains(marker))
-    {
-        return ChildVerdict::Failed(memory());
-    }
-    let margin = (limit_bytes / CAP_MARGIN_DIVISOR).max(CAP_MARGIN_MIN_BYTES);
-    if end
+    let margin = cap_margin(limit_bytes);
+    let peak_at_cap = end
         .peak_committed_bytes
-        .is_some_and(|peak| peak.saturating_add(margin) >= limit_bytes)
-    {
-        return ChildVerdict::Failed(memory());
+        .is_some_and(|peak| peak.saturating_add(margin) >= limit_bytes);
+    let last = end
+        .stderr_tail
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty());
+    let allocation_failed = last
+        .is_some_and(|line| line == ALLOCATION_FAILURE_MARKER || is_rust_allocation_failure(line));
+    if peak_at_cap || allocation_failed || end.killed_at_cap {
+        return ChildVerdict::Failed(FailureReason::MemoryLimit {
+            limit_bytes: limit_bytes.to_string(),
+        });
     }
     ChildVerdict::Failed(FailureReason::ConverterCrashed)
 }
@@ -350,6 +369,14 @@ fn footprint(system: &mut sysinfo::System, pid: u32) -> Option<u64> {
 #[cfg(not(target_os = "macos"))]
 async fn watchdog(_pid: Option<u32>, _limit_bytes: u64) {
     std::future::pending::<()>().await;
+}
+
+/// Whether a whole line is exactly Rust's message for a failed allocation.
+fn is_rust_allocation_failure(line: &str) -> bool {
+    let (before, after) = RUST_ALLOCATION_FAILURE;
+    line.strip_prefix(before)
+        .and_then(|rest| rest.strip_suffix(after))
+        .is_some_and(|size| !size.is_empty() && size.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Read a child's stderr to its end, keeping the last `STDERR_TAIL_BYTES`.

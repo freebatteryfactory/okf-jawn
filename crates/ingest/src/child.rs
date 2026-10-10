@@ -22,6 +22,11 @@
 //!
 //! A document the converter cannot read is a reply (`Unsupported`, `Failure`), never a failing
 //! exit. A failing exit without a reply is the child at fault, which the supervisor classifies.
+//! An allocation that fails and reaches the child as a typed error (`std::fs::read` reserves
+//! fallibly, so under the cap it returns `io::ErrorKind::OutOfMemory`) ends the child with
+//! `cap::ALLOCATION_FAILURE_MARKER` as its last stderr line, the explicit evidence the
+//! supervisor reads as the cap; Rust has no stable allocation-error hook for the failures that
+//! abort instead, whose runtime message the supervisor reads exactly.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -38,10 +43,20 @@ use okf_jawn_core::conversion::ConversionStatus;
 
 use serde_json::Value;
 
+use crate::cap::ALLOCATION_FAILURE_MARKER;
 use crate::protocol::{
     Block, EXPORT_FILE, MARKDOWN_FILE, Reply, Request, TEXT_LAYER_FILE, Task, Unlocated,
     write_reply,
 };
+
+/// Why the child stops without a reply.
+#[derive(Debug)]
+enum Stop {
+    /// A worker fault.
+    Fault(ApiError),
+    /// An allocation failed: the memory cap.
+    Allocation(String),
+}
 
 /// How many items of the arrays a line run's own item can be in the export has written.
 #[derive(Debug, Clone, Copy, Default)]
@@ -49,6 +64,12 @@ struct ItemCounts {
     texts: usize,
     tables: usize,
     pictures: usize,
+}
+
+impl From<ApiError> for Stop {
+    fn from(error: ApiError) -> Self {
+        Self::Fault(error)
+    }
 }
 
 impl ItemCounts {
@@ -85,26 +106,26 @@ pub fn main() -> ExitCode {
     };
     match run(Path::new(&request)) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => refuse(&format!("okf-jawn-convert: {}", error.message)),
+        Err(Stop::Fault(error)) => refuse(&format!("okf-jawn-convert: {}", error.message)),
+        Err(Stop::Allocation(what)) => {
+            let _written = writeln!(std::io::stderr(), "okf-jawn-convert: {what}");
+            refuse(ALLOCATION_FAILURE_MARKER)
+        }
     }
 }
 
 /// Read the request, carry it out, and write the reply last.
-///
-/// # Errors
-/// Returns `Internal` when the request cannot be read or an output cannot be written.
-pub fn run(request_path: &Path) -> Result<(), ApiError> {
+fn run(request_path: &Path) -> Result<(), Stop> {
     let directory = request_path
         .parent()
         .ok_or_else(|| fault("the request file has no directory"))?;
-    let bytes = std::fs::read(request_path)
-        .map_err(|error| fault(&format!("the request could not be read: {error}")))?;
+    let bytes = read_file(request_path, "the request")?;
     let request = Request::decode(&bytes)?;
     let reply = match request.task {
         Task::PageCount => page_count(&request)?,
         Task::Convert => convert(&request, directory)?,
     };
-    write_reply(directory, &reply)
+    Ok(write_reply(directory, &reply)?)
 }
 
 /// The input format the occurrence's file name selects.
@@ -178,7 +199,7 @@ pub fn line_blocks(document: &DoclingDocument, markdown: &str) -> Vec<Block> {
 }
 
 /// Count the pages of a paginated original.
-fn page_count(request: &Request) -> Result<Reply, ApiError> {
+fn page_count(request: &Request) -> Result<Reply, Stop> {
     let reply = |status, page_count, issues| Reply {
         status,
         page_count,
@@ -210,7 +231,7 @@ fn page_count(request: &Request) -> Result<Reply, ApiError> {
 }
 
 /// Convert one window and write its outputs.
-fn convert(request: &Request, directory: &Path) -> Result<Reply, ApiError> {
+fn convert(request: &Request, directory: &Path) -> Result<Reply, Stop> {
     let unconverted = |status, issues| Reply {
         status,
         page_count: None,
@@ -411,9 +432,20 @@ fn is_table(node: &Node) -> bool {
 }
 
 /// The retained original's bytes.
-fn read_source(request: &Request) -> Result<Vec<u8>, ApiError> {
-    std::fs::read(&request.source)
-        .map_err(|error| fault(&format!("the retained original could not be read: {error}")))
+fn read_source(request: &Request) -> Result<Vec<u8>, Stop> {
+    read_file(&request.source, "the retained original")
+}
+
+/// A file's bytes. An allocation that fails while reading it is the cap, not a fault.
+fn read_file(path: &Path, what: &str) -> Result<Vec<u8>, Stop> {
+    std::fs::read(path).map_err(|error| {
+        let message = format!("{what} could not be read: {error}");
+        if error.kind() == std::io::ErrorKind::OutOfMemory {
+            Stop::Allocation(message)
+        } else {
+            Stop::Fault(fault(&message))
+        }
+    })
 }
 
 /// One converter issue.

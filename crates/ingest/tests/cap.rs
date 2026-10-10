@@ -23,7 +23,7 @@ mod memory_cap_mechanism {
     };
     use okf_jawn_core::conversion::{ConversionStatus, WindowCoverage};
     use okf_jawn_ingest::cap::{
-        CAP_MARGIN_MIN_BYTES, ChildVerdict, classify, limit_self, spawn_capped, supervise,
+        ChildVerdict, cap_margin, classify, limit_self, spawn_capped, supervise,
     };
     use okf_jawn_ingest::record::{ConvertedWindow, WindowOutcome, assemble, sha256_digest};
 
@@ -87,13 +87,18 @@ mod memory_cap_mechanism {
             "the cap, not the time bound, stops the child"
         );
         // Stopped at the cap: where the platform reports the peak, it stayed within the
-        // classifier's margin of the cap, far below what the child asked for. (Observed on
-        // Windows 11: the job's peak commit stood 1.4 MiB above a 256 MiB limit when the
+        // classifier's margin of the cap, far below what the child asked for, and reached the
+        // cap by that margin, which is the evidence the classification reads there. (Observed
+        // on Windows 11: the job's peak commit stood 1.4 MiB above a 256 MiB limit when the
         // allocation was refused, so the bound is the margin, not the exact cap.)
         if let Some(peak) = end.peak_committed_bytes {
             assert!(
-                peak <= CAP.saturating_add(CAP_MARGIN_MIN_BYTES),
+                peak <= CAP.saturating_add(cap_margin(CAP)),
                 "peak commit {peak} passed the cap {CAP} by more than the margin"
+            );
+            assert!(
+                peak.saturating_add(cap_margin(CAP)) >= CAP,
+                "peak commit {peak} never came near the cap {CAP}"
             );
         }
         let verdict = classify(&end, CAP, TIME_LIMIT_SECONDS);
@@ -226,9 +231,12 @@ mod child_supervision {
 mod memory_cap_classification {
     use okf_jawn_contract::extraction::FailureReason;
     use okf_jawn_ingest::cap::{
-        CAP_MARGIN_MIN_BYTES, ChildEnd, ChildVerdict, WATCHDOG_SAMPLE_PERIOD_MS,
-        WORST_ALLOCATION_RATE_BYTES_PER_SECOND, classify, watchdog_threshold,
+        ALLOCATION_FAILURE_MARKER, CAP_MARGIN_MIN_BYTES, ChildEnd, ChildVerdict,
+        WATCHDOG_SAMPLE_PERIOD_MS, WORST_ALLOCATION_RATE_BYTES_PER_SECOND, cap_margin, classify,
+        watchdog_threshold,
     };
+
+    use crate::check::TestResult;
 
     const CAP: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -256,13 +264,13 @@ mod memory_cap_classification {
         };
         assert_eq!(classify(&killed, CAP, 600), memory());
         for words in [
-            "memory allocation of 1073741824 bytes failed\n",
-            "terminate called after throwing an instance of 'std::bad_alloc'",
-            "onnxruntime: Failed to allocate memory for requested buffer",
-            "okf-jawn-convert: the retained original could not be read: out of memory\n",
+            "memory allocation of 1073741824 bytes failed\n".to_owned(),
+            format!(
+                "okf-jawn-convert: the retained original could not be read: out of memory\n{ALLOCATION_FAILURE_MARKER}\n"
+            ),
         ] {
             let aborted = ChildEnd {
-                stderr_tail: words.to_owned(),
+                stderr_tail: words.clone(),
                 ..ChildEnd::default()
             };
             assert_eq!(classify(&aborted, CAP, 600), memory(), "{words}");
@@ -270,9 +278,67 @@ mod memory_cap_classification {
     }
 
     #[test]
-    fn a_peak_commit_at_the_cap_is_the_cap_and_one_well_below_is_a_crash() {
+    fn free_text_about_memory_is_never_the_cap() {
+        // Only the child's own marker or Rust's exact message, as the last line, is evidence.
+        // Words about memory anywhere else (a library log, a panic quoting document text) are
+        // a crash.
+        for words in [
+            "okf-jawn-convert: the retained original could not be read: out of memory\n",
+            "terminate called after throwing an instance of 'std::bad_alloc'",
+            "onnxruntime: Failed to allocate memory for requested buffer",
+            "thread 'main' panicked: byte index 3 is out of bounds of `Out of memory`",
+            "memory allocation of 8 bytes failed\nthen something else went wrong\n",
+            "note: memory allocation of 8 bytes failed here",
+            "memory allocation of many bytes failed",
+        ] {
+            let crashed = ChildEnd {
+                stderr_tail: words.to_owned(),
+                ..ChildEnd::default()
+            };
+            assert_eq!(
+                classify(&crashed, CAP, 600),
+                ChildVerdict::Failed(FailureReason::ConverterCrashed),
+                "{words}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_memory_failure_under_a_small_cap_is_a_crash() -> TestResult {
+        // A test-sized cap: the margin scales down with it, so a child that failed for another
+        // reason, far below the cap, is not read as having reached it.
+        const SMALL: u64 = 16 * 1024 * 1024;
+        let margin = cap_margin(SMALL);
+        assert!(margin < SMALL, "margin {margin} is not below the cap");
+        let failed = ChildEnd {
+            stderr_tail: "okf-jawn-convert: the retained original could not be read: not found\n"
+                .to_owned(),
+            peak_committed_bytes: Some(6 * 1024 * 1024),
+            ..ChildEnd::default()
+        };
+        assert_eq!(
+            classify(&failed, SMALL, 30),
+            ChildVerdict::Failed(FailureReason::ConverterCrashed)
+        );
         let at = ChildEnd {
-            peak_committed_bytes: Some(CAP - CAP_MARGIN_MIN_BYTES / 2),
+            peak_committed_bytes: Some(SMALL.checked_sub(margin / 2).ok_or("the cap")?),
+            ..ChildEnd::default()
+        };
+        assert_eq!(
+            classify(&at, SMALL, 30),
+            ChildVerdict::Failed(FailureReason::MemoryLimit {
+                limit_bytes: SMALL.to_string()
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_peak_commit_at_the_cap_is_the_cap_and_one_well_below_is_a_crash() {
+        assert_eq!(cap_margin(CAP), CAP / 16);
+        assert!(cap_margin(CAP) >= CAP_MARGIN_MIN_BYTES);
+        let at = ChildEnd {
+            peak_committed_bytes: Some(CAP.saturating_sub(cap_margin(CAP) / 2)),
             ..ChildEnd::default()
         };
         assert_eq!(classify(&at, CAP, 600), memory());

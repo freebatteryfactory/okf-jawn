@@ -811,7 +811,7 @@ mod conversion_child {
         ConversionInput, ConversionStatus, Converter, ConverterLimits,
     };
     use okf_jawn_core::storage::{LocalSource, ObjectInfo};
-    use okf_jawn_ingest::cap::MEMORY_LIMIT_ENV;
+    use okf_jawn_ingest::cap::{ALLOCATION_FAILURE_MARKER, MEMORY_LIMIT_ENV};
     use okf_jawn_ingest::converter::{ConverterConfig, DoclingConverter};
     use okf_jawn_ingest::protocol::{REQUEST_FILE, RESULT_FILE, Request, Task};
     use okf_jawn_ingest::record::sha256_digest;
@@ -1000,6 +1000,51 @@ mod conversion_child {
             conversion.issues
         );
         assert!(conversion.document.is_none());
+        // The evidence: the original is read with a fallible reservation, so the refused
+        // allocation reaches the child as an error and it ends with its explicit marker.
+        assert!(
+            conversion
+                .issues
+                .iter()
+                .any(|issue| issue.error_message == ALLOCATION_FAILURE_MARKER),
+            "{:?}",
+            conversion.issues
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_real_child_failing_for_another_reason_under_a_small_cap_is_a_crash() -> TestResult
+    {
+        // The same 16 MiB cap, but the retained original is missing: the child stops for a
+        // reason that has nothing to do with memory, far below the cap, and must not be read
+        // as having reached it.
+        const CAP: u64 = 16 * 1024 * 1024;
+        let store = tempfile::tempdir()?;
+        let output = tempfile::tempdir()?;
+        let source = LocalSource {
+            path: store.path().join("missing"),
+            object: ObjectInfo {
+                digest: sha256_digest(b"never stored")?,
+                size: 12,
+            },
+        };
+        let converter = DoclingConverter::new(ConverterConfig {
+            child: PathBuf::from(env!("CARGO_BIN_EXE_okf-jawn-convert")),
+            limits: ConverterLimits {
+                window_pages: 4,
+                memory_limit_bytes: CAP,
+            },
+        });
+        let mut request = input(source, "missing.md", output.path());
+        request.timeout = Duration::from_secs(30);
+        let conversion = converter.convert(request).await?;
+        assert_eq!(
+            conversion.status,
+            ConversionStatus::Failure(FailureReason::ConverterCrashed),
+            "{:?}",
+            conversion.issues
+        );
         Ok(())
     }
 
