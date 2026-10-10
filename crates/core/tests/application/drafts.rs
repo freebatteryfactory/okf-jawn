@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{
     ALICE, Built, NOTE, World, alice, context, draft_of, mutation, note, revision, scope,
+    served_digest,
 };
 
 fn save(base: Revision, properties: serde_json::Value) -> Built<SaveDraftRequest> {
@@ -91,6 +92,38 @@ async fn a_first_save_bases_on_the_head_a_later_one_keeps_its_base_until_it_reba
         content_digest(&written.body, &written.properties)?
     );
     assert!(world.versions.commits()?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_draft_records_the_digest_of_its_own_body_and_properties() -> TestResult {
+    let world = World::new()?;
+    stored_at(&world, 'a')?;
+    let at = revision('a')?;
+    let properties = json!({ "type": "Note", "tags": ["draft"] });
+    let request = save(at.clone(), properties.clone())?;
+    // The item the draft would commit: the drafted body and properties.
+    let drafted = note(NOTE, &at, "notes/plan.md", &request.body, properties)?;
+    let stored = note(
+        NOTE,
+        &at,
+        "notes/plan.md",
+        "# Plan\n",
+        json!({ "type": "Note" }),
+    )?;
+    let expected = served_digest(&drafted)?;
+    assert_ne!(expected, served_digest(&stored)?);
+    let answered = world
+        .service
+        .save_draft(
+            &alice(OperationName::SaveDraft, Some(mutation(1)))?,
+            request,
+        )
+        .await?;
+    assert_eq!(answered.content_digest, expected);
+    let writes = world.drafts.saves()?;
+    let (_, written) = some(writes.first(), "the save")?;
+    assert_eq!(written.content_digest, expected);
     Ok(())
 }
 
