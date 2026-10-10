@@ -156,9 +156,10 @@ fn candidate_check_of_an_edit_reports_lint_only_for_the_files_it_touched() -> Te
 fn candidate_check_of_an_edit_reports_validator_warnings_only_for_the_files_it_touched()
 -> TestResult {
     let staged = Staged::new()?;
+    // A broken cross-link is permitted; the validator reports it as an info naming no file.
     staged.write(
         "notes/plan.md",
-        "---\ntype: Note\ntitle: Plan\ndescription: The plan.\n---\n# Plan\n",
+        "---\ntype: Note\ntitle: Plan\ndescription: The plan.\n---\n# Plan\n\nSee [gone](gone.md).\n",
     )?;
     // `status` outside OKF's words is a producer deviation the validator only warns about.
     staged.write(
@@ -173,8 +174,10 @@ fn candidate_check_of_an_edit_reports_validator_warnings_only_for_the_files_it_t
             .collect()
     };
     let odd = Some("notes/odd.md".to_owned());
-    // The whole-bundle check reports the warning about the odd file.
-    assert!(validator(&OkfConformance.check(&staged.0)?).contains(&odd));
+    // The whole-bundle check reports the warning about the odd file and the unlocated info.
+    let whole = validator(&OkfConformance.check(&staged.0)?);
+    assert!(whole.contains(&odd), "{whole:?}");
+    assert!(whole.contains(&None), "{whole:?}");
     // An edit of the plan reports nothing about the file it did not touch, nor any warning
     // that names no file.
     let plan = EditCheck::new(
