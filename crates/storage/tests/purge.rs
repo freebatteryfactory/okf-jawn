@@ -495,24 +495,31 @@ fn pre_migration_copy(data: &Path, file: &str, name: &str) -> Fallible<()> {
     Ok(())
 }
 
-/// A pre-migration backup set holding a workspace archive of each workspace.
-fn pre_migration_set(data: &Path, fixture: &Fixture) -> Fallible<()> {
-    let directory = data
-        .join("backups")
-        .join("pre-migration")
-        .join("set-1")
-        .join("workspaces")
-        .join("local");
-    std::fs::create_dir_all(&directory)?;
-    std::fs::write(
-        directory.join(format!("{}.zip", fixture.target.workspace_id.0)),
-        b"zanzibar pre-migration archive",
-    )?;
-    std::fs::write(
-        directory.join(format!("{}.zip", fixture.survivor.workspace_id.0)),
-        b"garden pre-migration archive",
-    )?;
+/// A pre-migration backup set `name` holding a workspace archive of each workspace, written by
+/// the same writer an upgrade uses; the survivor's archive holds its receipt citing the target.
+async fn pre_migration_set(data: &Path, fixture: &Fixture, name: &str) -> Fallible<()> {
+    let directory = data.join("backups").join("pre-migration").join(name);
+    let written = fixture
+        .storage
+        .backups()
+        .write_backup_set(&directory, None)
+        .await?;
+    assert_eq!(written.len(), 3, "two workspace archives, one installation");
     Ok(())
+}
+
+/// The bytes of one entry of the archive object `digest`.
+fn archive_entry(data: &Path, digest: &Digest, name: &str) -> Fallible<Vec<u8>> {
+    use std::io::Read as _;
+    let path = data
+        .join("objects")
+        .join("local")
+        .join(some(digest.as_str().get(..2), "a digest")?)
+        .join(digest.as_str());
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
+    let mut bytes = Vec::new();
+    archive.by_name(name)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Every file under `directory` whose bytes contain the marker.
@@ -581,7 +588,10 @@ async fn assert_removed(fixture: &Fixture, report: &PurgeReport) -> TestResult {
         report.backups_removed, 3,
         "its archive artifact, the index copy, the set's archive"
     );
-    assert_eq!(report.backups_rewritten, 1, "the records copy");
+    assert_eq!(
+        report.backups_rewritten, 2,
+        "the records copy, and the survivor's set archive that cites the target"
+    );
     assert_eq!(report.exports_removed, 1);
     assert_eq!(report.drafts_removed, 1);
     assert_eq!(report.revisions_invalidated, 3);
@@ -655,7 +665,7 @@ async fn purge_workspace_leaves_no_copy_the_application_manages() -> TestResult 
     let storage = &fixture.storage;
     pre_migration_copy(directory.path(), "records.sqlite", "records-v1-1.sqlite")?;
     pre_migration_copy(directory.path(), "index.sqlite", "index-v1-1.sqlite")?;
-    pre_migration_set(directory.path(), &fixture)?;
+    pre_migration_set(directory.path(), &fixture, "set-1").await?;
     assert!(
         !marked_files(directory.path())?.is_empty(),
         "the fixture writes the marker"
@@ -780,6 +790,41 @@ async fn purge_scrubs_every_field_of_a_citation_that_can_hold_the_target() -> Te
         assert!(source.locations.is_empty(), "its locations go");
         assert_eq!(source.revision, *revision, "the revision map resolves it");
     }
+    Ok(())
+}
+
+/// Review probe R2: the survivor's own archive, taken before the purge, holds its receipt citing
+/// the target. Restoring it must not bring the citation back.
+#[tokio::test]
+async fn purge_rewrites_another_workspaces_archive_that_cites_it() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let backups = fixture.storage.backups();
+    let before = backups
+        .write_workspace_archive(&fixture.survivor, uuid!(71)?)
+        .await?;
+    let report = purge_target(&fixture).await?;
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    assert_eq!(report.backups_rewritten, 1, "the survivor's archive");
+    let after = backups
+        .write_workspace_archive(&fixture.survivor, uuid!(71)?)
+        .await?;
+    assert_ne!(after.digest, before.digest, "the record names the rewrite");
+    assert!(!held(&fixture.storage, &fixture.survivor, &before.digest).await?);
+    let records = directory.path().join("rewritten.sqlite");
+    std::fs::write(
+        &records,
+        archive_entry(directory.path(), &after.digest, "records.sqlite")?,
+    )?;
+    let receipt: String = rusqlite::Connection::open(&records)?.query_row(
+        "SELECT record FROM receipts",
+        [],
+        |row| row.get(0),
+    )?;
+    let receipt: Receipt = serde_json::from_str(&receipt)?;
+    assert_eq!(receipt.invalidated_by, Some(uuid!(60)?));
+    let cited = some(receipt.sources.first(), "the archived citation")?;
+    assert_eq!(cited.path.as_str(), format!("purged/{}", uuid_text(10)));
     Ok(())
 }
 

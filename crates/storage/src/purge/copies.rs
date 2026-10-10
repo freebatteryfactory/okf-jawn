@@ -12,7 +12,9 @@
 //!   bytes are not left in free pages, and checked;
 //! - an index copy (or any other database copy) that holds it is deleted: the index is rebuilt
 //!   from Git, so the copy is not needed to restore anything;
-//! - its archive in every backup set is deleted.
+//! - its archive in every backup set is deleted;
+//! - another workspace's archive (in a backup set, or in the object store) whose records still
+//!   cite it is rewritten with those records scrubbed (`rewrite_archive`).
 
 use std::path::{Path, PathBuf};
 
@@ -22,6 +24,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use super::rows;
 use crate::backup::PRE_MIGRATION_WORKSPACES;
+use crate::backup::archive::{Opened, RECORDS, replace_records};
 use crate::data::io_error;
 use crate::db::sql;
 
@@ -63,6 +66,63 @@ pub(crate) fn plan(directory: &Path, tenant: &str, workspace: &str) -> Result<Co
         }
     }
     Ok(plan)
+}
+
+/// The archives of the tenant's other workspaces in every pre-migration backup set under
+/// `directory`, relative to it. Blocking.
+pub(crate) fn other_archives(
+    directory: &Path,
+    tenant: &str,
+    workspace: &str,
+) -> Result<Vec<String>, ApiError> {
+    let mut found = Vec::new();
+    for (name, path) in entries(directory)? {
+        if !path.is_dir() {
+            continue;
+        }
+        let archives = path.join(PRE_MIGRATION_WORKSPACES).join(tenant);
+        for (archive, file) in entries(&archives)? {
+            if file.is_file()
+                && file.extension().is_some_and(|extension| extension == "zip")
+                && file.file_stem().and_then(std::ffi::OsStr::to_str) != Some(workspace)
+            {
+                found.push(format!(
+                    "{name}/{PRE_MIGRATION_WORKSPACES}/{tenant}/{archive}"
+                ));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Write `rewritten` as the workspace archive `archive` with its records scrubbed of the
+/// workspace exactly as the live records are (`rewrite`), when those records still hold
+/// anything of it (a citation, a ledger response); returns whether it did. Another workspace's
+/// archive holds no row of the purged one, so this scrubs citations: restoring the archive must
+/// not bring back a citation of purged content. `staging` is a private directory. Blocking.
+pub(crate) fn rewrite_archive(
+    archive: &Path,
+    rewritten: &Path,
+    staging: &Path,
+    tenant: &str,
+    workspace: &str,
+    purge: PurgeId,
+) -> Result<bool, ApiError> {
+    std::fs::create_dir_all(staging).map_err(|error| io_error("create", staging, &error))?;
+    let records = staging.join(RECORDS);
+    remove(&records)?;
+    Opened::open(archive)?.extract(RECORDS, &records)?;
+    let holds = {
+        let connection = Connection::open_with_flags(&records, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| sql(&error))?;
+        rows::holds(&connection, tenant, workspace)?
+    };
+    if holds {
+        rewrite(&records, tenant, workspace, purge)?;
+        replace_records(archive, &records, rewritten)?;
+    }
+    remove(&records)?;
+    Ok(holds)
 }
 
 /// Rewrite one records copy without the workspace, vacuum it and check it. Blocking.

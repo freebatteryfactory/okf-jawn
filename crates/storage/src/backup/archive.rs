@@ -183,6 +183,32 @@ pub(crate) fn write_workspace(
     Ok(manifest)
 }
 
+/// Write `target` as a copy of the workspace archive `source` whose records entry is the file
+/// `records`; every other entry is copied as it is stored. Blocking.
+pub(crate) fn replace_records(
+    source: &Path,
+    records: &Path,
+    target: &Path,
+) -> Result<(), ApiError> {
+    let mut opened = Opened::open(source)?;
+    let file = File::create(target).map_err(|error| io_error("create", target, &error))?;
+    let mut zip = ZipWriter::new(file);
+    for index in 0..opened.zip.len() {
+        let entry = opened
+            .zip
+            .by_index_raw(index)
+            .map_err(|error| invalid(&error.to_string()))?;
+        if entry.name() == RECORDS {
+            continue;
+        }
+        let name = entry.name().to_owned();
+        zip.raw_copy_file(entry)
+            .map_err(|error| zip_error(&name, &error))?;
+    }
+    entry_file(&mut zip, RECORDS, records)?;
+    finish(zip, target)
+}
+
 /// Write the installation archive `target` from the live records of `tenant`.
 pub(crate) fn write_installation(
     target: &Path,

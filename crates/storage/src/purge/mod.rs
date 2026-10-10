@@ -18,7 +18,10 @@
 //!    the revision map as invalidated by this purge with no replacement. The plan holds
 //!    identities and counts, never content.
 //! 2. **Backups**: every pre-migration copy that holds the workspace is rewritten without it or
-//!    deleted, and its archive in every pre-migration backup set is deleted (`copies`).
+//!    deleted, its archive in every pre-migration backup set is deleted, and every archive of
+//!    another workspace (in a backup set or in the object store) whose records still cite it is
+//!    rewritten with them scrubbed (`copies`).
+
 //! 3. **Records**: its rows are removed and what cites it is scrubbed (`rows`); its upload files
 //!    are deleted. Its retained exports and archives stop being downloadable here.
 //! 4. **Index**: its index entries are removed and the full-text index is merged, so no removed
@@ -47,7 +50,7 @@ use okf_jawn_contract::identity::{
 use okf_jawn_contract::purge::PurgeReport;
 use okf_jawn_contract::workspace::ArtifactKind;
 use okf_jawn_core::ports::PortFuture;
-use okf_jawn_core::storage::{Purger, StorageScope};
+use okf_jawn_core::storage::{ObjectInfo, Purger, StorageScope};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -77,6 +80,14 @@ struct WorkspacePlan {
     rewrite: Vec<String>,
     /// Pre-migration copies and archives to delete, relative to their directory.
     remove: Vec<String>,
+    /// Other workspaces' archives rewritten without a citation of the workspace: a backup-set
+    /// archive by its name relative to the pre-migration directory, an archive in the object
+    /// store by the digest it had.
+    #[serde(default)]
+    rewritten: BTreeSet<String>,
+    /// Archive objects a rewrite replaced; each is deleted, never counted as a kept object.
+    #[serde(default)]
+    superseded: BTreeSet<Digest>,
     /// The report; the object counts are filled in by the objects step.
     report: PurgeReport,
 }
@@ -97,6 +108,16 @@ const INDEX: i64 = 4;
 const REPOSITORY: i64 = 5;
 const OBJECTS: i64 = 6;
 const DONE: i64 = 7;
+
+impl WorkspacePlan {
+    /// Count the managed backups the plan removes and rewrites, as they stand now.
+    fn recount(&mut self) {
+        let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
+        self.report.backups_removed = count(self.archives.len().saturating_add(self.remove.len()));
+        self.report.backups_rewritten =
+            count(self.rewrite.len().saturating_add(self.rewritten.len()));
+    }
+}
 
 impl StoragePurger {
     pub(crate) const fn new(storage: Storage) -> Self {
@@ -127,7 +148,7 @@ impl StoragePurger {
             ));
         }
         if step < BACKUPS {
-            self.backups(&scope, purge, &plan).await?;
+            self.backups(&scope, purge, &mut plan).await?;
             step = self.advance(purge, BACKUPS, None).await?;
         }
         if step < RECORDS {
@@ -259,6 +280,8 @@ impl StoragePurger {
                     uploads,
                     rewrite: copy_plan.rewrite,
                     remove: copy_plan.remove,
+                    rewritten: BTreeSet::new(),
+                    superseded: BTreeSet::new(),
                 };
                 invalidate_revisions(transaction, &tenant, &workspace, purge, &history)?;
                 transaction
@@ -279,27 +302,133 @@ impl StoragePurger {
             .await
     }
 
-    /// Step 2: rewrite or delete every pre-migration backup that holds the workspace.
+    /// Step 2: rewrite or delete every managed backup that holds the workspace (`copies`).
     async fn backups(
         &self,
         scope: &StorageScope,
         purge: PurgeId,
-        plan: &WorkspacePlan,
+        plan: &mut WorkspacePlan,
     ) -> Result<(), ApiError> {
         let directory = self.storage.data.pre_migration_path();
+        let staging = self
+            .storage
+            .data
+            .staging_path()
+            .join(format!("purge-{}", purge.0));
         let (tenant, workspace) = scope_key(scope);
-        let rewrite = plan.rewrite.clone();
-        let remove = plan.remove.clone();
-        blocking(move || {
-            for name in &rewrite {
-                copies::rewrite(&directory.join(name), &tenant, &workspace, purge)?;
+        let (rewrite, remove, rewritten) = {
+            let (directory, staging) = (directory.clone(), staging.clone());
+            let (tenant, workspace) = (tenant.clone(), workspace.clone());
+            let (rewrite, remove) = (plan.rewrite.clone(), plan.remove.clone());
+            blocking(move || {
+                for name in &rewrite {
+                    copies::rewrite(&directory.join(name), &tenant, &workspace, purge)?;
+                }
+                for name in &remove {
+                    copies::remove(&directory.join(name))?;
+                }
+                let mut rewritten = Vec::new();
+                for name in copies::other_archives(&directory, &tenant, &workspace)? {
+                    let archive = directory.join(&name);
+                    let next = archive.with_extension("rewrite");
+                    if copies::rewrite_archive(
+                        &archive, &next, &staging, &tenant, &workspace, purge,
+                    )? {
+                        std::fs::rename(&next, &archive)
+                            .map_err(|error| io_error("replace", &archive, &error))?;
+                        rewritten.push(name);
+                    }
+                }
+                Ok((rewrite, remove, rewritten))
+            })
+            .await?
+        };
+        plan.rewrite = rewrite;
+        plan.remove = remove;
+        plan.rewritten.extend(rewritten);
+        plan.recount();
+        self.save_plan(purge, plan).await?;
+        self.stored_archives(scope, purge, plan, &staging).await?;
+        let _ = std::fs::remove_dir_all(&staging);
+        Ok(())
+    }
+
+    /// Rewrite every archive of another workspace in the object store whose records still cite
+    /// the workspace: the rewritten archive is stored, every record naming the old one is moved
+    /// to it (with the plan, in one transaction), and the old one is deleted.
+    async fn stored_archives(
+        &self,
+        scope: &StorageScope,
+        purge: PurgeId,
+        plan: &mut WorkspacePlan,
+        staging: &std::path::Path,
+    ) -> Result<(), ApiError> {
+        let (tenant, workspace) = scope_key(scope);
+        let digests = {
+            let (tenant, workspace) = (tenant.clone(), workspace.clone());
+            self.storage
+                .records
+                .call(move |connection| other_archives(connection, &tenant, &workspace))
+                .await?
+        };
+        for old in &plan.superseded {
+            self.storage.blobs.remove_for(&scope.tenant_id, old)?;
+        }
+        for old in digests {
+            let path = self.storage.blobs.local_path(&scope.tenant_id, &old)?;
+            if !path.is_file() {
+                continue;
             }
-            for name in &remove {
-                copies::remove(&directory.join(name))?;
+            let next = staging.join("rewritten.zip");
+            let rewritten = {
+                let (next, staging) = (next.clone(), staging.to_path_buf());
+                let (tenant, workspace) = (tenant.clone(), workspace.clone());
+                blocking(move || {
+                    copies::rewrite_archive(&path, &next, &staging, &tenant, &workspace, purge)
+                })
+                .await?
+            };
+            if !rewritten {
+                continue;
             }
-            Ok(())
-        })
-        .await
+            let size = std::fs::metadata(&next)
+                .map_err(|error| io_error("read", &next, &error))?
+                .len();
+            let new = self
+                .storage
+                .blobs
+                .put_for(
+                    &scope.tenant_id,
+                    crate::blobs::file_reader(Some(next), 0, size),
+                    size,
+                    None,
+                )
+                .await?;
+            plan.rewritten.insert(old.as_str().to_owned());
+            plan.superseded.insert(old.clone());
+            plan.recount();
+            let text = serde_json::to_string(&*plan).map_err(|error| json(&error))?;
+            let tenant = tenant.clone();
+            let moved = old.clone();
+            self.storage
+                .records
+                .transaction(move |transaction| {
+                    move_archive(transaction, &tenant, &moved, &new)?;
+                    store_plan(transaction, purge, &text)
+                })
+                .await?;
+            self.storage.blobs.remove_for(&scope.tenant_id, &old)?;
+        }
+        Ok(())
+    }
+
+    /// Record the plan as it stands now.
+    async fn save_plan(&self, purge: PurgeId, plan: &WorkspacePlan) -> Result<(), ApiError> {
+        let text = serde_json::to_string(plan).map_err(|error| json(&error))?;
+        self.storage
+            .records
+            .transaction(move |transaction| store_plan(transaction, purge, &text))
+            .await
     }
 
     /// Steps 3 and 5: remove the workspace's rows and upload files.
@@ -550,6 +679,97 @@ fn archives(
         .iter()
         .map(|digest| from_text!(digest.as_str()))
         .collect()
+}
+
+/// The workspace archives of the tenant's other workspaces in the object store: those written
+/// (`backup_archives`) and those recorded as artifacts.
+fn other_archives(
+    connection: &Connection,
+    tenant: &str,
+    workspace: &str,
+) -> Result<Vec<Digest>, ApiError> {
+    let kind = variant_text!(&ArtifactKind::WorkspaceBackup)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT digest FROM backup_archives
+               WHERE tenant_id = ?1 AND workspace_id IS NOT NULL AND workspace_id <> ?2
+             UNION SELECT digest FROM artifacts
+               WHERE tenant_id = ?1 AND workspace_id <> ?2 AND kind = ?3",
+        )
+        .map_err(|error| sql(&error))?;
+    let digests = statement
+        .query_map(params![tenant, workspace, kind], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| sql(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sql(&error))?;
+    digests
+        .iter()
+        .map(|digest| from_text!(digest.as_str()))
+        .collect()
+}
+
+/// Point every record of the tenant that names the archive object `old` at its rewrite `new`:
+/// the archive and artifact records, a job's download, a job output and an upload slot that
+/// holds it.
+fn move_archive(
+    transaction: &Transaction<'_>,
+    tenant: &str,
+    old: &Digest,
+    new: &ObjectInfo,
+) -> Result<(), ApiError> {
+    let size = crate::db::to_i64(new.size)?;
+    let (old, digest) = (old.as_str(), new.digest.as_str());
+    for (query, values) in [
+        (
+            "UPDATE backup_archives SET digest = ?3, size = ?4 WHERE tenant_id = ?1 AND digest = ?2",
+            params![tenant, old, digest, size],
+        ),
+        (
+            "UPDATE artifacts SET digest = ?3, size = ?4 WHERE tenant_id = ?1 AND digest = ?2",
+            params![tenant, old, digest, size],
+        ),
+        (
+            "UPDATE uploads SET object_digest = ?3, object_size = ?4
+             WHERE tenant_id = ?1 AND object_digest = ?2",
+            params![tenant, old, digest, size],
+        ),
+        (
+            "UPDATE jobs SET record = json_set(record, '$.artifact.sha256', ?3,
+                 '$.artifact.size', CAST(?4 AS TEXT))
+             WHERE tenant_id = ?1 AND json_extract(record, '$.artifact.sha256') = ?2",
+            params![tenant, old, digest, size],
+        ),
+        (
+            "UPDATE OR IGNORE job_outputs SET digest = ?3
+             WHERE digest = ?2 AND job_id IN (SELECT job_id FROM jobs WHERE tenant_id = ?1)
+               AND ?4 IS NOT NULL",
+            params![tenant, old, digest, size],
+        ),
+        (
+            "DELETE FROM job_outputs
+             WHERE digest = ?2 AND job_id IN (SELECT job_id FROM jobs WHERE tenant_id = ?1)
+               AND ?3 IS NOT NULL AND ?4 IS NOT NULL",
+            params![tenant, old, digest, size],
+        ),
+    ] {
+        transaction
+            .execute(query, values)
+            .map_err(|error| sql(&error))?;
+    }
+    Ok(())
+}
+
+/// Record `plan` (JSON) as the purge's plan.
+fn store_plan(transaction: &Transaction<'_>, purge: PurgeId, plan: &str) -> Result<(), ApiError> {
+    transaction
+        .execute(
+            "UPDATE purge_progress SET plan = ?1 WHERE purge_id = ?2",
+            params![plan, purge.0.to_string()],
+        )
+        .map(|_| ())
+        .map_err(|error| sql(&error))
 }
 
 /// The uploads of the workspace.

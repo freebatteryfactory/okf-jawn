@@ -609,7 +609,7 @@ fn install(
     Ok(())
 }
 
-mod archive;
+pub(crate) mod archive;
 mod restore;
 pub(crate) mod snapshot;
 
