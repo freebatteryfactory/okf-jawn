@@ -695,6 +695,21 @@ async fn an_integer_the_item_file_cannot_hold_exactly_is_refused_on_its_field() 
 }
 
 #[tokio::test]
+async fn find_commit_since_a_revision_the_repository_never_held_is_not_found() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, _) = workspace(directory.path()).await?;
+    let unknown = Revision::try_from("ab".repeat(20))?;
+    let error = err_of(
+        storage
+            .versions()
+            .find_commit(&scope, uuid!(20)?, Some(&unknown))
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::NotFound, "{}", error.message);
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (storage, scope, _) = workspace(directory.path()).await?;

@@ -259,7 +259,8 @@ impl VersionStore for GitVersions {
         }))
     }
 
-    /// `Some(since)` walks the head's history after `since`, as a commit's replay scan does.
+    /// `Some(since)` walks the head's history after `since`, as a commit's replay scan does; a
+    /// `since` the repository does not hold is `NotFound`.
     ///
     /// `None` walks `refs/heads/main` from the head back through first parents, newest first,
     /// and stops before the first commit whose committer time is more than
@@ -277,7 +278,9 @@ impl VersionStore for GitVersions {
             let repository = repositories.open(scope)?;
             let tip = head(&repository)?;
             let found = if let Some(since) = since {
-                find_trailer(&repository, tip, oid(&since)?, mutation_id)?
+                // A `since` this repository never held is the caller's error: `NotFound`.
+                let since = commit_of(&repository, &since)?.id();
+                find_trailer(&repository, tip, since, mutation_id)?
             } else {
                 let now = seam::now_ms()? / 1000;
                 let not_before = now.saturating_sub(RETENTION_SECONDS);
