@@ -19,7 +19,7 @@ use okf_jawn_core::storage::{ObjectInfo, StorageScope};
 use serde_json::json;
 use uuid::Uuid;
 
-use check::{TestResult, err_of};
+use check::{TestResult, err_of, some};
 use records::{Built, ITEM, appearance, citation, converted, digest, record, revision};
 
 fn workspace_archive() -> Built<ArtifactRecord> {
@@ -290,11 +290,13 @@ fn a_section_is_located_as_the_lines_its_heading_opens() -> TestResult {
 }
 
 #[test]
-fn an_item_outline_sections_end_before_the_next_heading_of_the_same_or_a_higher_level() {
+fn an_item_outline_sections_end_before_the_next_heading_of_the_same_or_a_higher_level() -> TestResult
+{
     let text =
         "# Plan\nintro\n## Goals\none\n### Detail\ntwo\n## Risks\nthree\n\nSetext top\n===\nlast\n";
+    let outline = markdown_outline(text);
     assert_eq!(
-        markdown_outline(text),
+        outline,
         vec![
             heading("Plan", 1, 1, 9),
             heading("Goals", 2, 3, 6),
@@ -303,17 +305,23 @@ fn an_item_outline_sections_end_before_the_next_heading_of_the_same_or_a_higher_
             heading("Setext top", 1, 10, 12),
         ]
     );
+    // A Setext heading is a heading too, and the last section runs to the last line.
+    let last = some(outline.last(), "the Setext heading")?;
+    assert_eq!(last.label, "Setext top");
+    Ok(())
 }
 
 #[test]
-fn an_item_outline_takes_headings_from_the_parser_not_from_code() {
+fn an_item_outline_takes_headings_from_the_parser_not_from_code() -> TestResult {
     let text =
         "Intro\n\n```\n# not a heading\n```\n\n    # indented code\n\n# Real `code` heading\nbody";
-    assert_eq!(
-        markdown_outline(text),
-        vec![heading("Real code heading", 1, 9, 10)]
-    );
+    let outline = markdown_outline(text);
+    assert_eq!(outline, vec![heading("Real code heading", 1, 9, 10)]);
+    // Inline code in a heading is kept as its text, without the backticks.
+    let real = some(outline.first(), "the real heading")?;
+    assert_eq!(real.label, "Real code heading");
     assert_eq!(markdown_outline(""), Vec::new());
+    Ok(())
 }
 
 #[test]

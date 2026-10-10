@@ -22,6 +22,9 @@
 //!   one clamped to the end of the text names only lines the text has, and every block of a
 //!   continued read, the last included, cites its own lines. Every read records a receipt
 //!   holding the same citation the response returns.
+//! - The outline returned is the whole outline only for a whole-item citation; otherwise it
+//!   holds only the entries whose own lines lie within the cited lines, so no heading outside
+//!   the citation is returned.
 
 use std::collections::BTreeSet;
 
@@ -200,11 +203,12 @@ pub(super) async fn read_item(
     let mut returned = vec![source.clone()];
     returned.extend(media.iter().map(|reference| reference.source.clone()));
     let receipt_id = record_receipt(service, context, &scope, None, returned).await?;
+    let outline = cited_outline(material.outline, &located, span.as_ref());
     Ok(ReadItemResponse {
         source,
         view: request.view,
         markdown: block.markdown,
-        outline: material.outline,
+        outline,
         media,
         warnings,
         truncated: next_cursor.is_some(),
@@ -478,6 +482,37 @@ fn budget(
         next: (next < selected.len()).then_some(next),
         partial: offset > 0 || next < selected.len(),
     })
+}
+
+/// The outline entries a read returns with its citation: the whole outline for a whole-item
+/// citation; otherwise only the entries whose own lines lie within the lines the citation names
+/// (`located`, or for pages, cells and a region the lines they resolved to, `span`), so no
+/// heading outside the cited selection is returned. An entry that selects anything but lines
+/// cannot be shown to lie within them and is left out.
+fn cited_outline(
+    outline: Vec<OutlineEntry>,
+    located: &Selection,
+    span: Option<&TextRange>,
+) -> Vec<OutlineEntry> {
+    let range = match located {
+        Selection::All => return outline,
+        Selection::Lines { range } => Some(range),
+        Selection::Section { .. }
+        | Selection::Pages { .. }
+        | Selection::Cells { .. }
+        | Selection::Region { .. } => span,
+    };
+    // A citation that covers no text has no heading.
+    let Some(range) = range else {
+        return Vec::new();
+    };
+    outline
+        .into_iter()
+        .filter(|entry| {
+            matches!(&entry.selection, Selection::Lines { range: own }
+                if own.start >= range.start && own.end <= range.end)
+        })
+        .collect()
 }
 
 /// The exact citation of what the read returned.

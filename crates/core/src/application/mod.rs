@@ -162,7 +162,8 @@ pub struct Ports {
 pub struct ApplicationConfig {
     /// The sandbox origin hostile representations are served from, such as
     /// `https://sandbox.example.test` or `http://127.0.0.1:8788`: an absolute `http` or `https`
-    /// origin with no path, query or fragment.
+    /// origin, a host and an optional port in `1..=65535`, with no path, query, fragment or user
+    /// information.
     pub sandbox_origin: String,
     /// How long a minted sandbox capability resolves; above zero.
     pub sandbox_ttl: Duration,
@@ -186,7 +187,8 @@ impl ApplicationConfig {
     ///
     /// # Errors
     /// Returns `InvalidInput` naming `sandbox_origin` when it is not an absolute `http` or
-    /// `https` origin without a path, query, fragment or user information, and naming
+    /// `https` origin of a host and an optional port in `1..=65535`, without a path, query,
+    /// fragment or user information, and naming
     /// `sandbox_ttl` when it is zero.
     pub fn check(&self) -> Result<(), ApiError> {
         if !is_origin(&self.sandbox_origin) {
@@ -272,8 +274,13 @@ fn pending<Request, Response>(
     )))
 }
 
-/// Whether `text` is `http://` or `https://` followed by a host and an optional port, and
-/// nothing else.
+/// Whether `text` is an origin and nothing else: the scheme `http` or `https`, `://`, a host,
+/// and an optional `:port` with a port in `1..=65535`; no path, query, fragment or user
+/// information.
+///
+/// Core does not depend on the workspace's `url` crate, so the check is written out exactly.
+/// The host is an IPv6 literal in brackets, or a name or IPv4 address of ASCII letters, digits,
+/// `-` and `.`.
 fn is_origin(text: &str) -> bool {
     let Some(authority) = text
         .strip_prefix("https://")
@@ -281,19 +288,40 @@ fn is_origin(text: &str) -> bool {
     else {
         return false;
     };
-    let (host, port) = match authority.rsplit_once(':') {
-        // An IPv6 literal holds colons inside its brackets.
-        Some((host, port)) if !port.contains(']') => (host, Some(port)),
-        _ => (authority, None),
+    // A path, a query, a fragment or user information.
+    if authority.contains(['/', '?', '#', '@']) {
+        return false;
+    }
+    let (host_ok, port) = if let Some(literal) = authority.strip_prefix('[') {
+        let Some((inner, after)) = literal.split_once(']') else {
+            return false;
+        };
+        let port = if after.is_empty() {
+            None
+        } else if let Some(port) = after.strip_prefix(':') {
+            Some(port)
+        } else {
+            return false;
+        };
+        let host_ok = inner.contains(':')
+            && inner
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() || matches!(character, ':' | '.'));
+        (host_ok, port)
+    } else {
+        let (host, port) = match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        let host_ok = !host.is_empty()
+            && host.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '.')
+            });
+        (host_ok, port)
     };
-    let host_ok = !host.is_empty()
-        && !host.chars().any(|character| {
-            character.is_whitespace()
-                || character.is_control()
-                || matches!(character, '/' | '?' | '#' | '@' | '\\')
-        });
     let port_ok = port.is_none_or(|port| {
-        !port.is_empty() && port.len() <= 5 && port.bytes().all(|byte| byte.is_ascii_digit())
+        port.bytes().all(|byte| byte.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|number| number >= 1)
     });
     host_ok && port_ok
 }
