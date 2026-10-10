@@ -26,7 +26,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::db::{Db, json, scope_key, sql};
 use crate::git::repo::{Repositories, commit_of, git};
-use crate::git::{ItemFile, items_of};
+use crate::git::{ItemFile, appearance_of, items_of};
 
 /// `SearchIndex` over the index database and the workspace repositories.
 #[derive(Debug, Clone)]
@@ -282,7 +282,8 @@ fn entries(
         .collect();
     let mut found = Vec::new();
     for (path, file) in &files {
-        let summary = file.summary(path, revision, None);
+        let appearance = appearance_of(&repository, &tree, file.header.item_id)?;
+        let summary = file.summary(path, revision, appearance.as_ref());
         let links = links_of(path, file, &by_path);
         found.push(Entry {
             summary,

@@ -32,6 +32,7 @@ use crate::blobs::{LocalBlobs, file_reader};
 use crate::db::Db;
 
 pub(crate) use item::ItemFile;
+pub(crate) use read::appearance as appearance_of;
 pub(crate) use read::items as items_of;
 
 use edit::{Staged, apply, maintain};
