@@ -721,6 +721,68 @@ async fn purge_reaches_a_workspace_archive_no_artifact_records() -> TestResult {
     Ok(())
 }
 
+/// Review probe R3, widened: every field of a stored citation that can hold the target's text.
+#[tokio::test]
+async fn purge_scrubs_every_field_of_a_citation_that_can_hold_the_target() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let revision = some(fixture.revisions.get(1), "the seeded revision")?;
+    let cell_range = json!({
+        "sheet": "zanzibar sheet",
+        "row_start": 1, "row_end": 2, "column_start": 1, "column_end": 2
+    });
+    let cited = |selection: serde_json::Value| {
+        json!({
+            "workspace_id": fixture.target.workspace_id,
+            "item_id": uuid_text(10),
+            "path": "notes/zanzibar-plans.md",
+            "revision": revision.as_str(),
+            "digest": "d".repeat(64),
+            "selection": selection,
+            "locations": [{
+                "provenance": "direct",
+                "locator": { "kind": "cells", "range": cell_range }
+            }]
+        })
+    };
+    let receipt: Receipt = serde_json::from_value(json!({
+        "id": uuid_text(43),
+        "workspace_id": fixture.survivor.workspace_id,
+        "operation_id": "read_item",
+        "principal_subject": "ana",
+        "route": "local_owner",
+        "sources": [
+            cited(json!({ "kind": "section", "heading": "zanzibar ferry" })),
+            cited(json!({ "kind": "cells", "range": cell_range }))
+        ],
+        "returned_at": "2026-10-09T12:00:00.000Z",
+        "audience": "agent_context"
+    }))?;
+    fixture
+        .storage
+        .records()
+        .insert_receipt(&fixture.survivor, None, receipt)
+        .await?;
+    let report = purge_target(&fixture).await?;
+    assert_eq!(report.citations_invalidated, 3);
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    let stored = fixture
+        .storage
+        .records()
+        .get_receipt(&fixture.survivor, uuid!(43)?)
+        .await?;
+    assert_eq!(stored.invalidated_by, Some(uuid!(60)?));
+    assert_eq!(stored.sources.len(), 2);
+    for source in &stored.sources {
+        assert_eq!(source.path.as_str(), format!("purged/{}", uuid_text(10)));
+        assert_eq!(source.selection, okf_jawn_contract::read::Selection::All);
+        assert!(source.digest.is_none(), "the target's derived digest goes");
+        assert!(source.locations.is_empty(), "its locations go");
+        assert_eq!(source.revision, *revision, "the revision map resolves it");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn purge_workspace_resumes_by_repeating_after_a_failure() -> TestResult {
     let directory = tempfile::tempdir()?;

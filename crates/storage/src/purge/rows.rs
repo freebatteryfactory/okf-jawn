@@ -13,8 +13,13 @@
 //! - a mutation-ledger row whose stored response names the workspace is removed (the response
 //!   may hold its name or an item's title; a retry then finds no response and is refused by the
 //!   purged workspace);
-//! - a receipt of another workspace of the tenant that cites the workspace is marked
-//!   `invalidated_by` the purge and each citing source's path becomes `purged/<item id>`.
+//! - a receipt or review of another workspace of the tenant that cites the workspace is marked
+//!   invalidated (a receipt's `invalidated_by`, a review's coverage), and each citing source
+//!   becomes the invalidated citation (`scrub_source`): its path `purged/<item id>`, its
+//!   selection `all`, without a digest or locations.
+//!
+//! "Holds" means holds something a purge still removes or scrubs, so a database or archive
+//! already scrubbed of the workspace no longer holds it.
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::identity::PurgeId;
@@ -31,6 +36,10 @@ struct Table {
 
 /// Tables that outlive a purged workspace: they hold identities, never content.
 const KEPT: &[&str] = &["purges", "purge_progress", "revision_map"];
+
+/// Tables whose records of one workspace can cite another, with their key column: a receipt's
+/// `sources` and a review's `source`.
+const CITING: &[(&str, &str)] = &[("receipts", "receipt_id"), ("reviews", "review_id")];
 
 impl Table {
     fn has(&self, column: &str) -> bool {
@@ -55,10 +64,6 @@ pub(crate) fn holds(
                 "SELECT 1 FROM \"{}\" WHERE tenant_id = ?1 AND workspace_id = ?2 LIMIT 1",
                 table.name
             )
-        } else if table.name == "receipts" && table.has("record") {
-            "SELECT 1 FROM receipts WHERE tenant_id = ?1 AND workspace_id <> ?2
-               AND instr(record, ?2) > 0 LIMIT 1"
-                .to_owned()
         } else if table.name == "mutations" && table.has("response") {
             "SELECT 1 FROM mutations WHERE tenant_id = ?1 AND instr(response, ?2) > 0 LIMIT 1"
                 .to_owned()
@@ -75,7 +80,7 @@ pub(crate) fn holds(
             return Ok(true);
         }
     }
-    Ok(false)
+    Ok(citations(connection, tenant, workspace, None)? > 0)
 }
 
 /// Remove the workspace's rows and scrub what cites it; see the module header. Run it inside
@@ -132,82 +137,110 @@ pub(crate) fn remove(
     {
         unlist_from_connectors(connection, workspace)?;
     }
-    if tables
-        .iter()
-        .any(|table| table.name == "receipts" && table.has("record"))
-    {
-        citations(connection, tenant, workspace, Some(purge))?;
-    }
+    citations(connection, tenant, workspace, Some(purge))?;
     Ok(())
 }
 
-/// The sources of other workspaces' receipts that cite the workspace and are not yet scrubbed.
-/// With `scrub`, each is scrubbed and its receipt marked invalidated by that purge.
+/// The stored citations of other workspaces' receipts and reviews that cite the workspace and
+/// are not yet scrubbed. With `scrub`, each is scrubbed (`scrub_source`) and its record marked
+/// invalidated: a receipt gets `invalidated_by` that purge, a review the coverage `invalidated`.
 pub(crate) fn citations(
     connection: &Connection,
     tenant: &str,
     workspace: &str,
     scrub: Option<PurgeId>,
 ) -> Result<u32, ApiError> {
-    let rows: Vec<(String, String)> = {
-        let mut statement = connection
-            .prepare(
-                "SELECT receipt_id, record FROM receipts
-                 WHERE tenant_id = ?1 AND workspace_id <> ?2 AND instr(record, ?2) > 0",
-            )
-            .map_err(|error| sql(&error))?;
-        statement
-            .query_map(params![tenant, workspace], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .map_err(|error| sql(&error))?
-            .collect::<Result<_, _>>()
-            .map_err(|error| sql(&error))?
-    };
+    let tables = tables(connection)?;
     let mut count: u32 = 0;
-    for (id, record) in rows {
-        let mut record: Value = serde_json::from_str(&record).map_err(|error| json(&error))?;
-        let mut cited = 0_u32;
-        if let Some(sources) = record.get_mut("sources").and_then(Value::as_array_mut) {
-            for source in sources {
-                if source.get("workspace_id").and_then(Value::as_str) != Some(workspace) {
-                    continue;
-                }
-                let item = source
-                    .get("item_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let scrubbed = format!("purged/{item}");
-                if source.get("path").and_then(Value::as_str) == Some(scrubbed.as_str()) {
-                    continue;
-                }
-                cited = cited.saturating_add(1);
-                if scrub.is_some()
-                    && let Some(object) = source.as_object_mut()
-                {
-                    object.insert("path".to_owned(), Value::String(scrubbed));
-                }
-            }
-        }
-        count = count.saturating_add(cited);
-        if let Some(purge) = scrub
-            && cited > 0
+    for (table, key) in CITING {
+        if !tables
+            .iter()
+            .any(|found| found.name == *table && found.has("record"))
         {
-            if let Some(object) = record.as_object_mut() {
-                object
+            continue;
+        }
+        let rows: Vec<(String, String)> = {
+            let mut statement = connection
+                .prepare(&format!(
+                    "SELECT {key}, record FROM {table}
+                     WHERE tenant_id = ?1 AND workspace_id <> ?2 AND instr(record, ?2) > 0"
+                ))
+                .map_err(|error| sql(&error))?;
+            statement
+                .query_map(params![tenant, workspace], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .map_err(|error| sql(&error))?
+                .collect::<Result<_, _>>()
+                .map_err(|error| sql(&error))?
+        };
+        for (id, record) in rows {
+            let mut record: Value = serde_json::from_str(&record).map_err(|error| json(&error))?;
+            let cited = match *table {
+                "receipts" => record
+                    .get_mut("sources")
+                    .and_then(Value::as_array_mut)
+                    .map_or(0, |sources| {
+                        sources.iter_mut().fold(0_u32, |cited, source| {
+                            cited.saturating_add(u32::from(scrub_source(source, workspace)))
+                        })
+                    }),
+                _ => record
+                    .get_mut("source")
+                    .map_or(0, |source| u32::from(scrub_source(source, workspace))),
+            };
+            count = count.saturating_add(cited);
+            let (Some(purge), Some(fields)) = (scrub, record.as_object_mut()) else {
+                continue;
+            };
+            if cited == 0 {
+                continue;
+            }
+            if *table == "receipts" {
+                fields
                     .entry("invalidated_by")
                     .or_insert_with(|| Value::String(purge.0.to_string()));
+            } else {
+                fields.insert(
+                    "coverage".to_owned(),
+                    Value::String("invalidated".to_owned()),
+                );
             }
             connection
                 .execute(
-                    "UPDATE receipts SET record = ?1 WHERE receipt_id = ?2",
+                    &format!("UPDATE {table} SET record = ?1 WHERE {key} = ?2"),
                     params![record.to_string(), id],
                 )
                 .map_err(|error| sql(&error))?;
         }
     }
     Ok(count)
+}
+
+/// Replace a stored citation of the purged workspace with the invalidated citation (Stage 1b
+/// design section 6): the identities stay (workspace, item, revision, which the revision map
+/// resolves to the purge), the path becomes `purged/<item id>`, which names nothing, and every
+/// field that can carry the target's content is dropped: the selection becomes `all` (a section
+/// heading or a sheet name is the target's text), and the derived digest and the locations (a
+/// sheet name again) go. Returns whether the citation was not yet in that form.
+fn scrub_source(source: &mut Value, workspace: &str) -> bool {
+    if source.get("workspace_id").and_then(Value::as_str) != Some(workspace) {
+        return false;
+    }
+    let field = |name: &str| source.get(name).cloned().unwrap_or(Value::Null);
+    let item = field("item_id");
+    let scrubbed = serde_json::json!({
+        "workspace_id": workspace,
+        "item_id": item,
+        "path": format!("purged/{}", item.as_str().unwrap_or_default()),
+        "revision": field("revision"),
+        "selection": { "kind": "all" },
+    });
+    if *source == scrubbed {
+        return false;
+    }
+    *source = scrubbed;
+    true
 }
 
 /// Remove the workspace from every connector's `workspace_ids`.
