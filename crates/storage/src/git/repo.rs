@@ -250,28 +250,21 @@ pub(crate) fn find_trailer(
     Ok(None)
 }
 
-/// The newest commit on the accepted line, from `tip` back through first parents, whose
-/// trailer names `mutation`, examining only commits whose committer time is at or after
-/// `not_before` (Unix seconds).
+/// The newest commit on the accepted line, from `tip` back through first parents to the root,
+/// whose trailer names `mutation`.
 ///
-/// The walk stops at the first commit, newest first, whose committer time is before
-/// `not_before`; that commit and every older one are not examined. It follows only `tip`'s
-/// first parents, so a proposal candidate or any other reference is never seen. The server
-/// stamps each commit's committer time when it writes it, so on the accepted line those times
-/// do not decrease toward the head unless the clock was set back.
+/// No commit time is read and nothing bounds the walk but the root. It follows only `tip`'s
+/// first parents, so a proposal candidate, the second parent of a merge, or any other
+/// reference is never seen.
 pub(crate) fn find_on_line(
     repository: &Repository,
     tip: Oid,
     mutation: MutationId,
-    not_before: i64,
 ) -> Result<Option<Oid>, ApiError> {
     let wanted = mutation.0.to_string();
     let mut next = Some(tip);
     while let Some(oid) = next {
         let commit = repository.find_commit(oid).map_err(|error| git(&error))?;
-        if commit.time().seconds() < not_before {
-            return Ok(None);
-        }
         if commit
             .message()
             .is_ok_and(|message| trailer_of(message) == Some(wanted.as_str()))

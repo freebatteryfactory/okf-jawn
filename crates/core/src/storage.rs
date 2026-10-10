@@ -525,14 +525,15 @@ pub trait VersionStore: Send + Sync {
     /// hold is the caller's error and answers `NotFound` (never `Unavailable`, which a caller
     /// would retry). `None` searches the accepted line back from the head, newest first,
     /// following first parents, and reads no other reference, so a proposal candidate is never
-    /// found. It stops at the mutation retention bound of SPEC section 8: the first commit,
-    /// newest first, whose committer time is more than seven days old, and every older one, is
-    /// not examined, since a mutation that old is no longer resumed.
+    /// found. It searches the whole accepted line, back to the root, with no time bound: a
+    /// mutation whose lease expired without completion or release stays until it is reconciled
+    /// (SPEC section 8), so its commit may be of any age.
     ///
     /// Only a writer whose expected head is not stable across attempts needs this before it
     /// calls `commit`: a Snapshot reads the current head, so on a resumed attempt it asks first,
-    /// with `None`. It never asks from one draft's base: a draft saved again after the commit
-    /// has a base the commit does not lie after.
+    /// with `None`. It is asked only on a resumed attempt, so the walk's cost falls on resumes.
+    /// It never asks from one draft's base: a draft saved again after the commit has a base the
+    /// commit does not lie after.
     fn find_commit<'a>(
         &'a self,
         scope: &'a StorageScope,

@@ -1601,18 +1601,20 @@ async fn find_commit_with_no_base_never_reads_a_proposal_candidate() -> TestResu
 }
 
 #[tokio::test]
-async fn find_commit_with_no_base_stops_at_the_first_commit_older_than_the_retention() -> TestResult
-{
+async fn find_commit_with_no_base_finds_a_commit_of_any_age_back_to_the_root() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (storage, scope, initial) = workspace(directory.path()).await?;
     let versions = storage.versions();
     let day = 24 * 60 * 60;
-    let expired = commit_aged(directory.path(), &scope, 50, 8 * day)?;
-    let retained = commit_aged(directory.path(), &scope, 52, 6 * day)?;
+    // A lease-expired mutation stays until it is reconciled (SPEC section 8), so its commit
+    // may be far older than the seven-day retention of completed mutations.
+    let ancient = commit_aged(directory.path(), &scope, 50, 400 * day)?;
+    let expired = commit_aged(directory.path(), &scope, 53, 8 * day)?;
+    let recent = commit_aged(directory.path(), &scope, 52, 6 * day)?;
     let head = versions
         .commit(
             &scope,
-            changes(51, &retained, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+            changes(51, &recent, vec![note(uuid!(10)?, "a.md", "A.")?])?,
             Arc::new(Counting::default()),
         )
         .await?
@@ -1623,20 +1625,22 @@ async fn find_commit_with_no_base_stops_at_the_first_commit_older_than_the_reten
     );
     assert_eq!(
         versions.find_commit(&scope, uuid!(52)?, None).await?,
-        Some(retained),
-        "six days old is within the retention"
+        Some(recent)
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(53)?, None).await?,
+        Some(expired),
+        "eight days old is found: nothing bounds the walk by time"
     );
     assert_eq!(
         versions.find_commit(&scope, uuid!(50)?, None).await?,
-        None,
-        "eight days old is past the retention, so the walk stops before it"
+        Some(ancient),
+        "four hundred days old is found"
     );
     assert_eq!(
-        versions
-            .find_commit(&scope, uuid!(50)?, Some(&initial))
-            .await?,
-        Some(expired),
-        "a search after a base is not bounded by the retention"
+        versions.find_commit(&scope, uuid!(1)?, None).await?,
+        Some(initial),
+        "the walk reaches the root: the workspace's creation commit"
     );
     Ok(())
 }

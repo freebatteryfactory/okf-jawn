@@ -30,8 +30,6 @@ use okf_jawn_core::storage::{
 
 use crate::blobs::{LocalBlobs, file_reader};
 use crate::db::Db;
-use crate::mutations::RETENTION_SECONDS;
-use crate::seam;
 
 pub(crate) use item::ItemFile;
 pub(crate) use read::appearance as appearance_of;
@@ -263,10 +261,10 @@ impl VersionStore for GitVersions {
     /// `since` the repository does not hold is `NotFound`.
     ///
     /// `None` walks `refs/heads/main` from the head back through first parents, newest first,
-    /// and stops before the first commit whose committer time is more than
-    /// `mutations::RETENTION_SECONDS` (seven days) before now: that commit and every older one
-    /// are not examined, because a mutation older than the retention is no longer resumed.
-    /// Proposal candidates and every other reference are never examined.
+    /// to the root commit, with no time bound: a mutation whose lease expired without
+    /// completion or release is kept until it is reconciled (SPEC section 8), however old its
+    /// commit. Proposal candidates and every other reference are never examined. Core asks
+    /// this only on a resumed attempt, so the walk's cost falls on resumes.
     fn find_commit<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -282,9 +280,7 @@ impl VersionStore for GitVersions {
                 let since = commit_of(&repository, &since)?.id();
                 find_trailer(&repository, tip, since, mutation_id)?
             } else {
-                let now = seam::now_ms()? / 1000;
-                let not_before = now.saturating_sub(RETENTION_SECONDS);
-                find_on_line(&repository, tip, mutation_id, not_before)?
+                find_on_line(&repository, tip, mutation_id)?
             };
             found.map(revision_of).transpose()
         }))

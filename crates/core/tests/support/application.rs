@@ -25,8 +25,7 @@
 //! each an unrelated commit on top of the head before it. A commit replays, and `find_commit`
 //! with `since` finds it, only when it lies after the revision asked about, and an unknown
 //! `since` is `NotFound`; `find_commit` without `since` searches that line back from the head,
-//! as the port documents (the fake keeps no commit times: every commit it holds is younger than
-//! the seven-day retention). The search
+//! as the port documents, back to the line's start with no time bound. The search
 //! index
 //! answers `Unavailable` for a revision it has not indexed, as its port documents, and applies
 //! the query's filters to the entries a test scripted (`put_entry`, `put_link`): the archived
