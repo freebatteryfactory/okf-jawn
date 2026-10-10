@@ -31,7 +31,8 @@
 //!    (`ALLOCATION_FAILURE_MARKER`; Rust has no stable allocation-error hook, so the child
 //!    writes it where an allocation failure reaches it as a typed error), or exactly the
 //!    message Rust's runtime prints before it aborts on one (`memory allocation of N bytes
-//!    failed`), hit the cap.
+//!    failed`), hit the cap. std's own backtrace note after that message is passed over,
+//!    exactly; no other line is.
 //! 5. A child the macOS watchdog killed hit the cap.
 //! 6. Any other end without a result is a crash.
 
@@ -115,6 +116,11 @@ pub const ALLOCATION_FAILURE_MARKER: &str =
 /// `memory allocation of N bytes failed` (std's default allocation-error handler).
 const RUST_ALLOCATION_FAILURE: (&str, &str) = ("memory allocation of ", " bytes failed");
 
+/// The line std's runtime may print after that message, exactly (observed on Linux under
+/// `RLIMIT_DATA`): it is passed over when the last line is read, and nothing else is.
+const RUST_BACKTRACE_NOTE: &str =
+    "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace";
+
 /// How often the macOS watchdog samples the child, within the 50 to 100 ms the plan allows.
 pub const WATCHDOG_SAMPLE_PERIOD_MS: u64 = 75;
 
@@ -178,7 +184,7 @@ pub fn classify(end: &ChildEnd, limit_bytes: u64, limit_seconds: u32) -> ChildVe
         .lines()
         .rev()
         .map(str::trim)
-        .find(|line| !line.is_empty());
+        .find(|line| !line.is_empty() && *line != RUST_BACKTRACE_NOTE);
     let allocation_failed = last
         .is_some_and(|line| line == ALLOCATION_FAILURE_MARKER || is_rust_allocation_failure(line));
     if peak_at_cap || allocation_failed || end.killed_at_cap {

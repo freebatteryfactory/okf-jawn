@@ -280,6 +280,8 @@ mod memory_cap_classification {
         );
         for words in [
             "memory allocation of 1073741824 bytes failed\n".to_owned(),
+            // Seen on Linux: std prints its backtrace note after the message.
+            "memory allocation of 16777216 bytes failed\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n".to_owned(),
             format!(
                 "okf-jawn-convert: the retained original could not be read: out of memory\n{ALLOCATION_FAILURE_MARKER}\n"
             ),
@@ -304,6 +306,7 @@ mod memory_cap_classification {
             "onnxruntime: Failed to allocate memory for requested buffer",
             "thread 'main' panicked: byte index 3 is out of bounds of `Out of memory`",
             "memory allocation of 8 bytes failed\nthen something else went wrong\n",
+            "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
             "note: memory allocation of 8 bytes failed here",
             "memory allocation of many bytes failed",
         ] {
