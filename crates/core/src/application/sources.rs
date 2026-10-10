@@ -7,7 +7,9 @@
 //! `id`, the key a footnote cites, and every other field), with the position of its citation or
 //! why it cites nothing. A digest authorizes nothing: `get_object` serves an object only when
 //! `reading::authorize_object` finds it among the cited item revision's objects, after the
-//! cited revision passed the purge check.
+//! cited revision passed the purge check. A citation's locations are the server's: a request's
+//! are filled when omitted and must equal the computed ones when present, and a response's are
+//! computed by the same rule (`computed_locations`).
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -17,17 +19,18 @@ use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::{
     DeclaredOutcome, DeclaredSource, GetObjectRequest, GetObjectResponse, GetSourcesRequest,
-    GetSourcesResponse, SourceAppearance, SourceReference, UncitedReason,
+    GetSourcesResponse, SourceAppearance, SourceLocation, SourceReference, UncitedReason,
 };
 use tokio::io::AsyncReadExt as _;
 
 use super::ApplicationService;
+use super::reads::shown_outline;
 use super::shared::{check_named, invalid, resolve, workspace_scope};
 use crate::context::OperationContext;
 use crate::conversion::ConversionRecord;
 use crate::reading::{
-    NoteSource, ObjectRole, SourceTarget, authorize_object, cited_locations, note_sources,
-    read_conversion_record,
+    NoteSource, ObjectRole, SourceTarget, authorize_object, cited_locations, fill_locations,
+    note_sources, read_conversion_record, section_lines,
 };
 use crate::storage::{Page, StorageScope};
 
@@ -124,13 +127,16 @@ pub(super) async fn get_sources(
 /// Return a bounded block of an object the citation may open.
 ///
 /// `length` defaults to, and is capped at, `MAX_OBJECT_BLOCK`; `has_more` says whether bytes
-/// remain after the block.
+/// remain after the block. The citation's locations follow the citation rule
+/// (`reading::fill_locations`): omitted, the server fills them; present, they must equal the
+/// ones the server computes (`server_locations`), so a caller cannot supply a location.
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/offset` for an offset that is not a decimal byte count or lies
 /// past the object, `InvalidInput` on `/length` for zero, the typed `NotFound` of an
 /// invalidated revision, `NotFound` for an object that does not belong to the cited item
-/// revision, or any port error.
+/// revision, `InvalidInput` on `/source/locations` for supplied locations that are not the
+/// computed ones, or any port error.
 pub(super) async fn get_object(
     service: &ApplicationService,
     context: &OperationContext,
@@ -148,7 +154,7 @@ pub(super) async fn get_object(
         None => MAX_OBJECT_BLOCK,
     };
     let scope = workspace_scope(context)?;
-    let source = &request.source;
+    let mut source = request.source;
     check_named(service, &scope, &source.revision).await?;
     let media_type = served_media_type(
         service,
@@ -158,6 +164,8 @@ pub(super) async fn get_object(
         &request.object,
     )
     .await?;
+    let computed = server_locations(service, &scope, &source).await?;
+    fill_locations(&mut source, computed, "/source")?;
     let read = service
         .ports()
         .blobs
@@ -275,6 +283,83 @@ pub(super) fn whole_citation(
             cited_locations(extraction, record, &Selection::All)
         }),
     }
+}
+
+/// The locations the server computes for a citation of `digest` with the selection `located`
+/// (a section already resolved to its lines) of an item whose appearance is `appearance`
+/// (Stage 1b design section 2: from item, revision, digest and selection).
+///
+/// - A citation of a source card's text, by its conversion record's digest (or by no digest
+///   when the card has no record), locates the selection in the original
+///   (`reading::cited_locations`).
+/// - A citation of one of the record's retained images is that image's own location.
+/// - Every other citation (a note, the original, a structured export, a derived object) has
+///   none.
+pub(super) fn computed_locations(
+    appearance: Option<&SourceAppearance>,
+    record: Option<&ConversionRecord>,
+    digest: Option<&Digest>,
+    located: &Selection,
+) -> Vec<SourceLocation> {
+    let Some(appearance) = appearance else {
+        return Vec::new();
+    };
+    if digest == appearance.extraction.digest.as_ref() {
+        return cited_locations(&appearance.extraction, record, located);
+    }
+    record
+        .and_then(|record| {
+            record
+                .assets
+                .iter()
+                .find(|asset| Some(&asset.digest) == digest)
+        })
+        .map(|asset| vec![asset.location.clone()])
+        .unwrap_or_default()
+}
+
+/// The locations the server computes for a citation a request carries, read through the ports:
+/// the ones a response carries for the same citation (`computed_locations`).
+///
+/// The conversion record is read only when the citation is not of the original, and a section
+/// is resolved to its lines through the outline of the shown text, as `read_item` resolves it.
+///
+/// # Errors
+/// Returns `NotFound` on `/source/selection/heading` for a section the text does not have,
+/// `InvalidInput` there for an ambiguous one, or any port error.
+async fn server_locations(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    source: &SourceReference,
+) -> Result<Vec<SourceLocation>, ApiError> {
+    let document = service
+        .ports()
+        .versions
+        .show(scope, &source.revision, source.item_id)
+        .await?;
+    let Some(appearance) = document.source.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if source.digest.as_ref() == Some(&appearance.object) {
+        return Ok(Vec::new());
+    }
+    let record = record_of(service, scope, Some(appearance)).await?;
+    let located = match &source.selection {
+        Selection::Section { heading } if source.digest == appearance.extraction.digest => {
+            let (_, outline) = shown_outline(&document, record.as_ref());
+            Selection::Lines {
+                range: section_lines(&outline, heading)
+                    .map_err(|error| error.with_field("/source/selection/heading"))?,
+            }
+        }
+        other => other.clone(),
+    };
+    Ok(computed_locations(
+        Some(appearance),
+        record.as_ref(),
+        source.digest.as_ref(),
+        &located,
+    ))
 }
 
 /// The conversion record a source appearance names, if it names one.

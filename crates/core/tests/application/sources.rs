@@ -6,7 +6,7 @@ use base64::engine::general_purpose::STANDARD;
 use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::{At, Digest, ItemId, PurgeId};
 use okf_jawn_contract::metadata::OperationName;
-use okf_jawn_contract::read::Selection;
+use okf_jawn_contract::read::{AssetRole, ReadItemRequest, ReadView, Selection};
 use okf_jawn_contract::source::{
     DeclaredOutcome, DeclaredSource, GetObjectRequest, GetSourcesRequest, SourceLocation,
     SourceLocator, SourceReference, UncitedReason,
@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{
-    Built, CARD_BODY, NOTE, World, alice, converted, digest, note, path, record, revision, scope,
-    source_card,
+    Built, CARD_BODY, NOTE, World, alice, converted, digest, image, note, path, record, revision,
+    scope, source_card,
 };
 
 const CARD: u128 = 10;
@@ -288,6 +288,107 @@ async fn get_object_serves_a_bounded_block_of_an_object_of_the_cited_revision() 
             .await,
     )?;
     assert_eq!(past.field.as_deref(), Some("/offset"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_object_fills_omitted_locations_and_refuses_supplied_ones_it_does_not_compute()
+-> TestResult {
+    let world = card_world()?;
+    let caller = alice(OperationName::GetObject, None)?;
+    let page = |page_no| SourceLocation::Direct {
+        locator: SourceLocator::Page { page_no },
+    };
+    // Omitted: the server fills them, and the read goes ahead.
+    let omitted = world
+        .service
+        .get_object(&caller, object_request(digest('a')?, None, Some(3))?)
+        .await?;
+    assert_eq!(STANDARD.decode(&omitted.data_base64)?, b"hel".to_vec());
+    // Present and equal to what the server computes: the whole record locates pages 1 and 2.
+    let mut matching = object_request(digest('a')?, None, Some(3))?;
+    matching.source.locations = vec![page(1), page(2)];
+    world.service.get_object(&caller, matching).await?;
+    // A made-up location is refused, and the object is not opened.
+    let original = digest('a')?;
+    let opens_of_original = |world: &World| -> Built<usize> {
+        Ok(world
+            .blobs
+            .opens()?
+            .iter()
+            .filter(|(opened, _, _)| *opened == original)
+            .count())
+    };
+    let before = opens_of_original(&world)?;
+    let mut made_up = object_request(digest('a')?, None, Some(3))?;
+    made_up.source.locations = vec![page(99)];
+    let refused = err_of(world.service.get_object(&caller, made_up).await)?;
+    assert_eq!(refused.code, ErrorCode::InvalidInput);
+    assert_eq!(refused.field.as_deref(), Some("/source/locations"));
+    assert_eq!(opens_of_original(&world)?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_object_accepts_the_citations_read_item_returns() -> TestResult {
+    let world = card_world()?;
+    world.blobs.put_object(
+        digest('b')?,
+        serde_json::to_vec(&record(vec![image('7', AssetRole::Picture, 2)?])?)?,
+    )?;
+    world
+        .blobs
+        .put_object(digest('7')?, b"png bytes".to_vec())?;
+    let reader = alice(OperationName::ReadItem, None)?;
+    let read = |view, selection| -> Built<ReadItemRequest> {
+        Ok(ReadItemRequest {
+            workspace_id: scope()?.workspace_id,
+            item_id: ItemId(Uuid::from_u128(CARD)),
+            at: At::Latest,
+            view,
+            selection,
+            max_bytes: 4096,
+            max_images: 4,
+            cursor: None,
+        })
+    };
+    let section = world
+        .service
+        .read_item(
+            &reader,
+            read(
+                ReadView::Text,
+                Selection::Section {
+                    heading: "Revenue".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+    let picture = world
+        .service
+        .read_item(&reader, read(ReadView::Multimodal, Selection::All)?)
+        .await?;
+    let media = some(picture.media.first(), "the picture")?;
+    let caller = alice(OperationName::GetObject, None)?;
+    for (source, object) in [
+        (section.source.clone(), digest('a')?),
+        (picture.source.clone(), digest('a')?),
+        (media.source.clone(), digest('7')?),
+    ] {
+        assert_ne!(source.locations, Vec::<SourceLocation>::new());
+        world
+            .service
+            .get_object(
+                &caller,
+                GetObjectRequest {
+                    source,
+                    object,
+                    offset: None,
+                    length: None,
+                },
+            )
+            .await?;
+    }
     Ok(())
 }
 
