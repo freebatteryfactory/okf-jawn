@@ -8,11 +8,16 @@
 //! Content is scripted by the test (`put_document`, `put_listing`), never computed from edits,
 //! so what a test asserts is what the application did with the ports. A port the operations
 //! under test do not call answers `Internal` ("not used by this test").
+//!
+//! The search index, the event log and the receipt store keep their documented idempotence
+//! (indexing a revision again is a no-op; an identical event or a receipt under the same
+//! mutation is not recorded twice), and a test may make the next call of one of them fail
+//! (`fail_next`, `fail_next_receipt`), as any port may, to show what a retry does.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -125,24 +130,29 @@ pub struct FakeBlobs {
     opens: Mutex<Vec<(Digest, u64, u64)>>,
 }
 
-/// `RecordStore` answering revision maps and derived objects, and keeping receipts.
+/// `RecordStore` answering revision maps and derived objects, and keeping receipts unique on
+/// their mutation.
 #[derive(Default)]
 pub struct FakeRecords {
     mappings: Mutex<BTreeMap<Revision, RevisionMapping>>,
     derived: Mutex<Vec<DerivedObject>>,
     receipts: Mutex<Vec<(Option<MutationId>, Receipt)>>,
+    fail_next_receipt: AtomicBool,
 }
 
-/// `SearchIndex` that records the revisions it was asked to index.
+/// `SearchIndex` that records each revision it indexed once: indexing it again is a no-op.
 #[derive(Default)]
 pub struct FakeSearch {
     indexed: Mutex<Vec<Revision>>,
+    fail_next: AtomicBool,
 }
 
-/// `EventLog` that keeps every append.
+/// `EventLog` that keeps every append, except an identical notification already appended
+/// under the same mutation.
 #[derive(Default)]
 pub struct FakeEvents {
     appended: Mutex<Vec<(EventScope, Option<MutationId>, NewEvent)>>,
+    fail_next: AtomicBool,
 }
 
 /// `DraftStore` with one draft per (item, editor).
@@ -398,15 +408,25 @@ impl FakeRecords {
     pub fn receipts(&self) -> Built<Vec<(Option<MutationId>, Receipt)>> {
         Ok(lock(&self.receipts)?.clone())
     }
+
+    /// Make the next `insert_receipt` fail, recording nothing, as a store that is down would.
+    pub fn fail_next_receipt(&self) {
+        self.fail_next_receipt.store(true, Ordering::SeqCst);
+    }
 }
 
 impl FakeSearch {
-    /// Every revision indexed, in order.
+    /// Every revision indexed, in the order first indexed.
     ///
     /// # Errors
     /// Returns when the lock is poisoned.
     pub fn indexed(&self) -> Built<Vec<Revision>> {
         Ok(lock(&self.indexed)?.clone())
+    }
+
+    /// Make the next `index_revision` fail, indexing nothing.
+    pub fn fail_next(&self) {
+        self.fail_next.store(true, Ordering::SeqCst);
     }
 }
 
@@ -417,6 +437,11 @@ impl FakeEvents {
     /// Returns when the lock is poisoned.
     pub fn appended(&self) -> Built<Vec<(EventScope, Option<MutationId>, NewEvent)>> {
         Ok(lock(&self.appended)?.clone())
+    }
+
+    /// Make the next `append` fail, appending nothing.
+    pub fn fail_next(&self) {
+        self.fail_next.store(true, Ordering::SeqCst);
     }
 }
 
@@ -800,6 +825,7 @@ impl RecordStore for FakeRecords {
         receipt: Receipt,
     ) -> PortFuture<'a, Receipt> {
         Box::pin(async move {
+            injected(&self.fail_next_receipt)?;
             let mut receipts = lock_api(&self.receipts)?;
             if let Some(prior) = receipts
                 .iter()
@@ -827,7 +853,11 @@ impl SearchIndex for FakeSearch {
         revision: Revision,
     ) -> PortFuture<'a, ()> {
         Box::pin(async move {
-            lock_api(&self.indexed)?.push(revision);
+            injected(&self.fail_next)?;
+            let mut indexed = lock_api(&self.indexed)?;
+            if !indexed.contains(&revision) {
+                indexed.push(revision);
+            }
             Ok(())
         })
     }
@@ -865,10 +895,22 @@ impl EventLog for FakeEvents {
         event: NewEvent,
     ) -> PortFuture<'a, Event> {
         Box::pin(async move {
+            injected(&self.fail_next)?;
             let mut appended = lock_api(&self.appended)?;
-            appended.push((scope.clone(), mutation_id, event.clone()));
+            let prior = appended.iter().position(|(held, under, notification)| {
+                mutation_id.is_some()
+                    && *under == mutation_id
+                    && held == scope
+                    && *notification == event
+            });
+            let position = if let Some(position) = prior {
+                position
+            } else {
+                appended.push((scope.clone(), mutation_id, event.clone()));
+                appended.len().saturating_sub(1)
+            };
             Ok(Event {
-                id: appended.len().to_string(),
+                id: position.saturating_add(1).to_string(),
                 workspace_id: match scope {
                     EventScope::Tenant(_) => None,
                     EventScope::Workspace(scope) => Some(scope.workspace_id),
@@ -1552,6 +1594,14 @@ fn metadata(write: &DraftWrite) -> Result<Draft, okf_jawn_contract::identity::Id
         content_digest: write.content_digest.clone(),
         saved_at: instant()?,
     })
+}
+
+/// Fail once when a test asked for it, then behave again.
+fn injected(fail_next: &AtomicBool) -> Result<(), ApiError> {
+    if fail_next.swap(false, Ordering::SeqCst) {
+        return Err(ApiError::new(ErrorCode::Internal, "injected failure"));
+    }
+    Ok(())
 }
 
 fn internal(error: impl std::fmt::Display) -> ApiError {

@@ -29,6 +29,9 @@ use crate::fixture::{
     served_digest,
 };
 
+/// Make one port call of a write fail.
+type InjectFailure = fn(&World);
+
 fn key() -> IdempotencyKey {
     IdempotencyKey(Uuid::from_u128(77))
 }
@@ -635,6 +638,46 @@ async fn a_resumed_write_answers_the_first_attempts_revision_and_receipt() -> Te
     assert_eq!(again.receipt_id, first.receipt_id);
     assert_eq!(world.versions.commits()?.len(), 1);
     assert_eq!(world.records.receipts()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_write_that_fails_after_its_commit_completes_on_retry() -> TestResult {
+    let failures: [(&str, InjectFailure); 3] = [
+        ("indexing", |world| world.search.fail_next()),
+        ("the event", |world| world.events.fail_next()),
+        ("the receipt", |world| world.records.fail_next_receipt()),
+    ];
+    for (step, fail) in failures {
+        let world = World::new()?;
+        note_at(&world, &['a'])?;
+        world.versions.queue_revision(revision('b')?)?;
+        fail(&world);
+        let caller = alice(OperationName::MoveItem, Some(mutation(1)))?;
+        let failed = err_of(world.service.move_item(&caller, move_request()?).await)?;
+        assert_eq!(failed.code, ErrorCode::Internal, "{step}");
+        assert_eq!(world.versions.commits()?.len(), 1, "{step}: committed");
+        // The retry under the same idempotency key re-runs the handler.
+        let retried = world.service.move_item(&caller, move_request()?).await?;
+        assert_eq!(retried.revision, revision('b')?, "{step}");
+        assert_eq!(
+            world.versions.commits()?.len(),
+            1,
+            "{step}: no second commit"
+        );
+        assert_eq!(world.search.indexed()?, vec![revision('b')?], "{step}");
+        let events = world.events.appended()?;
+        assert_eq!(events.len(), 1, "{step}: one event");
+        let (_, under, event) = some(events.first(), "the event")?;
+        assert_eq!(*under, Some(mutation(1)), "{step}");
+        assert_eq!(event.kind, EventKind::Changed, "{step}");
+        assert_eq!(event.revision, Some(revision('b')?), "{step}");
+        let receipts = world.records.receipts()?;
+        assert_eq!(receipts.len(), 1, "{step}: one receipt");
+        let (under, receipt) = some(receipts.first(), "the receipt")?;
+        assert_eq!(*under, Some(mutation(1)), "{step}");
+        assert_eq!(receipt.id, retried.receipt_id, "{step}");
+    }
     Ok(())
 }
 
