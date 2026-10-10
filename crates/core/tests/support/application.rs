@@ -54,7 +54,7 @@ use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, Conf
 use okf_jawn_core::context::{Attempt, OperationContext, TenantGrant, WorkspaceGrant};
 use okf_jawn_core::conversion::{
     Conversion, ConversionInput, ConversionRecord, Converter, ConverterLimits, LineLocation,
-    PixelSize, RetainedAsset, WindowExport,
+    PageCount, PixelSize, RetainedAsset, WindowExport,
 };
 use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, InstallationIdentity, NewConnector, SessionRecord,
@@ -1173,7 +1173,7 @@ impl Converter for Unused {
         &'a self,
         _source: &'a LocalSource,
         _file_name: &'a str,
-    ) -> PortFuture<'a, Option<u32>> {
+    ) -> PortFuture<'a, PageCount> {
         unused()
     }
     fn convert(&self, _input: ConversionInput) -> PortFuture<'_, Conversion> {

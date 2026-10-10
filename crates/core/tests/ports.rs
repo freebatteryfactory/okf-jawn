@@ -33,7 +33,7 @@ use okf_jawn_contract::workspace::{RestoreReport, Workspace};
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::conversion::{
     ConversionInput, ConversionSettings, ConversionStatus, ConvertedAsset, Converter,
-    ConverterLimits, OcrPolicy, PixelSize, RetainedAsset,
+    ConverterLimits, OcrPolicy, PageCount, PixelSize, RetainedAsset,
 };
 use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, InstallationIdentity, NewConnector, SessionRecord, secret_hash,
@@ -322,10 +322,14 @@ async fn converter_calls(
 ) -> Result<ConversionStatus, ApiError> {
     let pages = converter.page_count(&source, "report.pdf").await?;
     let ConverterLimits { window_pages, .. } = converter.limits();
-    let window = pages.map(|count| PageRange {
-        start: 1,
-        end: count.min(window_pages),
-    });
+    let window = match pages {
+        PageCount::Pages(count) => Some(PageRange {
+            start: 1,
+            end: count.min(window_pages),
+        }),
+        PageCount::Whole => None,
+        PageCount::Failed(conversion) => return Ok(conversion.status),
+    };
     let conversion = converter
         .convert(ConversionInput {
             source,

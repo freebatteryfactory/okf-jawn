@@ -27,7 +27,7 @@ use okf_jawn_contract::search::{GetGraphResponse, GetLinksResponse, SearchRespon
 use okf_jawn_contract::workspace::RestoreReport;
 use okf_jawn_core::conversion::{
     Conversion, ConversionInput, ConversionStatus, ConvertedDocument, Converter, ConverterLimits,
-    WindowCoverage,
+    PageCount, WindowCoverage,
 };
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
@@ -122,8 +122,8 @@ pub struct FakeConverter {
     pub on_page_count: Mutex<Option<PageCountHook>>,
     /// Conversions that never ended whose future was dropped.
     pub dropped: Arc<AtomicUsize>,
-    /// How the page count ended without a reply, as `DoclingConverter` reports it: no pages,
-    /// and the whole conversion that follows is that failure.
+    /// How the page count ended without a reply, as `DoclingConverter` reports it: the count
+    /// answers the document's failed whole conversion (`PageCount::Failed`).
     pub count_failed: Mutex<Option<FailureReason>>,
     /// Windows converted so far; each export names its run, so a conversion repeated on a
     /// later attempt retains different outputs from the first.
@@ -975,9 +975,9 @@ impl BlobStore for FakeBlobs {
 impl Converter for FakeConverter {
     fn page_count<'a>(
         &'a self,
-        _source: &'a LocalSource,
+        source: &'a LocalSource,
         _file_name: &'a str,
-    ) -> PortFuture<'a, Option<u32>> {
+    ) -> PortFuture<'a, PageCount> {
         let pages = self.pages;
         Box::pin(async move {
             let hang = self
@@ -990,10 +990,29 @@ impl Converter for FakeConverter {
                 let _count = DropCount(Arc::clone(&self.dropped));
                 std::future::pending::<()>().await;
             }
-            if self.count_failed.lock().map_err(|_| poisoned())?.is_some() {
-                return Ok(None);
+            let count_failed = self.count_failed.lock().map_err(|_| poisoned())?.clone();
+            if let Some(reason) = count_failed {
+                return Ok(PageCount::Failed(Box::new(Conversion {
+                    source_digest: source.object.digest.clone(),
+                    converter: ConverterIdentity {
+                        name: "docling".to_owned(),
+                        version: "2.3.0".to_owned(),
+                        packages: Vec::new(),
+                        settings: okf_jawn_contract::extraction::ConversionSettings::default(),
+                        models: Vec::new(),
+                        page_window: None,
+                    },
+                    status: ConversionStatus::Failure(reason),
+                    document: None,
+                    coverage: None,
+                    issues: vec![okf_jawn_contract::extraction::ConverterIssue {
+                        component_type: "worker".to_owned(),
+                        module_name: "okf-jawn-convert".to_owned(),
+                        error_message: "the page count reached its time bound".to_owned(),
+                    }],
+                })));
             }
-            Ok(pages)
+            Ok(pages.map_or(PageCount::Whole, PageCount::Pages))
         })
     }
     fn convert(&self, input: ConversionInput) -> PortFuture<'_, Conversion> {
@@ -1021,21 +1040,6 @@ impl Converter for FakeConverter {
                 page_window: input.window.as_ref().map(|_| self.limits.window_pages),
             };
             let source_digest = input.source.object.digest.clone();
-            let count_failed = self.count_failed.lock().map_err(|_| poisoned())?.clone();
-            if let (None, Some(reason)) = (input.window.as_ref(), count_failed) {
-                return Ok(Conversion {
-                    source_digest,
-                    converter,
-                    status: ConversionStatus::Failure(reason),
-                    document: None,
-                    coverage: None,
-                    issues: vec![okf_jawn_contract::extraction::ConverterIssue {
-                        component_type: "worker".to_owned(),
-                        module_name: "okf-jawn-convert".to_owned(),
-                        error_message: "the page count reached its time bound".to_owned(),
-                    }],
-                });
-            }
             let start = input.window.as_ref().map_or(1, |window| window.start);
             if self.capped.contains(&start) {
                 return Ok(Conversion {

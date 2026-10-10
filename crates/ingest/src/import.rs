@@ -78,7 +78,7 @@ use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::source::{SourceAppearance, SourceName};
 use okf_jawn_core::conversion::{
-    Conversion, ConversionInput, ConversionRecord, ConvertedDocument, RetainedAsset,
+    Conversion, ConversionInput, ConversionRecord, ConvertedDocument, PageCount, RetainedAsset,
 };
 use okf_jawn_core::items::without_header;
 use okf_jawn_core::jobs::ClaimedJob;
@@ -506,7 +506,8 @@ pub(crate) async fn redigest(
 }
 
 /// Convert one source window by window and retain what it produced; `None` when the job was
-/// cancelled on the way.
+/// cancelled on the way. A page count that itself ended the document (`PageCount::Failed`) is
+/// recorded as the source's whole conversion, and no window is converted.
 async fn convert_document(
     ports: &HandlerPorts,
     claimed: &ClaimedJob,
@@ -528,7 +529,18 @@ async fn convert_document(
     else {
         return Ok(None);
     };
-    let page_count = page_count.filter(|pages| *pages > 0);
+    let (page_count, counted) = match page_count {
+        PageCount::Pages(pages) if pages > 0 => (Some(pages), None),
+        PageCount::Pages(_) | PageCount::Whole => (None, None),
+        PageCount::Failed(conversion) => (None, Some(*conversion)),
+    };
+    if let Some(conversion) = counted {
+        let identity = conversion.converter.clone();
+        let outcome = window_outcome(ports, scope, None, conversion).await?;
+        return assembled(ports, scope, identity, None, vec![outcome])
+            .await
+            .map(Some);
+    }
     let windows: Vec<Option<PageRange>> = match page_count {
         Some(pages) => windows_of(pages, limits.window_pages)
             .into_iter()
@@ -569,6 +581,19 @@ async fn convert_document(
         }
     }
     let identity = identity.ok_or_else(|| fault("a conversion ran at least one window"))?;
+    assembled(ports, scope, identity, page_count, outcomes)
+        .await
+        .map(Some)
+}
+
+/// The windows of one source assembled into its record, and the record retained.
+async fn assembled(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    identity: ConverterIdentity,
+    page_count: Option<u32>,
+    outcomes: Vec<WindowOutcome>,
+) -> Result<Converted, ApiError> {
     let assembled = assemble(identity.clone(), page_count, outcomes)?;
     let (record, outputs) = match &assembled.record {
         Some(record) => {
@@ -581,13 +606,13 @@ async fn convert_document(
         None => (None, Vec::new()),
     };
     let converter = (assembled.outcome != ConversionOutcome::Unsupported).then_some(identity);
-    Ok(Some(Converted {
+    Ok(Converted {
         assembled,
         converter,
         page_count,
         record,
         outputs,
-    }))
+    })
 }
 
 /// Run `work` while renewing the lease every `heartbeat`; `None` when the job was found

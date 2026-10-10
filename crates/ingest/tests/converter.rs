@@ -810,7 +810,7 @@ mod conversion_child {
     use okf_jawn_contract::extraction::{ConversionSettings, FailureReason};
     use okf_jawn_contract::read::Selection;
     use okf_jawn_core::conversion::{
-        ConversionInput, ConversionStatus, Converter, ConverterLimits,
+        Conversion, ConversionInput, ConversionStatus, Converter, ConverterLimits, PageCount,
     };
     use okf_jawn_core::storage::{LocalSource, ObjectInfo};
     use okf_jawn_ingest::cap::{ALLOCATION_FAILURE_MARKER, MEMORY_LIMIT_ENV};
@@ -865,7 +865,10 @@ mod conversion_child {
         let bytes = b"# Guide\n\nIntro.\n\n## Setup\n\nSteps.\n\n# Appendix\n\nMore.\n";
         let source = retained(store.path(), bytes)?;
         let converter = converter(PathBuf::from(env!("CARGO_BIN_EXE_okf-jawn-convert")));
-        assert_eq!(converter.page_count(&source, "guide.md").await?, None);
+        assert!(matches!(
+            converter.page_count(&source, "guide.md").await?,
+            PageCount::Whole
+        ));
         let conversion = converter
             .convert(input(source.clone(), "guide.md", output.path()))
             .await?;
@@ -1060,6 +1063,15 @@ mod conversion_child {
         Ok(())
     }
 
+    /// The failed whole conversion a page count answered with, or why it answered otherwise.
+    fn failed_count(count: PageCount) -> Result<Conversion, Box<dyn std::error::Error>> {
+        match count {
+            PageCount::Failed(conversion) => Ok(*conversion),
+            PageCount::Pages(pages) => Err(format!("the count answered {pages} pages").into()),
+            PageCount::Whole => Err("the count answered a format converted whole".into()),
+        }
+    }
+
     #[tokio::test]
     async fn a_page_count_that_reaches_the_cap_is_the_documents_failure_not_a_fault() -> TestResult
     {
@@ -1078,27 +1090,33 @@ mod conversion_child {
                 memory_limit_bytes: CAP,
             },
         });
-        // Not a worker fault: the count gives no pages, and the import converts the document
-        // whole. (That conversion of a PDF names the pinned models in its identity, which this
-        // test cannot load; the next test shows what it returns, with a format that needs none.)
-        assert_eq!(converter.page_count(&source, "large.pdf").await?, None);
+        // Not a worker fault: the count answers the document's failed whole conversion, at the
+        // cap, with the count's own identity (no models: the count child loads none).
+        let conversion = failed_count(converter.page_count(&source, "large.pdf").await?)?;
+        assert_eq!(
+            conversion.status,
+            ConversionStatus::Failure(FailureReason::MemoryLimit {
+                limit_bytes: CAP.to_string()
+            }),
+            "{:?}",
+            conversion.issues
+        );
+        assert_eq!(conversion.source_digest, source.object.digest);
+        assert!(conversion.document.is_none());
+        assert_eq!(conversion.converter.models, Vec::new());
+        assert_eq!(conversion.converter.page_window, None);
         Ok(())
     }
 
     #[tokio::test]
-    async fn a_failed_page_count_is_the_whole_conversion_and_starts_no_second_child() -> TestResult
-    {
+    async fn a_page_count_that_ends_without_a_reply_answers_the_failed_whole_conversion()
+    -> TestResult {
         // This test binary as the child: it takes the request path as a test filter, runs no
         // test, and exits 0 without writing a reply, so the count ends as a crash.
         let store = tempfile::tempdir()?;
         let source = retained(store.path(), b"# Note\n")?;
         let converter = converter(std::env::current_exe()?);
-        assert_eq!(converter.page_count(&source, "note.md").await?, None);
-        // The whole conversion that follows records the count's failure without a child.
-        let output = tempfile::tempdir()?;
-        let conversion = converter
-            .convert(input(source.clone(), "note.md", output.path()))
-            .await?;
+        let conversion = failed_count(converter.page_count(&source, "note.md").await?)?;
         assert_eq!(
             conversion.status,
             ConversionStatus::Failure(FailureReason::ConverterCrashed)
@@ -1109,11 +1127,8 @@ mod conversion_child {
             "worker"
         );
         assert_eq!(conversion.source_digest, source.object.digest);
-        assert!(
-            !output.path().join(REQUEST_FILE).exists(),
-            "a child was started for the whole document"
-        );
-        // The verdict is taken once: a later conversion runs its own child.
+        // Nothing is kept between calls: a whole conversion of the same original runs its own
+        // child.
         let later = tempfile::tempdir()?;
         let _again = converter
             .convert(input(source, "note.md", later.path()))
@@ -1199,12 +1214,12 @@ mod conversion_child {
         let output = tempfile::tempdir()?;
         let source = retained(store.path(), &bytes)?;
         let converter = converter(PathBuf::from(env!("CARGO_BIN_EXE_okf-jawn-convert")));
-        let pages = some(
-            converter
-                .page_count(&source, "born_digital_text.pdf")
-                .await?,
-            "the page count",
-        )?;
+        let PageCount::Pages(pages) = converter
+            .page_count(&source, "born_digital_text.pdf")
+            .await?
+        else {
+            return Err("the PDF's pages were not counted".into());
+        };
         let window = okf_jawn_contract::common::PageRange {
             start: 1,
             end: pages.min(LIMITS.window_pages),

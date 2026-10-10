@@ -1325,7 +1325,8 @@ mod job_handler {
         assert_ne!(*issues, Vec::new());
         assert_eq!(card.appearance.extraction.page_count, None);
         assert_eq!(card.appearance.extraction.text_origin, TextOrigin::None);
-        assert_eq!(windows(&world)?, [None]);
+        // The count's failure is the card's conversion: no second child converts anything.
+        assert_eq!(windows(&world)?, Vec::<Option<PageRange>>::new());
         Ok(())
     }
 

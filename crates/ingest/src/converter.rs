@@ -10,13 +10,12 @@
 //!
 //! The page count runs in a capped child too. One that ends without a reply is classified as a
 //! window's child is (the cap, the time bound, a crash), and that is a property of the
-//! document, not a worker fault: `page_count` answers `None` (the `Converter` contract's
-//! "converted whole"), and the whole conversion of that original that follows returns the same
-//! `Failure(reason)` without starting a child, so the import records it in the card and the
-//! cost that ended the count is not paid again. Only the supervisor's own faults (a temporary
-//! directory refused, a child that cannot be started) are errors. The verdict is kept per
-//! original and file name until that conversion takes it; a later count of the same original
-//! replaces or clears it.
+//! document, not a worker fault: `page_count` answers `PageCount::Failed` with the failed
+//! whole-document `Conversion` (R-I9), which the import records in the card without starting
+//! a second child, so the cost that ended the count is not paid again. Nothing is kept between
+//! calls. That conversion's identity is the count's own: the pinned packages, the default
+//! settings and no models, since the count child loads none. Only the supervisor's own faults
+//! (a temporary directory refused, a child that cannot be started) are errors.
 //!
 //! `read_window` is pure over the child's files, so it is tested without models:
 //! - the window's coverage lists exactly the pages it converted: a page missing from the
@@ -41,7 +40,7 @@
 //! run is not yet paired with its export item's box), and no page render or picture asset is
 //! retained yet (`ConvertedDocument::assets` is empty).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -56,8 +55,9 @@ use okf_jawn_contract::extraction::{
 use okf_jawn_contract::identity::Digest;
 use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
 use okf_jawn_core::conversion::{
-    Conversion, ConversionInput, ConversionStatus, ConvertedCell, ConvertedDocument,
-    ConvertedTable, Converter, ConverterLimits, LineLocation, WindowCoverage,
+    Conversion, ConversionInput, ConversionSettings, ConversionStatus, ConvertedCell,
+    ConvertedDocument, ConvertedTable, Converter, ConverterLimits, LineLocation, PageCount,
+    WindowCoverage,
 };
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::LocalSource;
@@ -91,21 +91,6 @@ pub struct DoclingConverter {
     config: ConverterConfig,
     /// The hashed models and native libraries, read once.
     models: OnceCell<Vec<ModelIdentity>>,
-    /// Page counts that ended without a reply, by original and file name, until the whole
-    /// conversion that follows takes them.
-    failed_counts: std::sync::Mutex<BTreeMap<CountKey, FailedCount>>,
-}
-
-/// An original's digest and the file name it is converted under.
-type CountKey = (String, String);
-
-/// How a page-count child ended without a reply.
-#[derive(Debug, Clone)]
-struct FailedCount {
-    /// The verdict, classified as a window's.
-    reason: FailureReason,
-    /// The child's last stderr line.
-    message: String,
 }
 
 /// The pinned conversion packages, generated from the lockfile.
@@ -154,7 +139,6 @@ impl DoclingConverter {
         Self {
             config,
             models: OnceCell::const_new(),
-            failed_counts: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -178,22 +162,11 @@ impl DoclingConverter {
         } else {
             Vec::new()
         };
-        let version = packages
-            .iter()
-            .find(|package| package.name == "docling")
-            .map(|package| package.version.clone())
-            .ok_or_else(|| fault("the pinned packages do not name docling"))?;
-        Ok(ConverterIdentity {
-            name: "docling".to_owned(),
-            version,
-            packages,
-            settings: input.settings.clone(),
-            models,
-            page_window: input
-                .window
-                .as_ref()
-                .map(|_| self.config.limits.window_pages),
-        })
+        let page_window = input
+            .window
+            .as_ref()
+            .map(|_| self.config.limits.window_pages);
+        identity_of(packages, input.settings.clone(), models, page_window)
     }
 
     /// Run one request in a capped child and return how it ended and its reply, if any.
@@ -230,19 +203,6 @@ impl DoclingConverter {
     async fn convert_window(&self, input: ConversionInput) -> Result<Conversion, ApiError> {
         let converter = self.identity(&input).await?;
         let source_digest = input.source.object.digest.clone();
-        if input.window.is_none()
-            && let Some(failed) =
-                self.take_failed_count(&count_key(&input.source, &input.file_name))?
-        {
-            // The count already ended at the cap, the time bound or a crash: converting the
-            // whole document would only pay that cost again.
-            return Ok(failed_conversion(
-                source_digest,
-                converter,
-                failed.reason,
-                failed.message,
-            ));
-        }
         let request = Request {
             task: Task::Convert,
             source: input.source.path.clone(),
@@ -292,60 +252,41 @@ impl DoclingConverter {
         &self,
         source: &LocalSource,
         file_name: &str,
-    ) -> Result<Option<u32>, ApiError> {
+    ) -> Result<PageCount, ApiError> {
         let directory = tempfile::tempdir()
             .map_err(|error| fault(&format!("a page-count directory was refused: {error}")))?;
         let request = Request {
             task: Task::PageCount,
             source: source.path.clone(),
             file_name: file_name.to_owned(),
-            settings: okf_jawn_contract::extraction::ConversionSettings::default(),
+            settings: ConversionSettings::default(),
             window: None,
             timeout: PAGE_COUNT_TIME_LIMIT,
         };
         let (verdict, reply, stderr) = self
             .run_child(directory.path(), &request, PAGE_COUNT_TIME_LIMIT)
             .await?;
-        let key = count_key(source, file_name);
-        let mut failed_counts = self.failed_counts()?;
         match (verdict, reply) {
             // A count that failed (a damaged PDF) converts the document whole, where the
             // converter records why it cannot be read.
-            (_, Some(reply)) => {
-                let _earlier = failed_counts.remove(&key);
-                Ok(reply.page_count)
-            }
-            // The count ended at the cap, the time bound or a crash: the whole conversion that
-            // follows records that failure without starting a child.
+            (_, Some(reply)) => Ok(reply.page_count.map_or(PageCount::Whole, PageCount::Pages)),
+            // The count ended at the cap, the time bound or a crash: that is the document's
+            // failed conversion, recorded without a second child. Its identity is the count's,
+            // which loads no models.
             (ChildVerdict::Failed(reason), None) => {
-                let _earlier = failed_counts.insert(
-                    key,
-                    FailedCount {
-                        reason,
-                        message: last_line(&stderr),
-                    },
-                );
-                Ok(None)
+                let converter = identity_of(packages()?, request.settings, Vec::new(), None)?;
+                Ok(PageCount::Failed(Box::new(failed_conversion(
+                    source.object.digest.clone(),
+                    converter,
+                    reason,
+                    last_line(&stderr),
+                ))))
             }
             (ChildVerdict::Reported, None) => Err(fault(&format!(
                 "the page count child ended without a reply: {}",
                 last_line(&stderr)
             ))),
         }
-    }
-
-    /// The page counts that ended without a reply.
-    fn failed_counts(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<CountKey, FailedCount>>, ApiError> {
-        self.failed_counts
-            .lock()
-            .map_err(|_| fault("the failed page counts lock is poisoned"))
-    }
-
-    /// Take how the page count of an original ended, when it ended without a reply.
-    fn take_failed_count(&self, key: &CountKey) -> Result<Option<FailedCount>, ApiError> {
-        Ok(self.failed_counts()?.remove(key))
     }
 }
 
@@ -354,7 +295,7 @@ impl Converter for DoclingConverter {
         &'a self,
         source: &'a LocalSource,
         file_name: &'a str,
-    ) -> PortFuture<'a, Option<u32>> {
+    ) -> PortFuture<'a, PageCount> {
         Box::pin(self.count_pages(source, file_name))
     }
 
@@ -449,12 +390,27 @@ pub fn read_window(
     Ok((document, coverage))
 }
 
-/// The key a page count's verdict is kept under: the original's digest and its file name.
-fn count_key(source: &LocalSource, file_name: &str) -> CountKey {
-    (
-        source.object.digest.as_str().to_owned(),
-        file_name.to_owned(),
-    )
+/// The identity of a conversion run with the pinned `packages`, `settings` and `models`, in
+/// windows of `page_window` pages or whole.
+fn identity_of(
+    packages: Vec<ConverterPackage>,
+    settings: ConversionSettings,
+    models: Vec<ModelIdentity>,
+    page_window: Option<u32>,
+) -> Result<ConverterIdentity, ApiError> {
+    let version = packages
+        .iter()
+        .find(|package| package.name == "docling")
+        .map(|package| package.version.clone())
+        .ok_or_else(|| fault("the pinned packages do not name docling"))?;
+    Ok(ConverterIdentity {
+        name: "docling".to_owned(),
+        version,
+        packages,
+        settings,
+        models,
+        page_window,
+    })
 }
 
 /// A window, or a whole document, whose child ended without a reply, for `reason`.

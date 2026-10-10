@@ -273,15 +273,34 @@ pub struct ConversionRecord {
     pub warnings: Vec<ExtractionWarning>,
 }
 
+/// What a page count found.
+#[derive(Debug, Clone)]
+pub enum PageCount {
+    /// A paginated original with this many pages (1 for an image).
+    Pages(u32),
+    /// A format converted whole.
+    Whole,
+    /// The count itself ended the document (its cap, time bound or crash): the failed
+    /// whole-document `Conversion` to record. No second child runs.
+    Failed(Box<Conversion>),
+}
+
 /// Bounded worker execution backed by the selected conversion library.
 pub trait Converter: Send + Sync {
-    /// Page count of a paginated original (docling `pdf_page_count`; 1 for an image); `None`
-    /// for a format converted whole. Read in the worker, from the retained bytes.
+    /// What a page count found, read in the worker from the retained bytes (docling
+    /// `pdf_page_count`).
+    ///
+    /// `Pages` for a paginated original (1 for an image); `Whole` for a format converted
+    /// whole. `Failed` when the count itself ended the document (its cap, time bound or
+    /// crash): the failed whole-document `Conversion` to record, and no second child runs. A
+    /// count that answers that the document cannot be counted (a damaged PDF) is `Whole`, so
+    /// the conversion records why it cannot be read. An error means the worker itself is at
+    /// fault.
     fn page_count<'a>(
         &'a self,
         source: &'a LocalSource,
         file_name: &'a str,
-    ) -> PortFuture<'a, Option<u32>>;
+    ) -> PortFuture<'a, PageCount>;
 
     /// Convert one window in a child process under `limits().memory_limit_bytes`.
     ///
