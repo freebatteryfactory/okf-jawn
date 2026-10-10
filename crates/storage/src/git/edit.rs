@@ -6,12 +6,12 @@
 //! and the server's restores (`RestoreItem`, `RestorePaths`, `RestoreWorkspace`) write the
 //! files an earlier revision holds without that refusal. An item's companion files (its source
 //! appearance, supplied text and corrections folder under `.okf/`) go with it: `DeleteItem`
-//! removes them and `RestoreItem` sets them to `from`'s state. Moves rewrite the links that point at the item (`okf_core::move_concept`). An item, a move
-//! or a folder may not land on a reserved name (`.okf/`, `index.md`, `log.md`) in any letter
-//! case: it is refused naming the path before anything is written. After the edits, no two
-//! files may share a path collision key, the folder indexes are regenerated and the change is
-//! appended to `log.md`. Conformance is the `CandidateCheck`'s decision, not this
-//! module's.
+//! removes them and `RestoreItem` sets them to `from`'s state. Moves rewrite the links that
+//! point at the item (`okf_core::move_concept`). An item, a move or a folder may not land on a
+//! reserved name (`.okf/`, `index.md`, `log.md`) in any letter case: it is refused naming the
+//! path before anything is written. After the edits, no two files may share a path collision
+//! key, the folder indexes are regenerated and the change is appended to `log.md`.
+//! Conformance is the `CandidateCheck`'s decision, not this module's.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
