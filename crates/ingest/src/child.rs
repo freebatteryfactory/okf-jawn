@@ -1,7 +1,8 @@
 //! The body of the conversion child (`bin/okf-jawn-convert`): it runs one `protocol::Request`
 //! inside the capped child process and writes its files and `protocol::RESULT_FILE`.
 //!
-//! - `Task::PageCount` reads a PDF's page count with pdfium (`docling::pdf_page_count`); an
+//! - `Task::PageCount` reads a PDF's page count with docling's pure-Rust reader
+//!   (`docling::pdf_page_count`; this build has no pdfium); an
 //!   image is one page; any other format is converted whole and has none.
 //! - `Task::Convert` builds `DocumentConverter` from `ConversionSettings`, the window
 //!   (`page_range`) and the time budget (`document_timeout`), and opens the source with

@@ -32,6 +32,7 @@
 //! retained yet (`ConvertedDocument::assets` is empty).
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -97,6 +98,29 @@ const PDFIUM_STAGE: &str = "pdfium";
 /// The hard time bound of a page count.
 pub const PAGE_COUNT_TIME_LIMIT: Duration = Duration::from_secs(120);
 
+/// The docling variables the child inherits: exactly those the asset resolution behind
+/// `docling::model_inventory` reads (the model files, their int8 or fp32 choice and the
+/// execution provider that sways it, the OCR language that picks its model), so the child
+/// loads the files whose hashes the converter identity names. Every other `DOCLING_` variable
+/// (the renderer, `DOCLING_RS_RENDERER` and its `DOCLING_PARSE_RENDER_LIB` native library,
+/// thread counts, debug dumps, network fetches) is removed from the child's environment (review
+/// N6): nothing the identity does not record changes what the child does.
+pub const CHILD_INHERITED_DOCLING_ENV: [&str; 10] = [
+    "DOCLING_RS_MODELS_DIR",
+    "DOCLING_LAYOUT_ONNX",
+    "DOCLING_TABLEFORMER_ENCODER",
+    "DOCLING_TABLEFORMER_DECODER",
+    "DOCLING_TABLEFORMER_BBOX",
+    "DOCLING_OCR_REC_ONNX",
+    "DOCLING_OCR_DICT",
+    "DOCLING_RS_OCR_LANG",
+    "DOCLING_RS_FP32",
+    "DOCLING_RS_EP",
+];
+
+/// The prefix of the variables docling reads.
+const DOCLING_ENV_PREFIX: &str = "DOCLING_";
+
 impl DoclingConverter {
     /// A converter that runs `config.child` under `config.limits`.
     #[must_use]
@@ -156,7 +180,7 @@ impl DoclingConverter {
         // Small files, read and written in place: the workspace tokio has no `fs` feature.
         std::fs::write(&request_path, request.encode()?)
             .map_err(|error| fault(&format!("the request could not be written: {error}")))?;
-        let mut command = tokio::process::Command::new(&self.config.child);
+        let mut command = child_command(&self.config.child, std::env::vars_os());
         let _configured = command.arg(&request_path);
         let limit = self.config.limits.memory_limit_bytes;
         let child = spawn_capped(command, limit)?;
@@ -276,6 +300,25 @@ impl Converter for DoclingConverter {
     fn limits(&self) -> ConverterLimits {
         self.config.limits
     }
+}
+
+/// The conversion child's command: `program`, with every `DOCLING_` variable of `environment`
+/// (the supervisor's own) removed except those in `CHILD_INHERITED_DOCLING_ENV`.
+#[must_use]
+pub fn child_command(
+    program: &Path,
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    for (name, _value) in environment {
+        let upper = name.to_string_lossy().to_ascii_uppercase();
+        if upper.starts_with(DOCLING_ENV_PREFIX)
+            && !CHILD_INHERITED_DOCLING_ENV.contains(&upper.as_str())
+        {
+            let _configured = command.env_remove(&name);
+        }
+    }
+    command
 }
 
 /// Read back a window the child converted: the document and, for a paginated window, its

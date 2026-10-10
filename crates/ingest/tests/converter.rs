@@ -3,7 +3,8 @@
 //!
 //! Every test here but the last needs no model: a Markdown original converts through the real
 //! child with docling's pure-Rust Markdown backend. The last converts a PDF with the pinned
-//! models and pdfium, so it is ignored by default and runs locally only:
+//! models (no pdfium: this build renders and counts pages in pure Rust), so it is ignored by
+//! default and runs locally only:
 //! `DOCLING_RS_MODELS_DIR=<pinned models> cargo test -p okf-jawn-ingest --features runtime
 //! --test converter -- --ignored`.
 #![cfg(feature = "runtime")]
@@ -802,6 +803,7 @@ mod partial_windows {
 }
 
 mod conversion_child {
+    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -812,7 +814,9 @@ mod conversion_child {
     };
     use okf_jawn_core::storage::{LocalSource, ObjectInfo};
     use okf_jawn_ingest::cap::{ALLOCATION_FAILURE_MARKER, MEMORY_LIMIT_ENV};
-    use okf_jawn_ingest::converter::{ConverterConfig, DoclingConverter};
+    use okf_jawn_ingest::converter::{
+        CHILD_INHERITED_DOCLING_ENV, ConverterConfig, DoclingConverter, child_command,
+    };
     use okf_jawn_ingest::protocol::{REQUEST_FILE, RESULT_FILE, Request, Task};
     use okf_jawn_ingest::record::sha256_digest;
 
@@ -904,6 +908,49 @@ mod conversion_child {
         assert_eq!(
             (guide.0.as_str(), guide.1, guide.2),
             ("Guide", 1, appendix.1 - 1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_child_inherits_only_the_docling_variables_that_select_its_assets() -> TestResult {
+        let environment = [
+            ("DOCLING_RS_RENDERER", "docling-parse"),
+            ("DOCLING_PARSE_RENDER_LIB", "/opt/dparse"),
+            ("docling_rs_pdf_threads", "64"),
+            ("DOCLING_RS_MODELS_DIR", "/models"),
+            ("DOCLING_LAYOUT_ONNX", "/models/layout.onnx"),
+            ("PATH", "/usr/bin"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        let command = child_command(Path::new("okf-jawn-convert"), environment);
+        let mut removed: Vec<String> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().to_ascii_uppercase())
+            .collect();
+        removed.sort();
+        assert_eq!(
+            removed,
+            [
+                "DOCLING_PARSE_RENDER_LIB",
+                "DOCLING_RS_PDF_THREADS",
+                "DOCLING_RS_RENDERER"
+            ]
+        );
+        // The asset locations and everything that is not docling's are inherited untouched.
+        assert!(
+            command
+                .as_std()
+                .get_envs()
+                .all(|(_, value)| value.is_none()),
+            "the command sets no variable of its own"
+        );
+        assert!(CHILD_INHERITED_DOCLING_ENV.contains(&"DOCLING_RS_MODELS_DIR"));
+        assert_eq!(
+            some(command.as_std().get_program().to_str(), "the program")?,
+            "okf-jawn-convert"
         );
         Ok(())
     }
@@ -1049,7 +1096,7 @@ mod conversion_child {
     }
 
     #[tokio::test]
-    #[ignore = "needs the pinned docling models and pdfium; run locally with --ignored"]
+    #[ignore = "needs the pinned docling models; run locally with --ignored"]
     async fn a_pdf_window_converts_with_the_pinned_models() -> TestResult {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/documents");
         let bytes = std::fs::read(root.join("born_digital_text.pdf"))?;
