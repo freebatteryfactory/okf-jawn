@@ -2,6 +2,8 @@
 //! caller's own drafts in one commit and is blocked only by changes to a selected item; Rewind
 //! restores the target's state in a new commit.
 
+use std::collections::BTreeMap;
+
 use okf_jawn_contract::common::{PageRequest, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::EventKind;
@@ -13,8 +15,10 @@ use okf_jawn_contract::identity::{At, IdempotencyKey, ItemId, PurgeId, Workspace
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::{SourceLocation, SourceLocator};
-use okf_jawn_core::context::Attempt;
+use okf_jawn_core::context::{Attempt, OperationContext};
+use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::jobs::RevisionMapping;
+use okf_jawn_core::portable::content_digest;
 use okf_jawn_core::ports::Application;
 use okf_jawn_core::storage::TreeEdit;
 use serde_json::json;
@@ -640,6 +644,174 @@ async fn a_resumed_snapshot_recovers_the_drafts_its_first_attempt_removed() -> T
     Ok(())
 }
 
+/// NOTE and OTHER at `a` and `b`, Alice's draft of each based on `a`, and the revisions `b`
+/// then `d` queued: the reviewer's setup for a Snapshot resumed after its first attempt
+/// committed `b` and failed before removing any draft.
+fn resumable() -> Built<World> {
+    let world = World::new()?;
+    note_at(&world, NOTE, "notes/plan.md", &['a', 'b'])?;
+    note_at(&world, OTHER, "notes/other.md", &['a', 'b'])?;
+    for id in [NOTE, OTHER] {
+        world
+            .drafts
+            .put_draft(draft_of(id, ALICE, &revision('a')?, "# Mine\n")?)?;
+    }
+    world.versions.queue_revision(revision('b')?)?;
+    world.versions.queue_revision(revision('d')?)?;
+    Ok(world)
+}
+
+/// A newer draft of `id` by Alice, based on `b` and never committed.
+fn newer(id: u128) -> Built<DraftWrite> {
+    let body = "# Newer, never committed\n";
+    Ok(DraftWrite {
+        item_id: item(id),
+        editor: ALICE.to_owned(),
+        base_revision: revision('b')?,
+        body: body.to_owned(),
+        properties: BTreeMap::new(),
+        content_digest: content_digest(body, &BTreeMap::new())?,
+    })
+}
+
+/// Run the first attempt of a Snapshot of NOTE and OTHER, which commits `b` and fails before
+/// removing a draft; answer the caller of the resumed attempt.
+async fn first_attempt_fails_after_its_commit(world: &World) -> Built<OperationContext> {
+    world.search.fail_next();
+    let mut caller = alice(OperationName::CommitItems, Some(mutation(1)))?;
+    let failed = err_of(
+        world
+            .service
+            .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+            .await,
+    )?;
+    assert_eq!(failed.code, ErrorCode::Internal);
+    assert_eq!(world.versions.commits()?.len(), 1);
+    assert_eq!(world.drafts.held()?.len(), 2, "nothing removed yet");
+    caller.attempt = Attempt::Resumed;
+    Ok(caller)
+}
+
+fn holds_newer(world: &World, id: u128) -> Built<bool> {
+    Ok(world
+        .drafts
+        .held()?
+        .iter()
+        .any(|kept| kept.draft.item_id == item(id) && kept.body == "# Newer, never committed\n"))
+}
+
+#[tokio::test]
+async fn a_resumed_snapshot_keeps_a_newer_draft_of_a_later_item() -> TestResult {
+    let world = resumable()?;
+    let caller = first_attempt_fails_after_its_commit(&world).await?;
+    world
+        .drafts
+        .save(&scope()?, mutation(77), newer(OTHER)?)
+        .await?;
+    let retried = world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+        .await?;
+    assert_eq!(retried.revision, revision('b')?);
+    assert!(holds_newer(&world, OTHER)?, "{:?}", world.drafts.held()?);
+    // The committed draft of NOTE is removed.
+    assert_eq!(world.drafts.held()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_resumed_snapshot_finds_its_commit_when_the_first_draft_is_newer() -> TestResult {
+    let world = resumable()?;
+    // What storage answers: commit `b` changed OTHER between `a` and `b`.
+    world.versions.put_diff(
+        &revision('a')?,
+        &revision('b')?,
+        Some(item(OTHER)),
+        vec![change(
+            FileChangeKind::Modified,
+            Some("notes/other.md"),
+            Some("notes/other.md"),
+        )],
+    )?;
+    let caller = first_attempt_fails_after_its_commit(&world).await?;
+    world
+        .drafts
+        .save(&scope()?, mutation(77), newer(NOTE)?)
+        .await?;
+    let retried = world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+        .await?;
+    assert_eq!(retried.revision, revision('b')?);
+    assert_eq!(world.versions.commits()?.len(), 1);
+    assert!(holds_newer(&world, NOTE)?, "{:?}", world.drafts.held()?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_resumed_snapshot_whose_drafts_were_all_saved_again_writes_no_second_commit() -> TestResult
+{
+    let world = resumable()?;
+    let caller = first_attempt_fails_after_its_commit(&world).await?;
+    for id in [NOTE, OTHER] {
+        world
+            .drafts
+            .save(&scope()?, mutation(77), newer(id)?)
+            .await?;
+    }
+    let retried = world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+        .await?;
+    assert_eq!(
+        retried.revision,
+        revision('b')?,
+        "answers with the first commit"
+    );
+    let commits = world.versions.commits()?;
+    assert_eq!(commits.len(), 1, "no second commit under the mutation");
+    assert!(holds_newer(&world, NOTE)? && holds_newer(&world, OTHER)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_snapshot_keeps_a_draft_saved_again_between_its_read_and_its_removal() -> TestResult {
+    let world = resumable()?;
+    world.drafts.save_before_next_discard(newer(NOTE)?)?;
+    let result = world
+        .service
+        .commit_items(
+            &alice(OperationName::CommitItems, Some(mutation(1)))?,
+            snapshot(&[NOTE, OTHER])?,
+        )
+        .await?;
+    assert_eq!(result.revision, revision('b')?);
+    assert!(holds_newer(&world, NOTE)?, "{:?}", world.drafts.held()?);
+    assert_eq!(
+        world.drafts.held()?.len(),
+        1,
+        "OTHER's committed draft is removed"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_resumed_snapshot_completes_when_the_editor_discarded_a_draft_meanwhile() -> TestResult {
+    let world = resumable()?;
+    let caller = first_attempt_fails_after_its_commit(&world).await?;
+    world
+        .drafts
+        .discard(&scope()?, mutation(78), item(NOTE), ALICE, None)
+        .await?;
+    let retried = world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE, OTHER])?)
+        .await?;
+    assert_eq!(retried.revision, revision('b')?);
+    assert_eq!(world.drafts.held()?.len(), 0);
+    assert_eq!(world.records.receipts()?.len(), 1);
+    Ok(())
+}
 #[tokio::test]
 async fn commit_items_reports_lint_only_for_the_items_it_snapshots() -> TestResult {
     let world = World::new()?;

@@ -13,10 +13,15 @@
 //! lists every conflicting item with its draft base, the head and that comparison. On success
 //! the snapshotted drafts are removed. A Snapshot reads the current head, so its expected head is
 //! not stable across attempts: a resumed attempt first asks the store for the commit its earlier
-//! attempt may have written (`VersionStore::find_commit`, from a draft's base), and completes it
-//! instead of committing again. Drafts are removed only after the commit, and the draft store
-//! remembers what it removed under the mutation, so a resumed attempt also recovers a draft its
-//! earlier attempt already removed.
+//! attempt may have written anywhere on the accepted line (`VersionStore::find_commit` with no
+//! `since`), and completes it instead of committing again.
+//!
+//! A draft is removed only when it is still the content that was committed
+//! (`DraftStore::discard` with the expected digest): on a first attempt the digest of the draft
+//! read, and on a resumed attempt the digest of the item as the found commit holds it
+//! (`portable::item_content_digest`). A draft saved again in between, before or after a crash,
+//! stays in place. The draft store remembers what it removed under the mutation, so a resumed
+//! attempt also completes the removals its earlier attempt made.
 //!
 //! A Rewind restores the target's state in a new commit on its base and never rewrites history:
 //! one item's files (`TreeEdit::RestorePaths`) or the whole tree (`TreeEdit::RestoreWorkspace`).
@@ -36,7 +41,7 @@ use okf_jawn_contract::history::{
     BlameRequest, BlameResponse, CommitRequest, DiffRequest, DiffResponse, FileChange,
     FileChangeKind, LogRequest, LogResponse, RestoreRequest,
 };
-use okf_jawn_contract::identity::{ItemId, MutationId, Revision, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, MutationId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{Draft, DraftContent, ItemDocument};
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::SourceReference;
@@ -49,26 +54,8 @@ use super::shared::{
 use super::sources::{computed_locations, record_of};
 use crate::context::{Attempt, OperationContext};
 use crate::conversion::ConversionRecord;
+use crate::portable::item_content_digest;
 use crate::storage::{BlameQuery, DiffQuery, LogQuery, StorageScope, TreeEdit};
-
-/// One draft a Snapshot selected.
-enum Selected {
-    /// The caller's draft, still held.
-    Held(DraftContent),
-    /// The caller's draft an earlier attempt of this Snapshot already removed, as the draft
-    /// store remembers it under the mutation.
-    Snapshotted(Draft),
-}
-
-impl Selected {
-    /// The draft's metadata.
-    const fn draft(&self) -> &Draft {
-        match self {
-            Self::Held(content) => &content.draft,
-            Self::Snapshotted(draft) => draft,
-        }
-    }
-}
 
 /// Content snapshots of the workspace or of one item (following its moves), newest first,
 /// walking back from the resolved revision.
@@ -192,50 +179,44 @@ pub(super) async fn commit_items(
     let scope = workspace_scope(context)?;
     let mutation = mutation_id(context)?;
     refuse_repeats(&request.item_ids)?;
-    let mut selected = Vec::with_capacity(request.item_ids.len());
-    for (index, item) in request.item_ids.iter().enumerate() {
-        selected.push(select_draft(service, context, &scope, mutation, *item, index).await?);
-    }
-    // Every draft base is a revision this Snapshot reads at.
-    for one in &selected {
-        check_named(service, &scope, &one.draft().base_revision).await?;
-    }
     let item = match request.item_ids.as_slice() {
         [only] => Some(*only),
         _ => None,
     };
     let ports = service.ports();
     if context.attempt == Attempt::Resumed
-        && let Some(first) = selected.first()
-        && let Some(revision) = ports
-            .versions
-            .find_commit(&scope, mutation, &first.draft().base_revision)
-            .await?
+        && let Some(revision) = ports.versions.find_commit(&scope, mutation, None).await?
     {
         announce(service, scope.clone(), mutation, &revision, item).await?;
+        // Each draft is removed only if it is still what the found commit holds.
+        let mut committed = Vec::with_capacity(request.item_ids.len());
+        for selected in &request.item_ids {
+            let document = ports.versions.show(&scope, &revision, *selected).await?;
+            committed.push((*selected, item_content_digest(&document)?));
+        }
         return finish(
             service,
             context,
             &scope,
             mutation,
-            &request.item_ids,
+            committed,
             revision,
             Vec::new(),
         )
         .await;
     }
-    let mut drafts = Vec::with_capacity(selected.len());
-    for one in selected {
-        match one {
-            Selected::Held(drafted) => drafts.push(drafted),
-            Selected::Snapshotted(_) => {
-                return Err(ApiError::new(
-                    ErrorCode::Internal,
-                    "an earlier attempt removed a draft of this snapshot but wrote no commit",
-                ));
-            }
-        }
+    let mut drafts = Vec::with_capacity(request.item_ids.len());
+    for (index, selected) in request.item_ids.iter().enumerate() {
+        drafts.push(held_draft(service, context, &scope, *selected, index).await?);
     }
+    // Every draft base is a revision this Snapshot reads at.
+    for drafted in &drafts {
+        check_named(service, &scope, &drafted.draft.base_revision).await?;
+    }
+    let committed_drafts: Vec<(ItemId, Digest)> = drafts
+        .iter()
+        .map(|drafted| (drafted.draft.item_id, drafted.draft.content_digest.clone()))
+        .collect();
     let head = ports.versions.head(&scope).await?;
     let mut conflicts = Vec::new();
     for drafted in &drafts {
@@ -281,7 +262,7 @@ pub(super) async fn commit_items(
         context,
         &scope,
         mutation,
-        &request.item_ids,
+        committed_drafts,
         committed.revision,
         committed.warnings,
     )
@@ -376,37 +357,26 @@ fn refuse_repeats(items: &[ItemId]) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// The caller's own draft of `item`; on a resumed attempt, the one its earlier attempt
-/// removed, as the draft store remembers it under the mutation (`DraftStore::discard` removes
-/// nothing then: the editor holds no draft of the item).
-async fn select_draft(
+/// The caller's own draft of `item`, the `index`-th selected.
+async fn held_draft(
     service: &ApplicationService,
     context: &OperationContext,
     scope: &StorageScope,
-    mutation: MutationId,
     item: ItemId,
     index: usize,
-) -> Result<Selected, ApiError> {
-    let drafts = &service.ports().drafts;
-    let editor = context.principal.subject.as_str();
-    if let Some(content) = drafts.get(scope, item, editor).await? {
-        return Ok(Selected::Held(content));
-    }
-    let missing = || {
-        ApiError::new(
-            ErrorCode::NotFound,
-            "you hold no draft of this item to snapshot",
-        )
-        .with_field(format!("/item_ids/{index}"))
-    };
-    if context.attempt != Attempt::Resumed {
-        return Err(missing());
-    }
-    match drafts.discard(scope, mutation, item, editor).await {
-        Ok(draft) => Ok(Selected::Snapshotted(draft)),
-        Err(error) if error.code == ErrorCode::NotFound => Err(missing()),
-        Err(error) => Err(error),
-    }
+) -> Result<DraftContent, ApiError> {
+    service
+        .ports()
+        .drafts
+        .get(scope, item, &context.principal.subject)
+        .await?
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::NotFound,
+                "you hold no draft of this item to snapshot",
+            )
+            .with_field(format!("/item_ids/{index}"))
+        })
 }
 
 /// The conflict of one draft whose item changed or was deleted between its base and the head;
@@ -449,23 +419,40 @@ async fn conflict_of(
     }))
 }
 
-/// Remove the snapshotted drafts and record the Snapshot's receipt; both are idempotent on the
+/// Remove each snapshotted draft that is still the committed content (the item with the digest
+/// of what was committed), and record the Snapshot's receipt; both are idempotent on the
 /// mutation.
+///
+/// A draft saved again since that content was read (`Conflict`), or one the editor discarded
+/// meanwhile (`NotFound`), is left as the editor left it: neither was committed by this
+/// Snapshot.
 async fn finish(
     service: &ApplicationService,
     context: &OperationContext,
     scope: &StorageScope,
     mutation: MutationId,
-    items: &[ItemId],
+    committed: Vec<(ItemId, Digest)>,
     revision: Revision,
     warnings: Vec<okf_jawn_contract::common::Warning>,
 ) -> Result<MutationResult, ApiError> {
-    for item in items {
-        service
+    for (item, digest) in committed {
+        let removed = service
             .ports()
             .drafts
-            .discard(scope, mutation, *item, &context.principal.subject)
-            .await?;
+            .discard(
+                scope,
+                mutation,
+                item,
+                &context.principal.subject,
+                Some(digest),
+            )
+            .await;
+        match removed {
+            Err(error) if !matches!(error.code, ErrorCode::Conflict | ErrorCode::NotFound) => {
+                return Err(error);
+            }
+            _ => {}
+        }
     }
     let receipt_id = record_receipt(service, context, scope, Some(mutation), Vec::new()).await?;
     Ok(MutationResult {

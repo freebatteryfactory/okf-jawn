@@ -5,8 +5,11 @@
 //! on its expected head, replays a repeated mutation, and runs the check it is handed on a
 //! staged directory; the draft store keeps one draft per (item, editor); the record store
 //! answers revision maps and derived objects for exactly the (item, revision, digest) recorded.
-//! Content is scripted by the test (`put_document`, `put_listing`), never computed from edits,
-//! so what a test asserts is what the application did with the ports. `item_at_path` answers
+//! Content is scripted by the test (`put_document`, `put_listing`); the one thing computed from
+//! edits is that an `EditItem` a commit wrote is what `show` reads at the revision the commit
+//! produced (the item's document at the commit's base, with the edit's body and properties), as
+//! a store would answer, so what a test asserts is what the application did with the ports.
+//! `item_at_path` answers
 //! from the scripted documents as its port documents it: `None` when no item is at the path at
 //! a known revision, `NotFound` only for an unknown revision. A port the operations
 //! under test do not call answers `Internal` ("not used by this test").
@@ -18,9 +21,11 @@
 //!
 //! History is scripted too (`put_log`, `put_diff`, `put_blame`): a comparison nobody scripted
 //! between two known revisions lists no change, and an unknown revision is `NotFound`. The
-//! fake's history is one line of the commits it wrote: a commit replays, and `find_commit`
-//! finds it, only when it lies after the revision asked about, as the port documents; a head a
-//! test moves with `set_head` has no commit after it. The search index
+//! fake's history is one line: the commits it wrote, and the heads a test moves with `set_head`,
+//! each an unrelated commit on top of the head before it. A commit replays, and `find_commit`
+//! with `since` finds it, only when it lies after the revision asked about; `find_commit`
+//! without `since` searches that line back from the head, as the port documents. The search
+//! index
 //! answers `Unavailable` for a revision it has not indexed, as its port documents, and applies
 //! the query's filters to the entries a test scripted (`put_entry`, `put_link`): the archived
 //! flag unless archived items are included, the extraction filter, the folder and the text.
@@ -78,7 +83,7 @@ use okf_jawn_core::jobs::{
     NewArtifact, NewJob, NewPurge, RecordStore, RevisionMapping,
 };
 use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationLease, MutationStore};
-use okf_jawn_core::portable::item_content_digest;
+use okf_jawn_core::portable::{content_digest, item_content_digest};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::proposals::{CommentPage, ProposalFilter, ProposalStore};
 use okf_jawn_core::readiness::ReadinessProbe;
@@ -87,8 +92,8 @@ use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
     DiffQuery, FolderListing, LocalSource, LogQuery, NewWorkspace, ObjectInfo, ObjectRead, Page,
-    Promotion, Provenance, StorageScope, VersionStore, WorkspaceArchive, WorkspaceCatalog,
-    WorkspaceUpdate,
+    Promotion, Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
+    WorkspaceCatalog, WorkspaceUpdate,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 use serde_json::Value;
@@ -138,6 +143,7 @@ struct VersionState {
     types: Vec<TypeDefinition>,
     queued: Vec<Revision>,
     commits: Vec<(CommitChanges, Revision)>,
+    landed: Vec<(Revision, Revision)>,
     logs: Vec<(Revision, Option<ItemId>, LogResponse)>,
     diffs: Vec<(Revision, Revision, Option<ItemId>, Vec<FileChange>)>,
     blames: Vec<(Revision, ItemId, Vec<BlameLine>)>,
@@ -198,6 +204,7 @@ pub struct FakeDrafts {
     saves: Mutex<Vec<(MutationId, DraftWrite)>>,
     discarded: Mutex<Vec<(MutationId, Draft)>>,
     gets: AtomicUsize,
+    saved_before_discard: Mutex<Option<DraftWrite>>,
 }
 
 /// `SandboxCapabilityStore` that keeps every mint.
@@ -372,7 +379,12 @@ impl FakeVersions {
     /// # Errors
     /// Returns when the lock is poisoned.
     pub fn set_head(&self, revision: Revision) -> Built<()> {
-        lock(&self.state)?.head = Some(revision);
+        let mut state = lock(&self.state)?;
+        if let Some(parent) = state.head.replace(revision.clone())
+            && parent != revision
+        {
+            state.landed.push((revision, parent));
+        }
         Ok(())
     }
 
@@ -481,18 +493,51 @@ impl VersionState {
             .find(|(changes, _)| changes.mutation_id == mutation)?;
         let mut base = Some(&changes.expected_head);
         // Each step moves to an earlier commit; the bound stops a scripted cycle.
-        for _ in 0..=self.commits.len() {
+        for _ in 0..=self.line_length() {
             let at = base?;
             if at == revision {
                 return Some(written.clone());
             }
-            base = self
-                .commits
-                .iter()
-                .find(|(_, produced)| produced == at)
-                .map(|(earlier, _)| &earlier.expected_head);
+            base = self.parent_of(at);
         }
         None
+    }
+
+    /// The commit `mutation` wrote, when it lies on the line back from the head.
+    fn on_the_line(&self, mutation: MutationId) -> Option<Revision> {
+        let mut at = self.head.as_ref();
+        // Each step moves to an earlier commit; the bound stops a scripted cycle.
+        for _ in 0..=self.line_length() {
+            let revision = at?;
+            if self
+                .commits
+                .iter()
+                .any(|(changes, produced)| produced == revision && changes.mutation_id == mutation)
+            {
+                return Some(revision.clone());
+            }
+            at = self.parent_of(revision);
+        }
+        None
+    }
+
+    /// The commit before `revision` on the line: the head a written commit was based on, or the
+    /// head a test moved away from.
+    fn parent_of(&self, revision: &Revision) -> Option<&Revision> {
+        self.commits
+            .iter()
+            .find(|(_, produced)| produced == revision)
+            .map(|(changes, _)| &changes.expected_head)
+            .or_else(|| {
+                self.landed
+                    .iter()
+                    .find(|(produced, _)| produced == revision)
+                    .map(|(_, parent)| parent)
+            })
+    }
+
+    const fn line_length(&self) -> usize {
+        self.commits.len().saturating_add(self.landed.len())
     }
 
     /// Refuse an unknown revision with `NotFound`. A revision is known when it is the head, a
@@ -500,6 +545,7 @@ impl VersionState {
     fn require_known(&self, revision: &Revision) -> Result<(), ApiError> {
         let known = self.head.as_ref() == Some(revision)
             || self.commits.iter().any(|(_, at)| at == revision)
+            || self.landed.iter().any(|(at, _)| at == revision)
             || self.documents.iter().any(|(at, _)| at == revision)
             || self.listings.iter().any(|(at, _, _)| at == revision)
             || self.logs.iter().any(|(at, _, _)| at == revision)
@@ -711,6 +757,16 @@ impl FakeDrafts {
         self.gets.load(Ordering::SeqCst)
     }
 
+    /// Save `write` as its editor's draft just before the next `discard` runs, as an autosave
+    /// landing between a Snapshot's read and its removal would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn save_before_next_discard(&self, write: DraftWrite) -> Built<()> {
+        *lock(&self.saved_before_discard)? = Some(write);
+        Ok(())
+    }
+
     /// Every draft held now, most recently saved first.
     ///
     /// # Errors
@@ -840,6 +896,27 @@ impl VersionStore for FakeVersions {
                 return Err(ApiError::new(ErrorCode::Internal, "no revision queued"));
             }
             let revision = state.queued.remove(0);
+            // What `show` reads of each edited item at the new revision.
+            for edit in &changes.edits {
+                if let TreeEdit::EditItem {
+                    item_id,
+                    body,
+                    properties,
+                } = edit
+                    && let Some(mut edited) = state
+                        .documents
+                        .iter()
+                        .find(|(at, document)| {
+                            *at == changes.expected_head && document.summary.id == *item_id
+                        })
+                        .map(|(_, document)| document.clone())
+                {
+                    edited.summary.revision = revision.clone();
+                    edited.body.clone_from(body);
+                    edited.properties.clone_from(properties);
+                    state.documents.insert(0, (revision.clone(), edited));
+                }
+            }
             state.head = Some(revision.clone());
             state.commits.push((changes, revision.clone()));
             Ok(Committed {
@@ -853,12 +930,17 @@ impl VersionStore for FakeVersions {
         &'a self,
         _scope: &'a StorageScope,
         mutation_id: MutationId,
-        since: &'a Revision,
+        since: Option<&'a Revision>,
     ) -> PortFuture<'a, Option<Revision>> {
         Box::pin(async move {
             let state = lock_api(&self.state)?;
-            state.require_known(since)?;
-            Ok(state.written_after(mutation_id, since))
+            match since {
+                Some(since) => {
+                    state.require_known(since)?;
+                    Ok(state.written_after(mutation_id, since))
+                }
+                None => Ok(state.on_the_line(mutation_id)),
+            }
         })
     }
     fn create_candidate<'a>(
@@ -1427,12 +1509,17 @@ impl DraftStore for FakeDrafts {
     }
     fn discard<'a>(
         &'a self,
-        _scope: &'a StorageScope,
+        scope: &'a StorageScope,
         mutation_id: MutationId,
         item: ItemId,
         editor: &'a str,
+        expected: Option<Digest>,
     ) -> PortFuture<'a, Draft> {
         Box::pin(async move {
+            let landing = lock_api(&self.saved_before_discard)?.take();
+            if let Some(write) = landing {
+                self.save(scope, mutation(0xdead), write).await?;
+            }
             let mut discarded = lock_api(&self.discarded)?;
             if let Some((_, prior)) = discarded
                 .iter()
@@ -1445,6 +1532,16 @@ impl DraftStore for FakeDrafts {
                 .iter()
                 .position(|held| held.draft.item_id == item && held.draft.editor == editor)
                 .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no draft"))?;
+            if let Some(expected) = expected
+                && drafts
+                    .get(position)
+                    .is_some_and(|held| held.draft.content_digest != expected)
+            {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "the held draft is not the expected one",
+                ));
+            }
             let removed = drafts.remove(position).draft;
             discarded.push((mutation_id, removed.clone()));
             Ok(removed)
@@ -1999,7 +2096,7 @@ pub fn served_digest(document: &ItemDocument) -> Built<Digest> {
     Ok(item_content_digest(document)?)
 }
 
-/// A draft of `item` by `editor`.
+/// A draft of `item` by `editor`, with no properties, digested as the item it would commit.
 ///
 /// # Errors
 /// Returns when a fixture value does not parse.
@@ -2009,7 +2106,7 @@ pub fn draft_of(item: u128, editor: &str, base: &Revision, body: &str) -> Built<
             item_id: ItemId(Uuid::from_u128(item)),
             editor: editor.to_owned(),
             base_revision: base.clone(),
-            content_digest: digest('9')?,
+            content_digest: content_digest(body, &BTreeMap::new())?,
             saved_at: instant()?,
         },
         body: body.to_owned(),

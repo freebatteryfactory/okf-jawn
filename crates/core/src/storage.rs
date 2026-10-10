@@ -495,16 +495,21 @@ pub trait VersionStore: Send + Sync {
         changes: CommitChanges,
         check: Arc<dyn CandidateCheck>,
     ) -> PortFuture<'a, Committed>;
-    /// Find the commit after `since` on the head's history that carries `mutation_id`.
+    /// Find the commit on the head's history that carries `mutation_id`.
+    ///
+    /// `Some(since)` searches only the commits after `since`. `None` searches the accepted line
+    /// back from the head, newest first; the implementation may stop at the mutation retention
+    /// bound of SPEC section 8 (seven days), past which a mutation is no longer resumed.
     ///
     /// Only a writer whose expected head is not stable across attempts needs this before it
-    /// calls `commit`: a Snapshot reads the current head, so on a resumed attempt it must ask
-    /// first, with the base revision of one of its drafts as `since`.
+    /// calls `commit`: a Snapshot reads the current head, so on a resumed attempt it asks first,
+    /// with `None`. It never asks from one draft's base: a draft saved again after the commit
+    /// has a base the commit does not lie after.
     fn find_commit<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
-        since: &'a Revision,
+        since: Option<&'a Revision>,
     ) -> PortFuture<'a, Option<Revision>>;
     /// Write a proposal candidate commit on top of `changes.base` and retain it at
     /// `refs/okf-jawn/proposals/<proposal id>`. The head does not move.

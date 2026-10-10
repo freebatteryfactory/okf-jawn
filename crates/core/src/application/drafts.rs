@@ -122,6 +122,7 @@ pub(super) async fn discard_draft(
             mutation,
             request.item_id,
             &context.principal.subject,
+            None,
         )
         .await
 }
