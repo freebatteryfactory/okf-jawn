@@ -53,6 +53,7 @@ pub struct FakeRecords {
     entries: Mutex<BTreeMap<JobId, Entry>>,
     artifacts: Mutex<BTreeMap<MutationId, ArtifactRecord>>,
     purges: Mutex<BTreeMap<PurgeId, Purge>>,
+    renewals: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeRecords {
@@ -134,6 +135,12 @@ impl FakeRecords {
     /// Returns `NotFound` for an unknown job.
     pub fn entry(&self, id: JobId) -> Result<Entry, ApiError> {
         self.lock()?.get(&id).cloned().ok_or_else(not_found)
+    }
+
+    /// How many `update_progress` calls renewed a lease so far.
+    #[must_use]
+    pub fn renewals(&self) -> usize {
+        self.renewals.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Mark every live claim expired, as if its lease had lapsed.
@@ -233,6 +240,11 @@ impl RecordStore for FakeRecords {
             entry.job.progress = progress;
             entry.job.clone()
         });
+        if updated.is_ok() {
+            let _before = self
+                .renewals
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         Box::pin(async move { updated })
     }
 
@@ -529,6 +541,7 @@ mod tests {
         assert!(records.purge(purge).is_ok());
         records.cancel(id)?;
         assert_eq!(records.entry(id)?.job.state, JobState::Cancelled);
+        assert_eq!(records.renewals(), 0);
         Ok(())
     }
 }

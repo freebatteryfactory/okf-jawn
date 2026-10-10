@@ -7,6 +7,13 @@
 //! refused for good (an import colliding with what the workspace holds now, R-I8) writes its
 //! failure through the lease as not retryable; any other error is the runtime's to record.
 //!
+//! A long storage call runs under the same heartbeat as a conversion, so its lease stays live:
+//! the index rebuild, both archive writes, the restore and both purges each renew the lease
+//! every `HandlerLimits::heartbeat` while they run (`renewing`). Unlike a conversion, such a call
+//! is never dropped when the job is found cancelled: storage's write is one transaction that
+//! must not be abandoned mid-call, so the cancellation is observed after it returns, and the job
+//! then stops without a completion. A purge's own record still states what the purge removed.
+//!
 //! Built: import and redigest (`import`), index rebuild, both backups, restore, both purges.
 //! Construction limitations, stated rather than hidden: a portable export and a View export
 //! fail as `NotImplemented`, which the runtime records as a non-retryable failure (requests
@@ -20,6 +27,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{
     ArtifactId, Digest, ItemId, MutationId, PurgeId, Revision, TenantId, UploadId, WorkspaceId,
 };
+use okf_jawn_contract::import::JobState;
 use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
 use okf_jawn_contract::workspace::RestoreReport;
 use okf_jawn_core::conversion::Converter;
@@ -187,14 +195,25 @@ impl IngestHandler {
                 )
                 .await
             }
-            (JobSpec::RebuildIndex, JobScope::Workspace(scope)) => self.rebuild(scope).await,
+            (JobSpec::RebuildIndex, JobScope::Workspace(scope)) => {
+                self.rebuild(claimed, scope).await
+            }
             (JobSpec::BackupWorkspace, JobScope::Workspace(scope)) => {
-                let object = ports
-                    .backups
-                    .write_workspace_archive(scope, claimed.mutation_id)
-                    .await?;
-                self.artifact(claimed, ArtifactKind::WorkspaceBackup, object)
-                    .await
+                let written = renewing(
+                    ports,
+                    claimed,
+                    ports
+                        .backups
+                        .write_workspace_archive(scope, claimed.mutation_id),
+                )
+                .await?;
+                match written {
+                    Renewed::Done(object) => {
+                        self.artifact(claimed, ArtifactKind::WorkspaceBackup, object)
+                            .await
+                    }
+                    Renewed::Cancelled(_object) => Ok(Done::stopped()),
+                }
             }
             (
                 JobSpec::RestoreWorkspace {
@@ -208,12 +227,21 @@ impl IngestHandler {
                     .await
             }
             (JobSpec::BackupInstallation, JobScope::Tenant(tenant)) => {
-                let object = ports
-                    .backups
-                    .write_installation_archive(tenant, claimed.mutation_id)
-                    .await?;
-                self.artifact(claimed, ArtifactKind::InstallationBackup, object)
-                    .await
+                let written = renewing(
+                    ports,
+                    claimed,
+                    ports
+                        .backups
+                        .write_installation_archive(tenant, claimed.mutation_id),
+                )
+                .await?;
+                match written {
+                    Renewed::Done(object) => {
+                        self.artifact(claimed, ArtifactKind::InstallationBackup, object)
+                            .await
+                    }
+                    Renewed::Cancelled(_object) => Ok(Done::stopped()),
+                }
             }
             (
                 JobSpec::PurgeWorkspace { .. } | JobSpec::PurgeItem { .. },
@@ -246,10 +274,14 @@ impl IngestHandler {
     }
 
     /// Rebuild the derived index at the current head.
-    async fn rebuild(&self, scope: &StorageScope) -> Result<Done, ApiError> {
+    async fn rebuild(&self, claimed: &ClaimedJob, scope: &StorageScope) -> Result<Done, ApiError> {
         let head = self.ports.versions.head(scope).await?;
-        self.ports.search.rebuild(scope, head).await?;
-        Ok(Done::default())
+        Ok(
+            match renewing(&self.ports, claimed, self.ports.search.rebuild(scope, head)).await? {
+                Renewed::Done(()) => Done::default(),
+                Renewed::Cancelled(()) => Done::stopped(),
+            },
+        )
     }
 
     /// Import a workspace archive into the job's workspace.
@@ -271,15 +303,22 @@ impl IngestHandler {
     ) -> Result<Done, ApiError> {
         let ports = &self.ports;
         let before = ports.versions.head(scope).await?;
-        let report = ports
-            .backups
-            .restore_import(
+        // Under the heartbeat, and never dropped: a cancellation is observed once it returns.
+        let restored = renewing(
+            ports,
+            claimed,
+            ports.backups.restore_import(
                 scope,
                 archive.clone(),
                 claimed.mutation_id,
                 editors.to_vec(),
-            )
-            .await?;
+            ),
+        )
+        .await?;
+        let report = match restored {
+            Renewed::Done(report) => report,
+            Renewed::Cancelled(_report) => return Ok(Done::stopped()),
+        };
         let _consumed = ports
             .uploads
             .consume(scope, upload_id, claimed.lease.job_id)
@@ -371,7 +410,7 @@ impl IngestHandler {
                 purge_id,
                 workspace_id,
             } => {
-                self.purge(tenant, *purge_id, |purger| {
+                self.purge(claimed, tenant, *purge_id, |purger| {
                     purger.purge_workspace(tenant, claimed.mutation_id, *purge_id, *workspace_id)
                 })
                 .await
@@ -382,7 +421,7 @@ impl IngestHandler {
                 item_id,
             } => {
                 let scope = item_scope(tenant, *workspace_id);
-                self.purge(tenant, *purge_id, |purger| async move {
+                self.purge(claimed, tenant, *purge_id, |purger| async move {
                     purger
                         .purge_item(&scope, claimed.mutation_id, *purge_id, *item_id)
                         .await
@@ -403,9 +442,13 @@ impl IngestHandler {
         }
     }
 
-    /// Carry out a purge and keep its record current: running, then its report.
+    /// Carry out a purge and keep its record current: running, then its report. The removal
+    /// runs under the heartbeat and is never dropped; its report is recorded even when the job
+    /// was cancelled meanwhile, since the purge record states what was removed, and the job then
+    /// stops without a completion.
     async fn purge<'a, F, Fut>(
         &'a self,
+        claimed: &'a ClaimedJob,
         tenant: &'a TenantId,
         purge_id: PurgeId,
         remove: F,
@@ -416,19 +459,38 @@ impl IngestHandler {
     {
         let records = &self.ports.records;
         let mut purge: Purge = records.get_purge(tenant, purge_id).await?;
+        let mut done = Done::default();
         if purge.state != PurgeState::Completed {
             purge.state = PurgeState::Running;
             purge.error = None;
             purge.completed_at = None;
             purge = records.update_purge(tenant, purge).await?;
-            purge.report = Some(remove(self.ports.purger.as_ref()).await?);
+            let report =
+                match renewing(&self.ports, claimed, remove(self.ports.purger.as_ref())).await? {
+                    Renewed::Done(report) => report,
+                    Renewed::Cancelled(report) => {
+                        done = Done::stopped();
+                        report
+                    }
+                };
+            purge.report = Some(report);
             purge.state = PurgeState::Completed;
             // The store stamps `completed_at` in the write that first records completion
             // (`RecordStore::update_purge`); the handler has no clock and passes none.
             purge.completed_at = None;
             let _stored = records.update_purge(tenant, purge).await?;
         }
-        Ok(Done::default())
+        Ok(done)
+    }
+}
+
+impl Done {
+    /// A job found cancelled: no completion is written.
+    fn stopped() -> Self {
+        Self {
+            cancelled: true,
+            ..Self::default()
+        }
     }
 }
 
@@ -436,6 +498,53 @@ impl JobHandler for IngestHandler {
     fn handle<'a>(&'a self, claimed: &'a ClaimedJob) -> PortFuture<'a, ()> {
         Box::pin(self.run(claimed))
     }
+}
+
+/// Run a long storage call to its end while renewing the claim's lease every
+/// `HandlerLimits::heartbeat`, and say whether the job was found cancelled meanwhile.
+///
+/// The call is never dropped: a storage write is one transaction that must not be abandoned
+/// mid-call, so a cancellation is only observed, and acted on once the call has returned. A
+/// renewal that fails (the lease was lost) stops the renewals; the call still runs to its end,
+/// and then that error is returned.
+async fn renewing<T>(
+    ports: &HandlerPorts,
+    claimed: &ClaimedJob,
+    work: impl Future<Output = Result<T, ApiError>>,
+) -> Result<Renewed<T>, ApiError> {
+    let mut work = std::pin::pin!(work);
+    let period = ports.limits.heartbeat.max(Duration::from_millis(1));
+    let now = tokio::time::Instant::now();
+    let mut ticks = tokio::time::interval_at(now.checked_add(period).unwrap_or(now), period);
+    let mut cancelled = false;
+    let mut renewal: Result<(), ApiError> = Ok(());
+    loop {
+        tokio::select! {
+            result = &mut work => {
+                let value = result?;
+                renewal?;
+                return Ok(if cancelled {
+                    Renewed::Cancelled(value)
+                } else {
+                    Renewed::Done(value)
+                });
+            }
+            _instant = ticks.tick(), if renewal.is_ok() => {
+                match ports.records.update_progress(&claimed.lease, claimed.job.progress).await {
+                    Ok(job) => cancelled |= job.state == JobState::Cancelled,
+                    Err(error) => renewal = Err(error),
+                }
+            }
+        }
+    }
+}
+
+/// How a long storage call under the heartbeat ended.
+enum Renewed<T> {
+    /// It returned, and the job is still running.
+    Done(T),
+    /// It returned, and the job was found cancelled while it ran.
+    Cancelled(T),
 }
 
 /// The storage scope of an item purge's workspace.

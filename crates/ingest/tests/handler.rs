@@ -116,6 +116,7 @@ mod job_handler {
             writes: AtomicUsize::new(0),
             restored: Mutex::new(Vec::new()),
             versions: Arc::clone(&versions),
+            restore_hold: Mutex::new(None),
         });
         let purger = Arc::new(FakePurger {
             report: report()?,
@@ -456,6 +457,101 @@ mod job_handler {
                 .as_ref(),
             Some(&restored)
         );
+        Ok(())
+    }
+
+    /// A restore job of `world` under the job number `number`.
+    fn restore_job(world: &World, number: u128) -> Built<okf_jawn_contract::identity::JobId> {
+        let upload_id = upload(world, number, "backup.zip", b"archive bytes")?;
+        job(
+            world,
+            number,
+            workspace_scope()?,
+            JobSpec::RestoreWorkspace {
+                upload_id,
+                archive: Digest::try_from("cd".repeat(32))?,
+                editors: vec!["alice".to_owned()],
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_restore_that_outlasts_several_lease_intervals_keeps_its_lease() -> TestResult {
+        // A heartbeat of 10 ms; a lease that lapses when 50 ms pass without a renewal; a
+        // restore that takes six of those intervals.
+        let world = world_full(
+            Some(6),
+            Vec::new(),
+            Arc::new(AcceptAll),
+            Duration::from_millis(10),
+        )?;
+        let id = restore_job(&world, 120)?;
+        let records = Arc::clone(&world.records);
+        *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
+            let records = Arc::clone(&records);
+            Box::pin(async move {
+                for _interval in 0..6 {
+                    let before = records.renewals();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if records.renewals() == before {
+                        let _lapsed = records.expire_running();
+                    }
+                }
+            })
+        }));
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        // Completed under its own lease, the first attempt's.
+        let completion = some(entry.completions.first(), "the completion")?;
+        assert_eq!(
+            (completion.lease.attempt, completion.lease.token.as_str()),
+            (1, "lease-1")
+        );
+        assert!(
+            world.records.renewals() >= 6,
+            "{} renewals",
+            world.records.renewals()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_restore_cancelled_while_it_runs_is_not_abandoned_and_writes_no_completion()
+    -> TestResult {
+        let world = world_full(
+            Some(6),
+            Vec::new(),
+            Arc::new(AcceptAll),
+            Duration::from_millis(10),
+        )?;
+        let id = restore_job(&world, 121)?;
+        let records = Arc::clone(&world.records);
+        *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
+            let records = Arc::clone(&records);
+            Box::pin(async move {
+                let _cancelled = records.cancel(id);
+                // Long enough for several renewals to see the cancellation.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            })
+        }));
+        assert!(tokio::time::timeout(Duration::from_secs(20), run(&world, id)).await??);
+        // The restore ran to its end: its commit is written and its editors were passed on.
+        let mutation = world.records.entry(id)?.created.mutation_id;
+        assert!(
+            world
+                .versions
+                .written()?
+                .iter()
+                .any(|(changes, _)| changes.mutation_id == mutation)
+        );
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            1
+        );
+        // The cancellation is observed after it returned: no completion, no failure.
+        assert_stopped(&world, id)?;
+        assert_eq!(world.uploads.consumed()?, Vec::new());
         Ok(())
     }
 

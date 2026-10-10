@@ -158,7 +158,13 @@ pub struct FakeBackups {
     pub restored: Mutex<Vec<Vec<String>>>,
     /// Where a restore commits.
     pub versions: Arc<FakeVersions>,
+    /// Awaited as a restore starts, before it writes anything (a long restore).
+    pub restore_hold: Mutex<Option<RestoreHold>>,
 }
+
+/// What a restore awaits before it writes: a test makes it outlast several lease intervals.
+pub type RestoreHold =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// A `Purger` that returns one report and counts the calls.
 pub struct FakePurger {
@@ -784,18 +790,26 @@ impl Backups for FakeBackups {
         mutation_id: MutationId,
         editors: Vec<String>,
     ) -> PortFuture<'a, RestoreReport> {
-        let recorded = self
-            .restored
+        let hold = self
+            .restore_hold
             .lock()
-            .map(|mut restored| restored.push(editors))
-            .map_err(|_| poisoned())
-            .and_then(|()| self.versions.restore_commit(mutation_id))
-            .map(|()| RestoreReport {
-                items: 3,
-                drafts_restored: 1,
-                drafts_unassigned: 1,
-            });
-        Box::pin(async move { recorded })
+            .map(|hold| hold.clone())
+            .map_err(|_| poisoned());
+        Box::pin(async move {
+            if let Some(hold) = hold? {
+                hold().await;
+            }
+            self.restored
+                .lock()
+                .map(|mut restored| restored.push(editors))
+                .map_err(|_| poisoned())
+                .and_then(|()| self.versions.restore_commit(mutation_id))
+                .map(|()| RestoreReport {
+                    items: 3,
+                    drafts_restored: 1,
+                    drafts_unassigned: 1,
+                })
+        })
     }
 }
 
