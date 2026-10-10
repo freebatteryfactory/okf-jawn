@@ -174,6 +174,9 @@ pub struct FakeRecords {
 #[derive(Default)]
 pub struct FakeSearch {
     indexed: Mutex<Vec<Revision>>,
+    builds: AtomicUsize,
+    building: AtomicUsize,
+    most_at_once: AtomicUsize,
     fail_next: AtomicBool,
     entries: Mutex<Vec<(Revision, ItemSummary, String)>>,
     links: Mutex<Vec<(Revision, Link)>>,
@@ -668,6 +671,18 @@ impl FakeSearch {
     /// Returns when the lock is poisoned.
     pub fn indexed(&self) -> Built<Vec<Revision>> {
         Ok(lock(&self.indexed)?.clone())
+    }
+
+    /// How many times `index_revision` ran, a no-op repeat included.
+    #[must_use]
+    pub fn builds(&self) -> usize {
+        self.builds.load(Ordering::SeqCst)
+    }
+
+    /// The most `index_revision` calls that were running at one time.
+    #[must_use]
+    pub fn most_at_once(&self) -> usize {
+        self.most_at_once.load(Ordering::SeqCst)
     }
 
     /// Make the next `index_revision` fail, indexing nothing.
@@ -1330,6 +1345,15 @@ impl SearchIndex for FakeSearch {
     ) -> PortFuture<'a, ()> {
         Box::pin(async move {
             injected(&self.fail_next)?;
+            self.builds.fetch_add(1, Ordering::SeqCst);
+            let running = self
+                .building
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
+            self.most_at_once.fetch_max(running, Ordering::SeqCst);
+            // A build takes time: let another request run meanwhile.
+            tokio::task::yield_now().await;
+            self.building.fetch_sub(1, Ordering::SeqCst);
             let mut indexed = lock_api(&self.indexed)?;
             if !indexed.contains(&revision) {
                 indexed.push(revision);

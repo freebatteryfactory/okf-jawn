@@ -3,9 +3,20 @@
 //! The application owns what the index does not: the caller's workspace scope (dispatch has
 //! authorized it), resolving the selector once (a named revision is purge-checked first), the
 //! request's folder as a workspace path, and coordinating the index with content. A write
-//! indexes the revision it produced (`shared::announce`); a query at a revision the index has
-//! not built yet (it answers `Unavailable`) indexes that revision from retained content and
-//! asks once more, since indexing a revision is idempotent.
+//! indexes the revision it produced (`shared::announce`). A query at a revision the index has
+//! not built yet (it answers `Unavailable`) builds that revision's index on demand, bounded:
+//!
+//! - A workspace builds at most one index at a time: the build holds the workspace's gate
+//!   (`ApplicationService::index_gate`), and a request that waited on it asks the index again
+//!   before building, so concurrent requests for one revision share one build.
+//! - Only a revision inside the retained window is built: one of the first `INDEX_WINDOW`
+//!   commits of the accepted line's history from the head, the head included
+//!   (`VersionStore::log` from the head), after the purge check `shared::resolve` already
+//!   made. Any other revision, such as a
+//!   proposal candidate, an unknown commit or one older than the window, keeps the index's
+//!   `Unavailable` and nothing is built.
+//!
+//! Indexing a revision is idempotent, so the query is asked once more after the build.
 //!
 //! The index never holds a draft, so nothing here reads one. Deprecated items are always
 //! searchable: the query carries no status filter. Archived items are searched only when the
@@ -27,7 +38,13 @@ use super::ApplicationService;
 use super::shared::{invalid, record_receipt, resolve, workspace_scope};
 use crate::context::OperationContext;
 use crate::search::{GraphQuery, LinkQuery, SearchQuery};
-use crate::storage::StorageScope;
+use crate::storage::{LogQuery, Page, StorageScope};
+
+/// How many commits of the accepted line, from the head and the head included, an on-demand
+/// index build may reach.
+const INDEX_WINDOW: usize = 1000;
+/// Commits asked per page of the history walk that decides whether a revision is in the window.
+const WINDOW_PAGE: u16 = 250;
 
 /// Search one resolved revision and return cited snippets.
 ///
@@ -139,8 +156,9 @@ fn folder_of(folder: Option<String>) -> Result<Option<WorkspacePath>, ApiError> 
     }
 }
 
-/// Answer `query` from the index; when the index has not built `revision` yet, index it from
-/// retained content and ask once more.
+/// Answer `query` from the index; when the index has not built `revision` yet and it lies in
+/// the retained window, build it under the workspace's gate and ask once more, as the module
+/// header says.
 async fn indexed<T, Answer>(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -152,13 +170,74 @@ where
 {
     match query().await {
         Err(error) if error.code == ErrorCode::Unavailable => {
-            service
-                .ports()
-                .search
-                .index_revision(scope, revision.clone())
-                .await?;
-            query().await
+            let gate = service.index_gate(scope)?;
+            let _building = gate.lock().await;
+            // A build another request ran while this one waited may have built it.
+            match query().await {
+                Err(unavailable) if unavailable.code == ErrorCode::Unavailable => {
+                    if !in_window(service, scope, revision).await? {
+                        return Err(unavailable);
+                    }
+                    service
+                        .ports()
+                        .search
+                        .index_revision(scope, revision.clone())
+                        .await?;
+                    query().await
+                }
+                answer => answer,
+            }
         }
         answer => answer,
     }
+}
+
+/// Whether `revision` is one of the first `INDEX_WINDOW` commits of the accepted line's history
+/// from the head, the head included. Costs at most `INDEX_WINDOW / WINDOW_PAGE` pages of history
+/// from the head.
+async fn in_window(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+) -> Result<bool, ApiError> {
+    let versions = &service.ports().versions;
+    let head = versions.head(scope).await?;
+    if &head == revision {
+        return Ok(true);
+    }
+    let mut cursor = None;
+    let mut walked = 0_usize;
+    while walked < INDEX_WINDOW {
+        let page = versions
+            .log(
+                scope,
+                LogQuery {
+                    tip: head.clone(),
+                    item_id: None,
+                    page: Page {
+                        cursor,
+                        limit: WINDOW_PAGE,
+                    },
+                },
+            )
+            .await?;
+        if page.commits.is_empty() {
+            return Ok(false);
+        }
+        let room = INDEX_WINDOW.saturating_sub(walked);
+        if page
+            .commits
+            .iter()
+            .take(room)
+            .any(|commit| &commit.revision == revision)
+        {
+            return Ok(true);
+        }
+        walked = walked.saturating_add(page.commits.len());
+        let Some(next) = page.next_cursor else {
+            return Ok(false);
+        };
+        cursor = Some(next);
+    }
+    Ok(false)
 }

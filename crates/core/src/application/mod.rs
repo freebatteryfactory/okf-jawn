@@ -14,13 +14,15 @@
 //! naming the operation; nothing here claims an operation works that is not built, and no
 //! fixture or in-memory store stands in for one.
 
+use std::collections::BTreeMap;
 use std::future::Ready;
 use std::net::Ipv6Addr;
 use std::str::FromStr as _;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::{TenantId, WorkspaceId};
 use time::OffsetDateTime;
 
 use crate::access::AccessControl;
@@ -38,7 +40,7 @@ use crate::proposals::ProposalStore;
 use crate::readiness::ReadinessProbe;
 use crate::sandbox::SandboxCapabilityStore;
 use crate::search::SearchIndex;
-use crate::storage::{BlobStore, CandidateCheck, VersionStore, WorkspaceCatalog};
+use crate::storage::{BlobStore, CandidateCheck, StorageScope, VersionStore, WorkspaceCatalog};
 use crate::uploads::UploadStore;
 
 pub use sources::MAX_OBJECT_BLOCK;
@@ -217,7 +219,12 @@ pub struct ApplicationService {
     config: ApplicationConfig,
     conformance: Arc<dyn CandidateCheck>,
     clock: Clock,
+    index_builds: IndexBuilds,
 }
+
+/// One gate per workspace that an on-demand index build holds (`navigation`), so a workspace
+/// builds at most one revision's index at a time and a request that waited finds the build done.
+type IndexBuilds = Mutex<BTreeMap<(TenantId, WorkspaceId), Arc<tokio::sync::Mutex<()>>>>;
 
 impl ApplicationConfig {
     /// Refuse settings no deployment may run with.
@@ -258,6 +265,7 @@ impl ApplicationService {
             config,
             conformance: Arc::new(OkfConformance),
             clock: OffsetDateTime::now_utc,
+            index_builds: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -283,6 +291,24 @@ impl ApplicationService {
     #[must_use]
     pub fn config(&self) -> &ApplicationConfig {
         &self.config
+    }
+
+    /// The gate an on-demand index build of `scope`'s workspace holds while it builds.
+    ///
+    /// # Errors
+    /// Returns `Internal` when the gate map's lock is poisoned.
+    pub(super) fn index_gate(
+        &self,
+        scope: &StorageScope,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>, ApiError> {
+        let mut gates = self.index_builds.lock().map_err(|_| {
+            ApiError::new(ErrorCode::Internal, "the index build gates are poisoned")
+        })?;
+        Ok(Arc::clone(
+            gates
+                .entry((scope.tenant_id.clone(), scope.workspace_id))
+                .or_default(),
+        ))
     }
 
     /// The OKF conformance check every commit of this service runs; startup hands the same

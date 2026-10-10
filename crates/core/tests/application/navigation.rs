@@ -7,7 +7,8 @@ use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::{
     ExtractionFilter, ExtractionStatus, ExtractionSummary, TextOrigin,
 };
-use okf_jawn_contract::identity::{At, ItemId, PurgeId};
+use okf_jawn_contract::history::{Commit, LogResponse};
+use okf_jawn_contract::identity::{At, ItemId, PurgeId, Revision};
 use okf_jawn_contract::item::{ItemKind, ItemStatus, ItemSummary};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::search::{
@@ -19,7 +20,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::check::{TestResult, err_of, some};
-use crate::fixture::{ALICE, Built, NOTE, World, alice, draft_of, note, path, revision, scope};
+use crate::fixture::{
+    ALICE, Built, NOTE, World, alice, draft_of, instant, note, path, revision, scope,
+};
 
 const OTHER: u128 = 21;
 const THIRD: u128 = 22;
@@ -81,6 +84,39 @@ fn link(from: u128, to: u128, line: u32) -> Link {
 
 fn hit_items(response: &okf_jawn_contract::search::SearchResponse) -> Vec<ItemId> {
     response.hits.iter().map(|hit| hit.source.item_id).collect()
+}
+
+/// The accepted line back from the head `a`: the head, then each revision of `older`.
+fn accepted_line(world: &World, older: &[char]) -> Built<()> {
+    let commits = std::iter::once('a')
+        .chain(older.iter().copied())
+        .map(|fill| {
+            Ok(Commit {
+                revision: revision(fill)?,
+                parents: Vec::new(),
+                message: "Edit".to_owned(),
+                author: ALICE.to_owned(),
+                committed_at: instant()?,
+            })
+        })
+        .collect::<Built<Vec<_>>>()?;
+    world.versions.put_log(
+        &revision('a')?,
+        None,
+        LogResponse {
+            commits,
+            next_cursor: None,
+        },
+    )?;
+    Ok(())
+}
+
+fn search_at(fill: char) -> Built<SearchRequest> {
+    let mut request = search("plan", false)?;
+    request.at = At::Revision {
+        revision: revision(fill)?,
+    };
+    Ok(request)
 }
 
 #[tokio::test]
@@ -245,6 +281,7 @@ async fn search_items_refuses_a_folder_that_is_not_a_workspace_path() -> TestRes
 #[tokio::test]
 async fn a_query_at_a_revision_the_index_has_not_built_indexes_it_and_asks_again() -> TestResult {
     let world = World::new()?;
+    accepted_line(&world, &['b', 'c'])?;
     let at = revision('a')?;
     world
         .search
@@ -259,7 +296,8 @@ async fn a_query_at_a_revision_the_index_has_not_built_indexes_it_and_asks_again
         .await?;
     assert_eq!(hit_items(&response), vec![item(NOTE)]);
     assert_eq!(world.search.indexed()?, vec![at.clone()]);
-    assert_eq!(world.search.queries()?.len(), 2);
+    // Asked, asked again once the workspace's build gate is held, and asked after the build.
+    assert_eq!(world.search.queries()?.len(), 3);
     // Links and the graph of another unbuilt revision build it the same way.
     let older = revision('b')?;
     world.search.put_link(&older, link(NOTE, OTHER, 4))?;
@@ -295,6 +333,117 @@ async fn a_query_at_a_revision_the_index_has_not_built_indexes_it_and_asks_again
         .await?;
     assert_eq!(graphed.nodes.len(), 1);
     assert_eq!(world.search.indexed()?, vec![at, older, oldest]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_queries_at_one_unbuilt_revision_share_one_build() -> TestResult {
+    let world = World::new()?;
+    accepted_line(&world, &['b'])?;
+    world
+        .search
+        .put_entry(&revision('b')?, summary(NOTE, "notes/plan.md")?, "plan")?;
+    let caller = alice(OperationName::SearchItems, None)?;
+    let (first, second) = tokio::join!(
+        world.service.search_items(&caller, search_at('b')?),
+        world.service.search_items(&caller, search_at('b')?),
+    );
+    assert_eq!(hit_items(&first?), vec![item(NOTE)]);
+    assert_eq!(hit_items(&second?), vec![item(NOTE)]);
+    assert_eq!(
+        world.search.builds(),
+        1,
+        "the waiting request found the build done"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_workspace_builds_one_index_at_a_time() -> TestResult {
+    let world = World::new()?;
+    accepted_line(&world, &['b', 'c'])?;
+    let caller = alice(OperationName::SearchItems, None)?;
+    let (first, second) = tokio::join!(
+        world.service.search_items(&caller, search_at('b')?),
+        world.service.search_items(&caller, search_at('c')?),
+    );
+    first?;
+    second?;
+    assert_eq!(
+        world.search.indexed()?,
+        vec![revision('b')?, revision('c')?]
+    );
+    assert_eq!(world.search.most_at_once(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_revision_outside_the_retained_window_is_never_built() -> TestResult {
+    let world = World::new()?;
+    // `e` is not on the accepted line: a proposal candidate or an unknown commit.
+    accepted_line(&world, &['b'])?;
+    let refused = err_of(
+        world
+            .service
+            .search_items(&alice(OperationName::SearchItems, None)?, search_at('e')?)
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Unavailable);
+    assert_eq!(world.search.builds(), 0);
+    assert_eq!(world.search.indexed()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_retained_window_is_the_first_thousand_commits_from_the_head() -> TestResult {
+    let numbered = |number: usize| Revision::try_from(format!("{number:040x}"));
+    let world = World::new()?;
+    // The head `a`, then 1000 older commits numbered 1 to 1000.
+    let mut commits = vec![revision('a')?];
+    for number in 1..=1000 {
+        commits.push(numbered(number)?);
+    }
+    let commits = commits
+        .into_iter()
+        .map(|revision| {
+            Ok(Commit {
+                revision,
+                parents: Vec::new(),
+                message: "Edit".to_owned(),
+                author: ALICE.to_owned(),
+                committed_at: instant()?,
+            })
+        })
+        .collect::<Built<Vec<_>>>()?;
+    world.versions.put_log(
+        &revision('a')?,
+        None,
+        LogResponse {
+            commits,
+            next_cursor: None,
+        },
+    )?;
+    let caller = alice(OperationName::SearchItems, None)?;
+    let at = |revision| -> Built<SearchRequest> {
+        let mut request = search("plan", false)?;
+        request.at = At::Revision { revision };
+        Ok(request)
+    };
+    // The 1000th commit from the head, the head included, is built.
+    world
+        .service
+        .search_items(&caller, at(numbered(999)?)?)
+        .await?;
+    assert_eq!(world.search.indexed()?, vec![numbered(999)?]);
+    // The 1001st is not.
+    let refused = err_of(
+        world
+            .service
+            .search_items(&caller, at(numbered(1000)?)?)
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Unavailable);
+    assert_eq!(world.search.builds(), 1);
     Ok(())
 }
 
