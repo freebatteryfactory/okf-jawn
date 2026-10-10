@@ -1153,13 +1153,15 @@ async fn restore_items_refuses_to_restore_nothing_and_never_brings_back_or_overw
 async fn restore_items_reports_lint_only_for_the_files_it_restores() -> TestResult {
     let world = World::new()?;
     world.versions.set_head(revision('b')?)?;
+    // The file moved from `notes/bare.md` to `notes/other.md` since the target: the Rewind
+    // writes `notes/bare.md` back, and only that path counts as touched.
     world.versions.put_diff(
         &revision('b')?,
         &revision('a')?,
         None,
         vec![change(
-            FileChangeKind::Modified,
-            Some("notes/bare.md"),
+            FileChangeKind::Moved,
+            Some("notes/other.md"),
             Some("notes/bare.md"),
         )],
     )?;
