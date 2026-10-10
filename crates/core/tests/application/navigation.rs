@@ -2,8 +2,12 @@
 //! built on demand; drafts never reach a result; archived items only when asked, deprecated
 //! items always.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
+
 use okf_jawn_contract::common::PageRequest;
-use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::{
     ExtractionFilter, ExtractionStatus, ExtractionSummary, TextOrigin,
 };
@@ -12,20 +16,97 @@ use okf_jawn_contract::identity::{At, ItemId, PurgeId, Revision};
 use okf_jawn_contract::item::{ItemKind, ItemStatus, ItemSummary};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::search::{
-    GetGraphRequest, GetLinksRequest, Link, LinkDirection, SearchRequest,
+    GetGraphRequest, GetGraphResponse, GetLinksRequest, GetLinksResponse, Link, LinkDirection,
+    SearchRequest, SearchResponse,
 };
+use okf_jawn_core::application::{ApplicationService, Ports};
 use okf_jawn_core::jobs::RevisionMapping;
-use okf_jawn_core::ports::Application;
+use okf_jawn_core::ports::{Application, PortFuture};
+use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
+use okf_jawn_core::storage::StorageScope;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{
-    ALICE, Built, NOTE, World, alice, draft_of, instant, note, path, revision, scope,
+    ALICE, Built, FakeSearch, NOTE, Unused, World, alice, config, draft_of, instant, note, path,
+    revision, scope,
 };
+
+/// How many index builds started, are running, and ran at most at once.
+#[derive(Default)]
+struct Counters {
+    started: AtomicUsize,
+    running: AtomicUsize,
+    most: AtomicUsize,
+}
+
+/// A search index whose build runs on the blocking pool, as storage's does
+/// (`crates/storage/src/search.rs:69`, `tokio::task::spawn_blocking`): dropping the future
+/// that awaits it does not stop it.
+struct DetachedSearch {
+    inner: Arc<FakeSearch>,
+    counters: Arc<Counters>,
+    fail_first: AtomicBool,
+    millis: u64,
+}
 
 const OTHER: u128 = 21;
 const THIRD: u128 = 22;
+
+impl SearchIndex for DetachedSearch {
+    fn index_revision<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: Revision,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            let counters = Arc::clone(&self.counters);
+            let millis = self.millis;
+            let fail = self.fail_first.swap(false, Ordering::SeqCst);
+            tokio::task::spawn_blocking(move || {
+                counters.started.fetch_add(1, Ordering::SeqCst);
+                let now = counters
+                    .running
+                    .fetch_add(1, Ordering::SeqCst)
+                    .saturating_add(1);
+                counters.most.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(millis));
+                counters.running.fetch_sub(1, Ordering::SeqCst);
+            })
+            .await
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+            if fail {
+                return Err(ApiError::new(ErrorCode::Internal, "the build failed"));
+            }
+            self.inner.index_revision(scope, revision).await
+        })
+    }
+    fn search<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        query: SearchQuery,
+    ) -> PortFuture<'a, SearchResponse> {
+        self.inner.search(scope, query)
+    }
+    fn links<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        query: LinkQuery,
+    ) -> PortFuture<'a, GetLinksResponse> {
+        self.inner.links(scope, query)
+    }
+    fn graph<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        query: GraphQuery,
+    ) -> PortFuture<'a, GetGraphResponse> {
+        self.inner.graph(scope, query)
+    }
+    fn rebuild<'a>(&'a self, scope: &'a StorageScope, head: Revision) -> PortFuture<'a, ()> {
+        self.inner.rebuild(scope, head)
+    }
+}
 
 fn item(id: u128) -> ItemId {
     ItemId(Uuid::from_u128(id))
@@ -444,6 +525,110 @@ async fn the_retained_window_is_the_first_thousand_commits_from_the_head() -> Te
     )?;
     assert_eq!(refused.code, ErrorCode::Unavailable);
     assert_eq!(world.search.builds(), 1);
+    Ok(())
+}
+
+// The reviewer's probes of the build gate under a failed build and under cancellation, kept as
+// regression tests, over an index whose build runs on the blocking pool as storage's does.
+fn detached(
+    world: &World,
+    millis: u64,
+    fail_first: bool,
+) -> Built<(ApplicationService, Arc<Counters>)> {
+    let counters = Arc::new(Counters::default());
+    let search = Arc::new(DetachedSearch {
+        inner: world.search.clone(),
+        counters: Arc::clone(&counters),
+        fail_first: AtomicBool::new(fail_first),
+        millis,
+    });
+    let unused = Arc::new(Unused);
+    let ports = Ports {
+        access: unused.clone(),
+        mutations: unused.clone(),
+        catalog: unused.clone(),
+        blobs: world.blobs.clone(),
+        versions: world.versions.clone(),
+        records: world.records.clone(),
+        queue: unused.clone(),
+        search,
+        converter: unused.clone(),
+        proposals: unused.clone(),
+        uploads: unused.clone(),
+        events: world.events.clone(),
+        credentials: unused.clone(),
+        drafts: world.drafts.clone(),
+        confirmations: unused.clone(),
+        sandbox: world.sandbox.clone(),
+        readiness: world.readiness.clone(),
+    };
+    Ok((ApplicationService::new(ports, config())?, counters))
+}
+
+/// A request waiting on a build that fails then builds the revision itself, never two at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rr_a_waiter_on_a_failed_build_builds_it_once_the_gate_is_free() -> TestResult {
+    let world = World::new()?;
+    accepted_line(&world, &['b'])?;
+    let (service, counters) = detached(&world, 200, true)?;
+    let caller = alice(OperationName::SearchItems, None)?;
+    let (first, second) = tokio::join!(
+        service.search_items(&caller, search_at('b')?),
+        service.search_items(&caller, search_at('b')?),
+    );
+    let failed = err_of(first)?;
+    assert_eq!(failed.code, ErrorCode::Internal);
+    second?;
+    assert_eq!(counters.started.load(Ordering::SeqCst), 2);
+    assert_eq!(counters.most.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+/// A request cancelled while it waits on the gate leaves the build and the queue intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rr_cancelling_a_waiting_request_leaves_one_build() -> TestResult {
+    let world = World::new()?;
+    accepted_line(&world, &['b'])?;
+    let (service, counters) = detached(&world, 300, false)?;
+    let caller = alice(OperationName::SearchItems, None)?;
+    let (first, waiting) = tokio::join!(
+        service.search_items(&caller, search_at('b')?),
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            service.search_items(&caller, search_at('b')?)
+        ),
+    );
+    first?;
+    assert!(waiting.is_err(), "the waiting request was cancelled");
+    service.search_items(&caller, search_at('b')?).await?;
+    assert_eq!(counters.started.load(Ordering::SeqCst), 1);
+    assert_eq!(counters.most.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+/// A request cancelled while it builds must keep the workspace's gate until the build it
+/// started ends: storage's build keeps running after the request is dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rr_cancelling_a_building_request_keeps_one_build_at_a_time() -> TestResult {
+    let world = World::new()?;
+    accepted_line(&world, &['b', 'c'])?;
+    let (service, counters) = detached(&world, 400, false)?;
+    let caller = alice(OperationName::SearchItems, None)?;
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(100),
+        service.search_items(&caller, search_at('b')?),
+    )
+    .await;
+    assert!(
+        cancelled.is_err(),
+        "the first request was cancelled mid-build"
+    );
+    service.search_items(&caller, search_at('c')?).await?;
+    assert_eq!(
+        counters.most.load(Ordering::SeqCst),
+        1,
+        "two builds of one workspace ran at once after a cancelled request"
+    );
     Ok(())
 }
 
