@@ -17,12 +17,16 @@ use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::Receipt;
 use okf_jawn_contract::identity::{
-    Digest, ItemId, MutationId, PurgeId, Revision, TenantId, UploadId, WorkspacePath,
+    ConfirmationId, Digest, ItemId, MutationId, PurgeId, Revision, TenantId, UploadId,
+    WorkspacePath,
 };
 use okf_jawn_contract::item::ItemKind;
 use okf_jawn_contract::metadata::OperationName;
+use okf_jawn_contract::proposal::{Comment, Proposal, ProposalStatus};
 use okf_jawn_contract::purge::{PurgeReport, PurgeTarget};
+use okf_jawn_contract::review::{ConfirmationAction, ConfirmationTarget};
 use okf_jawn_contract::workspace::ArtifactKind;
+use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::credentials::{ConnectorIssue, CredentialStore, NewConnector};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::jobs::{
@@ -30,6 +34,7 @@ use okf_jawn_core::jobs::{
     NewPurge, RecordStore,
 };
 use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationStore};
+use okf_jawn_core::proposals::ProposalStore;
 use okf_jawn_core::sandbox::SandboxCapabilityStore;
 use okf_jawn_core::search::SearchIndex;
 use okf_jawn_core::storage::{
@@ -1504,6 +1509,143 @@ async fn purge_keeps_an_object_a_commit_names_inside_the_objects_step() -> TestR
         held(&storage, &survivor, &x.digest).await?,
         "the original the survivor's new card names stays"
     );
+    Ok(())
+}
+
+/// A proposal of `target` numbered `n` on `head`.
+fn proposal(target: &StorageScope, n: u32, head: &Revision) -> Fallible<Proposal> {
+    Ok(serde_json::from_value(json!({
+        "id": uuid_text(n),
+        "workspace_id": target.workspace_id,
+        "base_revision": head,
+        "proposal_revision": head,
+        "content_digest": "d".repeat(64),
+        "title": "zanzibar proposal",
+        "description": "zanzibar reasons",
+        "changes": [],
+        "kind": "content",
+        "status": "open",
+        "created_by": "agent",
+        "created_via": "mcp_delegation",
+        "created_at": "2026-10-09T12:00:00.000Z"
+    }))?)
+}
+
+/// A confirmation challenge for item 10 at `head`.
+fn challenge(head: &Revision) -> Fallible<ConfirmationCreate> {
+    Ok(ConfirmationCreate {
+        action: ConfirmationAction::Review,
+        target: ConfirmationTarget::Item {
+            item_id: uuid!(10)?,
+        },
+        revision: head.clone(),
+        content_digest: Digest::try_from("d".repeat(64))?,
+        session_id: "session-1".to_owned(),
+        subject: "ana".to_owned(),
+        expires_at: serde_json::from_value(json!("2099-01-01T00:00:00.000Z"))?,
+    })
+}
+
+/// Each write of a proposal, a comment and a confirmation to `target`: each refused.
+async fn refuse_discussion(
+    storage: &Storage,
+    target: &StorageScope,
+    head: &Revision,
+    open: &Proposal,
+    issued: ConfirmationId,
+    when: &str,
+) -> TestResult {
+    let proposals = storage.proposals();
+    refused(
+        proposals
+            .insert(target, uuid!(23)?, proposal(target, 24, head)?)
+            .await,
+        &format!("a proposal {when}"),
+    )?;
+    let mut changed = open.clone();
+    changed.status = ProposalStatus::Declined;
+    refused(
+        proposals.update(target, changed).await,
+        &format!("a proposal update {when}"),
+    )?;
+    let comment: Comment = serde_json::from_value(json!({
+        "id": "c1",
+        "author": "ana",
+        "text": "zanzibar comment",
+        "created_at": "2026-10-09T12:00:00.000Z"
+    }))?;
+    refused(
+        proposals
+            .add_comment(target, uuid!(25)?, open.id, comment)
+            .await,
+        &format!("a comment {when}"),
+    )?;
+    let confirmations = storage.confirmations();
+    refused(
+        confirmations
+            .create(target, uuid!(26)?, challenge(head)?)
+            .await,
+        &format!("a confirmation {when}"),
+    )?;
+    let presented = ConfirmationConsume {
+        confirmation_id: issued,
+        action: ConfirmationAction::Review,
+        target: ConfirmationTarget::Item {
+            item_id: uuid!(10)?,
+        },
+        revision: head.clone(),
+        content_digest: Digest::try_from("d".repeat(64))?,
+        session_id: "session-1".to_owned(),
+        subject: "ana".to_owned(),
+    };
+    refused(
+        confirmations.consume(target, uuid!(27)?, presented).await,
+        &format!("a confirmation's use {when}"),
+    )?;
+    Ok(())
+}
+
+/// Ruling 4: proposals, comments and confirmations carry the workspace's free text and come
+/// from synchronous requests, not jobs; each is refused inside its own transaction from the
+/// moment the purge is recorded, and after the purge completes.
+#[tokio::test]
+async fn purge_refuses_proposals_comments_and_confirmations_during_and_after() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, 1, "Trip").await?;
+    let open = storage
+        .proposals()
+        .insert(&target, uuid!(20)?, proposal(&target, 21, &head)?)
+        .await?;
+    let issued = storage
+        .confirmations()
+        .create(&target, uuid!(22)?, challenge(&head)?)
+        .await?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    refuse_discussion(
+        &storage,
+        &target,
+        &head,
+        &open,
+        issued.id,
+        "during the purge",
+    )
+    .await?;
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    refuse_discussion(
+        &storage,
+        &target,
+        &head,
+        &open,
+        issued.id,
+        "after the purge",
+    )
+    .await?;
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
     Ok(())
 }
 

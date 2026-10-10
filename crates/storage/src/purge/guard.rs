@@ -1,19 +1,25 @@
 //! The refusal of every write to a workspace a purge names (review B6, window 1).
 //!
 //! A purge plans what the workspace references once, at its first step, and removes the
-//! repository only at its fifth: a write that landed in between (a commit, an object, a draft,
-//! an upload, an artifact or a job completion) would leave content outside the plan. So from
-//! the moment core records the purge (`RecordStore::create_purge`, before it calls the purger)
-//! every storage write scoped to that workspace is refused with `Conflict`, naming the purge,
-//! the same way the catalog refuses to create a purged identity again. The purger itself does
-//! not go through these writes. A completed purge keeps refusing: the workspace is gone, and a
-//! stale writer must not leave a row or an object naming it.
+//! repository only at its fifth: a write that landed in between would leave content outside
+//! the plan. So from the moment core records the purge (`RecordStore::create_purge`, before it
+//! calls the purger) every storage write scoped to that workspace is refused with `Conflict`,
+//! naming the purge, the same way the catalog refuses to create a purged identity again. The
+//! purger itself does not go through these writes. A completed purge keeps refusing: the
+//! workspace is gone, and a stale writer must not leave a row or an object naming it.
 //!
-//! The check runs in the write's own transaction where the write is one SQLite transaction, so
-//! the purge record and the write are ordered by the database; a Git write checks before it
-//! takes the workspace's lock, and core drains the workspace's jobs before calling the purger
-//! (the `Purger` contract), so no write that passed the check is still running when the plan
-//! is read.
+//! Where a write is one SQLite transaction the check runs inside it, so the purge record and
+//! the write are ordered by the database: drafts (save, discard), upload slots and upload
+//! completions, artifacts, job completions, derived objects, receipts, reviews, proposals
+//! (insert, update), comments, confirmations (create, consume), sandbox capabilities and the
+//! catalog (update, archive, unarchive). An object put checks before it receives the body and
+//! again after it pinned the object (`LocalBlobs::put_pinned`), so a put that passed the first
+//! check before the purge was recorded either is waited for by the purge's object step or
+//! stores nothing.
+//!
+//! Events are not refused. An event carries identities only (its kind, revision, item, job,
+//! connector, actor and operation), and one appended after the rows step is tenant-level data
+//! of the same kind as the revision map and the purge record, which the purge keeps.
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_core::storage::StorageScope;
