@@ -585,8 +585,9 @@ async fn the_plan_waits_for_a_write_that_holds_the_workspace_lock() -> Result<()
     Ok(())
 }
 
-/// Ruling 4 (M8): an import that fails after it put its objects back leaves their pending
-/// puts, so a purge of the workspace deletes the bytes.
+/// Ruling 4 (M8): an import that fails after it put its objects back, before its history and
+/// rows land (the workspace is not blank), leaves their pending puts, so a purge of the
+/// workspace deletes the bytes, which nothing else names.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_import_leaves_pending_puts_a_purge_deletes() -> Result<(), ApiError> {
     let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
@@ -612,7 +613,19 @@ async fn a_failed_import_leaves_pending_puts_a_purge_deletes() -> Result<(), Api
             .local_path(&source.tenant_id, &archive.digest)?,
     )
     .map_err(|error| fault(&error))?;
-    let (target, _) = create(&storage, "elsewhere", 1, "Copy").await?;
+    let (target, head) = create(&storage, "elsewhere", 1, "Copy").await?;
+    commit(
+        &storage,
+        &target,
+        2,
+        &head,
+        vec![card(
+            item(14),
+            "sources/own.md",
+            &digest_of(b"its own card")?,
+        )?],
+    )
+    .await?;
     let uploaded = storage
         .blobs()
         .put(
@@ -621,17 +634,6 @@ async fn a_failed_import_leaves_pending_puts_a_purge_deletes() -> Result<(), Api
             1 << 30,
             None,
         )
-        .await?;
-    storage
-        .records
-        .call(|connection| {
-            connection
-                .execute_batch(
-                    "CREATE TRIGGER stop_restore BEFORE INSERT ON restores
-                     BEGIN SELECT RAISE(ABORT, 'stopped before the import record'); END;",
-                )
-                .map_err(|error| fault(&error))
-        })
         .await?;
     let failed = storage
         .backups()
@@ -642,16 +644,9 @@ async fn a_failed_import_leaves_pending_puts_a_purge_deletes() -> Result<(), Api
             vec!["ana".to_owned()],
         )
         .await;
-    storage
-        .records
-        .call(|connection| {
-            connection
-                .execute_batch("DROP TRIGGER stop_restore;")
-                .map_err(|error| fault(&error))
-        })
-        .await?;
-    if failed.is_ok() {
-        return Err(fault(&"the import was meant to fail"));
+    match failed {
+        Ok(report) => return Err(fault(&format!("the import was meant to fail: {report:?}"))),
+        Err(error) => assert_eq!(error.code, ErrorCode::Conflict, "only a blank one: {error}"),
     }
     assert!(
         held(&storage, &target, &original).await?,
