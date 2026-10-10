@@ -54,11 +54,12 @@ use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 /// `edit_elsewhere_before_call` makes one land just before the given `commit` call, as
 /// another writer racing the handler would.
 ///
-/// `show` reads an item at a revision by replaying, over the items present at the base
+/// `show` and `item_at_path` read an item at a revision by replaying, over the items present at the base
 /// (`at_base`), the edits of every commit up to that revision: `WriteSourceCard` writes the
 /// whole card (moving it to the card's path, as storage's `write_card` does), `EditItem`
 /// replaces body and properties, `MoveItem` the path, `DeleteItem` removes it. An item absent
-/// there is `NotFound`.
+/// there is `NotFound` for `show` and `None` for `item_at_path`; a revision not on the line is
+/// `NotFound` for both.
 pub struct FakeVersions {
     /// The head before any commit.
     pub head: Revision,
@@ -223,6 +224,17 @@ impl FakeVersions {
         revision: &Revision,
         item: ItemId,
     ) -> Result<Option<SourceCard>, ApiError> {
+        Ok(self
+            .items_at(revision)?
+            .into_iter()
+            .find(|card| card.item_id == item))
+    }
+
+    /// Every item as it stands at `revision`.
+    ///
+    /// # Errors
+    /// Returns `NotFound` when the revision is not on the line, or when a lock is poisoned.
+    pub fn items_at(&self, revision: &Revision) -> Result<Vec<SourceCard>, ApiError> {
         let mut items: Vec<SourceCard> = self.at_base.lock().map_err(|_| poisoned())?.clone();
         if *revision != self.head {
             let commits = self.commits.lock().map_err(|_| poisoned())?;
@@ -236,7 +248,7 @@ impl FakeVersions {
                 }
             }
         }
-        Ok(items.into_iter().find(|card| card.item_id == item))
+        Ok(items)
     }
 
     /// A restore's commit under `mutation_id`, on the head; nothing when one carries it already.
@@ -572,6 +584,23 @@ impl VersionStore for FakeVersions {
                 next_cursor: None,
             })
         })
+    }
+    fn item_at_path<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        revision: &'a Revision,
+        path: &'a WorkspacePath,
+    ) -> PortFuture<'a, Option<ItemSummary>> {
+        // The port doc: `Ok(None)` when no item is at the path at that revision; `NotFound`
+        // only for a revision the line does not hold (`items_at`).
+        let found = self.items_at(revision).and_then(|items| {
+            items
+                .iter()
+                .find(|card| card.path == *path)
+                .map(|card| document_of(card, revision).map(|document| document.summary))
+                .transpose()
+        });
+        Box::pin(async move { found })
     }
     fn show<'a>(
         &'a self,
