@@ -204,6 +204,44 @@ async fn only_the_current_unexpired_claim_completes_a_job() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_lapsed_claim_neither_renews_nor_fails_its_job() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let records = storage.records();
+    let scope = workspace_scope()?;
+    let job = records
+        .create_job(&scope, new_job(5, JobSpec::RebuildIndex)?)
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "a claim")?;
+    // The lease lapsed; no other worker has reclaimed the job yet.
+    expire_job_leases(&storage)?;
+    let renewed = err_of(records.update_progress(&claimed.lease, 30).await)?;
+    assert_eq!(
+        renewed.code,
+        ErrorCode::Conflict,
+        "a lapsed claim cannot renew"
+    );
+    let failed = err_of(
+        records
+            .fail_job(claimed.lease.clone(), "stalled".to_owned(), false)
+            .await,
+    )?;
+    assert_eq!(
+        failed.code,
+        ErrorCode::Conflict,
+        "a lapsed claim cannot fail"
+    );
+    assert_eq!(
+        records.expire_leases().await?,
+        1,
+        "the job is still reclaimable, neither resurrected nor failed"
+    );
+    let again = some(records.claim_job(job.id).await?, "the reclaim")?;
+    assert_eq!(again.lease.attempt, 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_cancelled_job_is_seen_by_the_heartbeat() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
