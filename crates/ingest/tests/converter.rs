@@ -1061,6 +1061,39 @@ mod conversion_child {
     }
 
     #[tokio::test]
+    async fn the_real_child_holds_one_copy_of_the_original_under_its_cap() -> TestResult {
+        // A 64 MiB original under a 96 MiB cap: room for one copy and the child itself, not for
+        // two. Its text is not UTF-8 nor windows-1252 (a 0x81 byte), so docling refuses it
+        // as damaged straight from the bytes it was given, without a copy of its own. A child
+        // that kept a second copy of the original beside the converter's would reach the cap.
+        const ORIGINAL: usize = 64 * 1024 * 1024;
+        const CAP: u64 = 96 * 1024 * 1024;
+        let store = tempfile::tempdir()?;
+        let output = tempfile::tempdir()?;
+        let mut bytes = b"Plain words of a large original.\n".repeat(ORIGINAL / 33);
+        bytes.push(0x81);
+        let source = retained(store.path(), &bytes)?;
+        drop(bytes);
+        let converter = DoclingConverter::new(ConverterConfig {
+            child: PathBuf::from(env!("CARGO_BIN_EXE_okf-jawn-convert")),
+            limits: ConverterLimits {
+                window_pages: 4,
+                memory_limit_bytes: CAP,
+            },
+        });
+        let mut request = input(source, "large.md", output.path());
+        request.timeout = Duration::from_secs(60);
+        let conversion = converter.convert(request).await?;
+        assert_eq!(
+            conversion.status,
+            ConversionStatus::Failure(FailureReason::Damaged),
+            "{:?}",
+            conversion.issues
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn the_real_child_failing_for_another_reason_under_a_small_cap_is_a_crash() -> TestResult
     {
         // The same 16 MiB cap, but the retained original is missing: the child stops for a

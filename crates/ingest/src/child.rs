@@ -8,7 +8,9 @@
 //!   (`page_range`) and the time budget (`document_timeout`), and opens the source with
 //!   `SourceDocument::from_bytes` in the format of the occurrence's file name. It writes the
 //!   Markdown export, the JSON export and, for a PDF, the JSON export of the window's text layer
-//!   (`docling::pdf_text_layer_pages`, read by the location rule).
+//!   (`docling::pdf_text_layer_pages`, read by the location rule). The original's bytes move
+//!   into the converter, and the text layer reads them again once it is done, so one copy of
+//!   the original counts against the cap at a time.
 //! - The line runs (`protocol::Block`): each top-level node is rendered on its own with
 //!   `MarkdownStreamer::push`, whose chunks concatenate byte for byte to the Markdown export, so
 //!   each node's lines are known. A run is on a page only by the node's own provenance (a
@@ -243,8 +245,10 @@ fn convert(request: &Request, directory: &Path) -> Result<Reply, Stop> {
     let Some(format) = format_of(&request.file_name) else {
         return Ok(unconverted(ConversionStatus::Unsupported, Vec::new()));
     };
-    let bytes = read_source(request)?;
-    let source = SourceDocument::from_bytes(request.file_name.clone(), format, bytes.clone());
+    // The converter owns the one copy of the original held while it runs; the PDF text layer
+    // reads the original again afterwards, so two copies never count against the cap at once.
+    let source =
+        SourceDocument::from_bytes(request.file_name.clone(), format, read_source(request)?);
     let result = match converter(request).convert(source) {
         Ok(result) => result,
         Err(error) => {
@@ -283,7 +287,7 @@ fn convert(request: &Request, directory: &Path) -> Result<Reply, Stop> {
     let blocks = line_blocks(&result.document, &markdown);
     let text_layer = format == InputFormat::Pdf
         && match docling::pdf_text_layer_pages(
-            &bytes,
+            &read_source(request)?,
             &request.file_name,
             request.window.as_ref().map(|window| {
                 (
