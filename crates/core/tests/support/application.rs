@@ -1,5 +1,5 @@
 //! Fakes of every port `ApplicationService` is built over, for handler tests; not production
-//! adapters.
+//! adapters. The `tests/application` target includes this file as its `fixture` module.
 //!
 //! Each fake answers what its port documents and nothing more: the version store commits only
 //! on its expected head, replays a repeated mutation, and runs the check it is handed on a

@@ -6,6 +6,7 @@
 //! draft-bearing operations, the mutation ledger) are tested in `tests/dispatch.rs`.
 
 mod drafts;
+#[path = "../support/application.rs"]
 mod fixture;
 mod items;
 mod reads;
