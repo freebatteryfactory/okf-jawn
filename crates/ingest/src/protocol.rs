@@ -3,41 +3,24 @@
 //! The supervisor writes `REQUEST_FILE` into a new, empty output directory and runs the child
 //! with that file's path as its only argument. The child writes its files into the same
 //! directory and `RESULT_FILE` last, so a child that ended without `RESULT_FILE` did not report
-//! (`cap::classify`). Until `serde` with `derive` reaches ingest (request R-I2, Batch B), both
-//! sides read and write `serde_json::Value` here and nowhere else, so the move to derived types
-//! touches only this module.
+//! (`cap::classify`).
+//!
+//! Both files are JSON of derived serde types that refuse a field they do not know
+//! (`deny_unknown_fields`), so a request or reply of another shape is refused rather than read
+//! with a part silently dropped.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use okf_jawn_contract::common::{PageRange, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::extraction::{ConversionSettings, ConverterIssue};
+use okf_jawn_contract::extraction::{ConversionSettings, ConverterIssue, FailureReason};
 use okf_jawn_core::conversion::ConversionStatus;
-use serde_json::{Map, Value};
-
-/// A contract part as JSON. A macro, not a function: ingest has `serde_json` but not `serde`,
-/// so it cannot name the `Serialize` bound (R-I2).
-macro_rules! to_json {
-    ($part:expr) => {
-        serde_json::to_value($part).map_err(|error| {
-            ApiError::new(
-                ErrorCode::Internal,
-                format!("a conversion protocol part did not serialize: {error}"),
-            )
-        })
-    };
-}
-
-/// A contract part read from JSON; a macro for the same reason as `to_json`.
-macro_rules! from_json {
-    ($value:expr, $name:expr) => {
-        serde_json::from_value($value.clone()).map_err(|_| shape($name))
-    };
-}
+use serde::{Deserialize, Serialize};
 
 /// What the supervisor asks of the child.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Task {
     /// Count the pages of a paginated original.
     PageCount,
@@ -63,7 +46,8 @@ pub struct Request {
 }
 
 /// A run of Markdown lines that one top-level document node rendered.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Block {
     /// One-based inclusive lines of the window's Markdown.
     pub lines: TextRange,
@@ -97,6 +81,40 @@ pub struct Reply {
     pub text_layer: bool,
 }
 
+/// The request as it is written: the time budget in whole milliseconds.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestFile {
+    task: Task,
+    source: PathBuf,
+    file_name: String,
+    settings: ConversionSettings,
+    window: Option<PageRange>,
+    timeout_ms: u64,
+}
+
+/// The reply as it is written: the status as a word, with the failure's reason beside it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplyFile {
+    status: StatusWord,
+    reason: Option<FailureReason>,
+    page_count: Option<u32>,
+    issues: Vec<ConverterIssue>,
+    blocks: Vec<Block>,
+    text_layer: bool,
+}
+
+/// `ConversionStatus` without its reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StatusWord {
+    Success,
+    PartialSuccess,
+    Unsupported,
+    Failure,
+}
+
 /// The request the supervisor writes.
 pub const REQUEST_FILE: &str = "request.json";
 /// The reply the child writes last.
@@ -109,194 +127,103 @@ pub const EXPORT_FILE: &str = "document.json";
 pub const TEXT_LAYER_FILE: &str = "text_layer.json";
 
 impl Request {
-    /// The JSON the supervisor writes.
+    /// The bytes the supervisor writes.
     ///
     /// # Errors
-    /// Returns `Internal` when the settings cannot be represented as JSON.
-    pub fn to_json(&self) -> Result<Value, ApiError> {
-        let mut object = Map::new();
-        let task = match self.task {
-            Task::PageCount => "page_count",
-            Task::Convert => "convert",
-        };
-        let _previous = object.insert("task".to_owned(), Value::from(task));
-        let _previous = object.insert(
-            "source".to_owned(),
-            Value::from(self.source.to_string_lossy().into_owned()),
-        );
-        let _previous = object.insert("file_name".to_owned(), Value::from(self.file_name.clone()));
-        let _previous = object.insert("settings".to_owned(), to_json!(&self.settings)?);
-        let window = match &self.window {
-            None => Value::Null,
-            Some(window) => to_json!(window)?,
-        };
-        let _previous = object.insert("window".to_owned(), window);
-        let _previous = object.insert(
-            "timeout_ms".to_owned(),
-            Value::from(u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX)),
-        );
-        Ok(Value::Object(object))
+    /// Returns `Internal` when the request cannot be written as JSON (a source path that is not
+    /// Unicode).
+    pub fn encode(&self) -> Result<Vec<u8>, ApiError> {
+        serde_json::to_vec(&RequestFile {
+            task: self.task,
+            source: self.source.clone(),
+            file_name: self.file_name.clone(),
+            settings: self.settings.clone(),
+            window: self.window.clone(),
+            timeout_ms: u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX),
+        })
+        .map_err(|error| fault(&format!("a conversion request did not serialize: {error}")))
     }
 
-    /// Read the JSON the supervisor wrote.
+    /// Read the bytes the supervisor wrote.
     ///
     /// # Errors
-    /// Returns `InvalidInput` naming the first field that is missing or of the wrong shape.
-    pub fn from_json(value: &Value) -> Result<Self, ApiError> {
-        let task = match text(value, "task")? {
-            "page_count" => Task::PageCount,
-            "convert" => Task::Convert,
-            _ => return Err(shape("task")),
-        };
-        let window = match value.get("window") {
-            None | Some(Value::Null) => None,
-            Some(window) => Some(from_json!(window, "window")?),
-        };
-        let timeout_ms = value
-            .get("timeout_ms")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| shape("timeout_ms"))?;
+    /// Returns `InvalidInput` naming what is missing, unknown or of the wrong shape.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ApiError> {
+        let file: RequestFile = serde_json::from_slice(bytes).map_err(|error| {
+            ApiError::new(
+                ErrorCode::InvalidInput,
+                format!("the conversion request is not of the protocol's shape: {error}"),
+            )
+        })?;
         Ok(Self {
-            task,
-            source: PathBuf::from(text(value, "source")?),
-            file_name: text(value, "file_name")?.to_owned(),
-            settings: from_json!(field(value, "settings")?, "settings")?,
-            window,
-            timeout: Duration::from_millis(timeout_ms),
+            task: file.task,
+            source: file.source,
+            file_name: file.file_name,
+            settings: file.settings,
+            window: file.window,
+            timeout: Duration::from_millis(file.timeout_ms),
         })
     }
 }
 
 impl Reply {
-    /// The JSON the child writes.
+    /// The bytes the child writes.
     ///
     /// # Errors
-    /// Returns `Internal` when a part cannot be represented as JSON.
-    pub fn to_json(&self) -> Result<Value, ApiError> {
-        let mut object = Map::new();
+    /// Returns `Internal` when a part cannot be written as JSON.
+    pub fn encode(&self) -> Result<Vec<u8>, ApiError> {
         let (status, reason) = match &self.status {
-            ConversionStatus::Success => ("success", Value::Null),
-            ConversionStatus::PartialSuccess => ("partial_success", Value::Null),
-            ConversionStatus::Unsupported => ("unsupported", Value::Null),
-            ConversionStatus::Failure(reason) => ("failure", to_json!(reason)?),
+            ConversionStatus::Success => (StatusWord::Success, None),
+            ConversionStatus::PartialSuccess => (StatusWord::PartialSuccess, None),
+            ConversionStatus::Unsupported => (StatusWord::Unsupported, None),
+            ConversionStatus::Failure(reason) => (StatusWord::Failure, Some(reason.clone())),
         };
-        let _previous = object.insert("status".to_owned(), Value::from(status));
-        let _previous = object.insert("reason".to_owned(), reason);
-        let _previous = object.insert(
-            "page_count".to_owned(),
-            self.page_count.map_or(Value::Null, Value::from),
-        );
-        let _previous = object.insert("issues".to_owned(), to_json!(&self.issues)?);
-        let blocks = self
-            .blocks
-            .iter()
-            .map(|block| {
-                let mut entry = Map::new();
-                let _previous = entry.insert("lines".to_owned(), to_json!(&block.lines)?);
-                let _previous = entry.insert(
-                    "page".to_owned(),
-                    block.page.map_or(Value::Null, Value::from),
-                );
-                let _previous = entry.insert(
-                    "unlocated".to_owned(),
-                    block
-                        .unlocated
-                        .as_ref()
-                        .map_or(Value::Null, |text| Value::from(text.clone())),
-                );
-                let _previous = entry.insert("table".to_owned(), Value::from(block.table));
-                Ok(Value::Object(entry))
-            })
-            .collect::<Result<Vec<Value>, ApiError>>()?;
-        let _previous = object.insert("blocks".to_owned(), Value::Array(blocks));
-        let _previous = object.insert("text_layer".to_owned(), Value::from(self.text_layer));
-        Ok(Value::Object(object))
+        serde_json::to_vec(&ReplyFile {
+            status,
+            reason,
+            page_count: self.page_count,
+            issues: self.issues.clone(),
+            blocks: self.blocks.clone(),
+            text_layer: self.text_layer,
+        })
+        .map_err(|error| fault(&format!("a conversion reply did not serialize: {error}")))
     }
 
-    /// Read the JSON the child wrote.
+    /// Read the bytes the child wrote.
     ///
     /// # Errors
-    /// Returns `Internal` naming the first field that is missing or of the wrong shape: a child
-    /// that reports nonsense is a worker fault.
-    pub fn from_json(value: &Value) -> Result<Self, ApiError> {
-        let fault = |error: ApiError| ApiError::new(ErrorCode::Internal, error.message);
-        let status = match text(value, "status").map_err(fault)? {
-            "success" => ConversionStatus::Success,
-            "partial_success" => ConversionStatus::PartialSuccess,
-            "unsupported" => ConversionStatus::Unsupported,
-            "failure" => ConversionStatus::Failure(
-                from_json!(field(value, "reason").map_err(fault)?, "reason").map_err(fault)?,
-            ),
-            _ => return Err(fault(shape("status"))),
+    /// Returns `Internal` naming what is missing, unknown or of the wrong shape, and when a
+    /// failure carries no reason or another status carries one: a child that reports nonsense
+    /// is a worker fault.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ApiError> {
+        let file: ReplyFile = serde_json::from_slice(bytes).map_err(|error| {
+            fault(&format!(
+                "the conversion reply is not of the protocol's shape: {error}"
+            ))
+        })?;
+        let status = match (file.status, file.reason) {
+            (StatusWord::Success, None) => ConversionStatus::Success,
+            (StatusWord::PartialSuccess, None) => ConversionStatus::PartialSuccess,
+            (StatusWord::Unsupported, None) => ConversionStatus::Unsupported,
+            (StatusWord::Failure, Some(reason)) => ConversionStatus::Failure(reason),
+            (StatusWord::Failure, None) => {
+                return Err(fault("a failed conversion reply names no reason"));
+            }
+            (StatusWord::Success | StatusWord::PartialSuccess | StatusWord::Unsupported, _) => {
+                return Err(fault("only a failed conversion reply names a reason"));
+            }
         };
-        let page_count = match value.get("page_count") {
-            None | Some(Value::Null) => None,
-            Some(count) => Some(
-                count
-                    .as_u64()
-                    .and_then(|count| u32::try_from(count).ok())
-                    .ok_or_else(|| fault(shape("page_count")))?,
-            ),
-        };
-        let blocks = value
-            .get("blocks")
-            .and_then(Value::as_array)
-            .ok_or_else(|| fault(shape("blocks")))?
-            .iter()
-            .map(|entry| {
-                Ok(Block {
-                    lines: from_json!(field(entry, "lines")?, "lines")?,
-                    page: entry
-                        .get("page")
-                        .and_then(Value::as_u64)
-                        .and_then(|page| u32::try_from(page).ok()),
-                    unlocated: match entry.get("unlocated") {
-                        None | Some(Value::Null) => None,
-                        Some(text) => Some(
-                            text.as_str()
-                                .map(str::to_owned)
-                                .ok_or_else(|| shape("unlocated"))?,
-                        ),
-                    },
-                    table: entry
-                        .get("table")
-                        .and_then(Value::as_bool)
-                        .ok_or_else(|| shape("table"))?,
-                })
-            })
-            .collect::<Result<Vec<Block>, ApiError>>()
-            .map_err(fault)?;
         Ok(Self {
             status,
-            page_count,
-            issues: from_json!(field(value, "issues").map_err(fault)?, "issues").map_err(fault)?,
-            blocks,
-            text_layer: value
-                .get("text_layer")
-                .and_then(Value::as_bool)
-                .ok_or_else(|| fault(shape("text_layer")))?,
+            page_count: file.page_count,
+            issues: file.issues,
+            blocks: file.blocks,
+            text_layer: file.text_layer,
         })
     }
 }
 
-/// A field that must be present.
-fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, ApiError> {
-    value.get(name).ok_or_else(|| shape(name))
-}
-
-/// A string field that must be present.
-fn text<'a>(value: &'a Value, name: &str) -> Result<&'a str, ApiError> {
-    value
-        .get(name)
-        .and_then(Value::as_str)
-        .ok_or_else(|| shape(name))
-}
-
-/// A field missing or of the wrong shape.
-fn shape(name: &str) -> ApiError {
-    ApiError::new(
-        ErrorCode::InvalidInput,
-        format!("the conversion protocol field `{name}` is missing or of the wrong shape"),
-    )
-    .with_field(format!("/{name}"))
+/// A worker fault.
+fn fault(message: &str) -> ApiError {
+    ApiError::new(ErrorCode::Internal, message)
 }

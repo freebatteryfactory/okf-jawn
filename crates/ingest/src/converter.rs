@@ -152,10 +152,8 @@ impl DoclingConverter {
         time_limit: Duration,
     ) -> Result<(ChildVerdict, Option<Reply>, String), ApiError> {
         let request_path = directory.join(REQUEST_FILE);
-        let text = serde_json::to_string(&request.to_json()?)
-            .map_err(|error| fault(&format!("a request did not serialize: {error}")))?;
         // Small files, read and written in place: the workspace tokio has no `fs` feature.
-        std::fs::write(&request_path, text)
+        std::fs::write(&request_path, request.encode()?)
             .map_err(|error| fault(&format!("the request could not be written: {error}")))?;
         let mut command = tokio::process::Command::new(&self.config.child);
         let _configured = command.arg(&request_path);
@@ -169,9 +167,7 @@ impl DoclingConverter {
         let reply = if verdict == ChildVerdict::Reported {
             let bytes = std::fs::read(&result)
                 .map_err(|error| fault(&format!("the reply could not be read: {error}")))?;
-            let value: Value = serde_json::from_slice(&bytes)
-                .map_err(|error| fault(&format!("the reply is not JSON: {error}")))?;
-            Some(Reply::from_json(&value)?)
+            Some(Reply::decode(&bytes)?)
         } else {
             None
         };

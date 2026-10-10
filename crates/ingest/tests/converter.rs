@@ -22,7 +22,7 @@ mod conversion_protocol {
     use okf_jawn_ingest::protocol::{Block, Reply, Request, Task};
     use serde_json::json;
 
-    use crate::check::{TestResult, err_of};
+    use crate::check::{TestResult, err_of, some};
 
     #[test]
     fn a_request_and_a_reply_read_back_as_written() -> TestResult {
@@ -34,7 +34,7 @@ mod conversion_protocol {
             window: Some(PageRange { start: 5, end: 8 }),
             timeout: Duration::from_millis(90_500),
         };
-        assert_eq!(Request::from_json(&request.to_json()?)?, request);
+        assert_eq!(Request::decode(&request.encode()?)?, request);
         for status in [
             ConversionStatus::Success,
             ConversionStatus::PartialSuccess,
@@ -65,18 +65,78 @@ mod conversion_protocol {
                 ],
                 text_layer: true,
             };
-            assert_eq!(Reply::from_json(&reply.to_json()?)?, reply);
+            assert_eq!(Reply::decode(&reply.encode()?)?, reply);
         }
         Ok(())
     }
 
     #[test]
     fn a_reply_of_the_wrong_shape_is_a_worker_fault() -> TestResult {
-        let error = err_of(Reply::from_json(&json!({ "status": "converted" })))?;
+        let error = err_of(Reply::decode(
+            json!({ "status": "converted" }).to_string().as_bytes(),
+        ))?;
         assert_eq!(error.code, ErrorCode::Internal);
-        let error = err_of(Request::from_json(&json!({ "task": "convert" })))?;
+        let error = err_of(Request::decode(
+            json!({ "task": "convert" }).to_string().as_bytes(),
+        ))?;
         assert_eq!(error.code, ErrorCode::InvalidInput);
-        assert!(error.field.is_some());
+        assert!(error.message.contains("source"), "{}", error.message);
+        // A failure must say why, and nothing else may.
+        let reply = json!({ "status": "failure", "reason": null, "page_count": null, "issues": [], "blocks": [], "text_layer": false });
+        assert_eq!(
+            err_of(Reply::decode(reply.to_string().as_bytes()))?.code,
+            ErrorCode::Internal
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_field_the_protocol_does_not_know_is_refused() -> TestResult {
+        let request = Request {
+            task: Task::PageCount,
+            source: PathBuf::from("objects/ab/cdef"),
+            file_name: "report.pdf".to_owned(),
+            settings: ConversionSettings::default(),
+            window: None,
+            timeout: Duration::from_secs(120),
+        };
+        let mut written: serde_json::Value = serde_json::from_slice(&request.encode()?)?;
+        let object = some(written.as_object_mut(), "the request object")?;
+        let _previous = object.insert("renderer".to_owned(), json!("docling-parse"));
+        let error = err_of(Request::decode(written.to_string().as_bytes()))?;
+        assert_eq!(error.code, ErrorCode::InvalidInput);
+        assert!(error.message.contains("renderer"), "{}", error.message);
+
+        let reply = Reply {
+            status: ConversionStatus::Success,
+            page_count: Some(3),
+            issues: Vec::new(),
+            blocks: vec![Block {
+                lines: TextRange { start: 1, end: 1 },
+                page: Some(1),
+                unlocated: None,
+                table: false,
+            }],
+            text_layer: false,
+        };
+        let mut written: serde_json::Value = serde_json::from_slice(&reply.encode()?)?;
+        let object = some(written.as_object_mut(), "the reply object")?;
+        let _previous = object.insert("pages_seen".to_owned(), json!(3));
+        let error = err_of(Reply::decode(written.to_string().as_bytes()))?;
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert!(error.message.contains("pages_seen"), "{}", error.message);
+        // An unknown field inside a line run is refused as well.
+        let mut written: serde_json::Value = serde_json::from_slice(&reply.encode()?)?;
+        let run = some(
+            written
+                .get_mut("blocks")
+                .and_then(|blocks| blocks.get_mut(0))
+                .and_then(serde_json::Value::as_object_mut),
+            "the first line run",
+        )?;
+        let _previous = run.insert("bbox".to_owned(), json!([0, 0, 1, 1]));
+        let error = err_of(Reply::decode(written.to_string().as_bytes()))?;
+        assert!(error.message.contains("bbox"), "{}", error.message);
         Ok(())
     }
 }
@@ -661,7 +721,7 @@ mod conversion_child {
             timeout: Duration::from_secs(60),
         };
         let path = output.join(REQUEST_FILE);
-        std::fs::write(&path, request.to_json()?.to_string())?;
+        std::fs::write(&path, request.encode()?)?;
         Ok(path)
     }
 

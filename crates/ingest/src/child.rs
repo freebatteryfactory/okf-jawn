@@ -59,14 +59,14 @@ pub fn run(request_path: &Path) -> Result<(), ApiError> {
         .ok_or_else(|| fault("the request file has no directory"))?;
     let bytes = std::fs::read(request_path)
         .map_err(|error| fault(&format!("the request could not be read: {error}")))?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|error| fault(&format!("the request is not JSON: {error}")))?;
-    let request = Request::from_json(&value)?;
+    let request = Request::decode(&bytes)?;
     let reply = match request.task {
         Task::PageCount => page_count(&request)?,
         Task::Convert => convert(&request, directory)?,
     };
-    write_json(&directory.join(RESULT_FILE), &reply.to_json()?)
+    let path = directory.join(RESULT_FILE);
+    std::fs::write(&path, reply.encode()?)
+        .map_err(|error| fault(&format!("{} could not be written: {error}", path.display())))
 }
 
 /// The input format the occurrence's file name selects.
@@ -352,13 +352,6 @@ fn issue(component_type: &str, module_name: &str, message: &str) -> ConverterIss
 fn write_text(path: &Path, text: &str) -> Result<(), ApiError> {
     std::fs::write(path, text)
         .map_err(|error| fault(&format!("{} could not be written: {error}", path.display())))
-}
-
-/// Write a JSON output.
-fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), ApiError> {
-    let text = serde_json::to_string(value)
-        .map_err(|error| fault(&format!("a reply did not serialize: {error}")))?;
-    write_text(path, &text)
 }
 
 /// Say why the child stops, and fail.
