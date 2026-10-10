@@ -45,9 +45,19 @@
 //! outlive the workspace: they hold identities only. Installation archives hold no workspace
 //! content (Stage 1b design section 8) and are left as they are.
 //!
-//! Known limit: an object first stored by work running in the workspace after step 1 is not in
-//! the plan and stays in the object store, unreferenced; and an identical object that another
-//! workspace starts to reference between step 6's read and its delete is deleted.
+//! What a write in flight can and cannot leave behind (the `Purger` contract in core):
+//!
+//! - Storage refuses every write to the workspace that the `guard` header lists, from the
+//!   moment the purge is recorded; a Git write checks under the workspace's lock, under which
+//!   step 1 reads; an object put pins before it retains and checks again after pinning; step 6
+//!   waits for the target's running writes and deletes the bytes their pins name.
+//! - Another workspace's object is deleted only when no reference step 6 read names it and
+//!   no workspace-scoped put of another workspace pinned it since step 6 began (`pins`).
+//! - Known limits: job work core did not drain before calling the purger can still store
+//!   what the plan does not name (a workspace archive and a written history put their objects
+//!   without a pin, and an import copies its rows without the refusal); bytes a write
+//!   retained just before a crash, whose record never landed, are named by nothing and stay
+//!   in the object store, unreferenced.
 
 use std::collections::BTreeSet;
 

@@ -9,13 +9,17 @@
 //! workspace is gone, and a stale writer must not leave a row or an object naming it.
 //!
 //! Where a write is one SQLite transaction the check runs inside it, so the purge record and
-//! the write are ordered by the database: drafts (save, discard), upload slots and upload
-//! completions, artifacts, job completions, derived objects, receipts, reviews, proposals
-//! (insert, update), comments, confirmations (create, consume), sandbox capabilities and the
-//! catalog (update, archive, unarchive). An object put checks before it receives the body and
-//! again after it pinned the object (`LocalBlobs::put_pinned`), so a put that passed the first
-//! check before the purge was recorded either is waited for by the purge's object step or
-//! stores nothing.
+//! the write are ordered by the database: drafts (save, discard), upload slots, upload content
+//! (which then removes the part file it appended to), upload completions, artifacts, job
+//! completions, derived objects, receipts, reviews, proposals (insert, update), comments,
+//! confirmations (create, consume), sandbox capabilities and the catalog (update, archive,
+//! unarchive). Commits, candidates and promotions check under the workspace's write lock,
+//! under which the purge's plan reads the workspace. An object put checks before it receives
+//! the body and again after it pinned the object (`LocalBlobs::put_pinned`), so a put that
+//! passed the first check before the purge was recorded either is waited for by the purge's
+//! object step or stores nothing. Written histories and workspace archives check before they
+//! take the workspace's lock only, and an import puts its objects that way but copies its rows
+//! without the check; they are job work, which core drains before it calls the purger.
 //!
 //! Events are not refused. An event carries identities only (its kind, revision, item, job,
 //! connector, actor and operation), and one appended after the rows step is tenant-level data
