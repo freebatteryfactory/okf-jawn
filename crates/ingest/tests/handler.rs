@@ -1308,7 +1308,7 @@ mod job_handler {
         // The job completes; it is not a worker fault to retry.
         let entry = world.records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
-        assert!(entry.failures.is_empty());
+        assert_eq!(entry.failures, Vec::new());
         // The pending card is replaced with the document's failure, and nothing is converted.
         let cards = cards(&world)?;
         assert_eq!(cards.len(), 2);

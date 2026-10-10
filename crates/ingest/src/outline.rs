@@ -7,7 +7,7 @@
 //!
 //! A heading is an ATX heading, which is the only form docling's Markdown export writes: one to
 //! six `#` at the start of a line, then a space or the end of the line. Its label drops the
-//! CommonMark closing sequence: a trailing `#` run only when whitespace precedes it or it is the
+//! `CommonMark` closing sequence: a trailing `#` run only when whitespace precedes it or it is the
 //! whole content, so a `#` that ends a word (`C#`) stays. A `#` line inside a
 //! fenced code block is code, not a heading. The outline of a windowed conversion is computed
 //! again over the joined Markdown, so a section that runs over a window boundary ends where the
@@ -101,7 +101,7 @@ fn headings(markdown: &str) -> Vec<(u32, u8, String)> {
 }
 
 /// The label of an ATX heading from what follows its opening `#` run: the content without its
-/// surrounding whitespace and without the CommonMark closing sequence. A trailing `#` run is a
+/// surrounding whitespace and without the `CommonMark` closing sequence. A trailing `#` run is a
 /// closing sequence only when a space or tab comes before it, or when it is the whole content;
 /// otherwise it is text (`# C#` is `C#`, `## F# ##` is `F#`, `# #` is empty).
 fn label_of(rest: &str) -> &str {

@@ -108,6 +108,14 @@ pub struct IngestHandler {
     ports: HandlerPorts,
 }
 
+/// How a long storage call under the heartbeat ended.
+enum Renewed<T> {
+    /// It returned, and the job is still running.
+    Done(T),
+    /// It returned, and the job was found cancelled while it ran.
+    Cancelled(T),
+}
+
 /// The media type both archives are served with (`download_artifact`,
 /// `download_tenant_artifact`).
 pub const ARCHIVE_MEDIA_TYPE: &str = "application/zip";
@@ -199,21 +207,11 @@ impl IngestHandler {
                 self.rebuild(claimed, scope).await
             }
             (JobSpec::BackupWorkspace, JobScope::Workspace(scope)) => {
-                let written = renewing(
-                    ports,
-                    claimed,
-                    ports
-                        .backups
-                        .write_workspace_archive(scope, claimed.mutation_id),
-                )
-                .await?;
-                match written {
-                    Renewed::Done(object) => {
-                        self.artifact(claimed, ArtifactKind::WorkspaceBackup, object)
-                            .await
-                    }
-                    Renewed::Cancelled(_object) => Ok(Done::stopped()),
-                }
+                let written = ports
+                    .backups
+                    .write_workspace_archive(scope, claimed.mutation_id);
+                self.backup(claimed, ArtifactKind::WorkspaceBackup, written)
+                    .await
             }
             (
                 JobSpec::RestoreWorkspace {
@@ -227,21 +225,11 @@ impl IngestHandler {
                     .await
             }
             (JobSpec::BackupInstallation, JobScope::Tenant(tenant)) => {
-                let written = renewing(
-                    ports,
-                    claimed,
-                    ports
-                        .backups
-                        .write_installation_archive(tenant, claimed.mutation_id),
-                )
-                .await?;
-                match written {
-                    Renewed::Done(object) => {
-                        self.artifact(claimed, ArtifactKind::InstallationBackup, object)
-                            .await
-                    }
-                    Renewed::Cancelled(_object) => Ok(Done::stopped()),
-                }
+                let written = ports
+                    .backups
+                    .write_installation_archive(tenant, claimed.mutation_id);
+                self.backup(claimed, ArtifactKind::InstallationBackup, written)
+                    .await
             }
             (
                 JobSpec::PurgeWorkspace { .. } | JobSpec::PurgeItem { .. },
@@ -270,6 +258,20 @@ impl IngestHandler {
                 ErrorCode::Internal,
                 "the claimed job's specification does not fit its scope",
             )),
+        }
+    }
+
+    /// Write an archive under the heartbeat and record it as the job's artifact; a job found
+    /// cancelled while it was written records none.
+    async fn backup(
+        &self,
+        claimed: &ClaimedJob,
+        kind: ArtifactKind,
+        write: impl Future<Output = Result<ObjectInfo, ApiError>>,
+    ) -> Result<Done, ApiError> {
+        match renewing(&self.ports, claimed, write).await? {
+            Renewed::Done(object) => self.artifact(claimed, kind, object).await,
+            Renewed::Cancelled(_object) => Ok(Done::stopped()),
         }
     }
 
@@ -537,14 +539,6 @@ async fn renewing<T>(
             }
         }
     }
-}
-
-/// How a long storage call under the heartbeat ended.
-enum Renewed<T> {
-    /// It returned, and the job is still running.
-    Done(T),
-    /// It returned, and the job was found cancelled while it ran.
-    Cancelled(T),
 }
 
 /// The storage scope of an item purge's workspace.

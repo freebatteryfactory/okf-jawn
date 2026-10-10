@@ -50,6 +50,18 @@ mod job_runtime {
         script: fn(u32) -> Action,
     }
 
+    /// A handler that never finishes: every worker that takes a job stays busy with it.
+    struct BusyHandler;
+
+    impl JobHandler for BusyHandler {
+        fn handle<'a>(&'a self, _claimed: &'a ClaimedJob) -> PortFuture<'a, ()> {
+            Box::pin(async move {
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+        }
+    }
+
     impl JobHandler for ScriptedHandler {
         fn handle<'a>(&'a self, claimed: &'a ClaimedJob) -> PortFuture<'a, ()> {
             Box::pin(async move {
@@ -235,18 +247,6 @@ mod job_runtime {
         runtime.shutdown().await;
         assert_eq!(handler.attempts()?, [1, 2]);
         Ok(())
-    }
-
-    /// A handler that never finishes: every worker that takes a job stays busy with it.
-    struct BusyHandler;
-
-    impl JobHandler for BusyHandler {
-        fn handle<'a>(&'a self, _claimed: &'a ClaimedJob) -> PortFuture<'a, ()> {
-            Box::pin(async move {
-                std::future::pending::<()>().await;
-                Ok(())
-            })
-        }
     }
 
     #[tokio::test]

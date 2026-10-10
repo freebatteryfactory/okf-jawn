@@ -238,62 +238,47 @@ pub(crate) async fn import(
         // A card an earlier attempt already committed is not converted again: the completion
         // takes its commit and the outputs its committed extraction references.
         if let Some(committed) = replayed(ports, claimed, scope, (base, ordinal), &check).await? {
-            done.outputs
-                .extend(committed_outputs(ports, scope, &committed.revision, card.item_id).await?);
-            done.revision = Some(committed.revision);
-            done.warnings.extend(committed.warnings);
-            done.item_ids.push(card.item_id);
-            if ordinal < total && cancelled_after(ports, claimed, ordinal, total).await? {
+            take_committed(ports, scope, card.item_id, committed, Vec::new(), &mut done).await?;
+        } else {
+            let Some(converted) =
+                convert_document(ports, claimed, scope, &local, &file_name, request.settings)
+                    .await?
+            else {
                 done.cancelled = true;
                 return Ok(done);
-            }
-            continue;
-        }
-        let Some(converted) =
-            convert_document(ports, claimed, scope, &local, &file_name, request.settings).await?
-        else {
-            done.cancelled = true;
-            return Ok(done);
-        };
-        card.body.clone_from(&converted.assembled.markdown);
-        card.appearance.extraction = extraction_of(&converted, None);
-        let message = format!("Import {}: {}", card.title, outcome_word(&converted));
-        let writes = Writes::Card {
-            card: &card,
-            since: &pending_revision,
-            rule: Blocked::AnyChange,
-        };
-        match commit(
-            ports,
-            claimed,
-            scope,
-            (base, ordinal),
-            message,
-            writes,
-            Arc::clone(&check),
-        )
-        .await?
-        {
-            Landed::Committed(committed) => {
-                // Replayed only when another attempt committed the card meanwhile: its
-                // outputs are those of that attempt's conversion, which the card references.
-                if committed.replayed {
-                    done.outputs.extend(
-                        committed_outputs(ports, scope, &committed.revision, card.item_id).await?,
-                    );
-                } else {
-                    done.outputs.extend(converted.outputs);
+            };
+            card.body.clone_from(&converted.assembled.markdown);
+            card.appearance.extraction = extraction_of(&converted, None);
+            let message = format!("Import {}: {}", card.title, outcome_word(&converted));
+            let writes = Writes::Card {
+                card: &card,
+                since: &pending_revision,
+                rule: Blocked::AnyChange,
+            };
+            match commit(
+                ports,
+                claimed,
+                scope,
+                (base, ordinal),
+                message,
+                writes,
+                Arc::clone(&check),
+            )
+            .await?
+            {
+                Landed::Committed(committed) => {
+                    let outputs = converted.outputs;
+                    take_committed(ports, scope, card.item_id, committed, outputs, &mut done)
+                        .await?;
                 }
-                done.revision = Some(committed.revision);
-                done.warnings.extend(committed.warnings);
+                Landed::Refused(error) => return Ok(refused(&error)),
+                // The person's edit stands; this conversion is not written, and not retried.
+                Landed::Kept(why) => done.warnings.push(Warning {
+                    code: CARD_NOT_WRITTEN.to_owned(),
+                    message: format!("the converted card was not written: {why}"),
+                    location: Some(card.path.as_str().to_owned()),
+                }),
             }
-            Landed::Refused(error) => return Ok(refused(&error)),
-            // The person's edit stands; this conversion is not written, and not retried.
-            Landed::Kept(why) => done.warnings.push(Warning {
-                code: CARD_NOT_WRITTEN.to_owned(),
-                message: format!("the converted card was not written: {why}"),
-                location: Some(card.path.as_str().to_owned()),
-            }),
         }
         done.item_ids.push(card.item_id);
         // Between card commits: a job cancelled now converts no further source.
@@ -303,6 +288,29 @@ pub(crate) async fn import(
         }
     }
     Ok(done)
+}
+
+/// Take a card's commit into the completion: its revision and warnings, and its outputs. A
+/// commit written now lists `converted`, the outputs of the conversion it wrote; a replayed one
+/// (an earlier or a concurrent attempt wrote it) lists the outputs its committed extraction
+/// references, which are that attempt's.
+async fn take_committed(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    item_id: ItemId,
+    committed: Committed,
+    converted: Vec<Digest>,
+    done: &mut Done,
+) -> Result<(), ApiError> {
+    if committed.replayed {
+        done.outputs
+            .extend(committed_outputs(ports, scope, &committed.revision, item_id).await?);
+    } else {
+        done.outputs.extend(converted);
+    }
+    done.revision = Some(committed.revision);
+    done.warnings.extend(committed.warnings);
+    Ok(())
 }
 
 /// Report progress after `done` of `total` cards, and say whether the job is now cancelled.
