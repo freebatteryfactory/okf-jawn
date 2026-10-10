@@ -117,6 +117,9 @@ pub struct FakeConverter {
     pub on_page_count: Mutex<Option<PageCountHook>>,
     /// Conversions that never ended whose future was dropped.
     pub dropped: Arc<AtomicUsize>,
+    /// How the page count ended without a reply, as `DoclingConverter` reports it: no pages,
+    /// and the whole conversion that follows is that failure.
+    pub count_failed: Mutex<Option<FailureReason>>,
 }
 
 /// What a test runs as a window starts: `true` makes that conversion never end.
@@ -955,6 +958,9 @@ impl Converter for FakeConverter {
                 let _count = DropCount(Arc::clone(&self.dropped));
                 std::future::pending::<()>().await;
             }
+            if self.count_failed.lock().map_err(|_| poisoned())?.is_some() {
+                return Ok(None);
+            }
             Ok(pages)
         })
     }
@@ -983,6 +989,21 @@ impl Converter for FakeConverter {
                 page_window: input.window.as_ref().map(|_| self.limits.window_pages),
             };
             let source_digest = input.source.object.digest.clone();
+            let count_failed = self.count_failed.lock().map_err(|_| poisoned())?.clone();
+            if let (None, Some(reason)) = (input.window.as_ref(), count_failed) {
+                return Ok(Conversion {
+                    source_digest,
+                    converter,
+                    status: ConversionStatus::Failure(reason),
+                    document: None,
+                    coverage: None,
+                    issues: vec![okf_jawn_contract::extraction::ConverterIssue {
+                        component_type: "worker".to_owned(),
+                        module_name: "okf-jawn-convert".to_owned(),
+                        error_message: "the page count reached its time bound".to_owned(),
+                    }],
+                });
+            }
             let start = input.window.as_ref().map_or(1, |window| window.start);
             if self.capped.contains(&start) {
                 return Ok(Conversion {

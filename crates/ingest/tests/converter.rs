@@ -1061,6 +1061,68 @@ mod conversion_child {
     }
 
     #[tokio::test]
+    async fn a_page_count_that_reaches_the_cap_is_the_documents_failure_not_a_fault() -> TestResult
+    {
+        // The real child counts the pages of a 24 MiB PDF under a 16 MiB cap: reading the
+        // original reaches the cap before any page is counted.
+        const CAP: u64 = 16 * 1024 * 1024;
+        let store = tempfile::tempdir()?;
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        bytes.resize(24 * 1024 * 1024, b' ');
+        let source = retained(store.path(), &bytes)?;
+        drop(bytes);
+        let converter = DoclingConverter::new(ConverterConfig {
+            child: PathBuf::from(env!("CARGO_BIN_EXE_okf-jawn-convert")),
+            limits: ConverterLimits {
+                window_pages: 4,
+                memory_limit_bytes: CAP,
+            },
+        });
+        // Not a worker fault: the count gives no pages, and the import converts the document
+        // whole. (That conversion of a PDF names the pinned models in its identity, which this
+        // test cannot load; the next test shows what it returns, with a format that needs none.)
+        assert_eq!(converter.page_count(&source, "large.pdf").await?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_page_count_is_the_whole_conversion_and_starts_no_second_child() -> TestResult
+    {
+        // This test binary as the child: it takes the request path as a test filter, runs no
+        // test, and exits 0 without writing a reply, so the count ends as a crash.
+        let store = tempfile::tempdir()?;
+        let source = retained(store.path(), b"# Note\n")?;
+        let converter = converter(std::env::current_exe()?);
+        assert_eq!(converter.page_count(&source, "note.md").await?, None);
+        // The whole conversion that follows records the count's failure without a child.
+        let output = tempfile::tempdir()?;
+        let conversion = converter
+            .convert(input(source.clone(), "note.md", output.path()))
+            .await?;
+        assert_eq!(
+            conversion.status,
+            ConversionStatus::Failure(FailureReason::ConverterCrashed)
+        );
+        assert!(conversion.document.is_none());
+        assert_eq!(
+            some(conversion.issues.first(), "the worker issue")?.component_type,
+            "worker"
+        );
+        assert_eq!(conversion.source_digest, source.object.digest);
+        assert!(
+            !output.path().join(REQUEST_FILE).exists(),
+            "a child was started for the whole document"
+        );
+        // The verdict is taken once: a later conversion runs its own child.
+        let later = tempfile::tempdir()?;
+        let _again = converter
+            .convert(input(source, "note.md", later.path()))
+            .await?;
+        assert!(later.path().join(REQUEST_FILE).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn the_real_child_holds_one_copy_of_the_original_under_its_cap() -> TestResult {
         // A 64 MiB original under a 96 MiB cap: room for one copy and the child itself, not for
         // two. Its text is not UTF-8 nor windows-1252 (a 0x81 byte), so docling refuses it

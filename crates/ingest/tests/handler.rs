@@ -18,7 +18,9 @@ mod job_handler {
 
     use okf_jawn_contract::access::AccessRoute;
     use okf_jawn_contract::common::PageRange;
-    use okf_jawn_contract::extraction::{ConversionOutcome, ConversionSettings, TextOrigin};
+    use okf_jawn_contract::extraction::{
+        ConversionOutcome, ConversionSettings, FailureReason, TextOrigin,
+    };
     use okf_jawn_contract::identity::{
         Digest, ItemId, MutationId, PurgeId, Revision, TenantId, Timestamp, UploadId, WorkspaceId,
         WorkspacePath,
@@ -132,6 +134,7 @@ mod job_handler {
             on_window: Mutex::new(None),
             on_page_count: Mutex::new(None),
             dropped: Arc::new(AtomicUsize::new(0)),
+            count_failed: Mutex::new(None),
         });
         let handler = IngestHandler::new(HandlerPorts {
             records: Arc::clone(&records) as Arc<dyn RecordStore>,
@@ -1046,6 +1049,47 @@ mod job_handler {
             ConversionOutcome::Completed
         );
         assert_eq!(card.appearance.media_type, "text/markdown");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_page_count_that_reached_its_time_bound_fails_the_document_not_the_job() -> TestResult
+    {
+        let world = world_with(Some(6), Vec::new())?;
+        *world
+            .converter
+            .count_failed
+            .lock()
+            .map_err(|_| "poisoned")? = Some(FailureReason::TimeLimit { limit_seconds: 120 });
+        let report = upload(&world, 113, "report.pdf", b"%PDF slow report")?;
+        let id = job(
+            &world,
+            24,
+            workspace_scope()?,
+            import_spec(vec![report], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        // The job completes; it is not a worker fault to retry.
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert!(entry.failures.is_empty());
+        // The pending card is replaced with the document's failure, and nothing is converted.
+        let cards = cards(&world)?;
+        assert_eq!(cards.len(), 2);
+        let card = some(cards.last(), "the converted card")?;
+        let ConversionOutcome::Failed { reason, issues } = &card.appearance.extraction.outcome
+        else {
+            return Err(format!(
+                "expected a failed outcome, got {:?}",
+                card.appearance.extraction.outcome
+            )
+            .into());
+        };
+        assert_eq!(*reason, FailureReason::TimeLimit { limit_seconds: 120 });
+        assert_ne!(*issues, Vec::new());
+        assert_eq!(card.appearance.extraction.page_count, None);
+        assert_eq!(card.appearance.extraction.text_origin, TextOrigin::None);
+        assert_eq!(windows(&world)?, [None]);
         Ok(())
     }
 
