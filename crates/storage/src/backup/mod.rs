@@ -612,3 +612,87 @@ fn install(
 mod archive;
 mod restore;
 pub(crate) mod snapshot;
+
+/// Unit tests here, not in `tests/`: they hold a workspace's write lock, which is private.
+/// They return `ApiError` like core's unit tests.
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use okf_jawn_contract::access::AccessRoute;
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
+    use okf_jawn_contract::identity::{MutationId, TenantId};
+    use okf_jawn_core::storage::{
+        Backups, NewWorkspace, Provenance, StorageScope, WorkspaceCatalog,
+    };
+
+    use crate::storage::Storage;
+
+    fn fault(message: &dyn std::fmt::Display) -> ApiError {
+        ApiError::new(ErrorCode::Internal, message.to_string())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn backup_a_workspace_archive_is_a_checkpoint_under_the_workspace_lock()
+    -> Result<(), ApiError> {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let tenant = TenantId::try_from("local".to_owned()).map_err(|error| fault(&error))?;
+        let mutation = |n: u128| MutationId(uuid::Uuid::from_u128(n));
+        let created = storage
+            .catalog()
+            .create(
+                &tenant,
+                mutation(1),
+                NewWorkspace {
+                    name: "Notes".to_owned(),
+                    description: String::new(),
+                    creator: Provenance {
+                        subject: "ana".to_owned(),
+                        route: AccessRoute::LocalOwner,
+                        client_id: None,
+                    },
+                },
+            )
+            .await?;
+        let scope = StorageScope {
+            tenant_id: tenant,
+            workspace_id: created.id,
+        };
+        let (held, release) = (mpsc::channel(), mpsc::channel::<()>());
+        let holder = {
+            let repositories = storage.repositories.clone();
+            let scope = scope.clone();
+            std::thread::spawn(move || {
+                repositories.locked(&scope, || {
+                    held.0.send(()).map_err(|error| fault(&error))?;
+                    release.1.recv().map_err(|error| fault(&error))
+                })
+            })
+        };
+        held.1.recv().map_err(|error| fault(&error))?;
+        let backups = storage.backups();
+        let writer = {
+            let scope = scope.clone();
+            tokio::spawn(async move { backups.write_workspace_archive(&scope, mutation(2)).await })
+        };
+        // Give the archive ample time to start: under another write's lock it never does.
+        for _ in 0..50 {
+            if writer.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            !writer.is_finished(),
+            "no archive is taken while another write holds the workspace"
+        );
+        release.0.send(()).map_err(|error| fault(&error))?;
+        holder
+            .join()
+            .map_err(|_| fault(&"the lock holder stopped"))??;
+        writer.await.map_err(|error| fault(&error))??;
+        Ok(())
+    }
+}
