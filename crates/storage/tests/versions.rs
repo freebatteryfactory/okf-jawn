@@ -1645,5 +1645,64 @@ async fn find_commit_with_no_base_finds_a_commit_of_any_age_back_to_the_root() -
     Ok(())
 }
 
+/// A merge commit on main whose second parent is a candidate: `None` follows first parents
+/// only, so the candidate's trailer is never found, while the merge's own trailer and a commit
+/// behind its first parent are. The store never writes a merge; this is written with `git2`.
+/// (Reviewer probe, adopted.)
+#[tokio::test]
+async fn find_commit_with_no_base_never_follows_a_merge_into_a_candidate() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let candidate = versions
+        .create_candidate(
+            &scope,
+            uuid!(50)?,
+            CandidateChanges {
+                mutation_id: uuid!(51)?,
+                base: initial.clone(),
+                author: person("agent"),
+                message: "Propose".to_owned(),
+                edits: vec![note(uuid!(10)?, "proposed.md", "P.")?],
+            },
+            Arc::new(Counting::default()),
+        )
+        .await?;
+    let head = versions
+        .commit(
+            &scope,
+            changes(30, &initial, vec![note(uuid!(11)?, "a.md", "A.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let repository = git2::Repository::open_bare(repository_path(directory.path(), &scope))?;
+    let first = repository.find_commit(git2::Oid::from_str(head.as_str())?)?;
+    let second = repository.find_commit(git2::Oid::from_str(candidate.as_str())?)?;
+    let who = git2::Signature::now("raw", "raw@example.invalid")?;
+    let merge = repository.commit(
+        Some("refs/heads/main"),
+        &who,
+        &who,
+        &format!("merge\n\nOkf-Jawn-Mutation: {}\n", uuid_text(52)),
+        &first.tree()?,
+        &[&first, &second],
+    )?;
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        None,
+        "the first-parent walk never reaches the candidate"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        Some(Revision::try_from(merge.to_string())?)
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(30)?, None).await?,
+        Some(head)
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

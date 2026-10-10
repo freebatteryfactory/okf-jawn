@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_contract::identity::{Digest, Revision, TenantId, Timestamp};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, Timestamp};
 use okf_jawn_contract::proposal::{Comment, Proposal, ProposalStatus};
 use okf_jawn_contract::review::{ConfirmationAction, ConfirmationTarget};
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
@@ -298,6 +298,71 @@ async fn a_replayed_discard_ignores_the_expected_digest() -> TestResult {
         "a replay removes nothing"
     );
     assert_eq!(draft_mutation_rows(&storage, 12)?, 1);
+    Ok(())
+}
+
+/// A save racing a conditional discard never loses the newer draft. Either the discard ran
+/// first (it removes the old draft and the save lands after it) or the save ran first (the
+/// discard answers `Conflict`); either way the newer draft is held afterwards. The spawn order
+/// alternates so both interleavings occur over the rounds. (Reviewer probe, adopted.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_racing_a_conditional_discard_is_never_lost() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let workspace = scope(1)?;
+    let item: ItemId = uuid!(3)?;
+    for round in 0..300_u32 {
+        let base = round.saturating_mul(3).saturating_add(1000);
+        storage
+            .drafts()
+            .save(&workspace, uuid!(base)?, draft("ana", "old")?)
+            .await?;
+        let saving = storage.drafts();
+        let discarder = storage.drafts();
+        let (save_scope, discard_scope) = (workspace.clone(), workspace.clone());
+        let save_id = uuid!(base.saturating_add(1))?;
+        let discard_id = uuid!(base.saturating_add(2))?;
+        let newer = DraftWrite {
+            content_digest: digest('e')?,
+            ..draft("ana", "new")?
+        };
+        let expected = digest('d')?;
+        let save_task = async move { saving.save(&save_scope, save_id, newer).await };
+        let discard_task = async move {
+            discarder
+                .discard(&discard_scope, discard_id, item, "ana", Some(expected))
+                .await
+        };
+        let (save, discard) = if round % 2 == 0 {
+            let discard = tokio::spawn(discard_task);
+            (tokio::spawn(save_task), discard)
+        } else {
+            let save = tokio::spawn(save_task);
+            (save, tokio::spawn(discard_task))
+        };
+        let (save_outcome, removed) = tokio::join!(save, discard);
+        save_outcome??;
+        match removed? {
+            Ok(removed) => assert_eq!(removed.content_digest, digest('d')?, "round {round}"),
+            Err(error) => assert_eq!(error.code, ErrorCode::Conflict, "round {round}: {error}"),
+        }
+        let held = some(
+            storage.drafts().get(&workspace, item, "ana").await?,
+            "the newer draft",
+        )?;
+        assert_eq!(held.draft.content_digest, digest('e')?, "round {round}");
+        assert_eq!(held.body, "new", "round {round}");
+        storage
+            .drafts()
+            .discard(
+                &workspace,
+                uuid!(base.saturating_add(900_000))?,
+                item,
+                "ana",
+                None,
+            )
+            .await?;
+    }
     Ok(())
 }
 

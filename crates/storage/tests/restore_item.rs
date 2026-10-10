@@ -107,15 +107,61 @@ impl Workspace {
             .revision)
     }
 
-    /// The bytes of the file at `at` in `revision`, read straight from the repository.
-    fn file(&self, revision: &Revision, at: &str) -> Fallible<Option<Vec<u8>>> {
-        let repository = Repository::open_bare(
+    /// The workspace's bare repository.
+    fn repository(&self) -> Fallible<Repository> {
+        Ok(Repository::open_bare(
             self.directory
                 .path()
                 .join("repositories")
                 .join(self.scope.tenant_id.as_str())
                 .join(format!("{}.git", self.scope.workspace_id.0)),
+        )?)
+    }
+
+    /// Every file path of `revision` that starts with `prefix`.
+    fn files_under(&self, revision: &Revision, prefix: &str) -> Fallible<Vec<String>> {
+        let repository = self.repository()?;
+        let tree = repository
+            .find_commit(git2::Oid::from_str(revision.as_str())?)?
+            .tree()?;
+        let mut found = Vec::new();
+        tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+            if entry.kind() == Some(git2::ObjectType::Blob)
+                && let Ok(name) = entry.name()
+            {
+                let full = format!("{root}{name}");
+                if full.starts_with(prefix) {
+                    found.push(full);
+                }
+            }
+            git2::TreeWalkResult::Ok
+        })?;
+        Ok(found)
+    }
+
+    /// Commit on main straight through `git2`, writing `bytes` at `at`, as no store edit can.
+    fn raw_upsert(&self, at: &str, bytes: &[u8], mutation: u32) -> Fallible<Revision> {
+        let repository = self.repository()?;
+        let parent = repository.find_commit(repository.refname_to_id("refs/heads/main")?)?;
+        let blob = repository.blob(bytes)?;
+        let mut update = git2::build::TreeUpdateBuilder::new();
+        update.upsert(at, blob, git2::FileMode::Blob);
+        let tree = repository.find_tree(update.create_updated(&repository, &parent.tree()?)?)?;
+        let who = git2::Signature::now("raw", "raw@example.invalid")?;
+        let commit = repository.commit(
+            Some("refs/heads/main"),
+            &who,
+            &who,
+            &format!("raw\n\nOkf-Jawn-Mutation: {}\n", uuid_text(mutation)),
+            &tree,
+            &[&parent],
         )?;
+        Ok(Revision::try_from(commit.to_string())?)
+    }
+
+    /// The bytes of the file at `at` in `revision`, read straight from the repository.
+    fn file(&self, revision: &Revision, at: &str) -> Fallible<Option<Vec<u8>>> {
+        let repository = self.repository()?;
         let tree = repository
             .find_commit(git2::Oid::from_str(revision.as_str())?)?
             .tree()?;
@@ -167,6 +213,13 @@ fn note(item: u32, at: &str, body: &str) -> Fallible<TreeEdit> {
         kind: ItemKind::Note,
         body: body.to_owned(),
         properties: BTreeMap::new(),
+    })
+}
+
+fn moved(item: u32, to: &str) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::MoveItem {
+        item_id: uuid!(item)?,
+        destination: path(to)?,
     })
 }
 
@@ -239,10 +292,15 @@ fn supplied_file(item: u32) -> String {
 
 fn correction_file(item: u32, of: char) -> String {
     format!(
-        ".okf/corrections/{}/{}.json",
-        uuid_text(item),
+        "{}{}.json",
+        corrections_folder(item),
         of.to_string().repeat(64)
     )
+}
+
+/// The corrections folder of `item`, with its trailing slash.
+fn corrections_folder(item: u32) -> String {
+    format!(".okf/corrections/{}/", uuid_text(item))
 }
 
 #[tokio::test]
@@ -560,6 +618,255 @@ async fn two_items_that_traded_paths_are_restored_in_one_commit() -> TestResult 
         .show(&space.scope, &rewound, uuid!(11)?)
         .await?;
     assert_eq!(shown.body, "Eleven.");
+    Ok(())
+}
+
+// Reviewer probes, adopted as regressions: grouping order, companions in odd shapes.
+
+#[tokio::test]
+async fn an_item_restored_onto_the_path_another_restored_item_vacates_in_either_order() -> TestResult
+{
+    for (first, second) in [(10_u32, 11_u32), (11, 10)] {
+        let space = Workspace::new().await?;
+        let early = space
+            .commit(
+                2,
+                &space.initial,
+                vec![note(10, "p.md", "A.")?, note(11, "q.md", "C.")?],
+            )
+            .await?;
+        let late = space
+            .commit(3, &early, vec![moved(10, "r.md")?, moved(11, "p.md")?])
+            .await?;
+        let rewound = space
+            .commit(
+                4,
+                &late,
+                vec![restore(first, &early)?, restore(second, &early)?],
+            )
+            .await?;
+        assert_eq!(space.item_at(&rewound, "p.md").await?, Some(uuid!(10)?));
+        assert_eq!(space.item_at(&rewound, "q.md").await?, Some(uuid!(11)?));
+        assert_eq!(space.file(&rewound, "r.md")?, None);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_item_restored_onto_the_path_an_item_absent_at_from_vacates_in_either_order()
+-> TestResult {
+    for (first, second) in [(10_u32, 12_u32), (12, 10)] {
+        let space = Workspace::new().await?;
+        let early = space
+            .commit(2, &space.initial, vec![note(10, "p.md", "A.")?])
+            .await?;
+        let late = space
+            .commit(3, &early, vec![moved(10, "r.md")?, note(12, "p.md", "D.")?])
+            .await?;
+        let rewound = space
+            .commit(
+                4,
+                &late,
+                vec![restore(first, &early)?, restore(second, &early)?],
+            )
+            .await?;
+        assert_eq!(space.item_at(&rewound, "p.md").await?, Some(uuid!(10)?));
+        assert_eq!(space.file(&rewound, "r.md")?, None);
+        let error = err_of(
+            space
+                .storage
+                .versions()
+                .show(&space.scope, &rewound, uuid!(12)?)
+                .await,
+        )?;
+        assert_eq!(error.code, ErrorCode::NotFound);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_restore_then_an_edit_of_the_same_item_apply_in_order() -> TestResult {
+    let space = Workspace::new().await?;
+    let early = space
+        .commit(
+            2,
+            &space.initial,
+            vec![note(10, "notes/a.md", "Original.")?],
+        )
+        .await?;
+    let late = space
+        .commit(3, &early, vec![moved(10, "other/a.md")?])
+        .await?;
+    let edited = space
+        .commit(
+            4,
+            &late,
+            vec![
+                restore(10, &early)?,
+                TreeEdit::EditItem {
+                    item_id: uuid!(10)?,
+                    body: "Edited after restore.".to_owned(),
+                    properties: BTreeMap::from([("title".to_owned(), json!("Note at notes/a.md"))]),
+                },
+            ],
+        )
+        .await?;
+    assert_eq!(
+        space.item_at(&edited, "notes/a.md").await?,
+        Some(uuid!(10)?)
+    );
+    assert_eq!(space.file(&edited, "other/a.md")?, None);
+    let shown = space
+        .storage
+        .versions()
+        .show(&space.scope, &edited, uuid!(10)?)
+        .await?;
+    assert_eq!(shown.body.trim(), "Edited after restore.");
+    Ok(())
+}
+
+#[tokio::test]
+async fn restores_separated_by_another_edit_are_not_one_group() -> TestResult {
+    let space = Workspace::new().await?;
+    let early = space
+        .commit(
+            2,
+            &space.initial,
+            vec![note(10, "x.md", "Ten.")?, note(11, "y.md", "Eleven.")?],
+        )
+        .await?;
+    let traded = space
+        .commit(
+            3,
+            &early,
+            vec![
+                moved(10, "parked.md")?,
+                moved(11, "x.md")?,
+                moved(10, "y.md")?,
+            ],
+        )
+        .await?;
+    let error = err_of(
+        space
+            .commit(
+                4,
+                &traded,
+                vec![
+                    restore(10, &early)?,
+                    TreeEdit::CreateFolder {
+                        folder: path("between")?,
+                    },
+                    restore(11, &early)?,
+                ],
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    Ok(())
+}
+
+#[tokio::test]
+async fn nested_files_in_a_corrections_folder_follow_the_restore_both_ways() -> TestResult {
+    let space = Workspace::new().await?;
+    let early = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                card(12, "application/pdf", 'a')?,
+                correction(12, 'a', "Corrected A.")?,
+            ],
+        )
+        .await?;
+    let folder = corrections_folder(12);
+    space.raw_upsert(
+        &format!("{folder}nested/deep/x.json"),
+        b"{\"nested\":true}",
+        40,
+    )?;
+    let late = space.raw_upsert(&format!("{folder}zz.json"), b"{}", 41)?;
+    let before = space.files_under(&late, &folder)?;
+    assert_eq!(before.len(), 3, "{before:?}");
+    let rewound = space.commit(4, &late, vec![restore(12, &early)?]).await?;
+    assert_eq!(
+        space.files_under(&rewound, &folder)?,
+        space.files_under(&early, &folder)?,
+        "exactly the corrections `from` holds"
+    );
+    let forward = space.commit(5, &rewound, vec![restore(12, &late)?]).await?;
+    assert_eq!(space.files_under(&forward, &folder)?, before);
+    for at in &before {
+        assert_eq!(space.file(&forward, at)?, space.file(&late, at)?, "{at}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_item_listed_twice_ends_as_its_last_listing() -> TestResult {
+    let space = Workspace::new().await?;
+    let early = space
+        .commit(2, &space.initial, vec![card(12, "application/pdf", 'a')?])
+        .await?;
+    let late = space
+        .commit(
+            3,
+            &early,
+            vec![card(12, "application/x-pdf", 'b')?, supplied(12, 'b')?],
+        )
+        .await?;
+    let head = space
+        .commit(4, &late, vec![note(10, "n.md", "N.")?])
+        .await?;
+    let as_late = space
+        .commit(5, &head, vec![restore(12, &early)?, restore(12, &late)?])
+        .await?;
+    assert!(space.file(&as_late, &supplied_file(12))?.is_some());
+    for at in [supplied_file(12), appearance_file(12)] {
+        assert_eq!(space.file(&as_late, &at)?, space.file(&late, &at)?, "{at}");
+    }
+    let as_early = space
+        .commit(6, &as_late, vec![restore(12, &late)?, restore(12, &early)?])
+        .await?;
+    assert_eq!(space.file(&as_early, &supplied_file(12))?, None);
+    assert_eq!(
+        space.file(&as_early, &appearance_file(12))?,
+        space.file(&early, &appearance_file(12))?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_item_of_a_group_absent_at_both_revisions_writes_nothing() -> TestResult {
+    let space = Workspace::new().await?;
+    let early = space
+        .commit(2, &space.initial, vec![note(10, "x.md", "Ten.")?])
+        .await?;
+    let late = space.commit(3, &early, vec![moved(10, "y.md")?]).await?;
+    let error = err_of(
+        space
+            .commit(4, &late, vec![restore(10, &early)?, restore(99, &early)?])
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::NotFound, "{}", error.message);
+    assert_eq!(space.storage.versions().head(&space.scope).await?, late);
+    Ok(())
+}
+
+#[tokio::test]
+async fn restoring_onto_a_path_that_differs_only_in_letter_case_conflicts() -> TestResult {
+    let space = Workspace::new().await?;
+    let early = space
+        .commit(2, &space.initial, vec![note(10, "Topic.md", "Ten.")?])
+        .await?;
+    let late = space
+        .commit(
+            3,
+            &early,
+            vec![moved(10, "z.md")?, note(11, "topic.md", "Eleven.")?],
+        )
+        .await?;
+    let error = err_of(space.commit(4, &late, vec![restore(10, &early)?]).await)?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
     Ok(())
 }
 
