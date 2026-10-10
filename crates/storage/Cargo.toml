@@ -31,6 +31,7 @@ uuid = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -38,4 +39,4 @@ tokio = { workspace = true }
 
 [features]
 default = []
-runtime = ["dep:git2", "dep:rusqlite", "dep:rusqlite_migration", "dep:object_store", "dep:okf-core", "dep:sha2", "dep:bytes", "dep:tokio", "dep:serde_json", "dep:yaml_serde", "dep:cap-std", "dep:directories", "dep:uuid", "dep:time", "dep:getrandom", "dep:serde"]
+runtime = ["dep:git2", "dep:rusqlite", "dep:rusqlite_migration", "dep:object_store", "dep:okf-core", "dep:sha2", "dep:bytes", "dep:tokio", "dep:serde_json", "dep:yaml_serde", "dep:cap-std", "dep:directories", "dep:uuid", "dep:time", "dep:getrandom", "dep:serde", "dep:zip"]
