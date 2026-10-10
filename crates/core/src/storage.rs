@@ -505,7 +505,8 @@ pub trait VersionStore: Send + Sync {
     /// (`items::refuse_header_change`): `CreateItem` and `EditItem` properties, a `SetType`
     /// definition (`items::refuse_header_in_type`), or a draft. The server's own header
     /// updates are allowed: `SetStatus`, `WriteSourceCard`, `CorrectDigest` and
-    /// `SupplyExtraction`.
+    /// `SupplyExtraction`, and the server's restores, which write each restored item's header
+    /// as the earlier revision holds it: `RestorePaths`, `RestoreItem` and `RestoreWorkspace`.
     fn commit<'a>(
         &'a self,
         scope: &'a StorageScope,
