@@ -11,7 +11,7 @@ use okf_jawn_contract::history::{
     BlameLine, BlameRequest, Commit, CommitRequest, DiffRequest, FileChange, FileChangeKind,
     LogRequest, LogResponse, RestoreRequest,
 };
-use okf_jawn_contract::identity::{At, IdempotencyKey, ItemId, PurgeId, WorkspacePath};
+use okf_jawn_contract::identity::{At, IdempotencyKey, ItemId, PurgeId};
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::{SourceLocation, SourceLocator};
@@ -20,7 +20,7 @@ use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::jobs::RevisionMapping;
 use okf_jawn_core::portable::content_digest;
 use okf_jawn_core::ports::Application;
-use okf_jawn_core::storage::TreeEdit;
+use okf_jawn_core::storage::{TreeEdit, VersionStore};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -880,13 +880,21 @@ async fn restore_items_restores_one_item_from_the_target_in_a_new_commit() -> Te
     assert_eq!(commits.len(), 1);
     assert_eq!(commit.expected_head, revision('b')?);
     assert_eq!(commit.message, "Rewind");
-    let restored: Vec<&str> = match commit.edits.as_slice() {
-        [TreeEdit::RestorePaths { from, paths }] if *from == revision('a')? => {
-            paths.iter().map(WorkspacePath::as_str).collect()
-        }
-        other => return Err(format!("not one item's restore: {other:?}").into()),
-    };
-    assert_eq!(restored, vec!["archive/plan.md", "notes/plan.md"]);
+    assert!(
+        matches!(
+            commit.edits.as_slice(),
+            [TreeEdit::RestoreItem { item_id, from }]
+                if *item_id == item(NOTE) && *from == revision('a')?
+        ),
+        "not one item's restore: {:?}",
+        commit.edits
+    );
+    // The item is back at its path at the target.
+    let shown = world
+        .versions
+        .show(&scope()?, &revision('c')?, item(NOTE))
+        .await?;
+    assert_eq!(shown.summary.path.as_str(), "notes/plan.md");
     let events = world.events.appended()?;
     let (_, _, event) = some(events.first(), "the changed event")?;
     assert_eq!(event.item_id, Some(item(NOTE)));
@@ -953,7 +961,79 @@ async fn restore_items_checks_its_base_and_target_against_the_purge_map_first() 
 }
 
 #[tokio::test]
-async fn restore_items_refuses_to_restore_nothing_or_another_items_file() -> TestResult {
+async fn restore_items_restores_a_source_card_with_its_companion_files() -> TestResult {
+    let world = World::new()?;
+    let base = revision('b')?;
+    let target = revision('a')?;
+    // At the target the card shows the converter's text; a correction was recorded since.
+    let card_at_target = source_card(
+        CARD,
+        &target,
+        "sources/report-pdf.md",
+        CARD_BODY,
+        converted(&digest('b')?),
+    )?;
+    let mut corrected = converted(&digest('b')?);
+    corrected.corrected = true;
+    world
+        .versions
+        .put_document(&target, card_at_target.clone())?;
+    world.versions.put_document(
+        &base,
+        source_card(
+            CARD,
+            &base,
+            "sources/report-pdf.md",
+            "# Corrected\n",
+            corrected,
+        )?,
+    )?;
+    world.versions.set_head(base.clone())?;
+    world.versions.put_diff(
+        &base,
+        &target,
+        Some(item(CARD)),
+        vec![change(
+            FileChangeKind::Modified,
+            Some("sources/report-pdf.md"),
+            Some("sources/report-pdf.md"),
+        )],
+    )?;
+    world.versions.queue_revision(revision('c')?)?;
+    world
+        .service
+        .restore_items(
+            &alice(OperationName::RestoreItems, Some(mutation(1)))?,
+            rewind('b', 'a', Some(CARD))?,
+        )
+        .await?;
+    let commits = world.versions.commits()?;
+    let commit = some(commits.first(), "the rewind")?;
+    assert!(
+        matches!(
+            commit.edits.as_slice(),
+            [TreeEdit::RestoreItem { item_id, from }]
+                if *item_id == item(CARD) && *from == target
+        ),
+        "not one item's restore with its companions: {:?}",
+        commit.edits
+    );
+    // The card comes back with the appearance it had at the target: no correction.
+    let shown = world
+        .versions
+        .show(&scope()?, &revision('c')?, item(CARD))
+        .await?;
+    assert_eq!(shown.body, CARD_BODY);
+    assert_eq!(
+        serde_json::to_value(&shown.source)?,
+        serde_json::to_value(&card_at_target.source)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn restore_items_refuses_to_restore_nothing_and_never_brings_back_or_overwrites_another_item()
+-> TestResult {
     let caller = || alice(OperationName::RestoreItems, Some(mutation(1)));
     // Nothing differs.
     let world = World::new()?;
@@ -967,8 +1047,8 @@ async fn restore_items_refuses_to_restore_nothing_or_another_items_file() -> Tes
     )?;
     assert_eq!(nothing.code, ErrorCode::InvalidInput);
     assert_eq!(nothing.field.as_deref(), Some("/target"));
-    // The note moved away from `notes/plan.md`, and another item held that path at the target:
-    // restoring the old path would bring that item back.
+    // The note moved away from `notes/new.md` to `notes/plan.md`, and another item held
+    // `notes/plan.md` at the target: the note is restored by identity, so that item stays gone.
     let world = World::new()?;
     world.versions.set_head(revision('b')?)?;
     note_at(&world, NOTE, "notes/new.md", &['a'])?;
@@ -985,15 +1065,22 @@ async fn restore_items_refuses_to_restore_nothing_or_another_items_file() -> Tes
         )],
     )?;
     world.versions.queue_revision(revision('c')?)?;
-    let back = err_of(
-        world
-            .service
-            .restore_items(&caller()?, rewind('b', 'a', Some(NOTE))?)
-            .await,
-    )?;
-    assert_eq!(back.code, ErrorCode::Conflict);
-    assert_eq!(back.field.as_deref(), Some("/item_id"));
-    assert_eq!(world.versions.commits()?.len(), 0);
+    world
+        .service
+        .restore_items(&caller()?, rewind('b', 'a', Some(NOTE))?)
+        .await?;
+    let restored = revision('c')?;
+    let note = world
+        .versions
+        .show(&scope()?, &restored, item(NOTE))
+        .await?;
+    assert_eq!(note.summary.path.as_str(), "notes/new.md");
+    let other = err_of(world.versions.show(&scope()?, &restored, item(OTHER)).await)?;
+    assert_eq!(
+        other.code,
+        ErrorCode::NotFound,
+        "the other item is not brought back"
+    );
     // Another item holds the note's target path at the base: restoring it would write over it.
     let world = World::new()?;
     world.versions.set_head(revision('b')?)?;

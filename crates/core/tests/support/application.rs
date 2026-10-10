@@ -5,12 +5,11 @@
 //! on its expected head, replays a repeated mutation, and runs the check it is handed on a
 //! staged directory; the draft store keeps one draft per (item, editor); the record store
 //! answers revision maps and derived objects for exactly the (item, revision, digest) recorded.
-//! Content is scripted by the test (`put_document`, `put_listing`); the one thing computed from
-//! edits is that an `EditItem` a commit wrote is what `show` reads at the revision the commit
-//! produced (the item's document at the commit's base, with the edit's body and properties), as
-//! a store would answer, so what a test asserts is what the application did with the ports.
-//! `item_at_path` answers
-//! from the scripted documents as its port documents it: `None` when no item is at the path at
+//! Content is scripted by the test (`put_document`, `put_listing`). Two edits are applied as a
+//! store would, so what `show` reads at the revision a commit produced follows them: an
+//! `EditItem` (the item's document at the commit's base, with the edit's body and properties)
+//! and a `RestoreItem` (the item as `from` holds it, its source appearance included, with the
+//! port's `NotFound` and `Conflict`). `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
 //! a known revision, `NotFound` only for an unknown revision. A port the operations
 //! under test do not call answers `Internal` ("not used by this test").
 //!
@@ -521,6 +520,44 @@ impl VersionState {
         None
     }
 
+    /// The documents each `TreeEdit::RestoreItem` of `changes` restores, as its port documents
+    /// it: the item as `from` holds it, its source appearance (the companion files) included;
+    /// nothing for an item absent at `from`, which is removed. `NotFound` for an item absent
+    /// both at `from` and at the expected head; `Conflict` when another item holds the restored
+    /// path at the expected head.
+    fn restored_items(&self, changes: &CommitChanges) -> Result<Vec<ItemDocument>, ApiError> {
+        let at = |revision: &Revision, item: ItemId| {
+            self.documents
+                .iter()
+                .find(|(held, document)| held == revision && document.summary.id == item)
+                .map(|(_, document)| document.clone())
+        };
+        let mut restored = Vec::new();
+        for edit in &changes.edits {
+            let TreeEdit::RestoreItem { item_id, from } = edit else {
+                continue;
+            };
+            let Some(document) = at(from, *item_id) else {
+                if at(&changes.expected_head, *item_id).is_none() {
+                    return Err(ApiError::new(ErrorCode::NotFound, "no such item"));
+                }
+                continue;
+            };
+            if self.documents.iter().any(|(held, other)| {
+                *held == changes.expected_head
+                    && other.summary.id != *item_id
+                    && other.summary.path == document.summary.path
+            }) {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "another item holds the restored path",
+                ));
+            }
+            restored.push(document);
+        }
+        Ok(restored)
+    }
+
     /// The commit before `revision` on the line: the head a written commit was based on, or the
     /// head a test moved away from.
     fn parent_of(&self, revision: &Revision) -> Option<&Revision> {
@@ -891,6 +928,7 @@ impl VersionStore for FakeVersions {
             if state.head.as_ref() != Some(&changes.expected_head) {
                 return Err(ApiError::new(ErrorCode::Conflict, "the head moved"));
             }
+            let restored = state.restored_items(&changes)?;
             let warnings = check.check(&self.stage.0)?;
             if state.queued.is_empty() {
                 return Err(ApiError::new(ErrorCode::Internal, "no revision queued"));
@@ -916,6 +954,10 @@ impl VersionStore for FakeVersions {
                     edited.properties.clone_from(properties);
                     state.documents.insert(0, (revision.clone(), edited));
                 }
+            }
+            for mut document in restored {
+                document.summary.revision = revision.clone();
+                state.documents.insert(0, (revision.clone(), document));
             }
             state.head = Some(revision.clone());
             state.commits.push((changes, revision.clone()));

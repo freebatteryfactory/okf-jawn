@@ -24,10 +24,12 @@
 //! attempt also completes the removals its earlier attempt made.
 //!
 //! A Rewind restores the target's state in a new commit on its base and never rewrites history:
-//! one item's files (`TreeEdit::RestorePaths`) or the whole tree (`TreeEdit::RestoreWorkspace`).
-//! The files it restores are those the comparison from the base to the target lists, which
-//! follows an item's moves; a Rewind of one item never writes over, or brings back, another
-//! item's file.
+//! one item with every companion file it owns (`TreeEdit::RestoreItem`, so a source card's
+//! appearance, supplied text and corrections come back with its card), or the whole tree
+//! (`TreeEdit::RestoreWorkspace`). It is refused when the item's comparison from the base to
+//! the target, which follows its moves, lists nothing. The store restores the item by identity,
+//! so another item's file is never brought back, and restoring over another item's path fails
+//! the commit with `Conflict`. The files that comparison shows at the target count as touched.
 //!
 //! Both writes commit through `shared::commit` with the production edit check: OKF conformance
 //! refuses, and the validator's warnings and OKF lint about the files the write touches come
@@ -38,8 +40,8 @@ use std::collections::BTreeSet;
 use okf_jawn_contract::common::{MutationResult, TextRange};
 use okf_jawn_contract::error::{ApiError, DraftConflictItem, ErrorCode, ErrorDetail};
 use okf_jawn_contract::history::{
-    BlameRequest, BlameResponse, CommitRequest, DiffRequest, DiffResponse, FileChange,
-    FileChangeKind, LogRequest, LogResponse, RestoreRequest,
+    BlameRequest, BlameResponse, CommitRequest, DiffRequest, DiffResponse, FileChangeKind,
+    LogRequest, LogResponse, RestoreRequest,
 };
 use okf_jawn_contract::identity::{Digest, ItemId, MutationId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{Draft, DraftContent, ItemDocument};
@@ -274,9 +276,8 @@ pub(super) async fn commit_items(
 ///
 /// # Errors
 /// Returns the typed `NotFound` of an invalidated base or target; `InvalidInput` on `/target`
-/// when nothing differs between the base and the target; `Conflict` on `/item_id` when
-/// restoring the item would write over, or bring back, another item's file; or any error of the
-/// commit.
+/// when nothing differs between the base and the target; or any error of the commit, among
+/// them the store's `Conflict` when restoring the item would write over another item's path.
 pub(super) async fn restore_items(
     service: &ApplicationService,
     context: &OperationContext,
@@ -314,14 +315,10 @@ pub(super) async fn restore_items(
         None => TreeEdit::RestoreWorkspace {
             from: request.target.clone(),
         },
-        Some(item) => {
-            let paths = item_paths(&changes)?;
-            refuse_other_items(service, &scope, &request, item, &paths).await?;
-            TreeEdit::RestorePaths {
-                from: request.target.clone(),
-                paths,
-            }
-        }
+        Some(item) => TreeEdit::RestoreItem {
+            item_id: item,
+            from: request.target.clone(),
+        },
     };
     commit_with_receipt(
         service,
@@ -460,59 +457,6 @@ async fn finish(
         receipt_id,
         warnings,
     })
-}
-
-/// Every file of one item the comparison names, at the base or at the target, once each.
-fn item_paths(changes: &[FileChange]) -> Result<Vec<WorkspacePath>, ApiError> {
-    let mut paths: Vec<WorkspacePath> = Vec::new();
-    for path in changes
-        .iter()
-        .flat_map(|change| [change.old_path.as_ref(), change.new_path.as_ref()])
-        .flatten()
-    {
-        let path = WorkspacePath::try_from(path.clone()).map_err(|error| {
-            ApiError::new(
-                ErrorCode::Internal,
-                format!(
-                    "the store compared a file that is not a workspace path: {}",
-                    error.0
-                ),
-            )
-        })?;
-        if !paths.contains(&path) {
-            paths.push(path);
-        }
-    }
-    Ok(paths)
-}
-
-/// Refuse a Rewind of one item that would write over another item's file at the base, or bring
-/// one back from the target.
-async fn refuse_other_items(
-    service: &ApplicationService,
-    scope: &StorageScope,
-    request: &RestoreRequest,
-    item: ItemId,
-    paths: &[WorkspacePath],
-) -> Result<(), ApiError> {
-    let versions = &service.ports().versions;
-    for path in paths {
-        for revision in [&request.base_revision, &request.target] {
-            if let Some(other) = versions.item_at_path(scope, revision, path).await?
-                && other.id != item
-            {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
-                    format!(
-                        "restoring this item would also restore {}, which holds another item",
-                        path.as_str()
-                    ),
-                )
-                .with_field("/item_id"));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// The server's citation of `range` of an item's shown text at one revision: a source card's

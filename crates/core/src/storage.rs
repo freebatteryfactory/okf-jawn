@@ -235,6 +235,23 @@ pub enum TreeEdit {
         /// The supplied-text proposal a person adopted as the correction, when it came from one.
         adopts: Option<ProposalId>,
     },
+    /// Restore one item, and every companion file it owns, to its state at an earlier revision.
+    ///
+    /// The item's own file is written as `from` holds it, at the item's path there; when the
+    /// item moved since, its file at the current path is removed. Every companion file the item
+    /// owns is restored with it as `from` holds it, and a companion that did not exist at
+    /// `from` is removed: the source appearance, the accepted supplied text and every recorded
+    /// correction of a source item. Storage owns where those files are. An item absent at
+    /// `from` is removed with its companions; an item absent both at `from` and in the tree the
+    /// edit is applied to fails the commit with `NotFound`, and restoring the item's file over
+    /// another item's path fails it with `Conflict`, as for every edit. A Rewind of several
+    /// items is one `RestoreItem` per item in one commit.
+    RestoreItem {
+        /// Item to restore.
+        item_id: ItemId,
+        /// Revision to restore from.
+        from: Revision,
+    },
     /// Restore the listed paths to their content at an earlier revision.
     ///
     /// A listed path that is absent at `from` is removed.
