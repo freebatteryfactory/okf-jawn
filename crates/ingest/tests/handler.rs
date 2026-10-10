@@ -352,24 +352,36 @@ mod job_handler {
     #[tokio::test]
     async fn a_kind_not_built_yet_fails_and_is_never_reported_done() -> TestResult {
         let world = world()?;
-        let id = job(
-            &world,
-            5,
-            workspace_scope()?,
-            JobSpec::ExportView {
-                item_id: serde_json::from_value::<ItemId>(json!(
-                    "00000000-0000-0000-0000-0000000000ef"
-                ))?,
-                revision: base()?,
-            },
-        )?;
-        assert!(run(&world, id).await?);
-        let entry = world.records.entry(id)?;
-        assert_eq!(entry.job.state, JobState::Failed);
-        assert!(entry.completions.is_empty());
-        let (message, retryable) = some(entry.failures.first(), "the failure")?;
-        assert!(message.contains("does not run"), "{message}");
-        assert!(!retryable);
+        let kinds = [
+            (
+                5,
+                JobSpec::ExportView {
+                    item_id: serde_json::from_value::<ItemId>(json!(
+                        "00000000-0000-0000-0000-0000000000ef"
+                    ))?,
+                    revision: base()?,
+                },
+            ),
+            (
+                21,
+                JobSpec::ExportWorkspace {
+                    revision: base()?,
+                    include_history: true,
+                },
+            ),
+        ];
+        for (number, spec) in kinds {
+            let kind = spec.kind();
+            let id = job(&world, number, workspace_scope()?, spec)?;
+            assert!(run(&world, id).await?);
+            let entry = world.records.entry(id)?;
+            assert_eq!(entry.job.state, JobState::Failed, "{kind:?}");
+            assert!(entry.completions.is_empty(), "{kind:?}");
+            let (message, retryable) = some(entry.failures.first(), "the failure")?;
+            assert!(message.contains("does not run"), "{kind:?}: {message}");
+            assert!(!retryable, "{kind:?}");
+        }
+        assert!(world.versions.written()?.is_empty());
         Ok(())
     }
 
