@@ -638,6 +638,61 @@ async fn a_shown_item_carries_the_content_digest_core_computes() -> TestResult {
 }
 
 #[tokio::test]
+async fn an_integer_the_item_file_cannot_hold_exactly_is_refused_on_its_field() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let with = |properties: serde_json::Value| -> Fallible<TreeEdit> {
+        Ok(TreeEdit::CreateItem {
+            item_id: uuid!(10)?,
+            path: path("n.md")?,
+            title: None,
+            type_name: "Note".to_owned(),
+            kind: ItemKind::Note,
+            body: "N.".to_owned(),
+            properties: serde_json::from_value(properties)?,
+        })
+    };
+    for (mutation, properties, field) in [
+        (20, json!({ "count": u64::MAX }), "/properties/count"),
+        (21, json!({ "list": [1, u64::MAX] }), "/properties/list/1"),
+        (
+            22,
+            json!({ "a/b": { "n": 9_223_372_036_854_775_808_u64 } }),
+            "/properties/a~1b/n",
+        ),
+    ] {
+        let error = err_of(
+            versions
+                .commit(
+                    &scope,
+                    changes(mutation, &initial, vec![with(properties)?])?,
+                    Arc::new(Counting::default()),
+                )
+                .await,
+        )?;
+        assert_eq!(error.code, ErrorCode::InvalidInput, "{}", error.message);
+        assert_eq!(error.field.as_deref(), Some(field));
+    }
+    assert_eq!(
+        versions.head(&scope).await?,
+        initial,
+        "nothing was changed silently"
+    );
+    let largest = versions
+        .commit(
+            &scope,
+            changes(23, &initial, vec![with(json!({ "count": i64::MAX }))?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let shown = versions.show(&scope, &largest, uuid!(10)?).await?;
+    assert_eq!(shown.properties.get("count"), Some(&json!(i64::MAX)));
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_refusal_never_names_the_server_staging_directory() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (storage, scope, initial) = workspace(directory.path()).await?;
