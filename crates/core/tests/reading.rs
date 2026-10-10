@@ -4,14 +4,16 @@
 use okf_jawn_contract::common::{CellRange, PageRange, TextRange};
 use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
 use okf_jawn_contract::extraction::TextOrigin;
-use okf_jawn_contract::identity::{ArtifactId, ItemId, JobId, PurgeId, TenantId, WorkspaceId};
+use okf_jawn_contract::identity::{
+    ArtifactId, ItemId, JobId, PurgeId, TenantId, WorkspaceId, WorkspacePath,
+};
 use okf_jawn_contract::read::{AssetRole, OutlineEntry, OutlineEntryKind, Selection};
-use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
+use okf_jawn_contract::source::{SourceLocation, SourceLocator, UncitedReason, UnresolvedReason};
 use okf_jawn_core::conversion::ConversionRecord;
 use okf_jawn_core::jobs::{ArtifactKind, ArtifactRecord, JobScope, RevisionMapping};
 use okf_jawn_core::reading::{
-    ObjectRole, RevisionObjects, cited_locations, decode_conversion_record, fill_locations,
-    invalidated, object_role, section_lines,
+    ObjectRole, RevisionObjects, SourceTarget, cited_locations, decode_conversion_record,
+    fill_locations, invalidated, markdown_outline, note_sources, object_role, section_lines,
 };
 use okf_jawn_core::storage::{ObjectInfo, StorageScope};
 use serde_json::json;
@@ -287,6 +289,89 @@ fn a_section_is_located_as_the_lines_its_heading_opens() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn an_item_outline_sections_end_before_the_next_heading_of_the_same_or_a_higher_level() {
+    let text =
+        "# Plan\nintro\n## Goals\none\n### Detail\ntwo\n## Risks\nthree\n\nSetext top\n===\nlast\n";
+    assert_eq!(
+        markdown_outline(text),
+        vec![
+            heading("Plan", 1, 1, 9),
+            heading("Goals", 2, 3, 6),
+            heading("Detail", 3, 5, 6),
+            heading("Risks", 2, 7, 9),
+            heading("Setext top", 1, 10, 12),
+        ]
+    );
+}
+
+#[test]
+fn an_item_outline_takes_headings_from_the_parser_not_from_code() {
+    let text =
+        "Intro\n\n```\n# not a heading\n```\n\n    # indented code\n\n# Real `code` heading\nbody";
+    assert_eq!(
+        markdown_outline(text),
+        vec![heading("Real code heading", 1, 9, 10)]
+    );
+    assert_eq!(markdown_outline(""), Vec::new());
+}
+
+#[test]
+fn section_lines_agrees_for_the_converter_outline_and_an_item_outline() -> TestResult {
+    // The same Markdown the fixture record describes: Overview on lines 1-4, Revenue on 5-8.
+    let text = "# Overview\nfirst\nsecond\n\n# Revenue\n| Quarter | Revenue |\n|---|---|\n| Q1 | 1200.5 |\n";
+    let converter = record()?.outline;
+    let parsed = markdown_outline(text);
+    for heading in ["Overview", "Revenue"] {
+        assert_eq!(
+            section_lines(&parsed, heading)?,
+            section_lines(&converter, heading)?,
+            "{heading}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_notes_okf_sources_are_classified_in_order_and_none_is_dropped() -> TestResult {
+    let entries = json!([
+        { "id": "web", "resource": "https://example.test/report", "title": "Report" },
+        { "id": "card", "resource": "card", "usage_count": 3 },
+        { "id": "scope", "resource": "all queries in project X" },
+        { "id": "bare" },
+        { "id": "up", "resource": "../sources/report-pdf.md", "x_extension": true },
+        "just a string"
+    ]);
+    let properties = serde_json::from_value(json!({ "sources": entries.clone() }))?;
+    let note = WorkspacePath::try_from("notes/plan.md".to_owned())?;
+    let path = |text: &str| WorkspacePath::try_from(text.to_owned());
+    let declared = note_sources(&properties, &note);
+    let written: Vec<&serde_json::Value> = declared.iter().map(|source| &source.entry).collect();
+    let expected: Vec<&serde_json::Value> = entries
+        .as_array()
+        .map(|list| list.iter().collect())
+        .unwrap_or_default();
+    assert_eq!(written, expected, "every entry is kept exactly as written");
+    let targets: Vec<SourceTarget> = declared.into_iter().map(|source| source.target).collect();
+    assert_eq!(
+        targets,
+        vec![
+            SourceTarget::Uncited(UncitedReason::External),
+            SourceTarget::Candidates(vec![path("notes/card.md")?, path("card.md")?]),
+            SourceTarget::Uncited(UncitedReason::Scope),
+            SourceTarget::Uncited(UncitedReason::Malformed),
+            SourceTarget::Candidates(vec![path("sources/report-pdf.md")?]),
+            SourceTarget::Uncited(UncitedReason::Malformed),
+        ]
+    );
+    let bare = serde_json::from_value(json!({ "sources": { "resource": "card" } }))?;
+    assert_eq!(note_sources(&bare, &note).len(), 1);
+    assert_eq!(
+        note_sources(&serde_json::from_value(json!({}))?, &note),
+        Vec::new()
+    );
+    Ok(())
+}
 #[path = "../../../tests/support/check.rs"]
 mod check;
 #[path = "support/records.rs"]
