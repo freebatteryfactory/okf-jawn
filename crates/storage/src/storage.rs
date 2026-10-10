@@ -79,8 +79,8 @@ impl Storage {
         let records = migrate_database(&data, RECORDS_FILE, &schema::RECORDS)?;
         let index = migrate_database(&data, INDEX_FILE, &schema::INDEX)?;
         Ok(Self {
-            records: Db::new(records.connection, Arc::clone(&data)),
-            index: Db::new(index.connection, Arc::clone(&data)),
+            records: Db::new(records.into_connection(), Arc::clone(&data)),
+            index: Db::new(index.into_connection(), Arc::clone(&data)),
             blobs: LocalBlobs::open(Arc::clone(&data))?,
             repositories: Repositories::new(Arc::clone(&data)),
             upload_writers: UploadWriters::default(),

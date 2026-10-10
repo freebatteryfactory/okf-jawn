@@ -158,7 +158,7 @@ fn migrations_back_up_then_upgrade_then_verify() -> TestResult {
     assert_eq!((first.from, first.to), (0, 1));
     assert!(first.backup.is_none(), "a new database needs no backup");
     first
-        .connection
+        .connection()
         .execute("INSERT INTO notes (text) VALUES ('kept')", [])?;
     drop(first);
 
@@ -182,7 +182,7 @@ fn migrations_back_up_then_upgrade_then_verify() -> TestResult {
     );
     let author: Option<String> =
         upgraded
-            .connection
+            .connection()
             .query_row("SELECT author FROM notes", [], |row| row.get(0))?;
     assert_eq!(author, None);
     Ok(())
@@ -220,7 +220,7 @@ fn migrations_roll_back_a_failing_step_and_keep_the_backup() -> TestResult {
         &steps(&["CREATE TABLE notes (text TEXT);"]),
     )?;
     first
-        .connection
+        .connection()
         .execute("INSERT INTO notes (text) VALUES ('kept')", [])?;
     drop(first);
     let error = err_of(migrate_database(

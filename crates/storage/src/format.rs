@@ -11,6 +11,7 @@
 //! backup of the whole installation (every workspace archive and the installation archive) is
 //! written by `Backups` in storage M2 and joins this step there.
 
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
@@ -21,16 +22,46 @@ use crate::data::{DataDir, io_error};
 use crate::seam;
 
 /// An opened database at the latest schema version.
+///
+/// The connection is reachable only by borrowing it from this value, which borrows the locked
+/// `DataDir`, so no connection that `migrate_database` opened outlives the single-writer lock:
+///
+/// ```compile_fail
+/// # use okf_jawn_storage::{data::DataDir, format::migrate_database, schema};
+/// # fn main() -> Result<(), okf_jawn_contract::error::ApiError> {
+/// let data = DataDir::open(std::path::Path::new("data"))?;
+/// let migrated = migrate_database(&data, "records.sqlite", &schema::RECORDS)?;
+/// drop(data); // the lock is released while the connection is still borrowed
+/// let deleted = migrated.connection().execute_batch("DELETE FROM jobs");
+/// # drop(deleted);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
-pub struct Migrated {
+pub struct Migrated<'data> {
     /// Connection to the migrated database.
-    pub connection: Connection,
+    connection: Connection,
+    /// The locked directory the database belongs to, borrowed for the connection's life.
+    data: PhantomData<&'data DataDir>,
     /// Schema version found before migrating; 0 for a new database.
     pub from: usize,
     /// Schema version after migrating.
     pub to: usize,
     /// The verified backup written before an upgrade, if one ran.
     pub backup: Option<PathBuf>,
+}
+
+impl Migrated<'_> {
+    /// The connection, borrowed: it lives no longer than the locked directory.
+    #[must_use]
+    pub const fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// The connection, for a store that keeps its own share of the lock (`Db::new`).
+    pub(crate) fn into_connection(self) -> Connection {
+        self.connection
+    }
 }
 
 /// Open the database `file` of the locked `data` directory and bring it to the latest step of
@@ -44,11 +75,11 @@ pub struct Migrated {
 /// `Unavailable` when the backup cannot be written or checked (nothing is migrated then);
 /// `Internal` when a step fails (the transaction rolls back) or the migrated result does not
 /// verify (the backup is kept and named).
-pub fn migrate_database(
-    data: &DataDir,
+pub fn migrate_database<'data>(
+    data: &'data DataDir,
     file: &str,
     migrations: &Migrations<'_>,
-) -> Result<Migrated, ApiError> {
+) -> Result<Migrated<'data>, ApiError> {
     let path = data.root().join(file);
     let path = path.as_path();
     let backups = data.pre_migration_path();
@@ -82,6 +113,7 @@ pub fn migrate_database(
         .into();
     Ok(Migrated {
         connection,
+        data: PhantomData,
         from,
         to,
         backup,
