@@ -213,7 +213,7 @@ impl VersionStore for GitVersions {
         Box::pin(self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
                 let repository = repositories.open_durable(scope)?;
-                let expected = oid(&changes.expected_head)?;
+                let expected = held_head(&repository, &changes.expected_head)?;
                 let current = head(&repository)?;
                 if let Some(found) =
                     find_trailer(&repository, current, expected, changes.mutation_id)?
@@ -405,7 +405,7 @@ fn without_staging(mut error: ApiError, staging: &std::path::Path) -> ApiError {
 
 /// Accept a candidate: its exact tree on top of the unchanged head, the approver committing.
 fn promote(repository: &Repository, promotion: &Promotion) -> Result<Committed, ApiError> {
-    let expected = oid(&promotion.expected_head)?;
+    let expected = held_head(repository, &promotion.expected_head)?;
     let current = head(repository)?;
     if let Some(found) = find_trailer(repository, current, expected, promotion.mutation_id)? {
         return replayed(found);
@@ -491,6 +491,18 @@ fn moved_head() -> ApiError {
         ErrorCode::Conflict,
         "the workspace head moved since the change was prepared",
     )
+}
+
+/// The commit an `expected_head` names. One the repository does not hold (stale after a
+/// purge rewrote the line, or never held) cannot be the head, so it answers `Conflict` like a
+/// moved head, not `Unavailable`.
+fn held_head(repository: &Repository, expected: &Revision) -> Result<Oid, ApiError> {
+    let id = oid(expected)?;
+    match repository.find_commit(id) {
+        Ok(_) => Ok(id),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Err(moved_head()),
+        Err(error) => Err(git(&error)),
+    }
 }
 
 fn oid(revision: &Revision) -> Result<Oid, ApiError> {

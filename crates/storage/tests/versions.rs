@@ -693,6 +693,41 @@ async fn an_integer_the_item_file_cannot_hold_exactly_is_refused_on_its_field() 
 }
 
 #[tokio::test]
+async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, _) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let unknown = Revision::try_from("ab".repeat(20))?;
+    let error = err_of(
+        versions
+            .commit(
+                &scope,
+                changes(20, &unknown, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    let promoted = err_of(
+        versions
+            .promote_candidate(
+                &scope,
+                Promotion {
+                    mutation_id: uuid!(21)?,
+                    proposal_id: uuid!(50)?,
+                    expected_head: unknown.clone(),
+                    candidate: unknown,
+                    approver: person("ana"),
+                    message: "Accept".to_owned(),
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(promoted.code, ErrorCode::Conflict, "{}", promoted.message);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_refusal_never_names_the_server_staging_directory() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (storage, scope, initial) = workspace(directory.path()).await?;
