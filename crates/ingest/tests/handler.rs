@@ -196,6 +196,31 @@ mod job_handler {
         Ok(id)
     }
 
+    /// An upload named `filename` whose bytes have not all arrived: not complete.
+    fn incomplete_upload(world: &World, number: u128, filename: &str) -> Built<UploadId> {
+        let id = serde_json::from_value::<UploadId>(json!(format!(
+            "00000000-0000-0000-0000-{number:012}"
+        )))?;
+        world
+            .uploads
+            .records
+            .lock()
+            .map_err(|_| "poisoned")?
+            .push(UploadRecord {
+                id,
+                filename: filename.to_owned(),
+                relative_path: String::new(),
+                expected_size: 100,
+                expected_sha256: None,
+                supplied_by: initiator(),
+                created_at: Timestamp::try_from("2026-10-09T00:00:00.000Z".to_owned())?,
+                received_bytes: 40,
+                object: None,
+                consumed_by: None,
+            });
+        Ok(id)
+    }
+
     fn initiator() -> Provenance {
         Provenance {
             subject: "owner".to_owned(),
@@ -677,6 +702,57 @@ mod job_handler {
             some(again.completions.first(), "the completion")?.item_ids,
             some(entry.completions.first(), "the first completion")?.item_ids
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_import_refused_for_one_upload_consumes_none_of_its_batch() -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let complete = upload(&world, 150, "complete.pdf", b"%PDF complete")?;
+        let partial = incomplete_upload(&world, 151, "partial.pdf")?;
+        let refused = job(
+            &world,
+            150,
+            workspace_scope()?,
+            import_spec(vec![complete, partial], false)?,
+        )?;
+        assert!(run(&world, refused).await?);
+        let entry = world.records.entry(refused)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("not complete"), "{message}");
+        // InvalidInput: not retried.
+        assert!(!retryable);
+        // The complete upload was not consumed, and nothing was written.
+        assert_eq!(world.uploads.consumed()?, Vec::new());
+        assert!(world.versions.written()?.is_empty());
+
+        // So another job can still import it.
+        let taker = job(
+            &world,
+            151,
+            workspace_scope()?,
+            import_spec(vec![complete], false)?,
+        )?;
+        assert!(run(&world, taker).await?);
+        let entry = world.records.entry(taker)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(world.uploads.consumed()?, [(complete, taker)]);
+
+        // A batch holding an upload another job consumed is refused before any consume.
+        let fresh = upload(&world, 152, "fresh.pdf", b"%PDF fresh")?;
+        let late = job(
+            &world,
+            152,
+            workspace_scope()?,
+            import_spec(vec![fresh, complete], false)?,
+        )?;
+        assert!(run(&world, late).await?);
+        let entry = world.records.entry(late)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let (message, _retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("another job"), "{message}");
+        assert_eq!(world.uploads.consumed()?, [(complete, taker)]);
         Ok(())
     }
 

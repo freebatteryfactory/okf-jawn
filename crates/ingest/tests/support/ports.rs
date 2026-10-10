@@ -83,7 +83,10 @@ pub struct FakeVersions {
     pub at_base: Mutex<Vec<SourceCard>>,
 }
 
-/// An `UploadStore` holding complete uploads and recording which job consumed each.
+/// An `UploadStore` holding uploads and recording which job consumed each.
+///
+/// `consume` encodes the port doc: an incomplete upload is `InvalidInput`, one another job
+/// consumed is `Conflict`, and consuming it again for the same job changes nothing.
 #[derive(Default)]
 pub struct FakeUploads {
     /// The slots `get` returns.
@@ -906,15 +909,40 @@ impl UploadStore for FakeUploads {
         upload: UploadId,
         job: JobId,
     ) -> PortFuture<'a, UploadRecord> {
-        let recorded = self
-            .consumed
+        let taken = self
+            .records
             .lock()
-            .map(|mut consumed| {
-                if !consumed.contains(&(upload, job)) {
-                    consumed.push((upload, job));
+            .map_err(|_| poisoned())
+            .and_then(|mut records| {
+                let record = records
+                    .iter_mut()
+                    .find(|record| record.id == upload)
+                    .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such upload"))?;
+                if record.object.is_none() {
+                    return Err(ApiError::new(
+                        ErrorCode::InvalidInput,
+                        "the upload is not complete",
+                    ));
                 }
-            })
-            .map_err(|_| poisoned());
+                if record.consumed_by.is_some_and(|consumer| consumer != job) {
+                    return Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "the upload was consumed by another job",
+                    ));
+                }
+                record.consumed_by = Some(job);
+                Ok(())
+            });
+        let recorded = taken.and_then(|()| {
+            self.consumed
+                .lock()
+                .map(|mut consumed| {
+                    if !consumed.contains(&(upload, job)) {
+                        consumed.push((upload, job));
+                    }
+                })
+                .map_err(|_| poisoned())
+        });
         Box::pin(async move {
             recorded?;
             self.get(scope, upload).await

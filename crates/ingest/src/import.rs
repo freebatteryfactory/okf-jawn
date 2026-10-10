@@ -2,7 +2,8 @@
 //! assembled and retained, and the source card committed (plan 3.2, Stage 1b design 9.1).
 //!
 //! Import:
-//! 1. Each upload must be complete; it is consumed by this job.
+//! 1. Each upload must be complete and taken by no other job; only once every upload of the
+//!    request passes is each consumed by this job, so a refused batch consumes none.
 //! 2. Each card is named `conventions::source_card_name` of its file name, with the
 //!    numbered-suffix rule (`report-pdf-2.md`) against the destination folder at the base
 //!    revision and against the other cards of the job.
@@ -345,14 +346,21 @@ fn refused(error: &ApiError) -> Done {
     }
 }
 
-/// The cards of an import, each with outcome `pending`, beside its materialized original. Each
-/// upload must be complete and is consumed by this job.
+/// The cards of an import, each with outcome `pending`, beside its materialized original.
+///
+/// Every upload of the request is read and checked before any is consumed: an incomplete one
+/// refuses the batch (`InvalidInput`), and so does one another job consumed (`Conflict`), and
+/// then no upload of the batch is consumed, so another job may still take the good ones. Only
+/// then is each consumed by this job. The race that remains is another job consuming an upload
+/// between this check and the consume: that is a concurrent import of the same upload, which
+/// `consume` already refuses with `Conflict`.
 async fn pending_cards(
     ports: &HandlerPorts,
     claimed: &ClaimedJob,
     scope: &StorageScope,
     request: &ImportRequest<'_>,
 ) -> Result<Vec<(SourceCard, LocalSource)>, ApiError> {
+    let job = claimed.lease.job_id;
     let mut sources = Vec::new();
     for upload_id in request.upload_ids {
         let upload = ports.uploads.get(scope, *upload_id).await?;
@@ -363,11 +371,17 @@ async fn pending_cards(
             )
             .with_field("/upload_ids")
         })?;
-        let _consumed = ports
-            .uploads
-            .consume(scope, *upload_id, claimed.lease.job_id)
-            .await?;
+        if upload.consumed_by.is_some_and(|consumer| consumer != job) {
+            return Err(ApiError::new(
+                ErrorCode::Conflict,
+                "an upload to import was already taken by another job",
+            )
+            .with_field("/upload_ids"));
+        }
         sources.push((upload, object));
+    }
+    for (upload, _object) in &sources {
+        let _consumed = ports.uploads.consume(scope, upload.id, job).await?;
     }
     let mut taken = taken_keys(ports, scope, request.base_revision, request.destination).await?;
     let mut cards = Vec::new();
