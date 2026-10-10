@@ -751,6 +751,34 @@ fn probe_files(directory: &Path) -> Fallible<usize> {
 }
 
 #[tokio::test]
+async fn readiness_reports_a_database_at_another_schema_version_as_not_ready() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    assert!(storage.readiness().probe().await?.ready);
+    rusqlite::Connection::open(storage.data().index_path())?.pragma_update(
+        None,
+        "user_version",
+        99,
+    )?;
+    let report = storage.readiness().probe().await?;
+    let index = some(
+        report
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.name == "index"),
+        "the index status",
+    )?;
+    assert!(!index.ready, "{}", index.message);
+    assert!(
+        index.message.contains("schema version"),
+        "{}",
+        index.message
+    );
+    assert!(!report.ready);
+    Ok(())
+}
+
+#[tokio::test]
 async fn readiness_reports_a_directory_it_cannot_write_as_not_ready() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
