@@ -55,6 +55,43 @@ fn the_configuration_needs_a_bare_http_origin_and_a_lifetime() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn the_sandbox_origin_port_lies_in_one_to_65535() -> TestResult {
+    let check = |origin: &str| {
+        ApplicationConfig {
+            sandbox_origin: origin.to_owned(),
+            ..config()
+        }
+        .check()
+    };
+    for origin in [
+        "https://sandbox.example.test:1",
+        "https://sandbox.example.test:65535",
+        "http://127.0.0.1:1",
+        "https://[::1]:65535",
+    ] {
+        check(origin)?;
+    }
+    for origin in [
+        "https://sandbox.example.test:0",
+        "https://sandbox.example.test:65536",
+        "https://sandbox.example.test:99999",
+        "https://sandbox.example.test:",
+        "https://[::1]:0",
+        "https://[::1]:65536",
+        "https://[::1]x",
+        "https://[::1",
+        "https://sandbox.example.test#fragment",
+        "https://sandbox example.test",
+        "https://a:1:2",
+    ] {
+        let refused = err_of(check(origin))?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput, "{origin}");
+        assert_eq!(refused.field.as_deref(), Some("sandbox_origin"), "{origin}");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_operation_of_a_later_part_answers_not_implemented() -> TestResult {
     let world = World::new()?;
