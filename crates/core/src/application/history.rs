@@ -47,8 +47,8 @@ use std::collections::BTreeSet;
 use okf_jawn_contract::common::{MutationResult, TextRange};
 use okf_jawn_contract::error::{ApiError, DraftConflictItem, ErrorCode, ErrorDetail};
 use okf_jawn_contract::history::{
-    BlameRequest, BlameResponse, CommitRequest, DiffRequest, DiffResponse, FileChange,
-    FileChangeKind, LogRequest, LogResponse, RestoreRequest,
+    BlameRequest, BlameResponse, CommitRequest, DiffRequest, DiffResponse, FileChange, LogRequest,
+    LogResponse, RestoreRequest,
 };
 use okf_jawn_contract::identity::{Digest, ItemId, MutationId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{Draft, DraftContent, ItemDocument};
@@ -463,7 +463,8 @@ async fn held_draft(
 }
 
 /// The conflict of one draft whose item changed or was deleted between its base and the head;
-/// `None` when the item's comparison lists no change.
+/// `None` when the item's comparison lists no change. The conflict is decided by that
+/// comparison, `deleted` by the item's identity at the head.
 async fn conflict_of(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -489,10 +490,18 @@ async fn conflict_of(
     if changes.is_empty() {
         return Ok(None);
     }
-    // Nothing of the item is present at the head (`FileChangeKind::Removed`).
-    let deleted = changes
-        .iter()
-        .all(|change| change.kind == FileChangeKind::Removed);
+    // Deleted means the item no longer exists at the head, whatever the comparison shows at its
+    // path: a different item may have been created there.
+    let deleted = match service
+        .ports()
+        .versions
+        .show(scope, head, draft.item_id)
+        .await
+    {
+        Ok(_) => false,
+        Err(error) if error.code == ErrorCode::NotFound => true,
+        Err(error) => return Err(error),
+    };
     Ok(Some(DraftConflictItem {
         item_id: draft.item_id,
         draft_base: draft.base_revision.clone(),

@@ -771,6 +771,85 @@ async fn commit_items_conflict_of_a_moved_and_rewritten_item_is_not_a_deletion()
     assert_eq!(world.versions.commits()?.len(), 0);
     Ok(())
 }
+#[tokio::test]
+async fn commit_items_conflict_of_a_replaced_item_is_a_deletion_whatever_sits_at_its_path()
+-> TestResult {
+    let world = World::new()?;
+    let base = revision('a')?;
+    let head = revision('c')?;
+    note_at(&world, NOTE, "notes/plan.md", &['a'])?;
+    // A different item was created at the drafted item's path.
+    note_at(&world, OTHER, "notes/plan.md", &['c'])?;
+    world.versions.set_head(head.clone())?;
+    world
+        .drafts
+        .put_draft(draft_of(NOTE, ALICE, &base, "# Mine\n")?)?;
+    let shown = vec![change(
+        FileChangeKind::Modified,
+        Some("notes/plan.md"),
+        Some("notes/plan.md"),
+    )];
+    world
+        .versions
+        .put_diff(&base, &head, Some(item(NOTE)), shown.clone())?;
+    let refused = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(1)))?,
+                snapshot(&[NOTE])?,
+            )
+            .await,
+    )?;
+    let Some(ErrorDetail::DraftConflict { items }) = refused.detail.as_deref() else {
+        return Err(format!("not a draft conflict: {refused:?}").into());
+    };
+    let only = some(items.first(), "the replaced item")?;
+    assert_eq!(items.len(), 1);
+    assert!(only.deleted, "the item no longer exists: {only:?}");
+    assert_eq!(only.changes, shown);
+    assert_eq!(world.versions.commits()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn commit_items_conflict_of_a_moved_and_edited_item_is_not_a_deletion() -> TestResult {
+    let world = World::new()?;
+    let base = revision('a')?;
+    let head = revision('c')?;
+    note_at(&world, NOTE, "notes/plan.md", &['a'])?;
+    note_at(&world, NOTE, "archive/plan.md", &['c'])?;
+    world.versions.set_head(head.clone())?;
+    world
+        .drafts
+        .put_draft(draft_of(NOTE, ALICE, &base, "# Mine\n")?)?;
+    world.versions.put_diff(
+        &base,
+        &head,
+        Some(item(NOTE)),
+        vec![change(
+            FileChangeKind::Moved,
+            Some("notes/plan.md"),
+            Some("archive/plan.md"),
+        )],
+    )?;
+    let refused = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(1)))?,
+                snapshot(&[NOTE])?,
+            )
+            .await,
+    )?;
+    let Some(ErrorDetail::DraftConflict { items }) = refused.detail.as_deref() else {
+        return Err(format!("not a draft conflict: {refused:?}").into());
+    };
+    let only = some(items.first(), "the moved item")?;
+    assert!(!only.deleted, "the item still exists: {only:?}");
+    Ok(())
+}
+
 /// NOTE at `a` and at each of `heads`, Alice's draft based on `a`, `d` queued, and an unrelated
 /// commit landing before each of the next commits, one per revision of `heads`.
 fn landing_mid_snapshot(heads: &[char]) -> Built<World> {
