@@ -30,6 +30,12 @@ use crate::storage::Storage;
 /// Accepts every candidate.
 struct Accept;
 
+/// A thread holding a workspace's write lock, and the sender that makes it let go.
+type Holder = (
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<Result<(), ApiError>>,
+);
+
 impl CandidateCheck for Accept {
     fn check(&self, _root: &std::path::Path) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
@@ -467,5 +473,104 @@ async fn an_upload_completion_of_another_workspace_inside_the_object_step_keeps_
         held(&storage, &survivor, &digest).await?,
         "the object the survivor's upload names stays"
     );
+    Ok(())
+}
+
+/// Hold `scope`'s workspace write lock on a thread until `release` receives; returns once it
+/// is held.
+fn hold_the_workspace(storage: &Storage, scope: &StorageScope) -> Result<Holder, ApiError> {
+    let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let holder = {
+        let repositories = storage.repositories.clone();
+        let scope = scope.clone();
+        std::thread::spawn(move || {
+            repositories.locked(&scope, || {
+                held.0.send(()).map_err(|error| fault(&error))?;
+                release.1.recv().map_err(|error| fault(&error))
+            })
+        })
+    };
+    held.1.recv().map_err(|error| fault(&error))?;
+    Ok((release.0, holder))
+}
+
+/// A Git write that passed the purge refusal before the purge was recorded, and waits for the
+/// workspace's lock while it is recorded, is refused under the lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_waiting_for_the_workspace_lock_when_the_purge_is_recorded_is_refused()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, "local", 1, "Trip").await?;
+    let (release, holder) = hold_the_workspace(&storage, &target)?;
+    let committing = {
+        let versions = storage.versions();
+        let target = target.clone();
+        let edits = vec![card(item(11), "sources/a.md", &digest_of(b"zanzibar")?)?];
+        tokio::spawn(async move {
+            versions
+                .commit(
+                    &target,
+                    CommitChanges {
+                        mutation_id: mutation(3),
+                        expected_head: head,
+                        author: person(),
+                        message: "Late".to_owned(),
+                        edits,
+                    },
+                    Arc::new(Accept),
+                )
+                .await
+        })
+    };
+    // The commit passes the first check at once and then waits for the lock.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    record_purge(&storage, &target).await?;
+    release.send(()).map_err(|error| fault(&error))?;
+    holder
+        .join()
+        .map_err(|_| fault(&"the lock holder stopped"))??;
+    let error = match committing.await.map_err(|error| fault(&error))? {
+        Ok(committed) => return Err(fault(&format!("the commit landed: {committed:?}"))),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert!(error.message.contains("purged by purge"), "{error}");
+    Ok(())
+}
+
+/// The plan reads the workspace under its write lock, so it waits for a Git write that holds
+/// the lock (and may land a commit) to end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_plan_waits_for_a_write_that_holds_the_workspace_lock() -> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, "local", 1, "Trip").await?;
+    record_purge(&storage, &target).await?;
+    let (release, holder) = hold_the_workspace(&storage, &target)?;
+    let purging = spawn_purge(&storage, &target);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let purge = purge_id().0.to_string();
+    let planned: bool = storage
+        .records
+        .call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM purge_progress WHERE purge_id = ?1)",
+                    [purge],
+                    |row| row.get(0),
+                )
+                .map_err(|error| fault(&error))
+        })
+        .await?;
+    assert!(
+        !planned,
+        "no plan is recorded while a write holds the workspace"
+    );
+    release.send(()).map_err(|error| fault(&error))?;
+    holder
+        .join()
+        .map_err(|_| fault(&"the lock holder stopped"))??;
+    purging.await.map_err(|error| fault(&error))??;
     Ok(())
 }

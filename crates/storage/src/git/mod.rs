@@ -107,8 +107,10 @@ impl GitVersions {
         export::record(&self.records, scope, mutation_id, revision, object).await
     }
 
-    /// Run a Git write: refused while a purge names the workspace; on success the pins of the
-    /// objects its cards name are released, since the commit that references them landed.
+    /// Run a Git write: refused while a purge names the workspace (checked here, before the
+    /// write is staged, and again by the write under the workspace's lock, `refuse_locked`);
+    /// on success the pins of the objects its cards name are released, since the commit that
+    /// references them landed.
     async fn guarded<T>(
         &self,
         scope: &StorageScope,
@@ -244,8 +246,10 @@ impl VersionStore for GitVersions {
         check: Arc<dyn CandidateCheck>,
     ) -> PortFuture<'a, Committed> {
         let named = card_objects(&changes.edits);
+        let records = self.records.clone();
         let commit = self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
+                refuse_locked(&records, scope)?;
                 let repository = repositories.open_durable(scope)?;
                 let expected = held_head(&repository, &changes.expected_head)?;
                 let current = head(&repository)?;
@@ -300,8 +304,10 @@ impl VersionStore for GitVersions {
         check: Arc<dyn CandidateCheck>,
     ) -> PortFuture<'a, Revision> {
         let named = card_objects(&changes.edits);
+        let records = self.records.clone();
         let candidate = self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
+                refuse_locked(&records, scope)?;
                 let repository = repositories.open_durable(scope)?;
                 let name = proposal_reference(proposal_id);
                 let base = oid(&changes.base)?;
@@ -344,8 +350,10 @@ impl VersionStore for GitVersions {
         scope: &'a StorageScope,
         promotion: Promotion,
     ) -> PortFuture<'a, Committed> {
+        let records = self.records.clone();
         let promoted = self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
+                refuse_locked(&records, scope)?;
                 promote(&repositories.open_durable(scope)?, &promotion)
             })
         });
@@ -561,6 +569,13 @@ fn oid(revision: &Revision) -> Result<Oid, ApiError> {
 }
 
 /// The reference that retains a proposal's candidate.
+/// Refuse a write to `scope` a purge names, from inside the workspace's lock (blocking). The
+/// purge's plan reads the workspace under the same lock, so a commit, candidate or promotion
+/// either landed before that read or is refused.
+fn refuse_locked(records: &Db, scope: &StorageScope) -> Result<(), ApiError> {
+    tokio::runtime::Handle::current().block_on(crate::purge::guard::refuse_scope(records, scope))
+}
+
 pub(crate) fn proposal_reference(proposal: ProposalId) -> String {
     format!("refs/okf-jawn/proposals/{}", proposal.0)
 }

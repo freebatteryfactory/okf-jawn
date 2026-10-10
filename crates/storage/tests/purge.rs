@@ -2039,5 +2039,87 @@ async fn purge_refuses_upload_content_inside_its_transaction_and_keeps_no_part()
     Ok(())
 }
 
+/// An indexing that read the target's repository before the repository step and stored its
+/// entries after the index step (core indexes right after a commit, in no job) is removed by
+/// the index pass the repository step runs again. The purge is stopped at the index step, then
+/// in the repository step after the repository went; the late entries are written then.
+#[tokio::test]
+async fn purge_removes_index_entries_stored_after_its_index_step() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, created) = create(&storage, 1, "Trip").await?;
+    let revision = commit(
+        &storage,
+        &target,
+        3,
+        &created,
+        vec![note(uuid!(10)?, "notes/plans.md", "Ferry to zanzibar.")?],
+    )
+    .await?;
+    storage
+        .search()
+        .index_revision(&target, revision.clone())
+        .await?;
+    let index = rusqlite::Connection::open(directory.path().join("index.sqlite"))?;
+    index.execute_batch(
+        "CREATE TRIGGER stop_purge BEFORE DELETE ON index_items
+         BEGIN SELECT RAISE(ABORT, 'stopped at the index step'); END;",
+    )?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    let purger = storage.purger();
+    let workspace = target.workspace_id;
+    err_of(
+        purger
+            .purge_workspace(&tenant()?, uuid!(61)?, purge, workspace)
+            .await,
+    )?;
+    index.execute_batch("DROP TRIGGER stop_purge;")?;
+    let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+    records.execute(
+        "INSERT INTO receipts (receipt_id, tenant_id, workspace_id, mutation_id, record)
+         VALUES (?1, 'local', ?2, NULL, '{\"late\": \"receipt\"}')",
+        [uuid_text(44), workspace.0.to_string()],
+    )?;
+    records.execute_batch(
+        "CREATE TRIGGER stop_rows BEFORE DELETE ON receipts
+         BEGIN SELECT RAISE(ABORT, 'stopped in the repository step'); END;",
+    )?;
+    err_of(
+        purger
+            .purge_workspace(&tenant()?, uuid!(61)?, purge, workspace)
+            .await,
+    )?;
+    let repository = storage
+        .data()
+        .repositories_path()
+        .join("local")
+        .join(format!("{}.git", workspace.0));
+    assert!(!repository.exists(), "stopped after the repository went");
+    index.execute(
+        "INSERT INTO index_items (tenant_id, workspace_id, revision, item_id, path, archived,
+             extraction_status, summary)
+         VALUES ('local', ?1, ?2, ?3, 'notes/plans.md', 0, NULL, '{\"title\": \"zanzibar\"}')",
+        [
+            workspace.0.to_string(),
+            revision.as_str().to_owned(),
+            uuid_text(10),
+        ],
+    )?;
+    index.execute(
+        "INSERT INTO index_text (rowid, title, description, body)
+         VALUES (last_insert_rowid(), 'zanzibar', '', 'Ferry to zanzibar.')",
+        [],
+    )?;
+    drop(index);
+    records.execute_batch("DROP TRIGGER stop_rows;")?;
+    drop(records);
+    purger
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, workspace)
+        .await?;
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

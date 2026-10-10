@@ -64,17 +64,23 @@ impl SqliteSearch {
             return Ok(());
         }
         let repositories = self.repositories.clone();
+        let index = self.index.clone();
         let owned = scope.clone();
-        let read = revision.clone();
-        let entries = tokio::task::spawn_blocking(move || entries(&repositories, &owned, &read))
-            .await
-            .map_err(|error| crate::db::internal(format!("an index task stopped: {error}")))??;
-        let (tenant, workspace) = scope_key(scope);
-        self.index
-            .transaction(move |transaction| {
-                store(transaction, &tenant, &workspace, &revision, &entries)
+        // Read and stored under the workspace's write lock: a purge deletes the repository
+        // under that lock and then removes the workspace's index entries again, so an indexing
+        // that read the revision before the repository went is removed by that second pass,
+        // and one that comes later finds no repository to read.
+        tokio::task::spawn_blocking(move || {
+            repositories.locked(&owned, || {
+                let entries = entries(&repositories, &owned, &revision)?;
+                let (tenant, workspace) = scope_key(&owned);
+                tokio::runtime::Handle::current().block_on(index.transaction(move |transaction| {
+                    store(transaction, &tenant, &workspace, &revision, &entries)
+                }))
             })
-            .await
+        })
+        .await
+        .map_err(|error| crate::db::internal(format!("an index task stopped: {error}")))?
     }
 }
 

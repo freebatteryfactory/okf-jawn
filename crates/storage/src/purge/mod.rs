@@ -13,8 +13,10 @@
 //! 1. **Plan**, before anything is removed: the objects the workspace references (its whole Git
 //!    history on every reference, the conversion records its cards name, its records), its
 //!    workspace archives (recorded as artifacts or only written), its uploads, the
-//!    pre-migration backups that hold it, and the
-//!    counts of the report. In the same transaction every commit of the workspace is written to
+//!    pre-migration backups that hold it, and the counts of the report. Its records and
+//!    history are read under the workspace's write lock, under which every Git write checks
+//!    the purge refusal (`guard`), so a commit either is in the plan or is refused. In the
+//!    same transaction every commit of the workspace is written to
 //!    the revision map as invalidated by this purge with no replacement. The plan holds
 //!    identities and counts, never content.
 //! 2. **Backups**: every pre-migration copy that holds the workspace is rewritten without it or
@@ -28,7 +30,9 @@
 //! 4. **Index**: its index entries are removed and the full-text index is merged, so no removed
 //!    term stays in an index segment.
 //! 5. **Repository**: its repository is deleted under the workspace's write lock; then the rows
-//!    step runs again, for a row a write in flight added after step 3.
+//!    and index steps run again, for a row a write in flight added after step 3 and for index
+//!    entries an indexing that read the repository before it went stored after step 4 (an
+//!    indexing reads and stores under the same lock).
 //! 6. **Objects**: a sweep of the in-flight pins begins (`pins`), then what every surviving
 //!    workspace and tenant record references is read; the step waits for the target's running
 //!    writes, adds the objects its pins name, and deletes each planned object that no surviving
@@ -168,6 +172,7 @@ impl StoragePurger {
             let removed = scope.clone();
             blocking(move || repositories.remove(&removed)).await?;
             self.records(&scope, purge, &plan.uploads).await?;
+            self.index(&scope).await?;
             step = self.advance(purge, REPOSITORY, None).await?;
         }
         if step < OBJECTS {
@@ -219,36 +224,39 @@ impl StoragePurger {
         purge: PurgeId,
     ) -> Result<WorkspacePlan, ApiError> {
         let (tenant, workspace) = scope_key(scope);
-        let (target, archives, uploads) = {
-            let (tenant, workspace) = (tenant.clone(), workspace.clone());
-            self.storage
-                .records
-                .call(move |connection| {
-                    let target = references::records(
-                        connection,
-                        &tenant,
-                        &workspace,
-                        Rows::Target,
-                        &BTreeSet::new(),
-                    )?;
-                    let archives = archives(connection, &tenant, &workspace)?;
-                    let uploads = uploads(connection, &tenant, &workspace)?;
-                    Ok((target, archives, uploads))
-                })
-                .await?
-        };
-        let (history, objects, copy_plan) = {
+        let (history, objects, copy_plan, archives, uploads) = {
             let repositories = self.storage.repositories.clone();
+            let records = self.storage.records.clone();
             let blobs = self.storage.blobs.clone();
             let pre_migration = self.storage.data.pre_migration_path();
             let scope = scope.clone();
             let (tenant, workspace) = (tenant.clone(), workspace.clone());
             blocking(move || {
-                let history = if repositories.path(&scope).exists() {
-                    references::history(&repositories.open(&scope)?)?
-                } else {
-                    references::History::default()
-                };
+                // Read under the workspace's write lock: a Git write checks the purge refusal
+                // under the same lock, so it either landed before this read or is refused.
+                let (target, archives, uploads, history) = repositories.locked(&scope, || {
+                    let (tenant, workspace) = (tenant.clone(), workspace.clone());
+                    let (target, archives, uploads) = tokio::runtime::Handle::current().block_on(
+                        records.call(move |connection| {
+                            let target = references::records(
+                                connection,
+                                &tenant,
+                                &workspace,
+                                Rows::Target,
+                                &BTreeSet::new(),
+                            )?;
+                            let archives = archives(connection, &tenant, &workspace)?;
+                            let uploads = uploads(connection, &tenant, &workspace)?;
+                            Ok((target, archives, uploads))
+                        }),
+                    )?;
+                    let history = if repositories.path(&scope).exists() {
+                        references::history(&repositories.open(&scope)?)?
+                    } else {
+                        references::History::default()
+                    };
+                    Ok((target, archives, uploads, history))
+                })?;
                 let mut objects = target;
                 objects.extend(history.objects.iter().cloned());
                 references::follow_records(&blobs, &scope.tenant_id, &mut objects)?;
@@ -259,7 +267,7 @@ impl StoragePurger {
                     }
                 }
                 let copy_plan = copies::plan(&pre_migration, &tenant, &workspace)?;
-                Ok((history.revisions, held, copy_plan))
+                Ok((history.revisions, held, copy_plan, archives, uploads))
             })
             .await?
         };
