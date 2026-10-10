@@ -45,6 +45,39 @@ fn read(item: u128, view: ReadView, selection: Selection) -> Built<ReadItemReque
     })
 }
 
+/// Assert that `response` cites exactly the lines of its text, from line `start`, and that its
+/// receipt records the same citation; answer the line after them.
+fn assert_cites_its_lines(world: &World, response: &ReadItemResponse, start: u32) -> Built<u32> {
+    let count = u32::try_from(response.markdown.lines().count())?;
+    let after = start.checked_add(count).ok_or("too many lines")?;
+    let end = after.checked_sub(1).ok_or("an empty block")?;
+    assert_eq!(
+        response.source.selection,
+        Selection::Lines {
+            range: TextRange { start, end }
+        }
+    );
+    assert_receipt_holds(world, response)?;
+    Ok(after)
+}
+
+/// Assert that the receipt of `response` records exactly the citation the response returned.
+fn assert_receipt_holds(world: &World, response: &ReadItemResponse) -> Built<()> {
+    let receipts = world.records.receipts()?;
+    let (_, receipt) = some(
+        receipts
+            .iter()
+            .find(|(_, receipt)| receipt.id == response.receipt_id),
+        "the read's receipt",
+    )?;
+    let recorded = some(receipt.sources.first(), "the recorded citation")?;
+    assert_eq!(
+        serde_json::to_value(recorded)?,
+        serde_json::to_value(&response.source)?
+    );
+    Ok(())
+}
+
 /// The fixed instant a test's clock answers: one billion seconds after the Unix epoch.
 fn issue_time() -> OffsetDateTime {
     OffsetDateTime::UNIX_EPOCH.saturating_add(time::Duration::seconds(1_000_000_000))
@@ -165,16 +198,10 @@ async fn a_budgeted_read_cuts_at_a_line_and_continues_on_the_same_revision() -> 
     let first = read_as_alice(&world, request.clone()).await?;
     assert!(first.truncated);
     assert!(first.markdown.len() <= 256 && first.markdown.ends_with('\n'));
-    let lines = u32::try_from(first.markdown.lines().count())?;
-    assert_eq!(
-        first.source.selection,
-        Selection::Lines {
-            range: TextRange {
-                start: 1,
-                end: lines
-            }
-        }
-    );
+    let mut next_line = 1_u32;
+    // Every block, the last included, cites exactly the lines it returned, and its receipt
+    // records that same citation.
+    next_line = assert_cites_its_lines(&world, &first, next_line)?;
     // The head moves to a revision with no such item; the continuation still reads `a`.
     world.versions.set_head(revision('b')?)?;
     let mut text = first.markdown.clone();
@@ -186,11 +213,56 @@ async fn a_budgeted_read_cuts_at_a_line_and_continues_on_the_same_revision() -> 
         again.cursor = Some(next);
         let page = read_as_alice(&world, again).await?;
         assert_eq!(page.source.revision, at);
+        next_line = assert_cites_its_lines(&world, &page, next_line)?;
         text.push_str(&page.markdown);
         cursor = page.next_cursor;
         assert!(rounds < 10, "the read must end");
     }
+    assert!(rounds > 0, "the read took more than one block");
+    assert_eq!(next_line, 41);
     assert_eq!(text, body);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_clamped_line_selection_is_cited_and_receipted_as_the_lines_the_text_has() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.versions.put_document(
+        &at,
+        note(
+            NOTE,
+            &at,
+            "notes/plan.md",
+            "one\ntwo\nthree\n",
+            json!({ "type": "Note" }),
+        )?,
+    )?;
+    let response = read_as_alice(
+        &world,
+        read(
+            NOTE,
+            ReadView::Text,
+            Selection::Lines {
+                range: TextRange { start: 1, end: 999 },
+            },
+        )?,
+    )
+    .await?;
+    assert_eq!(response.markdown, "one\ntwo\nthree\n");
+    assert_eq!(
+        response.source.selection,
+        Selection::Lines {
+            range: TextRange { start: 1, end: 3 }
+        }
+    );
+    assert!(
+        response
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "selection_clamped")
+    );
+    assert_receipt_holds(&world, &response)?;
     Ok(())
 }
 

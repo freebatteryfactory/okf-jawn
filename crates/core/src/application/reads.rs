@@ -18,7 +18,10 @@
 //!   byte position. A continuation reads that same revision whatever `latest` is now.
 //! - The citation is exact: the selection asked for when the whole of it was returned, else
 //!   the lines actually returned, with the digest and the server's locations
-//!   (`reading::cited_locations`). Every read records a receipt of what it returned.
+//!   (`sources::computed_locations`). A line selection is cited as the lines it resolved to, so
+//!   one clamped to the end of the text names only lines the text has, and every block of a
+//!   continued read, the last included, cites its own lines. Every read records a receipt
+//!   holding the same citation the response returns.
 
 use std::collections::BTreeSet;
 
@@ -150,10 +153,14 @@ pub(super) async fn read_item(
     } else {
         return Err(bad_cursor());
     };
-    let cited = match (&block.lines, block.partial) {
-        (Some(lines), true) => Selection::Lines {
-            range: lines.clone(),
-        },
+    let cited = match (&block.lines, block.partial, &request.selection, &span) {
+        // Part of the selection: the lines this block returned. The whole of a line selection:
+        // the lines it resolved to, so one clamped to the text names only lines it has.
+        (Some(lines), true, _, _) | (_, false, Selection::Lines { .. }, Some(lines)) => {
+            Selection::Lines {
+                range: lines.clone(),
+            }
+        }
         _ => request.selection.clone(),
     };
     let located = match (&cited, &span) {
