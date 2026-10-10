@@ -17,9 +17,10 @@
 //! (`fail_next`, `fail_next_receipt`), as any port may, to show what a retry does.
 //!
 //! History is scripted too (`put_log`, `put_diff`, `put_blame`): a comparison nobody scripted
-//! between two known revisions lists no change, and an unknown revision is `NotFound`.
-//! `find_commit` answers the commit a mutation wrote, wherever it lies: the fake's history is
-//! one line, so every recorded commit lies after any base a test names. The search index
+//! between two known revisions lists no change, and an unknown revision is `NotFound`. The
+//! fake's history is one line of the commits it wrote: a commit replays, and `find_commit`
+//! finds it, only when it lies after the revision asked about, as the port documents; a head a
+//! test moves with `set_head` has no commit after it. The search index
 //! answers `Unavailable` for a revision it has not indexed, as its port documents, and applies
 //! the query's filters to the entries a test scripted (`put_entry`, `put_link`): the archived
 //! flag unless archived items are included, the extraction filter, the folder and the text.
@@ -471,6 +472,29 @@ impl FakeVersions {
 }
 
 impl VersionState {
+    /// The commit `mutation` wrote, when it lies after `revision` on the fake's one line of
+    /// history: `revision` is the head that commit was written on, or a head before that one.
+    fn written_after(&self, mutation: MutationId, revision: &Revision) -> Option<Revision> {
+        let (changes, written) = self
+            .commits
+            .iter()
+            .find(|(changes, _)| changes.mutation_id == mutation)?;
+        let mut base = Some(&changes.expected_head);
+        // Each step moves to an earlier commit; the bound stops a scripted cycle.
+        for _ in 0..=self.commits.len() {
+            let at = base?;
+            if at == revision {
+                return Some(written.clone());
+            }
+            base = self
+                .commits
+                .iter()
+                .find(|(_, produced)| produced == at)
+                .map(|(earlier, _)| &earlier.expected_head);
+        }
+        None
+    }
+
     /// Refuse an unknown revision with `NotFound`. A revision is known when it is the head, a
     /// commit produced it, or the test scripted content at it.
     fn require_known(&self, revision: &Revision) -> Result<(), ApiError> {
@@ -800,13 +824,10 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, Committed> {
         Box::pin(async move {
             let mut state = lock_api(&self.state)?;
-            if let Some((_, revision)) = state
-                .commits
-                .iter()
-                .find(|(prior, _)| prior.mutation_id == changes.mutation_id)
+            if let Some(revision) = state.written_after(changes.mutation_id, &changes.expected_head)
             {
                 return Ok(Committed {
-                    revision: revision.clone(),
+                    revision,
                     replayed: true,
                     warnings: Vec::new(),
                 });
@@ -837,11 +858,7 @@ impl VersionStore for FakeVersions {
         Box::pin(async move {
             let state = lock_api(&self.state)?;
             state.require_known(since)?;
-            Ok(state
-                .commits
-                .iter()
-                .find(|(prior, _)| prior.mutation_id == mutation_id)
-                .map(|(_, revision)| revision.clone()))
+            Ok(state.written_after(mutation_id, since))
         })
     }
     fn create_candidate<'a>(
