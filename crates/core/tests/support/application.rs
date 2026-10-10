@@ -18,7 +18,8 @@
 //! mutation is not recorded twice), and a test may make the next call of one of them fail
 //! (`fail_next`, `fail_next_receipt`), as any port may, to show what a retry does.
 //!
-//! History is scripted too (`put_log`, `put_diff`, `put_blame`): a comparison nobody scripted
+//! History is scripted too (`put_log`, `put_diff`, `put_blame`); `log` pages a scripted history as
+//! storage does when a test asks (`page_log`). A comparison nobody scripted
 //! between two known revisions lists no change, and an unknown revision is `NotFound`. The
 //! fake's history is one line: the commits it wrote, and the heads a test moves with `set_head`,
 //! each an unrelated commit on top of the head before it. A commit replays, and `find_commit`
@@ -144,6 +145,7 @@ struct VersionState {
     commits: Vec<(CommitChanges, Revision)>,
     landed: Vec<(Revision, Revision)>,
     landing: Vec<Revision>,
+    log_page: Option<usize>,
     logs: Vec<(Revision, Option<ItemId>, LogResponse)>,
     diffs: Vec<(Revision, Revision, Option<ItemId>, Vec<FileChange>)>,
     blames: Vec<(Revision, ItemId, Vec<BlameLine>)>,
@@ -462,6 +464,18 @@ impl FakeVersions {
     /// Returns when the lock is poisoned.
     pub fn put_blame(&self, at: &Revision, item: ItemId, lines: Vec<BlameLine>) -> Built<()> {
         lock(&self.state)?.blames.push((at.clone(), item, lines));
+        Ok(())
+    }
+
+    /// Page `log` as storage does: a scripted history is answered `size` commits at a time (or
+    /// fewer when the query asks for fewer), from the offset its decimal cursor names, with the
+    /// next offset as the cursor while commits remain. Without it, `log` answers the scripted
+    /// response whole.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn page_log(&self, size: usize) -> Built<()> {
+        lock(&self.state)?.log_page = Some(size);
         Ok(())
     }
 
@@ -1044,7 +1058,7 @@ impl VersionStore for FakeVersions {
             let mut state = lock_api(&self.state)?;
             state.log_queries.push(query.clone());
             state.require_known(&query.tip)?;
-            Ok(state
+            let scripted = state
                 .logs
                 .iter()
                 .find(|(tip, item, _)| *tip == query.tip && *item == query.item_id)
@@ -1054,7 +1068,23 @@ impl VersionStore for FakeVersions {
                         next_cursor: None,
                     },
                     |(_, _, response)| response.clone(),
-                ))
+                );
+            let Some(size) = state.log_page else {
+                return Ok(scripted);
+            };
+            let skip = match query.page.cursor.as_deref() {
+                None => 0,
+                Some(cursor) => cursor
+                    .parse::<usize>()
+                    .map_err(|_| ApiError::new(ErrorCode::InvalidInput, "not a log cursor"))?,
+            };
+            let limit = size.min(usize::from(query.page.limit)).max(1);
+            let commits: Vec<_> = scripted.commits.into_iter().skip(skip).collect();
+            let more = commits.len() > limit;
+            Ok(LogResponse {
+                commits: commits.into_iter().take(limit).collect(),
+                next_cursor: more.then(|| skip.saturating_add(limit).to_string()),
+            })
         })
     }
     fn diff<'a>(

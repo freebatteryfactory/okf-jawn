@@ -476,9 +476,44 @@ async fn a_revision_outside_the_retained_window_is_never_built() -> TestResult {
 }
 
 #[tokio::test]
+async fn the_window_walk_follows_the_history_across_pages() -> TestResult {
+    let world = World::new()?;
+    accepted_line(&world, &['b', 'c', 'd', 'e'])?;
+    // Two commits a page: `e` is on the third page.
+    world.versions.page_log(2)?;
+    world
+        .service
+        .search_items(&alice(OperationName::SearchItems, None)?, search_at('e')?)
+        .await?;
+    assert_eq!(world.search.indexed()?, vec![revision('e')?]);
+    let cursors: Vec<Option<String>> = world
+        .versions
+        .log_queries()?
+        .into_iter()
+        .map(|query| query.page.cursor)
+        .collect();
+    assert_eq!(
+        cursors,
+        vec![None, Some("2".to_owned()), Some("4".to_owned())]
+    );
+    // `f` is not on the line: every page is read, and nothing is built.
+    let refused = err_of(
+        world
+            .service
+            .search_items(&alice(OperationName::SearchItems, None)?, search_at('f')?)
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Unavailable);
+    assert_eq!(world.search.builds(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_retained_window_is_the_first_thousand_commits_from_the_head() -> TestResult {
     let numbered = |number: usize| Revision::try_from(format!("{number:040x}"));
     let world = World::new()?;
+    // Pages of 7 commits, so the window's edge falls inside a page.
+    world.versions.page_log(7)?;
     // The head `a`, then 1000 older commits numbered 1 to 1000.
     let mut commits = vec![revision('a')?];
     for number in 1..=1000 {
