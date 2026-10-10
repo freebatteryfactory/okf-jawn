@@ -20,11 +20,13 @@ use okf_jawn_contract::identity::{
     Digest, ItemId, MutationId, PurgeId, Revision, TenantId, WorkspacePath,
 };
 use okf_jawn_contract::item::ItemKind;
+use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::purge::{PurgeReport, PurgeTarget};
 use okf_jawn_contract::workspace::ArtifactKind;
 use okf_jawn_core::credentials::{ConnectorIssue, CredentialStore, NewConnector};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::jobs::{JobScope, JobSpec, NewArtifact, NewJob, NewPurge, RecordStore};
+use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationStore};
 use okf_jawn_core::search::SearchIndex;
 use okf_jawn_core::storage::{
     BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, ObjectInfo,
@@ -396,11 +398,32 @@ async fn connect(
     }
 }
 
+/// A completed mutation whose stored response names the workspace and shows its name.
+async fn remember(storage: &Storage, workspace: &StorageScope) -> Fallible<()> {
+    let ledger = storage.mutations();
+    let key = MutationKey {
+        tenant_id: tenant()?,
+        subject: "ana".to_owned(),
+        client_id: None,
+        operation: OperationName::UpdateWorkspace,
+        key: uuid!(42)?,
+    };
+    let BeginOutcome::New(lease) = ledger
+        .begin(&key, &Digest::try_from("a".repeat(64))?)
+        .await?
+    else {
+        return Err("expected a new mutation".into());
+    };
+    let response = json!({ "id": workspace.workspace_id, "name": "zanzibar trip" });
+    ledger.complete(lease, response).await?;
+    Ok(())
+}
+
 /// The target with everything a purge must reach, and a survivor that shares one object,
 /// holds the target's archive in an upload slot and cites the target in a receipt.
 async fn fixture(directory: &Path) -> Fallible<Fixture> {
     let storage = Storage::open(directory)?;
-    let (target, created) = create(&storage, 1, "Zanzibar trip").await?;
+    let (target, created) = create(&storage, 1, "zanzibar trip").await?;
     let (survivor, survivor_head) = create(&storage, 2, "Garden").await?;
     let seeded = seed_git(&storage, &target, &survivor, (created, survivor_head)).await?;
     let base = some(seeded.revisions.get(1), "the seeded revision")?.clone();
@@ -448,6 +471,7 @@ async fn fixture(directory: &Path) -> Fallible<Fixture> {
     upload(&storage, &survivor, 9, b"zanzibar workspace archive", true).await?;
     cite(&storage, &survivor, &target, &base).await?;
     connect(&storage, vec![target.workspace_id, survivor.workspace_id]).await?;
+    remember(&storage, &target).await?;
     let mut only_target = seeded.objects;
     only_target.extend([export, history.digest, archive.clone()]);
     Ok(Fixture {
