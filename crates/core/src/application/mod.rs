@@ -13,6 +13,8 @@
 //! fixture or in-memory store stands in for one.
 
 use std::future::Ready;
+use std::net::Ipv6Addr;
+use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -279,8 +281,8 @@ fn pending<Request, Response>(
 /// information.
 ///
 /// Core does not depend on the workspace's `url` crate, so the check is written out exactly.
-/// The host is an IPv6 literal in brackets, or a name or IPv4 address of ASCII letters, digits,
-/// `-` and `.`.
+/// The host is an IPv6 address in brackets, parsed by `std::net::Ipv6Addr`, or a name or IPv4
+/// address of ASCII letters, digits, `-` and `.`.
 fn is_origin(text: &str) -> bool {
     let Some(authority) = text
         .strip_prefix("https://")
@@ -303,11 +305,7 @@ fn is_origin(text: &str) -> bool {
         } else {
             return false;
         };
-        let host_ok = inner.contains(':')
-            && inner
-                .chars()
-                .all(|character| character.is_ascii_hexdigit() || matches!(character, ':' | '.'));
-        (host_ok, port)
+        (Ipv6Addr::from_str(inner).is_ok(), port)
     } else {
         let (host, port) = match authority.split_once(':') {
             Some((host, port)) => (host, Some(port)),
