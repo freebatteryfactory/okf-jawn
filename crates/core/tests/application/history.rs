@@ -550,6 +550,102 @@ async fn commit_items_conflict_of_a_moved_and_rewritten_item_is_not_a_deletion()
     assert_eq!(world.versions.commits()?.len(), 0);
     Ok(())
 }
+/// NOTE at `a` and at each of `heads`, Alice's draft based on `a`, `d` queued, and an unrelated
+/// commit landing before each of the next commits, one per revision of `heads`.
+fn landing_mid_snapshot(heads: &[char]) -> Built<World> {
+    let world = World::new()?;
+    let mut fills = vec!['a'];
+    fills.extend_from_slice(heads);
+    note_at(&world, NOTE, "notes/plan.md", &fills)?;
+    world
+        .drafts
+        .put_draft(draft_of(NOTE, ALICE, &revision('a')?, "# Mine\n")?)?;
+    world.versions.queue_revision(revision('d')?)?;
+    world.versions.land_before_next_commits(
+        heads
+            .iter()
+            .map(|fill| revision(*fill))
+            .collect::<Built<Vec<_>>>()?,
+    )?;
+    Ok(world)
+}
+
+#[tokio::test]
+async fn commit_items_commits_on_the_new_head_when_an_unrelated_commit_lands_mid_snapshot()
+-> TestResult {
+    let world = landing_mid_snapshot(&['c'])?;
+    let result = world
+        .service
+        .commit_items(
+            &alice(OperationName::CommitItems, Some(mutation(1)))?,
+            snapshot(&[NOTE])?,
+        )
+        .await?;
+    assert_eq!(result.revision, revision('d')?);
+    let commits = world.versions.commits()?;
+    let commit = some(commits.first(), "the snapshot")?;
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commit.expected_head, revision('c')?);
+    // The item-level rule was evaluated again against the new head.
+    let queries = world.versions.diff_queries()?;
+    let query = some(queries.first(), "the item's comparison with the new head")?;
+    assert_eq!(
+        (&query.from, &query.to, query.item_id),
+        (&revision('a')?, &revision('c')?, Some(item(NOTE)))
+    );
+    assert_eq!(world.drafts.held()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn commit_items_is_blocked_when_the_commit_landing_mid_snapshot_changed_its_item()
+-> TestResult {
+    let world = landing_mid_snapshot(&['c'])?;
+    let edited = vec![change(
+        FileChangeKind::Modified,
+        Some("notes/plan.md"),
+        Some("notes/plan.md"),
+    )];
+    world
+        .versions
+        .put_diff(&revision('a')?, &revision('c')?, Some(item(NOTE)), edited)?;
+    let refused = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(1)))?,
+                snapshot(&[NOTE])?,
+            )
+            .await,
+    )?;
+    let Some(ErrorDetail::DraftConflict { items }) = refused.detail.as_deref() else {
+        return Err(format!("not a draft conflict: {refused:?}").into());
+    };
+    let only = some(items.first(), "the changed item")?;
+    assert_eq!(only.current_revision, revision('c')?);
+    assert_eq!(world.versions.commits()?.len(), 0);
+    assert_eq!(world.drafts.held()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn commit_items_gives_up_after_three_heads_moved_mid_snapshot() -> TestResult {
+    let world = landing_mid_snapshot(&['c', 'e', 'f'])?;
+    let refused = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(1)))?,
+                snapshot(&[NOTE])?,
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    assert!(refused.detail.is_none(), "{refused:?}");
+    assert_eq!(world.versions.commits()?.len(), 0);
+    assert_eq!(world.drafts.held()?.len(), 1);
+    Ok(())
+}
 #[tokio::test]
 async fn commit_items_checks_every_draft_base_against_the_purge_map_first() -> TestResult {
     let world = World::new()?;

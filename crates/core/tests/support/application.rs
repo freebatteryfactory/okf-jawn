@@ -143,6 +143,7 @@ struct VersionState {
     queued: Vec<Revision>,
     commits: Vec<(CommitChanges, Revision)>,
     landed: Vec<(Revision, Revision)>,
+    landing: Vec<Revision>,
     logs: Vec<(Revision, Option<ItemId>, LogResponse)>,
     diffs: Vec<(Revision, Revision, Option<ItemId>, Vec<FileChange>)>,
     blames: Vec<(Revision, ItemId, Vec<BlameLine>)>,
@@ -384,6 +385,16 @@ impl FakeVersions {
         {
             state.landed.push((revision, parent));
         }
+        Ok(())
+    }
+
+    /// Before each of the next `commit` calls, move the head to the next of `revisions`, as an
+    /// unrelated commit landing between a writer's check and its commit would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn land_before_next_commits(&self, revisions: Vec<Revision>) -> Built<()> {
+        lock(&self.state)?.landing = revisions;
         Ok(())
     }
 
@@ -917,6 +928,12 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, Committed> {
         Box::pin(async move {
             let mut state = lock_api(&self.state)?;
+            if !state.landing.is_empty() {
+                let landed = state.landing.remove(0);
+                if let Some(parent) = state.head.replace(landed.clone()) {
+                    state.landed.push((landed, parent));
+                }
+            }
             if let Some(revision) = state.written_after(changes.mutation_id, &changes.expected_head)
             {
                 return Ok(Committed {

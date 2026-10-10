@@ -23,6 +23,11 @@
 //! stays in place. The draft store remembers what it removed under the mutation, so a resumed
 //! attempt also completes the removals its earlier attempt made.
 //!
+//! An unrelated commit that lands between the Snapshot's check and its commit makes the store
+//! answer `Conflict` for the moved head. The Snapshot then reads the head again and evaluates
+//! the item-level rule against it; when no selected item changed, it commits on the new head.
+//! It tries at most `HEAD_ATTEMPTS` heads, then answers `Conflict`.
+//!
 //! A Rewind restores the target's state in a new commit on its base and never rewrites history:
 //! one item with every companion file it owns (`TreeEdit::RestoreItem`, so a source card's
 //! appearance, supplied text and corrections come back with its card), or the whole tree
@@ -57,7 +62,10 @@ use super::sources::{computed_locations, record_of};
 use crate::context::{Attempt, OperationContext};
 use crate::conversion::ConversionRecord;
 use crate::portable::item_content_digest;
-use crate::storage::{BlameQuery, DiffQuery, LogQuery, StorageScope, TreeEdit};
+use crate::storage::{BlameQuery, Committed, DiffQuery, LogQuery, StorageScope, TreeEdit};
+
+/// How many heads a Snapshot tries while unrelated commits keep landing before its commit.
+const HEAD_ATTEMPTS: usize = 3;
 
 /// Content snapshots of the workspace or of one item (following its moves), newest first,
 /// walking back from the resolved revision.
@@ -171,8 +179,8 @@ pub(super) async fn blame_item(
 /// Returns `InvalidInput` on `/item_ids` for an empty selection or on `/item_ids/<n>` for an
 /// item listed twice; `NotFound` on `/item_ids/<n>` when the caller has no draft of that item;
 /// the typed `NotFound` of an invalidated draft base; `Conflict` with the `draft_conflict` detail
-/// listing every selected item changed or deleted since its draft's base; or any error of the
-/// commit.
+/// listing every selected item changed or deleted since its draft's base; `Conflict` when the
+/// head moved under every one of `HEAD_ATTEMPTS` attempts; or any error of the commit.
 pub(super) async fn commit_items(
     service: &ApplicationService,
     context: &OperationContext,
@@ -219,44 +227,14 @@ pub(super) async fn commit_items(
         .iter()
         .map(|drafted| (drafted.draft.item_id, drafted.draft.content_digest.clone()))
         .collect();
-    let head = ports.versions.head(&scope).await?;
-    let mut conflicts = Vec::new();
-    for drafted in &drafts {
-        if let Some(conflict) = conflict_of(service, &scope, &drafted.draft, &head).await? {
-            conflicts.push(conflict);
-        }
-    }
-    if !conflicts.is_empty() {
-        return Err(ApiError::new(
-            ErrorCode::Conflict,
-            format!(
-                "{} of the selected items changed since their drafts were based; nothing was \
-                 committed",
-                conflicts.len()
-            ),
-        )
-        .with_detail(ErrorDetail::DraftConflict { items: conflicts }));
-    }
-    let committed = commit(
+    let committed = commit_on_a_head(
         service,
         context,
-        Write {
-            base: head,
-            message: request.message,
-            edits: drafts
-                .into_iter()
-                .map(|drafted| TreeEdit::EditItem {
-                    item_id: drafted.draft.item_id,
-                    body: drafted.body,
-                    properties: drafted.properties,
-                })
-                .collect(),
-            item,
-            touched: Touched {
-                items: request.item_ids.clone(),
-                ..Touched::default()
-            },
-        },
+        &scope,
+        &drafts,
+        &request.message,
+        item,
+        &request.item_ids,
     )
     .await?;
     finish(
@@ -335,6 +313,82 @@ pub(super) async fn restore_items(
         },
     )
     .await
+}
+
+/// Commit the drafts on the head when no selected item changed since its draft's base.
+///
+/// When the store answers `Conflict` and the head has moved, an unrelated commit landed after
+/// the check: the item-level rule is evaluated again against the new head, and the drafts are
+/// committed there when it still allows them. At most `HEAD_ATTEMPTS` heads are tried.
+async fn commit_on_a_head(
+    service: &ApplicationService,
+    context: &OperationContext,
+    scope: &StorageScope,
+    drafts: &[DraftContent],
+    message: &str,
+    item: Option<ItemId>,
+    items: &[ItemId],
+) -> Result<Committed, ApiError> {
+    let versions = &service.ports().versions;
+    let mut head = versions.head(scope).await?;
+    for _ in 0..HEAD_ATTEMPTS {
+        let mut conflicts = Vec::new();
+        for drafted in drafts {
+            if let Some(conflict) = conflict_of(service, scope, &drafted.draft, &head).await? {
+                conflicts.push(conflict);
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(ApiError::new(
+                ErrorCode::Conflict,
+                format!(
+                    "{} of the selected items changed since their drafts were based; nothing \
+                     was committed",
+                    conflicts.len()
+                ),
+            )
+            .with_detail(ErrorDetail::DraftConflict { items: conflicts }));
+        }
+        let written = commit(
+            service,
+            context,
+            Write {
+                base: head.clone(),
+                message: message.to_owned(),
+                edits: drafts
+                    .iter()
+                    .map(|drafted| TreeEdit::EditItem {
+                        item_id: drafted.draft.item_id,
+                        body: drafted.body.clone(),
+                        properties: drafted.properties.clone(),
+                    })
+                    .collect(),
+                item,
+                touched: Touched {
+                    items: items.to_vec(),
+                    ..Touched::default()
+                },
+            },
+        )
+        .await;
+        match written {
+            Err(error) if error.code == ErrorCode::Conflict => {
+                let now = versions.head(scope).await?;
+                if now == head {
+                    return Err(error);
+                }
+                head = now;
+            }
+            answer => return answer,
+        }
+    }
+    Err(ApiError::new(
+        ErrorCode::Conflict,
+        format!(
+            "the head moved under {HEAD_ATTEMPTS} attempts to commit this snapshot; nothing was \
+             committed"
+        ),
+    ))
 }
 
 /// Refuse an empty selection and an item listed twice.
