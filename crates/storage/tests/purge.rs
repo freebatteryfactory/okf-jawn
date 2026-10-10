@@ -2432,5 +2432,92 @@ async fn purge_leaves_nothing_of_an_upload_completion_past_its_second_check() ->
     Ok(())
 }
 
+/// Ruling B2: each record that references a freshly put object lands its pending put: a
+/// commit, a job completion, a derived object, an artifact and an upload completion.
+#[tokio::test]
+async fn every_record_that_references_a_put_object_lands_its_pending_put() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (workspace, head) = create(&storage, 1, "Trip").await?;
+    let original = put(&storage, &workspace, b"zanzibar original").await?;
+    let revision = commit(
+        &storage,
+        &workspace,
+        3,
+        &head,
+        vec![card(uuid!(11)?, "sources/scan.md", &original.digest, None)?],
+    )
+    .await?;
+    assert_eq!(pending_puts(directory.path(), &workspace)?, 0, "a commit");
+    let records = storage.records();
+    let job_scope = JobScope::Workspace(workspace.clone());
+    let job = records
+        .create_job(
+            &job_scope,
+            NewJob {
+                mutation_id: uuid!(30)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+    let output = put(&storage, &workspace, b"zanzibar output").await?;
+    records
+        .complete_job(JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: None,
+            restore: None,
+            outputs: vec![output.digest],
+            warnings: Vec::new(),
+        })
+        .await?;
+    assert_eq!(
+        pending_puts(directory.path(), &workspace)?,
+        0,
+        "a job completion"
+    );
+    let dataset = put(&storage, &workspace, b"zanzibar dataset").await?;
+    records
+        .record_derived_object(
+            &workspace,
+            DerivedObject {
+                item_id: uuid!(11)?,
+                revision,
+                digest: dataset.digest,
+                kind: DerivedKind::Dataset,
+                media_type: "text/csv".to_owned(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        pending_puts(directory.path(), &workspace)?,
+        0,
+        "a derived object"
+    );
+    artifact(
+        &storage,
+        &workspace,
+        32,
+        ArtifactKind::Export,
+        b"zanzibar export",
+    )
+    .await?;
+    assert_eq!(
+        pending_puts(directory.path(), &workspace)?,
+        0,
+        "an artifact"
+    );
+    upload(&storage, &workspace, 8, b"zanzibar upload", true).await?;
+    assert_eq!(
+        pending_puts(directory.path(), &workspace)?,
+        0,
+        "an upload completion"
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
