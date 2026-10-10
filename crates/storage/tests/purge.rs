@@ -2121,5 +2121,30 @@ async fn purge_removes_index_entries_stored_after_its_index_step() -> TestResult
     Ok(())
 }
 
+/// Re-review B1: an upload completion of the purged workspace after the purge completed is
+/// refused with `Conflict` naming the purge, not answered `NotFound`.
+#[tokio::test]
+async fn purge_refuses_an_upload_completion_after_it_completes_naming_the_purge() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let bytes = b"late completion";
+    let slot = upload(&storage, &target, 8, bytes, false).await?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    refused(
+        storage
+            .uploads()
+            .complete(&target, slot, digest_of(bytes)?)
+            .await,
+        "an upload completion after the purge",
+    )?;
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

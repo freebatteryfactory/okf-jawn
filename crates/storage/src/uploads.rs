@@ -257,8 +257,10 @@ impl SqliteUploads {
         upload: UploadId,
         sha256: Digest,
     ) -> Result<UploadRecord, ApiError> {
-        // The purge refusal is checked by the put before the part is read, after its pin is
-        // taken, and inside the record's transaction.
+        // Refused with the purge's `Conflict` before anything is read, during a purge and after
+        // it completed (when the upload's row is gone); checked again by the put before the
+        // part is read, after its pin is taken, and inside the record's transaction.
+        guard::refuse_scope(&self.db, scope).await?;
         let _writing = self.writers.claim(upload)?;
         let record = self.reconciled(scope, upload).await?;
         if let Some(object) = &record.object {
