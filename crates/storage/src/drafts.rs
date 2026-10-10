@@ -4,8 +4,8 @@
 //! returns; when that primary key already exists, the call changes nothing and returns the
 //! stored result. A discard with an expected digest compares it with the held draft after the
 //! replay lookup and before its row is written, so a refused removal records nothing under its
-//! mutation and a later call under that mutation may still remove the draft. Drafts live only in the records database: they are never indexed, exported
-//! or committed by storage.
+//! mutation and a later call under that mutation may still remove the draft. Drafts live only
+//! in the records database: they are never indexed, exported or committed by storage.
 
 use std::collections::BTreeMap;
 

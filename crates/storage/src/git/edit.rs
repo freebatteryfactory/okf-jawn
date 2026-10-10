@@ -20,7 +20,7 @@ use git2::Repository;
 use okf_core::{Bundle, ConceptId, MoveOptions, RefactorError};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::TextOrigin;
-use okf_jawn_contract::identity::{Digest, ItemId, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{ItemStatus, TypeDefinition};
 use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_header_in_type};
 use okf_jawn_core::storage::{SourceCard, TreeEdit};
@@ -363,7 +363,7 @@ fn correct(
 fn restore_paths(
     repository: &Repository,
     staged: &mut Staged,
-    from: &okf_jawn_contract::identity::Revision,
+    from: &Revision,
     paths: &[WorkspacePath],
 ) -> Result<(), ApiError> {
     let commit = commit_of(repository, from)?;
@@ -402,7 +402,7 @@ fn restore_paths(
 fn restore_items(
     repository: &Repository,
     staged: &mut Staged,
-    run: Vec<(ItemId, okf_jawn_contract::identity::Revision)>,
+    run: Vec<(ItemId, Revision)>,
 ) -> Result<(), ApiError> {
     let mut found = Vec::with_capacity(run.len());
     for (item, from) in run {
