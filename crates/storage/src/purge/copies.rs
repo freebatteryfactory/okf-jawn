@@ -15,6 +15,9 @@
 //! - its archive in every backup set is deleted;
 //! - another workspace's archive (in a backup set, or in the object store) whose records still
 //!   cite it is rewritten with those records scrubbed (`rewrite_archive`).
+//!
+//! The purge reads these again on every attempt and once more before it completes, so a copy
+//! written after the purge started (an upgrade after a failed attempt) is reached too.
 
 use std::path::{Path, PathBuf};
 

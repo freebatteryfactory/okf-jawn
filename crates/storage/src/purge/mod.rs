@@ -20,8 +20,9 @@
 //! 2. **Backups**: every pre-migration copy that holds the workspace is rewritten without it or
 //!    deleted, its archive in every pre-migration backup set is deleted, and every archive of
 //!    another workspace (in a backup set or in the object store) whose records still cite it is
-//!    rewritten with them scrubbed (`copies`).
-
+//!    rewritten with them scrubbed (`copies`). The pre-migration backups are read again on
+//!    every attempt, and this step runs once more before the purge completes, so a backup
+//!    written after the plan is reached too.
 //! 3. **Records**: its rows are removed and what cites it is scrubbed (`rows`); its upload files
 //!    are deleted. Its retained exports and archives stop being downloadable here.
 //! 4. **Index**: its index entries are removed and the full-text index is merged, so no removed
@@ -173,6 +174,9 @@ impl StoragePurger {
             step = self.advance(purge, OBJECTS, Some(&plan)).await?;
         }
         if step < DONE {
+            // A managed backup written while the purge ran (an upgrade between attempts takes
+            // a pre-migration set, which may hold the workspace) is reached before completing.
+            self.backups(&scope, purge, &mut plan).await?;
             for db in [&self.storage.records, &self.storage.index] {
                 db.call(|connection| copies::vacuum(connection)).await?;
             }
@@ -302,7 +306,9 @@ impl StoragePurger {
             .await
     }
 
-    /// Step 2: rewrite or delete every managed backup that holds the workspace (`copies`).
+    /// Step 2, and again before the purge completes: rewrite or delete every managed backup that
+    /// holds the workspace (`copies`). The pre-migration backups are read again on every pass,
+    /// so a set written after the plan (an upgrade after a failed attempt) is reached too.
     async fn backups(
         &self,
         scope: &StorageScope,
@@ -319,8 +325,19 @@ impl StoragePurger {
         let (rewrite, remove, rewritten) = {
             let (directory, staging) = (directory.clone(), staging.clone());
             let (tenant, workspace) = (tenant.clone(), workspace.clone());
-            let (rewrite, remove) = (plan.rewrite.clone(), plan.remove.clone());
+            let (mut rewrite, mut remove) = (plan.rewrite.clone(), plan.remove.clone());
             blocking(move || {
+                let fresh = copies::plan(&directory, &tenant, &workspace)?;
+                for name in fresh.rewrite {
+                    if !rewrite.contains(&name) {
+                        rewrite.push(name);
+                    }
+                }
+                for name in fresh.remove {
+                    if !remove.contains(&name) {
+                        remove.push(name);
+                    }
+                }
                 for name in &rewrite {
                     copies::rewrite(&directory.join(name), &tenant, &workspace, purge)?;
                 }

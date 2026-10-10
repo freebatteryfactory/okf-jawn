@@ -828,6 +828,38 @@ async fn purge_rewrites_another_workspaces_archive_that_cites_it() -> TestResult
     Ok(())
 }
 
+/// Review probe R4: an upgrade after a failed attempt writes a pre-migration set that holds the
+/// half-purged workspace; the resumed purge reaches it.
+#[tokio::test]
+async fn purge_reaches_a_pre_migration_set_written_after_a_failed_attempt() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    // A directory where the target's archive in a set would be: deleting it fails in step 2,
+    // after the plan is recorded.
+    let obstacle = directory
+        .path()
+        .join("backups/pre-migration/set-1/workspaces/local")
+        .join(format!("{}.zip", fixture.target.workspace_id.0));
+    std::fs::create_dir_all(obstacle.join("inside"))?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge(&fixture.storage, &fixture, purge).await?;
+    let tenant = tenant()?;
+    let purger = fixture.storage.purger();
+    err_of(
+        purger
+            .purge_workspace(&tenant, uuid!(61)?, purge, fixture.target.workspace_id)
+            .await,
+    )?;
+    std::fs::remove_dir_all(&obstacle)?;
+    pre_migration_set(directory.path(), &fixture, "set-2").await?;
+    let report = purger
+        .purge_workspace(&tenant, uuid!(61)?, purge, fixture.target.workspace_id)
+        .await?;
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    assert!(report.backups_removed >= 2, "{report:?}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn purge_workspace_resumes_by_repeating_after_a_failure() -> TestResult {
     let directory = tempfile::tempdir()?;
