@@ -34,7 +34,7 @@ use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
     Committed, DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page,
-    Promotion, Purger, StorageScope, VersionStore,
+    Promotion, Purger, StorageScope, TreeEdit, VersionStore,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 
@@ -43,8 +43,13 @@ use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 /// `commit` encodes the port doc: a commit carrying the same mutation after the expected head
 /// is returned as `replayed`; otherwise a head that moved is `Conflict`. It searches the line
 /// from the tip, newest first, as the storage lane's `find_trailer` walk does, so a handler
-/// that wrote two commits under one identity is caught replaying the wrong one. Folders list
-/// empty.
+/// that wrote two commits under one identity is caught replaying the wrong one. `find_commit`
+/// searches the same way. A source card whose path collision key another item holds at the
+/// head is refused with `Conflict`, as storage refuses a path collision. Folders list empty.
+///
+/// Someone else's edit is modelled as a foreign commit (`edit_elsewhere`), which may take a
+/// path; `edit_elsewhere_before_call` makes one land just before the given `commit` call, as
+/// another writer racing the handler would.
 pub struct FakeVersions {
     /// The head before any commit.
     pub head: Revision,
@@ -53,6 +58,10 @@ pub struct FakeVersions {
     /// After this many commits are written, the write that reaches it is kept and then the call
     /// fails, as a process that died right after the commit would (once; the count is cleared).
     pub die_after: Mutex<Option<usize>>,
+    /// Paths taken by foreign commits: collision key and the item holding it.
+    pub taken: Mutex<Vec<(String, ItemId)>>,
+    /// `commit` calls made so far, and the call numbers (1-based) a foreign commit precedes.
+    pub calls: Mutex<(usize, Vec<usize>)>,
 }
 
 /// An `UploadStore` holding complete uploads and recording which job consumed each.
@@ -134,7 +143,94 @@ impl FakeVersions {
             head,
             commits: Mutex::new(Vec::new()),
             die_after: Mutex::new(None),
+            taken: Mutex::new(Vec::new()),
+            calls: Mutex::new((0, Vec::new())),
         }
+    }
+
+    /// Someone else commits now; when `path` is given, an item of theirs takes it.
+    ///
+    /// # Errors
+    /// Returns when a lock is poisoned or the revision cannot be made.
+    pub fn edit_elsewhere(&self, path: Option<(&WorkspacePath, ItemId)>) -> Result<(), ApiError> {
+        let mut commits = self.commits.lock().map_err(|_| poisoned())?;
+        let head = commits
+            .last()
+            .map_or_else(|| self.head.clone(), |(_, revision)| revision.clone());
+        let number = commits.len().saturating_add(1);
+        let mutation_id = serde_json::from_value::<MutationId>(serde_json::Value::String(format!(
+            "ffffffff-ffff-ffff-ffff-{number:012}"
+        )))
+        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+        let revision = Revision::try_from(format!("{number:040x}"))
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+        commits.push((
+            CommitChanges {
+                mutation_id,
+                expected_head: head,
+                author: okf_jawn_core::storage::Provenance {
+                    subject: "someone-else".to_owned(),
+                    route: okf_jawn_contract::access::AccessRoute::LocalOwner,
+                    client_id: None,
+                },
+                message: "An unrelated edit".to_owned(),
+                edits: Vec::new(),
+            },
+            revision,
+        ));
+        if let Some((path, item)) = path {
+            self.taken
+                .lock()
+                .map_err(|_| poisoned())?
+                .push((path.collision_key(), item));
+        }
+        Ok(())
+    }
+
+    /// Someone else commits just before the `call`-th `commit` call (1-based) is applied.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn edit_elsewhere_before_call(&self, call: usize) -> Result<(), ApiError> {
+        self.calls.lock().map_err(|_| poisoned())?.1.push(call);
+        Ok(())
+    }
+
+    /// Count one `commit` call and land the foreign commit planned before it, if any.
+    fn count_call(&self) -> Result<(), ApiError> {
+        let race = {
+            let mut calls = self.calls.lock().map_err(|_| poisoned())?;
+            calls.0 = calls.0.saturating_add(1);
+            let call = calls.0;
+            calls.1.contains(&call)
+        };
+        if race {
+            self.edit_elsewhere(None)?;
+        }
+        Ok(())
+    }
+
+    /// The commit carrying `mutation_id` after `since` on the line, newest first.
+    fn found(
+        &self,
+        mutation_id: MutationId,
+        since: &Revision,
+    ) -> Result<Option<Revision>, ApiError> {
+        let commits = self.commits.lock().map_err(|_| poisoned())?;
+        let after: Vec<&(CommitChanges, Revision)> = if *since == self.head {
+            commits.iter().collect()
+        } else {
+            commits
+                .iter()
+                .skip_while(|(_, revision)| revision != since)
+                .skip(1)
+                .collect()
+        };
+        Ok(after
+            .iter()
+            .rev()
+            .find(|(earlier, _)| earlier.mutation_id == mutation_id)
+            .map(|(_, revision)| revision.clone()))
     }
 
     /// Die right after the `count`-th commit is written.
@@ -157,35 +253,41 @@ impl FakeVersions {
             .map_err(|_| poisoned())
     }
 
-    /// Apply the port's replay and head rules to one commit.
+    /// Apply the port's replay, head and path-collision rules to one commit.
     fn apply(&self, changes: CommitChanges) -> Result<Committed, ApiError> {
-        let mut commits = self.commits.lock().map_err(|_| poisoned())?;
-        let head = commits
-            .last()
-            .map_or_else(|| self.head.clone(), |(_, revision)| revision.clone());
-        // The commits after the expected head, on the line.
-        let after: Vec<&(CommitChanges, Revision)> = if changes.expected_head == self.head {
-            commits.iter().collect()
-        } else {
-            commits
-                .iter()
-                .skip_while(|(_, revision)| *revision != changes.expected_head)
-                .skip(1)
-                .collect()
-        };
-        if let Some((_, revision)) = after
-            .iter()
-            .rev()
-            .find(|(earlier, _)| earlier.mutation_id == changes.mutation_id)
-        {
+        self.count_call()?;
+        if let Some(revision) = self.found(changes.mutation_id, &changes.expected_head)? {
             return Ok(Committed {
-                revision: revision.clone(),
+                revision,
                 replayed: true,
                 warnings: Vec::new(),
             });
         }
+        let mut commits = self.commits.lock().map_err(|_| poisoned())?;
+        let head = commits
+            .last()
+            .map_or_else(|| self.head.clone(), |(_, revision)| revision.clone());
         if changes.expected_head != head {
             return Err(ApiError::new(ErrorCode::Conflict, "the head moved"));
+        }
+        let mut holders: Vec<(String, ItemId)> = self.taken.lock().map_err(|_| poisoned())?.clone();
+        holders.extend(commits.iter().flat_map(|(earlier, _)| {
+            earlier.edits.iter().filter_map(|edit| match edit {
+                TreeEdit::WriteSourceCard(card) => Some((card.path.collision_key(), card.item_id)),
+                _ => None,
+            })
+        }));
+        for edit in &changes.edits {
+            if let TreeEdit::WriteSourceCard(card) = edit
+                && holders
+                    .iter()
+                    .any(|(key, item)| *key == card.path.collision_key() && *item != card.item_id)
+            {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    format!("{} collides with another item", card.path.as_str()),
+                ));
+            }
         }
         let revision = Revision::try_from(format!("{:040x}", commits.len().saturating_add(1)))
             .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
@@ -336,10 +438,11 @@ impl VersionStore for FakeVersions {
     fn find_commit<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _mutation_id: MutationId,
-        _since: &'a Revision,
+        mutation_id: MutationId,
+        since: &'a Revision,
     ) -> PortFuture<'a, Option<Revision>> {
-        unused("find_commit")
+        let found = self.found(mutation_id, since);
+        Box::pin(async move { found })
     }
     fn create_candidate<'a>(
         &'a self,

@@ -15,10 +15,20 @@
 //!
 //! A mutation identity names at most one commit. The `n`-th commit of an import (0 for the
 //! pending cards, `i + 1` for card `i`, counted the same way on every attempt) carries
-//! `derive_commit_mutation_id(job, n)`, and new cards are named with `derive_item_id`. The first
-//! commit expects the job's base revision and each later one the revision before it, so on a
-//! repeated run each commit replays on its own identity, whatever order the store searches in,
-//! and nothing is written again.
+//! `derive_commit_mutation_id(job, n)`, and new cards are named with `derive_item_id`. Before
+//! it writes, an import commit asks `VersionStore::find_commit` whether an earlier attempt
+//! already wrote it after the job's base revision; if so it is replayed and nothing is written
+//! again, whatever order the store searches in.
+//!
+//! An import does not conflict with unrelated edits (SPEC: "Create, move, delete, import ...
+//! remain immediate commits"; integration-owner ruling R-I8). Each commit is written on the
+//! head as the attempt reads it: the base revision is what the import was accepted against
+//! (the card names are chosen there), not a lock on the head. A head that moved between the
+//! read and the write is read again. A commit the store refuses with `Conflict` while the head
+//! stands still is a real collision with what the import writes (a card path another item took
+//! after acceptance): the job fails and is not retried, and what it already committed stays.
+//!
+//! A redigest writes one commit, under ordinal 0, on its base revision.
 //!
 //! While a window converts, `update_progress` is called every `HandlerLimits::heartbeat`; a job
 //! found cancelled stops, and dropping the conversion kills its child.
@@ -61,7 +71,8 @@ use crate::record::{
 /// The inputs of an `Import` job, as its specification holds them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ImportRequest<'a> {
-    /// Revision the import is based on; the first commit expects it.
+    /// Revision the import was accepted against: card names are chosen there, and an earlier
+    /// attempt's commits are found after it. Not a lock on the head.
     pub(crate) base_revision: &'a Revision,
     /// Completed upload slots to import.
     pub(crate) upload_ids: &'a [UploadId],
@@ -87,6 +98,14 @@ struct Converted {
     outputs: Vec<Digest>,
 }
 
+/// How one commit of an import landed.
+enum Landed {
+    /// Written now, or replayed from an earlier attempt.
+    Committed(Committed),
+    /// Refused while the head stood still: a real collision with what the job writes.
+    Refused(ApiError),
+}
+
 /// The type name a new source card gets: no SPEC sentence fixes one, so this is the lane's
 /// choice, stated in the lane report for the owner to confirm.
 pub const SOURCE_CARD_TYPE: &str = "source";
@@ -96,6 +115,10 @@ pub const MAX_RETAINED_OUTPUT_BYTES: u64 = 1 << 30;
 
 /// How many entries one folder listing asks for.
 const LIST_PAGE: u16 = 500;
+
+/// How many times one import commit reads the head again after it moved under the write,
+/// before the attempt gives up as retryable.
+const HEAD_RACES: u32 = 8;
 
 /// Run an `Import` job.
 pub(crate) async fn import(
@@ -115,11 +138,12 @@ pub(crate) async fn import(
         Arc::clone(&ports.check),
         cards.iter().map(|(card, _)| card.path.clone()).collect(),
     ));
-    let pending = commit_on(
+    let base = request.base_revision;
+    let pending = match commit(
         ports,
         claimed,
         scope,
-        (request.base_revision.clone(), 0),
+        (base, 0),
         format!("Import {} sources, pending conversion", cards.len()),
         cards
             .iter()
@@ -127,7 +151,11 @@ pub(crate) async fn import(
             .collect(),
         Arc::clone(&check),
     )
-    .await?;
+    .await?
+    {
+        Landed::Committed(committed) => committed,
+        Landed::Refused(error) => return Ok(refused(&error)),
+    };
     let mut done = Done {
         revision: Some(pending.revision),
         warnings: pending.warnings,
@@ -149,26 +177,40 @@ pub(crate) async fn import(
         card.body.clone_from(&converted.assembled.markdown);
         card.appearance.extraction = extraction_of(&converted, None);
         let message = format!("Import {}: {}", card.title, outcome_word(&converted));
-        let expected = done
-            .revision
-            .clone()
-            .ok_or_else(|| fault("the pending cards have a revision"))?;
-        let committed = commit_on(
+        let committed = match commit(
             ports,
             claimed,
             scope,
-            (expected, ordinal),
+            (base, ordinal),
             message,
             vec![TreeEdit::WriteSourceCard(Box::new(card.clone()))],
             Arc::clone(&check),
         )
-        .await?;
+        .await?
+        {
+            Landed::Committed(committed) => committed,
+            Landed::Refused(error) => return Ok(refused(&error)),
+        };
         done.revision = Some(committed.revision);
         done.warnings.extend(committed.warnings);
         done.outputs.extend(converted.outputs);
         done.item_ids.push(card.item_id);
     }
     Ok(done)
+}
+
+/// A job refused by a real collision: it fails and is not retried.
+fn refused(error: &ApiError) -> Done {
+    Done {
+        refused: Some(ApiError::new(
+            ErrorCode::Conflict,
+            format!(
+                "the import collides with what the workspace holds now: {}",
+                error.message
+            ),
+        )),
+        ..Done::default()
+    }
 }
 
 /// The cards of an import, each with outcome `pending`, beside its materialized original. Each
@@ -474,6 +516,57 @@ async fn retain(
         )
         .await?;
     Ok(object.digest)
+}
+
+/// The `ordinal`-th commit of an import, on the current head.
+///
+/// Replayed when an earlier attempt already wrote it after `base` (`find_commit` on the
+/// commit's own derived identity). Otherwise written on the head as read now; a head that moved
+/// before the write is read again, at most `HEAD_RACES` times. A `Conflict` while the head
+/// stood still is the store refusing these edits, a real collision: `Landed::Refused`.
+async fn commit(
+    ports: &HandlerPorts,
+    claimed: &ClaimedJob,
+    scope: &StorageScope,
+    (base, ordinal): (&Revision, u32),
+    message: String,
+    edits: Vec<TreeEdit>,
+    check: Arc<dyn CandidateCheck>,
+) -> Result<Landed, ApiError> {
+    let mutation_id = derive_commit_mutation_id(claimed.mutation_id, ordinal);
+    if let Some(revision) = ports.versions.find_commit(scope, mutation_id, base).await? {
+        return Ok(Landed::Committed(Committed {
+            revision,
+            replayed: true,
+            warnings: Vec::new(),
+        }));
+    }
+    for _race in 0..HEAD_RACES {
+        let head = ports.versions.head(scope).await?;
+        let written = commit_on(
+            ports,
+            claimed,
+            scope,
+            (head.clone(), ordinal),
+            message.clone(),
+            edits.clone(),
+            Arc::clone(&check),
+        )
+        .await;
+        match written {
+            Ok(committed) => return Ok(Landed::Committed(committed)),
+            Err(error) if error.code == ErrorCode::Conflict => {
+                if ports.versions.head(scope).await? == head {
+                    return Ok(Landed::Refused(error));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(ApiError::new(
+        ErrorCode::Conflict,
+        "the workspace head kept moving under the import's commit; the job is retried",
+    ))
 }
 
 /// The `ordinal`-th commit of the job, expecting `expected_head`, under its derived identity.

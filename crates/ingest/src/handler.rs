@@ -3,7 +3,9 @@
 //! A claim is all a handler gets and all it needs. Every write is idempotent on the claim's
 //! `MutationId`, so a second run of the same job repeats no effect. The ports are storage's and
 //! the rules are core's; this module only sequences them and writes the completion through the
-//! claim's lease. A job found cancelled while it runs stops and writes no completion.
+//! claim's lease. A job found cancelled while it runs stops and writes no completion. A job
+//! refused for good (an import colliding with what the workspace holds now, R-I8) writes its
+//! failure through the lease as not retryable; any other error is the runtime's to record.
 //!
 //! Built: import and redigest (`import`), index rebuild, both backups, restore, both purges.
 //! Construction limitations, stated rather than hidden: a portable export and a View export
@@ -85,6 +87,9 @@ pub(crate) struct Done {
     pub(crate) warnings: Vec<Warning>,
     /// The job was found cancelled: no completion is written.
     pub(crate) cancelled: bool,
+    /// The job was refused for good (an import that collides with what the workspace holds
+    /// now): its failure is written as not retryable, and no completion.
+    pub(crate) refused: Option<ApiError>,
 }
 
 /// Runs claimed jobs of every kind.
@@ -108,6 +113,14 @@ impl IngestHandler {
     async fn run(&self, claimed: &ClaimedJob) -> Result<(), ApiError> {
         let done = self.dispatch(claimed).await?;
         if done.cancelled {
+            return Ok(());
+        }
+        if let Some(refusal) = done.refused {
+            let _job = self
+                .ports
+                .records
+                .fail_job(claimed.lease.clone(), refusal.message, false)
+                .await?;
             return Ok(());
         }
         let _job = self

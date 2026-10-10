@@ -594,6 +594,90 @@ mod job_handler {
     }
 
     #[tokio::test]
+    async fn an_import_completes_over_edits_made_elsewhere_after_it_was_accepted() -> TestResult {
+        let world = world_with(Some(6), Vec::new())?;
+        let report = upload(&world, 93, "report.pdf", b"%PDF report")?;
+        let id = job(
+            &world,
+            14,
+            workspace_scope()?,
+            import_spec(vec![report], false)?,
+        )?;
+        // Someone edits another item between acceptance and the first commit, and again just
+        // as the card commit is written.
+        world.versions.edit_elsewhere(None)?;
+        world.versions.edit_elsewhere_before_call(2)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let mutation = entry.created.mutation_id;
+        let commits = world.versions.written()?;
+        let ours: Vec<_> = commits
+            .iter()
+            .filter(|(changes, _)| changes.author.subject == "owner")
+            .collect();
+        assert_eq!(
+            ours.iter()
+                .map(|(changes, _)| changes.mutation_id)
+                .collect::<Vec<_>>(),
+            [0, 1].map(|ordinal| derive_commit_mutation_id(mutation, ordinal))
+        );
+        // Each was written on the head as it stood, not on the accepted base revision.
+        let pending = some(ours.first(), "the pending commit")?;
+        assert_eq!(
+            Some(&pending.0.expected_head),
+            commits.first().map(|(_, revision)| revision)
+        );
+        assert_eq!(commits.len(), 4);
+        assert_eq!(
+            some(entry.completions.first(), "the completion")?
+                .revision
+                .as_ref(),
+            commits.last().map(|(_, revision)| revision)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_import_whose_card_path_was_taken_after_acceptance_fails_once_and_for_good()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let report = upload(&world, 94, "report.pdf", b"%PDF report")?;
+        let id = job(
+            &world,
+            15,
+            workspace_scope()?,
+            import_spec(vec![report], false)?,
+        )?;
+        let theirs =
+            serde_json::from_value::<ItemId>(json!("00000000-0000-0000-0000-0000000000fe"))?;
+        world.versions.edit_elsewhere(Some((
+            &WorkspacePath::try_from("inbox/REPORT-pdf.md".to_owned())?,
+            theirs,
+        )))?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert!(entry.completions.is_empty());
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("collides"), "{message}");
+        assert!(!retryable);
+        assert_eq!(entry.failures.len(), 1);
+        // Nothing of the import was written, and the job is not delivered again.
+        assert_eq!(world.versions.written()?.len(), 1);
+        assert!(
+            !world
+                .records
+                .pending_jobs()
+                .await?
+                .iter()
+                .any(|(_, pending)| *pending == id)
+        );
+        assert!(!run(&world, id).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn an_original_converted_whole_has_one_window() -> TestResult {
         let world = world_with(None, Vec::new())?;
         let notes = upload(&world, 95, "notes.md", b"# Notes\n")?;
