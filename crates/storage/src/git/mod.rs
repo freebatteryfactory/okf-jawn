@@ -596,7 +596,13 @@ mod tests {
                 async move { versions.write_history(&scope, &revision, mutation(2)).await },
             )
         };
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Give the export ample time to start: under the lock it never does.
+        for _ in 0..50 {
+            if staging.exists() || writer.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         assert!(
             !staging.exists() && !writer.is_finished(),
             "nothing is staged while another write holds the workspace"
