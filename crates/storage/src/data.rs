@@ -4,8 +4,17 @@
 //! `DataDir::open` takes an exclusive lock on `okf-jawn.lock` (std `File::try_lock`) before any
 //! writable store is opened, and the lock lives as long as the `DataDir`; a second process is
 //! refused with a clear error. `Storage` and every store it hands out share the `DataDir`
-//! through an `Arc`, so the lock is released only when the last store that can write drops. A data directory on a network filesystem is not supported unless
-//! qualified: its lock semantics are not the local filesystem's.
+//! through an `Arc`, so the lock is released only when the last store that can write drops.
+//!
+//! The drop unlocks explicitly before the file closes. On Unix the lock is a `flock` on the
+//! open file description, and any child process the program spawns holds a duplicate of every
+//! descriptor from its fork until its exec closes them. Closing our descriptor alone would leave
+//! the lock held by such a child for that window, so an in-process reopen right after the drop
+//! could be refused. An explicit unlock releases it through every duplicate at once, so the lock
+//! is free when the last `DataDir` share has dropped.
+//!
+//! A data directory on a network filesystem is not supported unless qualified: its lock
+//! semantics are not the local filesystem's.
 //!
 //! The layout itself is an application-owned format and carries a version in `format.json`.
 //! Data written by a newer build is refused before anything in the directory is changed.
@@ -20,8 +29,8 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 #[derive(Debug)]
 pub struct DataDir {
     root: PathBuf,
-    /// Held for the life of the value; the operating system releases it when the file closes.
-    _lock: File,
+    /// Held for the life of the value and unlocked explicitly when it drops.
+    lock: File,
 }
 
 /// What `format.json` says about the directory.
@@ -84,7 +93,7 @@ impl DataDir {
         }
         let data = Self {
             root: root.to_path_buf(),
-            _lock: lock,
+            lock,
         };
         data.format_state()?;
         Ok(data)
@@ -214,6 +223,15 @@ impl DataDir {
             Err(error) => return Err(io_error("clear", &staging, &error)),
         }
         std::fs::create_dir_all(&staging).map_err(|error| io_error("create", &staging, &error))
+    }
+}
+
+impl Drop for DataDir {
+    fn drop(&mut self) {
+        // Unlock before the file closes, so a descriptor a spawned child still holds between
+        // its fork and its exec does not keep the directory locked. Should the unlock fail, the
+        // close that follows still releases the lock once every duplicate has closed.
+        let _ = self.lock.unlock();
     }
 }
 
