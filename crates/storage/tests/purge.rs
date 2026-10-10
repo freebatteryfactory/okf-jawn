@@ -1247,7 +1247,22 @@ async fn purge_reaches_every_row_kind_and_keeps_a_survivors_converted_asset() ->
     let head = storage.versions().head(survivor).await?;
     let converted = card(uuid!(15)?, "sources/own.md", &original, Some(&record))?;
     commit(storage, survivor, 16, &head, vec![converted]).await?;
-    purge_target(&fixture).await?;
+    // After a restart no pin is held (a sandbox capability releases none), so each row kind
+    // alone must name its object.
+    let Fixture {
+        storage,
+        target,
+        survivor,
+        ..
+    } = fixture;
+    drop(storage);
+    let storage = &Storage::open(directory.path())?;
+    let survivor = &survivor;
+    record_purge_of(storage, &target, uuid!(60)?).await?;
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, uuid!(60)?, target.workspace_id)
+        .await?;
     assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
     for digest in &only_rows {
         assert!(!held(storage, survivor, digest).await?, "{digest:?} goes");
