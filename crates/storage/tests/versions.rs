@@ -1287,6 +1287,46 @@ async fn a_creation_that_crashed_before_its_record_is_adopted_on_retry() -> Test
 }
 
 #[tokio::test]
+async fn a_creation_that_crashed_mid_repository_replaces_it_on_retry() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let tenant = TenantId::try_from("local".to_owned())?;
+    let id = okf_jawn_core::storage::derive_workspace_id(uuid!(1)?);
+    // The crash: a repository directory was begun, nothing valid in it, no record.
+    let partial = directory
+        .path()
+        .join("repositories")
+        .join("local")
+        .join(format!("{}.git", id.0));
+    std::fs::create_dir_all(partial.join("objects"))?;
+    std::fs::write(partial.join("description"), "half written")?;
+    let created = storage
+        .catalog()
+        .create(
+            &tenant,
+            uuid!(1)?,
+            NewWorkspace {
+                name: "Research".to_owned(),
+                description: String::new(),
+                creator: person("ana"),
+            },
+        )
+        .await?;
+    assert_eq!(created.id, id);
+    let repository = git2::Repository::open_bare(&partial)?;
+    assert_eq!(
+        some(
+            repository.find_reference("refs/heads/main")?.target(),
+            "the head"
+        )?
+        .to_string(),
+        created.head.as_str(),
+        "the partial directory was replaced by a whole repository"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_catalog_creates_once_lists_updates_and_archives() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (storage, scope, initial) = workspace(directory.path()).await?;
