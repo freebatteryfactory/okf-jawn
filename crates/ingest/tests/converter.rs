@@ -345,7 +345,9 @@ mod conversion_child {
         ConversionInput, ConversionStatus, Converter, ConverterLimits,
     };
     use okf_jawn_core::storage::{LocalSource, ObjectInfo};
+    use okf_jawn_ingest::cap::MEMORY_LIMIT_ENV;
     use okf_jawn_ingest::converter::{ConverterConfig, DoclingConverter};
+    use okf_jawn_ingest::protocol::{REQUEST_FILE, RESULT_FILE, Request, Task};
     use okf_jawn_ingest::record::sha256_digest;
 
     use crate::check::{TestResult, some};
@@ -457,6 +459,81 @@ mod conversion_child {
         );
         assert!(conversion.document.is_none());
         assert_ne!(conversion.issues, Vec::new());
+        Ok(())
+    }
+
+    /// A request for the real child to convert `source` as `file_name`, written into `output`.
+    fn write_request(
+        source: &LocalSource,
+        file_name: &str,
+        output: &Path,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let request = Request {
+            task: Task::Convert,
+            source: source.path.clone(),
+            file_name: file_name.to_owned(),
+            settings: ConversionSettings::default(),
+            window: None,
+            timeout: Duration::from_secs(60),
+        };
+        let path = output.join(REQUEST_FILE);
+        std::fs::write(&path, request.to_json()?.to_string())?;
+        Ok(path)
+    }
+
+    #[tokio::test]
+    async fn the_real_child_takes_its_cap_before_it_reads_its_request() -> TestResult {
+        // The real `okf-jawn-convert`, started without a usable cap, stops at its first
+        // statement (`cap::limit_self`): it never reads the request, so it writes no result.
+        let store = tempfile::tempdir()?;
+        let source = retained(store.path(), b"# Note\n\nText.\n")?;
+        for cap in [None, Some("0"), Some("lots")] {
+            let output = tempfile::tempdir()?;
+            let request = write_request(&source, "note.md", output.path())?;
+            let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_okf-jawn-convert"));
+            let _configured = command.arg(&request).env_remove(MEMORY_LIMIT_ENV);
+            if let Some(cap) = cap {
+                let _configured = command.env(MEMORY_LIMIT_ENV, cap);
+            }
+            let ended = command.output().await?;
+            let stderr = String::from_utf8_lossy(&ended.stderr);
+            assert!(!ended.status.success(), "{cap:?}: {stderr}");
+            assert!(stderr.contains(MEMORY_LIMIT_ENV), "{cap:?}: {stderr}");
+            assert!(!output.path().join(RESULT_FILE).exists(), "{cap:?}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_real_child_under_a_small_cap_fails_its_window_at_the_cap() -> TestResult {
+        // The real child under a 32 MiB cap must hold a 96 MiB original to convert it. On
+        // Linux the child's own RLIMIT_DATA is the cap (set as the first statement of its
+        // main); on Windows the job object holds it.
+        const CAP: u64 = 32 * 1024 * 1024;
+        let store = tempfile::tempdir()?;
+        let output = tempfile::tempdir()?;
+        let line = "Words of a large original that does not fit the cap.\n\n";
+        let bytes = line.repeat(96 * 1024 * 1024 / line.len());
+        let source = retained(store.path(), bytes.as_bytes())?;
+        let converter = DoclingConverter::new(ConverterConfig {
+            child: PathBuf::from(env!("CARGO_BIN_EXE_okf-jawn-convert")),
+            limits: ConverterLimits {
+                window_pages: 4,
+                memory_limit_bytes: CAP,
+            },
+        });
+        let mut request = input(source, "large.md", output.path());
+        request.timeout = Duration::from_secs(30);
+        let conversion = converter.convert(request).await?;
+        assert_eq!(
+            conversion.status,
+            ConversionStatus::Failure(FailureReason::MemoryLimit {
+                limit_bytes: CAP.to_string()
+            }),
+            "{:?}",
+            conversion.issues
+        );
+        assert!(conversion.document.is_none());
         Ok(())
     }
 
