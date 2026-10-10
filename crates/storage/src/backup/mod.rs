@@ -647,6 +647,12 @@ mod tests {
             tenant_id: tenant,
             workspace_id: created.id,
         };
+        let staging = storage
+            .data()
+            .staging_path()
+            .join("local")
+            .join(scope.workspace_id.0.to_string())
+            .join(mutation(2).0.to_string());
         let (held, release) = (mpsc::channel(), mpsc::channel::<()>());
         let holder = {
             let repositories = storage.repositories.clone();
@@ -665,21 +671,27 @@ mod tests {
             tokio::spawn(async move { backups.write_workspace_archive(&scope, mutation(2)).await })
         };
         // Give the archive ample time to start: under another write's lock it never does.
+        // The staging directory appears within milliseconds of a start, so a wrong lock is
+        // seen at once, not only when the whole archive finishes.
         for _ in 0..50 {
-            if writer.is_finished() {
+            if staging.exists() || writer.is_finished() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(
-            !writer.is_finished(),
-            "no archive is taken while another write holds the workspace"
+            !staging.exists() && !writer.is_finished(),
+            "no archive is staged while another write holds the workspace"
         );
         release.0.send(()).map_err(|error| fault(&error))?;
         holder
             .join()
             .map_err(|_| fault(&"the lock holder stopped"))??;
         writer.await.map_err(|error| fault(&error))??;
+        assert!(
+            !staging.exists(),
+            "the staging directory is removed afterwards"
+        );
         Ok(())
     }
 }
