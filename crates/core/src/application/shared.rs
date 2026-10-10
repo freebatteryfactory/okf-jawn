@@ -162,9 +162,27 @@ pub(super) async fn commit(
             check,
         )
         .await?;
+    announce(service, scope, mutation_id, &committed.revision, write.item).await?;
+    Ok(committed)
+}
+
+/// Index a revision a write produced and append its `changed` event under the write's
+/// mutation; both are idempotent on it, so a resumed attempt repeats them without a second
+/// effect.
+///
+/// # Errors
+/// Returns any port error.
+pub(super) async fn announce(
+    service: &ApplicationService,
+    scope: StorageScope,
+    mutation_id: MutationId,
+    revision: &Revision,
+    item: Option<ItemId>,
+) -> Result<(), ApiError> {
+    let ports = service.ports();
     ports
         .search
-        .index_revision(&scope, committed.revision.clone())
+        .index_revision(&scope, revision.clone())
         .await?;
     ports
         .events
@@ -173,8 +191,8 @@ pub(super) async fn commit(
             Some(mutation_id),
             NewEvent {
                 kind: EventKind::Changed,
-                revision: Some(committed.revision.clone()),
-                item_id: write.item,
+                revision: Some(revision.clone()),
+                item_id: item,
                 job_id: None,
                 connector_id: None,
                 actor: None,
@@ -182,7 +200,7 @@ pub(super) async fn commit(
             },
         )
         .await?;
-    Ok(committed)
+    Ok(())
 }
 
 /// Commit one write and answer with its revision, its receipt and the check's warnings.

@@ -5,8 +5,10 @@
 //! `ApplicationConfig`; startup wires dependencies and does not hold application behavior. The
 //! `ports::Application` implementation for `ApplicationService` is organized as cohesive child
 //! modules of this one: `items` (folders, items and types), `drafts`, `reads` (`read_item` and
-//! sandbox capabilities) and `sources` (citations and object reads), over the shared steps in
-//! `shared` (revision resolution, commits, receipts).
+//! sandbox capabilities), `sources` (citations and object reads), `history` (Timeline, Changes,
+//! Who, Snapshot and Rewind), `navigation` (search, links and the graph) and `status` (health,
+//! readiness and the session), over the shared steps in `shared` (revision resolution, commits,
+//! receipts).
 //!
 //! Operations whose part of the construction plan has not landed answer `NotImplemented`,
 //! naming the operation; nothing here claims an operation works that is not built, and no
@@ -91,6 +93,39 @@ macro_rules! route {
     };
     (get_object) => {
         sources::get_object
+    };
+    (log_items) => {
+        history::log_items
+    };
+    (diff_items) => {
+        history::diff_items
+    };
+    (commit_items) => {
+        history::commit_items
+    };
+    (restore_items) => {
+        history::restore_items
+    };
+    (blame_item) => {
+        history::blame_item
+    };
+    (search_items) => {
+        navigation::search_items
+    };
+    (get_links) => {
+        navigation::get_links
+    };
+    (get_graph) => {
+        navigation::get_graph
+    };
+    (get_health) => {
+        status::get_health
+    };
+    (get_readiness) => {
+        status::get_readiness
+    };
+    (get_session) => {
+        status::get_session
     };
     ($pending:ident) => {
         pending
@@ -325,7 +360,10 @@ fn is_origin(text: &str) -> bool {
 }
 
 mod drafts;
+mod history;
 mod items;
+mod navigation;
 mod reads;
 mod shared;
 mod sources;
+mod status;
