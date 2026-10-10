@@ -5,7 +5,8 @@
 //! through its Git history (the source appearance of every card, on every commit of every
 //! reference, proposal candidates included), through the conversion record such an appearance
 //! names (its structured exports and assets), and through its records (derived datasets,
-//! retained artifacts, uploads, sandbox capabilities, written histories and job outputs).
+//! retained artifacts, uploads, sandbox capabilities, written histories, written workspace
+//! archives and job outputs).
 //!
 //! References are read as every 64-character lower-case hexadecimal token of those files, not
 //! through one decoded shape: a file written by an older build still counts, and a token that
@@ -153,6 +154,7 @@ pub(crate) fn records(
         ("digest", "artifacts"),
         ("object", "sandbox_capabilities"),
         ("digest", "history_exports"),
+        ("digest", "backup_archives"),
     ] {
         collect(
             connection,

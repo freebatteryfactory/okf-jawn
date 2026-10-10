@@ -29,7 +29,7 @@ use okf_jawn_core::jobs::{JobScope, JobSpec, NewArtifact, NewJob, NewPurge, Reco
 use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationStore};
 use okf_jawn_core::search::SearchIndex;
 use okf_jawn_core::storage::{
-    BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, ObjectInfo,
+    Backups, BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, ObjectInfo,
     Provenance, Purger, SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadStore};
@@ -682,6 +682,42 @@ async fn purge_workspace_leaves_no_copy_the_application_manages() -> TestResult 
         repeated, report,
         "repeating a finished purge changes nothing"
     );
+    Ok(())
+}
+
+/// Run a purge of the fixture's target to completion under `purge` (numbered 60).
+async fn purge_target(fixture: &Fixture) -> Fallible<PurgeReport> {
+    let purge: PurgeId = uuid!(60)?;
+    record_purge(&fixture.storage, fixture, purge).await?;
+    Ok(fixture
+        .storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, fixture.target.workspace_id)
+        .await?)
+}
+
+/// Review probe R1: the backup handler failed (or its job was abandoned) after the archive was
+/// written, so only `backup_archives` knows it.
+#[tokio::test]
+async fn purge_reaches_a_workspace_archive_no_artifact_records() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let archive = fixture
+        .storage
+        .backups()
+        .write_workspace_archive(&fixture.target, uuid!(70)?)
+        .await?;
+    assert!(held(&fixture.storage, &fixture.survivor, &archive.digest).await?);
+    let report = purge_target(&fixture).await?;
+    assert!(
+        !held(&fixture.storage, &fixture.survivor, &archive.digest).await?,
+        "the unrecorded archive is removed"
+    );
+    assert_eq!(
+        report.backups_removed, 2,
+        "its recorded archive artifact and the unrecorded one"
+    );
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
     Ok(())
 }
 

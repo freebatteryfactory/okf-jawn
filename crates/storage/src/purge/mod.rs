@@ -12,7 +12,8 @@
 //!
 //! 1. **Plan**, before anything is removed: the objects the workspace references (its whole Git
 //!    history on every reference, the conversion records its cards name, its records), its
-//!    workspace-archive artifacts, its uploads, the pre-migration backups that hold it, and the
+//!    workspace archives (recorded as artifacts or only written), its uploads, the
+//!    pre-migration backups that hold it, and the
 //!    counts of the report. In the same transaction every commit of the workspace is written to
 //!    the revision map as invalidated by this purge with no replacement. The plan holds
 //!    identities and counts, never content.
@@ -523,7 +524,9 @@ fn report_at_plan(
     })
 }
 
-/// The workspace-archive artifacts of the workspace.
+/// The workspace archives of the workspace: every one recorded as an artifact, and every one
+/// `Backups::write_workspace_archive` wrote (`backup_archives`), recorded as an artifact or not
+/// (the backup handler may have failed, or its job been abandoned, after the write).
 fn archives(
     connection: &Connection,
     tenant: &str,
@@ -532,7 +535,8 @@ fn archives(
     let kind = variant_text!(&ArtifactKind::WorkspaceBackup)?;
     let mut statement = connection
         .prepare(
-            "SELECT digest FROM artifacts WHERE tenant_id = ?1 AND workspace_id = ?2 AND kind = ?3",
+            "SELECT digest FROM artifacts WHERE tenant_id = ?1 AND workspace_id = ?2 AND kind = ?3
+             UNION SELECT digest FROM backup_archives WHERE tenant_id = ?1 AND workspace_id = ?2",
         )
         .map_err(|error| sql(&error))?;
     let digests = statement
