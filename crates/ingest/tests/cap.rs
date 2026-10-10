@@ -259,6 +259,7 @@ mod memory_cap_classification {
             "memory allocation of 1073741824 bytes failed\n",
             "terminate called after throwing an instance of 'std::bad_alloc'",
             "onnxruntime: Failed to allocate memory for requested buffer",
+            "okf-jawn-convert: the retained original could not be read: out of memory\n",
         ] {
             let aborted = ChildEnd {
                 stderr_tail: words.to_owned(),

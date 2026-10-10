@@ -94,12 +94,16 @@ pub const CAP_MARGIN_DIVISOR: u64 = 16;
 pub const CAP_MARGIN_MIN_BYTES: u64 = 64 * 1024 * 1024;
 
 /// What a process writes to stderr when an allocation fails: Rust's default handler, the C++
-/// runtime ONNX Runtime throws through, and ONNX Runtime's own allocator.
-pub const ALLOCATION_FAILURE_MARKERS: [&str; 4] = [
+/// runtime ONNX Runtime throws through, ONNX Runtime's own allocator, and the text of
+/// `std::io::ErrorKind::OutOfMemory`, which a fallible std allocation reports instead of
+/// aborting (`std::fs::read` reserves its buffer with `try_reserve`; observed on Linux under
+/// `RLIMIT_DATA`, where the child then says "... could not be read: out of memory").
+pub const ALLOCATION_FAILURE_MARKERS: [&str; 5] = [
     "memory allocation of",
     "std::bad_alloc",
     "bad allocation",
     "Failed to allocate memory",
+    "out of memory",
 ];
 
 /// How often the macOS watchdog samples the child, within the 50 to 100 ms the plan allows.

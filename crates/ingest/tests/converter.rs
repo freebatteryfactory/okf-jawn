@@ -690,14 +690,14 @@ mod conversion_child {
 
     #[tokio::test]
     async fn the_real_child_under_a_small_cap_fails_its_window_at_the_cap() -> TestResult {
-        // The real child under a 32 MiB cap must hold a 96 MiB original to convert it. On
+        // The real child under a 16 MiB cap must hold a 24 MiB original to convert it. On
         // Linux the child's own RLIMIT_DATA is the cap (set as the first statement of its
         // main); on Windows the job object holds it.
-        const CAP: u64 = 32 * 1024 * 1024;
+        const CAP: u64 = 16 * 1024 * 1024;
         let store = tempfile::tempdir()?;
         let output = tempfile::tempdir()?;
         let line = "Words of a large original that does not fit the cap.\n\n";
-        let bytes = line.repeat(96 * 1024 * 1024 / line.len());
+        let bytes = line.repeat(24 * 1024 * 1024 / line.len());
         let source = retained(store.path(), bytes.as_bytes())?;
         let converter = DoclingConverter::new(ConverterConfig {
             child: PathBuf::from(env!("CARGO_BIN_EXE_okf-jawn-convert")),
