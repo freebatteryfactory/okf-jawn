@@ -46,13 +46,18 @@ use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 /// that wrote two commits under one identity is caught replaying the wrong one. `find_commit`
 /// searches the same way. A source card whose path collision key another item holds at the
 /// head is refused with `Conflict`, as storage refuses a path collision. A commit that is
-/// written first runs the caller's check once over a staged directory holding the source cards
-/// it writes; its error refuses the commit and its warnings are returned. Folders list empty.
+/// written first runs the caller's check once over a staged directory holding every item of
+/// the candidate tree (the items at the expected head with the edits applied), each rendered
+/// as `read_file` returns it; its error refuses the commit and its warnings are returned.
 ///
 /// Someone else's edit is modelled as a foreign commit (`edit_elsewhere`), which may take a
 /// path, or carry tree edits (`edit_elsewhere_with`: an edit, move or deletion of an item);
 /// `edit_elsewhere_before_call` makes one land just before the given `commit` call, as
 /// another writer racing the handler would.
+///
+/// `list` lists the items and child folders directly in a folder at a revision, in one page;
+/// `read_file` returns an item's rendered file and answers `NotFound` for any other path (the
+/// fake keeps no folder index or change log).
 ///
 /// `show` and `item_at_path` read an item at a revision by replaying, over the items present at the base
 /// (`at_base`), the edits of every commit up to that revision: `WriteSourceCard` writes the
@@ -469,6 +474,11 @@ impl FakeVersions {
                 warnings: Vec::new(),
             });
         }
+        // The candidate tree: the items at the expected head with the edits applied.
+        let mut candidate = self.items_at(&changes.expected_head).unwrap_or_default();
+        for edit in &changes.edits {
+            apply_to_items(&mut candidate, edit);
+        }
         let mut commits = self.commits.lock().map_err(|_| poisoned())?;
         let head = commits
             .last()
@@ -495,7 +505,7 @@ impl FakeVersions {
                 ));
             }
         }
-        let warnings = staged_check(&changes.edits, check)?;
+        let warnings = staged_check(&candidate, check)?;
         let revision = Revision::try_from(format!("{:040x}", commits.len().saturating_add(1)))
             .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
         commits.push((changes, revision.clone()));
@@ -582,17 +592,14 @@ impl VersionStore for FakeVersions {
     fn list<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _revision: &'a Revision,
-        _folder: Option<&'a WorkspacePath>,
+        revision: &'a Revision,
+        folder: Option<&'a WorkspacePath>,
         _page: Page,
     ) -> PortFuture<'a, FolderListing> {
-        Box::pin(async move {
-            Ok(FolderListing {
-                items: Vec::new(),
-                folders: Vec::new(),
-                next_cursor: None,
-            })
-        })
+        let listed = self
+            .items_at(revision)
+            .and_then(|items| listing(&items, folder, revision));
+        Box::pin(async move { listed })
     }
     fn item_at_path<'a>(
         &'a self,
@@ -626,10 +633,18 @@ impl VersionStore for FakeVersions {
     fn read_file<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _revision: &'a Revision,
-        _path: &'a WorkspacePath,
+        revision: &'a Revision,
+        path: &'a WorkspacePath,
     ) -> PortFuture<'a, Vec<u8>> {
-        unused("read_file")
+        // Only item files are kept; a folder index or the change log is absent (`NotFound`).
+        let read = self.items_at(revision).and_then(|items| {
+            items
+                .iter()
+                .find(|card| card.path == *path)
+                .map(|card| rendered(card).into_bytes())
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such file"))
+        });
+        Box::pin(async move { read })
     }
     fn rules<'a>(
         &'a self,
@@ -1077,28 +1092,69 @@ impl CandidateCheck for RefuseAll {
     }
 }
 
-/// Run `check` once over a staged directory holding the source cards `edits` write, as storage
-/// runs the caller's check on its staging directory; its error refuses the commit.
-fn staged_check(edits: &[TreeEdit], check: &dyn CandidateCheck) -> Result<Vec<Warning>, ApiError> {
+/// Run `check` once over a staged directory holding every item of the candidate tree, as
+/// storage runs the caller's check on its staging directory; its error refuses the commit.
+fn staged_check(
+    items: &[SourceCard],
+    check: &dyn CandidateCheck,
+) -> Result<Vec<Warning>, ApiError> {
     let internal = |error: std::io::Error| ApiError::new(ErrorCode::Internal, error.to_string());
     let staging = tempfile::tempdir().map_err(internal)?;
-    for edit in edits {
-        if let TreeEdit::WriteSourceCard(card) = edit {
-            let file = staging.path().join(card.path.as_str());
-            if let Some(folder) = file.parent() {
-                std::fs::create_dir_all(folder).map_err(internal)?;
-            }
-            std::fs::write(
-                &file,
-                format!(
-                    "---\ntype: {}\ntitle: {}\n---\n\n{}\n",
-                    card.type_name, card.title, card.body
-                ),
-            )
-            .map_err(internal)?;
+    for card in items {
+        let file = staging.path().join(card.path.as_str());
+        if let Some(folder) = file.parent() {
+            std::fs::create_dir_all(folder).map_err(internal)?;
         }
+        std::fs::write(&file, rendered(card)).map_err(internal)?;
     }
     check.check(staging.path())
+}
+
+/// An item's file as the fake keeps it: its type and title as frontmatter, then its body.
+fn rendered(card: &SourceCard) -> String {
+    format!(
+        "---\ntype: {}\ntitle: {}\n---\n\n{}\n",
+        card.type_name, card.title, card.body
+    )
+}
+
+/// The folder a path is in; `None` at the root.
+fn folder_of(path: &str) -> Option<&str> {
+    path.rsplit_once('/').map(|(folder, _)| folder)
+}
+
+/// The items directly in `folder` at a revision, and the child folders directly in it.
+fn listing(
+    items: &[SourceCard],
+    folder: Option<&WorkspacePath>,
+    revision: &Revision,
+) -> Result<FolderListing, ApiError> {
+    let folder = folder.map(WorkspacePath::as_str);
+    let mut folders: Vec<String> = Vec::new();
+    for card in items {
+        let mut path = card.path.as_str();
+        while let Some(parent) = folder_of(path) {
+            if folder_of(parent) == folder && !folders.iter().any(|known| known == parent) {
+                folders.push(parent.to_owned());
+            }
+            path = parent;
+        }
+    }
+    Ok(FolderListing {
+        items: items
+            .iter()
+            .filter(|card| folder_of(card.path.as_str()) == folder)
+            .map(|card| document_of(card, revision).map(|document| document.summary))
+            .collect::<Result<_, _>>()?,
+        folders: folders
+            .into_iter()
+            .map(|folder| {
+                WorkspacePath::try_from(folder)
+                    .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))
+            })
+            .collect::<Result<_, _>>()?,
+        next_cursor: None,
+    })
 }
 
 /// Apply one tree edit to the items, as storage would.

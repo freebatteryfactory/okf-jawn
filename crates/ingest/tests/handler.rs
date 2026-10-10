@@ -749,6 +749,67 @@ mod job_handler {
         Ok(())
     }
 
+    /// The warnings an import of two sources completes with, after its first attempt died right
+    /// after writing `died` commits, when it did.
+    async fn completed_warnings(
+        died: Option<usize>,
+        number: u128,
+    ) -> Built<Vec<(String, String, Option<String>)>> {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, number, "first.pdf", b"%PDF first")?;
+        let second = upload(
+            &world,
+            number.saturating_add(1),
+            "second.pdf",
+            b"%PDF second",
+        )?;
+        let id = job(
+            &world,
+            number,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        if let Some(count) = died {
+            world.versions.die_after(count)?;
+            assert!(run(&world, id).await?);
+            let entry = world.records.entry(id)?;
+            assert_eq!(entry.job.state, JobState::Failed);
+            world.records.insert(id, entry.scope, entry.created)?;
+        }
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(world.versions.written()?.len(), 3);
+        Ok(some(entry.completions.first(), "the completion")?
+            .warnings
+            .iter()
+            .map(|warning| {
+                (
+                    warning.code.clone(),
+                    warning.message.clone(),
+                    warning.location.clone(),
+                )
+            })
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn a_resumed_import_completes_with_the_warnings_of_the_commits_it_replays() -> TestResult
+    {
+        let whole = completed_warnings(None, 130).await?;
+        // OKF lint of the pending cards (no top-level heading) reached the completion.
+        assert!(
+            whole.iter().any(|(code, _, location)| {
+                code.starts_with("okf_lint") && location.as_deref() == Some("inbox/second-pdf.md")
+            }),
+            "{whole:?}"
+        );
+        // Died after the pending commit, and after the first card's commit: the same warnings.
+        assert_eq!(completed_warnings(Some(1), 132).await?, whole);
+        assert_eq!(completed_warnings(Some(2), 134).await?, whole);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn an_import_completes_over_edits_made_elsewhere_after_it_was_accepted() -> TestResult {
         let world = world_with(Some(6), Vec::new())?;
