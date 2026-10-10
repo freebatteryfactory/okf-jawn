@@ -21,7 +21,7 @@ use okf_jawn_contract::identity::{
     Digest, ItemId, JobId, MutationId, PurgeId, Revision, TenantId, UploadId, WorkspaceId,
     WorkspacePath,
 };
-use okf_jawn_contract::item::{ItemDocument, TypeDefinition};
+use okf_jawn_contract::item::{ItemDocument, ItemKind, ItemStatus, ItemSummary, TypeDefinition};
 use okf_jawn_contract::purge::PurgeReport;
 use okf_jawn_contract::search::{GetGraphResponse, GetLinksResponse, SearchResponse};
 use okf_jawn_contract::workspace::RestoreReport;
@@ -34,7 +34,7 @@ use okf_jawn_core::search::{GraphQuery, LinkQuery, SearchIndex, SearchQuery};
 use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
     Committed, DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page,
-    Promotion, Purger, StorageScope, TreeEdit, VersionStore,
+    Promotion, Purger, SourceCard, StorageScope, TreeEdit, VersionStore,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 
@@ -50,8 +50,15 @@ use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 /// it writes; its error refuses the commit and its warnings are returned. Folders list empty.
 ///
 /// Someone else's edit is modelled as a foreign commit (`edit_elsewhere`), which may take a
-/// path; `edit_elsewhere_before_call` makes one land just before the given `commit` call, as
+/// path, or carry tree edits (`edit_elsewhere_with`: an edit, move or deletion of an item);
+/// `edit_elsewhere_before_call` makes one land just before the given `commit` call, as
 /// another writer racing the handler would.
+///
+/// `show` reads an item at a revision by replaying, over the items present at the base
+/// (`at_base`), the edits of every commit up to that revision: `WriteSourceCard` writes the
+/// whole card (moving it to the card's path, as storage's `write_card` does), `EditItem`
+/// replaces body and properties, `MoveItem` the path, `DeleteItem` removes it. An item absent
+/// there is `NotFound`.
 pub struct FakeVersions {
     /// The head before any commit.
     pub head: Revision,
@@ -66,6 +73,8 @@ pub struct FakeVersions {
     pub calls: Mutex<(usize, Vec<usize>)>,
     /// Runs as each `commit` call starts, with its number (a test cancels the job there).
     pub on_commit: Mutex<Option<CommitHook>>,
+    /// Items present at the base revision, before any commit.
+    pub at_base: Mutex<Vec<SourceCard>>,
 }
 
 /// An `UploadStore` holding complete uploads and recording which job consumed each.
@@ -182,6 +191,7 @@ impl FakeVersions {
             taken: Mutex::new(Vec::new()),
             calls: Mutex::new((0, Vec::new())),
             on_commit: Mutex::new(None),
+            at_base: Mutex::new(Vec::new()),
         }
     }
 
@@ -190,6 +200,48 @@ impl FakeVersions {
     /// # Errors
     /// Returns when a lock is poisoned or the revision cannot be made.
     pub fn edit_elsewhere(&self, path: Option<(&WorkspacePath, ItemId)>) -> Result<(), ApiError> {
+        self.foreign_commit(path, Vec::new())
+    }
+
+    /// Someone else commits these tree edits now (a person editing, moving or deleting).
+    ///
+    /// # Errors
+    /// Returns when a lock is poisoned or the revision cannot be made.
+    pub fn edit_elsewhere_with(&self, edits: Vec<TreeEdit>) -> Result<(), ApiError> {
+        self.foreign_commit(None, edits)
+    }
+
+    /// The item as it stands at `revision`, or `None` when it is absent there.
+    ///
+    /// # Errors
+    /// Returns `NotFound` when the revision is not on the line, or when a lock is poisoned.
+    pub fn item_at(
+        &self,
+        revision: &Revision,
+        item: ItemId,
+    ) -> Result<Option<SourceCard>, ApiError> {
+        let mut items: Vec<SourceCard> = self.at_base.lock().map_err(|_| poisoned())?.clone();
+        if *revision != self.head {
+            let commits = self.commits.lock().map_err(|_| poisoned())?;
+            let upto = commits
+                .iter()
+                .position(|(_, made)| made == revision)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such revision"))?;
+            for (changes, _) in commits.iter().take(upto.saturating_add(1)) {
+                for edit in &changes.edits {
+                    apply_to_items(&mut items, edit);
+                }
+            }
+        }
+        Ok(items.into_iter().find(|card| card.item_id == item))
+    }
+
+    /// A commit by someone else, on the head.
+    fn foreign_commit(
+        &self,
+        path: Option<(&WorkspacePath, ItemId)>,
+        edits: Vec<TreeEdit>,
+    ) -> Result<(), ApiError> {
         let mut commits = self.commits.lock().map_err(|_| poisoned())?;
         let head = commits
             .last()
@@ -210,8 +262,8 @@ impl FakeVersions {
                     route: okf_jawn_contract::access::AccessRoute::LocalOwner,
                     client_id: None,
                 },
-                message: "An unrelated edit".to_owned(),
-                edits: Vec::new(),
+                message: "An edit by someone else".to_owned(),
+                edits,
             },
             revision,
         ));
@@ -435,10 +487,14 @@ impl VersionStore for FakeVersions {
     fn show<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _revision: &'a Revision,
-        _item: ItemId,
+        revision: &'a Revision,
+        item: ItemId,
     ) -> PortFuture<'a, ItemDocument> {
-        unused("show")
+        let shown = self.item_at(revision, item).and_then(|card| {
+            let card = card.ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such item"))?;
+            document_of(&card, revision)
+        });
+        Box::pin(async move { shown })
     }
     fn read_file<'a>(
         &'a self,
@@ -892,6 +948,62 @@ fn staged_check(edits: &[TreeEdit], check: &dyn CandidateCheck) -> Result<Vec<Wa
         }
     }
     check.check(staging.path())
+}
+
+/// Apply one tree edit to the items, as storage would.
+fn apply_to_items(items: &mut Vec<SourceCard>, edit: &TreeEdit) {
+    match edit {
+        TreeEdit::WriteSourceCard(card) => {
+            items.retain(|item| item.item_id != card.item_id);
+            items.push((**card).clone());
+        }
+        TreeEdit::EditItem {
+            item_id,
+            body,
+            properties,
+        } => {
+            for item in items.iter_mut().filter(|item| item.item_id == *item_id) {
+                item.body.clone_from(body);
+                item.properties.clone_from(properties);
+            }
+        }
+        TreeEdit::MoveItem {
+            item_id,
+            destination,
+        } => {
+            for item in items.iter_mut().filter(|item| item.item_id == *item_id) {
+                item.path = destination.clone();
+            }
+        }
+        TreeEdit::DeleteItem { item_id } => items.retain(|item| item.item_id != *item_id),
+        _ => {}
+    }
+}
+
+/// The document `show` returns for a card at a revision.
+fn document_of(card: &SourceCard, revision: &Revision) -> Result<ItemDocument, ApiError> {
+    let content = serde_json::to_vec(&(&card.body, &card.properties))
+        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+    Ok(ItemDocument {
+        summary: ItemSummary {
+            id: card.item_id,
+            path: card.path.clone(),
+            title: card.title.clone(),
+            description: String::new(),
+            type_name: card.type_name.clone(),
+            kind: ItemKind::Source,
+            revision: revision.clone(),
+            status: ItemStatus::Stable,
+            archived: false,
+            media_type: Some(card.appearance.media_type.clone()),
+            extraction: None,
+        },
+        body: card.body.clone(),
+        properties: card.properties.clone(),
+        content_digest: okf_jawn_ingest::record::sha256_digest(&content)?,
+        source: Some(card.appearance.clone()),
+        draft: None,
+    })
 }
 
 fn poisoned() -> ApiError {

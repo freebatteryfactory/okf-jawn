@@ -34,8 +34,9 @@ mod job_handler {
     };
     use okf_jawn_core::uploads::UploadRecord;
     use okf_jawn_ingest::handler::{
-        ARCHIVE_MEDIA_TYPE, HandlerLimits, HandlerPorts, IngestHandler,
+        ARCHIVE_MEDIA_TYPE, CARD_NOT_WRITTEN, HandlerLimits, HandlerPorts, IngestHandler,
     };
+
     use okf_jawn_ingest::runtime::run_one;
     use serde_json::json;
 
@@ -660,6 +661,100 @@ mod job_handler {
                 .revision
                 .as_ref(),
             commits.last().map(|(_, revision)| revision)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_import_never_overwrites_a_pending_card_a_person_changed_or_deleted() -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let edited = upload(&world, 110, "edited.pdf", b"%PDF edited")?;
+        let deleted = upload(&world, 111, "deleted.pdf", b"%PDF deleted")?;
+        let untouched = upload(&world, 112, "untouched.pdf", b"%PDF untouched")?;
+        let id = job(
+            &world,
+            23,
+            workspace_scope()?,
+            import_spec(vec![edited, deleted, untouched], false)?,
+        )?;
+        let mutation = world.records.entry(id)?.created.mutation_id;
+        let edited_id = derive_item_id(mutation, 0);
+        let deleted_id = derive_item_id(mutation, 1);
+        let mut theirs = std::collections::BTreeMap::new();
+        let _previous = theirs.insert("reviewed".to_owned(), json!(true));
+        // While each source converts, a person acts on that source's pending card: the first
+        // gets a property, the second is deleted. An unrelated item is edited too.
+        let versions = Arc::clone(&world.versions);
+        let windows_seen = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&windows_seen);
+        *world.converter.on_window.lock().map_err(|_| "poisoned")? =
+            Some(Box::new(move |_window: Option<&PageRange>| {
+                let edit = match seen.fetch_add(1, Ordering::SeqCst) {
+                    0 => vec![TreeEdit::EditItem {
+                        item_id: edited_id,
+                        body: String::new(),
+                        properties: theirs.clone(),
+                    }],
+                    1 => vec![TreeEdit::DeleteItem {
+                        item_id: deleted_id,
+                    }],
+                    _ => Vec::new(),
+                };
+                let _landed = versions.edit_elsewhere_with(edit);
+                false
+            }));
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        // The job completes; the two cards are reported, not written, and not retried.
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let completion = some(entry.completions.first(), "the completion")?;
+        let not_written: Vec<&str> = completion
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == CARD_NOT_WRITTEN)
+            .filter_map(|warning| warning.location.as_deref())
+            .collect();
+        assert_eq!(
+            not_written,
+            ["inbox/edited-pdf.md", "inbox/deleted-pdf.md"],
+            "{:?}",
+            completion.warnings
+        );
+        // Ours: the pending commit and the one card nobody touched.
+        let ours: Vec<_> = world
+            .versions
+            .written()?
+            .into_iter()
+            .filter(|(changes, _)| changes.author.subject == "owner")
+            .map(|(changes, _)| changes.mutation_id)
+            .collect();
+        assert_eq!(
+            ours,
+            [0, 3].map(|ordinal| derive_commit_mutation_id(mutation, ordinal))
+        );
+        // The person's edit and deletion stand at the head.
+        let head = some(
+            world
+                .versions
+                .written()?
+                .last()
+                .map(|(_, revision)| revision.clone()),
+            "the head",
+        )?;
+        let kept = some(world.versions.item_at(&head, edited_id)?, "the edited card")?;
+        assert_eq!(kept.properties.get("reviewed"), Some(&json!(true)));
+        assert_eq!(
+            kept.appearance.extraction.outcome,
+            ConversionOutcome::Pending
+        );
+        assert!(world.versions.item_at(&head, deleted_id)?.is_none());
+        let converted = some(
+            world.versions.item_at(&head, derive_item_id(mutation, 2))?,
+            "the untouched card",
+        )?;
+        assert_eq!(
+            converted.appearance.extraction.outcome,
+            ConversionOutcome::Completed
         );
         Ok(())
     }

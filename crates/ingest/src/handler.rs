@@ -34,6 +34,7 @@ use okf_jawn_core::storage::{
 };
 use okf_jawn_core::uploads::UploadStore;
 
+pub use crate::import::CARD_NOT_WRITTEN;
 use crate::import::{ImportRequest, import, redigest};
 
 /// The ports the handler calls: storage's, the converter and the injected check.

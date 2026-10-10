@@ -28,6 +28,13 @@
 //! stands still is a real collision with what the import writes (a card path another item took
 //! after acceptance): the job fails and is not retried, and what it already committed stays.
 //!
+//! A card commit follows SPEC's Snapshot rule (fix-2 ruling 2, review N1): it is blocked only
+//! when the item it writes was itself changed or deleted since its base, here the import's
+//! pending commit. Before writing a card, the card at the current head is compared with what
+//! the pending commit wrote. If a person changed or deleted it, that card is not written and
+//! not retried, and the completion says which card and why (`CARD_NOT_WRITTEN`): the person's
+//! edit is never overwritten. Otherwise the card is written onto the head's version.
+//!
 //! A redigest writes one commit, under ordinal 0, on its base revision.
 //!
 //! A job stops when `update_progress` shows it cancelled, and writes no completion: while the
@@ -49,7 +56,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use okf_jawn_contract::common::PageRange;
+use okf_jawn_contract::common::{PageRange, Warning};
 use okf_jawn_contract::conventions::source_card_name;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{
@@ -57,6 +64,7 @@ use okf_jawn_contract::extraction::{
 };
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, UploadId, WorkspacePath};
 use okf_jawn_contract::import::JobState;
+use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::source::{SourceAppearance, SourceName};
 use okf_jawn_core::conversion::{Conversion, ConversionInput, ConvertedDocument, RetainedAsset};
 use okf_jawn_core::items::without_header;
@@ -102,12 +110,37 @@ struct Converted {
     outputs: Vec<Digest>,
 }
 
-/// How one commit of an import landed.
+/// How one commit of a job landed.
 enum Landed {
     /// Written now, or replayed from an earlier attempt.
     Committed(Committed),
     /// Refused while the head stood still: a real collision with what the job writes.
     Refused(ApiError),
+    /// Not written: the item it writes was changed or deleted since its base, by someone else;
+    /// why.
+    Kept(String),
+}
+
+/// What one commit writes, given the head it is written on.
+enum Writes<'a> {
+    /// These edits, whatever the head holds.
+    Edits(Vec<TreeEdit>),
+    /// This card, onto the head's version of its item, by `rule` against the item at `since`.
+    Card {
+        /// The card as the job would write it.
+        card: &'a SourceCard,
+        /// The item's base: the import's pending commit.
+        since: &'a Revision,
+        /// What change since the base blocks the write.
+        rule: Blocked,
+    },
+}
+
+/// What change to a card's item since its base blocks writing the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Blocked {
+    /// Any change or deletion (an import's converted card against its pending card).
+    AnyChange,
 }
 
 /// The type name a new source card gets: no SPEC sentence fixes one, so this is the lane's
@@ -116,6 +149,10 @@ pub const SOURCE_CARD_TYPE: &str = "source";
 
 /// The most bytes of one retained output the handler reads back to store it.
 pub const MAX_RETAINED_OUTPUT_BYTES: u64 = 1 << 30;
+
+/// The warning code of a converted card an import did not write because a person changed or
+/// deleted the pending card meanwhile.
+pub const CARD_NOT_WRITTEN: &str = "import_card_not_written";
 
 /// How many entries one folder listing asks for.
 const LIST_PAGE: u16 = 500;
@@ -149,17 +186,21 @@ pub(crate) async fn import(
         scope,
         (base, 0),
         format!("Import {} sources, pending conversion", cards.len()),
-        cards
-            .iter()
-            .map(|(card, _)| TreeEdit::WriteSourceCard(Box::new(card.clone())))
-            .collect(),
+        Writes::Edits(
+            cards
+                .iter()
+                .map(|(card, _)| TreeEdit::WriteSourceCard(Box::new(card.clone())))
+                .collect(),
+        ),
         Arc::clone(&check),
     )
     .await?
     {
         Landed::Committed(committed) => committed,
         Landed::Refused(error) => return Ok(refused(&error)),
+        Landed::Kept(why) => return Err(fault(&why)),
     };
+    let pending_revision = pending.revision.clone();
     let mut done = Done {
         revision: Some(pending.revision),
         warnings: pending.warnings,
@@ -182,41 +223,61 @@ pub(crate) async fn import(
         card.body.clone_from(&converted.assembled.markdown);
         card.appearance.extraction = extraction_of(&converted, None);
         let message = format!("Import {}: {}", card.title, outcome_word(&converted));
-        let committed = match commit(
+        let writes = Writes::Card {
+            card: &card,
+            since: &pending_revision,
+            rule: Blocked::AnyChange,
+        };
+        match commit(
             ports,
             claimed,
             scope,
             (base, ordinal),
             message,
-            vec![TreeEdit::WriteSourceCard(Box::new(card.clone()))],
+            writes,
             Arc::clone(&check),
         )
         .await?
         {
-            Landed::Committed(committed) => committed,
+            Landed::Committed(committed) => {
+                done.revision = Some(committed.revision);
+                done.warnings.extend(committed.warnings);
+                done.outputs.extend(converted.outputs);
+            }
             Landed::Refused(error) => return Ok(refused(&error)),
-        };
-        done.revision = Some(committed.revision);
-        done.warnings.extend(committed.warnings);
-        done.outputs.extend(converted.outputs);
+            // The person's edit stands; this conversion is not written, and not retried.
+            Landed::Kept(why) => done.warnings.push(Warning {
+                code: CARD_NOT_WRITTEN.to_owned(),
+                message: format!("the converted card was not written: {why}"),
+                location: Some(card.path.as_str().to_owned()),
+            }),
+        }
         done.item_ids.push(card.item_id);
         // Between card commits: a job cancelled now converts no further source.
-        if ordinal < total {
-            let progress = percent(
-                usize::try_from(ordinal).unwrap_or(usize::MAX),
-                usize::try_from(total).unwrap_or(usize::MAX),
-            );
-            let job = ports
-                .records
-                .update_progress(&claimed.lease, progress)
-                .await?;
-            if job.state == JobState::Cancelled {
-                done.cancelled = true;
-                return Ok(done);
-            }
+        if ordinal < total && cancelled_after(ports, claimed, ordinal, total).await? {
+            done.cancelled = true;
+            return Ok(done);
         }
     }
     Ok(done)
+}
+
+/// Report progress after `done` of `total` cards, and say whether the job is now cancelled.
+async fn cancelled_after(
+    ports: &HandlerPorts,
+    claimed: &ClaimedJob,
+    done: u32,
+    total: u32,
+) -> Result<bool, ApiError> {
+    let progress = percent(
+        usize::try_from(done).unwrap_or(usize::MAX),
+        usize::try_from(total).unwrap_or(usize::MAX),
+    );
+    let job = ports
+        .records
+        .update_progress(&claimed.lease, progress)
+        .await?;
+    Ok(job.state == JobState::Cancelled)
 }
 
 /// A job refused by a real collision: it fails and is not retried.
@@ -546,19 +607,21 @@ async fn retain(
     Ok(object.digest)
 }
 
-/// The `ordinal`-th commit of an import, on the current head.
+/// The `ordinal`-th commit of a job, on the current head.
 ///
 /// Replayed when an earlier attempt already wrote it after `base` (`find_commit` on the
-/// commit's own derived identity). Otherwise written on the head as read now; a head that moved
-/// before the write is read again, at most `HEAD_RACES` times. A `Conflict` while the head
-/// stood still is the store refusing these edits, a real collision: `Landed::Refused`.
+/// commit's own derived identity). Otherwise written on the head as read now: a card onto the
+/// head's version of its item, or `Landed::Kept` when the item changed since its base in a way
+/// the card's rule blocks. A head that moved before the write is read again, at most
+/// `HEAD_RACES` times. A `Conflict` while the head stood still is the store refusing these
+/// edits, a real collision: `Landed::Refused`.
 async fn commit(
     ports: &HandlerPorts,
     claimed: &ClaimedJob,
     scope: &StorageScope,
     (base, ordinal): (&Revision, u32),
     message: String,
-    edits: Vec<TreeEdit>,
+    writes: Writes<'_>,
     check: Arc<dyn CandidateCheck>,
 ) -> Result<Landed, ApiError> {
     let mutation_id = derive_commit_mutation_id(claimed.mutation_id, ordinal);
@@ -571,13 +634,22 @@ async fn commit(
     }
     for _race in 0..HEAD_RACES {
         let head = ports.versions.head(scope).await?;
+        let edits = match &writes {
+            Writes::Edits(edits) => edits.clone(),
+            Writes::Card { card, since, rule } => {
+                match onto_head(ports, scope, &head, card, since, *rule).await? {
+                    Ok(card) => vec![TreeEdit::WriteSourceCard(Box::new(card))],
+                    Err(why) => return Ok(Landed::Kept(why)),
+                }
+            }
+        };
         let written = commit_on(
             ports,
             claimed,
             scope,
             (head.clone(), ordinal),
             message.clone(),
-            edits.clone(),
+            edits,
             Arc::clone(&check),
         )
         .await;
@@ -595,6 +667,63 @@ async fn commit(
         ErrorCode::Conflict,
         "the workspace head kept moving under the import's commit; the job is retried",
     ))
+}
+
+/// `card` written onto the head's version of its item, or why it must not be written: the item
+/// is gone at `head`, or changed since `since` in the way `rule` blocks. The head's path,
+/// title, type and properties are kept.
+async fn onto_head(
+    ports: &HandlerPorts,
+    scope: &StorageScope,
+    head: &Revision,
+    card: &SourceCard,
+    since: &Revision,
+    rule: Blocked,
+) -> Result<Result<SourceCard, String>, ApiError> {
+    let now = match ports.versions.show(scope, head, card.item_id).await {
+        Ok(now) => now,
+        Err(error) if error.code == ErrorCode::NotFound => {
+            return Ok(Err(format!(
+                "{} was deleted after the job's base revision",
+                card.path.as_str()
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    let then = ports.versions.show(scope, since, card.item_id).await?;
+    let mut written = card.clone();
+    match rule {
+        Blocked::AnyChange => {
+            if !same_item(&now, &then) {
+                return Ok(Err(format!(
+                    "{} was changed after the import committed it as pending; the change is kept",
+                    then.summary.path.as_str()
+                )));
+            }
+        }
+    }
+    written.path = now.summary.path.clone();
+    written.title.clone_from(&now.summary.title);
+    written.type_name.clone_from(&now.summary.type_name);
+    written.properties = without_header(&now.properties);
+    Ok(Ok(written))
+}
+
+/// Whether an item is as it was: the same place, name, type, status, content and appearance.
+fn same_item(now: &ItemDocument, then: &ItemDocument) -> bool {
+    let appearance = |document: &ItemDocument| {
+        document
+            .source
+            .as_ref()
+            .and_then(|appearance| serde_json::to_value(appearance).ok())
+    };
+    now.summary.path == then.summary.path
+        && now.summary.title == then.summary.title
+        && now.summary.type_name == then.summary.type_name
+        && now.summary.status == then.summary.status
+        && now.summary.archived == then.summary.archived
+        && now.content_digest == then.content_digest
+        && appearance(now) == appearance(then)
 }
 
 /// The `ordinal`-th commit of the job, expecting `expected_head`, under its derived identity.
