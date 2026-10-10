@@ -31,6 +31,7 @@ tokio-util = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 processkit = { workspace = true, optional = true }
@@ -39,8 +40,8 @@ processkit = { workspace = true, optional = true }
 rlimit = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-sysinfo = { workspace = true, optional = true }
+libproc = { workspace = true, optional = true }
 
 [features]
 default = []
-runtime = ["dep:docling", "dep:okf-core", "dep:calamine", "dep:zip", "dep:csv", "dep:infer", "dep:unicode-normalization", "dep:convert_case", "dep:regex", "dep:sha2", "dep:tokio", "dep:tokio-util", "dep:serde_json", "dep:tempfile", "dep:bytes", "dep:processkit", "dep:rlimit", "dep:sysinfo"]
+runtime = ["dep:docling", "dep:okf-core", "dep:calamine", "dep:zip", "dep:csv", "dep:infer", "dep:unicode-normalization", "dep:convert_case", "dep:regex", "dep:sha2", "dep:tokio", "dep:tokio-util", "dep:serde_json", "dep:tempfile", "dep:bytes", "dep:processkit", "dep:rlimit", "dep:libproc", "dep:serde"]
