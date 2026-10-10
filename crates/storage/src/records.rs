@@ -71,6 +71,16 @@ struct LeasedRow {
 /// How long a job claim lasts unless `update_progress` renews it.
 pub const JOB_LEASE_SECONDS: i64 = 300;
 
+impl LeasedRow {
+    /// Whether the claim on this row is still live: its expiry lies ahead. A lapsed claim is
+    /// one `claim_job` already treats as reclaimable, so its holder may not complete, fail or
+    /// renew the job even before another worker reclaims it.
+    fn live(&self) -> bool {
+        self.expires_ms
+            .is_some_and(|expiry| seam::now_ms().is_ok_and(|now| expiry > now))
+    }
+}
+
 impl SqliteRecords {
     pub(crate) const fn new(db: Db) -> Self {
         Self { db }
@@ -153,7 +163,7 @@ impl RecordStore for SqliteRecords {
             if job.state == JobState::Cancelled {
                 return Ok(job);
             }
-            if job.state != JobState::Running {
+            if job.state != JobState::Running || !row.live() {
                 return Err(lost_claim());
             }
             job.progress = progress.min(100);
@@ -179,7 +189,10 @@ impl RecordStore for SqliteRecords {
     fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job> {
         Box::pin(self.db.transaction(move |transaction| {
             let row = leased_row(transaction, lease.job_id)?;
-            if row.token.as_deref() != Some(lease.token.as_str()) || row.state != "running" {
+            if row.token.as_deref() != Some(lease.token.as_str())
+                || row.state != "running"
+                || !row.live()
+            {
                 return Err(lost_claim());
             }
             let mut job = decode_job(&row.record)?;
@@ -699,12 +712,9 @@ fn claim(transaction: &Transaction<'_>, job_id: JobId) -> Result<Option<ClaimedJ
 /// Record a completion for the current, unexpired claim.
 fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result<Job, ApiError> {
     let row = leased_row(transaction, completion.lease.job_id)?;
-    let live = row
-        .expires_ms
-        .is_some_and(|expiry| seam::now_ms().is_ok_and(|now| expiry > now));
     if row.token.as_deref() != Some(completion.lease.token.as_str())
         || row.state != "running"
-        || !live
+        || !row.live()
     {
         return Err(lost_claim());
     }
@@ -714,11 +724,11 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
         .artifact
         .map(|artifact| {
             read_artifact(transaction, "artifact_id", &artifact.0.to_string())?
-                .filter(|record| record.scope == scope)
-                .map(|record| record.download())
-                .ok_or_else(|| {
-                    internal("a completion names an artifact this job's scope does not hold")
+                .filter(|record| {
+                    record.scope == scope && record.created_by_job == completion.lease.job_id
                 })
+                .map(|record| record.download())
+                .ok_or_else(|| internal("a completion names an artifact this job did not create"))
         })
         .transpose()?;
     job.state = JobState::Succeeded;

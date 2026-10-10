@@ -37,6 +37,8 @@ pub(crate) const RULES_FILE: &str = ".okf/rules.yaml";
 pub(crate) const TYPES_FILE: &str = ".okf/types.json";
 /// The maintained change log at the root.
 pub(crate) const LOG_FILE: &str = "log.md";
+/// The request field of the server-owned header.
+const HEADER_FIELD: &str = "/properties/okf_jawn";
 
 impl ItemFile {
     /// Parse an item file; `None` when the text has no application header (it is then not an
@@ -71,9 +73,10 @@ impl ItemFile {
 
     /// Write this file's header back into its frontmatter.
     pub(crate) fn store_header(&mut self) -> Result<(), ApiError> {
-        self.document
-            .frontmatter
-            .set(APP_HEADER_KEY, json_to_yaml(&self.header.to_property()?)?);
+        self.document.frontmatter.set(
+            APP_HEADER_KEY,
+            json_to_yaml(&self.header.to_property()?, HEADER_FIELD)?,
+        );
         Ok(())
     }
 
@@ -204,44 +207,68 @@ fn frontmatter_of(
     let mut frontmatter = Frontmatter::new();
     for (key, value) in properties {
         if key != APP_HEADER_KEY {
-            frontmatter.set(key.clone(), json_to_yaml(value)?);
+            frontmatter.set(
+                key.clone(),
+                json_to_yaml(value, &pointer("/properties", key))?,
+            );
         }
     }
-    frontmatter.set(APP_HEADER_KEY, json_to_yaml(&header.to_property()?)?);
+    frontmatter.set(
+        APP_HEADER_KEY,
+        json_to_yaml(&header.to_property()?, HEADER_FIELD)?,
+    );
     frontmatter.reorder_preferred();
     Ok(frontmatter)
 }
 
-/// A JSON value as okf-core's YAML value; a number outside `i64` and `f64` is refused.
-pub(crate) fn json_to_yaml(value: &Json) -> Result<Yaml, ApiError> {
+/// A JSON value as okf-core's YAML value, exactly. `field` is the JSON pointer of the value
+/// in the request.
+///
+/// okf-core's YAML integer is an `i64`, so an unsigned integer above `i64::MAX` has no exact
+/// form in the item file. It is refused as `InvalidInput` on its field rather than rounded
+/// through `f64`: a silently changed value would change the item's content digest.
+pub(crate) fn json_to_yaml(value: &Json, field: &str) -> Result<Yaml, ApiError> {
     Ok(match value {
         Json::Null => Yaml::Null,
         Json::Bool(flag) => Yaml::Bool(*flag),
-        Json::Number(number) => match (number.as_i64(), number.as_f64()) {
-            (Some(integer), _) => Yaml::Int(integer),
-            (None, Some(float)) => Yaml::Float(float),
-            (None, None) => {
+        Json::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                Yaml::Int(integer)
+            } else if number.is_f64()
+                && let Some(float) = number.as_f64()
+            {
+                Yaml::Float(float)
+            } else {
                 return Err(ApiError::new(
                     ErrorCode::InvalidInput,
-                    "a property number is outside what the item file can hold",
-                ));
+                    format!(
+                        "the number {number} is an integer outside -2^63 to 2^63-1, which the                          item file cannot hold exactly; send it as a string"
+                    ),
+                )
+                .with_field(field));
             }
-        },
+        }
         Json::String(text) => Yaml::String(text.clone()),
         Json::Array(items) => Yaml::Sequence(
             items
                 .iter()
-                .map(json_to_yaml)
+                .enumerate()
+                .map(|(index, item)| json_to_yaml(item, &format!("{field}/{index}")))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Json::Object(map) => {
             let mut mapping = Mapping::new();
             for (key, child) in map {
-                mapping.insert(key.clone(), json_to_yaml(child)?);
+                mapping.insert(key.clone(), json_to_yaml(child, &pointer(field, key))?);
             }
             Yaml::Mapping(mapping)
         }
     })
+}
+
+/// `base` extended by the JSON pointer token `key` (RFC 6901 escaping).
+fn pointer(base: &str, key: &str) -> String {
+    format!("{base}/{}", key.replace('~', "~0").replace('/', "~1"))
 }
 
 /// okf-core's YAML value as JSON; a non-finite float reads as null.

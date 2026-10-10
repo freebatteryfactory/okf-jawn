@@ -324,6 +324,35 @@ async fn links_and_the_graph_come_from_the_indexed_revision() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_graph_node_of_a_source_keeps_its_media_type() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, revision) = populated(directory.path()).await?;
+    let search = storage.search();
+    search.index_revision(&scope, revision.clone()).await?;
+    let graph = search
+        .graph(
+            &scope,
+            GraphQuery {
+                revision,
+                folder: Some(WorkspacePath::try_from("sources".to_owned())?),
+                max_nodes: 10,
+            },
+        )
+        .await?;
+    let card: ItemId = uuid!(13)?;
+    let node = some(
+        graph.nodes.iter().find(|node| node.id == card),
+        "the source card's node",
+    )?;
+    assert_eq!(
+        node.media_type.as_deref(),
+        Some("application/pdf"),
+        "the media type of the committed source appearance, as a folder listing shows"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn rebuilding_the_index_never_touches_jobs_reviews_or_receipts() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (storage, scope, revision) = populated(directory.path()).await?;
@@ -719,6 +748,34 @@ fn probe_files(directory: &Path) -> Fallible<usize> {
         }
     }
     Ok(found)
+}
+
+#[tokio::test]
+async fn readiness_reports_a_database_at_another_schema_version_as_not_ready() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    assert!(storage.readiness().probe().await?.ready);
+    rusqlite::Connection::open(storage.data().index_path())?.pragma_update(
+        None,
+        "user_version",
+        99,
+    )?;
+    let report = storage.readiness().probe().await?;
+    let index = some(
+        report
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.name == "index"),
+        "the index status",
+    )?;
+    assert!(!index.ready, "{}", index.message);
+    assert!(
+        index.message.contains("schema version"),
+        "{}",
+        index.message
+    );
+    assert!(!report.ready);
+    Ok(())
 }
 
 #[tokio::test]

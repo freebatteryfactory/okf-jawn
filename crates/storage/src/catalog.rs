@@ -250,8 +250,17 @@ fn initialize(
     creator: &Provenance,
 ) -> Result<(), ApiError> {
     let path = repositories.path(scope);
+    // The path is derived from this creation's mutation id, so nothing else writes there. A
+    // directory a crash left that is not a repository at all is replaced; any other failure
+    // to open it is reported, never answered by deleting it.
     let repository = if path.exists() {
-        durable(&path)?
+        match git2::Repository::open_bare(&path) {
+            Ok(_) => durable(&path)?,
+            Err(error) if error.code() == git2::ErrorCode::NotFound => {
+                repositories.create(scope)?
+            }
+            Err(error) => return Err(git(&error)),
+        }
     } else {
         repositories.create(scope)?
     };

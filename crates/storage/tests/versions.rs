@@ -638,6 +638,96 @@ async fn a_shown_item_carries_the_content_digest_core_computes() -> TestResult {
 }
 
 #[tokio::test]
+async fn an_integer_the_item_file_cannot_hold_exactly_is_refused_on_its_field() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let with = |properties: serde_json::Value| -> Fallible<TreeEdit> {
+        Ok(TreeEdit::CreateItem {
+            item_id: uuid!(10)?,
+            path: path("n.md")?,
+            title: None,
+            type_name: "Note".to_owned(),
+            kind: ItemKind::Note,
+            body: "N.".to_owned(),
+            properties: serde_json::from_value(properties)?,
+        })
+    };
+    for (mutation, properties, field) in [
+        (20, json!({ "count": u64::MAX }), "/properties/count"),
+        (21, json!({ "list": [1, u64::MAX] }), "/properties/list/1"),
+        (
+            22,
+            json!({ "a/b": { "n": 9_223_372_036_854_775_808_u64 } }),
+            "/properties/a~1b/n",
+        ),
+    ] {
+        let error = err_of(
+            versions
+                .commit(
+                    &scope,
+                    changes(mutation, &initial, vec![with(properties)?])?,
+                    Arc::new(Counting::default()),
+                )
+                .await,
+        )?;
+        assert_eq!(error.code, ErrorCode::InvalidInput, "{}", error.message);
+        assert_eq!(error.field.as_deref(), Some(field));
+    }
+    assert_eq!(
+        versions.head(&scope).await?,
+        initial,
+        "nothing was changed silently"
+    );
+    let largest = versions
+        .commit(
+            &scope,
+            changes(23, &initial, vec![with(json!({ "count": i64::MAX }))?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let shown = versions.show(&scope, &largest, uuid!(10)?).await?;
+    assert_eq!(shown.properties.get("count"), Some(&json!(i64::MAX)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_expected_head_the_repository_never_held_conflicts() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, _) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let unknown = Revision::try_from("ab".repeat(20))?;
+    let error = err_of(
+        versions
+            .commit(
+                &scope,
+                changes(20, &unknown, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+                Arc::new(Counting::default()),
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
+    let promoted = err_of(
+        versions
+            .promote_candidate(
+                &scope,
+                Promotion {
+                    mutation_id: uuid!(21)?,
+                    proposal_id: uuid!(50)?,
+                    expected_head: unknown.clone(),
+                    candidate: unknown,
+                    approver: person("ana"),
+                    message: "Accept".to_owned(),
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(promoted.code, ErrorCode::Conflict, "{}", promoted.message);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_refusal_never_names_the_server_staging_directory() -> TestResult {
     let directory = tempfile::tempdir()?;
     let (storage, scope, initial) = workspace(directory.path()).await?;
@@ -1228,6 +1318,46 @@ async fn a_creation_that_crashed_before_its_record_is_adopted_on_retry() -> Test
         std::fs::read_dir(directory.path().join("repositories").join("local"))?.count();
     assert_eq!(repositories, 1, "no unreachable repository is left");
     assert_eq!(storage.catalog().list(&tenant, true).await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_creation_that_crashed_mid_repository_replaces_it_on_retry() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let tenant = TenantId::try_from("local".to_owned())?;
+    let id = okf_jawn_core::storage::derive_workspace_id(uuid!(1)?);
+    // The crash: a repository directory was begun, nothing valid in it, no record.
+    let partial = directory
+        .path()
+        .join("repositories")
+        .join("local")
+        .join(format!("{}.git", id.0));
+    std::fs::create_dir_all(partial.join("objects"))?;
+    std::fs::write(partial.join("description"), "half written")?;
+    let created = storage
+        .catalog()
+        .create(
+            &tenant,
+            uuid!(1)?,
+            NewWorkspace {
+                name: "Research".to_owned(),
+                description: String::new(),
+                creator: person("ana"),
+            },
+        )
+        .await?;
+    assert_eq!(created.id, id);
+    let repository = git2::Repository::open_bare(&partial)?;
+    assert_eq!(
+        some(
+            repository.find_reference("refs/heads/main")?.target(),
+            "the head"
+        )?
+        .to_string(),
+        created.head.as_str(),
+        "the partial directory was replaced by a whole repository"
+    );
     Ok(())
 }
 

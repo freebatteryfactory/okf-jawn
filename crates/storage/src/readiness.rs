@@ -13,9 +13,12 @@ use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::health::{DependencyStatus, ReadinessResponse};
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::readiness::ReadinessProbe;
+use rusqlite::Connection;
+use rusqlite_migration::Migrations;
 
 use crate::Storage;
 use crate::data::io_error;
+use crate::schema;
 use crate::seam;
 
 /// `ReadinessProbe` over an opened data directory.
@@ -34,27 +37,18 @@ impl ReadinessProbe for StorageReadiness {
     fn probe(&self) -> PortFuture<'_, ReadinessResponse> {
         Box::pin(async move {
             let mut dependencies = Vec::new();
-            for (name, database) in [
-                ("records", &self.storage.records),
-                ("index", &self.storage.index),
+            for (name, database, migrations) in [
+                (
+                    "records",
+                    &self.storage.records,
+                    records_schema as fn() -> Migrations<'static>,
+                ),
+                ("index", &self.storage.index, index_schema),
             ] {
                 let answer = database
-                    .call(|connection| {
-                        connection
-                            .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
-                            .map_err(|error| crate::db::sql(&error))
-                    })
+                    .call(move |connection| live(connection, &migrations()))
                     .await;
-                dependencies.push(status(
-                    name,
-                    answer.and_then(|check| {
-                        if check == "ok" {
-                            Ok(())
-                        } else {
-                            Err(crate::db::internal(check))
-                        }
-                    }),
-                ));
+                dependencies.push(status(name, answer));
             }
             for (name, directory) in [
                 ("objects", self.storage.data.objects_path()),
@@ -74,6 +68,35 @@ impl ReadinessProbe for StorageReadiness {
                 sandbox_origin: None,
             })
         })
+    }
+}
+
+/// The records schema's released steps.
+const fn records_schema() -> Migrations<'static> {
+    schema::RECORDS
+}
+
+/// The index schema's released steps.
+const fn index_schema() -> Migrations<'static> {
+    schema::INDEX
+}
+
+/// Whether a database answers, at constant cost: one trivial query and its schema version
+/// (the header field `user_version`). Integrity is checked at startup and after a migration,
+/// never here, because a full check reads every page while holding the store's connection.
+fn live(connection: &mut Connection, migrations: &Migrations<'static>) -> Result<(), ApiError> {
+    connection
+        .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+        .map_err(|error| crate::db::sql(&error))?;
+    let pending = migrations.pending_migrations(connection).map_err(|error| {
+        crate::db::internal(format!("the schema version is unreadable: {error}"))
+    })?;
+    if pending == 0 {
+        Ok(())
+    } else {
+        Err(crate::db::internal(format!(
+            "the schema version is not the one this build migrated to ({pending} steps apart)"
+        )))
     }
 }
 

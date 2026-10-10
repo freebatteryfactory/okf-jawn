@@ -223,7 +223,7 @@ pub(crate) fn correction(
 }
 
 /// A card's stored source appearance, if it is a card.
-fn appearance(
+pub(crate) fn appearance(
     repository: &Repository,
     tree: &Tree<'_>,
     item: ItemId,
