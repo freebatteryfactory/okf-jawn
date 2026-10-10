@@ -35,7 +35,10 @@
 //! not retried, and the completion says which card and why (`CARD_NOT_WRITTEN`): the person's
 //! edit is never overwritten. Otherwise the card is written onto the head's version.
 //!
-//! A redigest writes one commit, under ordinal 0, on its base revision.
+//! A redigest writes one commit, under ordinal 0, by the same rule against its base revision
+//! (R-I8 extended): replayed when an earlier attempt wrote it, refused (not retried) only when
+//! the item was deleted or its original changed since the base, and otherwise written onto the
+//! head's version of the card, keeping its path, title, properties and supplied text.
 //!
 //! A job stops when `update_progress` shows it cancelled, and writes no completion: while the
 //! pages are counted and while a window converts (it is called every `HandlerLimits::heartbeat`,
@@ -129,7 +132,7 @@ enum Writes<'a> {
     Card {
         /// The card as the job would write it.
         card: &'a SourceCard,
-        /// The item's base: the import's pending commit.
+        /// The item's base: the import's pending commit, or the redigest's base revision.
         since: &'a Revision,
         /// What change since the base blocks the write.
         rule: Blocked,
@@ -141,6 +144,8 @@ enum Writes<'a> {
 enum Blocked {
     /// Any change or deletion (an import's converted card against its pending card).
     AnyChange,
+    /// A deletion, or a change of the original the card shows (a redigest).
+    OriginalChanged,
 }
 
 /// The type name a new source card gets: no SPEC sentence fixes one, so this is the lane's
@@ -403,22 +408,38 @@ pub(crate) async fn redigest(
             ..appearance
         },
     };
-    let committed = commit_on(
+    let writes = Writes::Card {
+        card: &card,
+        since: base_revision,
+        rule: Blocked::OriginalChanged,
+    };
+    let landed = commit(
         ports,
         claimed,
         scope,
-        (base_revision.clone(), 0),
+        (base_revision, 0),
         format!("Redigest {}: {}", card.title, outcome_word(&converted)),
-        vec![TreeEdit::WriteSourceCard(Box::new(card))],
+        writes,
         Arc::clone(&ports.check),
     )
     .await?;
-    Ok(Done {
-        revision: Some(committed.revision),
-        item_ids: vec![item_id],
-        outputs: converted.outputs,
-        warnings: committed.warnings,
+    let refusal = |message: String| Done {
+        refused: Some(ApiError::new(ErrorCode::Conflict, message)),
         ..Done::default()
+    };
+    Ok(match landed {
+        Landed::Committed(committed) => Done {
+            revision: Some(committed.revision),
+            item_ids: vec![item_id],
+            outputs: converted.outputs,
+            warnings: committed.warnings,
+            ..Done::default()
+        },
+        Landed::Refused(error) => refusal(format!(
+            "the redigest collides with what the workspace holds now: {}",
+            error.message
+        )),
+        Landed::Kept(why) => refusal(format!("the redigest was not written: {why}")),
     })
 }
 
@@ -671,7 +692,8 @@ async fn commit(
 
 /// `card` written onto the head's version of its item, or why it must not be written: the item
 /// is gone at `head`, or changed since `since` in the way `rule` blocks. The head's path,
-/// title, type and properties are kept.
+/// title, type and properties are kept; a redigest also keeps the head's appearance and its
+/// supplied text, with the new extraction.
 async fn onto_head(
     ports: &HandlerPorts,
     scope: &StorageScope,
@@ -700,6 +722,29 @@ async fn onto_head(
                     then.summary.path.as_str()
                 )));
             }
+        }
+        Blocked::OriginalChanged => {
+            let Some(appearance) = now.source.clone() else {
+                return Ok(Err(format!(
+                    "{} is no longer a source item",
+                    now.summary.path.as_str()
+                )));
+            };
+            let original = then.source.as_ref().map(|before| &before.object);
+            if original != Some(&appearance.object) {
+                return Ok(Err(format!(
+                    "the original of {} changed after the job's base revision",
+                    now.summary.path.as_str()
+                )));
+            }
+            let supplied = appearance.extraction.supplied.clone();
+            written.appearance = SourceAppearance {
+                extraction: Extraction {
+                    supplied,
+                    ..card.appearance.extraction.clone()
+                },
+                ..appearance
+            };
         }
     }
     written.path = now.summary.path.clone();

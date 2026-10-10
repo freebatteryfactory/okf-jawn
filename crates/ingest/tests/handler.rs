@@ -63,6 +63,7 @@ mod job_handler {
 
     const PURGE: &str = "00000000-0000-0000-0000-0000000000cc";
     const WORKSPACE: &str = "00000000-0000-0000-0000-0000000000aa";
+    const SOURCE_ITEM: &str = "00000000-0000-0000-0000-0000000000ac";
 
     fn tenant() -> Built<TenantId> {
         Ok(TenantId::try_from("tenant-a".to_owned())?)
@@ -1052,6 +1053,161 @@ mod job_handler {
         let (message, retryable) = some(entry.failures.first(), "the failure")?;
         assert!(message.contains("R-I5"), "{message}");
         assert!(!retryable);
+        Ok(())
+    }
+
+    /// A world whose base holds one converted source card at `inbox/report-pdf.md`, with a
+    /// property of its own; and a redigest of it against the base.
+    fn redigest_world(number: u128) -> Built<(World, okf_jawn_contract::identity::JobId, ItemId)> {
+        let world = world_with(Some(3), Vec::new())?;
+        let object = world.blobs.insert(b"%PDF report")?;
+        let item_id = serde_json::from_value::<ItemId>(json!(SOURCE_ITEM))?;
+        let mut properties = std::collections::BTreeMap::new();
+        let _previous = properties.insert("topic".to_owned(), json!("budget"));
+        let card = SourceCard {
+            item_id,
+            path: WorkspacePath::try_from("inbox/report-pdf.md".to_owned())?,
+            title: "Report".to_owned(),
+            type_name: "source".to_owned(),
+            body: "old text".to_owned(),
+            properties,
+            appearance: serde_json::from_value(json!({
+                "object": object.digest.as_str(),
+                "names": [{ "filename": "report.pdf", "folder": "", "observed_at": "2026-10-09T00:00:00.000Z", "supplied_by": "owner" }],
+                "media_type": "application/pdf",
+                "size": "11",
+                "metadata": {},
+                "extraction": {
+                    "outcome": { "status": "pending" },
+                    "page_count": null,
+                    "text_origin": "none",
+                    "corrected": false,
+                    "warnings": [],
+                },
+            }))?,
+        };
+        world
+            .versions
+            .at_base
+            .lock()
+            .map_err(|_| "poisoned")?
+            .push(card);
+        let id = job(
+            &world,
+            number,
+            workspace_scope()?,
+            JobSpec::Redigest {
+                item_id,
+                base_revision: base()?,
+                settings: ConversionSettings::default(),
+                pages: None,
+            },
+        )?;
+        Ok((world, id, item_id))
+    }
+
+    #[tokio::test]
+    async fn a_redigest_lands_over_an_unrelated_edit_and_runs_again_without_a_second_commit()
+    -> TestResult {
+        let (world, id, item_id) = redigest_world(30)?;
+        world.versions.edit_elsewhere(None)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let commits = world.versions.written()?;
+        let (ours, made) = some(commits.last(), "the redigest commit")?;
+        assert_eq!(
+            ours.mutation_id,
+            derive_commit_mutation_id(entry.created.mutation_id, 0)
+        );
+        // Written on the head, after the unrelated edit, not on the base.
+        assert_eq!(
+            Some(&ours.expected_head),
+            commits.first().map(|(_, revision)| revision)
+        );
+        let card = some(world.versions.item_at(made, item_id)?, "the card")?;
+        assert_eq!(
+            card.appearance.extraction.outcome,
+            ConversionOutcome::Completed
+        );
+        assert_eq!(card.properties.get("topic"), Some(&json!("budget")));
+        // The completion was lost: the same claim runs again and replays its commit.
+        let before = commits.len();
+        world
+            .records
+            .insert(id, entry.scope.clone(), entry.created.clone())?;
+        assert!(run(&world, id).await?);
+        assert_eq!(world.versions.written()?.len(), before);
+        assert_eq!(world.records.entry(id)?.job.state, JobState::Succeeded);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_redigest_of_a_moved_card_lands_at_its_new_path() -> TestResult {
+        let (world, id, item_id) = redigest_world(31)?;
+        let mut renamed = std::collections::BTreeMap::new();
+        let _previous = renamed.insert("topic".to_owned(), json!("audit"));
+        world.versions.edit_elsewhere_with(vec![
+            TreeEdit::MoveItem {
+                item_id,
+                destination: WorkspacePath::try_from("archive/report.md".to_owned())?,
+            },
+            TreeEdit::EditItem {
+                item_id,
+                body: "a person's text".to_owned(),
+                properties: renamed,
+            },
+        ])?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let commits = world.versions.written()?;
+        let (ours, made) = some(commits.last(), "the redigest commit")?;
+        let written = cards(&world)?;
+        let card = some(written.last(), "the written card")?;
+        // The head's path, title and properties are kept; the new extraction is written.
+        assert_eq!(card.path.as_str(), "archive/report.md");
+        assert_eq!(card.title, "Report");
+        assert_eq!(card.properties.get("topic"), Some(&json!("audit")));
+        assert_eq!(
+            card.appearance.extraction.outcome,
+            ConversionOutcome::Completed
+        );
+        assert_eq!(ours.author.subject, "owner");
+        assert!(world.versions.item_at(made, item_id)?.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_redigest_of_a_deleted_card_is_refused_for_good() -> TestResult {
+        let (world, id, item_id) = redigest_world(32)?;
+        world
+            .versions
+            .edit_elsewhere_with(vec![TreeEdit::DeleteItem { item_id }])?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert!(entry.completions.is_empty());
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("deleted"), "{message}");
+        assert!(!retryable);
+        // Nothing of the redigest was written: the deletion stands.
+        assert!(
+            world
+                .versions
+                .written()?
+                .iter()
+                .all(|(changes, _)| changes.author.subject != "owner")
+        );
+        let head = some(
+            world
+                .versions
+                .written()?
+                .last()
+                .map(|(_, revision)| revision.clone()),
+            "the head",
+        )?;
+        assert!(world.versions.item_at(&head, item_id)?.is_none());
         Ok(())
     }
 
