@@ -667,3 +667,252 @@ async fn a_failed_import_leaves_pending_puts_a_purge_deletes() -> Result<(), Api
     );
     Ok(())
 }
+
+/// A candidate of `target` on `head` under proposal 20, mutation `n`.
+async fn candidate(
+    storage: &Storage,
+    target: &StorageScope,
+    n: u128,
+    head: &Revision,
+) -> Result<Revision, ApiError> {
+    storage
+        .versions()
+        .create_candidate(
+            target,
+            okf_jawn_contract::identity::ProposalId(uuid::Uuid::from_u128(20)),
+            okf_jawn_core::storage::CandidateChanges {
+                mutation_id: mutation(n),
+                base: head.clone(),
+                author: person(),
+                message: "Propose".to_owned(),
+                edits: vec![card(item(13), "sources/c.md", &digest_of(b"zanzibar")?)?],
+            },
+            Arc::new(Accept),
+        )
+        .await
+}
+
+/// Assert that a Git write waiting for the workspace's lock while the purge is recorded is
+/// refused under the lock: `write` starts it while the test holds the lock.
+async fn refused_under_the_lock<T: std::fmt::Debug + Send + 'static>(
+    storage: &Storage,
+    target: &StorageScope,
+    write: JoinHandle<Result<T, ApiError>>,
+    holder: Holder,
+) -> Result<(), ApiError> {
+    let (release, holding) = holder;
+    // The write passes its first check at once and then waits for the lock.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    record_purge(storage, target).await?;
+    release.send(()).map_err(|error| fault(&error))?;
+    holding
+        .join()
+        .map_err(|_| fault(&"the lock holder stopped"))??;
+    let error = match write.await.map_err(|error| fault(&error))? {
+        Ok(written) => return Err(fault(&format!("the write landed: {written:?}"))),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert!(error.message.contains("purged by purge"), "{error}");
+    Ok(())
+}
+
+/// Ruling 4 (M6a): a candidate waiting for the workspace's lock when the purge is recorded is
+/// refused under the lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_candidate_waiting_for_the_workspace_lock_when_the_purge_is_recorded_is_refused()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, "local", 1, "Trip").await?;
+    let holder = hold_the_workspace(&storage, &target)?;
+    let writing = {
+        let storage = storage.clone();
+        let target = target.clone();
+        tokio::spawn(async move { candidate(&storage, &target, 4, &head).await })
+    };
+    refused_under_the_lock(&storage, &target, writing, holder).await
+}
+
+/// Ruling 4 (M6b): a promotion waiting for the workspace's lock when the purge is recorded is
+/// refused under the lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_promotion_waiting_for_the_workspace_lock_when_the_purge_is_recorded_is_refused()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, "local", 1, "Trip").await?;
+    let proposed = candidate(&storage, &target, 4, &head).await?;
+    let holder = hold_the_workspace(&storage, &target)?;
+    let writing = {
+        let versions = storage.versions();
+        let target = target.clone();
+        tokio::spawn(async move {
+            versions
+                .promote_candidate(
+                    &target,
+                    okf_jawn_core::storage::Promotion {
+                        mutation_id: mutation(5),
+                        proposal_id: okf_jawn_contract::identity::ProposalId(
+                            uuid::Uuid::from_u128(20),
+                        ),
+                        expected_head: head,
+                        candidate: proposed,
+                        approver: person(),
+                        message: "Accept".to_owned(),
+                    },
+                )
+                .await
+        })
+    };
+    refused_under_the_lock(&storage, &target, writing, holder).await
+}
+
+/// Ruling 4 (M5): an indexing reads and stores under the workspace's write lock, so it waits
+/// while another write holds the lock (the purge's repository step deletes the repository
+/// under it, then removes the index entries again).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_indexing_waits_for_the_workspace_lock() -> Result<(), ApiError> {
+    use okf_jawn_core::search::SearchIndex;
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, "local", 1, "Trip").await?;
+    let (release, holding) = hold_the_workspace(&storage, &target)?;
+    let indexing = {
+        let search = storage.search();
+        let target = target.clone();
+        tokio::spawn(async move { search.index_revision(&target, head).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !indexing.is_finished(),
+        "no indexing runs while another write holds the workspace"
+    );
+    release.send(()).map_err(|error| fault(&error))?;
+    holding
+        .join()
+        .map_err(|_| fault(&"the lock holder stopped"))??;
+    indexing.await.map_err(|error| fault(&error))??;
+    Ok(())
+}
+
+/// Ruling 4 (M2): a purge deletes an object while it holds the pin table's lock, so a put
+/// cannot pin between the touched check and the delete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_put_cannot_pin_while_the_objects_step_deletes() -> Result<(), ApiError> {
+    let pins = crate::pins::Pins::default();
+    let digest = digest_of(b"commonplace identical bytes")?;
+    let (sweep, _) = pins.sweep("local", "target")?;
+    let pinning = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let deleted = sweep.delete_unless_touched(&digest, || {
+        let (pins, digest, flag) = (pins.clone(), digest.clone(), Arc::clone(&pinning));
+        let putting = std::thread::spawn(move || {
+            let pinned = pins.pin("local", "survivor", &digest);
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            pinned.map(|_| ())
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let raced = pinning.load(std::sync::atomic::Ordering::SeqCst);
+        // Detach the thread: it pins once the lock is released.
+        drop(putting);
+        if raced {
+            return Err(fault(&"a put pinned while the delete ran"));
+        }
+        Ok(true)
+    })?;
+    assert!(deleted, "the untouched object was deleted");
+    Ok(())
+}
+
+/// Re-review probe U1 (M1): a survivor's write still running when the sweep begins, which
+/// ends and lands its card only after the reference read, keeps its object.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_survivor_write_running_when_the_sweep_begins_keeps_its_object() -> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let shared = b"commonplace identical bytes";
+    let (target, survivor, survivor_head, digest) = target_with(&storage, "local", shared).await?;
+    let (tenant_key, survivor_key) = crate::db::scope_key(&survivor);
+    let running = storage
+        .blobs
+        .pins()
+        .pin(&tenant_key, &survivor_key, &digest)?;
+    record_purge(&storage, &target).await?;
+    let holding = hold_the_object_step(&storage, &target)?;
+    let purging = spawn_purge(&storage, &target);
+    until_held(&storage, &target).await?;
+    running.end()?;
+    commit(
+        &storage,
+        &survivor,
+        4,
+        &survivor_head,
+        vec![card(item(12), "sources/b.md", &digest)?],
+    )
+    .await?;
+    holding.end()?;
+    let report = purging.await.map_err(|error| fault(&error))??;
+    assert!(
+        held(&storage, &survivor, &digest).await?,
+        "the survivor's object stays: {report:?}"
+    );
+    Ok(())
+}
+
+/// Ruling 5 (the drain bound; re-review probe U2, with the limit shortened to 3 s): a write of
+/// the target that never ends makes the purge stop with `Unavailable` and delete nothing; once
+/// it ends, repeating the purge completes it and deletes its bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_drain_limit_stops_the_purge_with_unavailable_and_a_repeat_resumes_it()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, "local", 1, "Trip").await?;
+    let late = b"zanzibar bytes of a stuck write";
+    let digest = digest_of(late)?;
+    let (tenant_key, workspace_key) = crate::db::scope_key(&target);
+    let stuck = storage
+        .blobs
+        .pins()
+        .pin(&tenant_key, &workspace_key, &digest)?;
+    {
+        let digest = digest.clone();
+        storage
+            .records
+            .transaction(move |transaction| {
+                crate::puts::record(transaction, &tenant_key, &workspace_key, &digest)
+            })
+            .await?;
+    }
+    storage
+        .blobs
+        .put_for(
+            &target.tenant_id,
+            Box::pin(std::io::Cursor::new(late.to_vec())),
+            1 << 20,
+            None,
+        )
+        .await?;
+    storage.blobs.pins().shorten_drain(Duration::from_secs(3))?;
+    record_purge(&storage, &target).await?;
+    match spawn_purge(&storage, &target)
+        .await
+        .map_err(|error| fault(&error))?
+    {
+        Ok(report) => return Err(fault(&format!("the purge completed: {report:?}"))),
+        Err(error) => assert_eq!(error.code, ErrorCode::Unavailable, "{error}"),
+    }
+    assert!(
+        held(&storage, &target, &digest).await?,
+        "nothing deleted yet"
+    );
+    stuck.end()?;
+    let report = spawn_purge(&storage, &target)
+        .await
+        .map_err(|error| fault(&error))??;
+    assert!(
+        !held(&storage, &target, &digest).await?,
+        "the stuck write's bytes go: {report:?}"
+    );
+    Ok(())
+}

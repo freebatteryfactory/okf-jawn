@@ -2349,5 +2349,88 @@ async fn purge_refuses_a_new_job_of_the_workspace_it_names() -> TestResult {
     Ok(())
 }
 
+/// Re-review probe Q3-hard: the completion is past its second refusal (pinned, recorded,
+/// retaining into the object store) when the purge is recorded. Whatever order things end in,
+/// nothing of the target stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn purge_leaves_nothing_of_an_upload_completion_past_its_second_check() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let data = directory.path().to_path_buf();
+    let storage = Storage::open(&data)?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let (_survivor, _) = create(&storage, 2, "Garden").await?;
+    let bytes: Vec<u8> = MARKER.repeat(6 << 20);
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            &target,
+            uuid!(8)?,
+            NewUpload {
+                filename: "big.bin".to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(bytes.len())?,
+                expected_sha256: None,
+                supplied_by: person("ana"),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            &target,
+            slot.id,
+            Box::pin(std::io::Cursor::new(bytes.clone())),
+            1 << 28,
+        )
+        .await?;
+    let digest = digest_of(&bytes)?;
+    drop(bytes);
+    let shard = data
+        .join("objects")
+        .join("local")
+        .join(some(digest.as_str().get(..2), "a digest")?);
+    let prefix = digest.as_str().to_owned();
+    let finishing = {
+        let uploads = storage.uploads();
+        let target = target.clone();
+        let id = slot.id;
+        let digest = digest.clone();
+        tokio::spawn(async move { uploads.complete(&target, id, digest).await })
+    };
+    // Past the second refusal once the object store's multipart file for the digest exists.
+    let started = std::time::Instant::now();
+    loop {
+        let begun = shard.exists()
+            && std::fs::read_dir(&shard)?.any(|entry| {
+                entry.is_ok_and(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            });
+        if begun {
+            break;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(60) || finishing.is_finished() {
+            return Err("the completion never began retaining".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_micros(200)).await;
+    }
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(&storage, &target, purge).await?;
+    let report = storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?;
+    let completion = finishing.await?;
+    // The completion is refused in its transaction, unless its record landed before the purge
+    // was recorded; either way nothing of the target stays.
+    eprintln!(
+        "Q3-hard: completion ok {}; report {report:?}",
+        completion.is_ok()
+    );
+    assert_eq!(marked_files(&data)?, Vec::<String>::new());
+    assert!(
+        !held(&storage, &target, &digest).await?,
+        "the object is gone"
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

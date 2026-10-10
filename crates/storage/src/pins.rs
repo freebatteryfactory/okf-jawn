@@ -53,6 +53,8 @@ struct Table {
     sweeps: Vec<Watch>,
     /// The identity the next pin or sweep gets.
     next: u64,
+    /// A shorter `DRAIN_LIMIT` a test sets.
+    drain_limit: Option<Duration>,
 }
 
 /// One running write's put of an object in a workspace.
@@ -173,6 +175,13 @@ impl Pins {
             .any(|watch| watch.tenant == tenant && watch.target == target && watch.draining))
     }
 
+    /// Make every later drain give up after `limit`; for a test of the bound.
+    #[cfg(test)]
+    pub(crate) fn shorten_drain(&self, limit: Duration) -> Result<(), ApiError> {
+        self.lock()?.drain_limit = Some(limit);
+        Ok(())
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, Table>, ApiError> {
         self.table
             .lock()
@@ -205,6 +214,7 @@ impl Sweep {
     /// purge resumes it.
     pub(crate) async fn drain(&self) -> Result<(), ApiError> {
         let started = std::time::Instant::now();
+        let limit = self.pins.lock()?.drain_limit.unwrap_or(DRAIN_LIMIT);
         loop {
             {
                 let mut table = self.pins.lock()?;
@@ -219,7 +229,7 @@ impl Sweep {
                     return Ok(());
                 }
             }
-            if started.elapsed() > DRAIN_LIMIT {
+            if started.elapsed() > limit {
                 return Err(ApiError::new(
                     ErrorCode::Unavailable,
                     format!(
