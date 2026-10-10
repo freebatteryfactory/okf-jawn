@@ -18,7 +18,10 @@ use okf_jawn_contract::workspace::ArtifactKind;
 use okf_jawn_core::credentials::{CredentialStore, NewConnector};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
-use okf_jawn_core::jobs::{JobScope, JobSpec, NewArtifact, NewJob, NewPurge, RecordStore};
+use okf_jawn_core::jobs::{
+    DerivedKind, DerivedObject, JobCompletion, JobScope, JobSpec, NewArtifact, NewJob, NewPurge,
+    RecordStore,
+};
 use okf_jawn_core::storage::{
     Backups, BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, ObjectInfo,
     Provenance, Purger, SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
@@ -333,6 +336,56 @@ fn contains(bytes: &[u8], marker: &[u8]) -> bool {
     bytes.windows(marker.len()).any(|window| window == marker)
 }
 
+/// A connector a replacement restore brought back is revoked: listed only with the revoked
+/// ones, never live (review B7, M10).
+async fn assert_connector_revoked(restored: &Storage) -> TestResult {
+    let connectors = restored.credentials().list_connectors(true).await?;
+    assert!(
+        some(connectors.first(), "the connector")?
+            .revoked_at
+            .is_some(),
+        "a connector comes back revoked: no secret is kept"
+    );
+    assert!(
+        restored
+            .credentials()
+            .list_connectors(false)
+            .await?
+            .is_empty(),
+        "a restored connector is not listed or authenticated as live"
+    );
+    Ok(())
+}
+
+/// A replacement restore into a directory that holds only the repository directory of the
+/// archived workspace, with no record of it, is refused (review B7, M09).
+async fn refuse_a_leftover_repository(
+    installation: &Path,
+    archives: &[std::path::PathBuf],
+    workspace: &StorageScope,
+) -> TestResult {
+    let other = tempfile::tempdir()?;
+    let leftover = Storage::open(other.path())?;
+    std::fs::create_dir_all(
+        leftover
+            .data()
+            .repositories_path()
+            .join("local")
+            .join(format!("{}.git", workspace.workspace_id.0)),
+    )?;
+    let error = err_of(
+        leftover
+            .backups()
+            .restore_replacement(installation, archives)
+            .await,
+    )?;
+    assert!(
+        error.code == ErrorCode::Conflict && error.message.contains("already exists"),
+        "a repository directory left in place is not replaced: {error}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn backup_a_workspace_archive_holds_its_history_drafts_and_objects_only() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -481,6 +534,20 @@ async fn backup_an_installation_archive_holds_no_workspace_content() -> TestResu
         ErrorCode::NotFound,
         "only an installation archive is read back"
     );
+    let workspace_archive = backups
+        .write_workspace_archive(&fixture.workspace, uuid!(52)?)
+        .await?;
+    let error = err_of(
+        backups
+            .open_installation_archive(&tenant, &workspace_archive.digest, 0, 1)
+            .await
+            .map(|read| read.object),
+    )?;
+    assert_eq!(
+        error.code,
+        ErrorCode::NotFound,
+        "a workspace archive is not read back as an installation archive"
+    );
     Ok(())
 }
 
@@ -561,13 +628,7 @@ async fn backup_replacement_restore_after_deleting_the_data_directory() -> TestR
         .versions()
         .show(&workspace, &candidate, uuid!(12)?)
         .await?;
-    let connectors = restored.credentials().list_connectors(true).await?;
-    assert!(
-        some(connectors.first(), "the connector")?
-            .revoked_at
-            .is_some(),
-        "a connector comes back revoked: no secret is kept"
-    );
+    assert_connector_revoked(&restored).await?;
     let error = err_of(
         restored
             .backups()
@@ -583,6 +644,83 @@ async fn backup_replacement_restore_after_deleting_the_data_directory() -> TestR
         error.message.contains("already exists"),
         "refused before anything is written: {}",
         error.message
+    );
+    refuse_a_leftover_repository(&installation, &archives, &workspace).await?;
+    Ok(())
+}
+
+/// Review B7 (M11, M12): an archive copies every object its records name (a dataset, a job
+/// output), and never a written history, even where a job output names it.
+#[tokio::test]
+async fn backup_a_workspace_archive_holds_every_object_its_records_name() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let (storage, workspace) = (&fixture.storage, &fixture.workspace);
+    let dataset = put(storage, workspace, b"a recorded dataset").await?.digest;
+    storage
+        .records()
+        .record_derived_object(
+            workspace,
+            DerivedObject {
+                item_id: uuid!(11)?,
+                revision: fixture.head.clone(),
+                digest: dataset.clone(),
+                kind: DerivedKind::Dataset,
+                media_type: "text/csv".to_owned(),
+            },
+        )
+        .await?;
+    let output = put(storage, workspace, b"a job output").await?.digest;
+    let history = storage
+        .versions()
+        .write_history(workspace, &fixture.head, uuid!(33)?)
+        .await?
+        .digest;
+    let records = storage.records();
+    let job_scope = JobScope::Workspace(workspace.clone());
+    let job = records
+        .create_job(
+            &job_scope,
+            NewJob {
+                mutation_id: uuid!(34)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+    records
+        .complete_job(JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: None,
+            restore: None,
+            outputs: vec![output.clone(), history.clone()],
+            warnings: Vec::new(),
+        })
+        .await?;
+    let archive = storage
+        .backups()
+        .write_workspace_archive(workspace, uuid!(40)?)
+        .await?;
+    let names = entries(
+        &storage
+            .data()
+            .objects_path()
+            .join("local")
+            .join(archive.digest.as_str().get(..2).unwrap_or_default())
+            .join(archive.digest.as_str()),
+    )?;
+    for digest in [&dataset, &output] {
+        assert!(
+            names.contains(&format!("objects/{}", digest.as_str())),
+            "{digest:?} is copied"
+        );
+    }
+    assert!(
+        !names.contains(&format!("objects/{}", history.as_str())),
+        "a written history never is"
     );
     Ok(())
 }

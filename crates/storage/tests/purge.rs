@@ -30,6 +30,7 @@ use okf_jawn_core::jobs::{
     NewPurge, RecordStore,
 };
 use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationStore};
+use okf_jawn_core::sandbox::SandboxCapabilityStore;
 use okf_jawn_core::search::SearchIndex;
 use okf_jawn_core::storage::{
     Backups, BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, ObjectInfo,
@@ -1142,6 +1143,160 @@ async fn purge_keeps_an_object_another_workspace_stores_before_and_references_af
     Ok(())
 }
 
+/// Target rows of every kind that names an object (a dataset, a job output with its job's
+/// control, a sandbox capability), each over an object only that row names; returns them.
+async fn every_row_kind(fixture: &Fixture) -> Fallible<Vec<Digest>> {
+    let (storage, target) = (&fixture.storage, &fixture.target);
+    let revision = some(fixture.revisions.get(1), "the seeded revision")?.clone();
+    let dataset = put(storage, target, b"zanzibar dataset").await?.digest;
+    storage
+        .records()
+        .record_derived_object(
+            target,
+            DerivedObject {
+                item_id: uuid!(11)?,
+                revision: revision.clone(),
+                digest: dataset.clone(),
+                kind: DerivedKind::Dataset,
+                media_type: "text/csv".to_owned(),
+            },
+        )
+        .await?;
+    let output = put(storage, target, b"zanzibar job output").await?.digest;
+    let job_scope = JobScope::Workspace(target.clone());
+    let records = storage.records();
+    for (mutation, finish) in [(33_u32, true), (34, false)] {
+        let job = records
+            .create_job(
+                &job_scope,
+                NewJob {
+                    mutation_id: uuid!(mutation)?,
+                    initiator: person("ana"),
+                    spec: JobSpec::BackupWorkspace,
+                },
+            )
+            .await?;
+        if finish {
+            let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+            records
+                .complete_job(JobCompletion {
+                    lease: claimed.lease,
+                    revision: None,
+                    item_ids: Vec::new(),
+                    artifact: None,
+                    restore: None,
+                    outputs: vec![output.clone()],
+                    warnings: Vec::new(),
+                })
+                .await?;
+        } else {
+            records.cancel_job(&job_scope, uuid!(35)?, job.id).await?;
+        }
+    }
+    let rendered = put(storage, target, b"zanzibar sandbox render")
+        .await?
+        .digest;
+    storage
+        .sandbox()
+        .mint(
+            target,
+            [7; 32],
+            okf_jawn_core::sandbox::SandboxMint {
+                item_id: uuid!(11)?,
+                revision,
+                object: rendered.clone(),
+                media_type: "text/html".to_owned(),
+                expires_at: serde_json::from_value(json!("2099-01-01T00:00:00.000Z"))?,
+            },
+        )
+        .await?;
+    Ok(vec![dataset, output, rendered])
+}
+
+/// Review B7 (M01-M04, M13): every row kind that names an object is reached, and an asset the
+/// survivor reaches only through its own conversion record stays.
+#[tokio::test]
+async fn purge_reaches_every_row_kind_and_keeps_a_survivors_converted_asset() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let (storage, survivor) = (&fixture.storage, &fixture.survivor);
+    let only_rows = every_row_kind(&fixture).await?;
+    // The asset: the target names it through a dataset row, the survivor only through the
+    // conversion record its card names.
+    let asset = put(storage, &fixture.target, b"commonplace page image")
+        .await?
+        .digest;
+    storage
+        .records()
+        .record_derived_object(
+            &fixture.target,
+            DerivedObject {
+                item_id: uuid!(11)?,
+                revision: some(fixture.revisions.get(1), "the seeded revision")?.clone(),
+                digest: asset.clone(),
+                kind: DerivedKind::Dataset,
+                media_type: "image/png".to_owned(),
+            },
+        )
+        .await?;
+    let original = put(storage, survivor, b"the survivor's own scan")
+        .await?
+        .digest;
+    let record = json!({ "assets": [{ "digest": asset.as_str() }] }).to_string();
+    let record = put(storage, survivor, record.as_bytes()).await?.digest;
+    let head = storage.versions().head(survivor).await?;
+    let converted = card(uuid!(15)?, "sources/own.md", &original, Some(&record))?;
+    commit(storage, survivor, 16, &head, vec![converted]).await?;
+    purge_target(&fixture).await?;
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    for digest in &only_rows {
+        assert!(!held(storage, survivor, digest).await?, "{digest:?} goes");
+    }
+    assert!(
+        held(storage, survivor, &asset).await?,
+        "an asset the survivor's conversion record names stays"
+    );
+    Ok(())
+}
+
+/// Review B7 (M05): a row of the target that lands after the rows step (a write that passed the
+/// refusal before the purge was recorded) is removed by the rows pass after the repository
+/// goes. The purge is stopped at the index step, the row is written, the purge is resumed.
+#[tokio::test]
+async fn purge_removes_a_row_written_after_its_rows_step() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let index = rusqlite::Connection::open(directory.path().join("index.sqlite"))?;
+    index.execute_batch(
+        "CREATE TRIGGER stop_purge BEFORE DELETE ON index_items
+         BEGIN SELECT RAISE(ABORT, 'stopped at the index step'); END;",
+    )?;
+    let purge: PurgeId = uuid!(60)?;
+    record_purge(&fixture.storage, &fixture, purge).await?;
+    let purger = fixture.storage.purger();
+    let target = fixture.target.workspace_id;
+    err_of(
+        purger
+            .purge_workspace(&tenant()?, uuid!(61)?, purge, target)
+            .await,
+    )?;
+    {
+        let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+        records.execute(
+            "INSERT INTO receipts (receipt_id, tenant_id, workspace_id, mutation_id, record)
+             VALUES (?1, 'local', ?2, NULL, '{\"late\": \"zanzibar\"}')",
+            [uuid_text(44), target.0.to_string()],
+        )?;
+    }
+    index.execute_batch("DROP TRIGGER stop_purge;")?;
+    drop(index);
+    purger
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target)
+        .await?;
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
 #[tokio::test]
 async fn purge_workspace_resumes_by_repeating_after_a_failure() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -1177,6 +1332,17 @@ async fn purge_workspace_resumes_by_repeating_after_a_failure() -> TestResult {
         error.code,
         ErrorCode::NotFound,
         "the rows step ran before the failure"
+    );
+    let error = err_of(
+        storage
+            .purger()
+            .purge_workspace(&tenant, uuid!(61)?, purge, survivor.workspace_id)
+            .await,
+    )?;
+    assert_eq!(
+        error.code,
+        ErrorCode::Conflict,
+        "a purge identity resumes only the workspace it plans"
     );
     std::fs::remove_dir_all(&obstacle)?;
     let report = storage
