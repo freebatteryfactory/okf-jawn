@@ -29,8 +29,11 @@
 //!    term stays in an index segment.
 //! 5. **Repository**: its repository is deleted under the workspace's write lock; then the rows
 //!    step runs again, for a row a write in flight added after step 3.
-//! 6. **Objects**: what every surviving workspace and tenant record references is read now, and
-//!    each planned object nobody else references is deleted; the others are counted as kept.
+//! 6. **Objects**: a sweep of the in-flight pins begins (`pins`), then what every surviving
+//!    workspace and tenant record references is read; the step waits for the target's running
+//!    writes, adds the objects its pins name, and deletes each planned object that no surviving
+//!    reference names and no other workspace pinned since the sweep began; the others are
+//!    counted as kept.
 //! 7. **Vacuum**: both databases are rebuilt without free pages and their write-ahead logs folded
 //!    back, so removed rows leave no bytes behind; then the report is recorded.
 //!
@@ -497,12 +500,19 @@ impl StoragePurger {
     }
 
     /// Step 6: delete each planned object no survivor references; (removed, kept).
+    ///
+    /// The sweep (`pins`) begins before any surviving reference is read, so an object is
+    /// deleted only when no durable reference the step read names it and no other workspace
+    /// pinned it at any moment from the start of that read until the delete, which runs under
+    /// the pin table's lock.
     async fn objects(
         &self,
         scope: &StorageScope,
         plan: &WorkspacePlan,
     ) -> Result<(usize, usize), ApiError> {
         let (tenant, workspace) = scope_key(scope);
+        let blobs = self.storage.blobs.clone();
+        let (sweep, pinned) = blobs.pins().sweep(&tenant, &workspace)?;
         let archives = plan.archives.clone();
         let mut surviving = self
             .storage
@@ -512,21 +522,19 @@ impl StoragePurger {
             })
             .await?;
         let repositories = self.storage.repositories.clone();
-        let blobs = self.storage.blobs.clone();
         let scope = scope.clone();
         let surviving = {
             let (blobs, scope) = (blobs.clone(), scope.clone());
             blocking(move || {
-                let (tenant, target) = scope_key(&scope);
                 let mut found = BTreeSet::new();
                 for path in repositories.others(&scope.tenant_id, &scope)? {
                     let repository = git2::Repository::open_bare(&path)
                         .map_err(|error| crate::git::repo::git(&error))?;
                     found.extend(references::history(&repository)?.objects);
                 }
-                // An object another workspace stored and is about to reference (pinned) is a
-                // surviving reference.
-                found.extend(blobs.pins().others(&tenant, &target)?);
+                // The objects other workspaces had pinned when the sweep began are about to be
+                // referenced: the assets their conversion records name are kept too.
+                found.extend(pinned);
                 references::follow_records(&blobs, &scope.tenant_id, &mut found)?;
                 surviving.extend(found);
                 Ok(surviving)
@@ -536,9 +544,8 @@ impl StoragePurger {
         // Every write of the target that pinned before the purge was recorded has ended; one
         // that pins from now on stores nothing (`LocalBlobs::put_pinned`). The bytes its pins
         // name, a refused upload completion's among them, go with the target.
-        let (tenant, target) = scope_key(&scope);
         let mut planned = plan.objects.clone();
-        for digest in blobs.pins().drain(&tenant, &target).await? {
+        for digest in sweep.drain().await? {
             if blobs.local_path(&scope.tenant_id, &digest)?.is_file() {
                 planned.insert(digest);
             }
@@ -548,11 +555,9 @@ impl StoragePurger {
             let mut kept = 0_usize;
             for digest in &planned {
                 let deleted = !surviving.contains(digest)
-                    && blobs
-                        .pins()
-                        .delete_unless_pinned(&tenant, &target, digest, || {
-                            blobs.remove_for(&scope.tenant_id, digest)
-                        })?;
+                    && sweep.delete_unless_touched(digest, || {
+                        blobs.remove_for(&scope.tenant_id, digest)
+                    })?;
                 if deleted {
                     removed = removed.saturating_add(1);
                 } else {

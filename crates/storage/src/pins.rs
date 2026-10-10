@@ -1,4 +1,4 @@
-//! In-flight object pins (review B6, windows 1 and 2).
+//! In-flight object pins and the purge's sweep of them (review B6, windows 1 and 2).
 //!
 //! Objects are shared inside a tenant, and a record that references a freshly stored object
 //! lands only later: a job's outputs when it completes, a card when its commit lands, an
@@ -13,17 +13,31 @@
 //! - **abandoned** when the write failed after it may have stored the bytes: no record will
 //!   name them. A `Pinned` dropped unresolved (a cancelled future) is abandoned too.
 //!
-//! A purge's object step uses the pins of its target: it waits until the target holds no
-//! active pin (`Pins::drain`), and then deletes the target's pending and abandoned objects
-//! that no survivor references, the bytes of a write the purge refused among them. A target
-//! put that pins after the drain looked finds the purge record when it checks again after
-//! pinning (`LocalBlobs::put_pinned`) and stores nothing.
+//! A purge's object step runs as a `Sweep`, registered here before the step reads any
+//! surviving reference. Its invariant: a candidate object is deleted only when it holds no
+//! durable reference visible to the step, and no pin of another workspace existed for it at
+//! any moment from the start of the reference read until its deletion.
+//!
+//! - The sweep's touched set starts as the digests of every live pin of another workspace
+//!   (active or pending), and every pin another workspace takes later is added to it, under
+//!   the same lock. A release never removes a digest from it. A pin released before the sweep
+//!   began belongs to a record that was durable before the reference read began, so the read
+//!   sees that record.
+//! - Each delete runs under that lock (`Sweep::delete_unless_touched`). A put pins before it
+//!   looks whether the object is held, so a put that pins after a delete finds the object
+//!   missing and writes it again.
+//! - Before the target's objects go, the sweep waits until the target holds no active pin
+//!   (`Sweep::drain`), and then deletes the target's pending and abandoned objects that no
+//!   survivor references, the bytes of a write the purge refused among them. A target put that
+//!   pins after the drain looked finds the purge record when it checks again after pinning
+//!   (`LocalBlobs::put_pinned`) and stores nothing.
 //!
 //! Pins live in memory: the data directory has one writer process, and a crash ends every
 //! write in flight with it, so after a restart no pin is owed (a retried job stores its object
 //! again). A pin is dropped after `PIN_LIFETIME_MS` whatever its state; until then a pending
 //! pin whose record never lands (a failed job) only keeps an object its workspace stored.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -43,7 +57,9 @@ pub(crate) struct Pins {
 #[derive(Debug, Default)]
 struct Table {
     pins: Vec<Pin>,
-    /// The identity the next pin gets.
+    /// The object steps running now.
+    sweeps: Vec<Watch>,
+    /// The identity the next pin or sweep gets.
     next: u64,
 }
 
@@ -66,12 +82,33 @@ enum State {
     Abandoned,
 }
 
+/// What one running object step has seen in the table.
+#[derive(Debug)]
+struct Watch {
+    id: u64,
+    tenant: String,
+    target: String,
+    /// Every digest a workspace other than the target pinned since the step began.
+    touched: BTreeSet<Digest>,
+    /// Whether the step is waiting for the target's active pins (`Sweep::drain`).
+    draining: bool,
+}
+
 /// The pin of one write that is still running; abandoned when dropped unresolved.
 #[derive(Debug)]
 pub(crate) struct Pinned {
     pins: Pins,
     id: u64,
     resolved: bool,
+}
+
+/// One running object step of a purge of `target`; removed from the table when dropped.
+#[derive(Debug)]
+pub(crate) struct Sweep {
+    pins: Pins,
+    id: u64,
+    tenant: String,
+    target: String,
 }
 
 /// How long a pin keeps its object at most: longer than any one write in flight.
@@ -85,7 +122,8 @@ const DRAIN_LIMIT: Duration = Duration::from_mins(10);
 
 impl Pins {
     /// Pin `digest` for a write in `workspace` of `tenant`; the pin is active until the write
-    /// resolves the returned `Pinned`.
+    /// resolves the returned `Pinned`. Every running sweep of another workspace of the tenant
+    /// marks the digest touched.
     pub(crate) fn pin(
         &self,
         tenant: &str,
@@ -104,6 +142,13 @@ impl Pins {
             pinned_ms,
             state: State::Active,
         });
+        for watch in table
+            .sweeps
+            .iter_mut()
+            .filter(|watch| watch.tenant == tenant && watch.target != workspace)
+        {
+            watch.touched.insert(digest.clone());
+        }
         Ok(Pinned {
             pins: self.clone(),
             id,
@@ -112,7 +157,8 @@ impl Pins {
     }
 
     /// Release one pending pin of `workspace` for each of `digests`: its referencing record is
-    /// durable now. A digest with no pending pin releases nothing.
+    /// durable now. A digest with no pending pin releases nothing. A running sweep keeps the
+    /// digest as touched.
     pub(crate) fn release<'a>(
         &self,
         workspace: &str,
@@ -130,85 +176,50 @@ impl Pins {
         Ok(())
     }
 
-    /// The live pins of `tenant` held by workspaces other than `target`, active or pending:
-    /// objects a surviving workspace is about to reference. Expired pins are dropped.
-    pub(crate) fn others(&self, tenant: &str, target: &str) -> Result<Vec<Digest>, ApiError> {
-        let table = self.live()?;
-        Ok(table
+    /// Begin the object step of a purge of `target` (module header); returns the sweep and the
+    /// digests it is touched by from the start, so the step can follow conversion records
+    /// among them. Expired pins are dropped first.
+    pub(crate) fn sweep(
+        &self,
+        tenant: &str,
+        target: &str,
+    ) -> Result<(Sweep, BTreeSet<Digest>), ApiError> {
+        let mut table = self.live()?;
+        let touched: BTreeSet<Digest> = table
             .pins
             .iter()
             .filter(|pin| {
                 pin.tenant == tenant && pin.workspace != target && pin.state != State::Abandoned
             })
             .map(|pin| pin.digest.clone())
-            .collect())
+            .collect();
+        let id = table.next;
+        table.next = table.next.saturating_add(1);
+        table.sweeps.push(Watch {
+            id,
+            tenant: tenant.to_owned(),
+            target: target.to_owned(),
+            touched: touched.clone(),
+            draining: false,
+        });
+        let sweep = Sweep {
+            pins: self.clone(),
+            id,
+            tenant: tenant.to_owned(),
+            target: target.to_owned(),
+        };
+        Ok((sweep, touched))
     }
 
-    /// Wait until `workspace` of `tenant` holds no active pin, then return the objects its
-    /// pending and abandoned pins name: bytes it stored that no record of it may name.
-    ///
-    /// Only a purge calls this, after the purge is recorded: every write of the workspace that
-    /// pins from then on is refused before it stores anything, and every write that pinned
-    /// earlier ends (a record write refuses inside its transaction), so the wait is bounded by
-    /// the writes already running. A write that has not ended after `DRAIN_LIMIT` stops the
-    /// purge with `Unavailable`; repeating the purge resumes it.
-    pub(crate) async fn drain(
-        &self,
-        tenant: &str,
-        workspace: &str,
-    ) -> Result<Vec<Digest>, ApiError> {
-        let started = std::time::Instant::now();
-        loop {
-            {
-                let table = self.live()?;
-                let mut active = false;
-                let mut held = Vec::new();
-                for pin in table
-                    .pins
-                    .iter()
-                    .filter(|pin| pin.tenant == tenant && pin.workspace == workspace)
-                {
-                    active = active || pin.state == State::Active;
-                    held.push(pin.digest.clone());
-                }
-                if !active {
-                    return Ok(held);
-                }
-            }
-            if started.elapsed() > DRAIN_LIMIT {
-                return Err(ApiError::new(
-                    ErrorCode::Unavailable,
-                    format!(
-                        "a write to workspace {workspace} that began before the purge was \
-                         recorded is still running; repeat the purge to resume it"
-                    ),
-                ));
-            }
-            tokio::time::sleep(DRAIN_POLL).await;
-        }
-    }
-
-    /// Run `delete` for `digest` of `tenant` unless a workspace other than `target` holds a
-    /// live pin on it; returns whether it ran. The table stays locked meanwhile, so a put pins
-    /// either before this check (and the object is kept) or after the delete (and the put,
-    /// which checks whether the object is held only after it pinned, stores it again).
-    pub(crate) fn delete_unless_pinned(
-        &self,
-        tenant: &str,
-        target: &str,
-        digest: &Digest,
-        delete: impl FnOnce() -> Result<bool, ApiError>,
-    ) -> Result<bool, ApiError> {
-        let table = self.live()?;
-        if table.pins.iter().any(|pin| {
-            pin.tenant == tenant
-                && pin.workspace != target
-                && pin.state != State::Abandoned
-                && pin.digest == *digest
-        }) {
-            return Ok(false);
-        }
-        delete().map(|_| true)
+    /// Whether a sweep of `target` is waiting for its active pins; for tests that act inside
+    /// that wait, which comes after the sweep read every surviving reference.
+    #[cfg(test)]
+    pub(crate) fn draining(&self, tenant: &str, target: &str) -> Result<bool, ApiError> {
+        Ok(self
+            .lock()?
+            .sweeps
+            .iter()
+            .any(|watch| watch.tenant == tenant && watch.target == target && watch.draining))
     }
 
     /// The table with expired pins dropped.
@@ -267,11 +278,87 @@ impl Pinned {
     }
 }
 
+impl Sweep {
+    /// Wait until the target holds no active pin, then return the objects its pending and
+    /// abandoned pins name: bytes it stored that no record of it may name.
+    ///
+    /// Only a purge sweeps, after the purge is recorded: every write of the target that pins
+    /// from then on is refused before it stores anything, and every write that pinned earlier
+    /// ends (a record write refuses inside its transaction), so the wait is bounded by the
+    /// writes already running. A write that has not ended after `DRAIN_LIMIT` stops the purge
+    /// with `Unavailable`; repeating the purge resumes it.
+    pub(crate) async fn drain(&self) -> Result<Vec<Digest>, ApiError> {
+        let started = std::time::Instant::now();
+        loop {
+            {
+                let mut table = self.pins.live()?;
+                if let Some(watch) = table.sweeps.iter_mut().find(|watch| watch.id == self.id) {
+                    watch.draining = true;
+                }
+                let mut active = false;
+                let mut held = Vec::new();
+                for pin in table
+                    .pins
+                    .iter()
+                    .filter(|pin| pin.tenant == self.tenant && pin.workspace == self.target)
+                {
+                    active = active || pin.state == State::Active;
+                    held.push(pin.digest.clone());
+                }
+                if !active {
+                    return Ok(held);
+                }
+            }
+            if started.elapsed() > DRAIN_LIMIT {
+                return Err(ApiError::new(
+                    ErrorCode::Unavailable,
+                    format!(
+                        "a write to workspace {} that began before the purge was recorded is \
+                         still running; repeat the purge to resume it",
+                        self.target
+                    ),
+                ));
+            }
+            tokio::time::sleep(DRAIN_POLL).await;
+        }
+    }
+
+    /// Run `delete` for `digest` unless another workspace pinned it since the sweep began;
+    /// returns whether it ran. The table stays locked meanwhile, so a put pins either before
+    /// this check (and the object is kept) or after the delete (and the put, which looks
+    /// whether the object is held only after it pinned, stores it again).
+    pub(crate) fn delete_unless_touched(
+        &self,
+        digest: &Digest,
+        delete: impl FnOnce() -> Result<bool, ApiError>,
+    ) -> Result<bool, ApiError> {
+        let table = self.pins.lock()?;
+        let watch = table
+            .sweeps
+            .iter()
+            .find(|watch| watch.id == self.id)
+            .ok_or_else(|| internal("a purge's sweep left the pin table while it ran"))?;
+        if watch.touched.contains(digest) {
+            return Ok(false);
+        }
+        delete().map(|_| true)
+    }
+}
+
 impl Drop for Pinned {
     fn drop(&mut self) {
         if !self.resolved {
             // A poisoned table is already reported to every later caller.
             let _ = self.pins.resolve(self.id, Some(State::Abandoned));
+        }
+    }
+}
+
+impl Drop for Sweep {
+    fn drop(&mut self) {
+        // A poisoned table is already reported to every later caller.
+        if let Ok(mut table) = self.pins.lock() {
+            table.sweeps.retain(|watch| watch.id != self.id);
         }
     }
 }
