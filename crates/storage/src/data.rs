@@ -189,17 +189,15 @@ impl DataDir {
         let mut file =
             File::create(&temporary).map_err(|error| io_error("write", &temporary, &error))?;
         file.write_all(format!("{body}\n").as_bytes())
-            .and_then(|()| file.sync_all())
+            .and_then(|()| synced(&file, "sync format.json.tmp"))
             .map_err(|error| io_error("write and sync", &temporary, &error))?;
         drop(file);
-        steps::record("sync format.json.tmp");
         std::fs::rename(&temporary, &path).map_err(|error| io_error("replace", &path, &error))?;
         steps::record("rename");
         if cfg!(unix) {
             File::open(&self.root)
-                .and_then(|directory| directory.sync_all())
+                .and_then(|directory| synced(&directory, "sync directory"))
                 .map_err(|error| io_error("sync", &self.root, &error))?;
-            steps::record("sync directory");
         }
         Ok(())
     }
@@ -217,6 +215,13 @@ impl DataDir {
         }
         std::fs::create_dir_all(&staging).map_err(|error| io_error("create", &staging, &error))
     }
+}
+
+/// Sync `file` to disk and record `step` (in unit tests) once it is synced.
+fn synced(file: &File, step: &'static str) -> std::io::Result<()> {
+    file.sync_all()?;
+    steps::record(step);
+    Ok(())
 }
 
 /// A filesystem failure naming the path.
