@@ -7,10 +7,11 @@
 //! - Linux: the child sets its own `RLIMIT_DATA` as the first thing it does.
 //! - macOS: a supervisor watchdog samples the child's memory every `WATCHDOG_SAMPLE_PERIOD_MS`
 //!   and kills it (Tokio's `start_kill`, SIGKILL) at `watchdog_threshold`, the cap minus a
-//!   headroom. The metric is read in one private function, `footprint`. Today it reads
-//!   sysinfo's resident set, which under-reports once pages are compressed; Batch B moves that
-//!   one function to libproc's `phys_footprint` (what jetsam uses). The owner has not yet
-//!   confirmed that the watchdog counts as the hard cap there.
+//!   headroom. The metric is read in one private function, `footprint`: libproc's
+//!   `pidrusage::<RUsageInfoV2>` and its `ri_phys_footprint`, the physical footprint macOS
+//!   itself uses for memory pressure (jetsam), which unlike the resident set still counts
+//!   compressed pages. The owner has not yet confirmed that the watchdog counts as the hard cap
+//!   there. That function compiles only on macOS; no macOS target or runner builds it here.
 //!
 //! `spawn_capped` starts a child under the cap and `supervise` waits for it under the time
 //! bound, keeping the tail of its stderr. The child learns its cap from `MEMORY_LIMIT_ENV`,
@@ -342,27 +343,26 @@ async fn watchdog(pid: Option<u32>, limit_bytes: u64) {
         WATCHDOG_SAMPLE_PERIOD_MS,
         WORST_ALLOCATION_RATE_BYTES_PER_SECOND,
     );
-    let mut system = sysinfo::System::new();
     let mut ticks = tokio::time::interval(Duration::from_millis(WATCHDOG_SAMPLE_PERIOD_MS));
     loop {
         let _instant = ticks.tick().await;
-        if footprint(&mut system, pid).is_some_and(|bytes| bytes >= threshold) {
+        if footprint(pid).is_some_and(|bytes| bytes >= threshold) {
             return;
         }
     }
 }
 
-/// The one function that reads the child's memory for the watchdog. Today: sysinfo's resident
-/// set (`Process::memory`); Batch B replaces it with libproc's `phys_footprint`.
+/// The one function that reads the child's memory for the watchdog: its physical footprint,
+/// from libproc 0.14.11's `pidrusage::<RUsageInfoV2>` (`proc_pid_rusage`, flavor V2), field
+/// `ri_phys_footprint` (`src/libproc/pid_rusage.rs`). `None` when the child cannot be read
+/// (it has already exited).
 #[cfg(target_os = "macos")]
-fn footprint(system: &mut sysinfo::System, pid: u32) -> Option<u64> {
-    let pid = sysinfo::Pid::from_u32(pid);
-    let _refreshed = system.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[pid]),
-        true,
-        sysinfo::ProcessRefreshKind::nothing().with_memory(),
-    );
-    system.process(pid).map(sysinfo::Process::memory)
+fn footprint(pid: u32) -> Option<u64> {
+    use libproc::libproc::pid_rusage::{RUsageInfoV2, pidrusage};
+    let pid = i32::try_from(pid).ok()?;
+    pidrusage::<RUsageInfoV2>(pid)
+        .ok()
+        .map(|usage| usage.ri_phys_footprint)
 }
 
 /// Windows and Linux: no watchdog; the operating system enforces the cap.
