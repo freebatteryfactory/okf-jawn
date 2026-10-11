@@ -3613,5 +3613,70 @@ async fn backup_an_archive_entry_of_an_unknown_compression_method_is_refused() -
     assert_import_refused(&storage, outcome, "compression method").await
 }
 
+/// PR #20 Codex P2 (`restore.rs:680`): a replacement restore refuses, before anything is
+/// written, an archive whose records hold a row of another workspace than its manifest (a
+/// crafted copy of ana's draft under another workspace's identity).
+#[tokio::test]
+async fn backup_a_replacement_restore_refuses_an_archive_with_a_row_of_another_workspace()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let workspace = {
+        let storage = Storage::open(directory.path())?;
+        let workspace = notes_workspace(&storage).await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        workspace
+    };
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let bytes = std::fs::read(&archive)?;
+    let staged = tempfile::tempdir()?;
+    let records = staged.path().join("records.sqlite");
+    std::fs::write(&records, entry_bytes_of(&bytes, "records.sqlite")?)?;
+    rusqlite::Connection::open(&records)?.execute(
+        "INSERT INTO drafts SELECT tenant_id, ?1, item_id, editor, saved_at, record, body,
+             properties FROM drafts",
+        [uuid_text(99)],
+    )?;
+    let forged = std::fs::read(&records)?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    std::fs::write(&archive, crafted)?;
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let error = err_of(
+        restored
+            .backups()
+            .restore_replacement(&installation, &[archive])
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+    assert!(error.message.contains("drafts"), "{error}");
+    let live = directory.path().join("records.sqlite");
+    for table in ["workspaces", "drafts"] {
+        assert_eq!(
+            count(&live, &format!("SELECT count(*) FROM {table}"))?,
+            0,
+            "no {table} row written"
+        );
+    }
+    assert!(
+        !restored
+            .data()
+            .repositories_path()
+            .join("local")
+            .join(format!("{}.git", workspace.workspace_id.0))
+            .exists(),
+        "no repository written"
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
