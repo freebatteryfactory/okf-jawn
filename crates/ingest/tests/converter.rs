@@ -824,7 +824,8 @@ mod retains_images {
     use okf_jawn_core::conversion::{ConversionStatus, ConvertedAsset, PixelSize};
     use okf_jawn_ingest::child::write_assets;
     use okf_jawn_ingest::converter::read_window;
-    use okf_jawn_ingest::protocol::{EXPORT_FILE, MARKDOWN_FILE, Reply};
+    use okf_jawn_ingest::protocol::{AssetFile, EXPORT_FILE, MARKDOWN_FILE, Reply};
+    use okf_jawn_ingest::record::sha256_digest;
 
     use crate::check::{TestResult, err_of, some};
 
@@ -1350,10 +1351,65 @@ mod retains_images {
     }
 
     #[test]
+    fn a_picture_with_several_provenance_entries_takes_its_first() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let uri = "data:image/png;base64,cGljdHVyZQ==";
+        let entry = |page: u32, l: f64| {
+            serde_json::json!({
+                "page_no": page,
+                "bbox": { "l": l, "t": 10.0, "r": l + 50.0, "b": 60.0, "coord_origin": "TOPLEFT" },
+                "charspan": [0, 0],
+            })
+        };
+        let export = serde_json::json!({
+            "texts": [], "tables": [],
+            "pictures": [{
+                "self_ref": "#/pictures/0", "label": "picture", "captions": [],
+                "prov": [entry(1, 100.0), entry(2, 300.0)],
+                "image": { "mimetype": "image/png", "dpi": 144, "size": { "width": 8.0, "height": 8.0 }, "uri": uri },
+            }],
+            "pages": {
+                "1": { "page_no": 1, "size": { "width": 600.0, "height": 800.0 } },
+                "2": { "page_no": 2, "size": { "width": 600.0, "height": 800.0 } },
+            },
+        });
+        std::fs::write(directory.path().join(MARKDOWN_FILE), "<!-- image -->\n")?;
+        std::fs::write(directory.path().join(EXPORT_FILE), export.to_string())?;
+        std::fs::write(directory.path().join("picture-0.png"), b"picture")?;
+        let reply = Reply {
+            status: ConversionStatus::Success,
+            page_count: None,
+            issues: Vec::new(),
+            blocks: Vec::new(),
+            text_layer: false,
+            assets: vec![AssetFile {
+                file: "picture-0.png".to_owned(),
+                role: AssetRole::Picture,
+                media_type: "image/png".to_owned(),
+                width: 8,
+                height: 8,
+                page: None,
+                picture: Some(0),
+                encoding: Some(sha256_digest(uri.as_bytes())?.as_str().to_owned()),
+                caption: None,
+            }],
+        };
+        let window = PageRange { start: 1, end: 2 };
+        let (document, _coverage) = read_window(directory.path(), Some(&window), &reply)?;
+        let asset = some(document.assets.first(), "the picture")?;
+        assert_eq!(asset.location, region_of([100.0, 10.0, 150.0, 60.0]));
+        Ok(())
+    }
+    #[test]
     fn an_image_file_name_that_is_not_a_safe_plain_name_is_a_worker_fault() -> TestResult {
         let directory = tempfile::tempdir()?;
         let reply = child_outputs(directory.path(), &figure_document(), true)?;
+        // A name into a subdirectory is refused even when its file is there with the right
+        // bytes, so the refusal is the guard's, on every platform.
+        std::fs::create_dir(directory.path().join("sub"))?;
+        std::fs::write(directory.path().join("sub").join("picture-0.png"), b"plant")?;
         let names = [
+            "sub/picture-0.png",
             "../page-1.png",
             "/page-1.png",
             "a/b.png",
