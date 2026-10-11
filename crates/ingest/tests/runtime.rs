@@ -214,7 +214,7 @@ mod job_runtime {
         assert_eq!(handler.attempts()?, Vec::<u32>::new());
         let entry = records.entry(id)?;
         assert_eq!(entry.job.state, JobState::Queued);
-        assert!(entry.failures.is_empty());
+        assert_eq!(entry.failures, Vec::<(String, bool)>::new());
         assert_eq!(events.appended()?, Vec::new());
         Ok(())
     }

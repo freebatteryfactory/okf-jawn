@@ -718,6 +718,7 @@ mod tests {
         records.set_progress(id, 40)?;
         records.cancel_when_claimed(id)?;
         assert_eq!(records.entry(id)?.job.progress, 40);
+        records.purge_workspace_of(id)?;
         Ok(())
     }
 }
