@@ -22,7 +22,10 @@
 //! An item's file is its document as storage writes one (`file_text`): frontmatter of its
 //! properties, a blank line, then the body. `body_start` answers the line its body starts on
 //! there, and `file_patch` writes a patch between two such files numbered over the whole file,
-//! as libgit2 does, for a test to script as a diff.
+//! as libgit2 does, for a test to script as a diff. `read_file` answers that file at a
+//! document's path, and `list` of a folder no test scripted is derived from the documents at
+//! the revision, so a replayed commit's tree can be read back. The fake keeps no folder
+//! `index.md` and no `log.md`.
 //!
 //! History is scripted too (`put_log`, `put_diff`, `put_blame`); `log` pages a scripted history as
 //! storage does when a test asks (`page_log`). A comparison nobody scripted
@@ -653,6 +656,52 @@ impl VersionState {
 
     /// Refuse an unknown revision with `NotFound`. A revision is known when it is the head, a
     /// commit produced it, or the test scripted content at it.
+    /// The listing of `folder` at `revision` from the documents there, when no test scripted
+    /// one: the items directly inside it and its child folders. A folder no document lies
+    /// under is `NotFound`, as is an unknown revision.
+    fn derived_listing(
+        &self,
+        revision: &Revision,
+        folder: Option<&WorkspacePath>,
+    ) -> Result<FolderListing, ApiError> {
+        self.require_known(revision)?;
+        let prefix = folder.map(|folder| format!("{}/", folder.as_str()));
+        let mut items = Vec::new();
+        let mut folders = std::collections::BTreeSet::new();
+        for (_, document) in self.documents.iter().filter(|(at, _)| at == revision) {
+            let path = document.summary.path.as_str();
+            let rest = match prefix.as_deref() {
+                Some(prefix) => match path.strip_prefix(prefix) {
+                    Some(rest) => rest,
+                    None => continue,
+                },
+                None => path,
+            };
+            match rest.split_once('/') {
+                None => items.push(document.summary.clone()),
+                Some((child, _)) => {
+                    let child = match prefix.as_deref() {
+                        Some(prefix) => format!("{prefix}{child}"),
+                        None => child.to_owned(),
+                    };
+                    folders.insert(child);
+                }
+            }
+        }
+        if folder.is_some() && items.is_empty() && folders.is_empty() {
+            return Err(ApiError::new(ErrorCode::NotFound, "no such folder"));
+        }
+        Ok(FolderListing {
+            items,
+            folders: folders
+                .into_iter()
+                .map(WorkspacePath::try_from)
+                .collect::<Result<_, _>>()
+                .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?,
+            next_cursor: None,
+        })
+    }
+
     fn require_known(&self, revision: &Revision) -> Result<(), ApiError> {
         let known = self.head.as_ref() == Some(revision)
             || self.commits.iter().any(|(_, at)| at == revision)
@@ -932,12 +981,15 @@ impl VersionStore for FakeVersions {
         _page: Page,
     ) -> PortFuture<'a, FolderListing> {
         Box::pin(async move {
-            lock_api(&self.state)?
+            let state = lock_api(&self.state)?;
+            if let Some((_, _, listing)) = state
                 .listings
                 .iter()
                 .find(|(at, listed, _)| at == revision && listed.as_ref() == folder)
-                .map(|(_, _, listing)| listing.clone())
-                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such folder"))
+            {
+                return Ok(listing.clone());
+            }
+            state.derived_listing(revision, folder)
         })
     }
     fn item_at_path<'a>(
@@ -981,10 +1033,19 @@ impl VersionStore for FakeVersions {
     fn read_file<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        _revision: &'a Revision,
-        _path: &'a WorkspacePath,
+        revision: &'a Revision,
+        path: &'a WorkspacePath,
     ) -> PortFuture<'a, Vec<u8>> {
-        unused()
+        Box::pin(async move {
+            let state = lock_api(&self.state)?;
+            state.require_known(revision)?;
+            state
+                .documents
+                .iter()
+                .find(|(at, document)| at == revision && &document.summary.path == path)
+                .map(|(_, document)| file_text(document).into_bytes())
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "No file at that path here"))
+        })
     }
     fn rules<'a>(
         &'a self,
@@ -2470,21 +2531,24 @@ pub fn served_digest(document: &ItemDocument) -> Built<Digest> {
     Ok(item_content_digest(document)?)
 }
 
-/// A draft of `item` by `editor`, with no properties, digested as the item it would commit.
+/// A draft of `item` by `editor` whose properties are its type, `Note`, digested as the item
+/// it would commit.
 ///
 /// # Errors
 /// Returns when a fixture value does not parse.
 pub fn draft_of(item: u128, editor: &str, base: &Revision, body: &str) -> Built<DraftContent> {
+    // A draft holds the item's whole property map, its type included, as an editor saves it.
+    let properties = BTreeMap::from([("type".to_owned(), Value::String("Note".to_owned()))]);
     Ok(DraftContent {
         draft: Draft {
             item_id: ItemId(Uuid::from_u128(item)),
             editor: editor.to_owned(),
             base_revision: base.clone(),
-            content_digest: content_digest(body, &BTreeMap::new())?,
+            content_digest: content_digest(body, &properties)?,
             saved_at: instant()?,
         },
         body: body.to_owned(),
-        properties: BTreeMap::new(),
+        properties,
     })
 }
 

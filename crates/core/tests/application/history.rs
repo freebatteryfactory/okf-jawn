@@ -29,7 +29,7 @@ use uuid::Uuid;
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{
     ALICE, Built, CARD_BODY, NOTE, World, alice, context, converted, digest, draft_of, file_patch,
-    instant, mutation, note, record, revision, scope, source_card,
+    file_text, instant, mutation, note, record, revision, scope, source_card,
 };
 
 const OTHER: u128 = 21;
@@ -1273,6 +1273,69 @@ async fn a_conflict_after_the_snapshot_committed_never_leads_to_a_second_commit(
     assert_eq!(world.search.indexed()?, vec![revision('b')?]);
     Ok(())
 }
+/// A world where Alice's draft of NOTE, whose body has no heading, commits as `b`, and the
+/// staged tree the store checks is that commit's tree.
+fn snapshot_with_lint() -> Built<World> {
+    let world = World::new()?;
+    note_at(&world, NOTE, "notes/plan.md", &['a'])?;
+    world
+        .drafts
+        .put_draft(draft_of(NOTE, ALICE, &revision('a')?, "No heading.\n")?)?;
+    world.versions.queue_revision(revision('b')?)?;
+    let committed = note(
+        NOTE,
+        &revision('b')?,
+        "notes/plan.md",
+        "No heading.\n",
+        json!({ "type": "Note" }),
+    )?;
+    world
+        .versions
+        .stage()
+        .write("notes/plan.md", &file_text(&committed))?;
+    Ok(world)
+}
+
+#[tokio::test]
+async fn a_resumed_snapshot_answers_the_warnings_its_first_attempt_produced() -> TestResult {
+    let mut caller = alice(OperationName::CommitItems, Some(mutation(1)))?;
+    let uninterrupted = snapshot_with_lint()?;
+    let first = uninterrupted
+        .service
+        .commit_items(&caller, snapshot(&[NOTE])?)
+        .await?;
+    assert!(
+        first.warnings.iter().any(|warning| {
+            warning.code.starts_with("okf_lint")
+                && warning.location.as_deref() == Some("notes/plan.md")
+        }),
+        "{:?}",
+        first.warnings
+    );
+    // The same Snapshot fails after its commit; the resumed attempt finds that commit.
+    let world = snapshot_with_lint()?;
+    world.search.fail_next();
+    err_of(
+        world
+            .service
+            .commit_items(&caller, snapshot(&[NOTE])?)
+            .await,
+    )?;
+    caller.attempt = Attempt::Resumed;
+    let resumed = world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE])?)
+        .await?;
+    assert_eq!(world.versions.commits()?.len(), 1, "no second commit");
+    assert_eq!(resumed.revision, revision('b')?);
+    // `Warning` has no equality; its wire form is compared.
+    assert_eq!(
+        serde_json::to_value(&resumed.warnings)?,
+        serde_json::to_value(&first.warnings)?
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn commit_items_gives_up_after_three_heads_moved_mid_snapshot() -> TestResult {
     let world = landing_mid_snapshot(&['c', 'e', 'f'])?;
