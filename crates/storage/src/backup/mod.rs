@@ -116,9 +116,17 @@ impl StorageBackups {
             .tenant_id
             .clone()
             .ok_or_else(|| archive::invalid("the installation archive names no tenant"))?;
+        // The archive's own identity keys its events, so restoring another archive later never
+        // drops one at the same position.
+        let identity = {
+            use sha2::Digest as _;
+            let bytes = std::fs::read(installation)
+                .map_err(|error| io_error("read", installation, &error))?;
+            seam::hex(&sha2::Sha256::digest(&bytes))
+        };
         self.storage
             .records
-            .transaction(move |transaction| install(transaction, &manifest))
+            .transaction(move |transaction| install(transaction, &manifest, &identity))
             .await?;
         let mut reports = Vec::new();
         for path in workspaces {
@@ -169,6 +177,14 @@ impl StorageBackups {
                 // archive is recorded before the lock is released: a purge either refuses this
                 // archive or finds its record in the plan (`purge::archives`).
                 runtime.block_on(crate::purge::guard::refuse_scope(&storage.records, scope))?;
+                // A call under the same mutation that held the lock first recorded its archive
+                // under it: answer that one and store nothing, so no second archive object exists
+                // that no record names (and a purge could not reach).
+                if let Some(object) =
+                    runtime.block_on(recorded_archive(&storage.records, mutation))?
+                {
+                    return Ok(object);
+                }
                 let staging = storage.repositories.stage(scope, mutation)?;
                 let zip = staging.path.join("archive.zip");
                 let directory = staging.path.clone();
@@ -341,28 +357,7 @@ impl StorageBackups {
     }
 
     async fn recorded(&self, mutation: MutationId) -> Result<Option<ObjectInfo>, ApiError> {
-        let key = mutation.0.to_string();
-        self.storage
-            .records
-            .call(move |connection| {
-                let found: Option<(String, i64)> = connection
-                    .query_row(
-                        "SELECT digest, size FROM backup_archives WHERE mutation_id = ?1",
-                        [key],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(|error| sql(&error))?;
-                found
-                    .map(|(digest, size)| {
-                        Ok(ObjectInfo {
-                            digest: from_text!(digest.as_str())?,
-                            size: to_u64(size)?,
-                        })
-                    })
-                    .transpose()
-            })
-            .await
+        recorded_archive(&self.storage.records, mutation).await
     }
 }
 
@@ -402,6 +397,34 @@ impl Backups for StorageBackups {
     ) -> PortFuture<'a, RestoreReport> {
         Box::pin(self.import(scope, archive, mutation_id, editors))
     }
+}
+
+/// The archive recorded under `mutation`, if any.
+async fn recorded_archive(
+    records: &crate::db::Db,
+    mutation: MutationId,
+) -> Result<Option<ObjectInfo>, ApiError> {
+    let key = mutation.0.to_string();
+    records
+        .call(move |connection| {
+            let found: Option<(String, i64)> = connection
+                .query_row(
+                    "SELECT digest, size FROM backup_archives WHERE mutation_id = ?1",
+                    [key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|error| sql(&error))?;
+            found
+                .map(|(digest, size)| {
+                    Ok(ObjectInfo {
+                        digest: from_text!(digest.as_str())?,
+                        size: to_u64(size)?,
+                    })
+                })
+                .transpose()
+        })
+        .await
 }
 
 /// Record the archive `object` a backup wrote under `mutation` and return the recorded archive:
@@ -488,15 +511,25 @@ fn write_set(
     output: &Path,
     only: Option<&TenantId>,
 ) -> Result<Vec<PathBuf>, ApiError> {
-    // Every tenant a record names: an installation archive is written for each, even one with
-    // no workspace and no purge, so its identity and connectors survive.
+    // Every tenant any record names, from every table with a `tenant_id` column (read from the
+    // schema, so a new table is never missed): an installation archive is written for each,
+    // even one with no workspace and no purge. The installation identity and connectors have
+    // no tenant column; they travel in each tenant's installation archive.
+    let mut sources = vec!["SELECT tenant_id, workspace_id FROM workspaces".to_owned()];
+    for table in snapshot::tables(connection)? {
+        let tenant_keyed: bool = connection
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM pragma_table_info(?1) WHERE name = 'tenant_id')",
+                [&table],
+                |row| row.get(0),
+            )
+            .map_err(|error| sql(&error))?;
+        if tenant_keyed && table != "workspaces" {
+            sources.push(format!("SELECT tenant_id, NULL FROM \"{table}\""));
+        }
+    }
     let mut statement = connection
-        .prepare(
-            "SELECT tenant_id, workspace_id FROM workspaces
-             UNION SELECT tenant_id, NULL FROM purges
-             UNION SELECT tenant_id, NULL FROM events
-             UNION SELECT tenant_id, NULL FROM grants ORDER BY 1, 2",
-        )
+        .prepare(&format!("{} ORDER BY 1, 2", sources.join(" UNION ")))
         .map_err(|error| sql(&error))?;
     let rows: Vec<(String, Option<String>)> = statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -570,6 +603,7 @@ fn workspace_zip(
 fn install(
     transaction: &rusqlite::Transaction<'_>,
     manifest: &InstallationManifest,
+    archive: &str,
 ) -> Result<(), ApiError> {
     let tenant = manifest
         .tenant_id
@@ -615,8 +649,9 @@ fn install(
             )
             .map_err(|error| sql(&error))?;
     }
-    // Each archived tenant event carries a replay key (its tenant and its position in the
-    // archive), so a replacement restore run again inserts it once.
+    // Each archived tenant event carries a replay key (the archive's digest and the event's
+    // position in it), so a replacement restore run again inserts it once, and another archive
+    // restored later inserts all of its own.
     for (position, record) in manifest.events.iter().enumerate() {
         transaction
             .execute(
@@ -625,7 +660,7 @@ fn install(
                 params![
                     tenant,
                     record,
-                    format!("installation-restore/{tenant}/{position}")
+                    format!("installation-restore/{archive}/{position}")
                 ],
             )
             .map_err(|error| sql(&error))?;

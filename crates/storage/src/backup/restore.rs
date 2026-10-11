@@ -243,8 +243,14 @@ fn refuse(
                     "the installation archive records a purge of this workspace",
                 ));
             }
-            if exists || storage.repositories.path(scope).exists() {
+            if exists {
                 return Err(conflict("this workspace already exists here"));
+            }
+            // A repository no record names yet is what a replacement restore that stopped
+            // inside this workspace left behind (its rows commit last, all or nothing): it is
+            // removed and the workspace restored again, with no manual cleanup.
+            if storage.repositories.path(scope).exists() {
+                storage.repositories.remove(scope)?;
             }
         }
     }
@@ -675,4 +681,32 @@ fn rewrite_identity(value: &mut serde_json::Value, original: &str, workspace: &s
         _ => {}
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_identity;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// Backup re-review R10: the identity is rewritten in nested objects and lists too, and a
+    /// text that only quotes it keeps it.
+    #[test]
+    fn a_nested_identity_field_is_rewritten_and_quoting_text_is_kept() -> TestResult {
+        let mut value: serde_json::Value = serde_json::from_str(
+            r#"{"source": {"workspace_id": "a", "note": "a"},
+                "cited": [{"workspace_id": "a"}],
+                "workspace_ids": ["a", "b"],
+                "text": "a"}"#,
+        )?;
+        assert!(rewrite_identity(&mut value, "a", "z"));
+        let expected: serde_json::Value = serde_json::from_str(
+            r#"{"source": {"workspace_id": "z", "note": "a"},
+                "cited": [{"workspace_id": "z"}],
+                "workspace_ids": ["z", "b"],
+                "text": "a"}"#,
+        )?;
+        assert_eq!(value, expected);
+        Ok(())
+    }
 }

@@ -381,8 +381,9 @@ async fn assert_export_restored(
 }
 
 /// A replacement restore into a directory that holds only the repository directory of the
-/// archived workspace, with no record of it, is refused (review B7, M09).
-async fn refuse_a_leftover_repository(
+/// archived workspace, with no record of it (what a restore that stopped inside it leaves),
+/// replaces it and restores the workspace (backup re-review ruling 4; it was refused before).
+async fn a_leftover_repository_is_replaced(
     installation: &Path,
     archives: &[std::path::PathBuf],
     workspace: &StorageScope,
@@ -396,16 +397,11 @@ async fn refuse_a_leftover_repository(
             .join("local")
             .join(format!("{}.git", workspace.workspace_id.0)),
     )?;
-    let error = err_of(
-        leftover
-            .backups()
-            .restore_replacement(installation, archives)
-            .await,
-    )?;
-    assert!(
-        error.code == ErrorCode::Conflict && error.message.contains("already exists"),
-        "a repository directory left in place is not replaced: {error}"
-    );
+    leftover
+        .backups()
+        .restore_replacement(installation, archives)
+        .await?;
+    leftover.catalog().open(workspace).await?;
     Ok(())
 }
 
@@ -688,7 +684,7 @@ async fn backup_replacement_restore_after_deleting_the_data_directory() -> TestR
         "refused before anything is written: {}",
         error.message
     );
-    refuse_a_leftover_repository(&installation, &archives, &workspace).await?;
+    a_leftover_repository_is_replaced(&installation, &archives, &workspace).await?;
     Ok(())
 }
 
@@ -1280,6 +1276,430 @@ async fn backup_a_replacement_restore_run_again_restores_each_tenant_event_once(
         1,
         "the tenant event is restored once"
     );
+    Ok(())
+}
+
+/// Record a retained artifact of `kind` over `bytes` in `scope` (job under mutation `n`, the
+/// artifact under `n + 1`).
+async fn retained(
+    storage: &Storage,
+    scope: &StorageScope,
+    n: u32,
+    kind: ArtifactKind,
+    bytes: &[u8],
+) -> Fallible<Digest> {
+    let object = put(storage, scope, bytes).await?;
+    let job_scope = JobScope::Workspace(scope.clone());
+    let job = storage
+        .records()
+        .create_job(
+            &job_scope,
+            NewJob {
+                mutation_id: uuid!(n)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    storage
+        .records()
+        .record_artifact(
+            &job_scope,
+            uuid!(n.saturating_add(1))?,
+            NewArtifact {
+                kind,
+                object: object.clone(),
+                media_type: "application/zip".to_owned(),
+                created_by_job: job.id,
+            },
+        )
+        .await?;
+    Ok(object.digest)
+}
+
+/// Every object file under `data/objects` whose bytes contain `marker`.
+fn objects_holding(data: &Path, marker: &[u8]) -> Fallible<Vec<std::path::PathBuf>> {
+    let mut pending = vec![data.join("objects")];
+    let mut found = Vec::new();
+    while let Some(directory) = pending.pop() {
+        if !directory.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if contains(&std::fs::read(&path)?, marker) {
+                found.push(path);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Backup re-review B1 (probe `rr_concurrent_same_mutation_archives_with_draft_churn`): two
+/// archives under one mutation while drafts autosave. The second re-reads the record under the
+/// lock and stores nothing, so one archive object exists and the purge leaves none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backup_two_archives_under_one_mutation_store_one_object_a_purge_removes() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (workspace, created) = create(&storage, "local", 1, "zanzibar-marker-workspace").await?;
+    let item: ItemId = uuid!(10)?;
+    let head = commit(
+        &storage,
+        &workspace,
+        3,
+        &created,
+        vec![note(item, "notes/plan.md", "plan")?],
+    )
+    .await?;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let churn = {
+        let (drafts, scope, stop, head) = (
+            storage.drafts(),
+            workspace.clone(),
+            Arc::clone(&stop),
+            head.clone(),
+        );
+        tokio::spawn(async move {
+            let mut n = 1000_u32;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                n += 1;
+                let mutation = serde_json::from_value(json!(uuid_text(n)))
+                    .map_err(|error| error.to_string())?;
+                drafts
+                    .save(
+                        &scope,
+                        mutation,
+                        DraftWrite {
+                            item_id: item,
+                            editor: "ana".to_owned(),
+                            base_revision: head.clone(),
+                            body: format!("autosave {n}"),
+                            properties: BTreeMap::new(),
+                            content_digest: Digest::try_from("e".repeat(64))
+                                .map_err(|error| error.to_string())?,
+                        },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                tokio::task::yield_now().await;
+            }
+            Ok::<u32, String>(n)
+        })
+    };
+    let mutation = uuid!(40)?;
+    let first = {
+        let (backups, scope) = (storage.backups(), workspace.clone());
+        tokio::spawn(async move { backups.write_workspace_archive(&scope, mutation).await })
+    };
+    let second = {
+        let (backups, scope) = (storage.backups(), workspace.clone());
+        tokio::spawn(async move { backups.write_workspace_archive(&scope, mutation).await })
+    };
+    let (a, b) = (first.await??, second.await??);
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    churn.await??;
+    assert_eq!(a, b, "both answer the recorded archive");
+    assert_eq!(
+        objects_holding(directory.path(), b"zanzibar-marker-workspace")?.len(),
+        1,
+        "one archive object is stored"
+    );
+    storage
+        .records()
+        .create_purge(
+            &workspace.tenant_id,
+            uuid!(50)?,
+            NewPurge {
+                id: uuid!(60)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: workspace.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    storage
+        .purger()
+        .purge_workspace(
+            &workspace.tenant_id,
+            uuid!(61)?,
+            uuid!(60)?,
+            workspace.workspace_id,
+        )
+        .await?;
+    assert_eq!(
+        objects_holding(directory.path(), b"zanzibar-marker-workspace")?,
+        Vec::<std::path::PathBuf>::new(),
+        "a purge leaves no stored archive of the workspace"
+    );
+    Ok(())
+}
+
+/// Backup re-review R1 (probe `rr_export_without_upload_comes_back_after_replacement`): an
+/// export that only its artifact names (no upload slot) comes back, record and bytes.
+#[tokio::test]
+async fn backup_an_export_only_its_artifact_names_comes_back_after_replacement() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let (workspace, export) = {
+        let storage = Storage::open(directory.path())?;
+        let (workspace, _) = create(&storage, "local", 1, "Research").await?;
+        let export = retained(
+            &storage,
+            &workspace,
+            30,
+            ArtifactKind::Export,
+            b"an export only the artifact names",
+        )
+        .await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), Some(&tenant("local")?))
+            .await?;
+        (workspace, export)
+    };
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let archive = output
+        .path()
+        .join("workspaces")
+        .join("local")
+        .join(format!("{}.zip", workspace.workspace_id.0));
+    restored
+        .backups()
+        .restore_replacement(
+            &output.path().join("installation").join("local.zip"),
+            &[archive],
+        )
+        .await?;
+    assert_export_restored(&restored, &workspace, &export, directory.path()).await
+}
+
+/// Backup re-review R3: a workspace archive never holds a `workspace_backup` artifact record of
+/// the workspace, while it keeps the export's.
+#[tokio::test]
+async fn backup_a_workspace_archive_keeps_no_workspace_backup_record() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    retained(
+        storage,
+        &fixture.workspace,
+        34,
+        ArtifactKind::WorkspaceBackup,
+        b"an earlier archive",
+    )
+    .await?;
+    let archive = storage
+        .backups()
+        .write_workspace_archive(&fixture.workspace, uuid!(40)?)
+        .await?;
+    let path = storage
+        .data()
+        .objects_path()
+        .join("local")
+        .join(archive.digest.as_str().get(..2).unwrap_or_default())
+        .join(archive.digest.as_str());
+    let records = directory.path().join("archived.sqlite");
+    entry(&path, "records.sqlite", &records)?;
+    assert_eq!(
+        count(
+            &records,
+            "SELECT count(*) FROM artifacts WHERE kind = 'workspace_backup'"
+        )?,
+        0
+    );
+    assert_eq!(
+        count(
+            &records,
+            "SELECT count(*) FROM artifacts WHERE kind = 'export'"
+        )?,
+        1
+    );
+    Ok(())
+}
+
+/// Backup re-review R6 and R6b: an import into a workspace whose head is blank but which holds
+/// a reference the archive does not hold at that commit is refused, whether the reference has a
+/// name of its own or the archive's candidate name at another commit.
+#[tokio::test]
+async fn backup_an_import_refuses_a_blank_head_with_a_foreign_reference() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let candidate_name = some(
+        other_references(&repository_of(storage, &fixture.workspace)?)?
+            .first()
+            .map(|(name, _)| name.clone()),
+        "the archive's candidate reference",
+    )?;
+    for (n, name) in [
+        (80_u32, "refs/heads/other".to_owned()),
+        (81, candidate_name),
+    ] {
+        let (target, blank) = create(storage, "elsewhere", n, "Copy").await?;
+        let uploaded = archive_into(storage, &fixture.workspace, &target).await?;
+        repository_of(storage, &target)?.reference(
+            &name,
+            git2::Oid::from_str(blank.as_str())?,
+            true,
+            "a foreign reference",
+        )?;
+        let error = err_of(
+            storage
+                .backups()
+                .restore_import(
+                    &target,
+                    uploaded,
+                    uuid!(n.saturating_add(4))?,
+                    vec!["ana".to_owned()],
+                )
+                .await,
+        )?;
+        assert_eq!(error.code, ErrorCode::Conflict, "{name}: {error}");
+    }
+    Ok(())
+}
+
+/// Backup re-review R7: an unfiltered backup set writes the installation archive of a tenant
+/// that only a tenant event names.
+#[tokio::test]
+async fn backup_an_unfiltered_set_writes_the_archive_of_a_tenant_only_an_event_names() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    storage
+        .events()
+        .append(
+            &EventScope::Tenant(tenant("local")?),
+            None,
+            NewEvent {
+                kind: EventKind::SignedIn,
+                revision: None,
+                item_id: None,
+                job_id: None,
+                connector_id: None,
+                actor: None,
+                operation: None,
+            },
+        )
+        .await?;
+    let written = storage
+        .backups()
+        .write_backup_set(output.path(), None)
+        .await?;
+    assert_eq!(
+        written,
+        vec![output.path().join("installation").join("local.zip")]
+    );
+    Ok(())
+}
+
+/// Backup re-review ruling 3: the replay key of a restored tenant event names its archive, so
+/// restoring a different installation archive later inserts all of its events.
+#[tokio::test]
+async fn backup_a_later_installation_archive_restores_all_its_events() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (earlier, later) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    {
+        let storage = Storage::open(directory.path())?;
+        let event = || NewEvent {
+            kind: EventKind::SignedIn,
+            revision: None,
+            item_id: None,
+            job_id: None,
+            connector_id: None,
+            actor: None,
+            operation: None,
+        };
+        let scope = EventScope::Tenant(tenant("local")?);
+        storage.events().append(&scope, None, event()).await?;
+        storage
+            .backups()
+            .write_backup_set(earlier.path(), Some(&tenant("local")?))
+            .await?;
+        storage.events().append(&scope, None, event()).await?;
+        storage
+            .backups()
+            .write_backup_set(later.path(), Some(&tenant("local")?))
+            .await?;
+    }
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    for set in [earlier.path(), later.path()] {
+        restored
+            .backups()
+            .restore_replacement(&set.join("installation").join("local.zip"), &[])
+            .await?;
+    }
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            "SELECT count(*) FROM events WHERE workspace_id IS NULL"
+        )?,
+        3,
+        "one event of the first archive and both of the second"
+    );
+    Ok(())
+}
+
+/// Backup re-review ruling 4: a replacement restore that stopped inside a workspace (a trigger
+/// fails its rows after its repository was written) completes when run again, with no manual
+/// removal of the repository it left.
+#[tokio::test]
+async fn backup_a_replacement_restore_stopped_inside_a_workspace_completes_on_retry() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let workspace = {
+        let fixture = fixture(directory.path()).await?;
+        fixture
+            .storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        fixture.workspace.clone()
+    };
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let installation = output.path().join("installation").join("local.zip");
+    let archives = vec![
+        output
+            .path()
+            .join("workspaces")
+            .join("local")
+            .join(format!("{}.zip", workspace.workspace_id.0)),
+    ];
+    let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+    records.execute_batch(
+        "CREATE TRIGGER stop_restore BEFORE INSERT ON drafts
+         BEGIN SELECT RAISE(ABORT, 'stopped inside the workspace'); END;",
+    )?;
+    err_of(
+        restored
+            .backups()
+            .restore_replacement(&installation, &archives)
+            .await,
+    )?;
+    assert!(
+        restored
+            .data()
+            .repositories_path()
+            .join("local")
+            .join(format!("{}.git", workspace.workspace_id.0))
+            .exists(),
+        "the stopped restore left its repository"
+    );
+    records.execute_batch("DROP TRIGGER stop_restore;")?;
+    restored
+        .backups()
+        .restore_replacement(&installation, &archives)
+        .await?;
+    restored.catalog().open(&workspace).await?;
     Ok(())
 }
 

@@ -94,6 +94,13 @@ impl GitVersions {
         self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
                 refuse_locked(&records, scope)?;
+                // A call under the same mutation that held the lock first recorded its bundle:
+                // answer that one and store no second bundle that no record names.
+                if let Some(object) =
+                    runtime.block_on(export::recorded(&records, scope, mutation_id))?
+                {
+                    return Ok(object);
+                }
                 let staging = repositories.stage(scope, mutation_id)?;
                 let bundle = staging.path.join(export::BUNDLE_FILE);
                 let size = export::write_bundle(&repositories.open(scope)?, &wanted, &bundle)?;
