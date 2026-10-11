@@ -31,7 +31,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{Digest, MutationId};
 use okf_jawn_contract::workspace::RestoreReport;
 use okf_jawn_core::storage::StorageScope;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use tokio::runtime::Handle;
 
 use super::archive::{Opened, PACK, RECORDS, WorkspaceManifest, invalid, oid, read_pack};
@@ -93,6 +93,13 @@ pub(crate) fn restore(
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
     let mut opened = Opened::open(archive)?;
     let manifest = opened.workspace()?;
+    // A replacement restore run again after a crash in a later workspace accepts a workspace
+    // this same archive already restored in full, and leaves it as it is.
+    if matches!(mode, Mode::Replace)
+        && let Some(report) = restored_already(storage, runtime, scope, &manifest)?
+    {
+        return Ok((report, manifest));
+    }
     refuse(storage, runtime, scope, &manifest, mode)?;
     // Each object is pinned to the restored workspace while the import runs, and recorded as a
     // pending put (`puts`) until the import's rows land.
@@ -193,6 +200,53 @@ fn put_back(
     Ok((report, manifest.clone()))
 }
 
+/// The report of a workspace that a replacement restore of this archive already completed: its
+/// record exists (a restore's rows commit last, all or nothing) and its accepted head is the
+/// archive's. `None` otherwise, so a workspace with other content is refused as before.
+fn restored_already(
+    storage: &Storage,
+    runtime: &Handle,
+    scope: &StorageScope,
+    manifest: &WorkspaceManifest,
+) -> Result<Option<RestoreReport>, ApiError> {
+    let main = manifest
+        .references
+        .iter()
+        .find(|(name, _)| name == HEAD_REF)
+        .map(|(_, commit)| oid(commit))
+        .transpose()?;
+    let (tenant, workspace) = crate::db::scope_key(scope);
+    let (exists, drafts): (bool, i64) = runtime.block_on(storage.records.call(move |connection| {
+        connection
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM workspaces WHERE tenant_id = ?1 AND workspace_id = ?2),
+                        (SELECT count(*) FROM drafts WHERE tenant_id = ?1 AND workspace_id = ?2)",
+                params![tenant, workspace],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| sql(&error))
+    }))?;
+    if !exists || main.is_none() || !storage.repositories.path(scope).exists() {
+        return Ok(None);
+    }
+    let repository = storage.repositories.open(scope)?;
+    let current = head(&repository)?;
+    if Some(current) != main {
+        return Ok(None);
+    }
+    let tree = repository
+        .find_commit(current)
+        .and_then(|commit| commit.tree())
+        .map_err(|error| git(&error))?;
+    Ok(Some(RestoreReport {
+        items: u32::try_from(crate::git::items_of(&repository, &tree)?.len())
+            .map_err(|_| internal("too many items to count"))?,
+        drafts_restored: u32::try_from(drafts)
+            .map_err(|_| internal("a draft count is out of range"))?,
+        drafts_unassigned: 0,
+    }))
+}
+
 /// Refuse an archive the mode may not restore into `scope`.
 fn refuse(
     storage: &Storage,
@@ -203,7 +257,7 @@ fn refuse(
 ) -> Result<(), ApiError> {
     let tenant = manifest.tenant_id.as_str().to_owned();
     let workspace = manifest.workspace_id.0.to_string();
-    let (exists, purged, completed) = runtime.block_on(storage.records.call(move |connection| {
+    let (exists, purge) = runtime.block_on(storage.records.call(move |connection| {
         let exists: bool = connection
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM workspaces WHERE tenant_id = ?1 AND workspace_id = ?2)",
@@ -212,17 +266,19 @@ fn refuse(
             )
             .map_err(|error| sql(&error))?;
         let key = format!("workspace/{workspace}");
-        let (purged, completed): (bool, bool) = connection
+        // Any recorded purge of the workspace, finished or not.
+        let purge: Option<(String, String)> = connection
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM purges WHERE tenant_id = ?1 AND target_key = ?2),
-                        EXISTS (SELECT 1 FROM purges WHERE tenant_id = ?1 AND target_key = ?2
-                                  AND state = 'completed')",
+                "SELECT purge_id, state FROM purges WHERE tenant_id = ?1 AND target_key = ?2
+                 ORDER BY state = 'completed' DESC LIMIT 1",
                 params![tenant, key],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
+            .optional()
             .map_err(|error| sql(&error))?;
-        Ok((exists, purged, completed))
+        Ok((exists, purge))
     }))?;
+    let purged = purge.is_some();
     match mode {
         Mode::Import(..) => {
             if manifest.tenant_id == scope.tenant_id && (exists || purged) {
@@ -238,10 +294,12 @@ fn refuse(
                     "it belongs to another tenant than the installation archive",
                 ));
             }
-            if completed {
-                return Err(conflict(
-                    "the installation archive records a purge of this workspace",
-                ));
+            // A purge of the workspace, finished or not, refuses it: the operator finishes an
+            // unfinished purge first, and purged content never comes back.
+            if let Some((purge, state)) = &purge {
+                return Err(conflict(format!(
+                    "the installation archive records purge {purge} ({state}) of this workspace"
+                )));
             }
             if exists {
                 return Err(conflict("this workspace already exists here"));

@@ -20,7 +20,8 @@
 //! Each archive write is idempotent on its mutation id (`backup_archives`), and so is each
 //! import (`restores`).
 //!
-//! A pre-migration backup set is one directory under `<data>/backups/pre-migration`, holding
+//! A backup set (offline, or pre-migration under `<data>/backups/pre-migration`) holds
+//! `installation.zip` (the installation-level archive: identity and connectors, no tenant),
 //! `installation/<tenant>.zip` and `workspaces/<tenant>/<workspace>.zip`. A purge deletes a
 //! workspace's archive from every set (`purge::copies`).
 
@@ -63,9 +64,10 @@ impl StorageBackups {
         Self { storage }
     }
 
-    /// The offline backup: every installation archive and every workspace archive (of `only`,
-    /// when given) into `output`, as `installation/<tenant>.zip` and
-    /// `workspaces/<tenant>/<workspace>.zip`. Run it with no service on the data directory.
+    /// The offline backup: the installation-level archive (`installation.zip`), every tenant's
+    /// installation archive and every workspace archive (of `only`, when given) into `output`,
+    /// as `installation/<tenant>.zip` and `workspaces/<tenant>/<workspace>.zip`. Run it with no
+    /// service on the data directory.
     ///
     /// # Errors
     /// Returns `Unavailable` when a file cannot be written, `Internal` when a snapshot does not
@@ -121,17 +123,9 @@ impl StorageBackups {
                 "an installation-level archive restores no workspace; give the tenant's archive",
             ));
         }
-        // The archive's own identity keys its events, so restoring another archive later never
-        // drops one at the same position.
-        let identity = {
-            use sha2::Digest as _;
-            let bytes = std::fs::read(installation)
-                .map_err(|error| io_error("read", installation, &error))?;
-            seam::hex(&sha2::Sha256::digest(&bytes))
-        };
         self.storage
             .records
-            .transaction(move |transaction| install(transaction, &manifest, &identity))
+            .transaction(move |transaction| install(transaction, &manifest))
             .await?;
         let mut reports = Vec::new();
         for path in workspaces {
@@ -175,7 +169,7 @@ impl StorageBackups {
         }
         crate::purge::guard::refuse_scope(&self.storage.records, scope).await?;
         #[cfg(test)]
-        pause::point(scope).await?;
+        pause::point(&self.storage, scope).await?;
         let storage = self.storage.clone();
         let runtime = Handle::current();
         let locked_scope = scope.clone();
@@ -523,7 +517,7 @@ fn write_set(
     // Every tenant any record names, from every table with a `tenant_id` column (read from the
     // schema, so a new table is never missed): an installation archive is written for each,
     // even one with no workspace and no purge. The installation identity and connectors have
-    // no tenant column; they travel in each tenant's installation archive.
+    // no tenant column; they travel in the installation-level archive (and in each tenant's).
     let mut sources = vec!["SELECT tenant_id, workspace_id FROM workspaces".to_owned()];
     for table in snapshot::tables(connection)? {
         let tenant_keyed: bool = connection
@@ -618,7 +612,6 @@ fn workspace_zip(
 fn install(
     transaction: &rusqlite::Transaction<'_>,
     manifest: &InstallationManifest,
-    archive: &str,
 ) -> Result<(), ApiError> {
     // Purge records and tenant events belong to a tenant; an installation-level archive has none.
     if manifest.tenant_id.is_none() && !(manifest.purges.is_empty() && manifest.events.is_empty()) {
@@ -670,10 +663,19 @@ fn install(
             )
             .map_err(|error| sql(&error))?;
     }
-    // Each archived tenant event carries a replay key (the archive's digest and the event's
-    // position in it), so a replacement restore run again inserts it once, and another archive
-    // restored later inserts all of its own.
+    // Each archived tenant event is keyed by its own identity: the source installation's
+    // identity row and the event's sequence number there. Two archives of an unchanged
+    // installation restore it once, and another installation's events never collide with it.
+    // (An archive without sequence numbers falls back to the position.)
+    let source = manifest.identity.as_ref().map_or_else(
+        || "no-identity".to_owned(),
+        |(subject, created_at)| format!("{subject}/{created_at}"),
+    );
     for (position, record) in manifest.events.iter().enumerate() {
+        let event = manifest
+            .event_seqs
+            .get(position)
+            .map_or_else(|| format!("p{position}"), ToString::to_string);
         transaction
             .execute(
                 "INSERT INTO events (tenant_id, workspace_id, replay_key, record)
@@ -681,7 +683,7 @@ fn install(
                 params![
                     tenant,
                     record,
-                    format!("installation-restore/{archive}/{position}")
+                    format!("installation-restore/{source}/{event}")
                 ],
             )
             .map_err(|error| sql(&error))?;
@@ -706,28 +708,38 @@ mod pause {
     use okf_jawn_core::storage::StorageScope;
 
     use crate::db::internal;
+    use crate::storage::Storage;
 
-    /// The held workspace's arrival signal and release, by workspace identity.
+    /// The held workspace's arrival signal and release, by data directory and workspace.
     type Held = BTreeMap<String, (Sender<()>, Receiver<()>)>;
 
     static HELD: Mutex<Held> = Mutex::new(BTreeMap::new());
 
+    /// The held call's key: the data directory (a temporary directory unique to each test) and
+    /// the workspace, so parallel tests whose workspaces share an identity never meet.
+    fn key(storage: &Storage, scope: &StorageScope) -> String {
+        format!("{}|{}", storage.data.root().display(), scope.workspace_id.0)
+    }
+
     /// Hold the next archive call of `scope`; returns (told when it arrives, its release).
-    pub(super) fn hold(scope: &StorageScope) -> Result<(Receiver<()>, Sender<()>), ApiError> {
+    pub(super) fn hold(
+        storage: &Storage,
+        scope: &StorageScope,
+    ) -> Result<(Receiver<()>, Sender<()>), ApiError> {
         let (arrived, arrival) = channel();
         let (release, released) = channel();
         HELD.lock()
             .map_err(|_| internal("the pause table was poisoned"))?
-            .insert(scope.workspace_id.0.to_string(), (arrived, released));
+            .insert(key(storage, scope), (arrived, released));
         Ok((arrival, release))
     }
 
     /// Where an archive call of `scope` waits while a test holds it (once per hold).
-    pub(super) async fn point(scope: &StorageScope) -> Result<(), ApiError> {
+    pub(super) async fn point(storage: &Storage, scope: &StorageScope) -> Result<(), ApiError> {
         let held = HELD
             .lock()
             .map_err(|_| internal("the pause table was poisoned"))?
-            .remove(&scope.workspace_id.0.to_string());
+            .remove(&key(storage, scope));
         if let Some((arrived, released)) = held {
             arrived
                 .send(())
@@ -800,7 +812,7 @@ mod tests {
         let storage = Storage::open(directory.path())?;
         let scope = notes(&storage).await?;
         let mutation = MutationId(uuid::Uuid::from_u128(40));
-        let (arrival, release) = super::pause::hold(&scope)?;
+        let (arrival, release) = super::pause::hold(&storage, &scope)?;
         let first = {
             let (backups, scope) = (storage.backups(), scope.clone());
             tokio::spawn(async move { backups.write_workspace_archive(&scope, mutation).await })
