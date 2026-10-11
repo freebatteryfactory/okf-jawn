@@ -404,6 +404,8 @@ mod tests {
             "---\r\ntype: Note\r\n---\r\n\r\nFirst.\r\nSecond.\r\n",
             "---\ntype: Note\n---\n\n\nFirst.\n",
             "  ---  \ntype: Note\n ---\n\nFirst.\n",
+            // A whitespace-only line is not the empty line parse strips: it is body.
+            "---\ntype: Note\n---\n \nFirst.\n",
         ];
         for text in shapes {
             let body = Document::parse(text)?.body;
