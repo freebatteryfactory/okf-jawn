@@ -3255,5 +3255,58 @@ async fn backup_a_restored_backup_job_advertises_no_download_it_lost() -> TestRe
     Ok(())
 }
 
+/// PR #20 Codex P1 (`backup/mod.rs:164`): the search index starts empty in a replaced data
+/// directory; a replacement restore indexes each restored workspace's head, so search there
+/// answers at once, without a rebuild.
+#[tokio::test]
+async fn backup_a_replacement_restore_indexes_the_restored_head() -> TestResult {
+    use okf_jawn_core::search::{SearchIndex, SearchQuery};
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let (workspace, head) = {
+        let storage = Storage::open(directory.path())?;
+        let (workspace, created) = create(&storage, "local", 1, "Notes").await?;
+        let head = commit(
+            &storage,
+            &workspace,
+            3,
+            &created,
+            vec![note(uuid!(10)?, "notes/plan.md", "The harbor plan.")?],
+        )
+        .await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        (workspace, head)
+    };
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let (installation, archive) = set_of(output.path(), &workspace);
+    restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await?;
+    let found = restored
+        .search()
+        .search(
+            &workspace,
+            SearchQuery {
+                revision: head,
+                text: "harbor".to_owned(),
+                folder: None,
+                include_archived: false,
+                extraction: None,
+                page: okf_jawn_core::storage::Page {
+                    cursor: None,
+                    limit: 20,
+                },
+            },
+        )
+        .await?;
+    assert_eq!(found.hits.len(), 1, "the restored note is found");
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
