@@ -177,8 +177,13 @@ pub async fn run_one(
     handler: &dyn JobHandler,
     job: JobId,
 ) -> Result<bool, ApiError> {
-    let Some(claimed) = records.claim_job(job).await? else {
-        return Ok(false);
+    // A claim refused with `Conflict` names a recorded purge of the job's workspace: the job is
+    // skipped, not a fault, and stays for the purge's caller to cancel (`RecordStore::claim_job`).
+    let claimed = match records.claim_job(job).await {
+        Ok(Some(claimed)) => claimed,
+        Ok(None) => return Ok(false),
+        Err(error) if error.code == ErrorCode::Conflict => return Ok(false),
+        Err(error) => return Err(error),
     };
     if let Err(error) = handler.handle(&claimed).await {
         let retryable = !matches!(
