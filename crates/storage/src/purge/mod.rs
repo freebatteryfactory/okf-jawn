@@ -550,7 +550,14 @@ impl StoragePurger {
                         Rows::Survivors,
                         &archives,
                     )?;
-                    Ok((surviving, puts::others(connection, &tenant, &workspace)?))
+                    // Another workspace's pending put of the target's archive keeps it no more
+                    // than its upload slot would (`references::except_archives`).
+                    let pending = references::except_archives(
+                        puts::others(connection, &tenant, &workspace)?,
+                        &archives,
+                    )
+                    .collect::<Vec<_>>();
+                    Ok((surviving, pending))
                 })
                 .await?
         };

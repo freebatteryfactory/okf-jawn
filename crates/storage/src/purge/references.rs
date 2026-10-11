@@ -229,12 +229,23 @@ pub(crate) fn records(
         workspace,
         &mut uploads,
     )?;
-    found.extend(
-        uploads
-            .into_iter()
-            .filter(|digest| rows == Rows::Target || !not_surviving.contains(digest)),
-    );
+    match rows {
+        Rows::Target => found.extend(uploads),
+        Rows::Survivors => found.extend(except_archives(uploads, not_surviving)),
+    }
     Ok(found)
+}
+
+/// The objects of `held` that a survivor's upload slot or pending put may keep: all but the
+/// target's workspace archives (`archives`). A copy of the target's archive that another
+/// workspace holds or is putting is no surviving reference (Stage 1b design section 6), so the
+/// archive goes with the target.
+pub(crate) fn except_archives<'a>(
+    held: impl IntoIterator<Item = Digest> + 'a,
+    archives: &'a BTreeSet<Digest>,
+) -> impl Iterator<Item = Digest> + 'a {
+    held.into_iter()
+        .filter(move |digest| !archives.contains(digest))
 }
 
 fn collect(

@@ -2751,5 +2751,29 @@ async fn a_repeated_job_completion_lands_no_pending_put() -> TestResult {
     Ok(())
 }
 
+/// Re-review B4 (probe `rr3_a_survivor_pending_put_of_the_targets_archive_keeps_it`): another
+/// workspace put the bytes of the target's workspace archive and its record never landed. Its
+/// pending put is no surviving reference of the archive, as its upload slot would not be, so
+/// the purge deletes the archive.
+#[tokio::test]
+async fn purge_deletes_its_archive_another_workspaces_pending_put_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let (survivor, _) = create(&storage, 2, "Garden").await?;
+    let bytes = b"zanzibar workspace archive";
+    let archive = artifact(&storage, &target, 30, ArtifactKind::WorkspaceBackup, bytes).await?;
+    put(&storage, &survivor, bytes).await?;
+    assert_eq!(pending_puts(directory.path(), &survivor)?, 1);
+    let report = purge_now(&storage, &target).await?;
+    assert!(
+        !held(&storage, &survivor, &archive).await?,
+        "the target's archive goes with it: {report:?}"
+    );
+    assert_eq!(report.objects_kept_shared, "0", "{report:?}");
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
