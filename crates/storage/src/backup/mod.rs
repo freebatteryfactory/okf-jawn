@@ -217,13 +217,16 @@ impl StorageBackups {
                     size,
                     None,
                 ))?;
-                runtime.block_on(record(
+                let recorded = runtime.block_on(record(
                     &storage.records,
                     mutation,
                     &scope.tenant_id,
                     Some(scope),
                     object,
-                ))
+                ));
+                #[cfg(test)]
+                runtime.block_on(crate::pause::point(&recorded_point(&storage, mutation)))?;
+                recorded
             })
         })
         .await
@@ -730,6 +733,17 @@ fn pause_point(storage: &Storage, scope: &StorageScope) -> String {
     )
 }
 
+/// The name of the test-only pause point (`crate::pause`) of a workspace archive under
+/// `mutation`: after it is recorded, before it releases the workspace's lock.
+#[cfg(test)]
+fn recorded_point(storage: &Storage, mutation: MutationId) -> String {
+    format!(
+        "archive-recorded|{}|{}",
+        storage.data.root().display(),
+        mutation.0
+    )
+}
+
 /// Unit tests here, not in `tests/`: they hold a workspace's write lock, which is private.
 /// They return `ApiError` like core's unit tests.
 #[cfg(test)]
@@ -864,55 +878,55 @@ mod tests {
         Ok(())
     }
 
+    /// Wait until a caller of `scope`'s write lock besides the test's own holder has taken the
+    /// lock's handle: it passed every check it makes before the lock, and it waits for the lock.
+    async fn until_waiting_for_the_lock(
+        storage: &Storage,
+        scope: &StorageScope,
+    ) -> Result<(), ApiError> {
+        let started = std::time::Instant::now();
+        while storage.repositories.lock_users(scope)? < 2 {
+            if started.elapsed() > Duration::from_secs(120) {
+                return Err(fault(&"no write began to wait for the workspace's lock"));
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        Ok(())
+    }
+
     /// PR #20 finding (`CodeRabbit`, `backup/mod.rs:161`): the archive is recorded before the
     /// workspace's lock is released, so a purge that plans under the lock right after it finds
-    /// the record. The test takes the lock as soon as the archive lets it go (the archive is seen
-    /// to hold it by its staging directory) and reads the record there.
+    /// the record. The archive is held at its pause point after its record, inside the lock:
+    /// the lock is still its own, and the record is already there.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_workspace_archive_is_recorded_before_it_releases_the_lock() -> Result<(), ApiError> {
         let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
         let storage = Storage::open(directory.path())?;
         let scope = notes(&storage).await?;
         let mutation = MutationId(uuid::Uuid::from_u128(2));
-        let staging = storage
-            .data()
-            .staging_path()
-            .join("local")
-            .join(scope.workspace_id.0.to_string())
-            .join(mutation.0.to_string());
+        let (arrival, release) = crate::pause::hold(super::recorded_point(&storage, mutation))?;
         let writer = {
             let (backups, scope) = (storage.backups(), scope.clone());
             tokio::spawn(async move { backups.write_workspace_archive(&scope, mutation).await })
         };
-        let started = std::time::Instant::now();
-        while !staging.exists() {
-            if writer.is_finished() || started.elapsed() > Duration::from_secs(60) {
-                return Err(fault(&"the archive was never seen holding the lock"));
-            }
-            tokio::task::yield_now().await;
-        }
-        let recorded = {
-            let (storage, scope) = (storage.clone(), scope.clone());
-            tokio::task::spawn_blocking(move || {
-                storage.repositories.locked(&scope, || {
-                    let key = mutation.0.to_string();
-                    tokio::runtime::Handle::current().block_on(storage.records.call(
-                        move |connection| {
-                            connection
-                                .query_row(
-                                    "SELECT count(*) FROM backup_archives WHERE mutation_id = ?1",
-                                    [key],
-                                    |row| row.get::<_, i64>(0),
-                                )
-                                .map_err(|error| fault(&error))
-                        },
-                    ))
-                })
+        crate::pause::arrived(arrival).await?;
+        let holding = storage.repositories.lock_users(&scope)?;
+        let key = mutation.0.to_string();
+        let recorded = storage
+            .records
+            .call(move |connection| {
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM backup_archives WHERE mutation_id = ?1",
+                        [key],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| fault(&error))
             })
-            .await
-            .map_err(|error| fault(&error))??
-        };
+            .await?;
+        release.send(()).map_err(|error| fault(&error))?;
         writer.await.map_err(|error| fault(&error))??;
+        assert_eq!(holding, 1, "the archive still holds the workspace's lock");
         assert_eq!(recorded, 1, "recorded while the lock was still held");
         Ok(())
     }
@@ -945,9 +959,8 @@ mod tests {
                     .await
             })
         };
-        // The archive passes its first check at once and then waits for the lock (if it did
-        // not get there first, it is refused by that first check instead).
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // The archive passed its first check and waits for the lock.
+        until_waiting_for_the_lock(&storage, &scope).await?;
         storage
             .records()
             .create_purge(
