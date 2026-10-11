@@ -104,8 +104,11 @@ impl GitVersions {
                 let staging = repositories.stage(scope, mutation_id)?;
                 let bundle = staging.path.join(export::BUNDLE_FILE);
                 let size = export::write_bundle(&repositories.open(scope)?, &wanted, &bundle)?;
-                let object = runtime.block_on(blobs.put_for(
-                    &scope.tenant_id,
+                // A workspace-scoped put, like every other: pinned, and recorded as a pending put
+                // before the bytes are retained, which the history's record lands. A stop between
+                // the two leaves the pending put, so a purge of the workspace deletes the bytes.
+                let (object, pinned) = runtime.block_on(blobs.put_pinned(
+                    scope,
                     file_reader(Some(bundle), 0, size),
                     size,
                     None,
@@ -118,6 +121,8 @@ impl GitVersions {
                     &wanted,
                     object,
                 ));
+                // The write ends only once its record transaction has ended.
+                pinned.end()?;
                 #[cfg(test)]
                 runtime.block_on(crate::pause::point(&history_recorded_point(
                     repositories,
