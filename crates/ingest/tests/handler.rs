@@ -405,6 +405,222 @@ mod job_handler {
         Ok(())
     }
 
+    /// Every commit of the import `id` of two sources is indexed and announced as `changed`
+    /// exactly once, under its own derived mutation and naming its card (the pending commit
+    /// wrote two: none), and `imported` was appended once with the last revision.
+    fn assert_import_announced_once(
+        world: &World,
+        id: okf_jawn_contract::identity::JobId,
+    ) -> TestResult {
+        let mutation = world.records.entry(id)?.created.mutation_id;
+        let revisions: Vec<Revision> = world
+            .versions
+            .written()?
+            .into_iter()
+            .map(|(_, revision)| revision)
+            .collect();
+        assert_eq!(revisions.len(), 3);
+        let indexed = world.search.indexed()?;
+        for revision in &revisions {
+            assert!(indexed.contains(revision), "{revision:?} was not indexed");
+        }
+        let scope = EventScope::Workspace(storage_scope()?);
+        let changed: Vec<Announced> = events_of(world, &EventKind::Changed)?
+            .into_iter()
+            .map(|(log, mutation, event)| (log, mutation, event.revision, event.item_id))
+            .collect();
+        let items = [
+            None,
+            Some(derive_item_id(mutation, 0)),
+            Some(derive_item_id(mutation, 1)),
+        ];
+        let expected: Vec<Announced> = revisions
+            .iter()
+            .zip(items)
+            .zip(0_u32..)
+            .map(|((revision, item), ordinal)| {
+                (
+                    scope.clone(),
+                    Some(derive_commit_mutation_id(mutation, ordinal)),
+                    Some(revision.clone()),
+                    item,
+                )
+            })
+            .collect();
+        assert_eq!(changed, expected);
+        let imported = events_of(world, &EventKind::Imported)?;
+        assert_eq!(imported.len(), 1);
+        let (_, imported_mutation, event) = some(imported.first(), "the imported event")?;
+        assert_eq!(
+            (*imported_mutation, &event.revision),
+            (Some(mutation), &revisions.last().cloned())
+        );
+        Ok(())
+    }
+
+    /// An import of two sources whose first attempt `breaks` makes fail as a worker fault
+    /// (retryable, no completion), run again: it ends with every revision announced once.
+    async fn import_announces_after(
+        number: u128,
+        breaks: impl FnOnce(&World) -> Built<()>,
+    ) -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, number, "first.pdf", b"%PDF first")?;
+        let second = upload(
+            &world,
+            number.saturating_add(1),
+            "second.pdf",
+            b"%PDF second",
+        )?;
+        let id = job(
+            &world,
+            number,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        breaks(&world)?;
+        assert!(run(&world, id).await?);
+        let failed = world.records.entry(id)?;
+        assert_eq!(failed.job.state, JobState::Failed);
+        assert!(failed.completions.is_empty());
+        let (message, retryable) = some(failed.failures.first(), "the failure")?;
+        assert!(retryable, "{message}");
+        world.records.insert(id, failed.scope, failed.created)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_import_announced_once(&world, id)
+    }
+
+    #[tokio::test]
+    async fn a_commit_whose_attempt_died_before_announcing_it_is_announced_by_the_replay()
+    -> TestResult {
+        // The first card's commit is written and the process dies before announcing it.
+        import_announces_after(180, |world| Ok(world.versions.die_after(2)?)).await
+    }
+
+    #[tokio::test]
+    async fn an_index_failure_fails_the_attempt_and_the_replay_announces() -> TestResult {
+        // The first card's commit is the second revision indexed.
+        import_announces_after(182, |world| {
+            *world.search.fail_index.lock().map_err(|_| "poisoned")? = Some(2);
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_changed_append_failure_fails_the_attempt_and_the_replay_announces() -> TestResult {
+        import_announces_after(184, |world| {
+            Ok(world.events.fail_on(EventKind::Changed, 2)?)
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn an_imported_append_failure_fails_the_attempt_and_the_replay_appends_it_once()
+    -> TestResult {
+        import_announces_after(186, |world| {
+            Ok(world.events.fail_on(EventKind::Imported, 1)?)
+        })
+        .await
+    }
+
+    /// The redigest `id` of `item` was indexed and announced exactly once, under its derived
+    /// mutation and naming the item; a redigest appends no `imported`.
+    fn assert_redigest_announced_once(
+        world: &World,
+        id: okf_jawn_contract::identity::JobId,
+        item: ItemId,
+    ) -> TestResult {
+        let mutation = world.records.entry(id)?.created.mutation_id;
+        let ours =
+            some(
+                world.versions.written()?.into_iter().find(|(changes, _)| {
+                    changes.mutation_id == derive_commit_mutation_id(mutation, 0)
+                }),
+                "the redigest commit",
+            )?
+            .1;
+        assert!(world.search.indexed()?.contains(&ours));
+        let changed: Vec<Announced> = events_of(world, &EventKind::Changed)?
+            .into_iter()
+            .map(|(log, mutation, event)| (log, mutation, event.revision, event.item_id))
+            .collect();
+        assert_eq!(
+            changed,
+            [(
+                EventScope::Workspace(storage_scope()?),
+                Some(derive_commit_mutation_id(mutation, 0)),
+                Some(ours),
+                Some(item)
+            )]
+        );
+        assert_eq!(events_of(world, &EventKind::Imported)?, Vec::new());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_redigest_run_again_is_announced_once() -> TestResult {
+        let (world, id, item) = redigest_world(36)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        // The completion was lost: the rerun replays through the redigest's early replay.
+        world.records.insert(id, entry.scope, entry.created)?;
+        assert!(run(&world, id).await?);
+        assert_eq!(world.records.entry(id)?.job.state, JobState::Succeeded);
+        assert_redigest_announced_once(&world, id, item)
+    }
+
+    #[tokio::test]
+    async fn a_redigest_whose_attempt_died_before_announcing_is_announced_once_by_the_replay()
+    -> TestResult {
+        let (world, id, item) = redigest_world(37)?;
+        world.versions.die_after(1)?;
+        assert!(run(&world, id).await?);
+        let died = world.records.entry(id)?;
+        assert_eq!(died.job.state, JobState::Failed);
+        assert_eq!(events_of(&world, &EventKind::Changed)?, Vec::new());
+        world.records.insert(id, died.scope, died.created)?;
+        assert!(run(&world, id).await?);
+        assert_eq!(world.records.entry(id)?.job.state, JobState::Succeeded);
+        assert_redigest_announced_once(&world, id, item)
+    }
+
+    #[tokio::test]
+    async fn a_resumed_attempts_renewals_keep_the_progress_its_record_holds() -> TestResult {
+        let world = heartbeat_world()?;
+        let id = restore_job(&world, 188)?;
+        // An earlier attempt left the record at 37%.
+        world.records.set_progress(id, 37)?;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let records = Arc::clone(&world.records);
+        let observed = Arc::clone(&seen);
+        *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
+            let records = Arc::clone(&records);
+            let observed = Arc::clone(&observed);
+            Box::pin(async move {
+                for _interval in 0..5 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let progress = records.entry(id).map(|entry| entry.job.progress);
+                    if let (Ok(progress), Ok(mut seen)) = (progress, observed.lock()) {
+                        seen.push(progress);
+                    }
+                }
+            })
+        }));
+        let before = world.records.renewals();
+        assert!(run(&world, id).await?);
+        assert_completed_under(&world, id, 1)?;
+        assert!(world.records.renewals() > before.saturating_add(2));
+        // Every renewal wrote back the 37% the record held, and none was announced.
+        let seen = seen.lock().map_err(|_| "poisoned")?.clone();
+        assert_eq!(seen, [37; 5]);
+        assert_eq!(events_of(&world, &EventKind::JobUpdated)?.len(), 1);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn rebuild_index_rebuilds_at_the_current_head() -> TestResult {
         let world = world()?;

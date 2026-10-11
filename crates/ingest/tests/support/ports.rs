@@ -165,6 +165,9 @@ pub struct FakeSearch {
     pub indexed: Mutex<Vec<Revision>>,
     /// Awaited as a rebuild starts (a long rebuild).
     pub rebuild_hold: Mutex<Option<Hold>>,
+    /// The `n`-th `index_revision` call (1-based, counting the calls that succeeded) fails
+    /// with `Unavailable` and indexes nothing; once.
+    pub fail_index: Mutex<Option<usize>>,
 }
 
 /// `Backups` that write one archive per mutation id and count the writes. A restore writes one
@@ -778,10 +781,21 @@ impl SearchIndex for FakeSearch {
         revision: Revision,
     ) -> PortFuture<'a, ()> {
         let recorded = self
-            .indexed
+            .fail_index
             .lock()
-            .map(|mut revisions| revisions.push(revision))
-            .map_err(|_| poisoned());
+            .map_err(|_| poisoned())
+            .and_then(|mut fail| {
+                let mut revisions = self.indexed.lock().map_err(|_| poisoned())?;
+                if *fail == Some(revisions.len().saturating_add(1)) {
+                    *fail = None;
+                    return Err(ApiError::new(
+                        ErrorCode::Unavailable,
+                        "the index could not be written",
+                    ));
+                }
+                revisions.push(revision);
+                Ok(())
+            });
         Box::pin(async move { recorded })
     }
     fn search<'a>(

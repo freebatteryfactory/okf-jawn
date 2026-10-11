@@ -14,13 +14,14 @@
 //!
 //! `FakeEvents` encodes the `EventLog::append` doc: with a mutation identity, an identical
 //! notification already appended under it in the same log is not appended again; without one,
-//! every notification is appended. `list` is not modelled.
+//! every notification is appended. `list` is not modelled. `fail_on` makes one append fail
+//! with `Unavailable`, appending nothing, as a store that could not write would.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::events::{Event, ListEventsResponse, Receipt};
+use okf_jawn_contract::events::{Event, EventKind, ListEventsResponse, Receipt};
 use okf_jawn_contract::identity::{
     ArtifactId, Digest, ItemId, JobId, MutationId, PurgeId, ReceiptId, Revision, TenantId,
     Timestamp,
@@ -69,6 +70,8 @@ pub type Appended = (EventScope, Option<MutationId>, NewEvent);
 #[derive(Debug, Default)]
 pub struct FakeEvents {
     appended: Mutex<Vec<Appended>>,
+    /// The `n`-th append of this kind (1-based, counting those appended) fails; once.
+    fail: Mutex<Option<(EventKind, usize)>>,
 }
 
 impl FakeEvents {
@@ -82,6 +85,15 @@ impl FakeEvents {
             .map(|appended| appended.clone())
             .map_err(|_| poisoned())
     }
+
+    /// Make the `n`-th append of `kind` (1-based, counting those appended) fail, once.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_on(&self, kind: EventKind, n: usize) -> Result<(), ApiError> {
+        *self.fail.lock().map_err(|_| poisoned())? = Some((kind, n));
+        Ok(())
+    }
 }
 
 impl EventLog for FakeEvents {
@@ -91,36 +103,50 @@ impl EventLog for FakeEvents {
         mutation_id: Option<MutationId>,
         event: NewEvent,
     ) -> PortFuture<'a, Event> {
-        let appended = self
-            .appended
-            .lock()
-            .map_err(|_| poisoned())
-            .and_then(|mut log| {
-                let repeated = mutation_id.is_some()
-                    && log.iter().any(|(earlier, mutation, prior)| {
-                        earlier == scope && *mutation == mutation_id && *prior == event
-                    });
-                if !repeated {
-                    log.push((scope.clone(), mutation_id, event.clone()));
-                }
-                let at = Timestamp::try_from("2026-10-09T00:00:00.000Z".to_owned())
-                    .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
-                Ok(Event {
-                    id: log.len().to_string(),
-                    workspace_id: match scope {
-                        EventScope::Workspace(workspace) => Some(workspace.workspace_id),
-                        EventScope::Tenant(_) => None,
-                    },
-                    kind: event.kind,
-                    at,
-                    revision: event.revision,
-                    item_id: event.item_id,
-                    job_id: event.job_id,
-                    connector_id: event.connector_id,
-                    actor: event.actor,
-                    operation: event.operation,
-                })
-            });
+        let appended =
+            self.appended
+                .lock()
+                .map_err(|_| poisoned())
+                .and_then(|mut log| {
+                    let mut fail = self.fail.lock().map_err(|_| poisoned())?;
+                    let earlier = log
+                        .iter()
+                        .filter(|(_, _, prior)| prior.kind == event.kind)
+                        .count();
+                    if fail.as_ref().is_some_and(|(kind, n)| {
+                        *kind == event.kind && *n == earlier.saturating_add(1)
+                    }) {
+                        *fail = None;
+                        return Err(ApiError::new(
+                            ErrorCode::Unavailable,
+                            "the event could not be appended",
+                        ));
+                    }
+                    let repeated = mutation_id.is_some()
+                        && log.iter().any(|(earlier, mutation, prior)| {
+                            earlier == scope && *mutation == mutation_id && *prior == event
+                        });
+                    if !repeated {
+                        log.push((scope.clone(), mutation_id, event.clone()));
+                    }
+                    let at = Timestamp::try_from("2026-10-09T00:00:00.000Z".to_owned())
+                        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+                    Ok(Event {
+                        id: log.len().to_string(),
+                        workspace_id: match scope {
+                            EventScope::Workspace(workspace) => Some(workspace.workspace_id),
+                            EventScope::Tenant(_) => None,
+                        },
+                        kind: event.kind,
+                        at,
+                        revision: event.revision,
+                        item_id: event.item_id,
+                        job_id: event.job_id,
+                        connector_id: event.connector_id,
+                        actor: event.actor,
+                        operation: event.operation,
+                    })
+                });
         Box::pin(async move { appended })
     }
 
@@ -204,6 +230,19 @@ impl FakeRecords {
             .values()
             .cloned()
             .collect())
+    }
+
+    /// Set the progress a job's record holds, as an earlier attempt would have left it.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for an unknown job.
+    pub fn set_progress(&self, id: JobId, progress: u8) -> Result<(), ApiError> {
+        self.lock()?
+            .get_mut(&id)
+            .ok_or_else(not_found)?
+            .job
+            .progress = progress;
+        Ok(())
     }
 
     /// A job as it stands.
@@ -619,7 +658,11 @@ mod tests {
         records.cancel(id)?;
         assert_eq!(records.entry(id)?.job.state, JobState::Cancelled);
         assert_eq!(records.renewals(), 0);
-        assert_eq!(FakeEvents::default().appended()?, Vec::new());
+        let events = FakeEvents::default();
+        events.fail_on(okf_jawn_contract::events::EventKind::Imported, 1)?;
+        assert_eq!(events.appended()?, Vec::new());
+        records.set_progress(id, 40)?;
+        assert_eq!(records.entry(id)?.job.progress, 40);
         Ok(())
     }
 }
