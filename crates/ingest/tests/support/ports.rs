@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use okf_jawn_contract::common::{PageRange, Warning};
 use okf_jawn_contract::conventions::NamingRules;
@@ -135,6 +135,9 @@ pub struct FakeConverter {
     /// Windows converted so far; each export names its run, so a conversion repeated on a
     /// later attempt retains different outputs from the first.
     pub runs: AtomicUsize,
+    /// Each converted window also produces one picture: `picture.png` in its output directory
+    /// (`picture of window <start>, run <run>`), 20 by 10 pixels, captioned `Figure <start>`.
+    pub pictures: AtomicBool,
 }
 
 /// What a test runs as a window starts: `true` makes that conversion never end.
@@ -1184,6 +1187,25 @@ impl Converter for FakeConverter {
             let run = self.runs.fetch_add(1, Ordering::SeqCst);
             std::fs::write(&structured, format!("{{\"window\":{start},\"run\":{run}}}"))
                 .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+            let mut assets = Vec::new();
+            if self.pictures.load(Ordering::SeqCst) {
+                let path = input.output_directory.join("picture.png");
+                std::fs::write(&path, format!("picture of window {start}, run {run}"))
+                    .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+                assets.push(okf_jawn_core::conversion::ConvertedAsset {
+                    path,
+                    media_type: "image/png".to_owned(),
+                    role: okf_jawn_contract::read::AssetRole::Picture,
+                    location: okf_jawn_contract::source::SourceLocation::Direct {
+                        locator: okf_jawn_contract::source::SourceLocator::Page { page_no: start },
+                    },
+                    pixel_size: Some(okf_jawn_core::conversion::PixelSize {
+                        width: 20,
+                        height: 10,
+                    }),
+                    caption: Some(format!("Figure {start}")),
+                });
+            }
             Ok(Conversion {
                 source_digest,
                 converter,
@@ -1198,7 +1220,7 @@ impl Converter for FakeConverter {
                     markdown: format!("# Pages from {start}\n\nText.\n"),
                     structured,
                     outline: Vec::new(),
-                    assets: Vec::new(),
+                    assets,
                     locations: Vec::new(),
                     tables: Vec::new(),
                     warnings: Vec::new(),

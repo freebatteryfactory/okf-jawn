@@ -10,6 +10,11 @@
 //! with a part silently dropped. The reply is written under a temporary name and then renamed
 //! (`write_reply`), so a child stopped while writing it leaves no `RESULT_FILE`, and a partial
 //! reply is never read as a result.
+//!
+//! Images travel like the document: the child writes each picture's image and each page render
+//! as its own file in the output directory, straight from the bytes the converter holds, and
+//! the reply names each file with what it is (`AssetFile`). The supervisor reads them from
+//! there; no image is copied into the reply.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,6 +22,7 @@ use std::time::Duration;
 use okf_jawn_contract::common::{PageRange, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{ConversionSettings, ConverterIssue, FailureReason};
+use okf_jawn_contract::read::AssetRole;
 use okf_jawn_core::conversion::ConversionStatus;
 use serde::{Deserialize, Serialize};
 
@@ -79,6 +85,34 @@ pub struct Unlocated {
     pub text: String,
 }
 
+/// One image the child wrote into the output directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetFile {
+    /// Its file name in the output directory: one plain name, never a path.
+    pub file: String,
+    /// A picture's own image or a page render.
+    pub role: AssetRole,
+    /// Its media type, as the converter gave it (`PictureImage.mimetype`).
+    pub media_type: String,
+    /// Width in pixels (`PictureImage.width`).
+    pub width: u32,
+    /// Height in pixels (`PictureImage.height`).
+    pub height: u32,
+    /// A page render's one-based page; `None` for a picture.
+    pub page: Option<u32>,
+    /// A picture's item in the JSON export, `#/pictures/{n}`, when the child paired it with
+    /// one by docling's own encoding of the picture; `None` for a picture paired with none,
+    /// and for a page render.
+    pub picture: Option<usize>,
+    /// For a paired picture, the SHA-256 of docling's encoding of it (the image data URI its
+    /// own export writes), which the item's image must have; `None` otherwise.
+    pub encoding: Option<String>,
+    /// A picture's caption: docling's plain export text for it, the document's own words.
+    /// `None` when the document gives it none, and always for a page render.
+    pub caption: Option<String>,
+}
+
 /// What the child reports in `RESULT_FILE`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
@@ -93,6 +127,8 @@ pub struct Reply {
     pub blocks: Vec<Block>,
     /// `TEXT_LAYER_FILE` was written (a PDF window).
     pub text_layer: bool,
+    /// The images written beside the document: pictures, then page renders.
+    pub assets: Vec<AssetFile>,
 }
 
 /// The request as it is written: the time budget in whole milliseconds.
@@ -117,6 +153,7 @@ struct ReplyFile {
     issues: Vec<ConverterIssue>,
     blocks: Vec<Block>,
     text_layer: bool,
+    assets: Vec<AssetFile>,
 }
 
 /// `ConversionStatus` without its reason.
@@ -201,6 +238,7 @@ impl Reply {
             issues: self.issues.clone(),
             blocks: self.blocks.clone(),
             text_layer: self.text_layer,
+            assets: self.assets.clone(),
         })
         .map_err(|error| fault(&format!("a conversion reply did not serialize: {error}")))
     }
@@ -235,6 +273,7 @@ impl Reply {
             issues: file.issues,
             blocks: file.blocks,
             text_layer: file.text_layer,
+            assets: file.assets,
         })
     }
 }
