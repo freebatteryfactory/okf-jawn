@@ -1979,10 +1979,20 @@ async fn backup_a_replacement_restore_refuses_a_workspace_an_unfinished_purge_na
 {
     let directory = tempfile::tempdir()?;
     let output = tempfile::tempdir()?;
+    // A workspace with notes only: its archive holds no object, so no object put (which the
+    // restored purge record refuses too) stands in for the refusal under test.
     let workspace = {
-        let fixture = fixture(directory.path()).await?;
-        fixture
-            .storage
+        let storage = Storage::open(directory.path())?;
+        let (workspace, head) = create(&storage, "local", 1, "Notes").await?;
+        commit(
+            &storage,
+            &workspace,
+            3,
+            &head,
+            vec![note(uuid!(10)?, "notes/plan.md", "The plan.")?],
+        )
+        .await?;
+        storage
             .records()
             .create_purge(
                 &tenant("local")?,
@@ -1990,18 +2000,17 @@ async fn backup_a_replacement_restore_refuses_a_workspace_an_unfinished_purge_na
                 NewPurge {
                     id: uuid!(61)?,
                     target: PurgeTarget::Workspace {
-                        workspace_id: fixture.workspace.workspace_id,
+                        workspace_id: workspace.workspace_id,
                     },
                     initiator: person("ana"),
                 },
             )
             .await?;
-        fixture
-            .storage
+        storage
             .backups()
             .write_backup_set(output.path(), None)
             .await?;
-        fixture.workspace.clone()
+        workspace
     };
     std::fs::remove_dir_all(directory.path())?;
     let restored = Storage::open(directory.path())?;
