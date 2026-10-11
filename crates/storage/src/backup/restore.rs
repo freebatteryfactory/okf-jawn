@@ -1,8 +1,12 @@
 //! Restoring a workspace archive, as an import into a blank workspace (`restore_import`) or as
 //! part of a replacement restore (Stage 1b design section 8).
 //!
-//! In both, the objects are put back first (each checked against its digest), then the Git
-//! history (the pack is indexed and every reference set), then the records in one transaction.
+//! In both, the archive is checked first, before anything is written (`checked`): an archive
+//! may be a caller's file. Its entries, its manifest and every object's bytes against its
+//! digest; then its records: a database SQLite reads, intact, migrated to this build's schema,
+//! whose tables and indexes are exactly this build's, and whose rows are all of its own tenant,
+//! workspace and jobs. Then the objects are put back, then the Git history (the pack is indexed
+//! and every reference set), then the records in one transaction.
 //! An import then writes one commit on the archive head carrying its mutation (same tree), so
 //! its revision is found by that mutation like any job's write. A resumed import finds the
 //! accepted head already at the archive's, or at that commit, and skips what is done; the
@@ -27,7 +31,7 @@
 //! is not decided yet (core-cli M1.6), so an import does not rewrite them.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use git2::Repository;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
@@ -72,7 +76,49 @@ struct Target {
     followed: BTreeMap<Digest, BTreeSet<Digest>>,
     /// For a replacement restore, the SHA-256 of the archive file, recorded with the rows.
     replaced_from: Option<Digest>,
+    /// This build's schema and table order, which the rows are copied with.
+    live: Live,
 }
+
+/// This build's records schema, read from the live database: every table, and the order a
+/// replacement restore inserts the workspace tables in.
+struct Live {
+    schema: Schema,
+    /// `WORKSPACE_TABLES`, each after every one its foreign keys reference.
+    order: Vec<String>,
+}
+
+/// An archive opened and checked (`checked`), nothing written yet.
+struct Checked {
+    opened: Opened,
+    /// The manifest, its objects listed from the archive's entries.
+    manifest: WorkspaceManifest,
+    /// The archived records, extracted, migrated and checked.
+    records: PathBuf,
+    /// This build's schema, which the records were checked against and are copied with.
+    live: Live,
+}
+
+/// One table of a records database as its schema states it. Statements are kept with every run
+/// of whitespace made one space (`spaced`).
+#[derive(Debug, PartialEq, Eq)]
+struct Table {
+    /// Its columns, in order.
+    columns: Vec<Column>,
+    /// Its `CREATE TABLE` statement, which states what the columns do not: each column's
+    /// collation, STRICT, WITHOUT ROWID, CHECK and REFERENCES.
+    statement: String,
+    /// Each of its indexes by name, with its `CREATE INDEX` statement (none for the index
+    /// SQLite makes for a primary key or a unique column).
+    indexes: BTreeMap<String, Option<String>>,
+}
+
+/// One column of a table, as `pragma_table_xinfo` gives it: name, declared type, not null,
+/// default, primary-key position and hidden (non-zero for a generated column).
+type Column = (String, String, i64, Option<String>, i64, i64);
+
+/// Every ordinary table of a records database.
+type Schema = BTreeMap<String, Table>;
 
 /// Tables an import copies into the target workspace.
 const IMPORTED: &[&str] = &[
@@ -86,6 +132,8 @@ const IMPORTED: &[&str] = &[
 ];
 /// The message of the commit an import writes on the archive head.
 const RESTORE_MESSAGE: &str = "Restore the workspace from an archive";
+/// SQLite's extended result code of a failed foreign key (`SQLITE_CONSTRAINT_FOREIGNKEY`).
+const FOREIGN_KEY_FAILED: std::ffi::c_int = 787;
 
 /// Restore the archive at `archive` into `scope`, staging under `staging`. Blocking: `runtime`
 /// drives the object store and the records database.
@@ -97,22 +145,12 @@ pub(crate) fn restore(
     staging: &Path,
     mode: &Mode,
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
-    let mut opened = Opened::open(archive)?;
-    let manifest = opened.workspace()?;
-    // The archived records are read, brought to this build's schema and checked first, before
-    // anything is written: an archive may be a caller's file.
-    let records = staging.join(RECORDS);
-    opened.extract(RECORDS, &records)?;
-    let mut archived = Connection::open(&records).map_err(|error| sql(&error))?;
-    crate::schema::RECORDS
-        .to_latest(&mut archived)
-        .map_err(|error| {
-            internal(format!(
-                "an archived records database did not migrate: {error}"
-            ))
-        })?;
-    drop(archived);
-    refuse_foreign_rows(&records, &manifest)?;
+    let Checked {
+        mut opened,
+        manifest,
+        records,
+        live,
+    } = checked(storage, runtime, archive, staging)?;
     // A replacement restore run again after a crash in a later workspace accepts a workspace
     // this same archive already restored in full, and leaves it as it is.
     if let Some(report) = refuse(storage, runtime, scope, &manifest, mode)? {
@@ -126,7 +164,7 @@ pub(crate) fn restore(
         runtime,
         scope,
         (&mut opened, &mut pinned),
-        (&manifest, &records),
+        (&manifest, &records, live),
         staging,
         mode,
     );
@@ -136,6 +174,120 @@ pub(crate) fn restore(
     restored
 }
 
+/// Check the archive at `archive` as a restore does before it writes anything (`checked`),
+/// staging under `staging`; returns its manifest. A replacement restore checks every workspace
+/// archive of its set this way before it writes the installation archive's rows, so a set with
+/// a refused archive writes nothing. Blocking.
+///
+/// # Errors
+/// Returns `InvalidInput` for an archive a restore refuses.
+pub(crate) fn check(
+    storage: &Storage,
+    runtime: &Handle,
+    archive: &Path,
+    staging: &Path,
+) -> Result<WorkspaceManifest, ApiError> {
+    checked(storage, runtime, archive, staging).map(|checked| checked.manifest)
+}
+
+/// Open the archive at `archive` and check everything a restore reads from it, before anything
+/// is written (an archive may be a caller's file):
+/// - its entries (`Opened::open`: compression methods, sizes, and each object's bytes against
+///   its digest), its manifest, and its objects, listed from its entries (an older manifest's
+///   own list is not read);
+/// - its records, extracted under `staging` (`migrated`): a database SQLite reads, intact, and
+///   brought to this build's schema;
+/// - their schema (`refuse_other_schema`) and then their rows (`refuse_foreign_rows`), against
+///   this build's schema read from the live database: the one schema the rows are then copied
+///   with.
+///
+/// # Errors
+/// Returns `InvalidInput` for an archive that fails a check.
+fn checked(
+    storage: &Storage,
+    runtime: &Handle,
+    archive: &Path,
+    staging: &Path,
+) -> Result<Checked, ApiError> {
+    let mut opened = Opened::open(archive)?;
+    let mut manifest = opened.workspace()?;
+    manifest.objects = opened.objects()?;
+    let records = staging.join(RECORDS);
+    opened.extract(RECORDS, &records)?;
+    migrated(&records)?;
+    let live = runtime.block_on(storage.records.call(|connection| {
+        Ok(Live {
+            schema: schema_of(connection)?,
+            order: parents_first(connection, WORKSPACE_TABLES)?,
+        })
+    }))?;
+    let connection = super::snapshot::read_only(&records)?;
+    refuse_other_schema(&connection, &live.schema)?;
+    refuse_foreign_rows(&connection, &manifest, &live.schema)?;
+    drop(connection);
+    Ok(Checked {
+        opened,
+        manifest,
+        records,
+        live,
+    })
+}
+
+/// Check the extracted records database at `records` and bring it to this build's schema:
+/// SQLite must read it as a database, `PRAGMA integrity_check` must answer `ok` (the checks'
+/// count queries and the copy may take different paths through its tables and indexes, so
+/// those must agree), and this build's migrations must accept it.
+///
+/// # Errors
+/// Returns `InvalidInput` for a file that is not a database, is damaged or does not migrate (a
+/// newer schema, say); a store fault only for a failure of this machine (`is_fault`).
+fn migrated(records: &Path) -> Result<(), ApiError> {
+    let unreadable = |error: &rusqlite::Error| {
+        if is_fault(error) {
+            sql(error)
+        } else {
+            invalid(&format!("its records database cannot be read: {error}"))
+        }
+    };
+    let mut connection = Connection::open(records).map_err(|error| unreadable(&error))?;
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| unreadable(&error))?;
+    if integrity != "ok" {
+        return Err(invalid(&format!(
+            "its records database is damaged: {integrity}"
+        )));
+    }
+    crate::schema::RECORDS
+        .to_latest(&mut connection)
+        .map_err(|error| match &error {
+            rusqlite_migration::Error::RusqliteError { err, .. } if is_fault(err) => sql(err),
+            _ => invalid(&format!(
+                "its records database does not migrate to this build's schema: {error}"
+            )),
+        })
+}
+
+/// Whether a SQLite failure is this machine's (disk, memory, locks, permissions) rather than
+/// the file's.
+fn is_fault(error: &rusqlite::Error) -> bool {
+    use rusqlite::ErrorCode as Code;
+    error.sqlite_error().is_some_and(|failure| {
+        matches!(
+            failure.code,
+            Code::DiskFull
+                | Code::SystemIoFailure
+                | Code::CannotOpen
+                | Code::OutOfMemory
+                | Code::ReadOnly
+                | Code::DatabaseBusy
+                | Code::DatabaseLocked
+                | Code::PermissionDenied
+                | Code::FileLockingProtocolFailed
+        )
+    })
+}
+
 /// Put the archive's objects back (each pin kept in `pinned`), then its history and the rows of
 /// the checked records at `records`.
 fn put_back(
@@ -143,7 +295,7 @@ fn put_back(
     runtime: &Handle,
     scope: &StorageScope,
     (opened, pinned): (&mut Opened, &mut Vec<Pinned>),
-    (manifest, records): (&WorkspaceManifest, &Path),
+    (manifest, records, live): (&WorkspaceManifest, &Path, Live),
     staging: &Path,
     mode: &Mode,
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
@@ -165,10 +317,15 @@ fn put_back(
     let pack = staging.join(PACK);
     opened.extract(PACK, &pack)?;
     let items = history(storage, runtime, scope, manifest, &pack, mode)?;
-    let restored_history = references::history(&storage.repositories.open(scope)?)?.objects;
+    let restored_history = references::history(&storage.repositories.open(scope)?)?;
     let mut followed = BTreeMap::new();
     for digest in &manifest.objects {
-        let named = references::record_tokens(&storage.blobs, &scope.tenant_id, digest)?;
+        let named = references::record_tokens(
+            &storage.blobs,
+            &scope.tenant_id,
+            digest,
+            restored_history.records.contains(digest),
+        )?;
         if !named.is_empty() {
             followed.insert(digest.clone(), named);
         }
@@ -180,12 +337,13 @@ fn put_back(
             workspace: scope.workspace_id.0.to_string(),
             original: manifest.workspace_id.0.to_string(),
             objects: manifest.objects.clone(),
-            history: restored_history,
+            history: restored_history.objects,
             followed,
             replaced_from: match mode {
                 Mode::Import(..) => None,
                 Mode::Replace(digest) => Some(digest.clone()),
             },
+            live,
         };
         let editors = match mode {
             Mode::Import(editors, _) => {
@@ -259,35 +417,148 @@ fn restored_already(
         .map_err(|error| crate::db::json(&error))
 }
 
-/// Refuse an archive any of whose rows belongs to another tenant or workspace than its manifest
-/// names: a table with `tenant_id` and `workspace_id` holds only the manifest's tenant and
-/// workspace, one with `tenant_id` alone only its tenant, and one keyed by `job_id` alone only
-/// rows of the archive's own jobs. A written archive never holds another row
-/// (`snapshot::filter`), so one means a crafted file; it is refused before anything is written.
+/// Every ordinary table of the database `connection` opens (`table_of`).
+fn schema_of(connection: &Connection) -> Result<Schema, ApiError> {
+    let mut schema = Schema::new();
+    for table in super::snapshot::tables(connection)? {
+        let read = table_of(connection, &table)?;
+        schema.insert(table, read);
+    }
+    Ok(schema)
+}
+
+/// `tables` ordered so that each comes after every one of `tables` its foreign keys reference
+/// (parents first), in name order otherwise, read from the schema of `connection`.
+///
+/// # Errors
+/// Returns `Internal` for a foreign-key cycle, which no order satisfies.
+fn parents_first(connection: &Connection, tables: &[&str]) -> Result<Vec<String>, ApiError> {
+    let mut parents: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for table in tables {
+        let mut statement = connection
+            .prepare("SELECT \"table\" FROM pragma_foreign_key_list(?1)")
+            .map_err(|error| sql(&error))?;
+        let referenced = statement
+            .query_map([table], |row| row.get::<_, String>(0))
+            .map_err(|error| sql(&error))?
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(|error| sql(&error))?;
+        parents.insert(
+            table,
+            referenced
+                .into_iter()
+                .filter(|parent| parent != table && tables.contains(&parent.as_str()))
+                .collect(),
+        );
+    }
+    let mut ordered: Vec<String> = Vec::new();
+    while ordered.len() < tables.len() {
+        let next = tables.iter().find(|table| {
+            !ordered.iter().any(|placed| placed == **table)
+                && parents
+                    .get(**table)
+                    .is_none_or(|needed| needed.iter().all(|parent| ordered.contains(parent)))
+        });
+        match next {
+            Some(table) => ordered.push((*table).to_owned()),
+            None => return Err(internal("the records schema's foreign keys form a cycle")),
+        }
+    }
+    Ok(ordered)
+}
+
+/// The columns of `table` in `schema` that a restore copies: every column but an event's
+/// sequence number, which the live log assigns again.
+fn copied_columns(schema: &Schema, table: &str) -> Result<Vec<String>, ApiError> {
+    Ok(schema
+        .get(table)
+        .ok_or_else(|| internal(format!("this build's schema has no table {table}")))?
+        .columns
+        .iter()
+        .map(|(name, ..)| name.clone())
+        .filter(|name| !(table == "events" && name == "seq"))
+        .collect())
+}
+
+/// Refuse archived records whose schema is not exactly this build's (`live`), before any row is
+/// read. A written archive is never refused (it is a `VACUUM INTO` copy of this schema, or an
+/// older one this build's migrations bring to it); a refused one is a crafted file.
+///
+/// Each table of this build's schema must be an ordinary table of the archive under exactly its
+/// name (a view, a table under another case or a missing table is refused), and equal it
+/// exactly (`table_of`): the same columns (name, declared type, not null, default, primary-key
+/// position, and never a generated column), the same `CREATE TABLE` statement (so the same
+/// collation for each column, STRICT, WITHOUT ROWID, CHECK and REFERENCES) and the same indexes,
+/// each by name with the same statement. Statements are compared with every run of whitespace
+/// made one space, nothing else. What else the archive holds (a table this build does not have,
+/// a trigger) is never read, and nothing is written to the archive for a trigger to act on.
 ///
 /// # Errors
 /// Returns `InvalidInput` naming the table.
-fn refuse_foreign_rows(records: &Path, manifest: &WorkspaceManifest) -> Result<(), ApiError> {
-    let connection = super::snapshot::read_only(records)?;
-    let tenant = manifest.tenant_id.as_str();
-    let workspace = manifest.workspace_id.0.to_string();
-    for table in super::snapshot::tables(&connection)? {
-        let columns: Vec<String> = {
+fn refuse_other_schema(connection: &Connection, live: &Schema) -> Result<(), ApiError> {
+    for (table, expected) in live {
+        let found: Vec<(String, String)> = {
             let mut statement = connection
-                .prepare("SELECT name FROM pragma_table_info(?1)")
+                .prepare("SELECT name, type FROM sqlite_schema WHERE lower(name) = lower(?1)")
                 .map_err(|error| sql(&error))?;
             statement
-                .query_map([&table], |row| row.get(0))
+                .query_map([table], |row| Ok((row.get(0)?, row.get(1)?)))
                 .map_err(|error| sql(&error))?
                 .collect::<Result<_, _>>()
                 .map_err(|error| sql(&error))?
         };
-        let has = |name: &str| columns.iter().any(|column| column == name);
+        if found != [(table.clone(), "table".to_owned())] {
+            return Err(invalid(&format!(
+                "its {table} is not this build's table (found {found:?})"
+            )));
+        }
+        let archived = table_of(connection, table)?;
+        let differs = if archived.columns != expected.columns {
+            "columns"
+        } else if archived.statement != expected.statement {
+            "definition (a collation, STRICT, WITHOUT ROWID, CHECK or REFERENCES)"
+        } else if archived.indexes != expected.indexes {
+            "indexes"
+        } else {
+            continue;
+        };
+        return Err(invalid(&format!(
+            "its {table} table is not this build's: its {differs} differ"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse archived records holding a row the copy must not write, once their schema is this
+/// build's (`refuse_other_schema`). A written archive is never refused (`snapshot::filter`).
+///
+/// In the columns the copy selects (`copied_columns`, the same list), compared byte for byte
+/// (`COLLATE BINARY`, whatever collation the archive declares):
+/// - a table with `tenant_id` and `workspace_id` holds only the manifest's tenant and workspace;
+/// - one with `tenant_id` alone only its tenant;
+/// - one keyed by `job_id` alone only rows of the archive's own jobs;
+/// - and `workspaces` holds exactly one row, which is then the manifest's workspace.
+///
+/// # Errors
+/// Returns `InvalidInput` naming the table.
+fn refuse_foreign_rows(
+    connection: &Connection,
+    manifest: &WorkspaceManifest,
+    live: &Schema,
+) -> Result<(), ApiError> {
+    let tenant = manifest.tenant_id.as_str();
+    let workspace = manifest.workspace_id.0.to_string();
+    for table in WORKSPACE_TABLES {
+        let copied = copied_columns(live, table)?;
+        let has = |name: &str| copied.iter().any(|column| column == name);
         let foreign = match (has("tenant_id"), has("workspace_id")) {
-            (true, true) => "tenant_id IS NOT ?1 OR workspace_id IS NOT ?2",
-            (true, false) => "tenant_id IS NOT ?1 AND ?2 IS NOT NULL",
-            (false, _) if has("job_id") && table != "jobs" => {
-                "job_id NOT IN (SELECT job_id FROM jobs) AND ?1 IS NOT NULL AND ?2 IS NOT NULL"
+            (true, true) => {
+                "\"tenant_id\" COLLATE BINARY IS NOT ?1 OR \"workspace_id\" COLLATE BINARY IS NOT ?2"
+            }
+            (true, false) => "\"tenant_id\" COLLATE BINARY IS NOT ?1 AND ?2 IS NOT NULL",
+            (false, _) if has("job_id") && *table != "jobs" => {
+                "\"job_id\" COLLATE BINARY NOT IN (SELECT \"job_id\" COLLATE BINARY FROM jobs) \
+                 AND ?1 IS NOT NULL AND ?2 IS NOT NULL"
             }
             _ => continue,
         };
@@ -305,7 +576,76 @@ fn refuse_foreign_rows(records: &Path, manifest: &WorkspaceManifest) -> Result<(
             )));
         }
     }
+    let workspaces: i64 = connection
+        .query_row("SELECT count(*) FROM workspaces", [], |row| row.get(0))
+        .map_err(|error| sql(&error))?;
+    if workspaces != 1 {
+        return Err(invalid(&format!(
+            "its workspaces hold {workspaces} rows, not the one workspace its manifest names"
+        )));
+    }
     Ok(())
+}
+
+/// The one table `table` of `connection` as its schema states it: its columns
+/// (`pragma_table_xinfo`, generated ones included), its `CREATE TABLE` statement and its
+/// indexes, statements `spaced`.
+fn table_of(connection: &Connection, table: &str) -> Result<Table, ApiError> {
+    let columns = {
+        let mut statement = connection
+            .prepare(
+                "SELECT name, type, \"notnull\", dflt_value, pk, hidden \
+                 FROM pragma_table_xinfo(?1)",
+            )
+            .map_err(|error| sql(&error))?;
+        statement
+            .query_map([table], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .map_err(|error| sql(&error))?
+            .collect::<Result<Vec<Column>, _>>()
+            .map_err(|error| sql(&error))?
+    };
+    let statement: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(|error| sql(&error))?;
+    let indexes = {
+        let mut query = connection
+            .prepare(
+                "SELECT name, sql FROM sqlite_schema \
+                 WHERE type = 'index' AND lower(tbl_name) = lower(?1)",
+            )
+            .map_err(|error| sql(&error))?;
+        query
+            .query_map([table], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|error| sql(&error))?
+            .map(|index| index.map(|(name, text)| (name, text.as_deref().map(spaced))))
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(|error| sql(&error))?
+    };
+    Ok(Table {
+        columns,
+        statement: spaced(statement.as_deref().unwrap_or_default()),
+        indexes,
+    })
+}
+
+/// `text` with every run of whitespace made one space, and none at either end.
+fn spaced(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Refuse an archive the mode may not restore into `scope`. For a replacement restore, the
@@ -604,10 +944,12 @@ fn write_tables(
     items: u32,
     mutation: Option<MutationId>,
 ) -> Result<RestoreReport, ApiError> {
-    let tables: &[&str] = if editors.is_some() {
-        IMPORTED
+    // A replacement copies every workspace table, parents before the tables whose foreign keys
+    // reference them (`jobs` before `job_controls` and `job_outputs`).
+    let tables: Vec<&str> = if editors.is_some() {
+        IMPORTED.to_vec()
     } else {
-        WORKSPACE_TABLES
+        target.live.order.iter().map(String::as_str).collect()
     };
     for table in tables {
         insert(transaction, table, target, editors)?;
@@ -699,21 +1041,9 @@ fn insert(
     editors: Option<&str>,
 ) -> Result<(), ApiError> {
     let (tenant, workspace, original) = (&target.tenant, &target.workspace, &target.original);
-    let columns: Vec<String> = {
-        let mut statement = connection
-            .prepare("SELECT name FROM pragma_table_info(?1)")
-            .map_err(|error| sql(&error))?;
-        statement
-            .query_map([table], |row| row.get(0))
-            .map_err(|error| sql(&error))?
-            .collect::<Result<_, _>>()
-            .map_err(|error| sql(&error))?
-    };
-    // An event's sequence number is the live log's; it is assigned again.
-    let columns: Vec<String> = columns
-        .into_iter()
-        .filter(|name| !(table == "events" && name == "seq"))
-        .collect();
+    // The columns of this build's schema: the same list the archive's rows were checked in
+    // (`refuse_foreign_rows`). An event's sequence number is the live log's; it is assigned again.
+    let columns: Vec<String> = copied_columns(&target.live.schema, table)?;
     let rewrite = editors.is_some();
     let values: Vec<String> = columns
         .iter()
@@ -740,20 +1070,35 @@ fn insert(
     );
     connection
         .execute(&query, params![tenant, workspace, original, editors])
-        .map_err(|error| match error {
-            rusqlite::Error::SqliteFailure(failure, _)
-                if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                conflict(format!(
-                    "the archive's {table} collide with records this installation already holds"
-                ))
-            }
-            other => sql(&other),
-        })?;
+        .map_err(|error| copy_failure(table, &error))?;
     if rewrite && columns.iter().any(|column| column == "record") {
         rewrite_records(connection, table, target)?;
     }
     Ok(())
+}
+
+/// What a copy of `table` the live database rejected answers. Every constraint failure is the
+/// archive's, so `InvalidInput`: a failed foreign key names records the archive does not hold;
+/// any other (a key or unique value this installation already holds, a value of another type)
+/// is the archive's rows breaking this installation's records. Anything else is a store fault.
+fn copy_failure(table: &str, error: &rusqlite::Error) -> ApiError {
+    match error {
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.extended_code == FOREIGN_KEY_FAILED =>
+        {
+            invalid(&format!(
+                "its {table} reference records the archive does not hold (a foreign key failed)"
+            ))
+        }
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            invalid(&format!(
+                "its {table} break a constraint of this installation's records ({error})"
+            ))
+        }
+        other => sql(other),
+    }
 }
 
 /// Rewrite the workspace identity inside the stored JSON of `table`'s rows of the target
@@ -826,9 +1171,166 @@ fn rewrite_identity(value: &mut serde_json::Value, original: &str, workspace: &s
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_identity;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
+
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
+    use okf_jawn_contract::identity::{TenantId, WorkspaceId};
+    use rusqlite::Connection;
+
+    use super::super::archive::{ARCHIVE_VERSION, WORKSPACE_FORMAT, WorkspaceManifest};
+    use super::super::snapshot::{WORKSPACE_TABLES, text};
+    use super::{
+        Live, Target, insert, parents_first, refuse_foreign_rows, rewrite_identity, schema_of,
+    };
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// The workspace the row-check archives below belong to: its id has letters, so its
+    /// upper-cased form differs.
+    const WORKSPACE: u128 = 0x0000_0000_0000_4000_8000_0000_0000_abcd;
+
+    /// A records database at this build's schema in `directory/name`, then changed by `sql`
+    /// with foreign keys off (this build's SQLite turns them on by default).
+    fn records_at(directory: &Path, name: &str, sql: &str) -> Result<PathBuf, ApiError> {
+        let path = directory.join(name);
+        let mut connection = Connection::open(&path).map_err(|error| super::sql(&error))?;
+        crate::schema::RECORDS
+            .to_latest(&mut connection)
+            .map_err(|error| super::internal(error.to_string()))?;
+        connection
+            .execute_batch(&format!("PRAGMA foreign_keys = OFF; {sql}"))
+            .map_err(|error| super::sql(&error))?;
+        Ok(path)
+    }
+
+    /// The error a step that must fail gave.
+    fn refused(result: Result<(), ApiError>) -> Result<ApiError, Box<dyn std::error::Error>> {
+        match result {
+            Ok(()) => Err("the step succeeded".into()),
+            Err(error) => Ok(error),
+        }
+    }
+
+    /// Pass-4b re-review MFKMAP: a copy whose foreign key fails is refused as `InvalidInput`
+    /// naming the table and the foreign key, and any other constraint failure as `InvalidInput`
+    /// too, never as a collision. The archive's schema and rows are checked first, so a crafted
+    /// archive no longer reaches either; here the copy of `job_controls` runs before its job is
+    /// live, and `jobs` is copied twice.
+    #[test]
+    fn a_constraint_failure_of_a_copy_is_invalid_input() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let archive = records_at(
+            directory.path(),
+            "archive.sqlite",
+            "INSERT INTO jobs (job_id, tenant_id, workspace_id, mutation_id, initiator, spec,
+                 record, state) VALUES ('j1', 'local', 'w1', 'm1', '{}', '{}', '{}', 'cancelled');
+             INSERT INTO job_controls (mutation_id, job_id, action) VALUES ('m2', 'j1', 'cancel');",
+        )?;
+        let live = Connection::open(records_at(directory.path(), "live.sqlite", "")?)?;
+        live.execute_batch("PRAGMA foreign_keys = ON")?;
+        live.execute("ATTACH DATABASE ?1 AS archive", [text(&archive)?])?;
+        let target = Target {
+            tenant: "local".to_owned(),
+            workspace: "w1".to_owned(),
+            original: "w1".to_owned(),
+            objects: Vec::new(),
+            history: BTreeSet::new(),
+            followed: BTreeMap::new(),
+            replaced_from: None,
+            live: Live {
+                schema: schema_of(&live)?,
+                order: parents_first(&live, WORKSPACE_TABLES)?,
+            },
+        };
+        let error = refused(insert(&live, "job_controls", &target, None))?;
+        assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+        assert!(
+            error.message.contains("job_controls") && error.message.contains("foreign key"),
+            "{error}"
+        );
+        insert(&live, "jobs", &target, None)?;
+        let error = refused(insert(&live, "jobs", &target, None))?;
+        assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+        assert!(
+            error.message.contains("jobs") && error.message.contains("constraint"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    /// Pass-4b re-review B1-R, defence in depth: the row checks compare byte for byte whatever
+    /// collation the archive declares. The schema check is not run here: an archive's
+    /// `drafts.workspace_id`, then its `job_controls.job_id`, is made case-insensitive, and a
+    /// row whose workspace (or job) differs from the manifest's (or its job's) only in case is
+    /// still refused.
+    #[test]
+    fn the_row_checks_compare_bytes_whatever_the_archive_collation() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let workspace = uuid::Uuid::from_u128(WORKSPACE).to_string();
+        let upper = workspace.to_uppercase();
+        let live = schema_of(&Connection::open(records_at(
+            directory.path(),
+            "live.sqlite",
+            "",
+        )?)?)?;
+        let manifest = WorkspaceManifest {
+            format: WORKSPACE_FORMAT.to_owned(),
+            version: ARCHIVE_VERSION,
+            tenant_id: TenantId::try_from("local".to_owned())?,
+            workspace_id: WorkspaceId(uuid::Uuid::from_u128(WORKSPACE)),
+            name: "Notes".to_owned(),
+            description: String::new(),
+            created_at: "2026-10-11T00:00:00.000Z".to_owned(),
+            archived_at: None,
+            references: Vec::new(),
+            objects: Vec::new(),
+        };
+        let own = format!(
+            "INSERT INTO workspaces VALUES ('local', '{workspace}', 'm0', 'Notes', '', 't', NULL);"
+        );
+        for (table, sql) in [
+            (
+                "drafts",
+                format!(
+                    "{own} CREATE TABLE drafts_new (tenant_id TEXT NOT NULL,
+                         workspace_id TEXT NOT NULL COLLATE NOCASE, item_id TEXT NOT NULL,
+                         editor TEXT NOT NULL, saved_at TEXT NOT NULL, record TEXT NOT NULL,
+                         body TEXT NOT NULL, properties TEXT NOT NULL,
+                         PRIMARY KEY (tenant_id, workspace_id, item_id, editor)) STRICT;
+                     DROP TABLE drafts;
+                     ALTER TABLE drafts_new RENAME TO drafts;
+                     INSERT INTO drafts VALUES ('local', '{upper}', 'i', 'ana', 't', '{{}}', '',
+                         '{{}}');"
+                ),
+            ),
+            (
+                "job_controls",
+                format!(
+                    "{own} CREATE TABLE job_controls_new (mutation_id TEXT PRIMARY KEY,
+                         job_id TEXT NOT NULL COLLATE NOCASE REFERENCES jobs (job_id),
+                         action TEXT NOT NULL CHECK (action IN ('cancel', 'retry'))) STRICT;
+                     DROP TABLE job_controls;
+                     ALTER TABLE job_controls_new RENAME TO job_controls;
+                     INSERT INTO jobs (job_id, tenant_id, workspace_id, mutation_id, initiator,
+                         spec, record, state)
+                         VALUES ('job-a', 'local', '{workspace}', 'm1', '{{}}', '{{}}', '{{}}',
+                         'cancelled');
+                     INSERT INTO job_controls VALUES ('m2', 'JOB-A', 'cancel');"
+                ),
+            ),
+        ] {
+            let archive = Connection::open(records_at(
+                directory.path(),
+                &format!("{table}.sqlite"),
+                &sql,
+            )?)?;
+            let error = refused(refuse_foreign_rows(&archive, &manifest, &live))?;
+            assert_eq!(error.code, ErrorCode::InvalidInput, "{table}: {error}");
+            assert!(error.message.contains(table), "{table}: {error}");
+        }
+        Ok(())
+    }
 
     /// Backup re-review R10: the identity is rewritten in nested objects and lists too, and a
     /// text that only quotes it keeps it.

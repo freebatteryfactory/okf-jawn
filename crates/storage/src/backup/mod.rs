@@ -105,17 +105,20 @@ impl StorageBackups {
             .await
     }
 
-    /// The replacement restore: the installation archive first (identity, purge records,
-    /// tenant events under their own keys, connectors restored as revoked, since no secret is
-    /// kept), then each workspace archive under its own identity, whose restored head is then
-    /// indexed for search. Run it with no service on the data directory. Run again (after a stop in a later workspace, say), it accepts and leaves
-    /// as it is a workspace this same archive file already restored in full, unless a purge of
-    /// it is now recorded.
+    /// The replacement restore: every workspace archive is checked first, without writing
+    /// anything (`restore::check`: its entries, objects, records, schema and rows, and its
+    /// tenant against the installation archive's), so a set with a refused archive writes
+    /// nothing at all. Then the installation archive (identity, purge records, tenant events
+    /// under their own keys, connectors restored as revoked, since no secret is kept), then each
+    /// workspace archive under its own identity, whose restored head is then indexed for search.
+    /// Run it with no service on the data directory. Run again (after a stop in a later
+    /// workspace, say), it accepts and leaves as it is a workspace this same archive file
+    /// already restored in full, unless a purge of it is now recorded.
     ///
     /// # Errors
-    /// Returns `InvalidInput` for an archive this build cannot read or of another tenant, and
-    /// `Conflict` for a workspace any recorded purge names (finished or not) or that exists and
-    /// was not restored from this same archive.
+    /// Returns `InvalidInput` for an archive this build cannot read, refuses, or of another
+    /// tenant, and `Conflict` for a workspace any recorded purge names (finished or not) or that
+    /// exists and was not restored from this same archive.
     pub async fn restore_replacement(
         &self,
         installation: &Path,
@@ -129,19 +132,25 @@ impl StorageBackups {
                 "an installation-level archive restores no workspace; give the tenant's archive",
             ));
         }
+        let mut scopes = Vec::new();
+        for path in workspaces {
+            let checked = self.check_archive(path).await?;
+            if tenant.as_ref() != Some(&checked.tenant_id) {
+                return Err(archive::invalid(
+                    "it belongs to another tenant than the installation archive",
+                ));
+            }
+            scopes.push(StorageScope {
+                tenant_id: checked.tenant_id,
+                workspace_id: checked.workspace_id,
+            });
+        }
         self.storage
             .records
             .transaction(move |transaction| install(transaction, &manifest))
             .await?;
         let mut reports = Vec::new();
-        for path in workspaces {
-            let mut opened = archive::Opened::open(path)?;
-            let scope = StorageScope {
-                tenant_id: tenant
-                    .clone()
-                    .ok_or_else(|| archive::invalid("the installation archive names no tenant"))?,
-                workspace_id: opened.workspace()?.workspace_id,
-            };
+        for (path, scope) in workspaces.iter().zip(scopes) {
             let restored_scope = scope.clone();
             let storage = self.storage.clone();
             let runtime = Handle::current();
@@ -173,6 +182,28 @@ impl StorageBackups {
             reports.push(report);
         }
         Ok(reports)
+    }
+
+    /// Check the workspace archive at `path` as a restore does before it writes anything
+    /// (`restore::check`), staging under a private directory removed afterwards; returns its
+    /// manifest.
+    async fn check_archive(&self, path: &Path) -> Result<archive::WorkspaceManifest, ApiError> {
+        let storage = self.storage.clone();
+        let runtime = Handle::current();
+        let path = path.to_path_buf();
+        let staging = self.storage.data.staging_path().join(format!(
+            "restore-check-{}",
+            seam::hex(&seam::random_bytes::<8>()?)
+        ));
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&staging)
+                .map_err(|error| io_error("create", &staging, &error))?;
+            let checked = restore::check(&storage, &runtime, &path, &staging);
+            let _ = std::fs::remove_dir_all(&staging);
+            checked
+        })
+        .await
+        .map_err(|error| internal(format!("a restore task stopped: {error}")))?
     }
 
     async fn workspace_archive(
@@ -1010,6 +1041,29 @@ mod tests {
         };
         assert_eq!(error.code, ErrorCode::Conflict, "{error}");
         assert!(error.message.contains("purged by purge"), "{error}");
+        Ok(())
+    }
+
+    /// Pass-4 re-review B4: the writer refuses a manifest a restore would refuse to read, so a
+    /// written archive is never unrestorable: an installation archive whose manifest would pass
+    /// 64 MiB fails with `Internal`, and no file is left.
+    #[test]
+    fn an_installation_archive_whose_manifest_passes_the_cap_is_not_written() -> Result<(), ApiError>
+    {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let target = directory.path().join("installation.zip");
+        let manifest = super::archive::InstallationManifest {
+            format: super::archive::INSTALLATION_FORMAT.to_owned(),
+            version: super::archive::ARCHIVE_VERSION,
+            events: vec!["e".repeat(65 << 20)],
+            ..super::archive::InstallationManifest::default()
+        };
+        let error = match super::archive::write_installation(&target, &manifest) {
+            Ok(()) => return Err(fault(&"the archive was written")),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::Internal, "{error}");
+        assert!(!target.exists(), "no archive file is left");
         Ok(())
     }
 

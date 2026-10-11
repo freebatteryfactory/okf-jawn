@@ -278,7 +278,12 @@ impl StoragePurger {
                 })?;
                 let mut objects = target;
                 objects.extend(history.objects.iter().cloned());
-                references::follow_records(&blobs, &scope.tenant_id, &mut objects)?;
+                references::follow_records(
+                    &blobs,
+                    &scope.tenant_id,
+                    &mut objects,
+                    &history.records,
+                )?;
                 let mut held = BTreeSet::new();
                 for digest in objects {
                     if blobs.local_path(&scope.tenant_id, &digest)?.is_file() {
@@ -572,18 +577,21 @@ impl StoragePurger {
         let surviving = {
             let (blobs, scope) = (blobs.clone(), scope.clone());
             blocking(move || {
-                let mut found = BTreeSet::new();
+                let (mut found, mut records) = (BTreeSet::new(), BTreeSet::new());
                 for path in repositories.others(&scope.tenant_id, &scope)? {
                     let repository = git2::Repository::open_bare(&path)
                         .map_err(|error| crate::git::repo::git(&error))?;
-                    found.extend(references::history(&repository)?.objects);
+                    let history = references::history(&repository)?;
+                    found.extend(history.objects);
+                    records.extend(history.records);
                 }
                 // The objects other workspaces were putting when the sweep began, and those of
                 // their pending puts, are about to be referenced: the assets their conversion
-                // records name are kept too.
+                // records name are kept too (a large record only once a card names it; until
+                // then its assets are pending puts of that write, kept as such).
                 found.extend(pinned);
                 found.extend(pending);
-                references::follow_records(&blobs, &scope.tenant_id, &mut found)?;
+                references::follow_records(&blobs, &scope.tenant_id, &mut found, &records)?;
                 surviving.extend(found);
                 Ok(surviving)
             })

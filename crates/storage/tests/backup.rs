@@ -41,6 +41,12 @@ macro_rules! uuid {
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
+/// What a replacement restore returned.
+type Restored = Result<Vec<okf_jawn_contract::workspace::RestoreReport>, ApiError>;
+
+/// A zip archive being built in memory.
+type ZipBuild = zip::ZipWriter<std::io::Cursor<Vec<u8>>>;
+
 /// Accepts every candidate.
 struct Accept;
 
@@ -55,6 +61,17 @@ struct Fixture {
     original: Digest,
     export: Digest,
 }
+
+/// A zip local file header's signature.
+const LOCAL: [u8; 4] = [0x50, 0x4b, 0x03, 0x04];
+/// A zip central directory record's signature.
+const CENTRAL: [u8; 4] = [0x50, 0x4b, 0x01, 0x02];
+/// This build's `drafts` columns, without the table's key.
+const RR5_COLUMNS: &str = "tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL, \
+    item_id TEXT NOT NULL, editor TEXT NOT NULL, saved_at TEXT NOT NULL, \
+    record TEXT NOT NULL, body TEXT NOT NULL, properties TEXT NOT NULL";
+/// This build's `drafts` key.
+const RR5_KEY: &str = "PRIMARY KEY (tenant_id, workspace_id, item_id, editor)";
 
 impl CandidateCheck for Accept {
     fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
@@ -3675,6 +3692,1864 @@ async fn backup_a_replacement_restore_refuses_an_archive_with_a_row_of_another_w
             .exists(),
         "no repository written"
     );
+    Ok(())
+}
+
+// The PR #20 pass-4 security re-review's probes (lane-storage-m2-pass4-rereview.md), adopted.
+
+fn rr4_converter() -> serde_json::Value {
+    json!({
+        "name": "docling",
+        "version": "2.3.0",
+        "packages": [],
+        "settings": {
+            "ocr": "auto",
+            "table_structure": true,
+            "page_images": true,
+            "page_image_dpi": 144
+        },
+        "models": [{ "stage": "layout", "file": "layout.onnx", "size": "1", "sha256": "7".repeat(64) }]
+    })
+}
+
+/// A source card over `object` whose completed extraction names the conversion record `record`.
+fn rr4_converted_card(
+    item: ItemId,
+    at: &str,
+    object: &Digest,
+    record: &Digest,
+) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::WriteSourceCard(Box::new(SourceCard {
+        item_id: item,
+        path: WorkspacePath::try_from(at.to_owned())?,
+        title: "report.pdf".to_owned(),
+        type_name: "Source".to_owned(),
+        body: "Converted text.".to_owned(),
+        properties: BTreeMap::new(),
+        appearance: serde_json::from_value(json!({
+            "object": object.as_str(),
+            "names": [{
+                "filename": "report.pdf",
+                "folder": "",
+                "observed_at": "2026-10-09T12:00:00.000Z",
+                "supplied_by": "ana"
+            }],
+            "media_type": "application/pdf",
+            "size": "10",
+            "metadata": {},
+            "extraction": {
+                "outcome": { "status": "completed" },
+                "converter": rr4_converter(),
+                "digest": record.as_str(),
+                "page_count": 1,
+                "text_origin": "converter",
+                "corrected": false,
+                "warnings": []
+            }
+        }))?,
+    })))
+}
+
+/// A conversion record naming `structured` and `asset`, with `locations` line locations (so a
+/// large document's record is large); its markdown hash and model hash name no object.
+fn rr4_record(structured: &Digest, asset: &Digest, locations: usize) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let mut lines = String::with_capacity(locations.saturating_mul(48));
+    for line in 0..locations {
+        if line > 0 {
+            lines.push(',');
+        }
+        let _ = write!(
+            lines,
+            "{{\"lines\":{{\"start\":{line},\"end\":{line}}},\"page_no\":1}}"
+        );
+    }
+    format!(
+        "{{\"converter\":{},\"outcome\":{{\"status\":\"completed\"}},\"page_count\":1,\
+         \"structured\":[{{\"digest\":\"{}\"}}],\"markdown\":\"{}\",\"locations\":[{lines}],\
+         \"outline\":[],\"tables\":[],\"assets\":[{{\"digest\":\"{}\",\"media_type\":\"image/png\",\
+         \"role\":\"page_render\",\"location\":{{\"page_no\":1}}}}],\"warnings\":[]}}",
+        rr4_converter(),
+        structured.as_str(),
+        "8".repeat(64),
+        asset.as_str()
+    )
+    .into_bytes()
+}
+
+async fn rr4_put_large(
+    storage: &Storage,
+    scope: &StorageScope,
+    bytes: Vec<u8>,
+) -> Fallible<Digest> {
+    Ok(storage
+        .blobs()
+        .put(scope, Box::pin(std::io::Cursor::new(bytes)), 1 << 30, None)
+        .await?
+        .digest)
+}
+
+/// A completed upload of `workspace` (mutation 62); returns its object.
+async fn rr4_completed_upload(storage: &Storage, workspace: &StorageScope) -> Fallible<Digest> {
+    let body = b"rr4 upload body".to_vec();
+    let upload = put(storage, workspace, &body).await?.digest;
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            workspace,
+            uuid!(62)?,
+            NewUpload {
+                filename: "notes.txt".to_owned(),
+                relative_path: String::new(),
+                expected_size: 15,
+                expected_sha256: None,
+                supplied_by: person("ana"),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            workspace,
+            slot.id,
+            Box::pin(std::io::Cursor::new(body)),
+            1 << 20,
+        )
+        .await?;
+    uploads.complete(workspace, slot.id, upload.clone()).await?;
+    Ok(upload)
+}
+
+/// Q1: every structurally named object kind the implementer did not test is required, and a
+/// 64-hex string that names no object (markdown hash, model hash, draft content digest) is not.
+#[tokio::test]
+async fn rr4_missing_objects_of_every_named_kind_fail_the_archive() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let (storage, workspace) = (&fixture.storage, &fixture.workspace);
+    let source = put(storage, workspace, b"rr4 converted original")
+        .await?
+        .digest;
+    let structured = put(storage, workspace, b"{\"rr4\": \"docling export\"}")
+        .await?
+        .digest;
+    let asset = put(storage, workspace, b"rr4 page render").await?.digest;
+    let record = put(storage, workspace, &rr4_record(&structured, &asset, 3))
+        .await?
+        .digest;
+    commit(
+        storage,
+        workspace,
+        60,
+        &fixture.head,
+        vec![rr4_converted_card(
+            uuid!(14)?,
+            "sources/report.md",
+            &source,
+            &record,
+        )?],
+    )
+    .await?;
+    let dataset = put(storage, workspace, b"rr4 dataset").await?.digest;
+    storage
+        .records()
+        .record_derived_object(
+            workspace,
+            DerivedObject {
+                item_id: uuid!(11)?,
+                revision: fixture.head.clone(),
+                digest: dataset.clone(),
+                kind: DerivedKind::Dataset,
+                media_type: "text/csv".to_owned(),
+            },
+        )
+        .await?;
+    let output = put(storage, workspace, b"rr4 job output").await?.digest;
+    let job_scope = JobScope::Workspace(workspace.clone());
+    let job = storage
+        .records()
+        .create_job(
+            &job_scope,
+            NewJob {
+                mutation_id: uuid!(61)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    let claimed = some(storage.records().claim_job(job.id).await?, "the claim")?;
+    storage
+        .records()
+        .complete_job(JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: None,
+            restore: None,
+            outputs: vec![output.clone()],
+            warnings: Vec::new(),
+        })
+        .await?;
+    let upload = rr4_completed_upload(storage, workspace).await?;
+    // Baseline: with everything held (and unheld non-object hashes named), the archive is written.
+    storage
+        .backups()
+        .write_workspace_archive(workspace, uuid!(63)?)
+        .await?;
+    for (n, digest, row) in [
+        (64_u32, &structured, "structured export"),
+        (65, &asset, "retained asset"),
+        (66, &record, "conversion record"),
+        (67, &source, "original"),
+        (68, &dataset, "derived dataset"),
+        (69, &output, "job output"),
+        (70, &upload, "completed upload"),
+    ] {
+        let file = object_file(directory.path(), digest)?;
+        let bytes = std::fs::read(&file)?;
+        std::fs::remove_file(&file)?;
+        let result = storage
+            .backups()
+            .write_workspace_archive(workspace, uuid!(n)?)
+            .await;
+        std::fs::write(&file, bytes)?;
+        let error = err_of(result)?;
+        assert_eq!(error.code, ErrorCode::Internal, "{row}: {error}");
+        assert!(
+            error.message.contains(digest.as_str()) && error.message.contains(row),
+            "{row}: {error}"
+        );
+    }
+    Ok(())
+}
+
+/// Q1: a conversion record larger than 64 MiB (a large document's line locations) still names
+/// its structured export and retained asset: the archive must hold them, or fail.
+#[tokio::test]
+async fn rr4_a_large_conversion_record_keeps_what_it_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (workspace, created) = create(&storage, "local", 1, "Large").await?;
+    let source = put(&storage, &workspace, b"rr4 large original")
+        .await?
+        .digest;
+    let structured = put(&storage, &workspace, b"{\"rr4\": \"large export\"}")
+        .await?
+        .digest;
+    let asset = put(&storage, &workspace, b"rr4 large render").await?.digest;
+    let bytes = rr4_record(&structured, &asset, 1_500_000);
+    let size = bytes.len();
+    assert!(size > 64 << 20, "the record is {size} bytes");
+    let record = rr4_put_large(&storage, &workspace, bytes).await?;
+    commit(
+        &storage,
+        &workspace,
+        3,
+        &created,
+        vec![rr4_converted_card(
+            uuid!(14)?,
+            "sources/large.md",
+            &source,
+            &record,
+        )?],
+    )
+    .await?;
+    match storage
+        .backups()
+        .write_workspace_archive(&workspace, uuid!(40)?)
+        .await
+    {
+        Err(error) => {
+            // This build copies everything a record names: the archive is written, not refused.
+            return Err(format!("the archive was refused: {error}").into());
+        }
+        Ok(archive) => {
+            let names = entries(&object_file(directory.path(), &archive.digest)?)?;
+            assert!(
+                names.contains(&format!("objects/{}", record.as_str())),
+                "the record itself is held"
+            );
+            for (digest, what) in [(&structured, "structured export"), (&asset, "asset")] {
+                assert!(
+                    names.contains(&format!("objects/{}", digest.as_str())),
+                    "the archive was written without the {what} its {size}-byte conversion \
+                     record names ({}): not independently recoverable",
+                    digest.as_str()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every entry of `bytes` stored, then whatever `extra` writes.
+fn rr4_with(bytes: &[u8], extra: &dyn Fn(&mut ZipBuild) -> TestResult) -> Fallible<Vec<u8>> {
+    use std::io::Write as _;
+    let mut source = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec()))?;
+    let mut target = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for index in 0..source.len() {
+        let mut entry = source.by_index(index)?;
+        let name = entry.name().to_owned();
+        let mut content = Vec::new();
+        entry.read_to_end(&mut content)?;
+        target.start_file(
+            name.as_str(),
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )?;
+        target.write_all(&content)?;
+    }
+    extra(&mut target)?;
+    Ok(target.finish()?.into_inner())
+}
+
+/// A deflated entry `name` of `kibibytes` KiB of zeros, written in 64 KiB chunks.
+fn rr4_zeros(
+    writer: &mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>,
+    name: &str,
+    kibibytes: usize,
+) -> TestResult {
+    use std::io::Write as _;
+    writer.start_file(
+        name,
+        zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated),
+    )?;
+    let chunk = vec![0_u8; 64 << 10];
+    for _ in 0..kibibytes / 64 {
+        writer.write_all(&chunk)?;
+    }
+    Ok(())
+}
+
+/// Like `declare_size`, but only in the headers whose signature is in `which`; returns the count.
+fn rr4_declare(bytes: &mut [u8], name: &str, size: u32, which: &[[u8; 4]]) -> Fallible<u32> {
+    let headers: [([u8; 4], usize, usize, usize); 2] = [
+        ([0x50, 0x4b, 0x03, 0x04], 26, 30, 22),
+        ([0x50, 0x4b, 0x01, 0x02], 28, 46, 24),
+    ];
+    let mut patched = 0_u32;
+    for (signature, length_at, name_at, size_at) in headers {
+        if !which.contains(&signature) {
+            continue;
+        }
+        for position in 0..bytes.len() {
+            if bytes.get(position..position.saturating_add(4)) != Some(&signature[..]) {
+                continue;
+            }
+            let at = |offset: usize| position.saturating_add(offset);
+            let Some(length) = bytes.get(at(length_at)..at(length_at.saturating_add(2))) else {
+                continue;
+            };
+            let length = usize::from(u16::from_le_bytes(length.try_into()?));
+            if bytes.get(at(name_at)..at(name_at.saturating_add(length))) != Some(name.as_bytes()) {
+                continue;
+            }
+            some(
+                bytes.get_mut(at(size_at)..at(size_at.saturating_add(4))),
+                "the size field",
+            )?
+            .copy_from_slice(&size.to_le_bytes());
+            patched = patched.saturating_add(1);
+        }
+    }
+    Ok(patched)
+}
+
+/// Rename every entry named `from` to `to` (the same length), in local and central headers.
+fn rr4_rename(bytes: &mut [u8], from: &str, to: &str) -> Fallible<u32> {
+    assert_eq!(from.len(), to.len());
+    let mut renamed = 0_u32;
+    for position in 0..bytes.len() {
+        if bytes.get(position..position.saturating_add(from.len())) == Some(from.as_bytes()) {
+            some(
+                bytes.get_mut(position..position.saturating_add(to.len())),
+                "the name",
+            )?
+            .copy_from_slice(to.as_bytes());
+            renamed = renamed.saturating_add(1);
+        }
+    }
+    Ok(renamed)
+}
+
+/// Q2: a deflate bomb in a non-manifest entry that declares its 256 MiB honestly.
+#[tokio::test]
+async fn rr4_zip_an_honest_bomb_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let crafted = rr4_with(&bytes, &|zip| rr4_zeros(zip, "padding", 256 << 10))?;
+    assert!(
+        crafted.len() < 4 << 20,
+        "the bomb is {} bytes",
+        crafted.len()
+    );
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "padding").await
+}
+
+/// Q2: the same bomb declaring 1 KiB in both headers.
+#[tokio::test]
+async fn rr4_zip_a_lying_bomb_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let mut crafted = rr4_with(&bytes, &|zip| rr4_zeros(zip, "padding", 256 << 10))?;
+    assert_eq!(
+        rr4_declare(&mut crafted, "padding", 1024, &[LOCAL, CENTRAL])?,
+        2
+    );
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "holds a different amount").await
+}
+
+/// Q2: many small deflated entries, each honest, summing past the total bound.
+#[tokio::test]
+async fn rr4_zip_many_small_entries_past_the_total_are_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let crafted = rr4_with(&bytes, &|zip| {
+        for index in 0..2000 {
+            rr4_zeros(zip, &format!("pad/{index}"), 64)?;
+        }
+        Ok(())
+    })?;
+    eprintln!("rr4 many small entries: {} bytes", crafted.len());
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "in all").await
+}
+
+/// Q2: a stored entry that declares less, or more, than it holds.
+#[tokio::test]
+async fn rr4_zip_a_stored_entry_that_lies_is_refused() -> TestResult {
+    for delta in [-1_i64, 1] {
+        let directory = tempfile::tempdir()?;
+        let storage = Storage::open(directory.path())?;
+        let source = notes_workspace(&storage).await?;
+        let bytes = archive_bytes(&storage, &source).await?;
+        let real = i64::try_from(entry_bytes_of(&bytes, "records.sqlite")?.len())?;
+        let mut crafted = rr4_with(&bytes, &|_| Ok(()))?;
+        let lie = u32::try_from(real.saturating_add(delta.saturating_mul(4096)))?;
+        assert_eq!(
+            rr4_declare(&mut crafted, "records.sqlite", lie, &[LOCAL, CENTRAL])?,
+            2
+        );
+        let outcome = import_crafted(&storage, crafted).await?;
+        assert_import_refused(&storage, outcome, "records.sqlite").await?;
+    }
+    Ok(())
+}
+
+/// Q2: the central directory lies and the local header does not (and the reverse).
+#[tokio::test]
+async fn rr4_zip_a_central_directory_lie_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let deflated = rebuilt(
+        &bytes,
+        &|name| {
+            if name == "records.sqlite" {
+                zip::CompressionMethod::Deflated
+            } else {
+                zip::CompressionMethod::Stored
+            }
+        },
+        &|_| None,
+        &[],
+    )?;
+    let mut central = deflated.clone();
+    assert_eq!(
+        rr4_declare(&mut central, "records.sqlite", 1024, &[CENTRAL])?,
+        1
+    );
+    let outcome = import_crafted(&storage, central).await?;
+    assert_import_refused(&storage, outcome, "records.sqlite").await?;
+    // The local header alone lying: zip reads sizes from the central directory, so the archive is
+    // read by what it really holds (recorded, not asserted either way).
+    let mut local = deflated;
+    assert_eq!(
+        rr4_declare(&mut local, "records.sqlite", 1024, &[LOCAL])?,
+        1
+    );
+    let (_, _, result) = import_crafted(&storage, local).await?;
+    eprintln!(
+        "rr4 local-header-only lie: {:?}",
+        result.map(|_| "imported")
+    );
+    Ok(())
+}
+
+/// Q2: entries whose names climb out of any directory are never written anywhere.
+#[tokio::test]
+async fn rr4_zip_climbing_entry_names_write_nothing() -> TestResult {
+    use std::io::Write as _;
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let crafted = rr4_with(&bytes, &|zip| {
+        for name in [
+            "../../rr4-escape-a",
+            "objects/../../../rr4-escape-b",
+            "/rr4-escape-c",
+        ] {
+            zip.start_file(
+                name,
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )?;
+            zip.write_all(b"escaped")?;
+        }
+        Ok(())
+    })?;
+    let (target, _, result) = import_crafted(&storage, crafted).await?;
+    eprintln!(
+        "rr4 climbing names: {:?}",
+        result.as_ref().map(|_| "imported")
+    );
+    let mut stack = vec![directory.path().to_path_buf()];
+    if let Some(parent) = directory.path().parent() {
+        for name in ["rr4-escape-a", "rr4-escape-b", "rr4-escape-c"] {
+            assert!(!parent.join(name).exists(), "{name} escaped");
+        }
+    }
+    while let Some(path) = stack.pop() {
+        for entry in std::fs::read_dir(&path)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.starts_with("rr4-escape"),
+                "{} written",
+                entry.path().display()
+            );
+            if entry.file_type()?.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    let _ = target;
+    Ok(())
+}
+
+/// The records entry of `bytes` changed by `sql` (`WS99` stands for another workspace id).
+fn rr4_forged_records(bytes: &[u8], sql: &str) -> Fallible<Vec<u8>> {
+    let staged = tempfile::tempdir()?;
+    let records = staged.path().join("records.sqlite");
+    std::fs::write(&records, entry_bytes_of(bytes, "records.sqlite")?)?;
+    {
+        let connection = rusqlite::Connection::open(&records)?;
+        connection.execute_batch(&format!(
+            "PRAGMA foreign_keys = OFF; {}",
+            sql.replace("WS99", &uuid_text(99))
+        ))?;
+    }
+    Ok(std::fs::read(&records)?)
+}
+
+/// Q2: duplicate entry names. Two `records.sqlite` entries: whichever zip keeps (the last) is the
+/// one both checked and read; the other is invisible.
+#[tokio::test]
+async fn rr4_zip_duplicate_entry_names_read_one_checked_entry() -> TestResult {
+    use std::io::Write as _;
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let forged = rr4_forged_records(
+        &bytes,
+        "INSERT INTO drafts SELECT tenant_id, 'WS99', item_id, editor, saved_at, record, body,
+             properties FROM drafts",
+    )?;
+    // The forged copy last: it is the one read, so the foreign row is refused.
+    let mut last = rr4_with(&bytes, &|zip| {
+        zip.start_file(
+            "records.sqlitX",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )?;
+        zip.write_all(&forged)?;
+        Ok(())
+    })?;
+    assert_eq!(
+        rr4_rename(&mut last, "records.sqlitX", "records.sqlite")?,
+        2
+    );
+    assert_eq!(
+        zip::ZipArchive::new(std::io::Cursor::new(last.clone()))?.len(),
+        3,
+        "four entries, one name twice"
+    );
+    let outcome = import_crafted(&storage, last).await?;
+    assert_import_refused(&storage, outcome, "drafts").await?;
+    Ok(())
+}
+
+/// A backup set of a notes workspace whose workspace archive's records are changed by `sql`,
+/// restored by replacement over the deleted directory.
+async fn rr4_replace_forged(
+    sql: &str,
+) -> Fallible<(tempfile::TempDir, tempfile::TempDir, StorageScope, Restored)> {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let workspace = {
+        let storage = Storage::open(directory.path())?;
+        let workspace = notes_workspace(&storage).await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        workspace
+    };
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let bytes = std::fs::read(&archive)?;
+    let forged = rr4_forged_records(&bytes, sql)?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    std::fs::write(&archive, crafted)?;
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let result = restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await;
+    drop(restored);
+    Ok((directory, output, workspace, result))
+}
+
+/// Assert a forged replacement was refused as `InvalidInput` naming `table`, with no row of the
+/// other workspace written.
+fn rr4_assert_refused(directory: &Path, result: Restored, table: &str) -> TestResult {
+    let live = directory.join("records.sqlite");
+    let foreign = count(
+        &live,
+        &format!(
+            "SELECT count(*) FROM {table} WHERE {}",
+            if table == "job_outputs" {
+                "1".to_owned()
+            } else {
+                format!("workspace_id = '{}'", uuid_text(99))
+            }
+        ),
+    )?;
+    match result {
+        Ok(reports) => Err(format!(
+            "the forged archive was restored ({reports:?}); {foreign} {table} rows of the other \
+             workspace are now live"
+        )
+        .into()),
+        Err(error) => {
+            assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+            assert!(error.message.contains(table), "{error}");
+            assert_eq!(foreign, 0, "no foreign {table} row written");
+            Ok(())
+        }
+    }
+}
+
+/// Q3: the control: a plain foreign draft is refused (the implementer's case).
+#[tokio::test]
+async fn rr4_foreign_plain_draft_is_refused_by_replacement() -> TestResult {
+    let (directory, _output, _, result) = rr4_replace_forged(
+        "INSERT INTO drafts SELECT tenant_id, 'WS99', item_id, editor, saved_at, record, body,
+             properties FROM drafts",
+    )
+    .await?;
+    rr4_assert_refused(directory.path(), result, "drafts")
+}
+
+/// Q3: the same foreign draft, with the archive's column spelled `WORKSPACE_ID`.
+#[tokio::test]
+async fn rr4_foreign_draft_under_an_upper_case_column_is_refused_by_replacement() -> TestResult {
+    let (directory, _output, _, result) = rr4_replace_forged(
+        "ALTER TABLE drafts RENAME COLUMN workspace_id TO WORKSPACE_ID;
+         INSERT INTO drafts SELECT tenant_id, 'WS99', item_id, editor, saved_at, record, body,
+             properties FROM drafts",
+    )
+    .await?;
+    rr4_assert_refused(directory.path(), result, "drafts")
+}
+
+/// Q3: the foreign draft served by a view named `drafts`.
+#[tokio::test]
+async fn rr4_foreign_draft_through_a_view_is_refused_by_replacement() -> TestResult {
+    let (directory, _output, _, result) = rr4_replace_forged(
+        "ALTER TABLE drafts RENAME TO drafts_kept;
+         CREATE VIEW drafts AS
+             SELECT tenant_id, workspace_id, item_id, editor, saved_at, record, body, properties
+             FROM drafts_kept
+             UNION ALL
+             SELECT tenant_id, 'WS99', item_id, editor, saved_at, record, body, properties
+             FROM drafts_kept",
+    )
+    .await?;
+    rr4_assert_refused(directory.path(), result, "drafts")
+}
+
+/// Q3: the foreign workspace as a generated column (not listed by `pragma_table_info`).
+#[tokio::test]
+async fn rr4_foreign_draft_as_a_generated_column_is_refused_by_replacement() -> TestResult {
+    let (directory, _output, _, result) = rr4_replace_forged(
+        "CREATE TABLE drafts_new (tenant_id TEXT NOT NULL, item_id TEXT NOT NULL,
+             editor TEXT NOT NULL, saved_at TEXT NOT NULL, record TEXT NOT NULL,
+             body TEXT NOT NULL, properties TEXT NOT NULL,
+             workspace_id TEXT GENERATED ALWAYS AS ('WS99') VIRTUAL);
+         INSERT INTO drafts_new (tenant_id, item_id, editor, saved_at, record, body, properties)
+             SELECT tenant_id, item_id, editor, saved_at, record, body, properties FROM drafts;
+         DROP TABLE drafts;
+         ALTER TABLE drafts_new RENAME TO drafts",
+    )
+    .await?;
+    rr4_assert_refused(directory.path(), result, "drafts")
+}
+
+/// Q3: a job output whose job the archive does not hold (implementer claim, untested).
+#[tokio::test]
+async fn rr4_absent_job_output_is_refused_by_replacement_before_any_write() -> TestResult {
+    let (directory, _output, workspace, result) = rr4_replace_forged(&format!(
+        "INSERT INTO job_outputs (job_id, digest) VALUES ('{}', '{}')",
+        uuid_text(98),
+        "9".repeat(64)
+    ))
+    .await?;
+    let repository = directory
+        .path()
+        .join("repositories")
+        .join("local")
+        .join(format!("{}.git", workspace.workspace_id.0));
+    let error = err_of(result)?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+    assert!(error.message.contains("job_outputs"), "{error}");
+    assert!(!repository.exists(), "no repository written");
+    Ok(())
+}
+
+/// Q3: the same, with the archive's column spelled `JOB_ID`.
+#[tokio::test]
+async fn rr4_absent_job_output_under_an_upper_case_column_is_refused_before_any_write() -> TestResult
+{
+    let (directory, _output, workspace, result) = rr4_replace_forged(&format!(
+        "ALTER TABLE job_outputs RENAME COLUMN job_id TO JOB_ID;
+         INSERT INTO job_outputs VALUES ('{}', '{}')",
+        uuid_text(98),
+        "9".repeat(64)
+    ))
+    .await?;
+    let repository = directory
+        .path()
+        .join("repositories")
+        .join("local")
+        .join(format!("{}.git", workspace.workspace_id.0));
+    let written = repository.exists();
+    let error = err_of(result)?;
+    assert!(
+        error.code == ErrorCode::InvalidInput && !written,
+        "refused as {:?} ({}), repository written: {written}",
+        error.code,
+        error.message
+    );
+    Ok(())
+}
+
+/// Q3: an import refuses a plain foreign draft and an absent job's output too.
+#[tokio::test]
+async fn rr4_an_import_refuses_foreign_and_jobless_rows() -> TestResult {
+    for (sql, table) in [
+        (
+            "INSERT INTO drafts SELECT tenant_id, 'WS99', item_id, editor, saved_at, record,
+                 body, properties FROM drafts"
+                .to_owned(),
+            "drafts",
+        ),
+        (
+            format!(
+                "INSERT INTO job_outputs (job_id, digest) VALUES ('{}', '{}')",
+                uuid_text(98),
+                "9".repeat(64)
+            ),
+            "job_outputs",
+        ),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let storage = Storage::open(directory.path())?;
+        let source = notes_workspace(&storage).await?;
+        let bytes = archive_bytes(&storage, &source).await?;
+        let forged = rr4_forged_records(&bytes, &sql)?;
+        let crafted = rebuilt(
+            &bytes,
+            &|_| zip::CompressionMethod::Stored,
+            &|name| (name == "records.sqlite").then(|| forged.clone()),
+            &[],
+        )?;
+        let outcome = import_crafted(&storage, crafted).await?;
+        assert_import_refused(&storage, outcome, table).await?;
+    }
+    Ok(())
+}
+
+/// Q3: a notes workspace with one finished job (and its output, or its cancel control)
+/// round-trips by replacement over the deleted directory.
+async fn rr4_job_round_trip(control: bool, output: bool) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let backup = tempfile::tempdir()?;
+    let workspace = {
+        let storage = Storage::open(directory.path())?;
+        let workspace = notes_workspace(&storage).await?;
+        let records = storage.records();
+        let job_scope = JobScope::Workspace(workspace.clone());
+        let job = records
+            .create_job(
+                &job_scope,
+                NewJob {
+                    mutation_id: uuid!(61)?,
+                    initiator: person("ana"),
+                    spec: JobSpec::BackupWorkspace,
+                },
+            )
+            .await?;
+        if control {
+            records.cancel_job(&job_scope, uuid!(62)?, job.id).await?;
+        } else {
+            let claimed = some(records.claim_job(job.id).await?, "the claim")?;
+            let outputs = if output {
+                vec![put(&storage, &workspace, b"rr4 job output").await?.digest]
+            } else {
+                Vec::new()
+            };
+            records
+                .complete_job(JobCompletion {
+                    lease: claimed.lease,
+                    revision: None,
+                    item_ids: Vec::new(),
+                    artifact: None,
+                    restore: None,
+                    outputs,
+                    warnings: Vec::new(),
+                })
+                .await?;
+        }
+        storage
+            .backups()
+            .write_backup_set(backup.path(), None)
+            .await?;
+        workspace
+    };
+    let (installation, archive) = set_of(backup.path(), &workspace);
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn rr4_rt_a_finished_job_without_output_or_control() -> TestResult {
+    rr4_job_round_trip(false, false).await
+}
+
+#[tokio::test]
+async fn rr4_rt_a_finished_job_with_an_output() -> TestResult {
+    rr4_job_round_trip(false, true).await
+}
+
+#[tokio::test]
+async fn rr4_rt_a_cancelled_job_with_its_control() -> TestResult {
+    rr4_job_round_trip(true, false).await
+}
+
+/// Q3: the real backup journey. A workspace backed up once by the application's backup job
+/// (which, as `ingest/src/handler.rs:419` does, completes with its archive as the job's output)
+/// is backed up again in a set and restored by replacement over the deleted directory.
+#[tokio::test]
+async fn rr4_rt_a_workspace_the_app_backed_up_once_restores_by_replacement() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let workspace = {
+        let storage = Storage::open(directory.path())?;
+        let workspace = notes_workspace(&storage).await?;
+        let scope = JobScope::Workspace(workspace.clone());
+        let records = storage.records();
+        let job = records
+            .create_job(
+                &scope,
+                NewJob {
+                    mutation_id: uuid!(30)?,
+                    initiator: person("ana"),
+                    spec: JobSpec::BackupWorkspace,
+                },
+            )
+            .await?;
+        let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+        let archive = storage
+            .backups()
+            .write_workspace_archive(&workspace, claimed.mutation_id)
+            .await?;
+        let artifact = records
+            .record_artifact(
+                &scope,
+                claimed.mutation_id,
+                NewArtifact {
+                    kind: ArtifactKind::WorkspaceBackup,
+                    object: archive.clone(),
+                    media_type: "application/zip".to_owned(),
+                    created_by_job: job.id,
+                },
+            )
+            .await?;
+        records
+            .complete_job(JobCompletion {
+                lease: claimed.lease,
+                revision: None,
+                item_ids: Vec::new(),
+                artifact: Some(artifact.id),
+                restore: None,
+                outputs: vec![archive.digest],
+                warnings: Vec::new(),
+            })
+            .await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        workspace
+    };
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let (installation, archive) = set_of(output.path(), &workspace);
+    restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await?;
+    Ok(())
+}
+
+/// Pass-4 re-review MTENANT: a row of another TENANT under the archive's own workspace id is
+/// refused before anything is written.
+#[tokio::test]
+async fn backup_a_replacement_restore_refuses_a_row_of_another_tenant() -> TestResult {
+    let (directory, _output, _, result) = rr4_replace_forged(
+        "INSERT INTO drafts SELECT 'other', workspace_id, item_id, editor, saved_at, record, body,
+             properties FROM drafts",
+    )
+    .await?;
+    let error = err_of(result)?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+    assert!(error.message.contains("drafts"), "{error}");
+    let live = directory.path().join("records.sqlite");
+    for table in ["workspaces", "drafts"] {
+        assert_eq!(
+            count(&live, &format!("SELECT count(*) FROM {table}"))?,
+            0,
+            "no {table} row written"
+        );
+    }
+    Ok(())
+}
+
+/// Pass-4 re-review B1: an archive whose table is not this build's (here `drafts.body` made a
+/// generated column, its rows all of the archive's own tenant and workspace) is refused before
+/// any row is read or written: the schema, not only the rows, must be this build's.
+#[tokio::test]
+async fn backup_a_replacement_restore_refuses_an_archive_table_with_a_generated_column()
+-> TestResult {
+    let (directory, _output, _, result) = rr4_replace_forged(
+        "CREATE TABLE drafts_new (
+             tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL, item_id TEXT NOT NULL,
+             editor TEXT NOT NULL, saved_at TEXT NOT NULL, record TEXT NOT NULL,
+             body TEXT GENERATED ALWAYS AS ('forged') VIRTUAL, properties TEXT NOT NULL,
+             PRIMARY KEY (tenant_id, workspace_id, item_id, editor)) STRICT;
+         INSERT INTO drafts_new (tenant_id, workspace_id, item_id, editor, saved_at, record,
+             properties)
+             SELECT tenant_id, workspace_id, item_id, editor, saved_at, record, properties
+             FROM drafts;
+         DROP TABLE drafts;
+         ALTER TABLE drafts_new RENAME TO drafts;",
+    )
+    .await?;
+    let error = err_of(result)?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+    assert!(error.message.contains("drafts"), "{error}");
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            "SELECT count(*) FROM drafts"
+        )?,
+        0,
+        "no draft written"
+    );
+    Ok(())
+}
+
+// The PR #20 pass-4b re-review's probes (lane-storage-m2-pass4b-rereview.md), adopted, and the
+// tests of its rulings.
+
+/// The archive `drafts` table rebuilt as `definition`, its rows copied by `copy`.
+fn rr5_drafts_as(definition: &str, copy: &str) -> String {
+    format!(
+        "CREATE TABLE drafts_new {definition};
+         INSERT INTO drafts_new {copy};
+         DROP TABLE drafts;
+         ALTER TABLE drafts_new RENAME TO drafts;"
+    )
+}
+
+/// Each schema variant of `drafts` that is not this build's, with its rows all of the archive's
+/// own tenant and workspace.
+fn rr5_variants() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "collation",
+            rr5_drafts_as(
+                &format!(
+                    "({}, {RR5_KEY}) STRICT",
+                    RR5_COLUMNS.replace(
+                        "workspace_id TEXT NOT NULL",
+                        "workspace_id TEXT NOT NULL COLLATE NOCASE"
+                    )
+                ),
+                "SELECT * FROM drafts",
+            ),
+        ),
+        (
+            "not strict",
+            rr5_drafts_as(
+                &format!("({RR5_COLUMNS}, {RR5_KEY})"),
+                "SELECT * FROM drafts",
+            ),
+        ),
+        (
+            "without rowid",
+            rr5_drafts_as(
+                &format!("({RR5_COLUMNS}, {RR5_KEY}) STRICT, WITHOUT ROWID"),
+                "SELECT * FROM drafts",
+            ),
+        ),
+        (
+            "stored generated",
+            rr5_drafts_as(
+                &format!(
+                    "({}, {RR5_KEY}) STRICT",
+                    RR5_COLUMNS.replace(
+                        "body TEXT NOT NULL",
+                        "body TEXT GENERATED ALWAYS AS ('forged') STORED"
+                    )
+                ),
+                "(tenant_id, workspace_id, item_id, editor, saved_at, record, properties)
+                 SELECT tenant_id, workspace_id, item_id, editor, saved_at, record, properties
+                 FROM drafts",
+            ),
+        ),
+        (
+            "extra column",
+            rr5_drafts_as(
+                &format!("({RR5_COLUMNS}, extra TEXT, {RR5_KEY}) STRICT"),
+                "SELECT *, NULL FROM drafts",
+            ),
+        ),
+        (
+            "missing column",
+            rr5_drafts_as(
+                &format!(
+                    "({}, {RR5_KEY}) STRICT",
+                    RR5_COLUMNS.replace(", properties TEXT NOT NULL", "")
+                ),
+                "SELECT tenant_id, workspace_id, item_id, editor, saved_at, record, body
+                 FROM drafts",
+            ),
+        ),
+        (
+            "other type",
+            rr5_drafts_as(
+                &format!(
+                    "({}, {RR5_KEY}) STRICT",
+                    RR5_COLUMNS.replace("saved_at TEXT NOT NULL", "saved_at ANY NOT NULL")
+                ),
+                "SELECT * FROM drafts",
+            ),
+        ),
+        (
+            "other default",
+            rr5_drafts_as(
+                &format!(
+                    "({}, {RR5_KEY}) STRICT",
+                    RR5_COLUMNS.replace("body TEXT NOT NULL", "body TEXT NOT NULL DEFAULT ''")
+                ),
+                "SELECT * FROM drafts",
+            ),
+        ),
+        (
+            "other case table",
+            "ALTER TABLE drafts RENAME TO drafts_tmp; ALTER TABLE drafts_tmp RENAME TO Drafts;"
+                .to_owned(),
+        ),
+        (
+            "check",
+            rr5_drafts_as(
+                &format!("({RR5_COLUMNS}, CHECK (length(body) >= 0), {RR5_KEY}) STRICT"),
+                "SELECT * FROM drafts",
+            ),
+        ),
+        (
+            "extra index",
+            "CREATE INDEX drafts_by_editor ON drafts (editor);".to_owned(),
+        ),
+    ]
+}
+
+/// Assert a forged replacement was refused as `InvalidInput` before any workspace row or
+/// repository was written.
+fn rr5_refused_before_writing(
+    directory: &Path,
+    workspace: &StorageScope,
+    result: Restored,
+    what: &str,
+) -> TestResult {
+    let repository = directory
+        .join("repositories")
+        .join("local")
+        .join(format!("{}.git", workspace.workspace_id.0));
+    let written = repository.exists();
+    let rows = count(
+        &directory.join("records.sqlite"),
+        "SELECT count(*) FROM workspaces",
+    )?;
+    match result {
+        Ok(reports) => Err(format!("{what}: restored ({reports:?})").into()),
+        Err(error) => {
+            assert!(
+                error.code == ErrorCode::InvalidInput && !written && rows == 0,
+                "{what}: refused as {:?} ({}), repository written: {written}, workspace rows: \
+                 {rows}",
+                error.code,
+                error.message
+            );
+            Ok(())
+        }
+    }
+}
+
+/// B1-R: the schema variant `name` is refused by a replacement before anything is written.
+async fn rr5_replacement_refuses(name: &str) -> TestResult {
+    let variants = rr5_variants();
+    let sql = &some(variants.iter().find(|(n, _)| *n == name), "the variant")?.1;
+    let (directory, _output, workspace, result) = rr4_replace_forged(sql).await?;
+    rr5_refused_before_writing(directory.path(), &workspace, result, name)
+}
+
+/// B1-R: the schema variant `name` is refused by an import before anything is written.
+async fn rr5_import_refuses(name: &str) -> TestResult {
+    let variants = rr5_variants();
+    let sql = &some(variants.iter().find(|(n, _)| *n == name), "the variant")?.1;
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let forged = rr4_forged_records(&bytes, sql)?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|n| (n == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "drafts").await
+}
+
+#[tokio::test]
+async fn rr5_replace_collation() -> TestResult {
+    rr5_replacement_refuses("collation").await
+}
+
+#[tokio::test]
+async fn rr5_replace_not_strict() -> TestResult {
+    rr5_replacement_refuses("not strict").await
+}
+
+#[tokio::test]
+async fn rr5_replace_without_rowid() -> TestResult {
+    rr5_replacement_refuses("without rowid").await
+}
+
+#[tokio::test]
+async fn rr5_replace_stored_generated() -> TestResult {
+    rr5_replacement_refuses("stored generated").await
+}
+
+#[tokio::test]
+async fn rr5_replace_extra_column() -> TestResult {
+    rr5_replacement_refuses("extra column").await
+}
+
+#[tokio::test]
+async fn rr5_replace_missing_column() -> TestResult {
+    rr5_replacement_refuses("missing column").await
+}
+
+#[tokio::test]
+async fn rr5_replace_other_type() -> TestResult {
+    rr5_replacement_refuses("other type").await
+}
+
+#[tokio::test]
+async fn rr5_replace_other_default() -> TestResult {
+    rr5_replacement_refuses("other default").await
+}
+
+#[tokio::test]
+async fn rr5_replace_other_case_table() -> TestResult {
+    rr5_replacement_refuses("other case table").await
+}
+
+#[tokio::test]
+async fn rr5_replace_check() -> TestResult {
+    rr5_replacement_refuses("check").await
+}
+
+#[tokio::test]
+async fn rr5_replace_extra_index() -> TestResult {
+    rr5_replacement_refuses("extra index").await
+}
+
+#[tokio::test]
+async fn rr5_import_extra_index() -> TestResult {
+    rr5_import_refuses("extra index").await
+}
+
+#[tokio::test]
+async fn rr5_import_collation() -> TestResult {
+    rr5_import_refuses("collation").await
+}
+
+#[tokio::test]
+async fn rr5_import_not_strict() -> TestResult {
+    rr5_import_refuses("not strict").await
+}
+
+#[tokio::test]
+async fn rr5_import_without_rowid() -> TestResult {
+    rr5_import_refuses("without rowid").await
+}
+
+#[tokio::test]
+async fn rr5_import_stored_generated() -> TestResult {
+    rr5_import_refuses("stored generated").await
+}
+
+#[tokio::test]
+async fn rr5_import_extra_column() -> TestResult {
+    rr5_import_refuses("extra column").await
+}
+
+#[tokio::test]
+async fn rr5_import_missing_column() -> TestResult {
+    rr5_import_refuses("missing column").await
+}
+
+#[tokio::test]
+async fn rr5_import_other_type() -> TestResult {
+    rr5_import_refuses("other type").await
+}
+
+#[tokio::test]
+async fn rr5_import_other_default() -> TestResult {
+    rr5_import_refuses("other default").await
+}
+
+#[tokio::test]
+async fn rr5_import_other_case_table() -> TestResult {
+    rr5_import_refuses("other case table").await
+}
+
+/// B1-R: a trigger in the archive database never fires (nothing writes to the archive after the
+/// check), so an archive carrying one restores as any other: the schema comparison covers
+/// tables and their indexes, not triggers.
+#[tokio::test]
+async fn rr5_a_trigger_in_the_archive_changes_nothing() -> TestResult {
+    let (directory, _output, workspace, result) = rr4_replace_forged(
+        "CREATE TRIGGER drafts_touch AFTER INSERT ON drafts BEGIN SELECT 1; END;",
+    )
+    .await?;
+    result?;
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            &format!(
+                "SELECT count(*) FROM drafts WHERE workspace_id = '{}'",
+                workspace.workspace_id.0
+            )
+        )?,
+        1
+    );
+    Ok(())
+}
+
+/// A backup set of a notes workspace with one cancelled job (and its cancel control), its
+/// workspace archive's records changed by `sql`, restored by replacement over the deleted
+/// directory.
+async fn rr5_replace_job_forged(
+    sql: &str,
+) -> Fallible<(tempfile::TempDir, tempfile::TempDir, StorageScope, Restored)> {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let workspace = {
+        let storage = Storage::open(directory.path())?;
+        let workspace = notes_workspace(&storage).await?;
+        let records = storage.records();
+        let job_scope = JobScope::Workspace(workspace.clone());
+        let job = records
+            .create_job(
+                &job_scope,
+                NewJob {
+                    mutation_id: uuid!(61)?,
+                    initiator: person("ana"),
+                    spec: JobSpec::BackupWorkspace,
+                },
+            )
+            .await?;
+        records.cancel_job(&job_scope, uuid!(62)?, job.id).await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        workspace
+    };
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let bytes = std::fs::read(&archive)?;
+    let forged = rr4_forged_records(&bytes, sql)?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    std::fs::write(&archive, crafted)?;
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let result = restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await;
+    drop(restored);
+    Ok((directory, output, workspace, result))
+}
+
+/// B1-R: `job_controls` rebuilt with a case-insensitive `job_id`, its control pointing at the
+/// upper-cased id of its own job. Before this round the job-keyed row check compared under the
+/// archive column's collation and passed, and only the live foreign key caught it, after the
+/// objects and the repository were written.
+#[tokio::test]
+async fn rr5_a_case_insensitive_control_column_is_refused_before_any_write() -> TestResult {
+    let (directory, _output, workspace, result) = rr5_replace_job_forged(
+        "CREATE TABLE job_controls_new (
+             mutation_id TEXT PRIMARY KEY,
+             job_id TEXT NOT NULL COLLATE NOCASE REFERENCES jobs (job_id),
+             action TEXT NOT NULL CHECK (action IN ('cancel', 'retry'))) STRICT;
+         INSERT INTO job_controls_new SELECT mutation_id, upper(job_id), action FROM job_controls;
+         DROP TABLE job_controls;
+         ALTER TABLE job_controls_new RENAME TO job_controls;",
+    )
+    .await?;
+    if let Err(error) = &result {
+        assert!(error.message.contains("job_controls"), "{error}");
+    }
+    rr5_refused_before_writing(
+        directory.path(),
+        &workspace,
+        result,
+        "job_controls collation",
+    )
+}
+
+/// B1-R: a non-STRICT archive table holding a value of another type than its column is refused
+/// before anything is written, and never reported as a collision.
+#[tokio::test]
+async fn rr5_a_wrongly_typed_value_in_a_loose_table_is_refused_before_any_write() -> TestResult {
+    let sql = format!(
+        "{} UPDATE drafts SET body = CAST(body AS BLOB);",
+        rr5_drafts_as(
+            &format!("({RR5_COLUMNS}, {RR5_KEY})"),
+            "SELECT * FROM drafts"
+        )
+    );
+    let (directory, _output, workspace, result) = rr4_replace_forged(&sql).await?;
+    rr5_refused_before_writing(directory.path(), &workspace, result, "loose drafts")
+}
+
+/// B1-R: records that fail `PRAGMA integrity_check` are refused before anything is written.
+/// The `events_by_log` index is left empty under this build's statement (built partial, then
+/// its statement rewritten), so the table and its index disagree while every table and index
+/// statement is this build's, and every row is the archive's own.
+#[tokio::test]
+async fn backup_a_restore_refuses_damaged_records_before_any_write() -> TestResult {
+    let (directory, _output, workspace, result) = rr4_replace_forged(
+        "INSERT INTO events (tenant_id, workspace_id, event_key, record)
+             SELECT tenant_id, workspace_id, 'rr5-damaged', '{}' FROM workspaces;
+         DROP INDEX events_by_log;
+         CREATE INDEX events_by_log ON events (tenant_id, workspace_id, seq) WHERE seq < 0;
+         PRAGMA writable_schema = ON;
+         UPDATE sqlite_schema
+             SET sql = 'CREATE INDEX events_by_log ON events (tenant_id, workspace_id, seq)'
+             WHERE name = 'events_by_log';
+         PRAGMA writable_schema = OFF;",
+    )
+    .await?;
+    if let Err(error) = &result {
+        assert!(error.message.contains("damaged"), "{error}");
+    }
+    rr5_refused_before_writing(directory.path(), &workspace, result, "damaged records")
+}
+
+/// B1-R: a constraint the live database still enforces at the copy is the archive's, so
+/// `InvalidInput`, never a collision: here the second archive of a set gives its workspace the
+/// creation mutation of the first, which the same restore already wrote.
+#[tokio::test]
+async fn backup_a_constraint_failed_at_the_copy_is_invalid_input() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let (first, second) = {
+        let storage = Storage::open(directory.path())?;
+        let first = notes_workspace(&storage).await?;
+        let (second, _) = create(&storage, "local", 2, "Second").await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        (first, second)
+    };
+    let (installation, first_archive) = set_of(output.path(), &first);
+    let (_, second_archive) = set_of(output.path(), &second);
+    let bytes = std::fs::read(&second_archive)?;
+    let records = rr4_forged_records(
+        &bytes,
+        &format!("UPDATE workspaces SET mutation_id = '{}'", uuid_text(1)),
+    )?;
+    std::fs::write(
+        &second_archive,
+        rebuilt(
+            &bytes,
+            &|_| zip::CompressionMethod::Stored,
+            &|name| (name == "records.sqlite").then(|| records.clone()),
+            &[],
+        )?,
+    )?;
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let error = err_of(
+        restored
+            .backups()
+            .restore_replacement(&installation, &[first_archive, second_archive])
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+    assert!(
+        error.message.contains("workspaces") && error.message.contains("constraint"),
+        "{error}"
+    );
+    Ok(())
+}
+
+/// B1-R: a workspace archive whose records are at records schema 1 (a pre-migration set's)
+/// still restores by replacement after the schema comparison: this build's migrations bring it
+/// to exactly this build's tables and indexes.
+#[tokio::test]
+async fn backup_a_records_schema_1_archive_restores_by_replacement() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let workspace = fixture.workspace.clone();
+    drop(fixture);
+    as_records_schema_1(&directory.path().join("records.sqlite"))?;
+    let (installation, archive) = {
+        let storage = Storage::open(directory.path())?;
+        let sets: Vec<_> = std::fs::read_dir(storage.data().pre_migration_path())?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        let (installation, archive) =
+            set_of(some(sets.first(), "the pre-migration set")?, &workspace);
+        let copies = (
+            output.path().join("installation.zip"),
+            output.path().join("workspace.zip"),
+        );
+        std::fs::copy(installation, &copies.0)?;
+        std::fs::copy(archive, &copies.1)?;
+        copies
+    };
+    let staged = output.path().join("records.sqlite");
+    std::fs::write(
+        &staged,
+        entry_bytes_of(&std::fs::read(&archive)?, "records.sqlite")?,
+    )?;
+    assert_eq!(
+        count(&staged, "PRAGMA user_version")?,
+        1,
+        "a schema-1 archive"
+    );
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await?;
+    let live = directory.path().join("records.sqlite");
+    assert_eq!(count(&live, "SELECT count(*) FROM workspaces")?, 1);
+    assert!(
+        count(&live, "SELECT count(*) FROM drafts")? > 0,
+        "its drafts are restored"
+    );
+    Ok(())
+}
+
+/// Gap 2: a `records.sqlite` that is not a database is refused as invalid input.
+#[tokio::test]
+async fn rr5_a_records_entry_that_is_not_a_database_is_invalid_input() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| b"not a database at all".repeat(256)),
+        &[],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "records database").await
+}
+
+/// Gap 2: records at a newer schema than this build's do not migrate, and are refused as
+/// invalid input before anything is written.
+#[tokio::test]
+async fn backup_an_archive_whose_records_do_not_migrate_is_invalid_input() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let forged = rr4_forged_records(&bytes, "PRAGMA user_version = 99;")?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "migrate").await
+}
+
+/// Gap 2: an archive whose records entry is an empty file (which SQLite reads as an empty
+/// database, and this build migrates to its schema) holds no workspace, and is refused before
+/// anything is written.
+#[tokio::test]
+async fn backup_an_archive_whose_records_hold_no_workspace_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(Vec::new),
+        &[],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "workspaces").await
+}
+
+/// B4: an `objects/` entry whose name is not a digest is refused before anything is written.
+#[tokio::test]
+async fn rr5_an_object_entry_named_otherwise_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|_| None,
+        &[("objects/not-a-digest", b"rr5 stray")],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "objects/").await
+}
+
+/// B4: an `objects/<digest>` entry that no row or card names is stored (its digest checked),
+/// and stays as the target's pending put, which a purge of that workspace collects.
+#[tokio::test]
+async fn rr5_an_unneeded_object_entry_is_stored_and_left_pending() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let stray = b"rr5 stray object";
+    let digest = {
+        use sha2::Digest as _;
+        use std::fmt::Write as _;
+        let hash = sha2::Sha256::digest(stray);
+        Digest::try_from(hash.iter().fold(String::new(), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        }))?
+    };
+    let name = format!("objects/{}", digest.as_str());
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|_| None,
+        &[(name.as_str(), stray)],
+    )?;
+    let (target, _, result) = import_crafted(&storage, crafted).await?;
+    result?;
+    assert!(
+        storage.blobs().open(&target, &digest, 0, 1).await.is_ok(),
+        "stored"
+    );
+    let pending = count(
+        &directory.path().join("records.sqlite"),
+        &format!(
+            "SELECT count(*) FROM pending_puts WHERE workspace_id = '{}' AND digest = '{}'",
+            target.workspace_id.0,
+            digest.as_str()
+        ),
+    )?;
+    assert_eq!(pending, 1, "left as the target's pending put");
+    Ok(())
+}
+
+/// Gap 3: an `objects/<digest>` entry whose bytes are not that digest is refused as invalid
+/// input when the archive is opened, before anything is written or stored.
+#[tokio::test]
+async fn rr5_an_object_entry_whose_bytes_are_not_its_digest_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let claimed = Digest::try_from("a".repeat(64))?;
+    let name = format!("objects/{}", claimed.as_str());
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|_| None,
+        &[(name.as_str(), b"rr5 bytes of another digest")],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    let stored = storage
+        .blobs()
+        .open(&outcome.0, &claimed, 0, 1)
+        .await
+        .is_ok();
+    assert!(!stored, "nothing stored under the claimed digest");
+    assert_import_refused(&storage, outcome, "digest").await
+}
+
+/// Gap 1: a replacement checks every workspace archive before it writes the installation
+/// archive's rows, so a set whose second archive is refused writes nothing at all: no tenant
+/// event, no workspace and no repository. The good set then restores in full.
+#[tokio::test]
+async fn backup_a_replacement_set_with_a_refused_archive_writes_nothing() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let (first, second) = {
+        let storage = Storage::open(directory.path())?;
+        let first = notes_workspace(&storage).await?;
+        let (second, _) = create(&storage, "local", 2, "Second").await?;
+        storage
+            .events()
+            .append(&EventScope::Tenant(tenant("local")?), None, sign_in())
+            .await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        (first, second)
+    };
+    let (installation, first_archive) = set_of(output.path(), &first);
+    let (_, second_archive) = set_of(output.path(), &second);
+    let good = std::fs::read(&second_archive)?;
+    let records = rr4_forged_records(
+        &good,
+        "INSERT INTO grants VALUES ('local', 'WS99', 'mallory', '[\"read\"]')",
+    )?;
+    std::fs::write(
+        &second_archive,
+        rebuilt(
+            &good,
+            &|_| zip::CompressionMethod::Stored,
+            &|name| (name == "records.sqlite").then(|| records.clone()),
+            &[],
+        )?,
+    )?;
+    std::fs::remove_dir_all(directory.path())?;
+    let archives = [first_archive, second_archive.clone()];
+    {
+        let restored = Storage::open(directory.path())?;
+        let error = err_of(
+            restored
+                .backups()
+                .restore_replacement(&installation, &archives)
+                .await,
+        )?;
+        assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+        assert!(error.message.contains("grants"), "{error}");
+    }
+    let live = directory.path().join("records.sqlite");
+    for table in ["events", "workspaces"] {
+        assert_eq!(
+            count(&live, &format!("SELECT count(*) FROM {table}"))?,
+            0,
+            "no {table} row written"
+        );
+    }
+    assert!(
+        !directory
+            .path()
+            .join("repositories")
+            .join("local")
+            .join(format!("{}.git", first.workspace_id.0))
+            .exists(),
+        "the first workspace's repository is not written"
+    );
+    std::fs::write(&second_archive, &good)?;
+    let restored = Storage::open(directory.path())?;
+    let reports = restored
+        .backups()
+        .restore_replacement(&installation, &archives)
+        .await?;
+    assert_eq!(reports.len(), 2);
+    assert_eq!(count(&live, "SELECT count(*) FROM workspaces")?, 2);
+    assert_eq!(count(&live, "SELECT count(*) FROM events")?, 1);
+    Ok(())
+}
+
+/// B3: a purge of another workspace keeps the structured export and asset that a surviving
+/// workspace's conversion record over 64 MiB names, even when the purged workspace named them
+/// too (`references::record_tokens` past `RECORD_LIMIT`, read for survivors).
+#[tokio::test]
+async fn rr5_a_purge_keeps_what_a_survivors_large_record_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (survivor, created) = create(&storage, "local", 1, "Large").await?;
+    let (target, target_head) = create(&storage, "local", 2, "Purged").await?;
+    let source = put(&storage, &survivor, b"rr5 large original")
+        .await?
+        .digest;
+    let structured = put(&storage, &target, b"{\"rr5\": \"large export\"}")
+        .await?
+        .digest;
+    let asset = put(&storage, &target, b"rr5 large render").await?.digest;
+    let bytes = rr4_record(&structured, &asset, 1_500_000);
+    assert!(
+        bytes.len() > 64 << 20,
+        "the record is {} bytes",
+        bytes.len()
+    );
+    let record = rr4_put_large(&storage, &survivor, bytes).await?;
+    commit(
+        &storage,
+        &survivor,
+        3,
+        &created,
+        vec![rr4_converted_card(
+            uuid!(14)?,
+            "sources/large.md",
+            &source,
+            &record,
+        )?],
+    )
+    .await?;
+    // The target names the same two objects, as cards over them.
+    put(&storage, &target, b"{\"rr5\": \"large export\"}").await?;
+    put(&storage, &target, b"rr5 large render").await?;
+    commit(
+        &storage,
+        &target,
+        4,
+        &target_head,
+        vec![card(uuid!(15)?, &structured)?, {
+            let TreeEdit::WriteSourceCard(mut second) = card(uuid!(16)?, &asset)? else {
+                return Err("a card".into());
+            };
+            second.path = WorkspacePath::try_from("sources/render.md".to_owned())?;
+            TreeEdit::WriteSourceCard(second)
+        }],
+    )
+    .await?;
+    rr5_purge(&storage, &target).await?;
+    for (digest, what) in [(&structured, "structured export"), (&asset, "asset")] {
+        assert!(
+            object_file(directory.path(), digest)?.is_file(),
+            "the purge deleted the {what} a surviving large record names"
+        );
+    }
+    Ok(())
+}
+
+/// Purge the workspace `target` of tenant `local` (purge 61 under mutations 60 and 62).
+async fn rr5_purge(storage: &Storage, target: &StorageScope) -> TestResult {
+    let tenant = tenant("local")?;
+    let purge = storage
+        .records()
+        .create_purge(
+            &tenant,
+            uuid!(60)?,
+            NewPurge {
+                id: uuid!(61)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: target.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    storage
+        .purger()
+        .purge_workspace(&tenant, uuid!(62)?, purge.id, target.workspace_id)
+        .await?;
+    Ok(())
+}
+
+/// B3 bounded reading: an object over 64 MiB is read as a conversion record only when a source
+/// card names it as one. A surviving workspace's large JSON upload that no card names, whose
+/// `assets` and `structured` lists name two objects of the purged workspace, keeps neither:
+/// the purge deletes both.
+#[tokio::test]
+async fn backup_a_large_upload_is_never_read_as_a_conversion_record() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (survivor, _) = create(&storage, "local", 1, "Large").await?;
+    let (target, _) = create(&storage, "local", 2, "Purged").await?;
+    let structured = put(&storage, &target, b"{\"rr5\": \"export an upload names\"}")
+        .await?
+        .digest;
+    let asset = put(&storage, &target, b"rr5 render an upload names")
+        .await?
+        .digest;
+    let bytes = rr4_record(&structured, &asset, 1_500_000);
+    assert!(
+        bytes.len() > 64 << 20,
+        "the upload is {} bytes",
+        bytes.len()
+    );
+    // The survivor's pending put, which a purge reads as a surviving reference; no card names it.
+    rr4_put_large(&storage, &survivor, bytes).await?;
+    rr5_purge(&storage, &target).await?;
+    for (digest, what) in [(&structured, "structured export"), (&asset, "asset")] {
+        assert!(
+            !object_file(directory.path(), digest)?.is_file(),
+            "the {what} was kept because a large upload, read as a record, names it"
+        );
+    }
     Ok(())
 }
 
