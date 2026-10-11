@@ -1091,9 +1091,36 @@ mod job_handler {
         assert!(run(&world, late).await?);
         let entry = world.records.entry(late)?;
         assert_eq!(entry.job.state, JobState::Failed);
-        let (message, _retryable) = some(entry.failures.first(), "the failure")?;
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
         assert!(message.contains("another job"), "{message}");
+        // Refused for good, like a collision: a retry would meet the same refusal.
+        assert!(!retryable);
+        assert_eq!(entry.failures.len(), 1);
         assert_eq!(world.uploads.consumed()?, [(complete, taker)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_import_whose_file_name_gives_no_card_path_consumes_none_of_its_batch() -> TestResult
+    {
+        let world = world_with(Some(3), Vec::new())?;
+        let valid = upload(&world, 153, "valid.pdf", b"%PDF valid")?;
+        let escaping = upload(&world, 154, "../report.pdf", b"%PDF escaping")?;
+        let id = job(
+            &world,
+            153,
+            workspace_scope()?,
+            import_spec(vec![valid, escaping], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("gives no workspace path"), "{message}");
+        assert!(!retryable);
+        // The valid upload was not consumed, and nothing was written.
+        assert_eq!(world.uploads.consumed()?, Vec::new());
+        assert!(world.versions.written()?.is_empty());
         Ok(())
     }
 

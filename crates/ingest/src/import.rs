@@ -2,8 +2,9 @@
 //! assembled and retained, and the source card committed (plan 3.2, Stage 1b design 9.1).
 //!
 //! Import:
-//! 1. Each upload must be complete and taken by no other job; only once every upload of the
-//!    request passes is each consumed by this job, so a refused batch consumes none.
+//! 1. Each upload must be complete and taken by no other job, and its file name must give a
+//!    card path; only once every upload of the request passes is each consumed by this job,
+//!    so a refused batch consumes none. An upload another job took refuses the job for good.
 //! 2. Each card is named `conventions::source_card_name` of its file name, with the
 //!    numbered-suffix rule (`report-pdf-2.md`) against the destination folder at the base
 //!    revision and against the other cards of the job.
@@ -205,7 +206,13 @@ pub(crate) async fn import(
             "naming rules at import wait for core's rule function (request R-I4); import without them",
         ));
     }
-    let cards = pending_cards(ports, attempt.claimed, scope, &request).await?;
+    // Conflict from the batch check (an upload another job took, or took meanwhile) refuses
+    // the job for good, like a collision: retrying it meets the same refusal.
+    let cards = match pending_cards(ports, attempt.claimed, scope, &request).await {
+        Ok(cards) => cards,
+        Err(error) if error.code == ErrorCode::Conflict => return Ok(refused_as(error)),
+        Err(error) => return Err(error),
+    };
     let check: Arc<dyn CandidateCheck> = Arc::new(ImportCheck::new(
         Arc::clone(&ports.check),
         cards.iter().map(|(card, _)| card.path.clone()).collect(),
@@ -380,14 +387,23 @@ fn refused(error: &ApiError) -> Done {
     }
 }
 
+/// A job refused for good with `error` as it stands: its failure is written as not retryable.
+fn refused_as(error: ApiError) -> Done {
+    Done {
+        refused: Some(error),
+        ..Done::default()
+    }
+}
+
 /// The cards of an import, each with outcome `pending`, beside its materialized original.
 ///
-/// Every upload of the request is read and checked before any is consumed: an incomplete one
-/// refuses the batch (`InvalidInput`), and so does one another job consumed (`Conflict`), and
-/// then no upload of the batch is consumed, so another job may still take the good ones. Only
-/// then is each consumed by this job. The race that remains is another job consuming an upload
-/// between this check and the consume: that is a concurrent import of the same upload, which
-/// `consume` already refuses with `Conflict`.
+/// Every upload of the request is read and checked, and every card path derived, before any
+/// upload is consumed. An incomplete upload refuses the batch (`InvalidInput`), so does one
+/// another job consumed (`Conflict`), and so does a file name that gives no workspace path
+/// (`InvalidInput` on `/upload_ids`); then no upload of the batch is consumed, so another job
+/// may still take the good ones. Only then is each consumed by this job. The race that remains
+/// is another job consuming an upload between this check and the consume: that is a
+/// concurrent import of the same upload, which `consume` already refuses with `Conflict`.
 async fn pending_cards(
     ports: &HandlerPorts,
     claimed: &ClaimedJob,
@@ -414,17 +430,21 @@ async fn pending_cards(
         }
         sources.push((upload, object));
     }
+    let mut taken = taken_keys(ports, scope, request.base_revision, request.destination).await?;
+    let paths = sources
+        .iter()
+        .map(|(upload, _object)| free_path(request.destination, &upload.filename, &mut taken))
+        .collect::<Result<Vec<_>, _>>()?;
     for (upload, _object) in &sources {
         let _consumed = ports.uploads.consume(scope, upload.id, job).await?;
     }
-    let mut taken = taken_keys(ports, scope, request.base_revision, request.destination).await?;
     let mut cards = Vec::new();
-    for (ordinal, (upload, object)) in (0_u32..).zip(&sources) {
+    for ((ordinal, (upload, object)), path) in (0_u32..).zip(&sources).zip(paths) {
         let local = ports.blobs.materialize(scope, &object.digest).await?;
         cards.push((
             SourceCard {
                 item_id: derive_item_id(claimed.mutation_id, ordinal),
-                path: free_path(request.destination, &upload.filename, &mut taken)?,
+                path,
                 title: upload.filename.clone(),
                 type_name: SOURCE_CARD_TYPE.to_owned(),
                 body: String::new(),
@@ -1186,6 +1206,7 @@ fn free_path(
                 ErrorCode::InvalidInput,
                 format!("the file name {file_name:?} gives no workspace path: {error}"),
             )
+            .with_field("/upload_ids")
         })?;
         if taken.insert(path.collision_key()) {
             return Ok(path);
