@@ -845,12 +845,15 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
   - the `/upload_ids` field of an invalid card path;
   - the event-failure hook in the ingest fakes;
   - a second import of the same archive under another mutation, after the first stopped past its restore commit, is refused (storage F1 review, mutant MT);
-  - the export-only picture fallback in the ingest child, which today would write docling's PNG for a JPEG.
+  - the export-only picture fallback in the ingest child, which today would write docling's PNG for a JPEG;
+  - a landing clears only its own pending put, not every pending put of the workspace (storage P1 review, mutant MCLEAR);
+  - a kept export's artifact descriptor survives the job-artifact scrub (storage pass-3 review, mutant MKEPTART).
 - **`FormatHasNoLocator`** for an unmatched picture in a pageless format, which today records `NotLocatedByConverter`.
 
 **With their features.**
 
-- **Asset retention (ingest M2, its main body).** Page renders when `page_images` is set, and pictures with `pixel_size`, `media_type` and a source caption. Originals are retained, so a redigest regenerates the assets of documents imported before it.
+- **Asset retention (ingest M2, its main body).** Done in #21.
+- **An archive from a release build restores (the first release, or records schema V3, whichever comes first).** A restore compares the archive's stored schema statements with the live database's as text. Every database today is built by the same migrations under the same bundled SQLite, so they match. To catch a SQLite or migration change that would refuse older archives, commit a small workspace archive and installation archive written by a release build as crate test fixtures, with a test that restores them. This needs `.zip` in the foundation guard's declared binary types.
 - **Restored View bindings (core M1.6, with the View file layout).** An archive imported into a workspace with another id keeps the archive's tree. So once Views are stored in Git, the import's restore commit must rewrite each View's `bindings[].source.workspace_id` to the target and nothing else, or `require_own_workspace` rejects them. This ships in the same change that lands the View layout. Its test: a View restored into another id validates and opens with `get_view`.
 - **The purge job drains first (core M1.4, with the purge operation).** The `Purger` caller duty requires cancelling and draining the target workspace's jobs before the first call. The purge job's handler in ingest, which is the purger's caller, must therefore:
   - list the workspace's queued and running jobs;
