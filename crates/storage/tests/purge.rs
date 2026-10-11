@@ -515,7 +515,11 @@ async fn pre_migration_set(data: &Path, fixture: &Fixture, name: &str) -> Fallib
         .backups()
         .write_backup_set(&directory, None)
         .await?;
-    assert_eq!(written.len(), 3, "two workspace archives, one installation");
+    assert_eq!(
+        written.len(),
+        4,
+        "two workspace archives, the tenant's installation archive and the installation-level one"
+    );
     Ok(())
 }
 
