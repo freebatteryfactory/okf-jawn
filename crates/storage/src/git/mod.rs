@@ -84,28 +84,36 @@ impl GitVersions {
         crate::purge::guard::refuse_scope(&self.records, scope).await?;
         let wanted = revision.clone();
         let blobs = self.blobs.clone();
+        let records = self.records.clone();
         let runtime = tokio::runtime::Handle::current();
         // The staging directory is made, written, retained and removed under the workspace's
         // write lock, like every other staged write, so no write or purge of the workspace
-        // runs while it exists.
-        let object = self
-            .blocking(scope, move |repositories, scope| {
-                repositories.locked(scope, || {
-                    let staging = repositories.stage(scope, mutation_id)?;
-                    let bundle = staging.path.join(export::BUNDLE_FILE);
-                    let size = export::write_bundle(&repositories.open(scope)?, &wanted, &bundle)?;
-                    let object = runtime.block_on(blobs.put_for(
-                        &scope.tenant_id,
-                        file_reader(Some(bundle), 0, size),
-                        size,
-                        None,
-                    ))?;
-                    drop(staging);
-                    Ok(object)
-                })
+        // runs while it exists. The purge refusal is checked again under that lock, under which
+        // a purge plans the workspace, and the history is recorded before the lock is released:
+        // a purge either refuses it or finds its record in the plan.
+        self.blocking(scope, move |repositories, scope| {
+            repositories.locked(scope, || {
+                refuse_locked(&records, scope)?;
+                let staging = repositories.stage(scope, mutation_id)?;
+                let bundle = staging.path.join(export::BUNDLE_FILE);
+                let size = export::write_bundle(&repositories.open(scope)?, &wanted, &bundle)?;
+                let object = runtime.block_on(blobs.put_for(
+                    &scope.tenant_id,
+                    file_reader(Some(bundle), 0, size),
+                    size,
+                    None,
+                ))?;
+                drop(staging);
+                runtime.block_on(export::record(
+                    &records,
+                    scope,
+                    mutation_id,
+                    &wanted,
+                    object,
+                ))
             })
-            .await?;
-        export::record(&self.records, scope, mutation_id, revision, object).await
+        })
+        .await
     }
 
     /// Run a Git write: refused while a purge names the workspace (checked here, before the
@@ -663,6 +671,152 @@ mod tests {
 
     fn fault(message: &dyn std::fmt::Display) -> ApiError {
         ApiError::new(ErrorCode::Internal, message.to_string())
+    }
+
+    /// A workspace "Notes" of tenant `local` created under mutation 1, and its head.
+    async fn notes(
+        storage: &Storage,
+    ) -> Result<(StorageScope, okf_jawn_contract::identity::Revision), ApiError> {
+        let tenant = TenantId::try_from("local".to_owned()).map_err(|error| fault(&error))?;
+        let created = storage
+            .catalog()
+            .create(
+                &tenant,
+                MutationId(uuid::Uuid::from_u128(1)),
+                NewWorkspace {
+                    name: "Notes".to_owned(),
+                    description: String::new(),
+                    creator: Provenance {
+                        subject: "ana".to_owned(),
+                        route: AccessRoute::LocalOwner,
+                        client_id: None,
+                    },
+                },
+            )
+            .await?;
+        Ok((
+            StorageScope {
+                tenant_id: tenant,
+                workspace_id: created.id,
+            },
+            created.head,
+        ))
+    }
+
+    /// Backup fix round, ruling 1 (the written-history form of PR #20 finding 4): a written
+    /// history is recorded before it releases the workspace's lock. The test takes the lock the
+    /// moment the history lets go (it is seen holding it by its staging directory) and reads the
+    /// record there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_written_history_is_recorded_before_it_releases_the_lock() -> Result<(), ApiError> {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let (scope, head) = notes(&storage).await?;
+        let mutation = MutationId(uuid::Uuid::from_u128(2));
+        let staging = storage
+            .data()
+            .staging_path()
+            .join("local")
+            .join(scope.workspace_id.0.to_string())
+            .join(mutation.0.to_string());
+        let writer = {
+            let (versions, scope) = (storage.versions(), scope.clone());
+            tokio::spawn(async move { versions.write_history(&scope, &head, mutation).await })
+        };
+        let started = std::time::Instant::now();
+        while !staging.exists() {
+            if writer.is_finished() || started.elapsed() > Duration::from_secs(60) {
+                return Err(fault(&"the history was never seen holding the lock"));
+            }
+            tokio::task::yield_now().await;
+        }
+        let recorded = {
+            let (storage, scope) = (storage.clone(), scope.clone());
+            tokio::task::spawn_blocking(move || {
+                storage.repositories.locked(&scope, || {
+                    let key = mutation.0.to_string();
+                    tokio::runtime::Handle::current().block_on(storage.records.call(
+                        move |connection| {
+                            connection
+                                .query_row(
+                                    "SELECT count(*) FROM history_exports WHERE mutation_id = ?1",
+                                    [key],
+                                    |row| row.get::<_, i64>(0),
+                                )
+                                .map_err(|error| fault(&error))
+                        },
+                    ))
+                })
+            })
+            .await
+            .map_err(|error| fault(&error))??
+        };
+        writer.await.map_err(|error| fault(&error))??;
+        assert_eq!(recorded, 1, "recorded while the lock was still held");
+        Ok(())
+    }
+
+    /// Backup fix round, ruling 1: a written history that passed its first check and waits for
+    /// the workspace's lock while the purge is recorded is refused under the lock.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_written_history_waiting_for_the_lock_when_the_purge_is_recorded_is_refused()
+    -> Result<(), ApiError> {
+        use okf_jawn_core::jobs::RecordStore;
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let (scope, blank) = notes(&storage).await?;
+        let (held, release) = (mpsc::channel(), mpsc::channel::<()>());
+        let holder = {
+            let repositories = storage.repositories.clone();
+            let scope = scope.clone();
+            std::thread::spawn(move || {
+                repositories.locked(&scope, || {
+                    held.0.send(()).map_err(|error| fault(&error))?;
+                    release.1.recv().map_err(|error| fault(&error))
+                })
+            })
+        };
+        held.1.recv().map_err(|error| fault(&error))?;
+        let writer = {
+            let (versions, scope) = (storage.versions(), scope.clone());
+            tokio::spawn(async move {
+                versions
+                    .write_history(&scope, &blank, MutationId(uuid::Uuid::from_u128(2)))
+                    .await
+            })
+        };
+        // The history passes its first check at once and then waits for the lock (if it did
+        // not get there first, that first check refuses it instead).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        storage
+            .records()
+            .create_purge(
+                &scope.tenant_id,
+                MutationId(uuid::Uuid::from_u128(50)),
+                okf_jawn_core::jobs::NewPurge {
+                    id: okf_jawn_contract::identity::PurgeId(uuid::Uuid::from_u128(60)),
+                    target: okf_jawn_contract::purge::PurgeTarget::Workspace {
+                        workspace_id: scope.workspace_id,
+                    },
+                    initiator: Provenance {
+                        subject: "ana".to_owned(),
+                        route: AccessRoute::LocalOwner,
+                        client_id: None,
+                    },
+                },
+            )
+            .await?;
+        release.0.send(()).map_err(|error| fault(&error))?;
+        holder
+            .join()
+            .map_err(|_| fault(&"the lock holder stopped"))??;
+        let error = match writer.await.map_err(|error| fault(&error))? {
+            Ok(object) => return Err(fault(&format!("the history was written: {object:?}"))),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+        assert!(error.message.contains("purged by purge"), "{error}");
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
