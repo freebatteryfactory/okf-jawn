@@ -399,21 +399,30 @@ impl FakeVersions {
         Ok(())
     }
 
-    /// The commit carrying `mutation_id` after `since` on the line, newest first.
+    /// The commit carrying `mutation_id` after `since` on the line (the whole line for `None`),
+    /// newest first; a `since` the line never held is `NotFound`, as storage answers.
     fn found(
         &self,
         mutation_id: MutationId,
-        since: &Revision,
+        since: Option<&Revision>,
     ) -> Result<Option<Revision>, ApiError> {
         let commits = self.commits.lock().map_err(|_| poisoned())?;
-        let after: Vec<&(CommitChanges, Revision)> = if *since == self.head {
-            commits.iter().collect()
-        } else {
-            commits
-                .iter()
-                .skip_while(|(_, revision)| revision != since)
-                .skip(1)
-                .collect()
+        let after: Vec<&(CommitChanges, Revision)> = match since {
+            None => commits.iter().collect(),
+            Some(since) if *since == self.head => commits.iter().collect(),
+            Some(since) => {
+                if !commits.iter().any(|(_, revision)| revision == since) {
+                    return Err(ApiError::new(
+                        ErrorCode::NotFound,
+                        "the line never held that revision",
+                    ));
+                }
+                commits
+                    .iter()
+                    .skip_while(|(_, revision)| revision != since)
+                    .skip(1)
+                    .collect()
+            }
         };
         Ok(after
             .iter()
@@ -501,7 +510,12 @@ impl FakeVersions {
         check: &dyn CandidateCheck,
     ) -> Result<Committed, ApiError> {
         self.count_call()?;
-        if let Some(revision) = self.found(changes.mutation_id, &changes.expected_head)? {
+        // A commit's replay scan never refuses an unknown head; the head rules below answer it.
+        let replay = match self.found(changes.mutation_id, Some(&changes.expected_head)) {
+            Err(error) if error.code == ErrorCode::NotFound => None,
+            other => other?,
+        };
+        if let Some(revision) = replay {
             return Ok(Committed {
                 revision,
                 replayed: true,
@@ -725,7 +739,7 @@ impl VersionStore for FakeVersions {
         &'a self,
         _scope: &'a StorageScope,
         mutation_id: MutationId,
-        since: &'a Revision,
+        since: Option<&'a Revision>,
     ) -> PortFuture<'a, Option<Revision>> {
         let found = self.found(mutation_id, since);
         Box::pin(async move { found })
@@ -745,6 +759,14 @@ impl VersionStore for FakeVersions {
         _promotion: Promotion,
     ) -> PortFuture<'a, Committed> {
         unused("promote_candidate")
+    }
+    fn body_start<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _revision: &'a Revision,
+        _item_id: ItemId,
+    ) -> PortFuture<'a, u32> {
+        unused("body_start")
     }
     fn log<'a>(&'a self, _scope: &'a StorageScope, query: LogQuery) -> PortFuture<'a, LogResponse> {
         let logged = self.history(&query);
