@@ -703,32 +703,38 @@ async fn a_resumed_write_answers_the_first_attempts_revision_and_receipt() -> Te
 }
 
 /// A world where moving the fixture note to `archive/plan.md` commits `b`, whose moved file has
-/// no heading, and the staged tree the store checks is that commit's tree.
-fn move_with_lint() -> Built<World> {
+/// no heading and holds `committed` as its properties. The staged tree the store checks is
+/// that file with a type, so it is the commit's tree when `committed` holds the same type.
+fn move_with_lint(committed: serde_json::Value) -> Built<World> {
     let world = World::new()?;
     note_at(&world, &['a'])?;
-    let moved = note(
+    let staged = note(
         NOTE,
         &revision('b')?,
         "archive/plan.md",
         "No heading.\n",
         json!({ "type": "Note" }),
     )?;
-    world
-        .versions
-        .put_document(&revision('b')?, moved.clone())?;
+    let moved = note(
+        NOTE,
+        &revision('b')?,
+        "archive/plan.md",
+        "No heading.\n",
+        committed,
+    )?;
+    world.versions.put_document(&revision('b')?, moved)?;
     world.versions.queue_revision(revision('b')?)?;
     let stage = world.versions.stage();
     std::fs::remove_file(stage.0.join("notes/plan.md"))?;
     std::fs::create_dir_all(stage.0.join("archive"))?;
-    stage.write("archive/plan.md", &file_text(&moved))?;
+    stage.write("archive/plan.md", &file_text(&staged))?;
     Ok(world)
 }
 
 #[tokio::test]
 async fn a_resumed_write_answers_the_warnings_its_first_attempt_produced() -> TestResult {
     let caller = alice(OperationName::MoveItem, Some(mutation(1)))?;
-    let uninterrupted = move_with_lint()?;
+    let uninterrupted = move_with_lint(json!({ "type": "Note" }))?;
     let first = uninterrupted
         .service
         .move_item(&caller, move_request()?)
@@ -742,7 +748,7 @@ async fn a_resumed_write_answers_the_warnings_its_first_attempt_produced() -> Te
         first.warnings
     );
     // The same write fails after its commit; the store replays the commit on the retry.
-    let world = move_with_lint()?;
+    let world = move_with_lint(json!({ "type": "Note" }))?;
     world.search.fail_next();
     err_of(world.service.move_item(&caller, move_request()?).await)?;
     let retried = world.service.move_item(&caller, move_request()?).await?;
@@ -751,6 +757,33 @@ async fn a_resumed_write_answers_the_warnings_its_first_attempt_produced() -> Te
     assert_eq!(
         serde_json::to_value(&retried.warnings)?,
         serde_json::to_value(&first.warnings)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_replayed_write_whose_warnings_cannot_be_rebuilt_still_answers_its_commit() -> TestResult
+{
+    // The commit the store holds has no type, so the check refuses it on its second run; the
+    // staged tree it passed on its first run is conformant.
+    let world = move_with_lint(json!({}))?;
+    world.search.fail_next();
+    let caller = alice(OperationName::MoveItem, Some(mutation(1)))?;
+    err_of(world.service.move_item(&caller, move_request()?).await)?;
+    let retried = world.service.move_item(&caller, move_request()?).await?;
+    assert_eq!(retried.revision, revision('b')?);
+    assert_eq!(world.versions.commits()?.len(), 1, "no second commit");
+    let receipts = world.records.receipts()?;
+    let (_, receipt) = some(receipts.first(), "the write's receipt")?;
+    assert_eq!(receipt.id, retried.receipt_id);
+    let [only] = retried.warnings.as_slice() else {
+        return Err(format!("not one warning: {:?}", retried.warnings).into());
+    };
+    assert_eq!(only.code, "replay_warnings_unavailable");
+    assert!(
+        only.message.contains("could not be rebuilt") && only.message.contains("type"),
+        "says why: {}",
+        only.message
     );
     Ok(())
 }

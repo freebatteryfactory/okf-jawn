@@ -370,6 +370,21 @@ impl FakeVersions {
         Ok(())
     }
 
+    /// Make `document` the one readable at `at` under its identity, in place of any earlier
+    /// one, as a test that changes what a commit holds after it was written needs.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn replace_document(&self, at: &Revision, document: ItemDocument) -> Built<()> {
+        let mut state = lock(&self.state)?;
+        let id = document.summary.id;
+        state
+            .documents
+            .retain(|(revision, held)| !(revision == at && held.summary.id == id));
+        state.documents.push((at.clone(), document));
+        Ok(())
+    }
+
     /// Answer `list` of `folder` at `at` with `listing`.
     ///
     /// # Errors

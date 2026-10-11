@@ -1337,6 +1337,46 @@ async fn a_resumed_snapshot_answers_the_warnings_its_first_attempt_produced() ->
 }
 
 #[tokio::test]
+async fn a_resumed_snapshot_whose_warnings_cannot_be_rebuilt_still_completes() -> TestResult {
+    let world = snapshot_with_lint()?;
+    world.search.fail_next();
+    let mut caller = alice(OperationName::CommitItems, Some(mutation(1)))?;
+    err_of(
+        world
+            .service
+            .commit_items(&caller, snapshot(&[NOTE])?)
+            .await,
+    )?;
+    // The found commit's file reads back with no type, so the check refuses it on its second
+    // run; the staged tree it passed on its first run is conformant.
+    let typeless = note(
+        NOTE,
+        &revision('b')?,
+        "notes/plan.md",
+        "No heading.\n",
+        json!({}),
+    )?;
+    world.versions.replace_document(&revision('b')?, typeless)?;
+    caller.attempt = Attempt::Resumed;
+    let resumed = world
+        .service
+        .commit_items(&caller, snapshot(&[NOTE])?)
+        .await?;
+    assert_eq!(resumed.revision, revision('b')?);
+    assert_eq!(world.versions.commits()?.len(), 1, "no second commit");
+    let [only] = resumed.warnings.as_slice() else {
+        return Err(format!("not one warning: {:?}", resumed.warnings).into());
+    };
+    assert_eq!(only.code, "replay_warnings_unavailable");
+    assert!(
+        only.message.contains("could not be rebuilt") && only.message.contains("type"),
+        "says why: {}",
+        only.message
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn commit_items_gives_up_after_three_heads_moved_mid_snapshot() -> TestResult {
     let world = landing_mid_snapshot(&['c', 'e', 'f'])?;
     let refused = err_of(

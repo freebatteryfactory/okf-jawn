@@ -15,7 +15,8 @@
 //! not stable across attempts: a resumed attempt first asks the store for the commit its earlier
 //! attempt may have written anywhere on the accepted line (`VersionStore::find_commit` with no
 //! `since`), and completes it instead of committing again, answering the warnings the same
-//! check gives over that commit's tree (`shared::checked_again`).
+//! check gives over that commit's tree (`shared::replay_warnings`); a refusal there never fails
+//! the landed write.
 //!
 //! A draft is removed only when it is still the content that was committed
 //! (`DraftStore::discard` with the expected digest): on a first attempt the digest of the draft
@@ -59,8 +60,8 @@ use okf_jawn_contract::source::SourceReference;
 
 use super::ApplicationService;
 use super::shared::{
-    Touched, Write, announce, check_named, checked_again, commit_with_receipt, invalid,
-    mutation_id, record_receipt, resolve, store_commit, workspace_scope,
+    Touched, Write, announce, check_named, commit_with_receipt, invalid, mutation_id,
+    record_receipt, replay_warnings, resolve, store_commit, workspace_scope,
 };
 use super::sources::{computed_locations, record_of};
 use crate::conformance::EditCheck;
@@ -247,9 +248,10 @@ pub(super) async fn commit_items(
             touched.push(document.summary.path);
         }
         // The first attempt's warnings went with it: the same check runs again over the
-        // commit's tree (`shared::checked_again`).
+        // commit's tree (`shared::replay_warnings`); a refusal there never fails the landed
+        // write.
         let check = Arc::new(EditCheck::new(&touched, None));
-        let warnings = checked_again(service, &scope, &revision, check).await?;
+        let warnings = replay_warnings(service, &scope, &revision, check).await;
         return finish(
             service, context, &scope, mutation, committed, revision, warnings,
         )

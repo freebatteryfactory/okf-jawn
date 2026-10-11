@@ -10,8 +10,9 @@
 //! no-op, the event and the receipt are unique on the mutation), so a failure at any step
 //! fails the request and a retry under the same idempotency key completes it without a
 //! second effect. A replayed commit's warnings are rebuilt by the same check over the
-//! committed tree (`checked_again`), so the retry answers the warnings the first attempt
-//! would have.
+//! committed tree, so the retry answers the warnings the first attempt would have; when they
+//! cannot be rebuilt, one warning says so and the landed write still succeeds
+//! (`replay_warnings`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,8 +64,10 @@ pub(super) struct Touched {
     pub(super) of_type: Option<String>,
 }
 
-/// A private directory the tree of a replayed commit is written to for its check; removed when
-/// dropped.
+/// A private directory the tree of a replayed commit is written to for its check; a guard
+/// that removes it when dropped, so it goes on every path out of the check: a success, an
+/// error of a write or of the check, and a panic, whose unwinding drops it (the workspace
+/// builds with the default `panic = "unwind"`). core has no `tempfile`, so this is that guard.
 struct Scratch(PathBuf);
 
 /// How many entries of a folder are read at a time when a replayed commit's tree is read back.
@@ -73,6 +76,9 @@ const TREE_PAGE: u16 = 500;
 const MAINTAINED_INDEX: &str = "index.md";
 /// The change log the store maintains at the root.
 const CHANGE_LOG: &str = "log.md";
+/// The code of the warning a replayed write answers when its first attempt's warnings could
+/// not be rebuilt (`replay_warnings`).
+const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
 
 impl Scratch {
     /// A new, empty private directory under the system's temporary directory.
@@ -229,9 +235,35 @@ pub(super) async fn store_commit(
         )
         .await?;
     if committed.replayed {
-        committed.warnings = checked_again(service, &scope, &committed.revision, check).await?;
+        committed.warnings = replay_warnings(service, &scope, &committed.revision, check).await;
     }
     Ok(committed)
+}
+
+/// The warnings a replayed commit answers: those `checked_again` rebuilds, or, when it refuses
+/// or fails, one `replay_warnings_unavailable` warning in their place saying why.
+///
+/// The commit has landed, so a refusal or a fault here must not fail the write: an error would
+/// fail every retry the same way, and a landed commit would become a permanent error. The write
+/// answers its revision and receipt with this warning instead.
+pub(super) async fn replay_warnings(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    check: Arc<dyn CandidateCheck>,
+) -> Vec<Warning> {
+    match checked_again(service, scope, revision, check).await {
+        Ok(warnings) => warnings,
+        Err(error) => vec![Warning {
+            code: REPLAY_WARNINGS_UNAVAILABLE.to_owned(),
+            message: format!(
+                "the commit landed on an earlier attempt, and that attempt's warnings could not \
+                 be rebuilt: {}",
+                error.message
+            ),
+            location: None,
+        }],
+    }
 }
 
 /// The warnings `check` gives over the committed tree of `revision`, read back from the store.
@@ -246,13 +278,17 @@ pub(super) async fn store_commit(
 /// import's warnings the same way. The cleaner fix is R-I10, where the store keeps the warnings
 /// with the commit; it is a later shared change.
 ///
-/// The tree is written to a private directory under the system's temporary directory, because
-/// a `CandidateCheck` reads a directory; it is removed when the check returns.
+/// The tree is written to a private directory under the system's temporary directory
+/// (`Scratch`), which is removed on every path out of the check. This is core's only
+/// filesystem write: a `CandidateCheck` reads a directory, and no port offers one for a tree
+/// already committed. It goes when R-I10 lands.
+///
+/// A replaying write calls `replay_warnings`, which never fails on this function's error.
 ///
 /// # Errors
 /// Returns any port error of reading the tree, `Internal` when the directory cannot be
 /// written, or the check's own error.
-pub(super) async fn checked_again(
+async fn checked_again(
     service: &ApplicationService,
     scope: &StorageScope,
     revision: &Revision,
