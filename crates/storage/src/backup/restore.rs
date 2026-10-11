@@ -99,6 +99,20 @@ pub(crate) fn restore(
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
     let mut opened = Opened::open(archive)?;
     let manifest = opened.workspace()?;
+    // The archived records are read, brought to this build's schema and checked first, before
+    // anything is written: an archive may be a caller's file.
+    let records = staging.join(RECORDS);
+    opened.extract(RECORDS, &records)?;
+    let mut archived = Connection::open(&records).map_err(|error| sql(&error))?;
+    crate::schema::RECORDS
+        .to_latest(&mut archived)
+        .map_err(|error| {
+            internal(format!(
+                "an archived records database did not migrate: {error}"
+            ))
+        })?;
+    drop(archived);
+    refuse_foreign_rows(&records, &manifest)?;
     // A replacement restore run again after a crash in a later workspace accepts a workspace
     // this same archive already restored in full, and leaves it as it is.
     if let Some(report) = refuse(storage, runtime, scope, &manifest, mode)? {
@@ -112,7 +126,7 @@ pub(crate) fn restore(
         runtime,
         scope,
         (&mut opened, &mut pinned),
-        &manifest,
+        (&manifest, &records),
         staging,
         mode,
     );
@@ -122,13 +136,14 @@ pub(crate) fn restore(
     restored
 }
 
-/// Put the archive's objects back (each pin kept in `pinned`), then its history and rows.
+/// Put the archive's objects back (each pin kept in `pinned`), then its history and the rows of
+/// the checked records at `records`.
 fn put_back(
     storage: &Storage,
     runtime: &Handle,
     scope: &StorageScope,
     (opened, pinned): (&mut Opened, &mut Vec<Pinned>),
-    manifest: &WorkspaceManifest,
+    (manifest, records): (&WorkspaceManifest, &Path),
     staging: &Path,
     mode: &Mode,
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
@@ -158,19 +173,8 @@ fn put_back(
             followed.insert(digest.clone(), named);
         }
     }
-    let records = staging.join(RECORDS);
-    opened.extract(RECORDS, &records)?;
-    let mut archived = Connection::open(&records).map_err(|error| sql(&error))?;
-    crate::schema::RECORDS
-        .to_latest(&mut archived)
-        .map_err(|error| {
-            internal(format!(
-                "an archived records database did not migrate: {error}"
-            ))
-        })?;
-    drop(archived);
     let report = {
-        let path = text(&records)?.to_owned();
+        let path = text(records)?.to_owned();
         let target = Target {
             tenant: scope.tenant_id.as_str().to_owned(),
             workspace: scope.workspace_id.0.to_string(),
@@ -253,6 +257,55 @@ fn restored_already(
     serde_json::from_str(&recorded)
         .map(Some)
         .map_err(|error| crate::db::json(&error))
+}
+
+/// Refuse an archive any of whose rows belongs to another tenant or workspace than its manifest
+/// names: a table with `tenant_id` and `workspace_id` holds only the manifest's tenant and
+/// workspace, one with `tenant_id` alone only its tenant, and one keyed by `job_id` alone only
+/// rows of the archive's own jobs. A written archive never holds another row
+/// (`snapshot::filter`), so one means a crafted file; it is refused before anything is written.
+///
+/// # Errors
+/// Returns `InvalidInput` naming the table.
+fn refuse_foreign_rows(records: &Path, manifest: &WorkspaceManifest) -> Result<(), ApiError> {
+    let connection = super::snapshot::read_only(records)?;
+    let tenant = manifest.tenant_id.as_str();
+    let workspace = manifest.workspace_id.0.to_string();
+    for table in super::snapshot::tables(&connection)? {
+        let columns: Vec<String> = {
+            let mut statement = connection
+                .prepare("SELECT name FROM pragma_table_info(?1)")
+                .map_err(|error| sql(&error))?;
+            statement
+                .query_map([&table], |row| row.get(0))
+                .map_err(|error| sql(&error))?
+                .collect::<Result<_, _>>()
+                .map_err(|error| sql(&error))?
+        };
+        let has = |name: &str| columns.iter().any(|column| column == name);
+        let foreign = match (has("tenant_id"), has("workspace_id")) {
+            (true, true) => "tenant_id IS NOT ?1 OR workspace_id IS NOT ?2",
+            (true, false) => "tenant_id IS NOT ?1 AND ?2 IS NOT NULL",
+            (false, _) if has("job_id") && table != "jobs" => {
+                "job_id NOT IN (SELECT job_id FROM jobs) AND ?1 IS NOT NULL AND ?2 IS NOT NULL"
+            }
+            _ => continue,
+        };
+        let count: i64 = connection
+            .query_row(
+                &format!("SELECT count(*) FROM \"{table}\" WHERE {foreign}"),
+                params![tenant, workspace],
+                |row| row.get(0),
+            )
+            .map_err(|error| sql(&error))?;
+        if count > 0 {
+            return Err(invalid(&format!(
+                "its {table} hold {count} rows of another tenant or workspace than its manifest \
+                 names"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Refuse an archive the mode may not restore into `scope`. For a replacement restore, the

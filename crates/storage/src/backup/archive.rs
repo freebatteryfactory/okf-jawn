@@ -12,7 +12,8 @@
 //! holds no workspace content.
 //!
 //! Entries are stored, not compressed: originals are usually compressed already, and a stored
-//! entry streams back without a decoder. Reading takes entries by name only.
+//! entry streams back without a decoder. Reading takes entries by name only, after `Opened::open`
+//! has checked every entry against its bounds (an archive may be a caller's upload).
 
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -91,12 +92,73 @@ pub(crate) const RECORDS: &str = "records.sqlite";
 pub(crate) const PACK: &str = "history.pack";
 /// The only entry of an installation archive.
 pub(crate) const INSTALLATION: &str = "installation.json";
-
+/// The largest manifest read (`manifest.json`, `installation.json`), 64 MiB. A manifest is read
+/// whole into memory; the largest real one is an installation archive's, whose tenant events
+/// (a few hundred bytes each) would reach this only past about 200 000 events.
+const MANIFEST_LIMIT: u64 = 64 << 20;
+/// How many times its own size an archive may expand to in all (`expansion_bound`).
+const EXPANSION: u64 = 8;
+/// Bytes every archive may expand to beyond `EXPANSION` times its size, for a small archive.
+const EXPANSION_SLACK: u64 = 1 << 20;
 impl Opened {
-    /// Open an archive file.
+    /// Open an archive file and check every entry before anything is read from it: a stored or
+    /// deflated entry only, each manifest within `MANIFEST_LIMIT`, every entry's decompressed
+    /// size exactly what it declares, and all of them together within the expansion bound of the
+    /// file (`expansion_bound`). An archive may be a caller's upload, so nothing in it is trusted
+    /// to be small: the check streams each entry once, counting, and stores nothing.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` for an archive that fails a check.
     pub(crate) fn open(path: &Path) -> Result<Self, ApiError> {
         let file = File::open(path).map_err(|error| io_error("read", path, &error))?;
-        let zip = ZipArchive::new(file).map_err(|error| invalid(&error.to_string()))?;
+        let size = file
+            .metadata()
+            .map_err(|error| io_error("read", path, &error))?
+            .len();
+        let mut zip = ZipArchive::new(file).map_err(|error| invalid(&error.to_string()))?;
+        let budget = expansion_bound(size);
+        let mut total: u64 = 0;
+        for index in 0..zip.len() {
+            let mut entry = zip
+                .by_index(index)
+                .map_err(|error| invalid(&error.to_string()))?;
+            let name = entry.name().to_owned();
+            if !matches!(
+                entry.compression(),
+                CompressionMethod::Stored | CompressionMethod::Deflated
+            ) {
+                return Err(invalid(&format!(
+                    "{name} uses a compression method this build does not read"
+                )));
+            }
+            let declared = entry.size();
+            let bound = if name == MANIFEST || name == INSTALLATION {
+                MANIFEST_LIMIT
+            } else {
+                budget
+            };
+            if declared > bound {
+                return Err(invalid(&format!(
+                    "{name} declares {declared} bytes, more than the {bound} it may hold"
+                )));
+            }
+            total = total.saturating_add(declared);
+            if total > budget {
+                return Err(invalid(&format!(
+                    "its entries declare more than {budget} bytes in all, for a file of {size}"
+                )));
+            }
+            let actual = std::io::copy(
+                &mut (&mut entry).take(declared.saturating_add(1)),
+                &mut std::io::sink(),
+            )
+            .map_err(|error| invalid(&format!("{name}: {error}")))?;
+            if actual != declared {
+                return Err(invalid(&format!(
+                    "{name} declares {declared} bytes and holds a different amount"
+                )));
+            }
+        }
         Ok(Self { zip })
     }
 
@@ -122,29 +184,47 @@ impl Opened {
         Ok(manifest)
     }
 
-    /// Copy one entry to `target`.
+    /// Copy one entry to `target`; never more than the size it declares, which `open` checked.
     pub(crate) fn extract(&mut self, name: &str, target: &Path) -> Result<(), ApiError> {
-        let mut entry = self
+        let entry = self
             .zip
             .by_name(name)
             .map_err(|error| invalid(&format!("{name}: {error}")))?;
+        let declared = entry.size();
         let mut file = File::create(target).map_err(|error| io_error("create", target, &error))?;
-        std::io::copy(&mut entry, &mut file).map_err(|error| io_error("write", target, &error))?;
+        std::io::copy(&mut entry.take(declared), &mut file)
+            .map_err(|error| io_error("write", target, &error))?;
         file.sync_all()
             .map_err(|error| io_error("sync", target, &error))
     }
 
+    /// The bytes of a manifest entry, never more than `MANIFEST_LIMIT`.
     fn bytes(&mut self, name: &str) -> Result<Vec<u8>, ApiError> {
-        let mut entry = self
+        let entry = self
             .zip
             .by_name(name)
             .map_err(|error| invalid(&format!("{name}: {error}")))?;
         let mut bytes = Vec::new();
         entry
+            .take(MANIFEST_LIMIT.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|error| invalid(&format!("{name}: {error}")))?;
+        if u64::try_from(bytes.len()).map_or(true, |read| read > MANIFEST_LIMIT) {
+            return Err(invalid(&format!(
+                "{name} is larger than {MANIFEST_LIMIT} bytes"
+            )));
+        }
         Ok(bytes)
     }
+}
+
+/// How many decompressed bytes an archive file of `size` bytes may hold in all: `EXPANSION`
+/// times its size, plus `EXPANSION_SLACK`. This build writes every entry stored, so its own
+/// archives hold about their size; the factor leaves room for an archive deflated by another
+/// tool and refuses a bomb, whose ratio is in the hundreds or more.
+fn expansion_bound(size: u64) -> u64 {
+    size.saturating_mul(EXPANSION)
+        .saturating_add(EXPANSION_SLACK)
 }
 
 /// Write the workspace archive `target` from the repository at `repository`, the filtered
@@ -157,6 +237,7 @@ pub(crate) fn write_workspace(
     tenant: &TenantId,
     excluded: &BTreeSet<Digest>,
 ) -> Result<WorkspaceManifest, ApiError> {
+    refuse_missing(repository, records, blobs, tenant, excluded)?;
     let staged_pack = target.with_extension("pack");
     let references = write_pack(repository, &staged_pack)?;
     let mut manifest = manifest_of(records, tenant, references)?;
@@ -450,6 +531,87 @@ fn record_objects(records: &Path) -> Result<BTreeSet<Digest>, ApiError> {
         }
     }
     Ok(found)
+}
+
+/// Refuse to write an archive that would leave out an object a row it holds names (SPEC section
+/// 12: an archive must be independently recoverable): a source card's original or conversion
+/// record (on any commit), a conversion record's structured exports and assets, a retained
+/// artifact (an export, a View export), a derived dataset, a completed upload or a job output.
+/// Backup and written-history objects (`excluded`) are never archived and are not required.
+/// Objects named only as digest-shaped tokens are copied when held and are not required: a token
+/// need not name an object. Blocking.
+///
+/// # Errors
+/// Returns `Internal` naming the missing digest and the row kind that names it; nothing is
+/// written.
+fn refuse_missing(
+    repository: &Repository,
+    records: &Path,
+    blobs: &LocalBlobs,
+    tenant: &TenantId,
+    excluded: &BTreeSet<Digest>,
+) -> Result<(), ApiError> {
+    let mut named: Vec<(Digest, String)> = Vec::new();
+    let (originals, conversions) = references::card_objects(repository)?;
+    named.extend(
+        originals
+            .into_iter()
+            .map(|digest| (digest, "a source card's original".to_owned())),
+    );
+    for record in &conversions {
+        named.extend(
+            references::conversion_objects(blobs, tenant, record)?
+                .into_iter()
+                .map(|(digest, what)| (digest, what.to_owned())),
+        );
+    }
+    named.extend(
+        conversions
+            .into_iter()
+            .map(|digest| (digest, "a source card's conversion record".to_owned())),
+    );
+    let connection = super::snapshot::read_only(records)?;
+    for (query, what) in [
+        ("SELECT digest, kind FROM artifacts", "artifact"),
+        (
+            "SELECT digest, NULL FROM derived_objects",
+            "a derived dataset",
+        ),
+        (
+            "SELECT object_digest, NULL FROM uploads WHERE object_digest IS NOT NULL",
+            "a completed upload",
+        ),
+        ("SELECT digest, NULL FROM job_outputs", "a job output"),
+    ] {
+        let mut statement = connection.prepare(query).map_err(|error| sql(&error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|error| sql(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sql(&error))?;
+        for (digest, kind) in rows {
+            let what = kind.map_or_else(
+                || what.to_owned(),
+                |kind| format!("an {what} of kind {kind}"),
+            );
+            named.push((from_text!(digest.as_str())?, what));
+        }
+    }
+    for (digest, what) in named {
+        if !excluded.contains(&digest) && !blobs.local_path(tenant, &digest)?.is_file() {
+            return Err(ApiError::new(
+                ErrorCode::Internal,
+                format!(
+                    "the workspace archive was not written: {what} names the object {}, which \
+                     the store does not hold",
+                    digest.as_str()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn rows3(

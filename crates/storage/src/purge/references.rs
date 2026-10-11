@@ -87,6 +87,107 @@ pub(crate) fn history(repository: &Repository) -> Result<History, ApiError> {
     Ok(found)
 }
 
+/// The objects the source cards of every commit on every reference of `repository` name, read
+/// structurally rather than as tokens: each appearance's original (`object`) and its conversion
+/// record (`extraction.digest`), as (originals, conversion records). An appearance that does not
+/// parse as JSON names nothing here.
+pub(crate) fn card_objects(
+    repository: &Repository,
+) -> Result<(BTreeSet<Digest>, BTreeSet<Digest>), ApiError> {
+    let (mut originals, mut records) = (BTreeSet::new(), BTreeSet::new());
+    let mut walk = repository.revwalk().map_err(|error| git(&error))?;
+    let mut pushed = false;
+    for reference in repository.references().map_err(|error| git(&error))? {
+        let reference = reference.map_err(|error| git(&error))?;
+        if let Some(target) = reference.target()
+            && repository.find_commit(target).is_ok()
+        {
+            walk.push(target).map_err(|error| git(&error))?;
+            pushed = true;
+        }
+    }
+    if !pushed {
+        return Ok((originals, records));
+    }
+    let (mut trees, mut files) = (BTreeSet::new(), BTreeSet::new());
+    for oid in walk {
+        let oid = oid.map_err(|error| git(&error))?;
+        let Some(sources) = sources_tree(repository, oid)? else {
+            continue;
+        };
+        if !trees.insert(sources) {
+            continue;
+        }
+        let sources = repository.find_tree(sources).map_err(|error| git(&error))?;
+        for entry in &sources {
+            if entry.kind() != Some(ObjectType::Blob) || !files.insert(entry.id()) {
+                continue;
+            }
+            let blob = repository
+                .find_blob(entry.id())
+                .map_err(|error| git(&error))?;
+            let Ok(appearance) = serde_json::from_slice::<serde_json::Value>(blob.content()) else {
+                continue;
+            };
+            if let Some(digest) = digest_at(&appearance, &["object"]) {
+                originals.insert(digest);
+            }
+            if let Some(digest) = digest_at(&appearance, &["extraction", "digest"]) {
+                records.insert(digest);
+            }
+        }
+    }
+    Ok((originals, records))
+}
+
+/// The objects the held conversion record `digest` names, read structurally: each structured
+/// export (`structured[].digest`) and each retained asset (`assets[].digest`), with what names
+/// it. Nothing for an object that is not a JSON conversion record. Blocking.
+pub(crate) fn conversion_objects(
+    blobs: &LocalBlobs,
+    tenant: &TenantId,
+    digest: &Digest,
+) -> Result<Vec<(Digest, &'static str)>, ApiError> {
+    let path = blobs.local_path(tenant, digest)?;
+    let mut found = Vec::new();
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return Ok(found);
+    };
+    if metadata.len() > RECORD_LIMIT {
+        return Ok(found);
+    }
+    let bytes =
+        std::fs::read(&path).map_err(|error| crate::data::io_error("read", &path, &error))?;
+    let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Ok(found);
+    };
+    for (list, what) in [
+        ("structured", "a conversion record's structured export"),
+        ("assets", "a conversion record's retained asset"),
+    ] {
+        for item in record
+            .get(list)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(named) = digest_at(item, &["digest"]) {
+                found.push((named, what));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The digest at `path` inside `value`, when it is a digest string.
+fn digest_at(value: &serde_json::Value, path: &[&str]) -> Option<Digest> {
+    let mut current = value;
+    for key in path {
+        current = current.get(key)?;
+    }
+    Digest::try_from(current.as_str()?.to_owned()).ok()
+}
+
 /// The digest tokens of every source appearance on the one commit `commit`: the objects a
 /// record of the workspace names once that commit is stored.
 pub(crate) fn appearances(
