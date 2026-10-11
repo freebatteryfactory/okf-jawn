@@ -137,6 +137,11 @@ pub const CHILD_INHERITED_DOCLING_ENV: [&str; 10] = [
 /// The prefix of the variables docling reads.
 const DOCLING_ENV_PREFIX: &str = "DOCLING_";
 
+/// The prefix of the variables ONNX Runtime reads (its thread pools, logging, execution
+/// providers and the library it loads): none is recorded in the converter identity, so every
+/// one is removed from the child's environment.
+const ORT_ENV_PREFIX: &str = "ORT_";
+
 impl DoclingConverter {
     /// A converter that runs `config.child` under `config.limits`.
     #[must_use]
@@ -314,7 +319,8 @@ impl Converter for DoclingConverter {
 }
 
 /// The conversion child's command: `program`, with every `DOCLING_` variable of `environment`
-/// (the supervisor's own) removed except those in `CHILD_INHERITED_DOCLING_ENV`.
+/// (the supervisor's own) removed except those in `CHILD_INHERITED_DOCLING_ENV`, and every
+/// `ORT_` variable removed.
 #[must_use]
 pub fn child_command(
     program: &Path,
@@ -323,9 +329,9 @@ pub fn child_command(
     let mut command = tokio::process::Command::new(program);
     for (name, _value) in environment {
         let upper = name.to_string_lossy().to_ascii_uppercase();
-        if upper.starts_with(DOCLING_ENV_PREFIX)
-            && !CHILD_INHERITED_DOCLING_ENV.contains(&upper.as_str())
-        {
+        let docling = upper.starts_with(DOCLING_ENV_PREFIX)
+            && !CHILD_INHERITED_DOCLING_ENV.contains(&upper.as_str());
+        if docling || upper.starts_with(ORT_ENV_PREFIX) {
             let _configured = command.env_remove(&name);
         }
     }

@@ -1260,6 +1260,42 @@ mod conversion_child {
         Ok(())
     }
 
+    #[test]
+    fn the_child_inherits_no_onnx_runtime_variable() -> TestResult {
+        let environment = [
+            ("ORT_DYLIB_PATH", "/opt/onnxruntime.so"),
+            ("ort_intra_op_num_threads", "64"),
+            ("ORT_LOGGING_LEVEL", "0"),
+            ("DOCLING_RS_MODELS_DIR", "/models"),
+            ("SORT_ORDER", "name"),
+            ("PATH", "/usr/bin"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        let command = child_command(Path::new("okf-jawn-convert"), environment);
+        let mut removed: Vec<String> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().to_ascii_uppercase())
+            .collect();
+        removed.sort();
+        // Every ORT_ variable, whatever its case; a name that only contains ORT_ is kept, and
+        // so are the allowed docling asset locations.
+        assert_eq!(
+            removed,
+            [
+                "ORT_DYLIB_PATH",
+                "ORT_INTRA_OP_NUM_THREADS",
+                "ORT_LOGGING_LEVEL"
+            ]
+        );
+        assert_eq!(
+            some(command.as_std().get_program().to_str(), "the program")?,
+            "okf-jawn-convert"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_child_that_ends_without_a_reply_is_a_failed_window() -> TestResult {
         // This test binary as the child: it takes the request path as a test filter, runs no
