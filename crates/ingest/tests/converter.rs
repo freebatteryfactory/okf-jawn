@@ -813,12 +813,13 @@ mod partial_windows {
 mod retains_images {
     use std::path::Path;
 
-    use docling::{DoclingDocument, Node, PictureImage};
+    use docling::{ContentLayer, DoclingDocument, Node, PictureImage, Table};
     use okf_jawn_contract::common::PageRange;
     use okf_jawn_contract::error::ErrorCode;
     use okf_jawn_contract::read::AssetRole;
     use okf_jawn_contract::source::{
-        BoundingBox, CoordOrigin, SourceLocation, SourceLocator, UnresolvedReason,
+        BoundingBox, CoordOrigin, PageRegion, PageSize, SourceLocation, SourceLocator,
+        UnresolvedReason,
     };
     use okf_jawn_core::conversion::{ConversionStatus, ConvertedAsset, PixelSize};
     use okf_jawn_ingest::child::write_assets;
@@ -826,6 +827,17 @@ mod retains_images {
     use okf_jawn_ingest::protocol::{EXPORT_FILE, MARKDOWN_FILE, Reply};
 
     use crate::check::{TestResult, err_of, some};
+
+    type Built<T> = Result<T, Box<dyn std::error::Error>>;
+
+    const LEFT: [f32; 4] = [100.0, 100.0, 200.0, 200.0];
+    const RIGHT: [f32; 4] = [300.0, 300.0, 400.0, 400.0];
+
+    /// The default of a field type docling does not export by name (`Node::Picture`'s
+    /// caption parent, whose default is docling's own `add_text` placement).
+    fn unnamed_default<T: Default>() -> T {
+        T::default()
+    }
 
     fn image(width: u32, height: u32, data: &[u8]) -> PictureImage {
         PictureImage {
@@ -835,12 +847,6 @@ mod retains_images {
             data: data.to_vec(),
             dpi: 144,
         }
-    }
-
-    /// The default of a field type docling does not export by name (`Node::Picture`'s
-    /// caption parent, whose default is docling's own `add_text` placement).
-    fn unnamed_default<T: Default>() -> T {
-        T::default()
     }
 
     fn picture(caption: Option<&str>, picture_image: Option<PictureImage>) -> Node {
@@ -854,34 +860,39 @@ mod retains_images {
         }
     }
 
-    fn on_page_one(bbox: [f32; 4], inner: Node) -> Node {
+    /// `inner` with page-1 provenance at `bbox`, created `seq`-th among its siblings.
+    fn at(bbox: [f32; 4], seq: Option<usize>, inner: Node) -> Node {
         Node::Prov {
             page_no: 1,
             bbox,
             charspan: [0, 0],
-            seq: None,
+            seq,
             inner: Box::new(inner),
         }
     }
 
-    /// One page holding a captioned picture, a picture with no image of its own, and an
-    /// uncaptioned picture; renders of page 1 and of page 2, which the window did not convert.
-    fn figure_document() -> DoclingDocument {
+    /// A document of one 600 by 800 page.
+    fn one_page() -> DoclingDocument {
         let mut document = DoclingDocument::new("figure");
         document.push(Node::PageInfo {
             page_no: 1,
             width: 600.0,
             height: 800.0,
         });
-        document.push(on_page_one(
-            [100.0, 100.0, 300.0, 200.0],
+        document
+    }
+
+    /// One page holding a captioned picture, a picture with no image of its own, and an
+    /// uncaptioned picture; renders of page 1 and of page 2, which the window did not convert.
+    fn figure_document() -> DoclingDocument {
+        let mut document = one_page();
+        document.push(at(
+            LEFT,
+            None,
             picture(Some("Figure 1: The plant"), Some(image(40, 20, b"plant"))),
         ));
         document.push(picture(Some("An empty frame"), None));
-        document.push(on_page_one(
-            [50.0, 400.0, 150.0, 500.0],
-            picture(None, Some(image(10, 10, b"logo"))),
-        ));
+        document.push(at(RIGHT, None, picture(None, Some(image(10, 10, b"logo")))));
         let _render = document
             .page_images
             .insert(1, image(1200, 1600, b"page one"));
@@ -896,17 +907,37 @@ mod retains_images {
         directory: &Path,
         document: &DoclingDocument,
         page_images: bool,
-    ) -> Result<Reply, Box<dyn std::error::Error>> {
+    ) -> Built<Reply> {
+        let export = document.export_to_json_value();
         std::fs::write(directory.join(MARKDOWN_FILE), document.export_to_markdown())?;
-        std::fs::write(directory.join(EXPORT_FILE), document.export_to_json())?;
+        std::fs::write(
+            directory.join(EXPORT_FILE),
+            serde_json::to_string_pretty(&export)?,
+        )?;
         Ok(Reply {
             status: ConversionStatus::Success,
             page_count: None,
             issues: Vec::new(),
             blocks: Vec::new(),
             text_layer: false,
-            assets: write_assets(document, directory, page_images)?,
+            assets: write_assets(document, &export, directory, page_images)?,
         })
+    }
+
+    /// The pictures read back from the child's outputs for `document`, with their bytes.
+    fn pictures_of(document: &DoclingDocument) -> Built<Vec<(ConvertedAsset, Vec<u8>)>> {
+        let directory = tempfile::tempdir()?;
+        let reply = child_outputs(directory.path(), document, false)?;
+        let (converted, _coverage) = read_window(directory.path(), Some(&page_one()), &reply)?;
+        converted
+            .assets
+            .into_iter()
+            .filter(|asset| asset.role == AssetRole::Picture)
+            .map(|asset| {
+                let bytes = std::fs::read(&asset.path)?;
+                Ok((asset, bytes))
+            })
+            .collect()
     }
 
     fn page_one() -> PageRange {
@@ -917,10 +948,11 @@ mod retains_images {
         assets.iter().filter(|asset| asset.role == role).collect()
     }
 
-    fn region_on_page_one(l: f64, t: f64, r: f64, b: f64) -> SourceLocation {
+    fn region_of(bbox: [f32; 4]) -> SourceLocation {
+        let [l, t, r, b] = bbox.map(f64::from);
         SourceLocation::Direct {
             locator: SourceLocator::Region {
-                region: okf_jawn_contract::source::PageRegion {
+                region: PageRegion {
                     page_no: 1,
                     bbox: BoundingBox {
                         l,
@@ -929,7 +961,7 @@ mod retains_images {
                         b,
                         coord_origin: CoordOrigin::TopLeft,
                     },
-                    page_size: okf_jawn_contract::source::PageSize {
+                    page_size: PageSize {
                         width: 600.0,
                         height: 800.0,
                     },
@@ -938,15 +970,28 @@ mod retains_images {
         }
     }
 
+    fn not_located() -> SourceLocation {
+        SourceLocation::Unresolved {
+            reason: UnresolvedReason::NotLocatedByConverter,
+        }
+    }
+
+    /// The location, caption and bytes of each picture, in order.
+    fn seen(
+        pictures: &[(ConvertedAsset, Vec<u8>)],
+    ) -> Vec<(SourceLocation, Option<String>, Vec<u8>)> {
+        pictures
+            .iter()
+            .map(|(asset, bytes)| (asset.location.clone(), asset.caption.clone(), bytes.clone()))
+            .collect()
+    }
+
     #[test]
-    fn a_picture_keeps_its_size_media_type_and_own_caption_and_its_items_region() -> TestResult {
-        let directory = tempfile::tempdir()?;
-        let reply = child_outputs(directory.path(), &figure_document(), true)?;
-        let (document, _coverage) = read_window(directory.path(), Some(&page_one()), &reply)?;
-        let pictures = of_role(&document.assets, AssetRole::Picture);
-        // The picture with no image of its own retains nothing; the others keep their place.
+    fn a_picture_keeps_its_size_media_type_and_its_items_caption_and_region() -> TestResult {
+        let pictures = pictures_of(&figure_document())?;
+        // The picture with no image of its own retains nothing.
         assert_eq!(pictures.len(), 2);
-        let plant = some(pictures.first(), "the captioned picture")?;
+        let (plant, plant_bytes) = some(pictures.first(), "the captioned picture")?;
         assert_eq!(
             plant.pixel_size,
             Some(PixelSize {
@@ -956,15 +1001,221 @@ mod retains_images {
         );
         assert_eq!(plant.media_type, "image/png");
         assert_eq!(plant.caption.as_deref(), Some("Figure 1: The plant"));
-        assert_eq!(
-            plant.location,
-            region_on_page_one(100.0, 100.0, 300.0, 200.0)
-        );
-        assert_eq!(std::fs::read(&plant.path)?, b"plant");
-        let logo = some(pictures.get(1), "the uncaptioned picture")?;
+        assert_eq!(plant.location, region_of(LEFT));
+        assert_eq!(plant_bytes, b"plant");
+        let (logo, logo_bytes) = some(pictures.get(1), "the uncaptioned picture")?;
         assert_eq!(logo.caption, None);
-        assert_eq!(logo.location, region_on_page_one(50.0, 400.0, 150.0, 500.0));
-        assert_eq!(std::fs::read(&logo.path)?, b"logo");
+        assert_eq!(logo.location, region_of(RIGHT));
+        assert_eq!(logo_bytes, b"logo");
+        Ok(())
+    }
+
+    #[test]
+    fn a_repeated_identical_logo_takes_each_copys_own_box() -> TestResult {
+        let mut document = one_page();
+        document.push(at(
+            LEFT,
+            None,
+            picture(Some("Left logo"), Some(image(8, 8, b"logo"))),
+        ));
+        document.push(at(
+            RIGHT,
+            None,
+            picture(Some("Right logo"), Some(image(8, 8, b"logo"))),
+        ));
+        assert_eq!(
+            seen(&pictures_of(&document)?),
+            [
+                (
+                    region_of(LEFT),
+                    Some("Left logo".to_owned()),
+                    b"logo".to_vec()
+                ),
+                (
+                    region_of(RIGHT),
+                    Some("Right logo".to_owned()),
+                    b"logo".to_vec()
+                ),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_picture_in_a_rich_table_cell_is_kept_unlocated_and_moves_no_other_picture() -> TestResult {
+        // docling keeps a picture found in a table cell in the cell's blocks, which the JSON
+        // export does not write: the two logos after it are the export's first two pictures.
+        let mut document = one_page();
+        let table = Table {
+            rows: vec![vec!["a".to_owned()]],
+            cell_blocks: Some(vec![vec![vec![at(
+                [10.0, 10.0, 20.0, 20.0],
+                None,
+                picture(Some("An icon"), Some(image(4, 4, b"icon"))),
+            )]]]),
+            ..Table::default()
+        };
+        document.push(at([5.0, 5.0, 90.0, 90.0], None, Node::Table(table)));
+        document.push(at(
+            LEFT,
+            None,
+            picture(Some("Left logo"), Some(image(8, 8, b"logo"))),
+        ));
+        document.push(at(
+            RIGHT,
+            None,
+            picture(Some("Right logo"), Some(image(8, 8, b"logo"))),
+        ));
+        assert_eq!(
+            seen(&pictures_of(&document)?),
+            [
+                (
+                    region_of(LEFT),
+                    Some("Left logo".to_owned()),
+                    b"logo".to_vec()
+                ),
+                (
+                    region_of(RIGHT),
+                    Some("Right logo".to_owned()),
+                    b"logo".to_vec()
+                ),
+                // Kept, but with no export item to locate or caption it.
+                (not_located(), None, b"icon".to_vec()),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_furniture_picture_is_kept_unlocated_and_takes_no_body_pictures_box() -> TestResult {
+        // The export leaves furniture out; the body logo is its only picture.
+        let mut document = one_page();
+        document.push(Node::Furniture {
+            layer: ContentLayer::Furniture,
+            inner: Box::new(at(
+                [10.0, 10.0, 60.0, 30.0],
+                None,
+                picture(Some("Header logo"), Some(image(8, 8, b"logo"))),
+            )),
+        });
+        document.push(at(
+            LEFT,
+            None,
+            picture(Some("Body logo"), Some(image(8, 8, b"logo"))),
+        ));
+        assert_eq!(
+            seen(&pictures_of(&document)?),
+            [
+                (
+                    region_of(LEFT),
+                    Some("Body logo".to_owned()),
+                    b"logo".to_vec()
+                ),
+                (not_located(), None, b"logo".to_vec()),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pictures_numbered_in_creation_order_each_keep_their_own_box_and_caption() -> TestResult {
+        // A spreadsheet backend's creation order (`seq`) differs from the node order; the
+        // export numbers the pictures by it.
+        let mut document = one_page();
+        document.push(at(
+            LEFT,
+            Some(1),
+            picture(Some("Created second"), Some(image(8, 8, b"same"))),
+        ));
+        document.push(at(
+            RIGHT,
+            Some(0),
+            picture(Some("Created first"), Some(image(8, 8, b"same"))),
+        ));
+        let mut pictures = seen(&pictures_of(&document)?);
+        pictures.sort_by(|left, right| left.1.cmp(&right.1));
+        assert_eq!(
+            pictures,
+            [
+                (
+                    region_of(RIGHT),
+                    Some("Created first".to_owned()),
+                    b"same".to_vec()
+                ),
+                (
+                    region_of(LEFT),
+                    Some("Created second".to_owned()),
+                    b"same".to_vec()
+                ),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_chart_listed_as_a_picture_does_not_move_the_picture_after_it() -> TestResult {
+        let mut document = one_page();
+        document.push(Node::Chart {
+            kind: "bar_chart".to_owned(),
+            table: Table::default(),
+            caption: None,
+            location: None,
+        });
+        document.push(at(
+            LEFT,
+            None,
+            picture(Some("A photo"), Some(image(8, 8, b"photo"))),
+        ));
+        assert_eq!(
+            seen(&pictures_of(&document)?),
+            [(
+                region_of(LEFT),
+                Some("A photo".to_owned()),
+                b"photo".to_vec()
+            )]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_caption_is_the_documents_own_text_as_the_export_holds_it() -> TestResult {
+        // docling-pdf keeps a PDF caption Markdown-escaped in the node; the export holds the
+        // document's own words.
+        let mut document = one_page();
+        document.push(at(
+            LEFT,
+            None,
+            picture(
+                Some("R\\_1 &amp; R\\_2 &lt;b&gt;"),
+                Some(image(8, 8, b"chart")),
+            ),
+        ));
+        document.push(at(
+            RIGHT,
+            None,
+            picture(Some("   "), Some(image(8, 8, b"blank"))),
+        ));
+        let pictures = pictures_of(&document)?;
+        let (escaped, _bytes) = some(pictures.first(), "the captioned picture")?;
+        assert_eq!(escaped.caption.as_deref(), Some("R_1 & R_2 <b>"));
+        // A caption of only whitespace is no caption.
+        let (blank, _bytes) = some(pictures.get(1), "the blank-captioned picture")?;
+        assert_eq!(blank.caption, None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_picture_with_no_provenance_on_a_paged_document_is_not_given_a_page() -> TestResult {
+        let mut document = one_page();
+        document.push(picture(Some("Floating"), Some(image(8, 8, b"floating"))));
+        assert_eq!(
+            seen(&pictures_of(&document)?),
+            [(
+                not_located(),
+                Some("Floating".to_owned()),
+                b"floating".to_vec()
+            )]
+        );
         Ok(())
     }
 
@@ -1010,32 +1261,58 @@ mod retains_images {
     }
 
     #[test]
-    fn a_picture_whose_file_is_not_its_items_image_is_not_given_that_items_region() -> TestResult {
+    fn a_picture_whose_file_is_not_its_items_image_takes_neither_its_box_nor_its_words()
+    -> TestResult {
         let directory = tempfile::tempdir()?;
         let reply = child_outputs(directory.path(), &figure_document(), false)?;
         let first = some(reply.assets.first(), "the first picture's file")?;
-        std::fs::write(directory.path().join(&first.file), b"another image")?;
+        // The same length as the exported image, and different bytes.
+        std::fs::write(directory.path().join(&first.file), b"plank")?;
         let (document, _coverage) = read_window(directory.path(), Some(&page_one()), &reply)?;
         let plant = some(document.assets.first(), "the first picture")?;
-        assert_eq!(
-            plant.location,
-            SourceLocation::Unresolved {
-                reason: UnresolvedReason::NotLocatedByConverter
-            }
-        );
-        // What the child reported about the image itself is still kept.
-        assert_eq!(plant.caption.as_deref(), Some("Figure 1: The plant"));
+        assert_eq!(plant.location, not_located());
+        assert_eq!(plant.caption, None);
         Ok(())
     }
 
     #[test]
-    fn an_image_named_outside_the_output_directory_is_a_worker_fault() -> TestResult {
+    fn an_image_file_name_that_is_not_a_safe_plain_name_is_a_worker_fault() -> TestResult {
         let directory = tempfile::tempdir()?;
-        let mut reply = child_outputs(directory.path(), &figure_document(), false)?;
-        let first = some(reply.assets.first_mut(), "the first picture's file")?;
-        first.file = format!("../{}", first.file);
-        let error = err_of(read_window(directory.path(), Some(&page_one()), &reply))?;
-        assert_eq!(error.code, ErrorCode::Internal);
+        let reply = child_outputs(directory.path(), &figure_document(), true)?;
+        let names = [
+            "../page-1.png",
+            "/page-1.png",
+            "a/b.png",
+            "a\\b.png",
+            "C:x.png",
+            "x.png:stream",
+            "",
+            ".png",
+            "page.",
+            "NUL",
+            "nul.png",
+            "CON",
+            "Aux.txt",
+            "PRN.png",
+            "COM1",
+            "lpt9.png",
+        ];
+        for role in [AssetRole::Picture, AssetRole::PageImage] {
+            for name in names {
+                let mut renamed = reply.clone();
+                let entry = some(
+                    renamed.assets.iter_mut().find(|asset| asset.role == role),
+                    "an entry of the role",
+                )?;
+                name.clone_into(&mut entry.file);
+                let refused = read_window(directory.path(), Some(&page_one()), &renamed);
+                assert_eq!(
+                    err_of(refused)?.code,
+                    ErrorCode::Internal,
+                    "{role:?} {name:?}"
+                );
+            }
+        }
         Ok(())
     }
 }

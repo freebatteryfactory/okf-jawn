@@ -101,12 +101,10 @@ pub struct AssetFile {
     pub height: u32,
     /// A page render's one-based page; `None` for a picture.
     pub page: Option<u32>,
-    /// A picture's position among the document's pictures in node order, which is the export
-    /// item `#/pictures/{n}` the supervisor checks it against; `None` for a page render.
+    /// A picture's identity in the JSON export: its index `n` in `#/pictures/{n}`, the item
+    /// whose image the file was written from. `None` for a picture the export does not hold,
+    /// and for a page render.
     pub picture: Option<usize>,
-    /// A picture's own caption (`Node::Picture.caption`), as the document gives it; `None`
-    /// when it gives none, and always for a page render.
-    pub caption: Option<String>,
 }
 
 /// What the child reports in `RESULT_FILE`.

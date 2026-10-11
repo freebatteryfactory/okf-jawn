@@ -36,18 +36,20 @@
 //!   counts agree;
 //! - the outline carries the section-span rule (`outline::outline_of`);
 //! - the images the child wrote become the document's assets (`assets_of`): each picture with
-//!   its pixel size, media type and its own caption, located by its export item's provenance
-//!   only when that item's image is byte for byte the file the child wrote (otherwise
-//!   unresolved, never another item's box); each page render of a converted page located on its
-//!   page. A render of a page the window did not convert is not kept.
+//!   its pixel size and media type, and, for one the child wrote from an export picture item,
+//!   that item's own location and caption text, checked again byte for byte (otherwise
+//!   unresolved and uncaptioned, never another item's box or words); a picture the export does
+//!   not hold stays unresolved; each page render of a converted page is located on its page. A
+//!   render of a page the window did not convert is not kept. An image file name must be a
+//!   safe plain name (`asset_path`).
 //!
 //! Construction limitation, stated rather than hidden: line locations are page-level (a line
 //! run is not yet paired with its export item's box).
 
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::Read as _;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use docling::InputFormat;
@@ -71,7 +73,7 @@ use tokio::sync::OnceCell;
 
 use crate::cap::{ChildVerdict, classify, spawn_capped, supervise};
 use crate::child::format_of;
-use crate::export::{page_no, provenance, region, resolve};
+use crate::export::{page_no, picture_caption, picture_image_bytes, provenance, region, resolve};
 use crate::glyphs::{scrub_placeholders, undecoded_glyphs};
 use crate::locate::{Locations, locate_items, pages_by_item};
 use crate::outline::outline_of;
@@ -403,14 +405,14 @@ pub fn read_window(
 
 /// The images the child wrote, as the window's assets, in the reply's order.
 ///
-/// A picture keeps its pixel size, media type and its own caption, and takes its location
-/// from its export item (`picture_location`). A page render is located on its page, and only a
-/// page the window converted (one the export holds) keeps its render.
+/// A picture keeps its pixel size and media type; its location and caption are its export
+/// item's (`picture_of`). A page render is located on its page, and only a page the window
+/// converted (one the export holds) keeps its render.
 ///
 /// # Errors
-/// Returns `Internal` when an entry names a path rather than a file name, a page render names
-/// no page or a picture no position, or a picture's file cannot be read: a child that reports
-/// such files is a worker fault.
+/// Returns `Internal` when an entry's file is not a safe plain name (`asset_path`), a page
+/// render names no page, or a picture's file cannot be read: a child that reports such files
+/// is a worker fault.
 fn assets_of(
     directory: &Path,
     export: &Value,
@@ -420,7 +422,7 @@ fn assets_of(
     let mut assets = Vec::new();
     for file in files {
         let path = asset_path(directory, &file.file)?;
-        let location = match file.role {
+        let (location, caption) = match file.role {
             AssetRole::PageImage => {
                 let page = file
                     .page
@@ -428,16 +430,21 @@ fn assets_of(
                 if !present.contains(&page) {
                     continue;
                 }
-                SourceLocation::Direct {
+                let on_page = SourceLocation::Direct {
                     locator: SourceLocator::Page { page_no: page },
-                }
+                };
+                (on_page, None)
             }
-            AssetRole::Picture => {
-                let index = file
-                    .picture
-                    .ok_or_else(|| fault("a picture names no position"))?;
-                picture_location(export, index, &path)?
-            }
+            AssetRole::Picture => match file.picture {
+                Some(index) => picture_of(export, index, &path)?,
+                // A picture the export does not hold has no item to locate it or caption it.
+                None => (
+                    SourceLocation::Unresolved {
+                        reason: UnresolvedReason::NotLocatedByConverter,
+                    },
+                    None,
+                ),
+            },
         };
         assets.push(ConvertedAsset {
             path,
@@ -448,47 +455,68 @@ fn assets_of(
                 width: file.width,
                 height: file.height,
             }),
-            caption: file.caption.clone(),
+            caption,
         });
     }
     Ok(assets)
 }
 
-/// The path of an image file the child named, which must be one plain file name in its output
-/// directory.
+/// The path of an image file the child named. Only a plain name of ASCII letters, digits,
+/// `-`, `_` and `.` is taken: no separator, drive, stream or traversal, no leading dot, no
+/// trailing dot, and no name Windows reserves for a device (`CON`, `PRN`, `AUX`, `NUL`,
+/// `COM0`-`COM9`, `LPT0`-`LPT9`, with or without an extension), on every platform.
 fn asset_path(directory: &Path, file: &str) -> Result<PathBuf, ApiError> {
-    let mut components = Path::new(file).components();
-    match (components.next(), components.next()) {
-        (Some(Component::Normal(name)), None) if name == OsStr::new(file) => {
-            Ok(directory.join(file))
-        }
-        _ => Err(fault(&format!(
-            "the child named an image {file:?} that is not a file name"
-        ))),
+    let plain = !file.is_empty()
+        && file
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+        && !file.starts_with('.')
+        && !file.ends_with('.');
+    let device = file
+        .split('.')
+        .next()
+        .map(str::to_ascii_uppercase)
+        .is_some_and(|stem| {
+            ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+                || (stem.len() == 4
+                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && stem.ends_with(|last: char| last.is_ascii_digit()))
+        });
+    if plain && !device {
+        Ok(directory.join(file))
+    } else {
+        Err(fault(&format!(
+            "the child named an image {file:?} that is not a plain file name"
+        )))
     }
 }
 
-/// Where the picture the child numbered `index` is: its export item `#/pictures/{index}`'s
-/// own provenance (its region, or its page when the page's size is unknown), but only when that
-/// item's image is byte for byte the file the child wrote. Otherwise the picture is unresolved,
-/// never given another item's box. A picture whose item has no provenance is unresolved: the
-/// format has no pages, or the converter gave it none.
+/// The location and caption of the picture whose file the child wrote from the export item
+/// `#/pictures/{index}`: that item's own provenance (its region, or its page when the page's
+/// size is unknown) and its own caption text. As a second guard the item's image must be byte
+/// for byte the file; otherwise, or when the item is missing, the picture is unresolved and
+/// uncaptioned, never given another item's box or words. An item with no provenance is
+/// unresolved: the format has no pages, or the converter gave it none.
 ///
 /// # Errors
 /// Returns `Internal` when the file cannot be read.
-fn picture_location(export: &Value, index: usize, path: &Path) -> Result<SourceLocation, ApiError> {
+fn picture_of(
+    export: &Value,
+    index: usize,
+    path: &Path,
+) -> Result<(SourceLocation, Option<String>), ApiError> {
     let unresolved = |reason| SourceLocation::Unresolved { reason };
     let item = export
         .get("pictures")
         .and_then(Value::as_array)
         .and_then(|pictures| pictures.get(index));
     let Some(item) = item else {
-        return Ok(unresolved(UnresolvedReason::NotLocatedByConverter));
+        return Ok((unresolved(UnresolvedReason::NotLocatedByConverter), None));
     };
     if !same_image(item, path)? {
-        return Ok(unresolved(UnresolvedReason::NotLocatedByConverter));
+        return Ok((unresolved(UnresolvedReason::NotLocatedByConverter), None));
     }
-    Ok(match provenance(item).first() {
+    let location = match provenance(item).first() {
         Some(entry) => match (region(export, entry), page_no(entry)) {
             (Some(region), _) => SourceLocation::Direct {
                 locator: SourceLocator::Region { region },
@@ -502,26 +530,19 @@ fn picture_location(export: &Value, index: usize, path: &Path) -> Result<SourceL
             unresolved(UnresolvedReason::FormatHasNoLocator)
         }
         None => unresolved(UnresolvedReason::NotLocatedByConverter),
-    })
+    };
+    Ok((location, picture_caption(export, item)))
 }
 
-/// Whether an export picture item's image (its `data:` URI, decoded with docling's own codec)
-/// is byte for byte the file at `path`.
+/// Whether an export picture item's image is byte for byte, in full, the file at `path`.
 fn same_image(item: &Value, path: &Path) -> Result<bool, ApiError> {
-    let exported = item
-        .get("image")
-        .and_then(|image| image.get("uri"))
-        .and_then(Value::as_str)
-        .and_then(|uri| uri.split_once(";base64,"))
-        .and_then(|(_, payload)| docling::base64::decode(payload));
-    let Some(exported) = exported else {
+    let Some(exported) = picture_image_bytes(item) else {
         return Ok(false);
     };
     let written = std::fs::read(path)
         .map_err(|error| fault(&format!("{} could not be read: {error}", path.display())))?;
     Ok(exported == written)
 }
-
 /// The identity of a conversion run with the pinned `packages`, `settings` and `models`, in
 /// windows of `page_window` pages or whole.
 fn identity_of(
