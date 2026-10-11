@@ -2,7 +2,8 @@
 //! part of a replacement restore (Stage 1b design section 8).
 //!
 //! In both, the archive is checked first, before anything is written (`checked`): an archive
-//! may be a caller's file. Its entries and its manifest; then its records: a database SQLite reads, intact, migrated to this build's schema,
+//! may be a caller's file. Its entries, its manifest and every object's bytes against its
+//! digest; then its records: a database SQLite reads, intact, migrated to this build's schema,
 //! whose tables and indexes are exactly this build's, and whose rows are all of its own tenant,
 //! workspace and jobs. Then the objects are put back, then the Git history (the pack is indexed
 //! and every reference set), then the records in one transaction.
@@ -175,8 +176,9 @@ pub(crate) fn restore(
 
 /// Open the archive at `archive` and check everything a restore reads from it, before anything
 /// is written (an archive may be a caller's file):
-/// - its entries (`Opened::open`: compression methods and sizes), its manifest, and its
-///   objects, listed from its entries (an older manifest's own list is not read);
+/// - its entries (`Opened::open`: compression methods, sizes, and each object's bytes against
+///   its digest), its manifest, and its objects, listed from its entries (an older manifest's
+///   own list is not read);
 /// - its records, extracted under `staging` (`migrated`): a database SQLite reads, intact, and
 ///   brought to this build's schema;
 /// - their schema (`refuse_other_schema`) and then their rows (`refuse_foreign_rows`), against

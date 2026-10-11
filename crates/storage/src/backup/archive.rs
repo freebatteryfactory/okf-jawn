@@ -25,6 +25,7 @@ use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{Digest, TenantId, WorkspaceId};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -81,6 +82,9 @@ pub(crate) struct Opened {
     zip: ZipArchive<File>,
 }
 
+/// A sink that keeps nothing it is given, and hashes it when it holds a hasher.
+struct Hashing(Option<Sha256>);
+
 /// The format name of a workspace archive.
 pub(crate) const WORKSPACE_FORMAT: &str = "okf-jawn-workspace-archive";
 /// The format name of an installation archive.
@@ -106,9 +110,11 @@ const EXPANSION_SLACK: u64 = 1 << 20;
 impl Opened {
     /// Open an archive file and check every entry before anything is read from it: a stored or
     /// deflated entry only, each manifest within `MANIFEST_LIMIT`, every entry's decompressed
-    /// size exactly what it declares, and all of them together within the expansion bound of the
-    /// file (`expansion_bound`). An archive may be a caller's upload, so nothing in it is trusted
-    /// to be small: the check streams each entry once, counting, and stores nothing.
+    /// size exactly what it declares, all of them together within the expansion bound of the
+    /// file (`expansion_bound`), and each `objects/<digest>` entry's bytes of that SHA-256
+    /// digest. An archive may be a caller's upload, so nothing in it is trusted to be small or
+    /// honest: the check streams each entry once, counting (and hashing an object), and stores
+    /// nothing.
     ///
     /// # Errors
     /// Returns `InvalidInput` for an archive that fails a check.
@@ -151,14 +157,26 @@ impl Opened {
                     "its entries declare more than {budget} bytes in all, for a file of {size}"
                 )));
             }
+            // An object entry is hashed as it is counted: its bytes must be its digest.
+            let digest = name
+                .strip_prefix("objects/")
+                .and_then(|digest| Digest::try_from(digest.to_owned()).ok());
+            let mut sink = Hashing(digest.as_ref().map(|_| Sha256::new()));
             let actual = std::io::copy(
                 &mut (&mut entry).take(declared.saturating_add(1)),
-                &mut std::io::sink(),
+                &mut sink,
             )
             .map_err(|error| invalid(&format!("{name}: {error}")))?;
             if actual != declared {
                 return Err(invalid(&format!(
                     "{name} declares {declared} bytes and holds a different amount"
+                )));
+            }
+            if let (Some(digest), Some(hasher)) = (digest, sink.0)
+                && crate::seam::hex(&hasher.finalize()) != digest.as_str()
+            {
+                return Err(invalid(&format!(
+                    "{name} holds bytes whose SHA-256 is not its digest"
                 )));
             }
         }
@@ -234,6 +252,19 @@ impl Opened {
             )));
         }
         Ok(bytes)
+    }
+}
+
+impl std::io::Write for Hashing {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Some(hasher) = &mut self.0 {
+            hasher.update(bytes);
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

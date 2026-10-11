@@ -5327,5 +5327,31 @@ async fn rr5_an_unneeded_object_entry_is_stored_and_left_pending() -> TestResult
     Ok(())
 }
 
+/// Gap 3: an `objects/<digest>` entry whose bytes are not that digest is refused as invalid
+/// input when the archive is opened, before anything is written or stored.
+#[tokio::test]
+async fn rr5_an_object_entry_whose_bytes_are_not_its_digest_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let claimed = Digest::try_from("a".repeat(64))?;
+    let name = format!("objects/{}", claimed.as_str());
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|_| None,
+        &[(name.as_str(), b"rr5 bytes of another digest")],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    let stored = storage
+        .blobs()
+        .open(&outcome.0, &claimed, 0, 1)
+        .await
+        .is_ok();
+    assert!(!stored, "nothing stored under the claimed digest");
+    assert_import_refused(&storage, outcome, "digest").await
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
