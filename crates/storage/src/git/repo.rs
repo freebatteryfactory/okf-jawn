@@ -250,6 +250,32 @@ pub(crate) fn find_trailer(
     Ok(None)
 }
 
+/// The newest commit on the accepted line, from `tip` back through first parents to the root,
+/// whose trailer names `mutation`.
+///
+/// No commit time is read and nothing bounds the walk but the root. It follows only `tip`'s
+/// first parents, so a proposal candidate, the second parent of a merge, or any other
+/// reference is never seen.
+pub(crate) fn find_on_line(
+    repository: &Repository,
+    tip: Oid,
+    mutation: MutationId,
+) -> Result<Option<Oid>, ApiError> {
+    let wanted = mutation.0.to_string();
+    let mut next = Some(tip);
+    while let Some(oid) = next {
+        let commit = repository.find_commit(oid).map_err(|error| git(&error))?;
+        if commit
+            .message()
+            .is_ok_and(|message| trailer_of(message) == Some(wanted.as_str()))
+        {
+            return Ok(Some(oid));
+        }
+        next = commit.parent_ids().next();
+    }
+    Ok(None)
+}
+
 /// The message of a commit with its trailer.
 pub(crate) fn message_with_trailer(message: &str, mutation: MutationId) -> String {
     format!("{}\n\n{TRAILER} {}\n", message.trim_end(), mutation.0)

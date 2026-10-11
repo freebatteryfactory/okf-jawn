@@ -25,8 +25,8 @@ use uuid::Uuid;
 
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{
-    ALICE, Built, NOTE, World, alice, context, draft_of, mutation, note, path, revision, scope,
-    served_digest,
+    ALICE, Built, NOTE, World, alice, context, draft_of, file_text, mutation, note, path, revision,
+    scope, served_digest,
 };
 
 /// Make one port call of a write fail.
@@ -699,6 +699,92 @@ async fn a_resumed_write_answers_the_first_attempts_revision_and_receipt() -> Te
     assert_eq!(again.receipt_id, first.receipt_id);
     assert_eq!(world.versions.commits()?.len(), 1);
     assert_eq!(world.records.receipts()?.len(), 1);
+    Ok(())
+}
+
+/// A world where moving the fixture note to `archive/plan.md` commits `b`, whose moved file has
+/// no heading and holds `committed` as its properties. The staged tree the store checks is
+/// that file with a type, so it is the commit's tree when `committed` holds the same type.
+fn move_with_lint(committed: serde_json::Value) -> Built<World> {
+    let world = World::new()?;
+    note_at(&world, &['a'])?;
+    let staged = note(
+        NOTE,
+        &revision('b')?,
+        "archive/plan.md",
+        "No heading.\n",
+        json!({ "type": "Note" }),
+    )?;
+    let moved = note(
+        NOTE,
+        &revision('b')?,
+        "archive/plan.md",
+        "No heading.\n",
+        committed,
+    )?;
+    world.versions.put_document(&revision('b')?, moved)?;
+    world.versions.queue_revision(revision('b')?)?;
+    let stage = world.versions.stage();
+    std::fs::remove_file(stage.0.join("notes/plan.md"))?;
+    std::fs::create_dir_all(stage.0.join("archive"))?;
+    stage.write("archive/plan.md", &file_text(&staged))?;
+    Ok(world)
+}
+
+#[tokio::test]
+async fn a_resumed_write_answers_the_warnings_its_first_attempt_produced() -> TestResult {
+    let caller = alice(OperationName::MoveItem, Some(mutation(1)))?;
+    let uninterrupted = move_with_lint(json!({ "type": "Note" }))?;
+    let first = uninterrupted
+        .service
+        .move_item(&caller, move_request()?)
+        .await?;
+    assert!(
+        first.warnings.iter().any(|warning| {
+            warning.code.starts_with("okf_lint")
+                && warning.location.as_deref() == Some("archive/plan.md")
+        }),
+        "{:?}",
+        first.warnings
+    );
+    // The same write fails after its commit; the store replays the commit on the retry.
+    let world = move_with_lint(json!({ "type": "Note" }))?;
+    world.search.fail_next();
+    err_of(world.service.move_item(&caller, move_request()?).await)?;
+    let retried = world.service.move_item(&caller, move_request()?).await?;
+    assert_eq!(world.versions.commits()?.len(), 1, "no second commit");
+    // `Warning` has no equality; its wire form is compared.
+    assert_eq!(
+        serde_json::to_value(&retried.warnings)?,
+        serde_json::to_value(&first.warnings)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_replayed_write_whose_warnings_cannot_be_rebuilt_still_answers_its_commit() -> TestResult
+{
+    // The commit the store holds has no type, so the check refuses it on its second run; the
+    // staged tree it passed on its first run is conformant.
+    let world = move_with_lint(json!({}))?;
+    world.search.fail_next();
+    let caller = alice(OperationName::MoveItem, Some(mutation(1)))?;
+    err_of(world.service.move_item(&caller, move_request()?).await)?;
+    let retried = world.service.move_item(&caller, move_request()?).await?;
+    assert_eq!(retried.revision, revision('b')?);
+    assert_eq!(world.versions.commits()?.len(), 1, "no second commit");
+    let receipts = world.records.receipts()?;
+    let (_, receipt) = some(receipts.first(), "the write's receipt")?;
+    assert_eq!(receipt.id, retried.receipt_id);
+    let [only] = retried.warnings.as_slice() else {
+        return Err(format!("not one warning: {:?}", retried.warnings).into());
+    };
+    assert_eq!(only.code, "replay_warnings_unavailable");
+    assert!(
+        only.message.contains("could not be rebuilt") && only.message.contains("type"),
+        "says why: {}",
+        only.message
+    );
     Ok(())
 }
 

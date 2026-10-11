@@ -9,12 +9,16 @@
 //! idempotent on the mutation identity (the commit replays, indexing a revision again is a
 //! no-op, the event and the receipt are unique on the mutation), so a failure at any step
 //! fails the request and a retry under the same idempotency key completes it without a
-//! second effect.
+//! second effect. A replayed commit's warnings are rebuilt by the same check over the
+//! committed tree, so the retry answers the warnings the first attempt would have; when they
+//! cannot be rebuilt, one warning says so and the landed write still succeeds
+//! (`replay_warnings`).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use okf_jawn_contract::access::Principal;
-use okf_jawn_contract::common::MutationResult;
+use okf_jawn_contract::common::{MutationResult, Warning};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::{EventKind, Receipt, ReceiptAudience};
 use okf_jawn_contract::identity::{
@@ -31,7 +35,9 @@ use crate::context::OperationContext;
 use crate::events::{EventScope, NewEvent};
 use crate::portable::item_content_digest;
 use crate::reading::check_revision;
-use crate::storage::{CommitChanges, Committed, Provenance, StorageScope, TreeEdit};
+use crate::storage::{
+    CandidateCheck, CommitChanges, Committed, Page, Provenance, StorageScope, TreeEdit,
+};
 
 /// One content write of a handler.
 pub(super) struct Write {
@@ -56,6 +62,47 @@ pub(super) struct Touched {
     pub(super) items: Vec<ItemId>,
     /// The type a type change redefines; its concepts count as touched.
     pub(super) of_type: Option<String>,
+}
+
+/// A private directory the tree of a replayed commit is written to for its check; a guard
+/// that removes it when dropped, so it goes on every path out of the check: a success, an
+/// error of a write or of the check, and a panic, whose unwinding drops it (the workspace
+/// builds with the default `panic = "unwind"`). core has no `tempfile`, so this is that guard.
+struct Scratch(PathBuf);
+
+/// How many entries of a folder are read at a time when a replayed commit's tree is read back.
+const TREE_PAGE: u16 = 500;
+/// The index the store maintains in every folder.
+const MAINTAINED_INDEX: &str = "index.md";
+/// The change log the store maintains at the root.
+const CHANGE_LOG: &str = "log.md";
+/// The code of the warning a replayed write answers when its first attempt's warnings could
+/// not be rebuilt (`replay_warnings`).
+const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
+
+impl Scratch {
+    /// A new, empty private directory under the system's temporary directory.
+    fn create() -> Result<Self, ApiError> {
+        let root = std::env::temp_dir().join(format!("okf-jawn-recheck-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).map_err(|error| scratch_error(&error))?;
+        Ok(Self(root))
+    }
+
+    /// Write one file of the tree.
+    fn write(&self, path: &WorkspacePath, bytes: &[u8]) -> Result<(), ApiError> {
+        let target = self.0.join(path.as_str());
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| scratch_error(&error))?;
+        }
+        std::fs::write(&target, bytes).map_err(|error| scratch_error(&error))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // Best effort: a directory left under the temporary directory harms nothing.
+        let _left = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// The storage scope of the operation's one authorized workspace.
@@ -132,6 +179,31 @@ pub(super) async fn commit(
     context: &OperationContext,
     write: Write,
 ) -> Result<Committed, ApiError> {
+    let item = write.item;
+    let committed = store_commit(service, context, write).await?;
+    announce(
+        service,
+        workspace_scope(context)?,
+        mutation_id(context)?,
+        &committed.revision,
+        item,
+    )
+    .await?;
+    Ok(committed)
+}
+
+/// Commit one write in the store only, without indexing or announcing it: the step whose
+/// `Conflict` alone means the store refused the write (a moved head, a path collision). A writer
+/// that retries on a moved head retries only this step, and announces once it succeeded.
+///
+/// # Errors
+/// Returns the purge check's refusal of the base, the store's refusal, or any port error of
+/// reading the touched items.
+pub(super) async fn store_commit(
+    service: &ApplicationService,
+    context: &OperationContext,
+    write: Write,
+) -> Result<Committed, ApiError> {
     let scope = workspace_scope(context)?;
     let mutation_id = mutation_id(context)?;
     check_named(service, &scope, &write.base).await?;
@@ -148,7 +220,7 @@ pub(super) async fn commit(
         );
     }
     let check = Arc::new(EditCheck::new(&touched, write.touched.of_type));
-    let committed = ports
+    let mut committed = ports
         .versions
         .commit(
             &scope,
@@ -159,12 +231,169 @@ pub(super) async fn commit(
                 message: write.message,
                 edits: write.edits,
             },
-            check,
+            check.clone(),
         )
         .await?;
+    if committed.replayed {
+        committed.warnings = replay_warnings(service, &scope, &committed.revision, check).await;
+    }
+    Ok(committed)
+}
+
+/// The warnings a replayed commit answers: those `checked_again` rebuilds, or, when it refuses
+/// or fails, one `replay_warnings_unavailable` warning in their place saying why.
+///
+/// The commit has landed, so a refusal or a fault here must not fail the write: an error would
+/// fail every retry the same way, and a landed commit would become a permanent error. The write
+/// answers its revision and receipt with this warning instead.
+pub(super) async fn replay_warnings(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    check: Arc<dyn CandidateCheck>,
+) -> Vec<Warning> {
+    match checked_again(service, scope, revision, check).await {
+        Ok(warnings) => warnings,
+        Err(error) => vec![Warning {
+            code: REPLAY_WARNINGS_UNAVAILABLE.to_owned(),
+            message: format!(
+                "the commit landed on an earlier attempt, and that attempt's warnings could not \
+                 be rebuilt: {}",
+                error.message
+            ),
+            location: None,
+        }],
+    }
+}
+
+/// The warnings `check` gives over the committed tree of `revision`, read back from the store.
+///
+/// A store that replays a commit runs no check and returns no warnings, so the warnings the
+/// first attempt's check produced were lost with that attempt. They are rebuilt by running the
+/// same check, with the same touched set, over the tree the commit holds: every item file, each
+/// folder's maintained `index.md` and the root `log.md`, the Markdown files of the bundle the
+/// check reads (the store's side records under `.okf/` are not Markdown, and no OKF check reads
+/// them). That is the candidate tree the check saw when the store wrote the commit, so a
+/// replayed write answers the warnings its first attempt would have. Ingest rebuilds an
+/// import's warnings the same way. The cleaner fix is R-I10, where the store keeps the warnings
+/// with the commit; it is a later shared change.
+///
+/// The tree is written to a private directory under the system's temporary directory
+/// (`Scratch`), which is removed on every path out of the check. This is core's only
+/// filesystem write: a `CandidateCheck` reads a directory, and no port offers one for a tree
+/// already committed. It goes when R-I10 lands.
+///
+/// A replaying write calls `replay_warnings`, which never fails on this function's error.
+///
+/// # Errors
+/// Returns any port error of reading the tree, `Internal` when the directory cannot be
+/// written, or the check's own error.
+async fn checked_again(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    check: Arc<dyn CandidateCheck>,
+) -> Result<Vec<Warning>, ApiError> {
+    let versions = &service.ports().versions;
+    let mut files: Vec<(WorkspacePath, Vec<u8>)> = Vec::new();
+    let mut folders: Vec<Option<WorkspacePath>> = vec![None];
+    while let Some(folder) = folders.pop() {
+        let mut cursor = None;
+        loop {
+            let listing = versions
+                .list(
+                    scope,
+                    revision,
+                    folder.as_ref(),
+                    Page {
+                        cursor: cursor.take(),
+                        limit: TREE_PAGE,
+                    },
+                )
+                .await?;
+            for item in listing.items {
+                let bytes = versions.read_file(scope, revision, &item.path).await?;
+                files.push((item.path, bytes));
+            }
+            folders.extend(listing.folders.into_iter().map(Some));
+            match listing.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        let index = folder.as_ref().map_or_else(
+            || MAINTAINED_INDEX.to_owned(),
+            |folder| format!("{}/{MAINTAINED_INDEX}", folder.as_str()),
+        );
+        files.extend(file_if_present(service, scope, revision, index).await?);
+    }
+    files.extend(file_if_present(service, scope, revision, CHANGE_LOG.to_owned()).await?);
+    tokio::task::spawn_blocking(move || {
+        let scratch = Scratch::create()?;
+        for (path, bytes) in &files {
+            scratch.write(path, bytes)?;
+        }
+        check.check(&scratch.0)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::new(
+            ErrorCode::Internal,
+            format!("the replayed commit's check stopped: {error}"),
+        )
+    })?
+}
+
+/// The versioned file at `path` of `revision`, when the tree holds one.
+async fn file_if_present(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    path: String,
+) -> Result<Option<(WorkspacePath, Vec<u8>)>, ApiError> {
+    let path = WorkspacePath::try_from(path).map_err(|error| {
+        ApiError::new(
+            ErrorCode::Internal,
+            format!("a maintained file has no workspace path: {error}"),
+        )
+    })?;
+    match service
+        .ports()
+        .versions
+        .read_file(scope, revision, &path)
+        .await
+    {
+        Ok(bytes) => Ok(Some((path, bytes))),
+        Err(error) if error.code == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The `Internal` refusal of a scratch directory the system would not let us write.
+fn scratch_error(error: &std::io::Error) -> ApiError {
+    ApiError::new(
+        ErrorCode::Internal,
+        format!("the replayed commit's tree could not be written for its check: {error}"),
+    )
+}
+
+/// Index a revision a write produced and append its `changed` event under the write's
+/// mutation; both are idempotent on it, so a resumed attempt repeats them without a second
+/// effect.
+///
+/// # Errors
+/// Returns any port error.
+pub(super) async fn announce(
+    service: &ApplicationService,
+    scope: StorageScope,
+    mutation_id: MutationId,
+    revision: &Revision,
+    item: Option<ItemId>,
+) -> Result<(), ApiError> {
+    let ports = service.ports();
     ports
         .search
-        .index_revision(&scope, committed.revision.clone())
+        .index_revision(&scope, revision.clone())
         .await?;
     ports
         .events
@@ -173,8 +402,8 @@ pub(super) async fn commit(
             Some(mutation_id),
             NewEvent {
                 kind: EventKind::Changed,
-                revision: Some(committed.revision.clone()),
-                item_id: write.item,
+                revision: Some(revision.clone()),
+                item_id: item,
                 job_id: None,
                 connector_id: None,
                 actor: None,
@@ -182,7 +411,7 @@ pub(super) async fn commit(
             },
         )
         .await?;
-    Ok(committed)
+    Ok(())
 }
 
 /// Commit one write and answer with its revision, its receipt and the check's warnings.

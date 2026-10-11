@@ -195,6 +195,7 @@ pub(super) async fn move_item(
         Write {
             base: request.base_revision,
             message: format!("Move to {}", request.destination.as_str()),
+            // The referrers whose links the move rewrites are not counted (R-I12).
             touched: Touched {
                 paths: vec![request.destination.clone()],
                 items: vec![request.item_id],

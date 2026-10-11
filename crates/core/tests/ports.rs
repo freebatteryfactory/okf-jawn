@@ -186,7 +186,10 @@ async fn version_writes(
     let base = changes.expected_head.clone();
     let author = changes.author.clone();
     let edits = changes.edits.clone();
-    if let Some(found) = versions.find_commit(scope, mutation_id, &base).await? {
+    if let Some(found) = versions
+        .find_commit(scope, mutation_id, Some(&base))
+        .await?
+    {
         return Ok(Committed {
             revision: found,
             replayed: true,
@@ -612,7 +615,9 @@ async fn draft_calls(
     drafts.save(scope, mutation_id, draft).await?;
     drafts.get(scope, item, &editor).await?;
     drafts.list(scope, &editor).await?;
-    drafts.discard(scope, mutation_id, item, &editor).await
+    drafts
+        .discard(scope, mutation_id, item, &editor, None)
+        .await
 }
 
 async fn proposal_calls(

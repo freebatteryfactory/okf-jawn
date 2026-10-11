@@ -57,8 +57,7 @@ use okf_jawn_core::jobs::{
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::search::SearchIndex;
 use okf_jawn_core::storage::{
-    Backups, BlobStore, CandidateCheck, LogQuery, ObjectInfo, Page, Purger, StorageScope,
-    VersionStore,
+    Backups, BlobStore, CandidateCheck, ObjectInfo, Purger, StorageScope, VersionStore,
 };
 use okf_jawn_core::uploads::UploadStore;
 
@@ -150,9 +149,6 @@ pub(crate) enum Renewed<T> {
 /// The media type both archives are served with (`download_artifact`,
 /// `download_tenant_artifact`).
 pub const ARCHIVE_MEDIA_TYPE: &str = "application/zip";
-
-/// How many commits one history page asks for while a restore's commit is looked for.
-const HISTORY_PAGE: u16 = 100;
 
 impl IngestHandler {
     /// A handler over storage's ports.
@@ -366,7 +362,6 @@ impl IngestHandler {
             }
             Err(error) => return Err(error),
         }
-        let before = ports.versions.head(scope).await?;
         // Under the heartbeat, never dropped, and past the point of no return: a cancellation
         // seen while it runs is not honoured.
         let report = match renewing(
@@ -383,8 +378,10 @@ impl IngestHandler {
         {
             Renewed::Done(report) | Renewed::Cancelled(report) => report,
         };
-        let revision = self
-            .restored_revision(scope, claimed.mutation_id, &before)
+        // `None` walks the whole accepted line, so a commit an earlier attempt wrote is found.
+        let revision = ports
+            .versions
+            .find_commit(scope, claimed.mutation_id, None)
             .await?;
         if let Some(revision) = &revision {
             announce_commit(ports, claimed, scope, revision, claimed.mutation_id, None).await?;
@@ -394,48 +391,6 @@ impl IngestHandler {
             restore: Some(report),
             ..Done::default()
         })
-    }
-
-    /// The commit a restore wrote under `mutation_id`. A fresh restore wrote it after
-    /// `before`, the head read just before `restore_import`; on a resumed attempt an earlier
-    /// attempt wrote it at or before `before`, so the history behind `before` is walked back,
-    /// asking `find_commit` after each earlier commit, until it is found. `None` when the
-    /// restore wrote no commit.
-    async fn restored_revision(
-        &self,
-        scope: &StorageScope,
-        mutation_id: MutationId,
-        before: &Revision,
-    ) -> Result<Option<Revision>, ApiError> {
-        let versions = &self.ports.versions;
-        let mut cursor = None;
-        loop {
-            let page = versions
-                .log(
-                    scope,
-                    LogQuery {
-                        tip: before.clone(),
-                        item_id: None,
-                        page: Page {
-                            cursor: cursor.take(),
-                            limit: HISTORY_PAGE,
-                        },
-                    },
-                )
-                .await?;
-            for commit in &page.commits {
-                if let Some(revision) = versions
-                    .find_commit(scope, mutation_id, &commit.revision)
-                    .await?
-                {
-                    return Ok(Some(revision));
-                }
-            }
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => return Ok(None),
-            }
-        }
     }
 
     /// Record a retained archive as the job's artifact.

@@ -2,13 +2,17 @@
 //!
 //! Edits run in order on the staging directory. A caller edit may not change an application
 //! header (`items::refuse_header_change`, `items::refuse_header_in_type`); the server's own
-//! header updates (`SetStatus`, `WriteSourceCard`, `CorrectDigest`, `SupplyExtraction`) may.
-//! Moves rewrite the links that point at the item (`okf_core::move_concept`). An item, a move
-//! or a folder may not land on a reserved name (`.okf/`, `index.md`, `log.md`) in any letter
-//! case: it is refused naming the path before anything is written. After the edits, no two
-//! files may share a path collision key, the folder indexes are regenerated and the change is
-//! appended to `log.md`. Conformance is the `CandidateCheck`'s decision, not this
-//! module's.
+//! header updates (`SetStatus`, `WriteSourceCard`, `CorrectDigest`, `SupplyExtraction`) may,
+//! and the server's restores (`RestoreItem`, `RestorePaths`, `RestoreWorkspace`) write the
+//! files an earlier revision holds without that refusal. An item's companion files (its source
+//! appearance, supplied text and corrections folder under `.okf/`) go with it: `DeleteItem`
+//! removes them and `RestoreItem` sets them to `from`'s state. Moves rewrite the links that
+//! point at the item (`okf_core::move_concept`), and so does a `RestoreItem` that puts an item
+//! back at another path than the one it holds now. An item, a move or a folder may not land on a
+//! reserved name (`.okf/`, `index.md`, `log.md`) in any letter case: it is refused naming the
+//! path before anything is written. After the edits, no two files may share a path collision
+//! key, the folder indexes are regenerated and the change is appended to `log.md`.
+//! Conformance is the `CandidateCheck`'s decision, not this module's.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +21,7 @@ use git2::Repository;
 use okf_core::{Bundle, ConceptId, MoveOptions, RefactorError};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::TextOrigin;
-use okf_jawn_contract::identity::{Digest, ItemId, WorkspacePath};
+use okf_jawn_contract::identity::{Digest, ItemId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{ItemStatus, TypeDefinition};
 use okf_jawn_core::items::{ApplicationHeader, refuse_header_change, refuse_header_in_type};
 use okf_jawn_core::storage::{SourceCard, TreeEdit};
@@ -138,13 +142,27 @@ impl Staged {
 }
 
 /// Apply `edits` in order to the staged tree.
+///
+/// A run of consecutive `RestoreItem` edits is applied as one step (`restore_items`), so a
+/// Rewind of items that traded paths since `from` restores them all.
 pub(crate) fn apply(
     repository: &Repository,
     staged: &mut Staged,
     edits: Vec<TreeEdit>,
 ) -> Result<(), ApiError> {
-    for edit in edits {
-        apply_one(repository, staged, edit)?;
+    let mut edits = edits.into_iter().peekable();
+    while let Some(edit) = edits.next() {
+        let TreeEdit::RestoreItem { item_id, from } = edit else {
+            apply_one(repository, staged, edit)?;
+            continue;
+        };
+        let mut run = vec![(item_id, from)];
+        while let Some(TreeEdit::RestoreItem { item_id, from }) =
+            edits.next_if(|next| matches!(next, TreeEdit::RestoreItem { .. }))
+        {
+            run.push((item_id, from));
+        }
+        restore_items(repository, staged, run)?;
     }
     Ok(())
 }
@@ -192,7 +210,9 @@ fn apply_one(repository: &Repository, staged: &mut Staged, edit: TreeEdit) -> Re
             let path = staged.path_of(item_id)?;
             remove(&staged.root.join(&path))?;
             staged.items.remove(&item_id);
-            Ok(())
+            remove(&appearance_path(&staged.root, item_id))?;
+            remove(&supplied_path(&staged.root, item_id))?;
+            remove_folder(&staged.root.join(corrections_folder(item_id)))
         }
         TreeEdit::CreateFolder { folder } => create_folder(staged, &folder),
         TreeEdit::SetType { definition } => set_type(&staged.root, definition),
@@ -225,6 +245,9 @@ fn apply_one(repository: &Repository, staged: &mut Staged, edit: TreeEdit) -> Re
             corrected_markdown,
             adopts,
         } => correct(staged, item_id, &digest, corrected_markdown, adopts),
+        TreeEdit::RestoreItem { item_id, from } => {
+            restore_items(repository, staged, vec![(item_id, from)])
+        }
         TreeEdit::RestorePaths { from, paths } => restore_paths(repository, staged, &from, &paths),
         TreeEdit::RestoreWorkspace { from } => {
             let commit = commit_of(repository, &from)?;
@@ -341,7 +364,7 @@ fn correct(
 fn restore_paths(
     repository: &Repository,
     staged: &mut Staged,
-    from: &okf_jawn_contract::identity::Revision,
+    from: &Revision,
     paths: &[WorkspacePath],
 ) -> Result<(), ApiError> {
     let commit = commit_of(repository, from)?;
@@ -364,6 +387,178 @@ fn restore_paths(
     }
     staged.rescan()
 }
+
+/// Restore each listed item and its companions to their state at its `from`.
+///
+/// Each item is found by identity at its `from` and in the staged tree; absent at both is
+/// `NotFound`. An item the staged tree holds at another path than `from`'s is first moved
+/// back there with its links (`move_back`). Then every listed item's file is removed, so items that
+/// traded paths since `from` do not block each other. Then, in order, an item `from` holds is
+/// written at its path there with the exact bytes `from` holds, after that path is checked free
+/// (`Staged::occupied`): landing on another item's path, or on any other file or folder, is
+/// `Conflict`. Each companion (the source appearance, the supplied text and the whole
+/// corrections folder of the item) is set to `from`'s state: copied when present there,
+/// removed when not, so an item absent at `from` is removed with its companions. An item
+/// listed twice ends as its last listing restores it. The header refusal does not apply: this
+/// is the server's own restore, as `RestorePaths` is.
+fn restore_items(
+    repository: &Repository,
+    staged: &mut Staged,
+    run: Vec<(ItemId, Revision)>,
+) -> Result<(), ApiError> {
+    let mut found = Vec::with_capacity(run.len());
+    for (item, from) in run {
+        let tree = commit_of(repository, &from)?
+            .tree()
+            .map_err(|error| super::repo::git(&error))?;
+        let earlier = super::read::find(repository, &tree, item)?.map(|(path, _)| path);
+        if earlier.is_none() && !staged.items.contains_key(&item) {
+            return Err(ApiError::new(
+                ErrorCode::NotFound,
+                "No item with that identity at either revision",
+            ));
+        }
+        found.push((item, tree, earlier));
+    }
+    move_back(staged, &found)?;
+    for (item, _, _) in &found {
+        if let Some(current) = staged.items.remove(item) {
+            remove(&staged.root.join(current))?;
+        }
+    }
+    for (item, tree, earlier) in &found {
+        // Only an item listed twice was already restored by this run.
+        if let Some(restored) = staged.items.remove(item) {
+            remove(&staged.root.join(restored))?;
+        }
+        if let Some(earlier) = earlier {
+            if staged.occupied(earlier)? {
+                return Err(conflict(format!("{} is already taken", earlier.as_str())));
+            }
+            restore_file(repository, tree, &staged.root, earlier.as_str())?;
+            staged.items.insert(*item, earlier.as_str().to_owned());
+        }
+        restore_file(repository, tree, &staged.root, &appearance_file(*item))?;
+        restore_file(repository, tree, &staged.root, &supplied_file(*item))?;
+        restore_folder(repository, tree, &staged.root, &corrections_folder(*item))?;
+    }
+    staged.rescan()
+}
+
+/// Move each item of a restore run that the staged tree holds at a path other than its path at
+/// its `from` back to that path, as `MoveItem` moves an item, so every link that points at it
+/// follows it. An item the staged tree does not hold (deleted since) or holds at its `from`
+/// path has nothing to move; an item listed twice moves to its last listing's path.
+///
+/// Items that traded paths since `from` would block each other, so the movers go first to a
+/// private path each, then the other listed items' files are removed (they are restored from
+/// `from` after this), then each mover goes to its `from` path, refused as `Conflict` when that
+/// path is taken (`Staged::occupied`). Each step rewrites the links, so a link that pointed at
+/// a mover ends pointing at its restored path.
+fn move_back(
+    staged: &mut Staged,
+    found: &[(ItemId, git2::Tree<'_>, Option<WorkspacePath>)],
+) -> Result<(), ApiError> {
+    let mut destinations: BTreeMap<ItemId, Option<&WorkspacePath>> = BTreeMap::new();
+    for (item, _, earlier) in found {
+        destinations.insert(*item, earlier.as_ref());
+    }
+    let mut movers = Vec::new();
+    for (item, destination) in &destinations {
+        if let (Some(destination), Some(current)) = (destination, staged.items.get(item))
+            && current != destination.as_str()
+        {
+            movers.push((*item, current.clone(), *destination));
+        }
+    }
+    if movers.is_empty() {
+        return Ok(());
+    }
+    let mut parked = Vec::with_capacity(movers.len());
+    for (item, current, destination) in movers {
+        let private = WorkspacePath::try_from(format!("okf-jawn-rewind-{}.md", item.0))
+            .map_err(|error| internal(format!("a private restore path is invalid: {error}")))?;
+        if staged.occupied(&private)? {
+            return Err(conflict(format!("{} is already taken", private.as_str())));
+        }
+        relink(staged, &current, private.as_str(), None)?;
+        parked.push((private, destination));
+    }
+    for item in destinations.keys() {
+        let Some(current) = staged.items.get(item) else {
+            continue;
+        };
+        if parked
+            .iter()
+            .any(|(private, _)| private.as_str() == current)
+        {
+            continue;
+        }
+        let current = current.clone();
+        staged.items.remove(item);
+        remove(&staged.root.join(current))?;
+    }
+    for (private, destination) in parked {
+        if staged.occupied(destination)? {
+            return Err(conflict(format!(
+                "{} is already taken",
+                destination.as_str()
+            )));
+        }
+        relink(staged, private.as_str(), destination.as_str(), None)?;
+    }
+    Ok(())
+}
+
+/// Set the file at `path` under `root` to `tree`'s file there, or remove it when `tree` holds
+/// no file there.
+fn restore_file(
+    repository: &Repository,
+    tree: &git2::Tree<'_>,
+    root: &Path,
+    path: &str,
+) -> Result<(), ApiError> {
+    let target = root.join(path);
+    match tree.get_path(Path::new(path)) {
+        Ok(entry) if entry.kind() == Some(git2::ObjectType::Blob) => {
+            let bytes = super::repo::blob_bytes(repository, entry.id())?;
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| io_error("create", parent, &error))?;
+            }
+            std::fs::write(&target, bytes).map_err(|error| io_error("write", &target, &error))
+        }
+        Ok(_) => remove(&target),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => remove(&target),
+        Err(error) => Err(super::repo::git(&error)),
+    }
+}
+
+/// Replace the folder at `path` under `root` with `tree`'s folder there, or remove it when
+/// `tree` holds no folder there.
+fn restore_folder(
+    repository: &Repository,
+    tree: &git2::Tree<'_>,
+    root: &Path,
+    path: &str,
+) -> Result<(), ApiError> {
+    let target = root.join(path);
+    remove_folder(&target)?;
+    match tree.get_path(Path::new(path)) {
+        Ok(entry) if entry.kind() == Some(git2::ObjectType::Tree) => {
+            let folder = repository
+                .find_tree(entry.id())
+                .map_err(|error| super::repo::git(&error))?;
+            std::fs::create_dir_all(&target)
+                .map_err(|error| io_error("create", &target, &error))?;
+            materialize(repository, &folder, &target)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(()),
+        Err(error) => Err(super::repo::git(&error)),
+    }
+}
+
 /// Regenerate the folder indexes and append the change to `log.md`.
 pub(crate) fn maintain(root: &Path, message: &str) -> Result<(), ApiError> {
     okf_core::index::regenerate_indexes(root)
@@ -393,10 +588,23 @@ fn move_item(
             destination.as_str()
         )));
     }
+    relink(staged, &source, destination.as_str(), Some("/destination"))
+}
+
+/// Move the item file at `source` to `destination` with `okf_core::move_concept`, which rewrites
+/// every link that points at it, and index the staged tree again. The caller has checked
+/// `destination` free. A refusal other than an existing target is `InvalidInput` on `field`
+/// for a caller's move, and `Internal` for the server's own (`field` is `None`).
+fn relink(
+    staged: &mut Staged,
+    source: &str,
+    destination: &str,
+    field: Option<&str>,
+) -> Result<(), ApiError> {
     let bundle = Bundle::load(&staged.root)
         .map_err(|error| internal(format!("the staged tree did not load as a bundle: {error}")))?;
-    let from = concept(&source)?;
-    let to = concept(destination.as_str())?;
+    let from = concept(source)?;
+    let to = concept(destination)?;
     let options = MoveOptions {
         update_index: false,
         update_log: false,
@@ -404,9 +612,12 @@ fn move_item(
     };
     okf_core::move_concept(&bundle, &from, &to, &options).map_err(|error| match error {
         RefactorError::ConceptAlreadyExists(_) => conflict(error.to_string()),
-        other => {
-            ApiError::new(ErrorCode::InvalidInput, other.to_string()).with_field("/destination")
-        }
+        other => match field {
+            Some(field) => {
+                ApiError::new(ErrorCode::InvalidInput, other.to_string()).with_field(field)
+            }
+            None => internal(format!("moving {source} to {destination} failed: {other}")),
+        },
     })?;
     staged.rescan()
 }
@@ -523,7 +734,12 @@ pub(crate) fn appearance_file(item: ItemId) -> String {
 
 /// The tree path of a correction of one digest.
 pub(crate) fn correction_file(item: ItemId, digest: &Digest) -> String {
-    format!("{APP_DIR}/corrections/{}/{}.json", item.0, digest.as_str())
+    format!("{}/{}.json", corrections_folder(item), digest.as_str())
+}
+
+/// The tree path of the folder holding every correction of one item.
+fn corrections_folder(item: ItemId) -> String {
+    format!("{APP_DIR}/corrections/{}", item.0)
 }
 
 /// The tree path of accepted agent-supplied text.
@@ -592,6 +808,15 @@ fn write_text(path: &Path, text: &str) -> Result<(), ApiError> {
 
 fn remove(path: &Path) -> Result<(), ApiError> {
     match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error("remove", path, &error)),
+    }
+}
+
+/// Remove the folder at `path` with everything under it; an absent folder is no error.
+fn remove_folder(path: &Path) -> Result<(), ApiError> {
+    match std::fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(io_error("remove", path, &error)),

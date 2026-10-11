@@ -184,6 +184,9 @@ pub enum TreeEdit {
         archived: Option<bool>,
     },
     /// Remove an item from the tree; history and retained objects stay.
+    ///
+    /// Every companion file the item owns (the source appearance, the accepted supplied text
+    /// and every recorded correction, as `RestoreItem` names them) is removed with it.
     DeleteItem {
         /// Item to remove.
         item_id: ItemId,
@@ -234,6 +237,29 @@ pub enum TreeEdit {
         corrected_markdown: String,
         /// The supplied-text proposal a person adopted as the correction, when it came from one.
         adopts: Option<ProposalId>,
+    },
+    /// Restore one item, and every companion file it owns, to its state at an earlier revision.
+    ///
+    /// The item's own file is written as `from` holds it, at the item's path there; when the
+    /// item moved since, its file at the current path is removed. Every companion file the item
+    /// owns is restored with it as `from` holds it, and a companion that did not exist at
+    /// `from` is removed: the source appearance, the accepted supplied text and every recorded
+    /// correction of a source item. Storage owns where those files are. An item absent at
+    /// `from` is removed with its companions; an item absent both at `from` and in the tree the
+    /// edit is applied to fails the commit with `NotFound`, and restoring the item's file over
+    /// another item's path fails it with `Conflict`, as for every edit.
+    ///
+    /// A Rewind of several items is one `RestoreItem` per item in one commit. Consecutive
+    /// `RestoreItem` edits apply as one group: every listed item is looked up first, then every
+    /// listed item's current file is removed, and only then is each written back with its
+    /// companions, in order; so two items that swapped paths since `from` are rewound together,
+    /// and an item listed twice is restored as its last listing says. A `RestoreItem` separated
+    /// from the others by a different edit is not part of their group.
+    RestoreItem {
+        /// Item to restore.
+        item_id: ItemId,
+        /// Revision to restore from.
+        from: Revision,
     },
     /// Restore the listed paths to their content at an earlier revision.
     ///
@@ -488,23 +514,34 @@ pub trait VersionStore: Send + Sync {
     /// (`items::refuse_header_change`): `CreateItem` and `EditItem` properties, a `SetType`
     /// definition (`items::refuse_header_in_type`), or a draft. The server's own header
     /// updates are allowed: `SetStatus`, `WriteSourceCard`, `CorrectDigest` and
-    /// `SupplyExtraction`.
+    /// `SupplyExtraction`, and the server's restores, which write each restored item's header
+    /// as the earlier revision holds it: `RestorePaths`, `RestoreItem` and `RestoreWorkspace`.
     fn commit<'a>(
         &'a self,
         scope: &'a StorageScope,
         changes: CommitChanges,
         check: Arc<dyn CandidateCheck>,
     ) -> PortFuture<'a, Committed>;
-    /// Find the commit after `since` on the head's history that carries `mutation_id`.
+    /// Find the commit on the head's history that carries `mutation_id`.
+    ///
+    /// `Some(since)` searches only the commits after `since`; a `since` the repository does not
+    /// hold is the caller's error and answers `NotFound` (never `Unavailable`, which a caller
+    /// would retry). `None` searches the accepted line back from the head, newest first,
+    /// following first parents, and reads no other reference, so a proposal candidate is never
+    /// found. It searches the whole accepted line, back to the root, with no time bound: a
+    /// mutation whose lease expired without completion or release stays until it is reconciled
+    /// (SPEC section 8), so its commit may be of any age.
     ///
     /// Only a writer whose expected head is not stable across attempts needs this before it
-    /// calls `commit`: a Snapshot reads the current head, so on a resumed attempt it must ask
-    /// first, with the base revision of one of its drafts as `since`.
+    /// calls `commit`: a Snapshot reads the current head, so on a resumed attempt it asks first,
+    /// with `None`. It is asked only on a resumed attempt, so the walk's cost falls on resumes.
+    /// It never asks from one draft's base: a draft saved again after the commit has a base the
+    /// commit does not lie after.
     fn find_commit<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
-        since: &'a Revision,
+        since: Option<&'a Revision>,
     ) -> PortFuture<'a, Option<Revision>>;
     /// Write a proposal candidate commit on top of `changes.base` and retain it at
     /// `refs/okf-jawn/proposals/<proposal id>`. The head does not move.
@@ -549,6 +586,16 @@ pub trait VersionStore: Send + Sync {
         scope: &'a StorageScope,
         query: BlameQuery,
     ) -> PortFuture<'a, BlameResponse>;
+    /// The 1-based line of the item file at `revision` on which the item's body starts: the line
+    /// after the frontmatter, or 1 for a file without frontmatter. Lines a diff's patch numbers
+    /// from this line on are body lines `line - start + 1`, the lines a read and a blame cite.
+    /// `NotFound` when no item with that identity is at `revision`.
+    fn body_start<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        item_id: ItemId,
+    ) -> PortFuture<'a, u32>;
     /// Write the retained history of the accepted line up to `revision` into the blob store,
     /// for a portable export that asks for it (`JobSpec::ExportWorkspace::include_history`).
     ///

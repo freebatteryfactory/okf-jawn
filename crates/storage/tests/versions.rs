@@ -310,7 +310,7 @@ async fn mutation_crash_reconcile_retry_returns_the_first_commit_and_writes_no_s
         "the creation commit and one commit, no second"
     );
     let found = versions
-        .find_commit(&scope, lease.mutation_id, &initial)
+        .find_commit(&scope, lease.mutation_id, Some(&initial))
         .await?;
     assert_eq!(found, Some(first.revision));
     Ok(())
@@ -430,7 +430,9 @@ async fn draft_per_editor_second_snapshot_conflicts_after_the_first() -> TestRes
             Arc::new(Counting::default()),
         )
         .await?;
-    drafts.discard(&scope, uuid!(40)?, item, "ana").await?;
+    drafts
+        .discard(&scope, uuid!(40)?, item, "ana", None)
+        .await?;
     let ben = some(drafts.get(&scope, item, "ben").await?, "ben's draft")?;
     let error = err_of(
         versions
@@ -689,6 +691,21 @@ async fn an_integer_the_item_file_cannot_hold_exactly_is_refused_on_its_field() 
         .revision;
     let shown = versions.show(&scope, &largest, uuid!(10)?).await?;
     assert_eq!(shown.properties.get("count"), Some(&json!(i64::MAX)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn find_commit_since_a_revision_the_repository_never_held_is_not_found() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, _) = workspace(directory.path()).await?;
+    let unknown = Revision::try_from("ab".repeat(20))?;
+    let error = err_of(
+        storage
+            .versions()
+            .find_commit(&scope, uuid!(20)?, Some(&unknown))
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::NotFound, "{}", error.message);
     Ok(())
 }
 
@@ -1106,7 +1123,9 @@ async fn a_quoted_trailer_line_in_a_message_body_replays_nothing() -> TestResult
         .await?
         .revision;
     assert_eq!(
-        versions.find_commit(&scope, uuid!(31)?, &initial).await?,
+        versions
+            .find_commit(&scope, uuid!(31)?, Some(&initial))
+            .await?,
         None,
         "a quoted line is not the trailer of mutation 31"
     );
@@ -1126,7 +1145,9 @@ async fn a_quoted_trailer_line_in_a_message_body_replays_nothing() -> TestResult
         error.message
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(30)?, &initial).await?,
+        versions
+            .find_commit(&scope, uuid!(30)?, Some(&initial))
+            .await?,
         Some(quoting.clone()),
         "the real trailer is still found"
     );
@@ -1435,6 +1456,453 @@ async fn the_catalog_creates_once_lists_updates_and_archives() -> TestResult {
     };
     let error = err_of(catalog.open(&missing).await)?;
     assert_eq!(error.code, ErrorCode::NotFound);
+    Ok(())
+}
+
+/// Commit `message` with mutation `mutation`'s trailer on top of the head straight into the
+/// workspace repository, its committer time `age_seconds` before now, and return it.
+fn commit_aged(
+    directory: &Path,
+    scope: &StorageScope,
+    mutation: u32,
+    age_seconds: i64,
+) -> Fallible<Revision> {
+    let repository = git2::Repository::open_bare(repository_path(directory, scope))?;
+    let parent = repository.find_commit(repository.refname_to_id("refs/heads/main")?)?;
+    let tree = parent.tree()?;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+    )?;
+    let who = git2::Signature::new(
+        "raw",
+        "raw@example.invalid",
+        &git2::Time::new(now.saturating_sub(age_seconds), 0),
+    )?;
+    let message = format!(
+        "an aged change\n\nOkf-Jawn-Mutation: {}\n",
+        uuid_text(mutation)
+    );
+    let commit = repository.commit(
+        Some("refs/heads/main"),
+        &who,
+        &who,
+        &message,
+        &tree,
+        &[&parent],
+    )?;
+    Ok(Revision::try_from(commit.to_string())?)
+}
+
+#[tokio::test]
+async fn find_commit_with_no_base_searches_the_accepted_line_back_from_the_head() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let first = versions
+        .commit(
+            &scope,
+            changes(30, &initial, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    // A draft saved now is based on `base`, a revision after the commit asked about.
+    let base = versions
+        .commit(
+            &scope,
+            changes(31, &first, vec![note(uuid!(11)?, "b.md", "B.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let head = versions
+        .commit(
+            &scope,
+            changes(32, &base, vec![note(uuid!(12)?, "c.md", "C.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    assert_eq!(
+        versions
+            .find_commit(&scope, uuid!(30)?, Some(&base))
+            .await?,
+        None,
+        "searching after a later base cannot see it"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(30)?, None).await?,
+        Some(first),
+        "with no base, a commit older than the draft's base is found"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(32)?, None).await?,
+        Some(head),
+        "the head itself is examined"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(33)?, None).await?,
+        None,
+        "a mutation no commit carries"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn find_commit_with_no_base_never_reads_a_proposal_candidate() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let proposal = uuid!(50)?;
+    let candidate = versions
+        .create_candidate(
+            &scope,
+            proposal,
+            CandidateChanges {
+                mutation_id: uuid!(51)?,
+                base: initial.clone(),
+                author: person("agent"),
+                message: "Propose a note".to_owned(),
+                edits: vec![note(uuid!(10)?, "proposed.md", "Proposed.")?],
+            },
+            Arc::new(Counting::default()),
+        )
+        .await?;
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        None,
+        "the candidate carries the trailer but is not on the accepted line"
+    );
+    let accepted = versions
+        .promote_candidate(
+            &scope,
+            Promotion {
+                mutation_id: uuid!(52)?,
+                proposal_id: proposal,
+                expected_head: initial,
+                candidate,
+                approver: person("ana"),
+                message: "Accept the note".to_owned(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        None,
+        "promotion writes a new commit; the candidate's own stays off the line"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        Some(accepted.revision)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn find_commit_with_no_base_finds_a_commit_of_any_age_back_to_the_root() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let day = 24 * 60 * 60;
+    // A lease-expired mutation stays until it is reconciled (SPEC section 8), so its commit
+    // may be far older than the seven-day retention of completed mutations.
+    let ancient = commit_aged(directory.path(), &scope, 50, 400 * day)?;
+    let expired = commit_aged(directory.path(), &scope, 53, 8 * day)?;
+    let recent = commit_aged(directory.path(), &scope, 52, 6 * day)?;
+    let head = versions
+        .commit(
+            &scope,
+            changes(51, &recent, vec![note(uuid!(10)?, "a.md", "A.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        Some(head)
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        Some(recent)
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(53)?, None).await?,
+        Some(expired),
+        "eight days old is found: nothing bounds the walk by time"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(50)?, None).await?,
+        Some(ancient),
+        "four hundred days old is found"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(1)?, None).await?,
+        Some(initial),
+        "the walk reaches the root: the workspace's creation commit"
+    );
+    Ok(())
+}
+
+/// A merge commit on main whose second parent is a candidate: `None` follows first parents
+/// only, so the candidate's trailer is never found, while the merge's own trailer and a commit
+/// behind its first parent are. The store never writes a merge; this is written with `git2`.
+/// (Reviewer probe, adopted.)
+#[tokio::test]
+async fn find_commit_with_no_base_never_follows_a_merge_into_a_candidate() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let candidate = versions
+        .create_candidate(
+            &scope,
+            uuid!(50)?,
+            CandidateChanges {
+                mutation_id: uuid!(51)?,
+                base: initial.clone(),
+                author: person("agent"),
+                message: "Propose".to_owned(),
+                edits: vec![note(uuid!(10)?, "proposed.md", "P.")?],
+            },
+            Arc::new(Counting::default()),
+        )
+        .await?;
+    let head = versions
+        .commit(
+            &scope,
+            changes(30, &initial, vec![note(uuid!(11)?, "a.md", "A.")?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let repository = git2::Repository::open_bare(repository_path(directory.path(), &scope))?;
+    let first = repository.find_commit(git2::Oid::from_str(head.as_str())?)?;
+    let second = repository.find_commit(git2::Oid::from_str(candidate.as_str())?)?;
+    let who = git2::Signature::now("raw", "raw@example.invalid")?;
+    let merge = repository.commit(
+        Some("refs/heads/main"),
+        &who,
+        &who,
+        &format!("merge\n\nOkf-Jawn-Mutation: {}\n", uuid_text(52)),
+        &first.tree()?,
+        &[&first, &second],
+    )?;
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        None,
+        "the first-parent walk never reaches the candidate"
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        Some(Revision::try_from(merge.to_string())?)
+    );
+    assert_eq!(
+        versions.find_commit(&scope, uuid!(30)?, None).await?,
+        Some(head)
+    );
+    Ok(())
+}
+
+/// A note at `at` whose frontmatter holds `extra` properties besides its type, title and
+/// header, so its body starts on a later line the more it holds.
+fn note_with(item: ItemId, at: &str, body: &str, extra: usize) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::CreateItem {
+        item_id: item,
+        path: path(at)?,
+        title: Some(format!("Note at {at}")),
+        type_name: "Note".to_owned(),
+        kind: ItemKind::Note,
+        body: body.to_owned(),
+        properties: (0..extra)
+            .map(|key| (format!("key{key}"), json!(format!("value {key}"))))
+            .collect(),
+    })
+}
+
+/// The committed text of the file at `at` at `revision`.
+async fn file_lines(
+    versions: &okf_jawn_storage::GitVersions,
+    scope: &StorageScope,
+    revision: &Revision,
+    at: &str,
+) -> Fallible<Vec<String>> {
+    let bytes = versions.read_file(scope, revision, &path(at)?).await?;
+    Ok(String::from_utf8(bytes)?
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The new file's line number a unified `patch` gives the added line `text`, read from its
+/// hunk headers and the lines that follow them.
+fn added_at(patch: &str, text: &str) -> Fallible<u32> {
+    let mut new_line = 0_u32;
+    for line in patch.lines() {
+        if let Some(header) = line.strip_prefix("@@ ") {
+            let to = some(header.split_whitespace().nth(1), "the to side")?;
+            let first_line = some(to.trim_start_matches('+').split(',').next(), "a start")?;
+            new_line = first_line.parse()?;
+        } else if line.starts_with('+') && !line.starts_with("+++") {
+            if line.strip_prefix('+') == Some(text) {
+                return Ok(new_line);
+            }
+            new_line = new_line.saturating_add(1);
+        } else if line.starts_with(' ') {
+            new_line = new_line.saturating_add(1);
+        }
+    }
+    Err(format!("the patch adds no line {text:?}: {patch}").into())
+}
+
+#[tokio::test]
+async fn body_start_is_the_file_line_after_the_frontmatter_of_any_length() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let files = [
+        (10, "short.md", 0),
+        (11, "middle.md", 2),
+        (12, "long.md", 7),
+    ];
+    let mut edits = Vec::new();
+    for (item, at, extra) in files {
+        edits.push(note_with(uuid!(item)?, at, "First.\nSecond.", extra)?);
+    }
+    let revision = versions
+        .commit(
+            &scope,
+            changes(20, &initial, edits)?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let mut starts = Vec::new();
+    for (item, at, _) in files {
+        let start = versions.body_start(&scope, &revision, uuid!(item)?).await?;
+        let lines = file_lines(&versions, &scope, &revision, at).await?;
+        let index = usize::try_from(start)?.saturating_sub(1);
+        assert_eq!(
+            lines.get(index).map(String::as_str),
+            Some("First."),
+            "{at}: {lines:?}"
+        );
+        assert_eq!(
+            lines.get(index.saturating_sub(1)).map(String::as_str),
+            Some(""),
+            "{at}: the blank line after the frontmatter"
+        );
+        assert_eq!(
+            lines.get(index.saturating_sub(2)).map(String::as_str),
+            Some("---"),
+            "{at}: the closing delimiter"
+        );
+        starts.push(start);
+    }
+    assert!(
+        starts.windows(2).all(|pair| pair.first() < pair.get(1)),
+        "a longer frontmatter starts the body later: {starts:?}"
+    );
+    let unknown = err_of(versions.body_start(&scope, &revision, uuid!(99)?).await)?;
+    assert_eq!(unknown.code, ErrorCode::NotFound, "{}", unknown.message);
+    Ok(())
+}
+
+#[tokio::test]
+async fn body_start_maps_the_patch_and_blame_lines_to_the_same_body_line() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let item: ItemId = uuid!(10)?;
+    let first = versions
+        .commit(
+            &scope,
+            changes(
+                20,
+                &initial,
+                vec![note_with(
+                    item,
+                    "plan.md",
+                    "One.\nTwo.\nThree.\nFour.\nFive.",
+                    3,
+                )?],
+            )?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let document = versions.show(&scope, &first, item).await?;
+    let second = versions
+        .commit(
+            &scope,
+            changes(
+                21,
+                &first,
+                vec![TreeEdit::EditItem {
+                    item_id: item,
+                    body: "One.\nTwo.\nThree.\nFour, edited.\nFive.".to_owned(),
+                    properties: document.properties,
+                }],
+            )?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let start = versions.body_start(&scope, &second, item).await?;
+    // The patch's file line of the edited line, mapped with `body_start`, is body line 4.
+    let diff = versions
+        .diff(
+            &scope,
+            okf_jawn_core::storage::DiffQuery {
+                from: first.clone(),
+                to: second.clone(),
+                item_id: Some(item),
+            },
+        )
+        .await?;
+    let patch = &some(diff.changes.first(), "the item's change")?.patch;
+    let edited = added_at(patch, "Four, edited.")?;
+    assert_eq!(edited.saturating_sub(start).saturating_add(1), 4, "{patch}");
+    // Blame of each body line is libgit2's blame of the file line `body_start` maps it to.
+    let blame = versions
+        .blame(
+            &scope,
+            okf_jawn_core::storage::BlameQuery {
+                revision: second.clone(),
+                item_id: item,
+                lines: okf_jawn_contract::common::TextRange { start: 1, end: 5 },
+            },
+        )
+        .await?;
+    let repository = git2::Repository::open_bare(repository_path(directory.path(), &scope))?;
+    let mut options = git2::BlameOptions::new();
+    options.newest_commit(git2::Oid::from_str(second.as_str())?);
+    let raw = repository.blame_file(Path::new("plan.md"), Some(&mut options))?;
+    for blamed in &blame.lines {
+        let file_line = usize::try_from(blamed.line.saturating_add(start).saturating_sub(1))?;
+        let hunk = some(raw.get_line(file_line), "the file line's blame")?;
+        assert_eq!(
+            blamed.commit.revision.as_str(),
+            hunk.final_commit_id().to_string(),
+            "body line {}",
+            blamed.line
+        );
+    }
+    let attributed: Vec<_> = blame
+        .lines
+        .iter()
+        .map(|line| (line.line, line.commit.revision.clone()))
+        .collect();
+    assert_eq!(
+        attributed,
+        vec![
+            (1, first.clone()),
+            (2, first.clone()),
+            (3, first.clone()),
+            (4, second),
+            (5, first),
+        ]
+    );
     Ok(())
 }
 

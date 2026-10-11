@@ -929,7 +929,11 @@ async fn replayed(
 ) -> Result<Option<Committed>, ApiError> {
     let claimed = attempt.claimed;
     let mutation_id = derive_commit_mutation_id(claimed.mutation_id, ordinal);
-    let Some(revision) = ports.versions.find_commit(scope, mutation_id, base).await? else {
+    let Some(revision) = ports
+        .versions
+        .find_commit(scope, mutation_id, Some(base))
+        .await?
+    else {
         return Ok(None);
     };
     announce_commit(ports, claimed, scope, &revision, mutation_id, item).await?;
