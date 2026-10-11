@@ -7,7 +7,8 @@
 //! files an earlier revision holds without that refusal. An item's companion files (its source
 //! appearance, supplied text and corrections folder under `.okf/`) go with it: `DeleteItem`
 //! removes them and `RestoreItem` sets them to `from`'s state. Moves rewrite the links that
-//! point at the item (`okf_core::move_concept`). An item, a move or a folder may not land on a
+//! point at the item (`okf_core::move_concept`), and so does a `RestoreItem` that puts an item
+//! back at another path than the one it holds now. An item, a move or a folder may not land on a
 //! reserved name (`.okf/`, `index.md`, `log.md`) in any letter case: it is refused naming the
 //! path before anything is written. After the edits, no two files may share a path collision
 //! key, the folder indexes are regenerated and the change is appended to `log.md`.
@@ -390,7 +391,8 @@ fn restore_paths(
 /// Restore each listed item and its companions to their state at its `from`.
 ///
 /// Each item is found by identity at its `from` and in the staged tree; absent at both is
-/// `NotFound`. First every listed item's file at its current path is removed, so items that
+/// `NotFound`. An item the staged tree holds at another path than `from`'s is first moved
+/// back there with its links (`move_back`). Then every listed item's file is removed, so items that
 /// traded paths since `from` do not block each other. Then, in order, an item `from` holds is
 /// written at its path there with the exact bytes `from` holds, after that path is checked free
 /// (`Staged::occupied`): landing on another item's path, or on any other file or folder, is
@@ -418,6 +420,7 @@ fn restore_items(
         }
         found.push((item, tree, earlier));
     }
+    move_back(staged, &found)?;
     for (item, _, _) in &found {
         if let Some(current) = staged.items.remove(item) {
             remove(&staged.root.join(current))?;
@@ -440,6 +443,71 @@ fn restore_items(
         restore_folder(repository, tree, &staged.root, &corrections_folder(*item))?;
     }
     staged.rescan()
+}
+
+/// Move each item of a restore run that the staged tree holds at a path other than its path at
+/// its `from` back to that path, as `MoveItem` moves an item, so every link that points at it
+/// follows it. An item the staged tree does not hold (deleted since) or holds at its `from`
+/// path has nothing to move; an item listed twice moves to its last listing's path.
+///
+/// Items that traded paths since `from` would block each other, so the movers go first to a
+/// private path each, then the other listed items' files are removed (they are restored from
+/// `from` after this), then each mover goes to its `from` path, refused as `Conflict` when that
+/// path is taken (`Staged::occupied`). Each step rewrites the links, so a link that pointed at
+/// a mover ends pointing at its restored path.
+fn move_back(
+    staged: &mut Staged,
+    found: &[(ItemId, git2::Tree<'_>, Option<WorkspacePath>)],
+) -> Result<(), ApiError> {
+    let mut destinations: BTreeMap<ItemId, Option<&WorkspacePath>> = BTreeMap::new();
+    for (item, _, earlier) in found {
+        destinations.insert(*item, earlier.as_ref());
+    }
+    let mut movers = Vec::new();
+    for (item, destination) in &destinations {
+        if let (Some(destination), Some(current)) = (destination, staged.items.get(item))
+            && current != destination.as_str()
+        {
+            movers.push((*item, current.clone(), *destination));
+        }
+    }
+    if movers.is_empty() {
+        return Ok(());
+    }
+    let mut parked = Vec::with_capacity(movers.len());
+    for (item, current, destination) in movers {
+        let private = WorkspacePath::try_from(format!("okf-jawn-rewind-{}.md", item.0))
+            .map_err(|error| internal(format!("a private restore path is invalid: {error}")))?;
+        if staged.occupied(&private)? {
+            return Err(conflict(format!("{} is already taken", private.as_str())));
+        }
+        relink(staged, &current, private.as_str(), None)?;
+        parked.push((private, destination));
+    }
+    for item in destinations.keys() {
+        let Some(current) = staged.items.get(item) else {
+            continue;
+        };
+        if parked
+            .iter()
+            .any(|(private, _)| private.as_str() == current)
+        {
+            continue;
+        }
+        let current = current.clone();
+        staged.items.remove(item);
+        remove(&staged.root.join(current))?;
+    }
+    for (private, destination) in parked {
+        if staged.occupied(destination)? {
+            return Err(conflict(format!(
+                "{} is already taken",
+                destination.as_str()
+            )));
+        }
+        relink(staged, private.as_str(), destination.as_str(), None)?;
+    }
+    Ok(())
 }
 
 /// Set the file at `path` under `root` to `tree`'s file there, or remove it when `tree` holds
@@ -520,10 +588,23 @@ fn move_item(
             destination.as_str()
         )));
     }
+    relink(staged, &source, destination.as_str(), Some("/destination"))
+}
+
+/// Move the item file at `source` to `destination` with `okf_core::move_concept`, which rewrites
+/// every link that points at it, and index the staged tree again. The caller has checked
+/// `destination` free. A refusal other than an existing target is `InvalidInput` on `field`
+/// for a caller's move, and `Internal` for the server's own (`field` is `None`).
+fn relink(
+    staged: &mut Staged,
+    source: &str,
+    destination: &str,
+    field: Option<&str>,
+) -> Result<(), ApiError> {
     let bundle = Bundle::load(&staged.root)
         .map_err(|error| internal(format!("the staged tree did not load as a bundle: {error}")))?;
-    let from = concept(&source)?;
-    let to = concept(destination.as_str())?;
+    let from = concept(source)?;
+    let to = concept(destination)?;
     let options = MoveOptions {
         update_index: false,
         update_log: false,
@@ -531,9 +612,12 @@ fn move_item(
     };
     okf_core::move_concept(&bundle, &from, &to, &options).map_err(|error| match error {
         RefactorError::ConceptAlreadyExists(_) => conflict(error.to_string()),
-        other => {
-            ApiError::new(ErrorCode::InvalidInput, other.to_string()).with_field("/destination")
-        }
+        other => match field {
+            Some(field) => {
+                ApiError::new(ErrorCode::InvalidInput, other.to_string()).with_field(field)
+            }
+            None => internal(format!("moving {source} to {destination} failed: {other}")),
+        },
     })?;
     staged.rescan()
 }

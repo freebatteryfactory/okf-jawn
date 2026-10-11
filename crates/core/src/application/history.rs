@@ -319,10 +319,17 @@ pub(super) async fn restore_items(
             "/target",
         ));
     }
-    // What the restore leaves in the tree: every file present at the target.
+    // What the restore leaves in the tree: every file present at the target. Restoring one
+    // item moves it back from its path at the base, as `MoveItem` moves it, so that path counts
+    // too, as a move's old path does. Neither write counts the referrers whose links the move
+    // rewrote (R-I12).
     let restored: Vec<WorkspacePath> = changes
         .iter()
-        .filter_map(|change| change.new_path.clone())
+        .flat_map(|change| {
+            let moved_from = request.item_id.and(change.old_path.clone());
+            [change.new_path.clone(), moved_from]
+        })
+        .flatten()
         .filter_map(|path| WorkspacePath::try_from(path).ok())
         .collect();
     let edit = match request.item_id {

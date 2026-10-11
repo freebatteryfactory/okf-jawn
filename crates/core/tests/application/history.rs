@@ -2,7 +2,7 @@
 //! caller's own drafts in one commit and is blocked only by changes to a selected item; Rewind
 //! restores the target's state in a new commit.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::{PageRequest, TextRange};
@@ -2008,6 +2008,53 @@ async fn restore_items_refuses_to_restore_nothing_and_never_brings_back_or_overw
     )?;
     assert_eq!(over.code, ErrorCode::Conflict);
     assert_eq!(world.versions.commits()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn restoring_a_moved_item_touches_its_path_at_the_base_and_its_restored_path() -> TestResult {
+    let world = World::new()?;
+    // The note was at `notes/plan.md` at the target and moved to `archive/plan.md` since; the
+    // Rewind moves it back, as a `MoveItem` would, so both paths count, as a move's do.
+    note_at(&world, NOTE, "notes/plan.md", &['a'])?;
+    note_at(&world, NOTE, "archive/plan.md", &['b'])?;
+    world.versions.set_head(revision('b')?)?;
+    world.versions.put_diff(
+        &revision('b')?,
+        &revision('a')?,
+        Some(item(NOTE)),
+        vec![change(
+            FileChangeKind::Moved,
+            Some("archive/plan.md"),
+            Some("notes/plan.md"),
+        )],
+    )?;
+    world.versions.queue_revision(revision('c')?)?;
+    let stage = world.versions.stage();
+    std::fs::create_dir_all(stage.0.join("archive"))?;
+    for at in ["notes/plan.md", "archive/plan.md", "notes/referrer.md"] {
+        stage.write(at, "---\ntype: Note\n---\n\nNo heading.\n")?;
+    }
+    let result = world
+        .service
+        .restore_items(
+            &alice(OperationName::RestoreItems, Some(mutation(1)))?,
+            rewind('b', 'a', Some(NOTE))?,
+        )
+        .await?;
+    let located: BTreeSet<_> = result
+        .warnings
+        .iter()
+        .filter(|warning| warning.code.starts_with("okf_lint"))
+        .filter_map(|warning| warning.location.as_deref())
+        .collect();
+    // A referrer whose link the move rewrote is not counted, as a `MoveItem` does not (R-I12).
+    assert_eq!(
+        located,
+        BTreeSet::from(["archive/plan.md", "notes/plan.md"]),
+        "{:?}",
+        result.warnings
+    );
     Ok(())
 }
 

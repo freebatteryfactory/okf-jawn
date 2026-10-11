@@ -949,5 +949,135 @@ async fn restoring_onto_a_path_that_differs_only_in_letter_case_conflicts() -> T
     Ok(())
 }
 
+/// The body of item `item` at `revision`.
+async fn body_of(space: &Workspace, revision: &Revision, item: u32) -> Fallible<String> {
+    Ok(space
+        .storage
+        .versions()
+        .show(&space.scope, revision, uuid!(item)?)
+        .await?
+        .body)
+}
+
+#[tokio::test]
+async fn a_rewind_to_an_earlier_path_moves_the_links_that_point_at_the_item() -> TestResult {
+    let space = Workspace::new().await?;
+    let early = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "notes/a.md", "Original.")?,
+                note(11, "ref.md", "See [the note](notes/a.md).")?,
+            ],
+        )
+        .await?;
+    let moved = space
+        .commit(3, &early, vec![moved(10, "archive/a.md")?])
+        .await?;
+    let referring = body_of(&space, &moved, 11).await?;
+    assert!(referring.contains("archive/a.md"), "{referring}");
+    let rewound = space.commit(4, &moved, vec![restore(10, &early)?]).await?;
+    assert_eq!(
+        space.item_at(&rewound, "notes/a.md").await?,
+        Some(uuid!(10)?)
+    );
+    assert_eq!(
+        space.file(&rewound, "notes/a.md")?,
+        space.file(&early, "notes/a.md")?
+    );
+    assert_eq!(space.file(&rewound, "archive/a.md")?, None);
+    let referring = body_of(&space, &rewound, 11).await?;
+    assert!(
+        referring.contains("](notes/a.md)") && !referring.contains("archive/a.md"),
+        "the link follows the item back: {referring}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn links_to_items_that_traded_paths_follow_each_item_back() -> TestResult {
+    let space = Workspace::new().await?;
+    let early = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "x.md", "Ten.")?,
+                note(11, "y.md", "Eleven.")?,
+                note(12, "ref.md", "[ten](x.md) and [eleven](y.md)")?,
+            ],
+        )
+        .await?;
+    let traded = space
+        .commit(
+            3,
+            &early,
+            vec![
+                moved(10, "parked.md")?,
+                moved(11, "x.md")?,
+                moved(10, "y.md")?,
+            ],
+        )
+        .await?;
+    assert_eq!(
+        body_of(&space, &traded, 12).await?,
+        "[ten](y.md) and [eleven](x.md)"
+    );
+    let rewound = space
+        .commit(4, &traded, vec![restore(10, &early)?, restore(11, &early)?])
+        .await?;
+    assert_eq!(space.item_at(&rewound, "x.md").await?, Some(uuid!(10)?));
+    assert_eq!(space.item_at(&rewound, "y.md").await?, Some(uuid!(11)?));
+    assert_eq!(
+        body_of(&space, &rewound, 12).await?,
+        "[ten](x.md) and [eleven](y.md)"
+    );
+    let left: Vec<String> = space
+        .files_under(&rewound, "")?
+        .into_iter()
+        .filter(|file| file.contains("rewind"))
+        .collect();
+    assert!(left.is_empty(), "no private path is left: {left:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_deleted_item_is_restored_without_rewriting_any_link() -> TestResult {
+    let space = Workspace::new().await?;
+    let early = space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                note(10, "notes/a.md", "Original.")?,
+                note(11, "ref.md", "See [the note](notes/a.md).")?,
+            ],
+        )
+        .await?;
+    let deleted = space
+        .commit(
+            3,
+            &early,
+            vec![TreeEdit::DeleteItem {
+                item_id: uuid!(10)?,
+            }],
+        )
+        .await?;
+    let rewound = space
+        .commit(4, &deleted, vec![restore(10, &early)?])
+        .await?;
+    assert_eq!(
+        space.item_at(&rewound, "notes/a.md").await?,
+        Some(uuid!(10)?)
+    );
+    assert_eq!(
+        space.file(&rewound, "ref.md")?,
+        space.file(&deleted, "ref.md")?,
+        "the referrer is untouched"
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
