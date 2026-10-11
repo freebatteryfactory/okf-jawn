@@ -369,6 +369,18 @@ impl VersionStore for GitVersions {
         }))
     }
 
+    fn body_start<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        item_id: ItemId,
+    ) -> PortFuture<'a, u32> {
+        let revision = revision.clone();
+        Box::pin(self.blocking(scope, move |repositories, scope| {
+            history::body_start(&repositories.open(scope)?, &revision, item_id)
+        }))
+    }
+
     fn write_history<'a>(
         &'a self,
         scope: &'a StorageScope,

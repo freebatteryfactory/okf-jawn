@@ -200,6 +200,14 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, BlameResponse> {
         unused()
     }
+    fn body_start<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        _revision: &'a Revision,
+        _item_id: ItemId,
+    ) -> PortFuture<'a, u32> {
+        unused()
+    }
     fn write_history<'a>(
         &'a self,
         _scope: &'a StorageScope,

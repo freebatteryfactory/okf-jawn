@@ -586,6 +586,16 @@ pub trait VersionStore: Send + Sync {
         scope: &'a StorageScope,
         query: BlameQuery,
     ) -> PortFuture<'a, BlameResponse>;
+    /// The 1-based line of the item file at `revision` on which the item's body starts: the line
+    /// after the frontmatter, or 1 for a file without frontmatter. Lines a diff's patch numbers
+    /// from this line on are body lines `line - start + 1`, the lines a read and a blame cite.
+    /// `NotFound` when no item with that identity is at `revision`.
+    fn body_start<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        item_id: ItemId,
+    ) -> PortFuture<'a, u32>;
     /// Write the retained history of the accepted line up to `revision` into the blob store,
     /// for a portable export that asks for it (`JobSpec::ExportWorkspace::include_history`).
     ///

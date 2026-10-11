@@ -1704,5 +1704,207 @@ async fn find_commit_with_no_base_never_follows_a_merge_into_a_candidate() -> Te
     Ok(())
 }
 
+/// A note at `at` whose frontmatter holds `extra` properties besides its type, title and
+/// header, so its body starts on a later line the more it holds.
+fn note_with(item: ItemId, at: &str, body: &str, extra: usize) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::CreateItem {
+        item_id: item,
+        path: path(at)?,
+        title: Some(format!("Note at {at}")),
+        type_name: "Note".to_owned(),
+        kind: ItemKind::Note,
+        body: body.to_owned(),
+        properties: (0..extra)
+            .map(|key| (format!("key{key}"), json!(format!("value {key}"))))
+            .collect(),
+    })
+}
+
+/// The committed text of the file at `at` at `revision`.
+async fn file_lines(
+    versions: &okf_jawn_storage::GitVersions,
+    scope: &StorageScope,
+    revision: &Revision,
+    at: &str,
+) -> Fallible<Vec<String>> {
+    let bytes = versions.read_file(scope, revision, &path(at)?).await?;
+    Ok(String::from_utf8(bytes)?
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The new file's line number a unified `patch` gives the added line `text`, read from its
+/// hunk headers and the lines that follow them.
+fn added_at(patch: &str, text: &str) -> Fallible<u32> {
+    let mut new_line = 0_u32;
+    for line in patch.lines() {
+        if let Some(header) = line.strip_prefix("@@ ") {
+            let to = some(header.split_whitespace().nth(1), "the to side")?;
+            let first_line = some(to.trim_start_matches('+').split(',').next(), "a start")?;
+            new_line = first_line.parse()?;
+        } else if line.starts_with('+') && !line.starts_with("+++") {
+            if line.strip_prefix('+') == Some(text) {
+                return Ok(new_line);
+            }
+            new_line = new_line.saturating_add(1);
+        } else if line.starts_with(' ') {
+            new_line = new_line.saturating_add(1);
+        }
+    }
+    Err(format!("the patch adds no line {text:?}: {patch}").into())
+}
+
+#[tokio::test]
+async fn body_start_is_the_file_line_after_the_frontmatter_of_any_length() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let files = [
+        (10, "short.md", 0),
+        (11, "middle.md", 2),
+        (12, "long.md", 7),
+    ];
+    let mut edits = Vec::new();
+    for (item, at, extra) in files {
+        edits.push(note_with(uuid!(item)?, at, "First.\nSecond.", extra)?);
+    }
+    let revision = versions
+        .commit(
+            &scope,
+            changes(20, &initial, edits)?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let mut starts = Vec::new();
+    for (item, at, _) in files {
+        let start = versions.body_start(&scope, &revision, uuid!(item)?).await?;
+        let lines = file_lines(&versions, &scope, &revision, at).await?;
+        let index = usize::try_from(start)?.saturating_sub(1);
+        assert_eq!(
+            lines.get(index).map(String::as_str),
+            Some("First."),
+            "{at}: {lines:?}"
+        );
+        assert_eq!(
+            lines.get(index.saturating_sub(1)).map(String::as_str),
+            Some(""),
+            "{at}: the blank line after the frontmatter"
+        );
+        assert_eq!(
+            lines.get(index.saturating_sub(2)).map(String::as_str),
+            Some("---"),
+            "{at}: the closing delimiter"
+        );
+        starts.push(start);
+    }
+    assert!(
+        starts.windows(2).all(|pair| pair.first() < pair.get(1)),
+        "a longer frontmatter starts the body later: {starts:?}"
+    );
+    let unknown = err_of(versions.body_start(&scope, &revision, uuid!(99)?).await)?;
+    assert_eq!(unknown.code, ErrorCode::NotFound, "{}", unknown.message);
+    Ok(())
+}
+
+#[tokio::test]
+async fn body_start_maps_the_patch_and_blame_lines_to_the_same_body_line() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let item: ItemId = uuid!(10)?;
+    let first = versions
+        .commit(
+            &scope,
+            changes(
+                20,
+                &initial,
+                vec![note_with(
+                    item,
+                    "plan.md",
+                    "One.\nTwo.\nThree.\nFour.\nFive.",
+                    3,
+                )?],
+            )?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let document = versions.show(&scope, &first, item).await?;
+    let second = versions
+        .commit(
+            &scope,
+            changes(
+                21,
+                &first,
+                vec![TreeEdit::EditItem {
+                    item_id: item,
+                    body: "One.\nTwo.\nThree.\nFour, edited.\nFive.".to_owned(),
+                    properties: document.properties,
+                }],
+            )?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let start = versions.body_start(&scope, &second, item).await?;
+    // The patch's file line of the edited line, mapped with `body_start`, is body line 4.
+    let diff = versions
+        .diff(
+            &scope,
+            okf_jawn_core::storage::DiffQuery {
+                from: first.clone(),
+                to: second.clone(),
+                item_id: Some(item),
+            },
+        )
+        .await?;
+    let patch = &some(diff.changes.first(), "the item's change")?.patch;
+    let edited = added_at(patch, "Four, edited.")?;
+    assert_eq!(edited.saturating_sub(start).saturating_add(1), 4, "{patch}");
+    // Blame of each body line is libgit2's blame of the file line `body_start` maps it to.
+    let blame = versions
+        .blame(
+            &scope,
+            okf_jawn_core::storage::BlameQuery {
+                revision: second.clone(),
+                item_id: item,
+                lines: okf_jawn_contract::common::TextRange { start: 1, end: 5 },
+            },
+        )
+        .await?;
+    let repository = git2::Repository::open_bare(repository_path(directory.path(), &scope))?;
+    let mut options = git2::BlameOptions::new();
+    options.newest_commit(git2::Oid::from_str(second.as_str())?);
+    let raw = repository.blame_file(Path::new("plan.md"), Some(&mut options))?;
+    for blamed in &blame.lines {
+        let file_line = usize::try_from(blamed.line.saturating_add(start).saturating_sub(1))?;
+        let hunk = some(raw.get_line(file_line), "the file line's blame")?;
+        assert_eq!(
+            blamed.commit.revision.as_str(),
+            hunk.final_commit_id().to_string(),
+            "body line {}",
+            blamed.line
+        );
+    }
+    let attributed: Vec<_> = blame
+        .lines
+        .iter()
+        .map(|line| (line.line, line.commit.revision.clone()))
+        .collect();
+    assert_eq!(
+        attributed,
+        vec![
+            (1, first.clone()),
+            (2, first.clone()),
+            (3, first.clone()),
+            (4, second),
+            (5, first),
+        ]
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

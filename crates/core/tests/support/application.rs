@@ -18,6 +18,10 @@
 //! mutation is not recorded twice), and a test may make the next call of one of them fail
 //! (`fail_next`, `fail_next_receipt`), as any port may, to show what a retry does.
 //!
+//! An item's file is its document as storage writes one (`file_text`): frontmatter of its
+//! properties, a blank line, then the body. `body_start` answers the line its body starts on
+//! there.
+//!
 //! History is scripted too (`put_log`, `put_diff`, `put_blame`); `log` pages a scripted history as
 //! storage does when a test asks (`page_log`). A comparison nobody scripted
 //! between two known revisions lists no change, and an unknown revision is `NotFound`. The
@@ -1178,6 +1182,23 @@ impl VersionStore for FakeVersions {
             })
         })
     }
+    fn body_start<'a>(
+        &'a self,
+        _scope: &'a StorageScope,
+        revision: &'a Revision,
+        item_id: ItemId,
+    ) -> PortFuture<'a, u32> {
+        Box::pin(async move {
+            let state = lock_api(&self.state)?;
+            let document = state
+                .documents
+                .iter()
+                .find(|(at, document)| at == revision && document.summary.id == item_id)
+                .map(|(_, document)| document)
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such item"))?;
+            body_start_of(document)
+        })
+    }
     fn write_history<'a>(
         &'a self,
         _scope: &'a StorageScope,
@@ -2111,6 +2132,45 @@ pub fn note(
         source: None,
         draft: None,
     })
+}
+
+/// The item file the fake holds for `document`, as storage writes one: frontmatter of its
+/// properties (one `key: <JSON>` line each, which YAML reads as the same value), the closing
+/// delimiter and a blank line, then the body ending in a newline; a document without
+/// properties is its body alone.
+#[must_use]
+pub fn file_text(document: &ItemDocument) -> String {
+    let mut body = document.body.clone();
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    if document.properties.is_empty() {
+        return body;
+    }
+    let mut text = String::from("---\n");
+    for (key, value) in &document.properties {
+        text.push_str(key);
+        text.push_str(": ");
+        text.push_str(&value.to_string());
+        text.push('\n');
+    }
+    text.push_str("---\n\n");
+    text.push_str(&body);
+    text
+}
+
+/// The 1-based line of `file_text(document)` on which the body starts, counted as storage
+/// counts it: the file's lines less the body's.
+///
+/// # Errors
+/// Returns `Internal` when the line does not fit a `u32`.
+pub fn body_start_of(document: &ItemDocument) -> Result<u32, ApiError> {
+    let offset = file_text(document)
+        .lines()
+        .count()
+        .saturating_sub(document.body.lines().count());
+    u32::try_from(offset.saturating_add(1))
+        .map_err(|_| ApiError::new(ErrorCode::Internal, "a line number does not fit"))
 }
 
 /// A completed converter extraction whose conversion record is `record`.
