@@ -2321,6 +2321,34 @@ mod job_handler {
     }
 
     #[tokio::test]
+    async fn a_redigest_whose_original_changed_since_its_base_is_refused_for_good() -> TestResult {
+        let (world, id, item_id) = redigest_world(39)?;
+        // Someone replaces the card's original after the redigest was accepted.
+        let replacement = world.blobs.insert(b"%PDF a different report")?;
+        let mut card = some(world.versions.item_at(&base()?, item_id)?, "the card")?;
+        card.appearance.object = replacement.digest;
+        world
+            .versions
+            .edit_elsewhere_with(vec![TreeEdit::WriteSourceCard(Box::new(card))])?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert!(entry.completions.is_empty());
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("original"), "{message}");
+        assert!(message.contains("changed"), "{message}");
+        assert!(!retryable);
+        // Nothing of the redigest was written: the new original stands.
+        assert!(
+            world
+                .versions
+                .written()?
+                .iter()
+                .all(|(changes, _)| changes.author.subject != "owner")
+        );
+        Ok(())
+    }
+    #[tokio::test]
     async fn a_redigest_of_a_deleted_card_is_refused_for_good() -> TestResult {
         let (world, id, item_id) = redigest_world(32)?;
         world
