@@ -4651,5 +4651,39 @@ async fn backup_a_replacement_restore_refuses_a_row_of_another_tenant() -> TestR
     Ok(())
 }
 
+/// Pass-4 re-review B1: an archive whose table is not this build's (here `drafts.body` made a
+/// generated column, its rows all of the archive's own tenant and workspace) is refused before
+/// any row is read or written: the schema, not only the rows, must be this build's.
+#[tokio::test]
+async fn backup_a_replacement_restore_refuses_an_archive_table_with_a_generated_column()
+-> TestResult {
+    let (directory, _output, _, result) = rr4_replace_forged(
+        "CREATE TABLE drafts_new (
+             tenant_id TEXT NOT NULL, workspace_id TEXT NOT NULL, item_id TEXT NOT NULL,
+             editor TEXT NOT NULL, saved_at TEXT NOT NULL, record TEXT NOT NULL,
+             body TEXT GENERATED ALWAYS AS ('forged') VIRTUAL, properties TEXT NOT NULL,
+             PRIMARY KEY (tenant_id, workspace_id, item_id, editor)) STRICT;
+         INSERT INTO drafts_new (tenant_id, workspace_id, item_id, editor, saved_at, record,
+             properties)
+             SELECT tenant_id, workspace_id, item_id, editor, saved_at, record, properties
+             FROM drafts;
+         DROP TABLE drafts;
+         ALTER TABLE drafts_new RENAME TO drafts;",
+    )
+    .await?;
+    let error = err_of(result)?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+    assert!(error.message.contains("drafts"), "{error}");
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            "SELECT count(*) FROM drafts"
+        )?,
+        0,
+        "no draft written"
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
