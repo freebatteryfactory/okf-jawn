@@ -41,6 +41,7 @@ use crate::blobs::{LocalBlobs, file_reader};
 use crate::data::{DataDir, io_error};
 use crate::db::{internal, json, not_found, sql, to_i64, to_u64};
 use crate::git::repo::Repositories;
+use crate::puts;
 use crate::seam;
 use crate::storage::Storage;
 use archive::InstallationManifest;
@@ -211,8 +212,11 @@ impl StorageBackups {
                 let size = std::fs::metadata(&zip)
                     .map_err(|error| io_error("read", &zip, &error))?
                     .len();
-                let object = runtime.block_on(storage.blobs.put_for(
-                    &scope.tenant_id,
+                // A workspace-scoped put, like every other: pinned, and recorded as a pending put
+                // before the bytes are retained, which the archive's record lands. A stop between
+                // the two leaves the pending put, so a purge of the workspace deletes the bytes.
+                let (object, pinned) = runtime.block_on(storage.blobs.put_pinned(
+                    scope,
                     file_reader(Some(zip.clone()), 0, size),
                     size,
                     None,
@@ -224,6 +228,8 @@ impl StorageBackups {
                     Some(scope),
                     object,
                 ));
+                // The write ends only once its record transaction has ended.
+                pinned.end()?;
                 #[cfg(test)]
                 runtime.block_on(crate::pause::point(&recorded_point(&storage, mutation)))?;
                 recorded
@@ -466,6 +472,10 @@ async fn record(
                     ],
                 )
                 .map_err(|error| sql(&error))?;
+            // A workspace archive's record lands the pending put of the object it wrote.
+            if let Some(workspace) = &workspace {
+                puts::land(transaction, &tenant, workspace, [&object.digest])?;
+            }
             let (digest, size): (String, i64) = transaction
                 .query_row(
                     "SELECT digest, size FROM backup_archives WHERE mutation_id = ?1",

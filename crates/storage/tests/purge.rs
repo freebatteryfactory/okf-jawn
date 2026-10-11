@@ -2783,5 +2783,129 @@ async fn purge_deletes_its_archive_another_workspaces_pending_put_names() -> Tes
     Ok(())
 }
 
+/// Every file in the object store of the data directory `data`.
+fn stored_objects(data: &Path) -> Fallible<Vec<String>> {
+    let mut found = Vec::new();
+    let mut pending = vec![data.join("objects")];
+    while let Some(directory) = pending.pop() {
+        if !directory.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                found.push(path.display().to_string());
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Fail every insert into `table` of the records database of `data` until the returned
+/// connection runs `DROP TRIGGER stop_record`: a record that never lands, as after a stop
+/// between a write's bytes and its record.
+fn stop_records_of(data: &Path, table: &str) -> Fallible<rusqlite::Connection> {
+    let records = rusqlite::Connection::open(data.join("records.sqlite"))?;
+    records.execute_batch(&format!(
+        "CREATE TRIGGER stop_record BEFORE INSERT ON {table}
+         BEGIN SELECT RAISE(ABORT, 'stopped before the record'); END;"
+    ))?;
+    Ok(records)
+}
+
+/// Purge `target` to completion under purge 60.
+async fn purge_scope(storage: &Storage, target: &StorageScope) -> Fallible<PurgeReport> {
+    let purge: PurgeId = uuid!(60)?;
+    record_purge_of(storage, target, purge).await?;
+    Ok(storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
+        .await?)
+}
+
+/// PR #20 Codex P1 (`backup/mod.rs:218`): a workspace archive whose record never landed (the
+/// process stopped between storing its bytes and recording them; here a trigger fails the
+/// record) left a pending put, so the purge of the workspace deletes its bytes.
+#[tokio::test]
+async fn purge_deletes_a_workspace_archive_whose_record_never_landed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let records = stop_records_of(directory.path(), "backup_archives")?;
+    err_of(
+        storage
+            .backups()
+            .write_workspace_archive(&target, uuid!(70)?)
+            .await,
+    )?;
+    records.execute_batch("DROP TRIGGER stop_record;")?;
+    drop(records);
+    assert_eq!(
+        stored_objects(directory.path())?.len(),
+        1,
+        "the archive's bytes were stored, and no record names them"
+    );
+    purge_scope(&storage, &target).await?;
+    assert_eq!(
+        stored_objects(directory.path())?,
+        Vec::<String>::new(),
+        "the purge deletes the unrecorded archive"
+    );
+    Ok(())
+}
+
+/// PR #20 Codex P1, the written-history form: a written history whose record never landed left
+/// a pending put, so the purge of the workspace deletes its bytes.
+#[tokio::test]
+async fn purge_deletes_a_written_history_whose_record_never_landed() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, 1, "Trip").await?;
+    let records = stop_records_of(directory.path(), "history_exports")?;
+    err_of(
+        storage
+            .versions()
+            .write_history(&target, &head, uuid!(70)?)
+            .await,
+    )?;
+    records.execute_batch("DROP TRIGGER stop_record;")?;
+    drop(records);
+    assert_eq!(
+        stored_objects(directory.path())?.len(),
+        1,
+        "the history's bytes were stored, and no record names them"
+    );
+    purge_scope(&storage, &target).await?;
+    assert_eq!(
+        stored_objects(directory.path())?,
+        Vec::<String>::new(),
+        "the purge deletes the unrecorded history"
+    );
+    Ok(())
+}
+
+/// PR #20 Codex P1: a workspace archive's record and a written history's record each land the
+/// pending put of the bytes they stored.
+#[tokio::test]
+async fn a_workspace_archive_and_a_written_history_land_their_pending_puts() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, 1, "Trip").await?;
+    storage
+        .backups()
+        .write_workspace_archive(&target, uuid!(70)?)
+        .await?;
+    assert_eq!(pending_puts(directory.path(), &target)?, 0, "an archive");
+    storage
+        .versions()
+        .write_history(&target, &head, uuid!(71)?)
+        .await?;
+    assert_eq!(pending_puts(directory.path(), &target)?, 0, "a history");
+    assert_eq!(stored_objects(directory.path())?.len(), 2);
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
