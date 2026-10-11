@@ -1103,7 +1103,8 @@ async fn a_put_cannot_pin_while_the_objects_step_deletes() -> Result<(), ApiErro
 }
 
 /// Re-review probe U1 (M1): a survivor's write still running when the sweep begins, which
-/// ends and lands its card only after the reference read, keeps its object.
+/// ends and lands its card only after the reference read, keeps its object, and the report
+/// counts it as kept (fix round 5, P4: the kept count covers pins).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_survivor_write_running_when_the_sweep_begins_keeps_its_object() -> Result<(), ApiError> {
     let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
@@ -1134,6 +1135,8 @@ async fn a_survivor_write_running_when_the_sweep_begins_keeps_its_object() -> Re
         held(&storage, &survivor, &digest).await?,
         "the survivor's object stays: {report:?}"
     );
+    // No durable reference the step read names it: only the pin kept it, and it is counted.
+    assert_eq!(report.objects_kept_shared, "1", "{report:?}");
     Ok(())
 }
 
