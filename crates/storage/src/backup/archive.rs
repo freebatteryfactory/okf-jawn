@@ -157,6 +157,7 @@ pub(crate) fn write_workspace(
     tenant: &TenantId,
     excluded: &BTreeSet<Digest>,
 ) -> Result<WorkspaceManifest, ApiError> {
+    refuse_missing(repository, records, blobs, tenant, excluded)?;
     let staged_pack = target.with_extension("pack");
     let references = write_pack(repository, &staged_pack)?;
     let mut manifest = manifest_of(records, tenant, references)?;
@@ -450,6 +451,87 @@ fn record_objects(records: &Path) -> Result<BTreeSet<Digest>, ApiError> {
         }
     }
     Ok(found)
+}
+
+/// Refuse to write an archive that would leave out an object a row it holds names (SPEC section
+/// 12: an archive must be independently recoverable): a source card's original or conversion
+/// record (on any commit), a conversion record's structured exports and assets, a retained
+/// artifact (an export, a View export), a derived dataset, a completed upload or a job output.
+/// Backup and written-history objects (`excluded`) are never archived and are not required.
+/// Objects named only as digest-shaped tokens are copied when held and are not required: a token
+/// need not name an object. Blocking.
+///
+/// # Errors
+/// Returns `Internal` naming the missing digest and the row kind that names it; nothing is
+/// written.
+fn refuse_missing(
+    repository: &Repository,
+    records: &Path,
+    blobs: &LocalBlobs,
+    tenant: &TenantId,
+    excluded: &BTreeSet<Digest>,
+) -> Result<(), ApiError> {
+    let mut named: Vec<(Digest, String)> = Vec::new();
+    let (originals, conversions) = references::card_objects(repository)?;
+    named.extend(
+        originals
+            .into_iter()
+            .map(|digest| (digest, "a source card's original".to_owned())),
+    );
+    for record in &conversions {
+        named.extend(
+            references::conversion_objects(blobs, tenant, record)?
+                .into_iter()
+                .map(|(digest, what)| (digest, what.to_owned())),
+        );
+    }
+    named.extend(
+        conversions
+            .into_iter()
+            .map(|digest| (digest, "a source card's conversion record".to_owned())),
+    );
+    let connection = super::snapshot::read_only(records)?;
+    for (query, what) in [
+        ("SELECT digest, kind FROM artifacts", "artifact"),
+        (
+            "SELECT digest, NULL FROM derived_objects",
+            "a derived dataset",
+        ),
+        (
+            "SELECT object_digest, NULL FROM uploads WHERE object_digest IS NOT NULL",
+            "a completed upload",
+        ),
+        ("SELECT digest, NULL FROM job_outputs", "a job output"),
+    ] {
+        let mut statement = connection.prepare(query).map_err(|error| sql(&error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|error| sql(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sql(&error))?;
+        for (digest, kind) in rows {
+            let what = kind.map_or_else(
+                || what.to_owned(),
+                |kind| format!("an {what} of kind {kind}"),
+            );
+            named.push((from_text!(digest.as_str())?, what));
+        }
+    }
+    for (digest, what) in named {
+        if !excluded.contains(&digest) && !blobs.local_path(tenant, &digest)?.is_file() {
+            return Err(ApiError::new(
+                ErrorCode::Internal,
+                format!(
+                    "the workspace archive was not written: {what} names the object {}, which \
+                     the store does not hold",
+                    digest.as_str()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn rows3(

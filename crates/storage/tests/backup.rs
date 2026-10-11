@@ -3308,5 +3308,52 @@ async fn backup_a_replacement_restore_indexes_the_restored_head() -> TestResult 
     Ok(())
 }
 
+/// The file of the object `digest` of tenant `local` in the data directory `data`.
+fn object_file(data: &Path, digest: &Digest) -> Fallible<std::path::PathBuf> {
+    Ok(data
+        .join("objects")
+        .join("local")
+        .join(some(digest.as_str().get(..2), "a digest")?)
+        .join(digest.as_str()))
+}
+
+/// PR #20 Codex P1 (`archive.rs:169`): an archive must be independently recoverable (SPEC
+/// section 12), so a workspace archive whose rows name an object the store no longer holds
+/// fails, naming the digest and the row, and records nothing: here a source card's original,
+/// then an export artifact.
+#[tokio::test]
+async fn backup_an_archive_missing_an_object_a_row_names_fails_and_records_nothing() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let records = directory.path().join("records.sqlite");
+    for (n, digest, row) in [
+        (70_u32, &fixture.original, "a source card's original"),
+        (71, &fixture.export, "an artifact of kind export"),
+    ] {
+        let file = object_file(directory.path(), digest)?;
+        let bytes = std::fs::read(&file)?;
+        std::fs::remove_file(&file)?;
+        let error = err_of(
+            fixture
+                .storage
+                .backups()
+                .write_workspace_archive(&fixture.workspace, uuid!(n)?)
+                .await,
+        )?;
+        assert_eq!(error.code, ErrorCode::Internal, "{error}");
+        assert!(
+            error.message.contains(digest.as_str()) && error.message.contains(row),
+            "names the digest and the row: {error}"
+        );
+        assert_eq!(
+            count(&records, "SELECT count(*) FROM backup_archives")?,
+            0,
+            "no archive is recorded"
+        );
+        std::fs::write(&file, bytes)?;
+    }
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
