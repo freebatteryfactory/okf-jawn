@@ -1061,6 +1061,253 @@ async fn backup_an_import_stopped_before_its_record_leaves_nothing_and_completes
     Ok(())
 }
 
+/// Write a workspace archive of `source` under mutation 40 and put its bytes into `target`, as
+/// an upload of it would; returns the digest to import.
+async fn archive_into(
+    storage: &Storage,
+    source: &StorageScope,
+    target: &StorageScope,
+) -> Fallible<Digest> {
+    let archive = storage
+        .backups()
+        .write_workspace_archive(source, uuid!(40)?)
+        .await?;
+    let bytes = std::fs::read(
+        storage
+            .data()
+            .objects_path()
+            .join(source.tenant_id.as_str())
+            .join(archive.digest.as_str().get(..2).unwrap_or_default())
+            .join(archive.digest.as_str()),
+    )?;
+    Ok(storage
+        .blobs()
+        .put(target, Box::pin(std::io::Cursor::new(bytes)), 1 << 30, None)
+        .await?
+        .digest)
+}
+
+/// The bare repository of `scope`.
+fn repository_of(storage: &Storage, scope: &StorageScope) -> Fallible<git2::Repository> {
+    Ok(git2::Repository::open_bare(
+        storage
+            .data()
+            .repositories_path()
+            .join(scope.tenant_id.as_str())
+            .join(format!("{}.git", scope.workspace_id.0)),
+    )?)
+}
+
+/// The accepted head of `repository` and every commit on its first-parent line whose trailer
+/// names mutation `n`.
+fn carrying(repository: &git2::Repository, n: u32) -> Fallible<(git2::Oid, Vec<git2::Oid>)> {
+    let trailer = format!("Okf-Jawn-Mutation: {}", uuid_text(n));
+    let head = repository.refname_to_id("refs/heads/main")?;
+    let mut found = Vec::new();
+    let mut next = Some(head);
+    while let Some(oid) = next {
+        let commit = repository.find_commit(oid)?;
+        if commit
+            .message()
+            .is_ok_and(|message| message.contains(&trailer))
+        {
+            found.push(oid);
+        }
+        next = commit.parent_ids().next();
+    }
+    Ok((head, found))
+}
+
+/// Assert that the head of `target` is the one commit carrying mutation 84: its only parent is
+/// the archived head and its tree is the archived head's.
+fn assert_one_restore_commit(
+    storage: &Storage,
+    target: &StorageScope,
+    archived: &Revision,
+) -> TestResult {
+    let repository = repository_of(storage, target)?;
+    let (head, found) = carrying(&repository, 84)?;
+    assert_eq!(
+        found,
+        vec![head],
+        "one commit carries the import's mutation, at the head"
+    );
+    let commit = repository.find_commit(head)?;
+    let archived = repository.find_commit(git2::Oid::from_str(archived.as_str())?)?;
+    assert_eq!(commit.parent_ids().collect::<Vec<_>>(), vec![archived.id()]);
+    assert_eq!(commit.tree_id(), archived.tree_id(), "no content change");
+    Ok(())
+}
+
+/// Take-main re-review F1 (probe `rr_an_import_leaves_a_commit_carrying_its_mutation`): the
+/// import's revision is found by its mutation, as ingest's restore handler looks for it, and a
+/// repeated import writes no second commit.
+#[tokio::test]
+async fn backup_an_import_leaves_a_commit_carrying_its_mutation() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let backups = storage.backups();
+    let (target, _) = create(storage, "elsewhere", 80, "Copy").await?;
+    let uploaded = archive_into(storage, &fixture.workspace, &target).await?;
+    let report = backups
+        .restore_import(
+            &target,
+            uploaded.clone(),
+            uuid!(84)?,
+            vec!["ana".to_owned()],
+        )
+        .await?;
+    let head = storage.versions().head(&target).await?;
+    let found = storage
+        .versions()
+        .find_commit(&target, uuid!(84)?, None)
+        .await?;
+    assert_eq!(
+        found,
+        Some(head.clone()),
+        "the restore's revision is found by its mutation"
+    );
+    assert_one_restore_commit(storage, &target, &fixture.head)?;
+    let repeated = backups
+        .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
+        .await?;
+    assert_eq!(repeated, report);
+    assert_eq!(
+        storage.versions().head(&target).await?,
+        head,
+        "nothing is written again"
+    );
+    assert_one_restore_commit(storage, &target, &fixture.head)?;
+    Ok(())
+}
+
+/// F1, a stop after the history is installed and before the restore commit (the archive's
+/// references are set straight into the target repository, as the first attempt left them):
+/// the resumed import writes the one commit.
+#[tokio::test]
+async fn backup_an_import_stopped_before_its_commit_writes_it_once_on_retry() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let (target, _) = create(storage, "elsewhere", 80, "Copy").await?;
+    let uploaded = archive_into(storage, &fixture.workspace, &target).await?;
+    let source = storage
+        .data()
+        .repositories_path()
+        .join("local")
+        .join(format!("{}.git", fixture.workspace.workspace_id.0));
+    let repository = repository_of(storage, &target)?;
+    repository
+        .remote_anonymous(some(source.to_str(), "a UTF-8 repository path")?)?
+        .fetch(&["+refs/*:refs/*"], None, None)?;
+    assert_eq!(
+        repository.refname_to_id("refs/heads/main")?.to_string(),
+        fixture.head.as_str(),
+        "the history is installed and no commit carries the import"
+    );
+    storage
+        .backups()
+        .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
+        .await?;
+    assert_one_restore_commit(storage, &target, &fixture.head)?;
+    Ok(())
+}
+
+/// F1, a stop after the restore commit and before the import's rows and record (a trigger on
+/// `restores` fails the rows' transaction): the resumed import finds the commit at the head and
+/// writes no second one.
+#[tokio::test]
+async fn backup_an_import_stopped_after_its_commit_writes_no_second_one_on_retry() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let backups = storage.backups();
+    let (target, _) = create(storage, "elsewhere", 80, "Copy").await?;
+    let uploaded = archive_into(storage, &fixture.workspace, &target).await?;
+    let records = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+    records.execute_batch(
+        "CREATE TRIGGER stop_restore BEFORE INSERT ON restores
+         BEGIN SELECT RAISE(ABORT, 'stopped before the import record'); END;",
+    )?;
+    err_of(
+        backups
+            .restore_import(
+                &target,
+                uploaded.clone(),
+                uuid!(84)?,
+                vec!["ana".to_owned()],
+            )
+            .await,
+    )?;
+    assert_one_restore_commit(storage, &target, &fixture.head)?;
+    let stopped = storage.versions().head(&target).await?;
+    records.execute_batch("DROP TRIGGER stop_restore;")?;
+    backups
+        .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
+        .await?;
+    assert_eq!(storage.versions().head(&target).await?, stopped);
+    assert_one_restore_commit(storage, &target, &fixture.head)?;
+    Ok(())
+}
+
+/// F1, the purge rule: an import into a workspace a purge names is refused under the
+/// workspace's lock before any Git write. The archive holds no object, so no object put
+/// refuses first.
+#[tokio::test]
+async fn backup_an_import_into_a_purged_workspace_writes_no_history() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (source, source_head) = create(&storage, "local", 1, "Notes").await?;
+    commit(
+        &storage,
+        &source,
+        3,
+        &source_head,
+        vec![note(uuid!(10)?, "notes/plan.md", "The harbor plan.")?],
+    )
+    .await?;
+    let (target, blank) = create(&storage, "elsewhere", 80, "Copy").await?;
+    let uploaded = archive_into(&storage, &source, &target).await?;
+    storage
+        .records()
+        .create_purge(
+            &tenant("elsewhere")?,
+            uuid!(60)?,
+            NewPurge {
+                id: uuid!(61)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: target.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    let error = err_of(
+        storage
+            .backups()
+            .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert!(
+        error.message.contains(&uuid_text(61)),
+        "names the purge: {error}"
+    );
+    let (head, found) = carrying(&repository_of(&storage, &target)?, 84)?;
+    assert_eq!(
+        head.to_string(),
+        blank.as_str(),
+        "the workspace is as it was"
+    );
+    assert_eq!(
+        found,
+        Vec::<git2::Oid>::new(),
+        "no commit carries the import"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn migrations_take_a_pre_migration_backup_set_before_an_upgrade() -> TestResult {
     let directory = tempfile::tempdir()?;

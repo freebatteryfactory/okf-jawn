@@ -3,9 +3,11 @@
 //!
 //! In both, the objects are put back first (each checked against its digest), then the Git
 //! history (the pack is indexed and every reference set), then the records in one transaction.
-//! A resumed import finds the accepted head already at the archive's and skips the Git step;
-//! the records step and the import's own record (`restores`) commit in one transaction, so it
-//! is all or nothing.
+//! An import then writes one commit on the archive head carrying its mutation (same tree), so
+//! its revision is found by that mutation like any job's write. A resumed import finds the
+//! accepted head already at the archive's, or at that commit, and skips what is done; the
+//! records step and the import's own record (`restores`) commit in one transaction, so it is
+//! all or nothing.
 //!
 //! - **Import** keeps item identities and revisions, rewrites the workspace identity in every
 //!   imported row (and inside its stored JSON), and gives back only the drafts whose editor is
@@ -37,7 +39,7 @@ use super::snapshot::{WORKSPACE_TABLES, text};
 use crate::blobs::file_reader;
 use crate::data::io_error;
 use crate::db::{conflict, internal, sql};
-use crate::git::repo::{HEAD_REF, git, head, sync_directories};
+use crate::git::repo::{HEAD_REF, git, head, message_with_trailer, sync_directories, trailer_of};
 use crate::pins::Pinned;
 use crate::purge::references::{self, Rows};
 use crate::puts;
@@ -76,6 +78,8 @@ const IMPORTED: &[&str] = &[
     "revision_map",
     "reviews",
 ];
+/// The message of the commit an import writes on the archive head.
+const RESTORE_MESSAGE: &str = "Restore the workspace from an archive";
 
 /// Restore the archive at `archive` into `scope`, staging under `staging`. Blocking: `runtime`
 /// drives the object store and the records database.
@@ -135,7 +139,7 @@ fn put_back(
     }
     let pack = staging.join(PACK);
     opened.extract(PACK, &pack)?;
-    let items = history(storage, scope, manifest, &pack, mode)?;
+    let items = history(storage, runtime, scope, manifest, &pack, mode)?;
     let restored_history = references::history(&storage.repositories.open(scope)?)?.objects;
     let mut followed = BTreeMap::new();
     for digest in &manifest.objects {
@@ -247,9 +251,20 @@ fn refuse(
     Ok(())
 }
 
-/// Index the pack and set every reference; returns the item count at the accepted head.
+/// Index the pack and set every reference, then, for an import, write the one commit that
+/// carries the import's mutation; returns the item count at the accepted head.
+///
+/// The restore commit has the archive head as its only parent and the archive head's tree, so
+/// the import's revision is found by its mutation (`VersionStore::find_commit`) like every
+/// job's write, and a mutation names at most one commit. It is written before the import's
+/// rows, whose transaction records the import, so a resumed import that stopped after the
+/// history finds the head at the archive's and writes the commit, and one that stopped after
+/// the commit finds it at the head and writes nothing again. Under the workspace's lock, which
+/// the caller holds for the whole import, an import into a workspace a purge names is refused
+/// before any Git write, as a commit is (`purge::guard`).
 fn history(
     storage: &Storage,
+    runtime: &Handle,
     scope: &StorageScope,
     manifest: &WorkspaceManifest,
     pack: &Path,
@@ -263,11 +278,20 @@ fn history(
         .transpose()?
         .ok_or_else(|| invalid("it has no accepted head"))?;
     let repository = match mode {
-        Mode::Import(..) => storage.repositories.open_durable(scope)?,
+        Mode::Import(..) => {
+            runtime.block_on(crate::purge::guard::refuse_scope(&storage.records, scope))?;
+            storage.repositories.open_durable(scope)?
+        }
         Mode::Replace => storage.repositories.create(scope)?,
     };
     let current = crate::git::repo::reference_target(&repository, HEAD_REF)?;
-    if current != Some(main) {
+    let committed = match (mode, current) {
+        (Mode::Import(_, mutation), Some(current)) => {
+            is_restore_commit(&repository, current, main, *mutation)?
+        }
+        _ => false,
+    };
+    if current != Some(main) && !committed {
         if let Some(current) = current {
             refuse_unless_blank(&repository, current)?;
         }
@@ -285,12 +309,62 @@ fn history(
         repository.set_head(HEAD_REF).map_err(|error| git(&error))?;
         sync_directories(&repository, &["objects", "refs", "refs/heads"])?;
     }
+    if let Mode::Import(_, mutation) = mode
+        && !committed
+    {
+        restore_commit(&repository, main, *mutation)?;
+    }
     let tree = repository
         .find_commit(head(&repository)?)
         .and_then(|commit| commit.tree())
         .map_err(|error| git(&error))?;
     u32::try_from(crate::git::items_of(&repository, &tree)?.len())
         .map_err(|_| internal("too many items to count"))
+}
+
+/// Whether `current` is the restore commit of `mutation` on the archive head `main`: its only
+/// parent is `main` and its trailer names `mutation`.
+fn is_restore_commit(
+    repository: &Repository,
+    current: git2::Oid,
+    main: git2::Oid,
+    mutation: MutationId,
+) -> Result<bool, ApiError> {
+    let commit = repository
+        .find_commit(current)
+        .map_err(|error| git(&error))?;
+    let wanted = mutation.0.to_string();
+    Ok(commit.parent_ids().collect::<Vec<_>>() == vec![main]
+        && commit
+            .message()
+            .is_ok_and(|message| trailer_of(message) == Some(wanted.as_str())))
+}
+
+/// Write the restore commit of `mutation` on the archive head `main` (same tree, no content
+/// change) and move the accepted head to it, only if the head is still `main`.
+fn restore_commit(
+    repository: &Repository,
+    main: git2::Oid,
+    mutation: MutationId,
+) -> Result<(), ApiError> {
+    let parent = repository.find_commit(main).map_err(|error| git(&error))?;
+    let tree = parent.tree().map_err(|error| git(&error))?;
+    let who = git2::Signature::now("okf-jawn", "restore").map_err(|error| git(&error))?;
+    let commit = repository
+        .commit(
+            None,
+            &who,
+            &who,
+            &message_with_trailer(RESTORE_MESSAGE, mutation),
+            &tree,
+            &[&parent],
+        )
+        .map_err(|error| git(&error))?;
+    sync_directories(repository, &["objects"])?;
+    repository
+        .reference_matching(HEAD_REF, commit, true, main, "okf-jawn restore commit")
+        .map_err(|error| git(&error))?;
+    sync_directories(repository, &["refs", "refs/heads"])
 }
 
 /// Refuse a target workspace that holds anything beyond its creation commit.
