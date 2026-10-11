@@ -25,22 +25,31 @@
 //! request includes them (`SearchQuery::include_archived`, which the index applies). A query may
 //! be empty only with an extraction filter (`SearchQuery::check`, the contract's
 //! `require_text_or_filter`). The hits a search returns are recorded in a receipt, as every read
-//! of content is.
+//! of content is, and so are the links `get_links` returns: each cites its linking item at the
+//! resolved revision, by the body line the link is on.
 
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::future::Future;
 use std::sync::Arc;
 
+use okf_jawn_contract::common::TextRange;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{Revision, WorkspacePath};
+use okf_jawn_contract::identity::{ItemId, Revision, WorkspacePath};
+use okf_jawn_contract::item::ItemDocument;
+use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::search::{
-    GetGraphRequest, GetGraphResponse, GetLinksRequest, GetLinksResponse, SearchRequest,
+    GetGraphRequest, GetGraphResponse, GetLinksRequest, GetLinksResponse, Link, SearchRequest,
     SearchResponse,
 };
+use okf_jawn_contract::source::SourceReference;
 use tokio::sync::OwnedMutexGuard;
 
 use super::ApplicationService;
 use super::shared::{invalid, record_receipt, resolve, workspace_scope};
+use super::sources::{citation, record_of};
 use crate::context::OperationContext;
+use crate::conversion::ConversionRecord;
 use crate::search::{GraphQuery, LinkQuery, SearchQuery};
 use crate::storage::{LogQuery, Page, StorageScope};
 
@@ -86,7 +95,8 @@ pub(super) async fn search_items(
     })
 }
 
-/// One item's outgoing links, backlinks or both at one resolved revision.
+/// One item's outgoing links, backlinks or both at one resolved revision, recorded in a receipt
+/// that cites each link (`link_citations`).
 ///
 /// # Errors
 /// Returns the typed `NotFound` of an invalidated revision, or any port error.
@@ -108,6 +118,8 @@ pub(super) async fn get_links(
         index.links(&scope, query.clone())
     })
     .await?;
+    let sources = link_citations(service, &scope, &revision, &response.links).await?;
+    record_receipt(service, context, &scope, None, sources).await?;
     Ok(GetLinksResponse {
         revision,
         ..response
@@ -147,6 +159,50 @@ pub(super) async fn get_graph(
         revision,
         ..response
     })
+}
+
+/// One citation per link, in order: its linking item (`from`) at `revision`, the line the link
+/// is on (`sources::citation`, as Who and Changes cite). A broken link cites its linking item
+/// the same way. Each linking item is read once.
+///
+/// The index numbers `Link::line` by the item's body (storage's `search::links_of` enumerates
+/// the body's lines from 1), the lines a read and a blame cite, so the line is cited as it is,
+/// with no frontmatter offset (`VersionStore::body_start` is for a patch's file lines).
+async fn link_citations(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    links: &[Link],
+) -> Result<Vec<SourceReference>, ApiError> {
+    let mut read: BTreeMap<ItemId, (ItemDocument, Option<ConversionRecord>)> = BTreeMap::new();
+    let mut sources = Vec::with_capacity(links.len());
+    for link in links {
+        let (document, record) = match read.entry(link.from) {
+            Entry::Occupied(held) => held.into_mut(),
+            Entry::Vacant(slot) => {
+                let document = service
+                    .ports()
+                    .versions
+                    .show(scope, revision, link.from)
+                    .await?;
+                let record = record_of(service, scope, document.source.as_ref()).await?;
+                slot.insert((document, record))
+            }
+        };
+        sources.push(citation(
+            scope,
+            revision,
+            document,
+            record.as_ref(),
+            Selection::Lines {
+                range: TextRange {
+                    start: link.line,
+                    end: link.line,
+                },
+            },
+        ));
+    }
+    Ok(sources)
 }
 
 /// The request's folder as a workspace path; absent or empty is the whole workspace.

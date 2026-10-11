@@ -54,7 +54,7 @@ use okf_jawn_contract::history::{
     LogResponse, RestoreRequest,
 };
 use okf_jawn_contract::identity::{Digest, ItemId, MutationId, Revision, WorkspacePath};
-use okf_jawn_contract::item::{Draft, DraftContent, ItemDocument};
+use okf_jawn_contract::item::{Draft, DraftContent};
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::SourceReference;
 
@@ -63,10 +63,9 @@ use super::shared::{
     Touched, Write, announce, check_named, commit_with_receipt, invalid, mutation_id,
     record_receipt, replay_warnings, resolve, store_commit, workspace_scope,
 };
-use super::sources::{computed_locations, record_of};
+use super::sources::{citation, record_of};
 use crate::conformance::EditCheck;
 use crate::context::{Attempt, OperationContext};
-use crate::conversion::ConversionRecord;
 use crate::portable::item_content_digest;
 use crate::storage::{BlameQuery, Committed, DiffQuery, LogQuery, StorageScope, TreeEdit};
 
@@ -703,35 +702,5 @@ fn span(text: &str) -> Option<(u32, u32)> {
     match text.split_once(',') {
         Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
         None => Some((text.parse().ok()?, 1)),
-    }
-}
-
-/// The server's citation of `selection` of an item's shown text at one revision: a source card's
-/// lines are cited by its conversion record's digest and located in the original.
-fn citation(
-    scope: &StorageScope,
-    revision: &Revision,
-    document: &ItemDocument,
-    record: Option<&ConversionRecord>,
-    selection: Selection,
-) -> SourceReference {
-    let digest = document
-        .source
-        .as_ref()
-        .and_then(|source| source.extraction.digest.clone());
-    let locations = computed_locations(
-        document.source.as_ref(),
-        record,
-        digest.as_ref(),
-        &selection,
-    );
-    SourceReference {
-        workspace_id: scope.workspace_id,
-        item_id: document.summary.id,
-        path: document.summary.path.clone(),
-        revision: revision.clone(),
-        digest,
-        selection,
-        locations,
     }
 }

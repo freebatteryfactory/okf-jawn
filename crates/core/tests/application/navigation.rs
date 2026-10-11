@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use okf_jawn_contract::common::PageRequest;
+use okf_jawn_contract::common::{PageRequest, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
+use okf_jawn_contract::events::ReceiptAudience;
 use okf_jawn_contract::extraction::{
     ExtractionFilter, ExtractionStatus, ExtractionSummary, TextOrigin,
 };
@@ -15,6 +16,7 @@ use okf_jawn_contract::history::{Commit, LogResponse};
 use okf_jawn_contract::identity::{At, ItemId, PurgeId, Revision};
 use okf_jawn_contract::item::{ItemKind, ItemStatus, ItemSummary};
 use okf_jawn_contract::metadata::OperationName;
+use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::search::{
     GetGraphRequest, GetGraphResponse, GetLinksRequest, GetLinksResponse, Link, LinkDirection,
     SearchRequest, SearchResponse,
@@ -382,6 +384,11 @@ async fn a_query_at_a_revision_the_index_has_not_built_indexes_it_and_asks_again
     // Links and the graph of another unbuilt revision build it the same way.
     let older = revision('b')?;
     world.search.put_link(&older, link(NOTE, OTHER, 4))?;
+    // The receipt cites the linking item, read at that revision.
+    world.versions.put_document(
+        &older,
+        note(NOTE, &older, "notes/plan.md", "", json!({ "type": "Note" }))?,
+    )?;
     let linked = world
         .service
         .get_links(
@@ -719,6 +726,11 @@ async fn navigation_reads_are_purge_checked_before_the_index_is_asked() -> TestR
     assert_eq!(world.search.link_queries()?.len(), 0);
     assert_eq!(world.search.graph_queries()?.len(), 0);
     assert_eq!(world.search.indexed()?.len(), 0);
+    assert_eq!(
+        world.records.receipts()?.len(),
+        0,
+        "a refused read records none"
+    );
     Ok(())
 }
 
@@ -729,6 +741,7 @@ async fn get_links_reads_one_direction_of_one_item_at_the_resolved_revision() ->
     world.search.mark_indexed(&at)?;
     world.search.put_link(&at, link(NOTE, OTHER, 3))?;
     world.search.put_link(&at, link(THIRD, NOTE, 7))?;
+    linking_items(&world, &at)?;
     let caller = alice(OperationName::GetLinks, None)?;
     let mut lines = Vec::new();
     for direction in [
@@ -754,6 +767,116 @@ async fn get_links_reads_one_direction_of_one_item_at_the_resolved_revision() ->
     let query = some(queries.first(), "the link query")?;
     assert_eq!(query.revision, at);
     assert_eq!(query.item_id, item(NOTE));
+    Ok(())
+}
+
+/// NOTE at `notes/plan.md`, with frontmatter of its type and two more properties, and THIRD at
+/// `notes/third.md`, both readable at `at`: the items the fixture links come from.
+fn linking_items(world: &World, at: &Revision) -> Built<()> {
+    world.versions.put_document(
+        at,
+        note(
+            NOTE,
+            at,
+            "notes/plan.md",
+            "# Plan\nfirst\nsee [other](21.md)\n",
+            json!({ "type": "Note", "author": "Ana", "tags": "plans" }),
+        )?,
+    )?;
+    world.versions.put_document(
+        at,
+        note(THIRD, at, "notes/third.md", "", json!({ "type": "Note" }))?,
+    )?;
+    Ok(())
+}
+
+/// The item, revision and selection of each source of the only receipt.
+fn cited(world: &World) -> Built<Vec<(ItemId, Revision, Selection)>> {
+    let receipts = world.records.receipts()?;
+    assert_eq!(receipts.len(), 1, "one receipt");
+    let (under, receipt) = some(receipts.first(), "the receipt")?;
+    assert_eq!(*under, None, "a read records under no mutation");
+    Ok(receipt
+        .sources
+        .iter()
+        .map(|source| {
+            (
+                source.item_id,
+                source.revision.clone(),
+                source.selection.clone(),
+            )
+        })
+        .collect())
+}
+
+fn line(at: u32) -> Selection {
+    Selection::Lines {
+        range: TextRange { start: at, end: at },
+    }
+}
+
+#[tokio::test]
+async fn get_links_records_one_reference_per_link_by_its_body_line() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
+    world.search.put_link(&at, link(THIRD, NOTE, 7))?;
+    // A broken link names no item; it still cites the item it is written in.
+    world.search.put_link(
+        &at,
+        Link {
+            from: item(NOTE),
+            to_path: "notes/missing.md".to_owned(),
+            to: None,
+            label: "gone".to_owned(),
+            line: 2,
+        },
+    )?;
+    linking_items(&world, &at)?;
+    let response = world
+        .service
+        .get_links(
+            &alice(OperationName::GetLinks, None)?,
+            links(LinkDirection::Both, At::Latest)?,
+        )
+        .await?;
+    assert_eq!(response.links.len(), 3);
+    // NOTE has frontmatter; the index numbers its body, so line 3 is cited as body line 3.
+    assert_eq!(
+        cited(&world)?,
+        vec![
+            (item(NOTE), at.clone(), line(3)),
+            (item(THIRD), at.clone(), line(7)),
+            (item(NOTE), at, line(2)),
+        ]
+    );
+    let receipts = world.records.receipts()?;
+    let (_, receipt) = some(receipts.first(), "the receipt")?;
+    assert_eq!(receipt.operation_id, OperationName::GetLinks);
+    assert_eq!(receipt.audience, ReceiptAudience::HumanDisplay);
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_links_whose_linking_item_cannot_be_read_fails_and_records_no_receipt() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
+    linking_items(&world, &at)?;
+    world.versions.fail_next_show(ErrorCode::Unavailable)?;
+    let failed = err_of(
+        world
+            .service
+            .get_links(
+                &alice(OperationName::GetLinks, None)?,
+                links(LinkDirection::Outgoing, At::Latest)?,
+            )
+            .await,
+    )?;
+    assert_eq!(failed.code, ErrorCode::Unavailable);
+    assert_eq!(world.records.receipts()?.len(), 0);
     Ok(())
 }
 
