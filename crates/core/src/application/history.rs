@@ -119,7 +119,8 @@ pub(super) async fn log_items(
 /// Compare two named revisions, optionally only one item (following its moves).
 ///
 /// The comparison returns content, so a receipt records what it returned: for each side of each
-/// change that holds an item, one citation per hunk of that side (`diff_citations`).
+/// change that holds an item, one citation of body lines per hunk of that side, or the side
+/// whole when a hunk shows its frontmatter (`diff_citations`).
 ///
 /// # Errors
 /// Returns the typed `NotFound` of an invalidated revision at either end, or any port error.
@@ -572,9 +573,11 @@ async fn finish(
 }
 
 /// The citations of what a comparison returned: for each change, the item at `old_path` at
-/// `from` and the item at `new_path` at `to`, each cited once per hunk of its side, or whole
-/// for a binary change, a side without a hunk or a hunk header that does not parse. A path that
-/// holds no item (a companion file) cites nothing.
+/// `from` and the item at `new_path` at `to`, each cited once per hunk of its side by the body
+/// lines the hunk covers (a patch numbers lines of the whole file, frontmatter included), or
+/// once whole for a binary change, a side without a hunk, a hunk header that does not parse,
+/// or a side with a hunk reaching into the frontmatter. A path that holds no item (a companion
+/// file) cites nothing.
 async fn diff_citations(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -595,8 +598,9 @@ async fn diff_citations(
                 continue;
             };
             let document = versions.show(scope, revision, found.id).await?;
+            let start = versions.body_start(scope, revision, found.id).await?;
             let record = record_of(service, scope, document.source.as_ref()).await?;
-            for selection in side_selections(change, side) {
+            for selection in side_selections(change, side, start) {
                 sources.push(citation(
                     scope,
                     revision,
@@ -610,8 +614,10 @@ async fn diff_citations(
     Ok(sources)
 }
 
-/// What one side of a change returned: the lines of each hunk of that side, or everything.
-fn side_selections(change: &FileChange, side: Side) -> Vec<Selection> {
+/// What one side of a change returned: the body lines of each hunk of that side, or
+/// everything. `start` is the file line the side's body starts on (`VersionStore::body_start`):
+/// a hunk's file lines from it on are body lines `line - start + 1`.
+fn side_selections(change: &FileChange, side: Side, start: u32) -> Vec<Selection> {
     if change.binary {
         return vec![Selection::All];
     }
@@ -627,11 +633,26 @@ fn side_selections(change: &FileChange, side: Side) -> Vec<Selection> {
     for header in headers {
         match hunk_side(header, side) {
             Hunk::Empty => {}
-            Hunk::Lines(range) => selections.push(Selection::Lines { range }),
+            // A hunk reaching before the body returned frontmatter, which no line selection
+            // names: the side is cited whole. Context lines count, because they are returned.
+            Hunk::Lines(range) => match body_lines(&range, start) {
+                Some(range) => selections.push(Selection::Lines { range }),
+                None => return vec![Selection::All],
+            },
             Hunk::Unparsed => return vec![Selection::All],
         }
     }
     selections
+}
+
+/// The body lines of a hunk side's file lines `range`, the body starting on file line `start`;
+/// `None` when the range reaches a line before the body.
+fn body_lines(range: &TextRange, start: u32) -> Option<TextRange> {
+    let body = |line: u32| line.checked_sub(start)?.checked_add(1);
+    Some(TextRange {
+        start: body(range.start)?,
+        end: body(range.end)?,
+    })
 }
 
 /// The lines one side of a unified hunk header `@@ -a,b +c,d @@` covers.

@@ -20,7 +20,8 @@
 //!
 //! An item's file is its document as storage writes one (`file_text`): frontmatter of its
 //! properties, a blank line, then the body. `body_start` answers the line its body starts on
-//! there.
+//! there, and `file_patch` writes a patch between two such files numbered over the whole file,
+//! as libgit2 does, for a test to script as a diff.
 //!
 //! History is scripted too (`put_log`, `put_diff`, `put_blame`); `log` pages a scripted history as
 //! storage does when a test asks (`page_log`). A comparison nobody scripted
@@ -132,6 +133,15 @@ pub struct World {
 /// A staged candidate directory, removed when dropped.
 pub struct Staged(pub PathBuf);
 
+/// One line of a line diff (`file_patch`): kept, removed from the old file or added in the new
+/// one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edit {
+    Keep,
+    Remove,
+    Add,
+}
+
 /// `VersionStore` over scripted documents and listings.
 pub struct FakeVersions {
     state: Mutex<VersionState>,
@@ -241,6 +251,8 @@ pub const CARD_BODY: &str =
 
 /// The sandbox origin the fixture service is configured with.
 pub const SANDBOX_ORIGIN: &str = "https://sandbox.example.test";
+/// The lines of context around a change in a hunk `file_patch` writes, libgit2's default.
+const PATCH_CONTEXT: usize = 3;
 
 impl World {
     /// A service over fresh fakes whose head is `revision('a')`, with a conformant staged tree.
@@ -2171,6 +2183,147 @@ pub fn body_start_of(document: &ItemDocument) -> Result<u32, ApiError> {
         .saturating_sub(document.body.lines().count());
     u32::try_from(offset.saturating_add(1))
         .map_err(|_| ApiError::new(ErrorCode::Internal, "a line number does not fit"))
+}
+
+/// The unified patch between the item files of `old` and `new` (`file_text`; `None` is an
+/// absent file), numbered over the whole file, frontmatter included, as libgit2 writes it:
+/// hunks with three lines of context, merged when their context would touch, a count of 1
+/// omitted and an empty side numbered by the line before it.
+#[must_use]
+pub fn file_patch(old: Option<&ItemDocument>, new: Option<&ItemDocument>) -> String {
+    let old_text = old.map(file_text).unwrap_or_default();
+    let new_text = new.map(file_text).unwrap_or_default();
+    let before: Vec<&str> = old_text.lines().collect();
+    let after: Vec<&str> = new_text.lines().collect();
+    let edits = line_diff(&before, &after);
+    let name = |document: Option<&ItemDocument>, side: &str| {
+        document.map_or_else(
+            || "/dev/null".to_owned(),
+            |document| format!("{side}/{}", document.summary.path.as_str()),
+        )
+    };
+    let mut patch = format!("--- {}\n+++ {}\n", name(old, "a"), name(new, "b"));
+    // Positions: (old lines before, new lines before) each edit.
+    let mut positions = Vec::with_capacity(edits.len());
+    let (mut at_old, mut at_new) = (0_usize, 0_usize);
+    for (edit, _) in &edits {
+        positions.push((at_old, at_new));
+        match edit {
+            Edit::Keep => {
+                at_old = at_old.saturating_add(1);
+                at_new = at_new.saturating_add(1);
+            }
+            Edit::Remove => at_old = at_old.saturating_add(1),
+            Edit::Add => at_new = at_new.saturating_add(1),
+        }
+    }
+    let changed: Vec<usize> = edits
+        .iter()
+        .enumerate()
+        .filter(|(_, (edit, _))| *edit != Edit::Keep)
+        .map(|(index, _)| index)
+        .collect();
+    let mut hunks: Vec<(usize, usize)> = Vec::new();
+    for index in changed {
+        let start = index.saturating_sub(PATCH_CONTEXT);
+        let end = index
+            .saturating_add(PATCH_CONTEXT)
+            .saturating_add(1)
+            .min(edits.len());
+        match hunks.last_mut() {
+            Some((_, last_end)) if start <= *last_end => *last_end = end,
+            _ => hunks.push((start, end)),
+        }
+    }
+    for (start, end) in hunks {
+        let slice = edits.get(start..end).unwrap_or_default();
+        let (old_before, new_before) = positions.get(start).copied().unwrap_or_default();
+        let old_count = slice.iter().filter(|(edit, _)| *edit != Edit::Add).count();
+        let new_count = slice
+            .iter()
+            .filter(|(edit, _)| *edit != Edit::Remove)
+            .count();
+        patch.push_str("@@ -");
+        patch.push_str(&hunk_span(old_before, old_count));
+        patch.push_str(" +");
+        patch.push_str(&hunk_span(new_before, new_count));
+        patch.push_str(" @@\n");
+        for (edit, line) in slice {
+            let mark = match edit {
+                Edit::Keep => ' ',
+                Edit::Remove => '-',
+                Edit::Add => '+',
+            };
+            patch.push(mark);
+            patch.push_str(line);
+            patch.push('\n');
+        }
+    }
+    patch
+}
+
+/// One side of a hunk header: `start,count`, the count omitted when 1, and an empty side
+/// numbered by the line before it.
+fn hunk_span(before: usize, count: usize) -> String {
+    match count {
+        0 => format!("{before},0"),
+        1 => before.saturating_add(1).to_string(),
+        _ => format!("{},{count}", before.saturating_add(1)),
+    }
+}
+
+/// A shortest edit from `before` to `after` by longest common subsequence, removals of a
+/// replaced run before its additions.
+fn line_diff<'t>(before: &[&'t str], after: &[&'t str]) -> Vec<(Edit, &'t str)> {
+    // `common[i][j]`: the longest common subsequence of `before[i..]` and `after[j..]`.
+    let mut common =
+        vec![vec![0_usize; after.len().saturating_add(1)]; before.len().saturating_add(1)];
+    let at = |table: &[Vec<usize>], i: usize, j: usize| {
+        table
+            .get(i)
+            .and_then(|row| row.get(j))
+            .copied()
+            .unwrap_or(0)
+    };
+    for i in (0..before.len()).rev() {
+        for j in (0..after.len()).rev() {
+            let value = if before.get(i) == after.get(j) {
+                at(&common, i.saturating_add(1), j.saturating_add(1)).saturating_add(1)
+            } else {
+                at(&common, i.saturating_add(1), j).max(at(&common, i, j.saturating_add(1)))
+            };
+            if let Some(cell) = common.get_mut(i).and_then(|row| row.get_mut(j)) {
+                *cell = value;
+            }
+        }
+    }
+    let mut edits = Vec::new();
+    let (mut i, mut j) = (0_usize, 0_usize);
+    loop {
+        match (before.get(i), after.get(j)) {
+            (None, None) => break,
+            (Some(old), Some(new)) if old == new => {
+                edits.push((Edit::Keep, *old));
+                i = i.saturating_add(1);
+                j = j.saturating_add(1);
+            }
+            (Some(old), Some(_))
+                if at(&common, i.saturating_add(1), j) >= at(&common, i, j.saturating_add(1)) =>
+            {
+                edits.push((Edit::Remove, *old));
+                i = i.saturating_add(1);
+            }
+            (Some(old), None) => {
+                edits.push((Edit::Remove, *old));
+                i = i.saturating_add(1);
+            }
+            (_, Some(new)) => {
+                edits.push((Edit::Add, *new));
+                j = j.saturating_add(1);
+            }
+        }
+    }
+    edits
 }
 
 /// A completed converter extraction whose conversion record is `record`.

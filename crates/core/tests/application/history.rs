@@ -13,6 +13,7 @@ use okf_jawn_contract::history::{
     LogRequest, LogResponse, RestoreRequest,
 };
 use okf_jawn_contract::identity::{At, IdempotencyKey, ItemId, PurgeId};
+use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::{SourceLocation, SourceLocator};
@@ -27,13 +28,18 @@ use uuid::Uuid;
 
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{
-    ALICE, Built, CARD_BODY, NOTE, World, alice, context, converted, digest, draft_of, instant,
-    mutation, note, record, revision, scope, source_card,
+    ALICE, Built, CARD_BODY, NOTE, World, alice, context, converted, digest, draft_of, file_patch,
+    instant, mutation, note, record, revision, scope, source_card,
 };
 
 const OTHER: u128 = 21;
 const THIRD: u128 = 22;
 const CARD: u128 = 10;
+/// The properties a `filed` note holds besides its type: with it, three frontmatter keys, so
+/// its body starts on file line 7.
+const HEADER: [(&str, &str); 2] = [("author", "Ana"), ("tags", "plans")];
+/// `HEADER` with another author: a change of properties.
+const RESIGNED: [(&str, &str); 2] = [("author", "Ben"), ("tags", "plans")];
 
 fn item(id: u128) -> ItemId {
     ItemId(Uuid::from_u128(id))
@@ -223,12 +229,14 @@ fn patched(kind: FileChangeKind, old: Option<&str>, new: Option<&str>, patch: &s
 async fn diff_items_records_a_receipt_citing_each_hunk_side_it_returned() -> TestResult {
     let world = World::new()?;
     note_at(&world, NOTE, "notes/plan.md", &['a', 'b'])?;
+    // The note's file is `---`, `type: "Note"`, `---`, a blank line, then the body from file
+    // line 5, so these hunks cover body lines 2 to 4 and 10 at `a`, and 2 to 5 at `b`.
     let changes = vec![
         patched(
             FileChangeKind::Modified,
             Some("notes/plan.md"),
             Some("notes/plan.md"),
-            "--- a\n+++ b\n@@ -2,3 +2,4 @@\n x\n@@ -10 +11,0 @@\n-y\n",
+            "--- a\n+++ b\n@@ -6,3 +6,4 @@\n x\n@@ -14 +15,0 @@\n-y\n",
         ),
         // A companion file holds no item, so nothing of it is cited.
         patched(
@@ -276,9 +284,6 @@ async fn diff_items_records_a_receipt_citing_each_hunk_side_it_returned() -> Tes
             )
         })
         .collect();
-    let lines = |start, end| Selection::Lines {
-        range: TextRange { start, end },
-    };
     assert_eq!(
         cited,
         vec![
@@ -293,7 +298,7 @@ async fn diff_items_records_a_receipt_citing_each_hunk_side_it_returned() -> Tes
 #[tokio::test]
 async fn diff_items_cites_only_the_to_side_of_an_added_item() -> TestResult {
     let world = World::new()?;
-    note_at(&world, NOTE, "notes/new.md", &['b'])?;
+    let added = filed(&world, NOTE, 'b', "notes/new.md", "a\nb\nc\n", &HEADER)?;
     world.versions.put_diff(
         &revision('a')?,
         &revision('b')?,
@@ -302,7 +307,7 @@ async fn diff_items_cites_only_the_to_side_of_an_added_item() -> TestResult {
             FileChangeKind::Added,
             None,
             Some("notes/new.md"),
-            "@@ -0,0 +1,3 @@\n+a\n+b\n+c\n",
+            &file_patch(None, Some(&added)),
         )],
     )?;
     world
@@ -323,12 +328,8 @@ async fn diff_items_cites_only_the_to_side_of_an_added_item() -> TestResult {
     assert_eq!(receipt.sources.len(), 1);
     let only = some(receipt.sources.first(), "the added item's citation")?;
     assert_eq!(only.revision, revision('b')?);
-    assert_eq!(
-        only.selection,
-        Selection::Lines {
-            range: TextRange { start: 1, end: 3 }
-        }
-    );
+    // The added file's one hunk shows every line, its frontmatter included.
+    assert_eq!(only.selection, Selection::All);
     Ok(())
 }
 
@@ -364,6 +365,198 @@ async fn diff_items_cites_a_binary_change_whole() -> TestResult {
     assert_eq!(receipt.sources.len(), 1);
     assert_eq!(only.selection, Selection::All);
     assert_eq!(only.revision, revision('a')?);
+    Ok(())
+}
+
+/// A note `id` at `location`, readable at `at`, whose frontmatter holds its type and `extra`
+/// properties, with `body`. Returned so a test can write the patch between two of them.
+fn filed(
+    world: &World,
+    id: u128,
+    at: char,
+    location: &str,
+    body: &str,
+    extra: &[(&str, &str)],
+) -> Built<ItemDocument> {
+    let mut properties = serde_json::Map::new();
+    properties.insert("type".to_owned(), json!("Note"));
+    for (key, value) in extra {
+        properties.insert((*key).to_owned(), json!(value));
+    }
+    let revision = revision(at)?;
+    let document = note(
+        id,
+        &revision,
+        location,
+        body,
+        serde_json::Value::Object(properties),
+    )?;
+    world.versions.put_document(&revision, document.clone())?;
+    Ok(document)
+}
+
+/// A body of `count` numbered lines, those numbered in `edited` changed.
+fn numbered(count: usize, edited: &[usize]) -> String {
+    (1..=count).fold(String::new(), |mut body, line| {
+        body.push_str("line ");
+        body.push_str(&line.to_string());
+        if edited.contains(&line) {
+            body.push_str(", edited");
+        }
+        body.push('\n');
+        body
+    })
+}
+
+/// Run Changes from `a` to `b`, optionally of NOTE, and return what its receipt cites: the
+/// item, the revision, the path and the selection of each source.
+async fn cited_by_diff(
+    world: &World,
+    only: Option<u128>,
+) -> Built<Vec<(ItemId, char, String, Selection)>> {
+    world
+        .service
+        .diff_items(
+            &alice(OperationName::DiffItems, None)?,
+            DiffRequest {
+                workspace_id: scope()?.workspace_id,
+                from: revision('a')?,
+                to: revision('b')?,
+                item_id: only.map(item),
+            },
+        )
+        .await?;
+    let receipts = world.records.receipts()?;
+    let (_, receipt) = some(receipts.first(), "the diff's receipt")?;
+    let mut cited = Vec::new();
+    for source in &receipt.sources {
+        let side = if source.revision == revision('a')? {
+            'a'
+        } else {
+            'b'
+        };
+        cited.push((
+            source.item_id,
+            side,
+            source.path.as_str().to_owned(),
+            source.selection.clone(),
+        ));
+    }
+    Ok(cited)
+}
+
+/// The body lines `start` to `end`.
+fn lines(start: u32, end: u32) -> Selection {
+    Selection::Lines {
+        range: TextRange { start, end },
+    }
+}
+
+/// NOTE edited from `a` to `b` at `notes/plan.md`: `before` and `after` bodies and extra
+/// properties, its patch numbered over the whole file as storage's libgit2 numbers it.
+fn edited_between(
+    world: &World,
+    (before, before_extra): (String, &[(&str, &str)]),
+    (after, after_extra): (String, &[(&str, &str)]),
+) -> Built<()> {
+    let old = filed(world, NOTE, 'a', "notes/plan.md", &before, before_extra)?;
+    let new = filed(world, NOTE, 'b', "notes/plan.md", &after, after_extra)?;
+    world.versions.put_diff(
+        &revision('a')?,
+        &revision('b')?,
+        None,
+        vec![patched(
+            FileChangeKind::Modified,
+            Some("notes/plan.md"),
+            Some("notes/plan.md"),
+            &file_patch(Some(&old), Some(&new)),
+        )],
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn diff_items_cites_a_body_only_edit_by_the_body_lines_of_each_hunk() -> TestResult {
+    let world = World::new()?;
+    edited_between(
+        &world,
+        (numbered(20, &[]), HEADER.as_slice()),
+        (numbered(20, &[6, 16]), HEADER.as_slice()),
+    )?;
+    // Two hunks, each the edited line with three lines of context: body lines 3 to 9 and 13
+    // to 19, which the file numbers 6 lines later.
+    let path = "notes/plan.md".to_owned();
+    assert_eq!(
+        cited_by_diff(&world, None).await?,
+        vec![
+            (item(NOTE), 'a', path.clone(), lines(3, 9)),
+            (item(NOTE), 'a', path.clone(), lines(13, 19)),
+            (item(NOTE), 'b', path.clone(), lines(3, 9)),
+            (item(NOTE), 'b', path, lines(13, 19)),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn diff_items_cites_a_side_whole_when_its_properties_changed() -> TestResult {
+    let world = World::new()?;
+    let body = numbered(20, &[]);
+    edited_between(
+        &world,
+        (body.clone(), HEADER.as_slice()),
+        (body, RESIGNED.as_slice()),
+    )?;
+    let path = "notes/plan.md".to_owned();
+    assert_eq!(
+        cited_by_diff(&world, None).await?,
+        vec![
+            (item(NOTE), 'a', path.clone(), Selection::All),
+            (item(NOTE), 'b', path, Selection::All),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn diff_items_cites_a_side_once_whole_when_both_its_properties_and_body_changed() -> TestResult
+{
+    let world = World::new()?;
+    edited_between(
+        &world,
+        (numbered(20, &[]), HEADER.as_slice()),
+        (numbered(20, &[16]), RESIGNED.as_slice()),
+    )?;
+    // The body hunk (lines 13 to 19) is cited by the side's All, not again as lines.
+    let path = "notes/plan.md".to_owned();
+    assert_eq!(
+        cited_by_diff(&world, None).await?,
+        vec![
+            (item(NOTE), 'a', path.clone(), Selection::All),
+            (item(NOTE), 'b', path, Selection::All),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn diff_items_cites_a_side_whole_when_a_hunk_returns_frontmatter_as_context() -> TestResult {
+    let world = World::new()?;
+    edited_between(
+        &world,
+        (numbered(20, &[]), HEADER.as_slice()),
+        (numbered(20, &[2]), HEADER.as_slice()),
+    )?;
+    // Body line 2's context reaches the blank line and the closing delimiter: the patch shows
+    // frontmatter, which no line selection names.
+    let path = "notes/plan.md".to_owned();
+    assert_eq!(
+        cited_by_diff(&world, None).await?,
+        vec![
+            (item(NOTE), 'a', path.clone(), Selection::All),
+            (item(NOTE), 'b', path, Selection::All),
+        ]
+    );
     Ok(())
 }
 
