@@ -47,7 +47,10 @@ pub(crate) struct WorkspaceManifest {
     pub(crate) archived_at: Option<String>,
     /// Every reference and the commit it names.
     pub(crate) references: Vec<(String, String)>,
-    /// Every object copied under `objects/`.
+    /// Every object copied under `objects/`. This build writes it empty and reads the list from
+    /// the archive's `objects/<digest>` entries (`Opened::objects`), so a manifest's size does
+    /// not grow with a workspace's objects.
+    #[serde(default)]
     pub(crate) objects: Vec<Digest>,
 }
 
@@ -162,6 +165,22 @@ impl Opened {
         Ok(Self { zip })
     }
 
+    /// The objects the archive holds: the digest of each `objects/<digest>` entry. The entries,
+    /// not the manifest, list them (`WorkspaceManifest::objects`).
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` for an `objects/` entry whose name is not a digest.
+    pub(crate) fn objects(&self) -> Result<Vec<Digest>, ApiError> {
+        self.zip
+            .file_names()
+            .filter_map(|name| name.strip_prefix("objects/"))
+            .map(|digest| {
+                Digest::try_from(digest.to_owned())
+                    .map_err(|_| invalid(&format!("objects/{digest} is not an object's digest")))
+            })
+            .collect()
+    }
+
     /// The workspace manifest, checked.
     pub(crate) fn workspace(&mut self) -> Result<WorkspaceManifest, ApiError> {
         let manifest: WorkspaceManifest = serde_json::from_slice(&self.bytes(MANIFEST)?)
@@ -237,24 +256,51 @@ pub(crate) fn write_workspace(
     tenant: &TenantId,
     excluded: &BTreeSet<Digest>,
 ) -> Result<WorkspaceManifest, ApiError> {
-    refuse_missing(repository, records, blobs, tenant, excluded)?;
+    let required = refuse_missing(repository, records, blobs, tenant, excluded)?;
     let staged_pack = target.with_extension("pack");
     let references = write_pack(repository, &staged_pack)?;
     let mut manifest = manifest_of(records, tenant, references)?;
     let mut objects = references::history(repository)?.objects;
     objects.extend(record_objects(records)?);
     references::follow_records(blobs, tenant, &mut objects)?;
+    // Every object a row names is copied, whatever found it.
+    objects.extend(required.iter().map(|(digest, _)| digest.clone()));
     let mut held = Vec::new();
     for digest in objects {
         if !excluded.contains(&digest) && blobs.local_path(tenant, &digest)?.is_file() {
             held.push(digest);
         }
     }
+    // The archive copies every required object, not only the store holding it: an archive
+    // that claims success is independently recoverable.
+    if let Some((digest, what)) = required
+        .iter()
+        .find(|(digest, _)| !excluded.contains(digest) && !held.contains(digest))
+    {
+        let _ = std::fs::remove_file(&staged_pack);
+        return Err(ApiError::new(
+            ErrorCode::Internal,
+            format!(
+                "the workspace archive was not written: {what} names the object {}, which it \
+                 would not copy",
+                digest.as_str()
+            ),
+        ));
+    }
+    // The archive's `objects/<digest>` entries list its objects; the manifest does not repeat
+    // them, so its size does not grow with the workspace's objects (`MANIFEST_LIMIT`).
+    let manifest_text = {
+        let mut written = manifest.clone();
+        written.objects = Vec::new();
+        serde_json::to_vec_pretty(&written).map_err(|error| crate::db::json(&error))?
+    };
+    if let Err(error) = refuse_large_manifest(&manifest_text) {
+        let _ = std::fs::remove_file(&staged_pack);
+        return Err(error);
+    }
     manifest.objects.clone_from(&held);
     let file = File::create(target).map_err(|error| io_error("create", target, &error))?;
     let mut zip = ZipWriter::new(file);
-    let manifest_text =
-        serde_json::to_vec_pretty(&manifest).map_err(|error| crate::db::json(&error))?;
     entry_bytes(&mut zip, MANIFEST, &manifest_text)?;
     entry_file(&mut zip, RECORDS, records)?;
     entry_file(&mut zip, PACK, &staged_pack)?;
@@ -302,9 +348,10 @@ pub(crate) fn write_installation(
     target: &Path,
     manifest: &InstallationManifest,
 ) -> Result<(), ApiError> {
+    let text = serde_json::to_vec_pretty(manifest).map_err(|error| crate::db::json(&error))?;
+    refuse_large_manifest(&text)?;
     let file = File::create(target).map_err(|error| io_error("create", target, &error))?;
     let mut zip = ZipWriter::new(file);
-    let text = serde_json::to_vec_pretty(manifest).map_err(|error| crate::db::json(&error))?;
     entry_bytes(&mut zip, INSTALLATION, &text)?;
     finish(zip, target)
 }
@@ -543,14 +590,14 @@ fn record_objects(records: &Path) -> Result<BTreeSet<Digest>, ApiError> {
 ///
 /// # Errors
 /// Returns `Internal` naming the missing digest and the row kind that names it; nothing is
-/// written.
+/// written. Otherwise the required objects, each with what names it.
 fn refuse_missing(
     repository: &Repository,
     records: &Path,
     blobs: &LocalBlobs,
     tenant: &TenantId,
     excluded: &BTreeSet<Digest>,
-) -> Result<(), ApiError> {
+) -> Result<Vec<(Digest, String)>, ApiError> {
     let mut named: Vec<(Digest, String)> = Vec::new();
     let (originals, conversions) = references::card_objects(repository)?;
     named.extend(
@@ -599,8 +646,8 @@ fn refuse_missing(
             named.push((from_text!(digest.as_str())?, what));
         }
     }
-    for (digest, what) in named {
-        if !excluded.contains(&digest) && !blobs.local_path(tenant, &digest)?.is_file() {
+    for (digest, what) in &named {
+        if !excluded.contains(digest) && !blobs.local_path(tenant, digest)?.is_file() {
             return Err(ApiError::new(
                 ErrorCode::Internal,
                 format!(
@@ -611,9 +658,27 @@ fn refuse_missing(
             ));
         }
     }
-    Ok(())
+    Ok(named)
 }
 
+/// Refuse to write a manifest a restore would refuse to read (`MANIFEST_LIMIT`): the backup
+/// fails loudly rather than writing an archive no restore reads.
+///
+/// # Errors
+/// Returns `Internal`; nothing is written.
+fn refuse_large_manifest(text: &[u8]) -> Result<(), ApiError> {
+    let size = u64::try_from(text.len()).unwrap_or(u64::MAX);
+    if size > MANIFEST_LIMIT {
+        return Err(ApiError::new(
+            ErrorCode::Internal,
+            format!(
+                "the archive was not written: its manifest is {size} bytes, more than the \
+                 {MANIFEST_LIMIT} a restore reads"
+            ),
+        ));
+    }
+    Ok(())
+}
 fn rows3(
     connection: &Connection,
     query: &str,

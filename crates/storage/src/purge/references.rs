@@ -44,7 +44,22 @@ pub(crate) enum Rows {
     Survivors,
 }
 
-/// The largest object read as a possible conversion record.
+/// The two lists of a conversion record that name objects; every other field is skipped.
+#[derive(serde::Deserialize)]
+struct RecordLists {
+    #[serde(default)]
+    structured: Vec<NamedObject>,
+    #[serde(default)]
+    assets: Vec<NamedObject>,
+}
+
+/// An entry of `RecordLists`: only its digest is read.
+#[derive(serde::Deserialize)]
+struct NamedObject {
+    digest: String,
+}
+
+/// The largest object scanned in memory for digest tokens as a possible conversion record.
 const RECORD_LIMIT: u64 = 64 << 20;
 /// The tree that holds the source appearance of each card.
 const SOURCES_TREE: &str = ".okf/sources";
@@ -142,39 +157,50 @@ pub(crate) fn card_objects(
 
 /// The objects the held conversion record `digest` names, read structurally: each structured
 /// export (`structured[].digest`) and each retained asset (`assets[].digest`), with what names
-/// it. Nothing for an object that is not a JSON conversion record. Blocking.
+/// it. The record is streamed, whatever its size, and every other field is skipped unread, so
+/// memory stays bounded by the two lists. Nothing for an object that is not a JSON object with
+/// those lists. Blocking.
 pub(crate) fn conversion_objects(
     blobs: &LocalBlobs,
     tenant: &TenantId,
     digest: &Digest,
 ) -> Result<Vec<(Digest, &'static str)>, ApiError> {
     let path = blobs.local_path(tenant, digest)?;
-    let mut found = Vec::new();
-    let Ok(metadata) = std::fs::metadata(&path) else {
-        return Ok(found);
+    let Ok(file) = std::fs::File::open(&path) else {
+        return Ok(Vec::new());
     };
-    if metadata.len() > RECORD_LIMIT {
-        return Ok(found);
-    }
-    let bytes =
-        std::fs::read(&path).map_err(|error| crate::data::io_error("read", &path, &error))?;
-    let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return Ok(found);
-    };
-    for (list, what) in [
-        ("structured", "a conversion record's structured export"),
-        ("assets", "a conversion record's retained asset"),
-    ] {
-        for item in record
-            .get(list)
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(named) = digest_at(item, &["digest"]) {
-                found.push((named, what));
+    let mut reader = std::io::BufReader::new(file);
+    // Only a JSON object can be a record: anything else is not read further.
+    let starts_an_object = loop {
+        let buffer = std::io::BufRead::fill_buf(&mut reader)
+            .map_err(|error| crate::data::io_error("read", &path, &error))?;
+        let Some(position) = buffer.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+            if buffer.is_empty() {
+                break false;
             }
-        }
+            let length = buffer.len();
+            std::io::BufRead::consume(&mut reader, length);
+            continue;
+        };
+        break buffer.get(position) == Some(&b'{');
+    };
+    if !starts_an_object {
+        return Ok(Vec::new());
+    }
+    let Ok(lists) = serde_json::from_reader::<_, RecordLists>(reader) else {
+        return Ok(Vec::new());
+    };
+    let mut found = Vec::new();
+    for (named, what) in [
+        (lists.structured, "a conversion record's structured export"),
+        (lists.assets, "a conversion record's retained asset"),
+    ] {
+        found.extend(
+            named
+                .into_iter()
+                .filter_map(|item| Digest::try_from(item.digest).ok())
+                .map(|digest| (digest, what)),
+        );
     }
     Ok(found)
 }
@@ -262,6 +288,13 @@ pub(crate) fn record_tokens(
         return Ok(found);
     };
     if metadata.len() > RECORD_LIMIT {
+        // Too large to scan for tokens in memory: what it names structurally is still read,
+        // streamed, so a large record never silently loses its exports and assets.
+        found.extend(
+            conversion_objects(blobs, tenant, digest)?
+                .into_iter()
+                .map(|(named, _)| named),
+        );
         return Ok(found);
     }
     let mut bytes = Vec::new();

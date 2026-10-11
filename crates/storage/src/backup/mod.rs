@@ -1013,6 +1013,29 @@ mod tests {
         Ok(())
     }
 
+    /// Pass-4 re-review B4: the writer refuses a manifest a restore would refuse to read, so a
+    /// written archive is never unrestorable: an installation archive whose manifest would pass
+    /// 64 MiB fails with `Internal`, and no file is left.
+    #[test]
+    fn an_installation_archive_whose_manifest_passes_the_cap_is_not_written() -> Result<(), ApiError>
+    {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let target = directory.path().join("installation.zip");
+        let manifest = super::archive::InstallationManifest {
+            format: super::archive::INSTALLATION_FORMAT.to_owned(),
+            version: super::archive::ARCHIVE_VERSION,
+            events: vec!["e".repeat(65 << 20)],
+            ..super::archive::InstallationManifest::default()
+        };
+        let error = match super::archive::write_installation(&target, &manifest) {
+            Ok(()) => return Err(fault(&"the archive was written")),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::Internal, "{error}");
+        assert!(!target.exists(), "no archive file is left");
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn backup_a_workspace_archive_is_a_checkpoint_under_the_workspace_lock()
     -> Result<(), ApiError> {

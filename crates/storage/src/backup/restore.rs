@@ -72,7 +72,24 @@ struct Target {
     followed: BTreeMap<Digest, BTreeSet<Digest>>,
     /// For a replacement restore, the SHA-256 of the archive file, recorded with the rows.
     replaced_from: Option<Digest>,
+    /// This build's schema and table order, which the rows are copied with.
+    live: Live,
 }
+
+/// This build's records schema, read from the live database: every table's columns, and the
+/// order a replacement restore inserts the workspace tables in.
+struct Live {
+    schema: Schema,
+    /// `WORKSPACE_TABLES`, each after every one its foreign keys reference.
+    order: Vec<String>,
+}
+
+/// One column of a table, as `pragma_table_xinfo` gives it: name, declared type, not null,
+/// default, primary-key position and hidden (non-zero for a generated column).
+type Column = (String, String, i64, Option<String>, i64, i64);
+
+/// Every ordinary table of a records database and its columns, in order.
+type Schema = BTreeMap<String, Vec<Column>>;
 
 /// Tables an import copies into the target workspace.
 const IMPORTED: &[&str] = &[
@@ -86,6 +103,8 @@ const IMPORTED: &[&str] = &[
 ];
 /// The message of the commit an import writes on the archive head.
 const RESTORE_MESSAGE: &str = "Restore the workspace from an archive";
+/// SQLite's extended result code of a failed foreign key (`SQLITE_CONSTRAINT_FOREIGNKEY`).
+const FOREIGN_KEY_FAILED: std::ffi::c_int = 787;
 
 /// Restore the archive at `archive` into `scope`, staging under `staging`. Blocking: `runtime`
 /// drives the object store and the records database.
@@ -98,7 +117,9 @@ pub(crate) fn restore(
     mode: &Mode,
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
     let mut opened = Opened::open(archive)?;
-    let manifest = opened.workspace()?;
+    let mut manifest = opened.workspace()?;
+    // The archive's entries list its objects; an older manifest's own list is not read.
+    manifest.objects = opened.objects()?;
     // The archived records are read, brought to this build's schema and checked first, before
     // anything is written: an archive may be a caller's file.
     let records = staging.join(RECORDS);
@@ -112,7 +133,15 @@ pub(crate) fn restore(
             ))
         })?;
     drop(archived);
-    refuse_foreign_rows(&records, &manifest)?;
+    // This build's schema and its foreign-key order, read from the live database: the one
+    // column list the archive is checked against and its rows are copied with.
+    let live = runtime.block_on(storage.records.call(|connection| {
+        Ok(Live {
+            schema: schema_of(connection)?,
+            order: parents_first(connection, WORKSPACE_TABLES)?,
+        })
+    }))?;
+    refuse_foreign_rows(&records, &manifest, &live.schema)?;
     // A replacement restore run again after a crash in a later workspace accepts a workspace
     // this same archive already restored in full, and leaves it as it is.
     if let Some(report) = refuse(storage, runtime, scope, &manifest, mode)? {
@@ -126,7 +155,7 @@ pub(crate) fn restore(
         runtime,
         scope,
         (&mut opened, &mut pinned),
-        (&manifest, &records),
+        (&manifest, &records, live),
         staging,
         mode,
     );
@@ -143,7 +172,7 @@ fn put_back(
     runtime: &Handle,
     scope: &StorageScope,
     (opened, pinned): (&mut Opened, &mut Vec<Pinned>),
-    (manifest, records): (&WorkspaceManifest, &Path),
+    (manifest, records, live): (&WorkspaceManifest, &Path, Live),
     staging: &Path,
     mode: &Mode,
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
@@ -186,6 +215,7 @@ fn put_back(
                 Mode::Import(..) => None,
                 Mode::Replace(digest) => Some(digest.clone()),
             },
+            live,
         };
         let editors = match mode {
             Mode::Import(editors, _) => {
@@ -259,35 +289,124 @@ fn restored_already(
         .map_err(|error| crate::db::json(&error))
 }
 
-/// Refuse an archive any of whose rows belongs to another tenant or workspace than its manifest
-/// names: a table with `tenant_id` and `workspace_id` holds only the manifest's tenant and
-/// workspace, one with `tenant_id` alone only its tenant, and one keyed by `job_id` alone only
-/// rows of the archive's own jobs. A written archive never holds another row
-/// (`snapshot::filter`), so one means a crafted file; it is refused before anything is written.
+/// Every ordinary table of the database `connection` opens and its columns, generated ones
+/// included (`pragma_table_xinfo`), in order.
+fn schema_of(connection: &Connection) -> Result<Schema, ApiError> {
+    let mut schema = Schema::new();
+    for table in super::snapshot::tables(connection)? {
+        let columns = schema_of_table(connection, &table)?;
+        schema.insert(table, columns);
+    }
+    Ok(schema)
+}
+
+/// `tables` ordered so that each comes after every one of `tables` its foreign keys reference
+/// (parents first), in name order otherwise, read from the schema of `connection`.
+///
+/// # Errors
+/// Returns `Internal` for a foreign-key cycle, which no order satisfies.
+fn parents_first(connection: &Connection, tables: &[&str]) -> Result<Vec<String>, ApiError> {
+    let mut parents: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for table in tables {
+        let mut statement = connection
+            .prepare("SELECT \"table\" FROM pragma_foreign_key_list(?1)")
+            .map_err(|error| sql(&error))?;
+        let referenced = statement
+            .query_map([table], |row| row.get::<_, String>(0))
+            .map_err(|error| sql(&error))?
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(|error| sql(&error))?;
+        parents.insert(
+            table,
+            referenced
+                .into_iter()
+                .filter(|parent| parent != table && tables.contains(&parent.as_str()))
+                .collect(),
+        );
+    }
+    let mut ordered: Vec<String> = Vec::new();
+    while ordered.len() < tables.len() {
+        let next = tables.iter().find(|table| {
+            !ordered.iter().any(|placed| placed == **table)
+                && parents
+                    .get(**table)
+                    .is_none_or(|needed| needed.iter().all(|parent| ordered.contains(parent)))
+        });
+        match next {
+            Some(table) => ordered.push((*table).to_owned()),
+            None => return Err(internal("the records schema's foreign keys form a cycle")),
+        }
+    }
+    Ok(ordered)
+}
+
+/// The columns of `table` in `schema` that a restore copies: every column but an event's
+/// sequence number, which the live log assigns again.
+fn copied_columns(schema: &Schema, table: &str) -> Result<Vec<String>, ApiError> {
+    Ok(schema
+        .get(table)
+        .ok_or_else(|| internal(format!("this build's schema has no table {table}")))?
+        .iter()
+        .map(|(name, ..)| name.clone())
+        .filter(|name| !(table == "events" && name == "seq"))
+        .collect())
+}
+
+/// Refuse an archive whose records are not this build's tables, or hold a row of another tenant
+/// or workspace than its manifest names. A written archive is never refused
+/// (`snapshot::filter`); a refused one is a crafted file, and nothing has been written.
+///
+/// - Before any row is read: each table of this build's schema (`live`) must be an ordinary
+///   table of the archive under exactly its name, with exactly its columns (names, case
+///   included, types, constraints and order; a generated column is never one of them). So a
+///   view, a generated column or a renamed column never stands in for what the copy reads.
+/// - Then, in the columns the copy selects (`copied_columns`, the same list): a table with
+///   `tenant_id` and `workspace_id` holds only the manifest's tenant and workspace, one with
+///   `tenant_id` alone only its tenant, and one keyed by `job_id` alone only rows of the
+///   archive's own jobs.
 ///
 /// # Errors
 /// Returns `InvalidInput` naming the table.
-fn refuse_foreign_rows(records: &Path, manifest: &WorkspaceManifest) -> Result<(), ApiError> {
+fn refuse_foreign_rows(
+    records: &Path,
+    manifest: &WorkspaceManifest,
+    live: &Schema,
+) -> Result<(), ApiError> {
     let connection = super::snapshot::read_only(records)?;
-    let tenant = manifest.tenant_id.as_str();
-    let workspace = manifest.workspace_id.0.to_string();
-    for table in super::snapshot::tables(&connection)? {
-        let columns: Vec<String> = {
+    for (table, columns) in live {
+        let found: Vec<(String, String)> = {
             let mut statement = connection
-                .prepare("SELECT name FROM pragma_table_info(?1)")
+                .prepare("SELECT name, type FROM sqlite_schema WHERE lower(name) = lower(?1)")
                 .map_err(|error| sql(&error))?;
             statement
-                .query_map([&table], |row| row.get(0))
+                .query_map([table], |row| Ok((row.get(0)?, row.get(1)?)))
                 .map_err(|error| sql(&error))?
                 .collect::<Result<_, _>>()
                 .map_err(|error| sql(&error))?
         };
-        let has = |name: &str| columns.iter().any(|column| column == name);
+        if found != [(table.clone(), "table".to_owned())] {
+            return Err(invalid(&format!(
+                "its {table} is not this build's table (found {found:?})"
+            )));
+        }
+        let archived = schema_of_table(&connection, table)?;
+        if archived != *columns {
+            return Err(invalid(&format!(
+                "its {table} columns are not this build's schema"
+            )));
+        }
+    }
+    let tenant = manifest.tenant_id.as_str();
+    let workspace = manifest.workspace_id.0.to_string();
+    for table in WORKSPACE_TABLES {
+        let copied = copied_columns(live, table)?;
+        let has = |name: &str| copied.iter().any(|column| column == name);
         let foreign = match (has("tenant_id"), has("workspace_id")) {
-            (true, true) => "tenant_id IS NOT ?1 OR workspace_id IS NOT ?2",
-            (true, false) => "tenant_id IS NOT ?1 AND ?2 IS NOT NULL",
-            (false, _) if has("job_id") && table != "jobs" => {
-                "job_id NOT IN (SELECT job_id FROM jobs) AND ?1 IS NOT NULL AND ?2 IS NOT NULL"
+            (true, true) => "\"tenant_id\" IS NOT ?1 OR \"workspace_id\" IS NOT ?2",
+            (true, false) => "\"tenant_id\" IS NOT ?1 AND ?2 IS NOT NULL",
+            (false, _) if has("job_id") && *table != "jobs" => {
+                "\"job_id\" NOT IN (SELECT \"job_id\" FROM jobs) AND ?1 IS NOT NULL \
+                 AND ?2 IS NOT NULL"
             }
             _ => continue,
         };
@@ -306,6 +425,29 @@ fn refuse_foreign_rows(records: &Path, manifest: &WorkspaceManifest) -> Result<(
         }
     }
     Ok(())
+}
+
+/// The columns of the one table `table` of `connection`, as `schema_of` reads them.
+fn schema_of_table(connection: &Connection, table: &str) -> Result<Vec<Column>, ApiError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT name, type, \"notnull\", dflt_value, pk, hidden FROM pragma_table_xinfo(?1)",
+        )
+        .map_err(|error| sql(&error))?;
+    statement
+        .query_map([table], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .map_err(|error| sql(&error))?
+        .collect::<Result<Vec<Column>, _>>()
+        .map_err(|error| sql(&error))
 }
 
 /// Refuse an archive the mode may not restore into `scope`. For a replacement restore, the
@@ -604,10 +746,12 @@ fn write_tables(
     items: u32,
     mutation: Option<MutationId>,
 ) -> Result<RestoreReport, ApiError> {
-    let tables: &[&str] = if editors.is_some() {
-        IMPORTED
+    // A replacement copies every workspace table, parents before the tables whose foreign keys
+    // reference them (`jobs` before `job_controls` and `job_outputs`).
+    let tables: Vec<&str> = if editors.is_some() {
+        IMPORTED.to_vec()
     } else {
-        WORKSPACE_TABLES
+        target.live.order.iter().map(String::as_str).collect()
     };
     for table in tables {
         insert(transaction, table, target, editors)?;
@@ -699,21 +843,9 @@ fn insert(
     editors: Option<&str>,
 ) -> Result<(), ApiError> {
     let (tenant, workspace, original) = (&target.tenant, &target.workspace, &target.original);
-    let columns: Vec<String> = {
-        let mut statement = connection
-            .prepare("SELECT name FROM pragma_table_info(?1)")
-            .map_err(|error| sql(&error))?;
-        statement
-            .query_map([table], |row| row.get(0))
-            .map_err(|error| sql(&error))?
-            .collect::<Result<_, _>>()
-            .map_err(|error| sql(&error))?
-    };
-    // An event's sequence number is the live log's; it is assigned again.
-    let columns: Vec<String> = columns
-        .into_iter()
-        .filter(|name| !(table == "events" && name == "seq"))
-        .collect();
+    // The columns of this build's schema: the same list the archive's rows were checked in
+    // (`refuse_foreign_rows`). An event's sequence number is the live log's; it is assigned again.
+    let columns: Vec<String> = copied_columns(&target.live.schema, table)?;
     let rewrite = editors.is_some();
     let values: Vec<String> = columns
         .iter()
@@ -741,6 +873,14 @@ fn insert(
     connection
         .execute(&query, params![tenant, workspace, original, editors])
         .map_err(|error| match error {
+            rusqlite::Error::SqliteFailure(failure, _)
+                if failure.extended_code == FOREIGN_KEY_FAILED =>
+            {
+                invalid(&format!(
+                    "its {table} reference records the archive does not hold (a foreign key \
+                     failed)"
+                ))
+            }
             rusqlite::Error::SqliteFailure(failure, _)
                 if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
