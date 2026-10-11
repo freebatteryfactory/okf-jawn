@@ -29,6 +29,8 @@ use tokio::io::AsyncReadExt as _;
 use crate::blobs::{LocalBlobs, file_reader};
 use crate::data::io_error;
 use crate::db::{Db, conflict, json, not_found, scope_key, sql, to_i64, to_u64};
+use crate::purge::guard;
+use crate::puts;
 use crate::seam;
 
 /// `UploadStore` over the records database and the blob store.
@@ -176,6 +178,7 @@ impl SqliteUploads {
         mut body: ByteReader,
         limit: u64,
     ) -> Result<UploadRecord, ApiError> {
+        guard::refuse_scope(&self.db, scope).await?;
         let _writing = self.writers.claim(upload)?;
         let record = self.reconciled(scope, upload).await?;
         if record.object.is_some() {
@@ -212,10 +215,12 @@ impl SqliteUploads {
                 .map_err(|error| io_error("write", &incoming, &error))?;
         }
         drop(file);
-        append_file(&incoming, &self.part(upload))?;
+        let part = self.part(upload);
+        append_file(&incoming, &part)?;
         let _ = std::fs::remove_file(&incoming);
         let (tenant, workspace) = scope_key(scope);
-        self.db
+        let recorded = self
+            .db
             .transaction(move |transaction| {
                 transaction
                     .execute(
@@ -223,9 +228,28 @@ impl SqliteUploads {
                         params![to_i64(total)?, upload.0.to_string()],
                     )
                     .map_err(|error| sql(&error))?;
+                guard::refuse(transaction, &tenant, &workspace)?;
                 read(transaction, &tenant, &workspace, upload)?.ok_or_else(|| not_found("upload"))
             })
-            .await
+            .await;
+        // A purge recorded while the body arrived refuses the count; the part file this call
+        // appended to may have been recreated after the purge removed the workspace's upload
+        // files, so it is removed here. Any other failure keeps it: a resumed transfer
+        // reconciles the count from the file.
+        if let Err(error) = &recorded
+            && guard::is_refusal(error)
+        {
+            std::fs::remove_file(&part)
+                .or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|error| io_error("remove", &part, &error))?;
+        }
+        recorded
     }
 
     async fn finish(
@@ -234,6 +258,10 @@ impl SqliteUploads {
         upload: UploadId,
         sha256: Digest,
     ) -> Result<UploadRecord, ApiError> {
+        // Refused with the purge's `Conflict` before anything is read, during a purge and after
+        // it completed (when the upload's row is gone); checked again by the put before the
+        // part is read, after its pin is taken, and inside the record's transaction.
+        guard::refuse_scope(&self.db, scope).await?;
         let _writing = self.writers.claim(upload)?;
         let record = self.reconciled(scope, upload).await?;
         if let Some(object) = &record.object {
@@ -263,9 +291,12 @@ impl SqliteUploads {
         } else {
             file_reader(Some(part.clone()), 0, record.expected_size)
         };
-        let object = self
+        // Pinned until this write ends, and recorded as a pending put until the upload's record
+        // names the object; a failed record write leaves the pending put, so a purge of the
+        // workspace deletes the bytes.
+        let (object, pinned) = self
             .blobs
-            .put_for(&scope.tenant_id, body, record.expected_size, Some(sha256))
+            .put_pinned(scope, body, record.expected_size, Some(sha256))
             .await?;
         let (tenant, workspace) = scope_key(scope);
         let stored = self
@@ -282,9 +313,21 @@ impl SqliteUploads {
                         ],
                     )
                     .map_err(|error| sql(&error))?;
-                read(transaction, &tenant, &workspace, upload)?.ok_or_else(|| not_found("upload"))
+                let stored = read(transaction, &tenant, &workspace, upload)?
+                    .ok_or_else(|| not_found("upload"))?;
+                // The stored record lands the object it names.
+                if let Some(named) = &stored.object {
+                    puts::land(transaction, &tenant, &workspace, [&named.digest])?;
+                }
+                // Last in the transaction, so a purge recorded at any moment before it commits
+                // refuses the record (`purge::guard`).
+                guard::refuse(transaction, &tenant, &workspace)?;
+                Ok(stored)
             })
-            .await?;
+            .await;
+        // The write ends only now that the transaction has ended, committed or rolled back.
+        pinned.end()?;
+        let stored = stored?;
         let _ = std::fs::remove_file(&part);
         Ok(stored)
     }
@@ -299,6 +342,7 @@ impl UploadStore for SqliteUploads {
     ) -> PortFuture<'a, UploadRecord> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let id: UploadId = new_id!()?;
             transaction
                 .execute(

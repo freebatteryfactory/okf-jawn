@@ -81,27 +81,56 @@ impl GitVersions {
         if let Some(object) = export::recorded(&self.records, scope, mutation_id).await? {
             return Ok(object);
         }
+        crate::purge::guard::refuse_scope(&self.records, scope).await?;
         let wanted = revision.clone();
-        let (staging, size) = self
+        let blobs = self.blobs.clone();
+        let runtime = tokio::runtime::Handle::current();
+        // The staging directory is made, written, retained and removed under the workspace's
+        // write lock, like every other staged write, so no write or purge of the workspace
+        // runs while it exists.
+        let object = self
             .blocking(scope, move |repositories, scope| {
-                let staging = repositories.stage(scope, mutation_id)?;
-                let bundle = staging.path.join(export::BUNDLE_FILE);
-                let size = export::write_bundle(&repositories.open(scope)?, &wanted, &bundle)?;
-                Ok((staging, size))
+                repositories.locked(scope, || {
+                    let staging = repositories.stage(scope, mutation_id)?;
+                    let bundle = staging.path.join(export::BUNDLE_FILE);
+                    let size = export::write_bundle(&repositories.open(scope)?, &wanted, &bundle)?;
+                    let object = runtime.block_on(blobs.put_for(
+                        &scope.tenant_id,
+                        file_reader(Some(bundle), 0, size),
+                        size,
+                        None,
+                    ))?;
+                    drop(staging);
+                    Ok(object)
+                })
             })
             .await?;
-        let bundle = staging.path.join(export::BUNDLE_FILE);
-        let object = self
-            .blobs
-            .put_for(
-                &scope.tenant_id,
-                file_reader(Some(bundle), 0, size),
-                size,
-                None,
-            )
-            .await?;
-        drop(staging);
         export::record(&self.records, scope, mutation_id, revision, object).await
+    }
+
+    /// Run a Git write: refused while a purge names the workspace (checked here, before the
+    /// write is staged, and again by the write under the workspace's lock, `refuse_locked`).
+    /// On success the write returns, beside its value, the objects whose pending puts land
+    /// (`puts`): those the stored commit's cards name, since that commit is durable. A replay
+    /// answered by an earlier commit lands only the objects that commit names, so a retry's
+    /// different bytes keep their pending puts. A crash between the commit and the landing
+    /// leaves pending puts of referenced objects, which cost nothing.
+    async fn guarded<T>(
+        &self,
+        scope: &StorageScope,
+        write: impl std::future::Future<Output = Result<(T, Vec<Digest>), ApiError>>,
+    ) -> Result<T, ApiError> {
+        crate::purge::guard::refuse_scope(&self.records, scope).await?;
+        let (written, landed) = write.await?;
+        if !landed.is_empty() {
+            let (tenant, workspace) = crate::db::scope_key(scope);
+            self.records
+                .transaction(move |transaction| {
+                    crate::puts::land(transaction, &tenant, &workspace, &landed)
+                })
+                .await?;
+        }
+        Ok(written)
     }
 
     async fn blocking<T, F>(&self, scope: &StorageScope, work: F) -> Result<T, ApiError>
@@ -224,15 +253,18 @@ impl VersionStore for GitVersions {
         changes: CommitChanges,
         check: Arc<dyn CandidateCheck>,
     ) -> PortFuture<'a, Committed> {
-        Box::pin(self.blocking(scope, move |repositories, scope| {
+        let named = card_objects(&changes.edits);
+        let records = self.records.clone();
+        let commit = self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
+                refuse_locked(&records, scope)?;
                 let repository = repositories.open_durable(scope)?;
                 let expected = held_head(&repository, &changes.expected_head)?;
                 let current = head(&repository)?;
                 if let Some(found) =
                     find_trailer(&repository, current, expected, changes.mutation_id)?
                 {
-                    return replayed(found);
+                    return Ok((replayed(found)?, named_by(&repository, found, named)?));
                 }
                 if current != expected {
                     return Err(moved_head());
@@ -248,13 +280,15 @@ impl VersionStore for GitVersions {
                 let (commit, warnings) =
                     stage_and_commit(repositories, scope, &repository, write, &*check)?;
                 move_reference(&repository, HEAD_REF, commit, Some(current))?;
-                Ok(Committed {
+                let committed = Committed {
                     revision: revision_of(commit)?,
                     replayed: false,
                     warnings,
-                })
+                };
+                Ok((committed, named))
             })
-        }))
+        });
+        Box::pin(self.guarded(scope, commit))
     }
 
     /// `Some(since)` walks the head's history after `since`, as a commit's replay scan does; a
@@ -293,8 +327,11 @@ impl VersionStore for GitVersions {
         changes: CandidateChanges,
         check: Arc<dyn CandidateCheck>,
     ) -> PortFuture<'a, Revision> {
-        Box::pin(self.blocking(scope, move |repositories, scope| {
+        let named = card_objects(&changes.edits);
+        let records = self.records.clone();
+        let candidate = self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
+                refuse_locked(&records, scope)?;
                 let repository = repositories.open_durable(scope)?;
                 let name = proposal_reference(proposal_id);
                 let base = oid(&changes.base)?;
@@ -304,7 +341,10 @@ impl VersionStore for GitVersions {
                     if find_trailer(&repository, retained, base, changes.mutation_id)?
                         == Some(retained)
                     {
-                        return revision_of(retained);
+                        return Ok((
+                            revision_of(retained)?,
+                            named_by(&repository, retained, named)?,
+                        ));
                     }
                     return Err(ApiError::new(
                         ErrorCode::Conflict,
@@ -326,9 +366,10 @@ impl VersionStore for GitVersions {
                     &repository,
                     &["refs", "refs/okf-jawn", "refs/okf-jawn/proposals"],
                 )?;
-                revision_of(commit)
+                Ok((revision_of(commit)?, named))
             })
-        }))
+        });
+        Box::pin(self.guarded(scope, candidate))
     }
 
     fn promote_candidate<'a>(
@@ -336,11 +377,19 @@ impl VersionStore for GitVersions {
         scope: &'a StorageScope,
         promotion: Promotion,
     ) -> PortFuture<'a, Committed> {
-        Box::pin(self.blocking(scope, move |repositories, scope| {
+        let records = self.records.clone();
+        let promoted = self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
-                promote(&repositories.open_durable(scope)?, &promotion)
+                refuse_locked(&records, scope)?;
+                // A promotion stores the candidate's tree, whose objects landed with the
+                // candidate.
+                Ok((
+                    promote(&repositories.open_durable(scope)?, &promotion)?,
+                    Vec::new(),
+                ))
             })
-        }))
+        });
+        Box::pin(self.guarded(scope, promoted))
     }
 
     fn log<'a>(&'a self, scope: &'a StorageScope, query: LogQuery) -> PortFuture<'a, LogResponse> {
@@ -389,6 +438,33 @@ impl VersionStore for GitVersions {
     ) -> PortFuture<'a, ObjectInfo> {
         Box::pin(self.history(scope, revision, mutation_id))
     }
+}
+
+/// The objects the source cards of `edits` name: every digest token of their appearances.
+fn card_objects(edits: &[TreeEdit]) -> Vec<Digest> {
+    let mut found = std::collections::BTreeSet::new();
+    for edit in edits {
+        if let TreeEdit::WriteSourceCard(card) = edit
+            && let Ok(text) = serde_json::to_vec(&card.appearance)
+        {
+            crate::purge::references::tokens(&text, &mut found);
+        }
+    }
+    found.into_iter().collect()
+}
+
+/// The objects of `named` (a write's cards) that the stored commit `stored` names, for a write
+/// answered by that earlier commit: a retry that put different bytes keeps their pending puts.
+fn named_by(
+    repository: &Repository,
+    stored: Oid,
+    named: Vec<Digest>,
+) -> Result<Vec<Digest>, ApiError> {
+    let appearances = crate::purge::references::appearances(repository, stored)?;
+    Ok(named
+        .into_iter()
+        .filter(|digest| appearances.contains(digest))
+        .collect())
 }
 
 /// Stage `write.base`, apply the edits, check, and write the commit (no reference moves).
@@ -551,6 +627,13 @@ fn oid(revision: &Revision) -> Result<Oid, ApiError> {
 }
 
 /// The reference that retains a proposal's candidate.
+/// Refuse a write to `scope` a purge names, from inside the workspace's lock (blocking). The
+/// purge's plan reads the workspace under the same lock, so a commit, candidate or promotion
+/// either landed before that read or is refused.
+fn refuse_locked(records: &Db, scope: &StorageScope) -> Result<(), ApiError> {
+    tokio::runtime::Handle::current().block_on(crate::purge::guard::refuse_scope(records, scope))
+}
+
 pub(crate) fn proposal_reference(proposal: ProposalId) -> String {
     format!("refs/okf-jawn/proposals/{}", proposal.0)
 }
@@ -561,3 +644,99 @@ mod history;
 mod item;
 mod read;
 pub(crate) mod repo;
+
+/// Unit tests here, not in `tests/`: they hold a workspace's write lock, which is private.
+/// They return `ApiError` like core's unit tests.
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use okf_jawn_contract::access::AccessRoute;
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
+    use okf_jawn_contract::identity::{MutationId, TenantId};
+    use okf_jawn_core::storage::{
+        NewWorkspace, Provenance, StorageScope, VersionStore, WorkspaceCatalog,
+    };
+
+    use crate::storage::Storage;
+
+    fn fault(message: &dyn std::fmt::Display) -> ApiError {
+        ApiError::new(ErrorCode::Internal, message.to_string())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_written_history_is_staged_only_under_the_workspace_lock() -> Result<(), ApiError> {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let tenant = TenantId::try_from("local".to_owned()).map_err(|error| fault(&error))?;
+        let mutation = |n: u128| MutationId(uuid::Uuid::from_u128(n));
+        let created = storage
+            .catalog()
+            .create(
+                &tenant,
+                mutation(1),
+                NewWorkspace {
+                    name: "Notes".to_owned(),
+                    description: String::new(),
+                    creator: Provenance {
+                        subject: "ana".to_owned(),
+                        route: AccessRoute::LocalOwner,
+                        client_id: None,
+                    },
+                },
+            )
+            .await?;
+        let scope = StorageScope {
+            tenant_id: tenant,
+            workspace_id: created.id,
+        };
+        let staging = storage
+            .data()
+            .staging_path()
+            .join("local")
+            .join(created.id.0.to_string())
+            .join(mutation(2).0.to_string());
+        let (held, release) = (mpsc::channel(), mpsc::channel::<()>());
+        let holder = {
+            let repositories = storage.repositories.clone();
+            let scope = scope.clone();
+            std::thread::spawn(move || {
+                repositories.locked(&scope, || {
+                    held.0.send(()).map_err(|error| fault(&error))?;
+                    release.1.recv().map_err(|error| fault(&error))
+                })
+            })
+        };
+        held.1.recv().map_err(|error| fault(&error))?;
+        let versions = storage.versions();
+        let writer = {
+            let scope = scope.clone();
+            let revision = created.head.clone();
+            tokio::spawn(
+                async move { versions.write_history(&scope, &revision, mutation(2)).await },
+            )
+        };
+        // Give the export ample time to start: under the lock it never does.
+        for _ in 0..50 {
+            if staging.exists() || writer.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            !staging.exists() && !writer.is_finished(),
+            "nothing is staged while another write holds the workspace"
+        );
+        release.0.send(()).map_err(|error| fault(&error))?;
+        holder
+            .join()
+            .map_err(|_| fault(&"the lock holder stopped"))??;
+        writer.await.map_err(|error| fault(&error))??;
+        assert!(
+            !staging.exists(),
+            "the staging directory is removed afterwards"
+        );
+        Ok(())
+    }
+}

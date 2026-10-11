@@ -36,6 +36,9 @@ macro_rules! uuid {
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
+/// A stored shape of an item file the serializer does not write.
+type Shape = fn(&str) -> String;
+
 /// A check that accepts every candidate and counts how often it ran.
 #[derive(Default)]
 struct Counting {
@@ -55,6 +58,9 @@ struct Interloper {
     repository: std::path::PathBuf,
     moved_to: std::sync::Mutex<Option<git2::Oid>>,
 }
+
+/// The closing `---` of a stored file's frontmatter, followed by `\n`.
+const CLOSING: &str = "\n---\n";
 
 impl CandidateCheck for Counting {
     fn check(&self, root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
@@ -1903,6 +1909,184 @@ async fn body_start_maps_the_patch_and_blame_lines_to_the_same_body_line() -> Te
             (5, first),
         ]
     );
+    Ok(())
+}
+
+/// Commit `bytes` at `at` on main straight into the workspace repository, as no store edit
+/// can (an archive restore brings such files), and return the commit.
+fn raw_write(
+    directory: &Path,
+    scope: &StorageScope,
+    at: &str,
+    bytes: &[u8],
+    mutation: u32,
+) -> Fallible<Revision> {
+    let repository = git2::Repository::open_bare(repository_path(directory, scope))?;
+    let parent = repository.find_commit(repository.refname_to_id("refs/heads/main")?)?;
+    let blob = repository.blob(bytes)?;
+    let mut update = git2::build::TreeUpdateBuilder::new();
+    update.upsert(at, blob, git2::FileMode::Blob);
+    let tree = repository.find_tree(update.create_updated(&repository, &parent.tree()?)?)?;
+    let who = git2::Signature::now("raw", "raw@example.invalid")?;
+    let commit = repository.commit(
+        Some("refs/heads/main"),
+        &who,
+        &who,
+        &format!("raw\n\nOkf-Jawn-Mutation: {}\n", uuid_text(mutation)),
+        &tree,
+        &[&parent],
+    )?;
+    Ok(Revision::try_from(commit.to_string())?)
+}
+
+/// Write a note through the store, then store its file again in `shape` and then once more in
+/// `shape` with body line 2 edited, both by raw commits. `body_start` must name the stored
+/// file's line holding the first body line, and blame of body line N must be libgit2's blame
+/// of the stored line `start + N - 1`: line 2 from the edit, lines 1 and 3 from earlier.
+async fn stored_shape_keeps_body_lines(shape: Shape) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let item: ItemId = uuid!(10)?;
+    let written = versions
+        .commit(
+            &scope,
+            changes(
+                20,
+                &initial,
+                vec![note_with(item, "plan.md", "One.\nTwo.\nThree.", 2)?],
+            )?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let canonical = String::from_utf8(
+        versions
+            .read_file(&scope, &written, &path("plan.md")?)
+            .await?,
+    )?;
+    let reshaped = shape(&canonical);
+    assert_ne!(reshaped, canonical, "the shape changes the stored bytes");
+    raw_write(directory.path(), &scope, "plan.md", reshaped.as_bytes(), 21)?;
+    let edited = shape(&canonical.replacen("\nTwo.\n", "\nTwo, edited.\n", 1));
+    let tip = raw_write(directory.path(), &scope, "plan.md", edited.as_bytes(), 22)?;
+    let start = versions.body_start(&scope, &tip, item).await?;
+    let stored: Vec<&str> = edited.lines().collect();
+    let first = usize::try_from(start)?.saturating_sub(1);
+    assert_eq!(
+        stored.get(first).copied(),
+        Some("One."),
+        "body_start {start} names the first body line: {edited:?}"
+    );
+    let blame = versions
+        .blame(
+            &scope,
+            okf_jawn_core::storage::BlameQuery {
+                revision: tip.clone(),
+                item_id: item,
+                lines: okf_jawn_contract::common::TextRange { start: 1, end: 3 },
+            },
+        )
+        .await?;
+    let repository = git2::Repository::open_bare(repository_path(directory.path(), &scope))?;
+    let mut options = git2::BlameOptions::new();
+    options.newest_commit(git2::Oid::from_str(tip.as_str())?);
+    let raw = repository.blame_file(Path::new("plan.md"), Some(&mut options))?;
+    let texts: Vec<&str> = blame.lines.iter().map(|line| line.text.as_str()).collect();
+    assert_eq!(texts, vec!["One.", "Two, edited.", "Three."]);
+    for blamed in &blame.lines {
+        let file_line = usize::try_from(blamed.line.saturating_add(start).saturating_sub(1))?;
+        let hunk = some(raw.get_line(file_line), "the stored line's blame")?;
+        assert_eq!(
+            blamed.commit.revision.as_str(),
+            hunk.final_commit_id().to_string(),
+            "body line {} is stored line {file_line}",
+            blamed.line
+        );
+        assert_eq!(
+            blamed.commit.revision == tip,
+            blamed.line == 2,
+            "only body line 2 comes from the edit"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn body_start_and_blame_count_a_stored_file_with_no_blank_line_after_its_frontmatter()
+-> TestResult {
+    stored_shape_keeps_body_lines(|text| text.replacen("\n---\n\n", CLOSING, 1)).await
+}
+
+#[tokio::test]
+async fn body_start_and_blame_count_a_stored_file_with_a_comment_in_its_frontmatter() -> TestResult
+{
+    stored_shape_keeps_body_lines(|text| {
+        text.replacen("---\n", "---\n# a comment the serializer drops\n", 1)
+    })
+    .await
+}
+
+#[tokio::test]
+async fn body_start_and_blame_count_a_stored_file_with_crlf_line_endings() -> TestResult {
+    stored_shape_keeps_body_lines(|text| text.replace('\n', "\r\n")).await
+}
+
+/// An empty body: `body_start` names the line where the body would begin (the line after the
+/// closing delimiter), and blame has no body line to attribute.
+#[tokio::test]
+async fn body_start_of_a_stored_file_with_an_empty_body_is_the_line_after_its_frontmatter()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let item: ItemId = uuid!(10)?;
+    let written = versions
+        .commit(
+            &scope,
+            changes(20, &initial, vec![note_with(item, "plan.md", "One.", 2)?])?,
+            Arc::new(Counting::default()),
+        )
+        .await?
+        .revision;
+    let canonical = String::from_utf8(
+        versions
+            .read_file(&scope, &written, &path("plan.md")?)
+            .await?,
+    )?;
+    let closing = some(canonical.find(CLOSING), "the closing delimiter")?;
+    let frontmatter_only = some(
+        canonical.get(..closing.saturating_add(CLOSING.len())),
+        "the frontmatter",
+    )?;
+    let tip = raw_write(
+        directory.path(),
+        &scope,
+        "plan.md",
+        frontmatter_only.as_bytes(),
+        21,
+    )?;
+    assert_eq!(versions.show(&scope, &tip, item).await?.body, "");
+    let start = versions.body_start(&scope, &tip, item).await?;
+    let stored_lines = u32::try_from(frontmatter_only.lines().count())?;
+    assert_eq!(
+        start,
+        stored_lines.saturating_add(1),
+        "{frontmatter_only:?}"
+    );
+    let error = err_of(
+        versions
+            .blame(
+                &scope,
+                okf_jawn_core::storage::BlameQuery {
+                    revision: tip,
+                    item_id: item,
+                    lines: okf_jawn_contract::common::TextRange { start: 1, end: 1 },
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{}", error.message);
     Ok(())
 }
 
