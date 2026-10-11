@@ -66,6 +66,23 @@ use crate::conversion::ConversionRecord;
 use crate::portable::item_content_digest;
 use crate::storage::{BlameQuery, Committed, DiffQuery, LogQuery, StorageScope, TreeEdit};
 
+/// Which side of a comparison a citation is of.
+#[derive(Clone, Copy)]
+enum Side {
+    From,
+    To,
+}
+
+/// What one side of a unified hunk header covers.
+enum Hunk {
+    /// The lines the side holds.
+    Lines(TextRange),
+    /// A count of 0: the side holds no line of this hunk.
+    Empty,
+    /// A header that does not parse.
+    Unparsed,
+}
+
 /// How many heads a Snapshot tries while unrelated commits keep landing before its commit.
 const HEAD_ATTEMPTS: usize = 3;
 
@@ -554,13 +571,6 @@ async fn finish(
     })
 }
 
-/// Which side of a comparison a citation is of.
-#[derive(Clone, Copy)]
-enum Side {
-    From,
-    To,
-}
-
 /// The citations of what a comparison returned: for each change, the item at `old_path` at
 /// `from` and the item at `new_path` at `to`, each cited once per hunk of its side, or whole
 /// for a binary change, a side without a hunk or a hunk header that does not parse. A path that
@@ -605,40 +615,53 @@ fn side_selections(change: &FileChange, side: Side) -> Vec<Selection> {
     if change.binary {
         return vec![Selection::All];
     }
-    let mut selections = Vec::new();
-    let mut hunks = 0_usize;
-    for line in change.patch.lines().filter(|line| line.starts_with("@@")) {
-        hunks += 1;
-        match hunk_side(line, side) {
-            Some(None) => {}
-            Some(Some(range)) => selections.push(Selection::Lines { range }),
-            None => return vec![Selection::All],
-        }
-    }
-    if hunks == 0 {
+    let headers: Vec<&str> = change
+        .patch
+        .lines()
+        .filter(|line| line.starts_with("@@"))
+        .collect();
+    if headers.is_empty() {
         return vec![Selection::All];
+    }
+    let mut selections = Vec::new();
+    for header in headers {
+        match hunk_side(header, side) {
+            Hunk::Empty => {}
+            Hunk::Lines(range) => selections.push(Selection::Lines { range }),
+            Hunk::Unparsed => return vec![Selection::All],
+        }
     }
     selections
 }
 
-/// The lines one side of a unified hunk header `@@ -a,b +c,d @@` covers: `Some(None)` for a
-/// side with no line (a count of 0), `None` for a header that does not parse.
-fn hunk_side(header: &str, side: Side) -> Option<Option<TextRange>> {
+/// The lines one side of a unified hunk header `@@ -a,b +c,d @@` covers.
+fn hunk_side(header: &str, side: Side) -> Hunk {
+    let parsed = parse_side(header, side);
+    match parsed {
+        Some((_, 0)) => Hunk::Empty,
+        Some((start, count)) => match start
+            .checked_add(count)
+            .and_then(|next| next.checked_sub(1))
+        {
+            Some(end) => Hunk::Lines(TextRange { start, end }),
+            None => Hunk::Unparsed,
+        },
+        None => Hunk::Unparsed,
+    }
+}
+
+/// `start` and `count` of one side of a header.
+fn parse_side(header: &str, side: Side) -> Option<(u32, u32)> {
     let mut parts = header.split_whitespace();
     if parts.next()? != "@@" {
         return None;
     }
     let from = parts.next()?.strip_prefix('-')?;
     let to = parts.next()?.strip_prefix('+')?;
-    let (start, count) = span(match side {
+    span(match side {
         Side::From => from,
         Side::To => to,
-    })?;
-    if count == 0 {
-        return Some(None);
-    }
-    let end = start.checked_add(count)?.checked_sub(1)?;
-    Some(Some(TextRange { start, end }))
+    })
 }
 
 /// `start,count` of one side of a hunk header; a missing count is 1.
