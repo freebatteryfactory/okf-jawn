@@ -36,6 +36,9 @@ macro_rules! uuid {
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
+/// A stored shape of an item file the serializer does not write.
+type Shape = fn(&str) -> String;
+
 /// A check that accepts every candidate and counts how often it ran.
 #[derive(Default)]
 struct Counting {
@@ -55,6 +58,9 @@ struct Interloper {
     repository: std::path::PathBuf,
     moved_to: std::sync::Mutex<Option<git2::Oid>>,
 }
+
+/// The closing `---` of a stored file's frontmatter, followed by `\n`.
+const CLOSING: &str = "\n---\n";
 
 impl CandidateCheck for Counting {
     fn check(&self, root: &Path) -> Result<Vec<okf_jawn_contract::common::Warning>, ApiError> {
@@ -1933,9 +1939,6 @@ fn raw_write(
     Ok(Revision::try_from(commit.to_string())?)
 }
 
-/// A stored shape of an item file the serializer does not write.
-type Shape = fn(&str) -> String;
-
 /// Write a note through the store, then store its file again in `shape` and then once more in
 /// `shape` with body line 2 edited, both by raw commits. `body_start` must name the stored
 /// file's line holding the first body line, and blame of body line N must be libgit2's blame
@@ -2008,9 +2011,6 @@ async fn stored_shape_keeps_body_lines(shape: Shape) -> TestResult {
     }
     Ok(())
 }
-
-/// The closing `---` of a stored file's frontmatter, followed by `\n`.
-const CLOSING: &str = "\n---\n";
 
 #[tokio::test]
 async fn body_start_and_blame_count_a_stored_file_with_no_blank_line_after_its_frontmatter()

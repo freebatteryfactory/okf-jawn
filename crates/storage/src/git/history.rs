@@ -384,6 +384,11 @@ mod tests {
             // `---`, one line per key, `---`, the blank line.
             assert_eq!(offset, keys + 3, "{text:?}");
             assert_eq!(text.lines().nth(offset), Some("First."), "{text:?}");
+            assert_eq!(
+                Document::parse(&text)?.body.lines().next(),
+                Some("First."),
+                "{text:?}"
+            );
         }
         Ok(())
     }
