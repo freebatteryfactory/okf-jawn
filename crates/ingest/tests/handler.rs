@@ -29,7 +29,7 @@ mod job_handler {
     use okf_jawn_contract::import::JobState;
     use okf_jawn_contract::purge::{Purge, PurgeReport, PurgeState};
     use okf_jawn_contract::workspace::ArtifactKind;
-    use okf_jawn_core::conversion::{ConversionRecord, ConverterLimits};
+    use okf_jawn_core::conversion::{ConversionRecord, ConverterLimits, PixelSize, RetainedAsset};
     use okf_jawn_core::events::EventScope;
     use okf_jawn_core::jobs::{JobHandler, JobScope, JobSpec, NewJob, RecordStore};
     use okf_jawn_core::storage::{
@@ -52,6 +52,12 @@ mod job_handler {
     use crate::records::{Appended, FakeEvents, FakeRecords, job_id};
 
     type Built<T> = Result<T, Box<dyn std::error::Error>>;
+
+    /// A retained picture of a record, with its retained bytes.
+    type Kept = (RetainedAsset, Vec<u8>);
+
+    /// A picture as a test compares it: media type, caption, pixel size and bytes.
+    type Seen = (String, Option<String>, Option<PixelSize>, Vec<u8>);
 
     /// A `changed` notification as a test compares it: log, mutation, revision and item.
     type Announced = (
@@ -151,6 +157,7 @@ mod job_handler {
             dropped: Arc::new(AtomicUsize::new(0)),
             count_failed: Mutex::new(None),
             runs: AtomicUsize::new(0),
+            pictures: std::sync::atomic::AtomicBool::new(false),
         });
         let handler = IngestHandler::new(HandlerPorts {
             records: Arc::clone(&records) as Arc<dyn RecordStore>,
@@ -618,6 +625,103 @@ mod job_handler {
         let seen = seen.lock().map_err(|_| "poisoned")?.clone();
         assert_eq!(seen, [37; 5]);
         assert_eq!(events_of(&world, &EventKind::JobUpdated)?.len(), 1);
+        Ok(())
+    }
+
+    /// The pictures the record of `card` names, each with its retained bytes.
+    fn retained_pictures(world: &World, card: &SourceCard) -> Built<Vec<Kept>> {
+        let digest = some(
+            card.appearance.extraction.digest.as_ref(),
+            "the record digest",
+        )?;
+        let record: ConversionRecord = serde_json::from_slice(&world.blobs.bytes(digest)?)?;
+        Ok(record
+            .assets
+            .iter()
+            .map(|asset| Ok((asset.clone(), world.blobs.bytes(&asset.digest)?)))
+            .collect::<Result<Vec<_>, okf_jawn_contract::error::ApiError>>()?)
+    }
+
+    #[tokio::test]
+    async fn an_import_retains_each_windows_pictures_in_its_record_and_its_outputs() -> TestResult {
+        // Six pages in windows of four: two windows, one picture each.
+        let world = world_with(Some(6), Vec::new())?;
+        world.converter.pictures.store(true, Ordering::SeqCst);
+        let report = upload(&world, 190, "report.pdf", b"%PDF report")?;
+        let id = job(
+            &world,
+            190,
+            workspace_scope()?,
+            import_spec(vec![report], false)?,
+        )?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let cards = cards(&world)?;
+        let card = some(cards.last(), "the converted card")?;
+        let pictures = retained_pictures(&world, card)?;
+        // Both windows' pictures are merged into the record, in page order, each retained.
+        let seen: Vec<Seen> = pictures
+            .iter()
+            .map(|(asset, bytes)| {
+                (
+                    asset.media_type.clone(),
+                    asset.caption.clone(),
+                    asset.pixel_size,
+                    bytes.clone(),
+                )
+            })
+            .collect();
+        let size = Some(PixelSize {
+            width: 20,
+            height: 10,
+        });
+        assert_eq!(
+            seen,
+            [
+                (
+                    "image/png".to_owned(),
+                    Some("Figure 1".to_owned()),
+                    size,
+                    b"picture of window 1, run 0".to_vec()
+                ),
+                (
+                    "image/png".to_owned(),
+                    Some("Figure 5".to_owned()),
+                    size,
+                    b"picture of window 5, run 1".to_vec()
+                ),
+            ]
+        );
+        // And the job's outputs list each picture's object.
+        let completion = some(entry.completions.first(), "the completion")?;
+        for (asset, _bytes) in &pictures {
+            assert!(completion.outputs.contains(&asset.digest), "{asset:?}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_redigest_of_a_source_imported_before_pictures_were_kept_retains_them() -> TestResult
+    {
+        // The card was imported before assets were retained: its extraction names no record.
+        let (world, id, item_id) = redigest_world(38)?;
+        world.converter.pictures.store(true, Ordering::SeqCst);
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let completion = some(entry.completions.first(), "the completion")?;
+        let head = some(completion.revision.as_ref(), "the redigest's revision")?;
+        let card = some(
+            world.versions.item_at(head, item_id)?,
+            "the redigested card",
+        )?;
+        let pictures = retained_pictures(&world, &card)?;
+        assert_eq!(pictures.len(), 1);
+        let (asset, bytes) = some(pictures.first(), "the picture")?;
+        assert_eq!(bytes, b"picture of window 1, run 0");
+        assert_eq!(asset.caption.as_deref(), Some("Figure 1"));
+        assert!(completion.outputs.contains(&asset.digest));
         Ok(())
     }
 
@@ -2216,6 +2320,34 @@ mod job_handler {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn a_redigest_whose_original_changed_since_its_base_is_refused_for_good() -> TestResult {
+        let (world, id, item_id) = redigest_world(39)?;
+        // Someone replaces the card's original after the redigest was accepted.
+        let replacement = world.blobs.insert(b"%PDF a different report")?;
+        let mut card = some(world.versions.item_at(&base()?, item_id)?, "the card")?;
+        card.appearance.object = replacement.digest;
+        world
+            .versions
+            .edit_elsewhere_with(vec![TreeEdit::WriteSourceCard(Box::new(card))])?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        assert!(entry.completions.is_empty());
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("original"), "{message}");
+        assert!(message.contains("changed"), "{message}");
+        assert!(!retryable);
+        // Nothing of the redigest was written: the new original stands.
+        assert!(
+            world
+                .versions
+                .written()?
+                .iter()
+                .all(|(changes, _)| changes.author.subject != "owner")
+        );
+        Ok(())
+    }
     #[tokio::test]
     async fn a_redigest_of_a_deleted_card_is_refused_for_good() -> TestResult {
         let (world, id, item_id) = redigest_world(32)?;

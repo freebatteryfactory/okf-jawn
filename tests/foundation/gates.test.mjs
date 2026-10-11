@@ -219,12 +219,12 @@ test('what is binary is declared in .gitattributes, and git finds no line ending
  // Every other file is text by attribute, stored with LF, and git's own detection agrees it is text.
  const odd=files.filter(file=>!binary.includes(file)).filter(file=>file.attributes!=='text=auto eol=lf'||!['lf','none'].includes(file.index)||!['lf','none',''].includes(file.work));
  assert.deepEqual(odd.map(file=>`${file.path}: i/${file.index} w/${file.work} attr/${file.attributes}`),[],'declare a binary type in .gitattributes, or store the text with LF');
- // The binary files are the fixture documents, and each of their types is declared by extension.
+ // The binary files are the fixture documents (and a crate's own test fixtures), and each of their types is declared by extension.
  const attributes=await read('.gitattributes');
  const types=[...new Set(binary.map(file=>file.path.slice(file.path.lastIndexOf('.'))))].sort();
- assert.deepEqual(types,['.docx','.pdf','.png','.pptx','.xlsx']);
+ assert.deepEqual(types,['.docx','.jpg','.pdf','.png','.pptx','.xlsx']);
  for(const type of types)assert.match(attributes,new RegExp(`^\\*\\${type} binary$`,'m'),`${type} is not declared binary`);
- assert.ok(binary.every(file=>file.path.startsWith('tests/fixtures/documents/')),'a binary file outside the document fixtures');
+ assert.ok(binary.every(file=>file.path.startsWith('tests/fixtures/documents/')||/^crates\/[a-z]+\/tests\/fixtures\/[^/]+$/.test(file.path)),'a binary file outside the document fixtures and the crates\' own test fixtures');
 });
 test('the text guards read every directory and leave out only what .gitattributes declares binary',async t=>{
  const bytes=(...parts)=>Buffer.concat(parts.map(part=>typeof part==='string'?Buffer.from(part,'utf8'):Buffer.from(part)));

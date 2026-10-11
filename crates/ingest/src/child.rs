@@ -11,6 +11,13 @@
 //!   (`docling::pdf_text_layer_pages`, read by the location rule). The original's bytes move
 //!   into the converter, and the text layer reads them again once it is done, so one copy of
 //!   the original counts against the cap at a time.
+//! - The images (`write_assets`): each picture of the document is written once from its own
+//!   original bytes and media type, with docling's plain caption text from its lone export,
+//!   and paired with the JSON export's item of the same docling encoding (its lone export's
+//!   image data URI) only when that pairing gives the same assets every way; and, when the
+//!   settings ask for page images, each page render (`DoclingDocument::page_images`, rendered
+//!   at `images_scale`). The parsed export is dropped once the images are written, before the
+//!   text layer reads the original again.
 //! - The line runs (`protocol::Block`): each top-level node is rendered on its own with
 //!   `MarkdownStreamer::push`, whose chunks concatenate byte for byte to the Markdown export, so
 //!   each node's lines are known. A run is on a page only by the node's own provenance (a
@@ -31,26 +38,30 @@
 //! supervisor reads as the cap; Rust has no stable allocation-error hook for the failures that
 //! abort instead, whose runtime message the supervisor reads exactly.
 
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
 use docling::{
     ConversionError, DoclingDocument, DocumentConverter, ImageMode, InputFormat, MarkdownStreamer,
-    Node, SourceDocument,
+    Node, PictureImage, SourceDocument,
 };
 use okf_jawn_contract::common::TextRange;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{ConverterIssue, FailureReason, OcrPolicy};
+use okf_jawn_contract::read::AssetRole;
 use okf_jawn_core::conversion::ConversionStatus;
 
 use serde_json::Value;
 
 use crate::cap::ALLOCATION_FAILURE_MARKER;
+use crate::export::{picture_caption, picture_image_bytes};
 use crate::protocol::{
-    Block, EXPORT_FILE, MARKDOWN_FILE, Reply, Request, TEXT_LAYER_FILE, Task, Unlocated,
+    AssetFile, Block, EXPORT_FILE, MARKDOWN_FILE, Reply, Request, TEXT_LAYER_FILE, Task, Unlocated,
     write_reply,
 };
+use crate::record::sha256_digest;
 
 /// Why the child stops without a reply.
 #[derive(Debug)]
@@ -68,6 +79,16 @@ struct ItemCounts {
     tables: usize,
     pictures: usize,
 }
+
+/// docling's own encoding of a picture (the digest of its image data URI) with its caption.
+type Signature = (String, Option<String>);
+
+/// The pictures of the document and the export items that share one signature.
+type Group = (Vec<usize>, Vec<usize>);
+
+/// Each picture's export item, and the export items no picture took, each with whether its
+/// item is certain.
+type Pairing = (Vec<Option<usize>>, Vec<(usize, bool)>);
 
 impl From<ApiError> for Stop {
     fn from(error: ApiError) -> Self {
@@ -201,6 +222,203 @@ pub fn line_blocks(document: &DoclingDocument, markdown: &str) -> Vec<Block> {
     }
 }
 
+/// Write the document's images into `directory` and name each one.
+///
+/// - Every picture of the document (looking through groups, wrappers and rich table cells) is
+///   written once, from its own original bytes with its own media type (`PictureImage`): a
+///   JPEG stays a JPEG.
+/// - Its caption is docling's plain export text for that picture, read from its lone export
+///   (`export_alone`), so a picture the whole export leaves out keeps its own words too.
+/// - It is paired with an item of `export` (docling's JSON export of `document`) by docling's
+///   own encoding of the picture: the digest of the image data URI its lone export writes,
+///   with its caption. Pictures of equal encoding pair with the export's items of that
+///   encoding in order only when their original bytes are identical (so any pairing gives the
+///   same assets); otherwise none of them is paired. A paired picture names its item
+///   (`#/pictures/{n}`) and that encoding's digest; an unpaired one names none.
+/// - An export item holding an image that no picture of the document pairs with (a node the
+///   walk does not reach) is written from the export's own bytes, so no picture is lost.
+/// - Only when `page_images` is set, every page render, with its page.
+///
+/// # Errors
+/// Returns `Internal` when a picture's lone export holds no image, an exported picture's image
+/// is not a readable data URI with its media type and size, or a file cannot be written.
+pub fn write_assets(
+    document: &DoclingDocument,
+    export: &Value,
+    directory: &Path,
+    page_images: bool,
+) -> Result<Vec<AssetFile>, ApiError> {
+    let mut pictures = Vec::new();
+    collect_pictures(&document.nodes, &mut pictures);
+    // docling's own encoding of each picture, from its lone export, with its plain caption.
+    let mut signatures = Vec::new();
+    for (node, _image) in &pictures {
+        let alone = export_alone(node);
+        let item = alone
+            .get("pictures")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .ok_or_else(|| fault("a picture's own export holds no picture"))?;
+        signatures.push((encoding_of(item)?, picture_caption(&alone, item)));
+    }
+    let items = export.get("pictures").and_then(Value::as_array);
+    let (paired, unpaired_items) = pair_pictures(&pictures, &signatures, items, export)?;
+    let mut assets = Vec::new();
+    for (index, ((_node, image), (encoding, caption))) in
+        pictures.iter().zip(&signatures).enumerate()
+    {
+        let picture = paired.get(index).copied().flatten();
+        let file = format!("picture-{index}.{}", extension(&image.mimetype));
+        write_bytes(&directory.join(&file), &image.data)?;
+        assets.push(AssetFile {
+            file,
+            role: AssetRole::Picture,
+            media_type: image.mimetype.clone(),
+            width: image.width,
+            height: image.height,
+            page: None,
+            picture,
+            encoding: picture.map(|_| encoding.clone()),
+            caption: caption.clone(),
+        });
+    }
+    for (index, located) in unpaired_items {
+        let Some(item) = items.and_then(|items| items.get(index)) else {
+            continue;
+        };
+        assets.push(exported_only(export, item, index, located, directory)?);
+    }
+    if page_images {
+        for (page, image) in &document.page_images {
+            let Ok(page) = u32::try_from(*page) else {
+                continue;
+            };
+            let file = format!("page-{page}.{}", extension(&image.mimetype));
+            write_bytes(&directory.join(&file), &image.data)?;
+            assets.push(AssetFile {
+                file,
+                role: AssetRole::PageImage,
+                media_type: image.mimetype.clone(),
+                width: image.width,
+                height: image.height,
+                page: Some(page),
+                picture: None,
+                encoding: None,
+                caption: None,
+            });
+        }
+    }
+    Ok(assets)
+}
+
+/// Pair each picture of the document (`pictures`, with their `signatures`) with an export
+/// item of the same signature. Pictures of one signature pair with its items in order only
+/// when their original bytes and media types are identical, so any pairing gives the same
+/// assets; otherwise none of them is paired. Return each picture's item, and the items no
+/// picture took, each with whether its item is certain.
+fn pair_pictures(
+    pictures: &[(&Node, &PictureImage)],
+    signatures: &[Signature],
+    items: Option<&Vec<Value>>,
+    export: &Value,
+) -> Result<Pairing, ApiError> {
+    let mut groups: BTreeMap<Signature, Group> = BTreeMap::new();
+    for (index, signature) in signatures.iter().enumerate() {
+        groups.entry(signature.clone()).or_default().0.push(index);
+    }
+    for (index, item) in items.into_iter().flatten().enumerate() {
+        if item.get("image").is_some() {
+            let signature = (encoding_of(item)?, picture_caption(export, item));
+            groups.entry(signature).or_default().1.push(index);
+        }
+    }
+    let mut paired: Vec<Option<usize>> = vec![None; pictures.len()];
+    let mut unpaired_items = Vec::new();
+    for (nodes, exported) in groups.values() {
+        let image = |index: &usize| pictures.get(*index).map(|(_, image)| *image);
+        let identical = nodes.windows(2).all(|pair| match pair {
+            [first, second] => match (image(first), image(second)) {
+                (Some(left), Some(right)) => {
+                    left.data == right.data && left.mimetype == right.mimetype
+                }
+                _ => false,
+            },
+            _ => true,
+        });
+        let count = if identical {
+            nodes.len().min(exported.len())
+        } else {
+            0
+        };
+        for (node, item) in nodes.iter().zip(exported).take(count) {
+            if let Some(slot) = paired.get_mut(*node) {
+                *slot = Some(*item);
+            }
+        }
+        unpaired_items.extend(
+            exported
+                .iter()
+                .skip(nodes.len())
+                .map(|item| (*item, identical)),
+        );
+    }
+    Ok((paired, unpaired_items))
+}
+
+/// The digest of docling's own encoding of an exported picture: its image data URI.
+fn encoding_of(item: &Value) -> Result<String, ApiError> {
+    let uri = item
+        .get("image")
+        .and_then(|image| image.get("uri"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| fault("an exported picture's image has no data URI"))?;
+    Ok(sha256_digest(uri.as_bytes())?.as_str().to_owned())
+}
+
+/// An export picture item that no picture of the document pairs with, written from the
+/// export's own bytes and media type, named by its index when its item is certain.
+fn exported_only(
+    export: &Value,
+    item: &Value,
+    index: usize,
+    located: bool,
+    directory: &Path,
+) -> Result<AssetFile, ApiError> {
+    let image = item
+        .get("image")
+        .ok_or_else(|| fault("an exported picture holds no image"))?;
+    let bytes = picture_image_bytes(item)
+        .ok_or_else(|| fault("an exported picture's image is not a data URI"))?;
+    let media_type = image
+        .get("mimetype")
+        .and_then(Value::as_str)
+        .ok_or_else(|| fault("an exported picture's image names no media type"))?;
+    let size = |side: &str| {
+        image
+            .get("size")
+            .and_then(|size| size.get(side))
+            .and_then(Value::as_f64)
+            .and_then(pixels)
+            .ok_or_else(|| fault("an exported picture's image has no pixel size"))
+    };
+    let file = format!("picture-export-{index}.{}", extension(media_type));
+    write_bytes(&directory.join(&file), &bytes)?;
+    Ok(AssetFile {
+        file,
+        role: AssetRole::Picture,
+        media_type: media_type.to_owned(),
+        width: size("width")?,
+        height: size("height")?,
+        page: None,
+        picture: located.then_some(index),
+        encoding: if located {
+            Some(encoding_of(item)?)
+        } else {
+            None
+        },
+        caption: picture_caption(export, item),
+    })
+}
 /// Count the pages of a paginated original.
 fn page_count(request: &Request) -> Result<Reply, Stop> {
     let reply = |status, page_count, issues| Reply {
@@ -209,6 +427,7 @@ fn page_count(request: &Request) -> Result<Reply, Stop> {
         issues,
         blocks: Vec::new(),
         text_layer: false,
+        assets: Vec::new(),
     };
     match format_of(&request.file_name) {
         Some(InputFormat::Pdf) => {
@@ -241,6 +460,7 @@ fn convert(request: &Request, directory: &Path) -> Result<Reply, Stop> {
         issues,
         blocks: Vec::new(),
         text_layer: false,
+        assets: Vec::new(),
     };
     let Some(format) = format_of(&request.file_name) else {
         return Ok(unconverted(ConversionStatus::Unsupported, Vec::new()));
@@ -280,11 +500,22 @@ fn convert(request: &Request, directory: &Path) -> Result<Reply, Stop> {
     };
     let markdown = result.document.export_to_markdown();
     write_text(&directory.join(MARKDOWN_FILE), &markdown)?;
-    write_text(
-        &directory.join(EXPORT_FILE),
-        &result.document.export_to_json(),
-    )?;
+    // The same text `DoclingDocument::export_to_json` writes, from the one export value the
+    // images are read from too.
+    let export = result.document.export_to_json_value();
+    let exported = serde_json::to_string_pretty(&export)
+        .map_err(|error| fault(&format!("the JSON export did not serialize: {error}")))?;
+    write_text(&directory.join(EXPORT_FILE), &exported)?;
+    drop(exported);
     let blocks = line_blocks(&result.document, &markdown);
+    let assets = write_assets(
+        &result.document,
+        &export,
+        directory,
+        request.settings.page_images,
+    )?;
+    // One copy at a time: the parsed export goes before the text layer reads the original.
+    drop(export);
     let text_layer = format == InputFormat::Pdf
         && match docling::pdf_text_layer_pages(
             &read_source(request)?,
@@ -310,6 +541,7 @@ fn convert(request: &Request, directory: &Path) -> Result<Reply, Stop> {
         issues,
         blocks,
         text_layer,
+        assets,
     })
 }
 
@@ -427,6 +659,51 @@ fn own_item(alone: &Value, written: &ItemCounts) -> Option<(String, Option<Strin
     Some((format!("#/{array}/{}", before.checked_add(index)?), text))
 }
 
+/// Every picture of `nodes` that has its own image, with that image: a picture inside a group,
+/// a furniture, comment, location or provenance wrapper, or a rich table cell, whether or not
+/// the JSON export holds it.
+fn collect_pictures<'a>(nodes: &'a [Node], into: &mut Vec<(&'a Node, &'a PictureImage)>) {
+    for node in nodes {
+        match node {
+            Node::Picture {
+                image: Some(image), ..
+            } => into.push((node, image)),
+            Node::Group { children, .. } => collect_pictures(children, into),
+            Node::Furniture { inner, .. }
+            | Node::Commented { inner, .. }
+            | Node::Located { inner, .. }
+            | Node::Prov { inner, .. } => {
+                collect_pictures(std::slice::from_ref(inner.as_ref()), into);
+            }
+            Node::Table(table) => {
+                for cell in table.cell_blocks.iter().flatten().flatten() {
+                    collect_pictures(cell, into);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A pixel count the export spells as a number: `f64`'s `Display` writes a whole value with
+/// no fraction (`40` for `40.0`), so only a whole, non-negative count within `u32` reads back.
+fn pixels(value: f64) -> Option<u32> {
+    value.to_string().parse::<u32>().ok()
+}
+
+/// The file extension an image of `media_type` is written with.
+fn extension(media_type: &str) -> &'static str {
+    match media_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/tiff" => "tiff",
+        "image/bmp" => "bmp",
+        _ => "bin",
+    }
+}
+
 /// Whether a node is a table, looking through location wrappers.
 fn is_table(node: &Node) -> bool {
     match node {
@@ -465,6 +742,12 @@ fn issue(component_type: &str, module_name: &str, message: &str) -> ConverterIss
 /// Write a text output.
 fn write_text(path: &Path, text: &str) -> Result<(), ApiError> {
     std::fs::write(path, text)
+        .map_err(|error| fault(&format!("{} could not be written: {error}", path.display())))
+}
+
+/// Write a binary output.
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), ApiError> {
+    std::fs::write(path, bytes)
         .map_err(|error| fault(&format!("{} could not be written: {error}", path.display())))
 }
 
