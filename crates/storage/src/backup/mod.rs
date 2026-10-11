@@ -33,7 +33,8 @@ use okf_jawn_contract::identity::{Digest, MutationId, TenantId};
 use okf_jawn_contract::workspace::RestoreReport;
 use okf_jawn_core::credentials::secret_hash;
 use okf_jawn_core::ports::PortFuture;
-use okf_jawn_core::storage::{Backups, ObjectInfo, ObjectRead, StorageScope};
+use okf_jawn_core::search::SearchIndex as _;
+use okf_jawn_core::storage::{Backups, ObjectInfo, ObjectRead, StorageScope, VersionStore as _};
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::runtime::Handle;
 
@@ -106,8 +107,8 @@ impl StorageBackups {
 
     /// The replacement restore: the installation archive first (identity, purge records,
     /// tenant events under their own keys, connectors restored as revoked, since no secret is
-    /// kept), then each workspace archive under its own identity. Run it with no service on the
-    /// data directory. Run again (after a stop in a later workspace, say), it accepts and leaves
+    /// kept), then each workspace archive under its own identity, whose restored head is then
+    /// indexed for search. Run it with no service on the data directory. Run again (after a stop in a later workspace, say), it accepts and leaves
     /// as it is a workspace this same archive file already restored in full, unless a purge of
     /// it is now recorded.
     ///
@@ -141,6 +142,7 @@ impl StorageBackups {
                     .ok_or_else(|| archive::invalid("the installation archive names no tenant"))?,
                 workspace_id: opened.workspace()?.workspace_id,
             };
+            let restored_scope = scope.clone();
             let storage = self.storage.clone();
             let runtime = Handle::current();
             let path = path.clone();
@@ -159,6 +161,15 @@ impl StorageBackups {
             })
             .await
             .map_err(|error| internal(format!("a restore task stopped: {error}")))??;
+            // The search index is derived and starts empty in a replaced directory: the
+            // restored head is indexed at once, so search and links answer there without a
+            // rebuild (older revisions follow core's indexing window like any revision).
+            // Indexing an indexed revision again is a no-op, so a run again indexes too.
+            let head = self.storage.versions().head(&restored_scope).await?;
+            self.storage
+                .search()
+                .index_revision(&restored_scope, head)
+                .await?;
             reports.push(report);
         }
         Ok(reports)

@@ -3,7 +3,8 @@
 //! Stage 1b design section 8: "a `VACUUM INTO` snapshot of the SQLite records filtered to that
 //! workspace before it is published (temporary file, integrity check, publish on success)". The
 //! live database is copied with `VACUUM INTO` into a private file; every table not listed in
-//! `WORKSPACE_TABLES` is emptied and the listed ones keep only the workspace's rows; the result
+//! `WORKSPACE_TABLES` is emptied and the listed ones keep only the workspace's rows (a kept job
+//! loses the download descriptor of an artifact the archive leaves out); the result
 //! is vacuumed again into a second file, so nothing removed is left in free pages; that file is
 //! checked (`integrity_check`, `foreign_key_check`, schema version) before the caller publishes
 //! it.
@@ -165,6 +166,18 @@ pub(crate) fn filter(
                 .execute(&query, params![tenant, workspace])
                 .map_err(|error| sql(&error))?;
         }
+        // A kept job keeps no download descriptor of an artifact the archive leaves out (a
+        // workspace backup): it stays finished, with no artifact, so a restored job never
+        // advertises a download that answers not found.
+        transaction
+            .execute(
+                "UPDATE jobs SET record = json_remove(record, '$.artifact')
+                 WHERE json_extract(record, '$.artifact.artifact_id') IS NOT NULL
+                   AND json_extract(record, '$.artifact.artifact_id')
+                       NOT IN (SELECT artifact_id FROM artifacts)",
+                [],
+            )
+            .map_err(|error| sql(&error))?;
         transaction.commit().map_err(|error| sql(&error))?;
         let target = directory.join("records.sqlite");
         connection

@@ -3171,5 +3171,142 @@ async fn backup_restored_tenant_events_keep_their_order() -> TestResult {
     Ok(())
 }
 
+/// PR #20 Codex P2 (`snapshot.rs:143`): a workspace archive leaves out the workspace's own
+/// backup artifacts, and the finished backup job it keeps loses that artifact's download
+/// descriptor with it. After a replacement restore the job is finished with no artifact, not
+/// one that advertises a download answering not found.
+#[tokio::test]
+async fn backup_a_restored_backup_job_advertises_no_download_it_lost() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let (workspace, job) = {
+        let storage = Storage::open(directory.path())?;
+        let (workspace, _) = create(&storage, "local", 1, "Notes").await?;
+        let scope = JobScope::Workspace(workspace.clone());
+        let records = storage.records();
+        let job = records
+            .create_job(
+                &scope,
+                NewJob {
+                    mutation_id: uuid!(30)?,
+                    initiator: person("ana"),
+                    spec: JobSpec::BackupWorkspace,
+                },
+            )
+            .await?;
+        let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+        let archive = storage
+            .backups()
+            .write_workspace_archive(&workspace, uuid!(31)?)
+            .await?;
+        let artifact = records
+            .record_artifact(
+                &scope,
+                uuid!(32)?,
+                NewArtifact {
+                    kind: ArtifactKind::WorkspaceBackup,
+                    object: archive,
+                    media_type: "application/zip".to_owned(),
+                    created_by_job: job.id,
+                },
+            )
+            .await?;
+        let completed = records
+            .complete_job(JobCompletion {
+                lease: claimed.lease,
+                revision: None,
+                item_ids: Vec::new(),
+                artifact: Some(artifact.id),
+                restore: None,
+                outputs: Vec::new(),
+                warnings: Vec::new(),
+            })
+            .await?;
+        assert!(
+            completed.artifact.is_some(),
+            "the live job names its backup"
+        );
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        (workspace, job.id)
+    };
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let (installation, archive) = set_of(output.path(), &workspace);
+    restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await?;
+    let restored_job = restored
+        .records()
+        .get_job(&JobScope::Workspace(workspace.clone()), job)
+        .await?;
+    assert_eq!(
+        restored_job.state,
+        okf_jawn_contract::import::JobState::Succeeded
+    );
+    assert!(
+        restored_job.artifact.is_none(),
+        "no download the restored workspace cannot serve: {:?}",
+        restored_job.artifact
+    );
+    Ok(())
+}
+
+/// PR #20 Codex P1 (`backup/mod.rs:164`): the search index starts empty in a replaced data
+/// directory; a replacement restore indexes each restored workspace's head, so search there
+/// answers at once, without a rebuild.
+#[tokio::test]
+async fn backup_a_replacement_restore_indexes_the_restored_head() -> TestResult {
+    use okf_jawn_core::search::{SearchIndex, SearchQuery};
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let (workspace, head) = {
+        let storage = Storage::open(directory.path())?;
+        let (workspace, created) = create(&storage, "local", 1, "Notes").await?;
+        let head = commit(
+            &storage,
+            &workspace,
+            3,
+            &created,
+            vec![note(uuid!(10)?, "notes/plan.md", "The harbor plan.")?],
+        )
+        .await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        (workspace, head)
+    };
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let (installation, archive) = set_of(output.path(), &workspace);
+    restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await?;
+    let found = restored
+        .search()
+        .search(
+            &workspace,
+            SearchQuery {
+                revision: head,
+                text: "harbor".to_owned(),
+                folder: None,
+                include_archived: false,
+                extraction: None,
+                page: okf_jawn_core::storage::Page {
+                    cursor: None,
+                    limit: 20,
+                },
+            },
+        )
+        .await?;
+    assert_eq!(found.hits.len(), 1, "the restored note is found");
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
