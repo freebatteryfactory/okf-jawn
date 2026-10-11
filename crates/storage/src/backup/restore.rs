@@ -71,8 +71,8 @@ struct Target {
     objects: Vec<Digest>,
     /// The objects the restored history's cards name.
     history: BTreeSet<Digest>,
-    /// For each of the archive's objects that reads as a conversion record, the objects it
-    /// names.
+    /// For each of the archive's objects that a restored card names as its conversion record,
+    /// the objects it names (`references::record_tokens`).
     followed: BTreeMap<Digest, BTreeSet<Digest>>,
     /// For a replacement restore, the SHA-256 of the archive file, recorded with the rows.
     replaced_from: Option<Digest>,

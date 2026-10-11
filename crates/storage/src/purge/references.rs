@@ -8,15 +8,20 @@
 //! retained artifacts, uploads, sandbox capabilities, written histories, written workspace
 //! archives and job outputs).
 //!
-//! References are read as every 64-character lower-case hexadecimal token of those files, not
-//! through one decoded shape: a file written by an older build still counts, and a token that
-//! only looks like a digest can only keep an object, or name one the target already held. A
-//! conversion record is followed one level (`record_tokens`): an object of at most
-//! `RECORD_LIMIT` bytes whose bytes start with `{` is scanned in memory for tokens; a larger one
-//! only when a source card names it as its conversion record (`extraction.digest`), and then
-//! its two lists are read structurally, streamed (`conversion_objects`). A large upload or any
-//! other object is never read as a record, and no reading holds memory that grows with an
-//! object's size.
+//! References are read as every 64-character lower-case hexadecimal token of those files (the
+//! cards in Git and the rows), not through one decoded shape: a file written by an older build
+//! still counts, and a token that only looks like a digest can only keep an object, or name one
+//! the target already held.
+//!
+//! A conversion record is followed one level (`record_tokens`), and only an object a source card
+//! names as its conversion record (`extraction.digest`, `History::records`), whatever its size:
+//! at most `RECORD_LIMIT` bytes, its tokens are scanned in memory; larger, its two lists are read
+//! structurally, streamed (`conversion_objects`). Any other object (an upload, an artifact, a
+//! derived dataset, a pending put) is never opened for references, whatever it holds, so a file
+//! a person uploads cannot keep or copy another workspace's object. No row needs following: a
+//! conversion job's completion lists the record, its structured exports and its assets as job
+//! outputs, each its own row (`RecordStore::complete_job`), and before it, they are pending puts
+//! of the writing workspace.
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, Read as _};
@@ -39,7 +44,7 @@ pub(crate) struct History {
     /// Digest tokens of every source appearance on those commits.
     pub(crate) objects: BTreeSet<Digest>,
     /// The conversion records those appearances name (`extraction.digest`), read structurally:
-    /// the only objects over `RECORD_LIMIT` that are ever read as records.
+    /// the only objects ever opened as records, at any size.
     pub(crate) records: BTreeSet<Digest>,
 }
 
@@ -93,7 +98,8 @@ type Visit<'a> = dyn FnMut(Digest, &'static str) -> Result<(), ApiError> + 'a;
 /// key (`None` past `KEY_LIMIT` bytes) and the first byte of its value, it reads the value.
 type Member<'a, S> = dyn FnMut(&mut S, Option<&[u8]>, u8) -> Result<(), Stop> + 'a;
 
-/// The largest object scanned in memory for digest tokens as a possible conversion record.
+/// The largest named conversion record scanned in memory for digest tokens; a larger one is
+/// streamed.
 const RECORD_LIMIT: u64 = 64 << 20;
 /// The tree that holds the source appearance of each card.
 const SOURCES_TREE: &str = ".okf/sources";
@@ -513,8 +519,8 @@ fn scan(
     Ok(())
 }
 
-/// Add to `objects` what each held object of `objects` names when it reads as a conversion
-/// record (`record_tokens`); `records` are those a source card names as its conversion record.
+/// Add to `objects` what each object of `objects` that is also in `records` (those a source card
+/// names as its conversion record) names (`record_tokens`); no other object is opened.
 /// Blocking.
 pub(crate) fn follow_records(
     blobs: &LocalBlobs,
@@ -535,13 +541,12 @@ pub(crate) fn follow_records(
     Ok(())
 }
 
-/// What the held object `digest` names when it reads as a conversion record; none otherwise.
-/// Blocking.
+/// What the held object `digest` names as a conversion record, when `named_as_record` (a source
+/// card names it as its conversion record). Otherwise nothing, and the object is not opened,
+/// whatever its size or bytes. Blocking.
 /// - At most `RECORD_LIMIT` bytes, starting with `{`: its digest tokens, scanned in memory.
-/// - Larger: only when `named_as_record` (a source card names it as its conversion record), the
-///   objects its two lists name (`conversion_objects`), each kept only when the store holds it,
-///   so memory is bounded by the tenant's objects, not by the record. A large upload or any
-///   other object is never read as a record.
+/// - Larger: the objects its two lists name (`conversion_objects`), each kept only when the
+///   store holds it, so memory is bounded by the tenant's objects, not by the record.
 pub(crate) fn record_tokens(
     blobs: &LocalBlobs,
     tenant: &TenantId,
@@ -549,19 +554,20 @@ pub(crate) fn record_tokens(
     named_as_record: bool,
 ) -> Result<BTreeSet<Digest>, ApiError> {
     let mut found = BTreeSet::new();
+    if !named_as_record {
+        return Ok(found);
+    }
     let path = blobs.local_path(tenant, digest)?;
     let Ok(metadata) = std::fs::metadata(&path) else {
         return Ok(found);
     };
     if metadata.len() > RECORD_LIMIT {
-        if named_as_record {
-            conversion_objects(blobs, tenant, digest, &mut |named, _| {
-                if blobs.local_path(tenant, &named)?.is_file() {
-                    found.insert(named);
-                }
-                Ok(())
-            })?;
-        }
+        conversion_objects(blobs, tenant, digest, &mut |named, _| {
+            if blobs.local_path(tenant, &named)?.is_file() {
+                found.insert(named);
+            }
+            Ok(())
+        })?;
         return Ok(found);
     }
     let mut bytes = Vec::new();
