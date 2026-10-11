@@ -64,11 +64,12 @@ pub(crate) struct InstallationManifest {
     pub(crate) purges: Vec<(String, String, String, String, String)>,
     /// Tenant-level event records, oldest first.
     pub(crate) events: Vec<String>,
-    /// Each event's sequence number in the source installation, in the order of `events`: with
-    /// the source identity it names the event, so a restore inserts each event once whatever
-    /// archive file carries it.
+    /// Each event's permanent key (`events.event_key`), in the order of `events`, copied
+    /// verbatim: a restore inserts each event once under it, whatever archive file or
+    /// installation carries it. Empty in an archive written before keys existed (or from a
+    /// records database older than them); a restore then keys each event by its position.
     #[serde(default)]
-    pub(crate) event_seqs: Vec<i64>,
+    pub(crate) event_keys: Vec<String>,
 }
 
 /// An opened archive.
@@ -255,7 +256,7 @@ pub(crate) fn installation_level_of(
         connectors,
         purges: Vec::new(),
         events: Vec::new(),
-        event_seqs: Vec::new(),
+        event_keys: Vec::new(),
     })
 }
 
@@ -289,18 +290,29 @@ pub(crate) fn installation_of(
         .map_err(|error| sql(&error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| sql(&error))?;
-    let mut statement = connection
-        .prepare(
-            "SELECT seq, record FROM events WHERE tenant_id = ?1 AND workspace_id IS NULL
-             ORDER BY seq",
+    // A records database older than event keys (the pre-migration set reads one) has none: its
+    // archive is written without keys, as an archive of that build was.
+    let keyed: bool = connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('events') WHERE name = 'event_key')",
+            [],
+            |row| row.get(0),
         )
         .map_err(|error| sql(&error))?;
-    let rows: Vec<(i64, String)> = statement
+    let key = if keyed { "event_key" } else { "NULL" };
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT {key}, record FROM events WHERE tenant_id = ?1 AND workspace_id IS NULL
+             ORDER BY seq"
+        ))
+        .map_err(|error| sql(&error))?;
+    let rows: Vec<(Option<String>, String)> = statement
         .query_map([tenant.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(|error| sql(&error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| sql(&error))?;
-    let (event_seqs, events) = rows.into_iter().unzip();
+    let (keys, events): (Vec<Option<String>>, Vec<String>) = rows.into_iter().unzip();
+    let event_keys = keys.into_iter().flatten().collect();
     Ok(InstallationManifest {
         format: INSTALLATION_FORMAT.to_owned(),
         version: ARCHIVE_VERSION,
@@ -309,7 +321,7 @@ pub(crate) fn installation_of(
         connectors,
         purges,
         events,
-        event_seqs,
+        event_keys,
     })
 }
 

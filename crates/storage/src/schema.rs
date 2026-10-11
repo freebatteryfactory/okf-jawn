@@ -279,14 +279,68 @@ CREATE TABLE sessions (
 ) STRICT;
 ";
 
-/// Records schema, version 2: the progress of each purge, so a purge resumes by repeating;
-/// the archive each backup mutation wrote; the report of each restore mutation; and the
+/// Records schema, version 2: each event's permanent key; the progress of each purge, so a
+/// purge resumes by repeating; the archive each backup mutation wrote; the report of each
+/// restore mutation; the archive each replacement restore restored a workspace from; and the
 /// object puts of a workspace whose referencing record has not landed yet (`puts`).
+///
+/// `event_key` names an event wherever it travels: a fresh UUID assigned once, when the event is
+/// first appended, and copied verbatim by every archive and restore, so a restore never
+/// recomputes it (`replay_key` keeps its own job, the mutation dedupe of `EventLog::append`).
+/// SQLite cannot add a unique, non-null column in place, so the table is rebuilt with every
+/// row, its sequence and the log's high-water mark kept. An event that existed before this step
+/// gets a key here: a tenant-level one the key an installation archive without keys gives it
+/// (`legacy/<installation identity or no-identity>/<tenant>/<position in the tenant's log>`, see
+/// `backup::install`), so a backup set written before the upgrade restores over the upgraded
+/// directory without repeating it; a workspace event a fresh UUID.
 ///
 /// `plan` is written once, before anything is removed: what the target references cannot be
 /// read again after its repository and rows are gone. It holds identities and counts, never
 /// content. `step` is the last step completed; `report` is present once the purge is done.
+///
+/// `replacement_restores` names, for each workspace a replacement restore completed, the SHA-256
+/// of the archive file it restored and the report it gave, written in the transaction of the
+/// workspace's rows: the same restore run again accepts only a workspace this same archive
+/// restored.
 const RECORDS_V2: &str = r"
+CREATE TABLE keyed_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT,
+    replay_key TEXT UNIQUE,
+    event_key TEXT NOT NULL UNIQUE,
+    record TEXT NOT NULL
+) STRICT;
+INSERT INTO keyed_events (seq, tenant_id, workspace_id, replay_key, event_key, record)
+SELECT seq, tenant_id, workspace_id, replay_key,
+    CASE WHEN workspace_id IS NULL THEN
+        'legacy/'
+        || coalesce((SELECT subject || '/' || created_at FROM installation), 'no-identity')
+        || '/' || tenant_id || '/'
+        || (row_number() OVER (PARTITION BY tenant_id, workspace_id IS NULL ORDER BY seq) - 1)
+    ELSE
+        lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4'
+        || substr(lower(hex(randomblob(2))), 2) || '-'
+        || substr('89ab', 1 + (random() & 3), 1) || substr(lower(hex(randomblob(2))), 2) || '-'
+        || lower(hex(randomblob(6)))
+    END,
+    record
+FROM events;
+DELETE FROM sqlite_sequence WHERE name = 'keyed_events';
+INSERT INTO sqlite_sequence (name, seq) SELECT 'keyed_events', seq FROM sqlite_sequence
+    WHERE name = 'events';
+DROP TABLE events;
+ALTER TABLE keyed_events RENAME TO events;
+CREATE INDEX events_by_log ON events (tenant_id, workspace_id, seq);
+
+CREATE TABLE replacement_restores (
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    archive TEXT NOT NULL,
+    report TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, workspace_id)
+) STRICT;
+
 CREATE TABLE purge_progress (
     purge_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,

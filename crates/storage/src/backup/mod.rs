@@ -104,12 +104,16 @@ impl StorageBackups {
     }
 
     /// The replacement restore: the installation archive first (identity, purge records,
-    /// tenant events, connectors restored as revoked, since no secret is kept), then each
-    /// workspace archive under its own identity. Run it with no service on the data directory.
+    /// tenant events under their own keys, connectors restored as revoked, since no secret is
+    /// kept), then each workspace archive under its own identity. Run it with no service on the
+    /// data directory. Run again (after a stop in a later workspace, say), it accepts and leaves
+    /// as it is a workspace this same archive file already restored in full, unless a purge of
+    /// it is now recorded.
     ///
     /// # Errors
     /// Returns `InvalidInput` for an archive this build cannot read or of another tenant, and
-    /// `Conflict` for a workspace that exists or that a completed purge removed.
+    /// `Conflict` for a workspace any recorded purge names (finished or not) or that exists and
+    /// was not restored from this same archive.
     pub async fn restore_replacement(
         &self,
         installation: &Path,
@@ -145,10 +149,10 @@ impl StorageBackups {
                 .staging_path()
                 .join(format!("restore-{}", scope.workspace_id.0));
             let report = tokio::task::spawn_blocking(move || {
+                let mode = Mode::Replace(crate::blobs::hash_file(&path)?);
                 std::fs::create_dir_all(&staging)
                     .map_err(|error| io_error("create", &staging, &error))?;
-                let restored =
-                    restore::restore(&storage, &runtime, &scope, &path, &staging, &Mode::Replace);
+                let restored = restore::restore(&storage, &runtime, &scope, &path, &staging, &mode);
                 let _ = std::fs::remove_dir_all(&staging);
                 restored.map(|(report, _)| report)
             })
@@ -663,32 +667,49 @@ fn install(
             )
             .map_err(|error| sql(&error))?;
     }
-    // Each archived tenant event is keyed by its own identity: the source installation's
-    // identity row and the event's sequence number there. Two archives of an unchanged
-    // installation restore it once, and another installation's events never collide with it.
-    // (An archive without sequence numbers falls back to the position.)
-    let source = manifest.identity.as_ref().map_or_else(
-        || "no-identity".to_owned(),
-        |(subject, created_at)| format!("{subject}/{created_at}"),
-    );
+    // Each archived tenant event is inserted under its own permanent key, copied verbatim and
+    // never recomputed: any archive of any installation that carries the event restores it
+    // once, whatever sequence numbers the installations gave it.
     for (position, record) in manifest.events.iter().enumerate() {
-        let event = manifest
-            .event_seqs
-            .get(position)
-            .map_or_else(|| format!("p{position}"), ToString::to_string);
         transaction
             .execute(
-                "INSERT INTO events (tenant_id, workspace_id, replay_key, record)
-                 VALUES (?1, NULL, ?3, ?2) ON CONFLICT (replay_key) DO NOTHING",
-                params![
-                    tenant,
-                    record,
-                    format!("installation-restore/{source}/{event}")
-                ],
+                "INSERT INTO events (tenant_id, workspace_id, event_key, record)
+                 VALUES (?1, NULL, ?2, ?3) ON CONFLICT (event_key) DO NOTHING",
+                params![tenant, event_key(manifest, &tenant, position)?, record],
             )
             .map_err(|error| sql(&error))?;
     }
     Ok(())
+}
+
+/// The key of the tenant event at `position` of `manifest`: the archived key; or, for an archive
+/// without keys (written before they existed), the position in the tenant's log under the
+/// source installation, the key records schema 2 gave every tenant event that existed before it
+/// (`schema::RECORDS_V2`). A position is stable for one installation, whose tenant log is
+/// append-only, but not across two installations restored from one set (the known limit of
+/// archives without keys).
+fn event_key(
+    manifest: &InstallationManifest,
+    tenant: &str,
+    position: usize,
+) -> Result<String, ApiError> {
+    if manifest.event_keys.is_empty() {
+        let source = manifest.identity.as_ref().map_or_else(
+            || "no-identity".to_owned(),
+            |(subject, created_at)| format!("{subject}/{created_at}"),
+        );
+        return Ok(format!("legacy/{source}/{tenant}/{position}"));
+    }
+    if manifest.event_keys.len() != manifest.events.len() {
+        return Err(archive::invalid(
+            "its events and their keys do not correspond",
+        ));
+    }
+    manifest
+        .event_keys
+        .get(position)
+        .cloned()
+        .ok_or_else(|| archive::invalid("an event has no key"))
 }
 
 pub(crate) mod archive;

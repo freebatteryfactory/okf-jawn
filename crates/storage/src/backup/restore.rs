@@ -17,8 +17,11 @@
 //!   of this tenant is refused when its workspace still exists or a purge names it: purged
 //!   content never comes back through an import.
 //! - **Replacement** restores the workspace under its own identity with every archived row,
-//!   and refuses an archive of another tenant, of a workspace that exists, or of one a
-//!   completed purge removed.
+//!   and records, with those rows, the SHA-256 of the archive file it restored them from
+//!   (`replacement_restores`). It refuses, in this order: an archive of another tenant; a
+//!   workspace any recorded purge names, finished or not; and a workspace that exists, unless
+//!   that record names this same archive file and its head is still the archive's, which is the
+//!   same restore run again after a stop in a later workspace: it is accepted as it is.
 //!
 //! Known gap: a View's bindings name its workspace, and the on-disk form of a View document
 //! is not decided yet (core-cli M1.6), so an import does not rewrite them.
@@ -49,8 +52,9 @@ use crate::storage::Storage;
 pub(crate) enum Mode {
     /// Into a blank workspace of this installation, for these editors, under this mutation.
     Import(Vec<String>, MutationId),
-    /// Under its own identity, after the installation archive.
-    Replace,
+    /// Under its own identity, after the installation archive, from the archive file with this
+    /// SHA-256.
+    Replace(Digest),
 }
 
 /// Where archived rows go: the target tenant and workspace, and the archive's own workspace
@@ -66,6 +70,8 @@ struct Target {
     /// For each of the archive's objects that reads as a conversion record, the objects it
     /// names.
     followed: BTreeMap<Digest, BTreeSet<Digest>>,
+    /// For a replacement restore, the SHA-256 of the archive file, recorded with the rows.
+    replaced_from: Option<Digest>,
 }
 
 /// Tables an import copies into the target workspace.
@@ -95,12 +101,9 @@ pub(crate) fn restore(
     let manifest = opened.workspace()?;
     // A replacement restore run again after a crash in a later workspace accepts a workspace
     // this same archive already restored in full, and leaves it as it is.
-    if matches!(mode, Mode::Replace)
-        && let Some(report) = restored_already(storage, runtime, scope, &manifest)?
-    {
+    if let Some(report) = refuse(storage, runtime, scope, &manifest, mode)? {
         return Ok((report, manifest));
     }
-    refuse(storage, runtime, scope, &manifest, mode)?;
     // Each object is pinned to the restored workspace while the import runs, and recorded as a
     // pending put (`puts`) until the import's rows land.
     let mut pinned = Vec::new();
@@ -175,16 +178,20 @@ fn put_back(
             objects: manifest.objects.clone(),
             history: restored_history,
             followed,
+            replaced_from: match mode {
+                Mode::Import(..) => None,
+                Mode::Replace(digest) => Some(digest.clone()),
+            },
         };
         let editors = match mode {
             Mode::Import(editors, _) => {
                 Some(serde_json::to_string(editors).map_err(|error| crate::db::json(&error))?)
             }
-            Mode::Replace => None,
+            Mode::Replace(_) => None,
         };
         let mutation = match mode {
             Mode::Import(_, mutation) => Some(*mutation),
-            Mode::Replace => None,
+            Mode::Replace(_) => None,
         };
         runtime.block_on(storage.records.call(move |connection| {
             copy_rows(
@@ -200,14 +207,17 @@ fn put_back(
     Ok((report, manifest.clone()))
 }
 
-/// The report of a workspace that a replacement restore of this archive already completed: its
-/// record exists (a restore's rows commit last, all or nothing) and its accepted head is the
-/// archive's. `None` otherwise, so a workspace with other content is refused as before.
+/// The report of a workspace that a replacement restore of the archive file `archive` already
+/// completed: the record of that restore (`replacement_restores`, written with the workspace's
+/// rows, all or nothing) names this same archive file, and the workspace's accepted head is
+/// still the archive's. `None` otherwise (a workspace never restored here, restored from
+/// another archive, or moved on since), so it is refused as existing.
 fn restored_already(
     storage: &Storage,
     runtime: &Handle,
     scope: &StorageScope,
     manifest: &WorkspaceManifest,
+    archive: &Digest,
 ) -> Result<Option<RestoreReport>, ApiError> {
     let main = manifest
         .references
@@ -216,45 +226,45 @@ fn restored_already(
         .map(|(_, commit)| oid(commit))
         .transpose()?;
     let (tenant, workspace) = crate::db::scope_key(scope);
-    let (exists, drafts): (bool, i64) = runtime.block_on(storage.records.call(move |connection| {
+    let digest = archive.as_str().to_owned();
+    let recorded: Option<String> = runtime.block_on(storage.records.call(move |connection| {
         connection
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM workspaces WHERE tenant_id = ?1 AND workspace_id = ?2),
-                        (SELECT count(*) FROM drafts WHERE tenant_id = ?1 AND workspace_id = ?2)",
-                params![tenant, workspace],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT restored.report FROM replacement_restores AS restored
+                 JOIN workspaces USING (tenant_id, workspace_id)
+                 WHERE restored.tenant_id = ?1 AND restored.workspace_id = ?2
+                   AND restored.archive = ?3",
+                params![tenant, workspace, digest],
+                |row| row.get(0),
             )
+            .optional()
             .map_err(|error| sql(&error))
     }))?;
-    if !exists || main.is_none() || !storage.repositories.path(scope).exists() {
+    let Some(recorded) = recorded else {
+        return Ok(None);
+    };
+    if main.is_none() || !storage.repositories.path(scope).exists() {
         return Ok(None);
     }
     let repository = storage.repositories.open(scope)?;
-    let current = head(&repository)?;
-    if Some(current) != main {
+    if Some(head(&repository)?) != main {
         return Ok(None);
     }
-    let tree = repository
-        .find_commit(current)
-        .and_then(|commit| commit.tree())
-        .map_err(|error| git(&error))?;
-    Ok(Some(RestoreReport {
-        items: u32::try_from(crate::git::items_of(&repository, &tree)?.len())
-            .map_err(|_| internal("too many items to count"))?,
-        drafts_restored: u32::try_from(drafts)
-            .map_err(|_| internal("a draft count is out of range"))?,
-        drafts_unassigned: 0,
-    }))
+    serde_json::from_str(&recorded)
+        .map(Some)
+        .map_err(|error| crate::db::json(&error))
 }
 
-/// Refuse an archive the mode may not restore into `scope`.
+/// Refuse an archive the mode may not restore into `scope`. For a replacement restore, the
+/// report of a workspace this same archive already restored (`restored_already`), which is
+/// accepted as it is; a purge refuses even that one.
 fn refuse(
     storage: &Storage,
     runtime: &Handle,
     scope: &StorageScope,
     manifest: &WorkspaceManifest,
     mode: &Mode,
-) -> Result<(), ApiError> {
+) -> Result<Option<RestoreReport>, ApiError> {
     let tenant = manifest.tenant_id.as_str().to_owned();
     let workspace = manifest.workspace_id.0.to_string();
     let (exists, purge) = runtime.block_on(storage.records.call(move |connection| {
@@ -288,18 +298,23 @@ fn refuse(
                 ));
             }
         }
-        Mode::Replace => {
+        Mode::Replace(archive) => {
             if manifest.tenant_id != scope.tenant_id {
                 return Err(invalid(
                     "it belongs to another tenant than the installation archive",
                 ));
             }
             // A purge of the workspace, finished or not, refuses it: the operator finishes an
-            // unfinished purge first, and purged content never comes back.
+            // unfinished purge first, and purged content never comes back. Checked before the
+            // run-again acceptance, so a workspace restored before a purge was recorded is
+            // refused too, and before anything is removed.
             if let Some((purge, state)) = &purge {
                 return Err(conflict(format!(
-                    "the installation archive records purge {purge} ({state}) of this workspace"
+                    "purge {purge} ({state}) of this workspace is recorded here"
                 )));
+            }
+            if let Some(report) = restored_already(storage, runtime, scope, manifest, archive)? {
+                return Ok(Some(report));
             }
             if exists {
                 return Err(conflict("this workspace already exists here"));
@@ -312,7 +327,7 @@ fn refuse(
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Index the pack and set every reference, then, for an import, write the one commit that
@@ -346,7 +361,7 @@ fn history(
             runtime.block_on(crate::purge::guard::refuse_scope(&storage.records, scope))?;
             storage.repositories.open_durable(scope)?
         }
-        Mode::Replace => storage.repositories.create(scope)?,
+        Mode::Replace(_) => storage.repositories.create(scope)?,
     };
     let current = crate::git::repo::reference_target(&repository, HEAD_REF)?;
     let committed = match (mode, current) {
@@ -573,6 +588,21 @@ fn write_tables(
                     target.workspace,
                     text
                 ],
+            )
+            .map_err(|error| sql(&error))?;
+    }
+    // A replacement restore records the archive file it restored the workspace from, with the
+    // rows: the same restore run again accepts the workspace only on this record. The workspace
+    // had no row (it is refused otherwise), so a record left from before is stale.
+    if let Some(archive) = &target.replaced_from {
+        let text = serde_json::to_string(&report).map_err(|error| crate::db::json(&error))?;
+        transaction
+            .execute(
+                "INSERT INTO replacement_restores (tenant_id, workspace_id, archive, report)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (tenant_id, workspace_id)
+                 DO UPDATE SET archive = excluded.archive, report = excluded.report",
+                params![target.tenant, target.workspace, archive.as_str(), text],
             )
             .map_err(|error| sql(&error))?;
     }

@@ -1780,14 +1780,8 @@ async fn backup_a_tenantless_installation_survives_the_pre_migration_set() -> Te
             .await?;
         subject
     };
-    {
-        // The directory as records schema 1 left it: opening it takes a pre-migration set.
-        let connection = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
-        connection.execute_batch(
-            "DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
-             DROP TABLE pending_puts; PRAGMA user_version = 1;",
-        )?;
-    }
+    // The directory as records schema 1 left it: opening it takes a pre-migration set.
+    as_records_schema_1(&directory.path().join("records.sqlite"))?;
     let level = {
         let storage = Storage::open(directory.path())?;
         let sets: Vec<_> = std::fs::read_dir(storage.data().pre_migration_path())?
@@ -2497,14 +2491,7 @@ async fn migrations_take_a_pre_migration_backup_set_before_an_upgrade() -> TestR
     let fixture = fixture(directory.path()).await?;
     let workspace = fixture.workspace.clone();
     drop(fixture);
-    {
-        // The directory as records schema 1 left it: schema 2 only adds these tables.
-        let connection = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
-        connection.execute_batch(
-            "DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
-             DROP TABLE pending_puts; PRAGMA user_version = 1;",
-        )?;
-    }
+    as_records_schema_1(&directory.path().join("records.sqlite"))?;
     let storage = Storage::open(directory.path())?;
     let sets: Vec<_> = std::fs::read_dir(storage.data().pre_migration_path())?
         .filter_map(Result::ok)
@@ -2529,6 +2516,569 @@ async fn migrations_take_a_pre_migration_backup_set_before_an_upgrade() -> TestR
         )?,
         2,
         "then the records are upgraded"
+    );
+    Ok(())
+}
+
+/// Put a records database back as records schema 1 left it: without the tables schema 2 adds,
+/// and with the events table as it was before event keys.
+fn as_records_schema_1(records: &Path) -> TestResult {
+    let connection = rusqlite::Connection::open(records)?;
+    connection.execute_batch(
+        "DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
+         DROP TABLE pending_puts; DROP TABLE replacement_restores;
+         CREATE TABLE unkeyed_events (
+             seq INTEGER PRIMARY KEY AUTOINCREMENT,
+             tenant_id TEXT NOT NULL,
+             workspace_id TEXT,
+             replay_key TEXT UNIQUE,
+             record TEXT NOT NULL
+         ) STRICT;
+         INSERT INTO unkeyed_events SELECT seq, tenant_id, workspace_id, replay_key, record
+             FROM events;
+         DROP TABLE events;
+         ALTER TABLE unkeyed_events RENAME TO events;
+         CREATE INDEX events_by_log ON events (tenant_id, workspace_id, seq);
+         PRAGMA user_version = 1;",
+    )?;
+    Ok(())
+}
+
+/// The tenant `local`'s tenant-level events in `records`: (event key, record), by sequence.
+fn tenant_events(records: &Path) -> Fallible<Vec<(String, String)>> {
+    let connection = rusqlite::Connection::open(records)?;
+    let mut statement = connection.prepare(
+        "SELECT event_key, record FROM events WHERE tenant_id = 'local' AND workspace_id IS NULL
+         ORDER BY seq",
+    )?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Each tenant event of `rows` is kept once: `expected` distinct records, none repeated.
+fn assert_each_event_once(rows: &[(String, String)], expected: usize) {
+    let distinct: std::collections::BTreeSet<&String> =
+        rows.iter().map(|(_, record)| record).collect();
+    assert_eq!(distinct.len(), expected, "no event is lost: {rows:?}");
+    assert_eq!(rows.len(), expected, "no event is repeated: {rows:?}");
+}
+
+/// The archives of a backup set for `workspace`: the tenant's installation archive and the
+/// workspace's archive.
+fn set_of(output: &Path, workspace: &StorageScope) -> (std::path::PathBuf, std::path::PathBuf) {
+    (
+        output
+            .join("installation")
+            .join(format!("{}.zip", workspace.tenant_id.as_str())),
+        output
+            .join("workspaces")
+            .join(workspace.tenant_id.as_str())
+            .join(format!("{}.zip", workspace.workspace_id.0)),
+    )
+}
+
+/// Save ana's draft of item 10 in `scope` again with `body`, under mutation `n`.
+async fn redraft(
+    storage: &Storage,
+    scope: &StorageScope,
+    n: u32,
+    base: &Revision,
+    body: &str,
+) -> TestResult {
+    storage
+        .drafts()
+        .save(
+            scope,
+            uuid!(n)?,
+            DraftWrite {
+                item_id: uuid!(10)?,
+                editor: "ana".to_owned(),
+                base_revision: base.clone(),
+                body: body.to_owned(),
+                properties: BTreeMap::new(),
+                content_digest: Digest::try_from("f".repeat(64))?,
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Ana's draft bodies in the records database of `data`.
+fn draft_bodies(data: &Path) -> Fallible<Vec<String>> {
+    let connection = rusqlite::Connection::open(data.join("records.sqlite"))?;
+    let mut statement = connection.prepare("SELECT body FROM drafts WHERE editor = 'ana'")?;
+    let bodies = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(bodies)
+}
+
+/// Backup round-3 B3 (the reviewer's probe
+/// `rr3_a_set_of_a_restored_installation_after_the_original_set_keeps_every_event`): a replacement
+/// restore renumbers the tenant events it brings back (another tenant's event took a sequence of
+/// the shared log in the source), so a key from the sequence would name different events on the
+/// two sides. Each event keeps its own key: the original set and a set of the restored
+/// installation, restored into one directory, keep each of the three events once.
+#[tokio::test]
+async fn backup_a_set_of_a_restored_installation_after_the_original_set_keeps_every_event()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (earlier, later) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let pause = || tokio::time::sleep(std::time::Duration::from_millis(30));
+    {
+        let storage = Storage::open(directory.path())?;
+        storage.credentials().installation_identity().await?;
+        let events = storage.events();
+        events
+            .append(&EventScope::Tenant(tenant("local")?), None, sign_in())
+            .await?;
+        pause().await;
+        // Another tenant's event takes the next sequence of the shared log.
+        events
+            .append(&EventScope::Tenant(tenant("other")?), None, sign_in())
+            .await?;
+        pause().await;
+        events
+            .append(&EventScope::Tenant(tenant("local")?), None, sign_in())
+            .await?;
+        storage
+            .backups()
+            .write_backup_set(earlier.path(), None)
+            .await?;
+    }
+    std::fs::remove_dir_all(directory.path())?;
+    {
+        let restored = Storage::open(directory.path())?;
+        restored
+            .backups()
+            .restore_replacement(&earlier.path().join("installation").join("local.zip"), &[])
+            .await?;
+        pause().await;
+        restored
+            .events()
+            .append(&EventScope::Tenant(tenant("local")?), None, sign_in())
+            .await?;
+        restored
+            .backups()
+            .write_backup_set(later.path(), None)
+            .await?;
+    }
+    let target = tempfile::tempdir()?;
+    let fresh = Storage::open(target.path())?;
+    for set in [earlier.path(), later.path()] {
+        fresh
+            .backups()
+            .restore_replacement(&set.join("installation").join("local.zip"), &[])
+            .await?;
+    }
+    assert_each_event_once(&tenant_events(&target.path().join("records.sqlite"))?, 3);
+    Ok(())
+}
+
+/// Backup round-3 B3, ruling 1: an event's key is carried verbatim, never derived from its
+/// position. Two installations restored from one set each go on with an event of their own (at
+/// the same position of their tenant logs); their later sets, restored into one directory, keep
+/// the shared event once and both later events.
+#[tokio::test]
+async fn backup_two_installations_restored_from_one_set_keep_each_ones_later_events() -> TestResult
+{
+    let (first, second) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let (original, later_first, later_second) = (
+        tempfile::tempdir()?,
+        tempfile::tempdir()?,
+        tempfile::tempdir()?,
+    );
+    {
+        let storage = Storage::open(first.path())?;
+        storage.credentials().installation_identity().await?;
+        storage
+            .events()
+            .append(&EventScope::Tenant(tenant("local")?), None, sign_in())
+            .await?;
+        storage
+            .backups()
+            .write_backup_set(original.path(), None)
+            .await?;
+    }
+    Storage::open(second.path())?
+        .backups()
+        .restore_replacement(&original.path().join("installation").join("local.zip"), &[])
+        .await?;
+    for (data, output) in [(&first, &later_first), (&second, &later_second)] {
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let storage = Storage::open(data.path())?;
+        storage
+            .events()
+            .append(&EventScope::Tenant(tenant("local")?), None, sign_in())
+            .await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+    }
+    let target = tempfile::tempdir()?;
+    let fresh = Storage::open(target.path())?;
+    for output in [&later_first, &later_second] {
+        fresh
+            .backups()
+            .restore_replacement(&output.path().join("installation").join("local.zip"), &[])
+            .await?;
+    }
+    assert_each_event_once(&tenant_events(&target.path().join("records.sqlite"))?, 3);
+    Ok(())
+}
+
+/// Backup round-3 B3: the events of a records database older than event keys get theirs from
+/// the migration, as an archive without keys keys them. A backup set written before the upgrade
+/// (without keys) restored over the upgraded directory repeats no event, for either tenant.
+#[tokio::test]
+async fn backup_a_pre_migration_set_restored_over_the_upgraded_directory_repeats_no_event()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("records.sqlite");
+    {
+        let storage = Storage::open(directory.path())?;
+        storage.credentials().installation_identity().await?;
+        for name in ["local", "other", "local"] {
+            storage
+                .events()
+                .append(&EventScope::Tenant(tenant(name)?), None, sign_in())
+                .await?;
+        }
+    }
+    as_records_schema_1(&records)?;
+    let storage = Storage::open(directory.path())?;
+    let sets: Vec<_> = std::fs::read_dir(storage.data().pre_migration_path())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    let set = some(sets.first(), "the pre-migration set")?.clone();
+    let query = "SELECT count(DISTINCT event_key) FROM events";
+    assert_eq!(count(&records, query)?, 3, "every event has its own key");
+    for name in ["local", "other"] {
+        storage
+            .backups()
+            .restore_replacement(&set.join("installation").join(format!("{name}.zip")), &[])
+            .await?;
+    }
+    assert_eq!(
+        count(&records, "SELECT count(*) FROM events")?,
+        3,
+        "no event is repeated"
+    );
+    Ok(())
+}
+
+/// Backup round-3 B4 (the reviewer's probe
+/// `rr3_a_rerun_refuses_a_restored_workspace_a_purge_now_names`): a workspace a replacement
+/// restore completed, of which a purge is then recorded (requested, not run): the same restore
+/// run again is refused with `Conflict` naming the purge, not accepted as already restored.
+#[tokio::test]
+async fn backup_a_rerun_refuses_a_restored_workspace_a_purge_now_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let workspace = {
+        let storage = Storage::open(directory.path())?;
+        let (workspace, head) = create(&storage, "local", 1, "Notes").await?;
+        commit(
+            &storage,
+            &workspace,
+            3,
+            &head,
+            vec![note(uuid!(10)?, "notes/plan.md", "The plan.")?],
+        )
+        .await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        workspace
+    };
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let archives = vec![archive];
+    restored
+        .backups()
+        .restore_replacement(&installation, &archives)
+        .await?;
+    restored
+        .records()
+        .create_purge(
+            &tenant("local")?,
+            uuid!(60)?,
+            NewPurge {
+                id: uuid!(61)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: workspace.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    let error = err_of(
+        restored
+            .backups()
+            .restore_replacement(&installation, &archives)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert!(
+        error.message.contains(&uuid_text(61)),
+        "names the purge: {error}"
+    );
+    Ok(())
+}
+
+/// Backup round-3 B5 (the reviewer's probe
+/// `rr3_a_live_workspace_with_other_drafts_is_not_accepted_as_restored`): a live workspace whose
+/// head is still the archive's but whose draft changed after the set was never restored from
+/// that archive, so a replacement restore over it is refused as existing; the live draft is
+/// kept, and the tenant event, already here under its own key, is not repeated.
+#[tokio::test]
+async fn backup_a_live_workspace_with_other_drafts_is_not_accepted_as_restored() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    storage.credentials().installation_identity().await?;
+    let (workspace, created) = create(&storage, "local", 1, "Notes").await?;
+    let head = commit(
+        &storage,
+        &workspace,
+        3,
+        &created,
+        vec![note(uuid!(10)?, "notes/plan.md", "The plan.")?],
+    )
+    .await?;
+    draft(&storage, &workspace, 6, "ana", &head).await?;
+    storage
+        .events()
+        .append(&EventScope::Tenant(tenant("local")?), None, sign_in())
+        .await?;
+    storage
+        .backups()
+        .write_backup_set(output.path(), None)
+        .await?;
+    redraft(&storage, &workspace, 7, &head, "Changed after the set").await?;
+    let records = directory.path().join("records.sqlite");
+    let tenant_level = "SELECT count(*) FROM events WHERE workspace_id IS NULL";
+    let before = count(&records, tenant_level)?;
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let error = err_of(
+        storage
+            .backups()
+            .restore_replacement(&installation, &[archive])
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert!(error.message.contains("already exists"), "{error}");
+    assert_eq!(
+        draft_bodies(directory.path())?,
+        vec!["Changed after the set".to_owned()],
+        "the live draft is kept"
+    );
+    assert_eq!(
+        count(&records, tenant_level)?,
+        before,
+        "the tenant event is not repeated"
+    );
+    Ok(())
+}
+
+/// Backup round-3 B5, ruling 3: a workspace a replacement restore restored from one archive is
+/// not taken as restored by another archive of it (a later set, whose draft differs, with the
+/// same head): it is refused as existing and keeps the first archive's draft.
+#[tokio::test]
+async fn backup_a_workspace_restored_from_another_archive_is_not_accepted_as_restored() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let (earlier, later) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let workspace = {
+        let storage = Storage::open(directory.path())?;
+        let (workspace, created) = create(&storage, "local", 1, "Notes").await?;
+        let head = commit(
+            &storage,
+            &workspace,
+            3,
+            &created,
+            vec![note(uuid!(10)?, "notes/plan.md", "The plan.")?],
+        )
+        .await?;
+        draft(&storage, &workspace, 6, "ana", &head).await?;
+        storage
+            .backups()
+            .write_backup_set(earlier.path(), None)
+            .await?;
+        redraft(&storage, &workspace, 7, &head, "Changed after the set").await?;
+        storage
+            .backups()
+            .write_backup_set(later.path(), None)
+            .await?;
+        workspace
+    };
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let (installation, archive) = set_of(earlier.path(), &workspace);
+    restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await?;
+    let (installation, archive) = set_of(later.path(), &workspace);
+    let error = err_of(
+        restored
+            .backups()
+            .restore_replacement(&installation, &[archive])
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert!(error.message.contains("already exists"), "{error}");
+    assert_eq!(
+        draft_bodies(directory.path())?,
+        vec!["Draft by ana".to_owned()],
+        "the first archive's draft is kept"
+    );
+    Ok(())
+}
+
+/// Backup round-3 `RMp`: the purge refusal of a replacement restore over a live directory leaves
+/// the live workspace as it was: its moved history, its record and its draft.
+#[tokio::test]
+async fn backup_the_purge_refusal_leaves_a_live_workspace_intact() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (workspace, created) = create(&storage, "local", 1, "Notes").await?;
+    let head = commit(
+        &storage,
+        &workspace,
+        3,
+        &created,
+        vec![note(uuid!(10)?, "notes/plan.md", "The plan.")?],
+    )
+    .await?;
+    draft(&storage, &workspace, 6, "ana", &head).await?;
+    storage
+        .backups()
+        .write_backup_set(output.path(), None)
+        .await?;
+    let moved = commit(
+        &storage,
+        &workspace,
+        4,
+        &head,
+        vec![note(uuid!(15)?, "notes/later.md", "Later.")?],
+    )
+    .await?;
+    storage
+        .records()
+        .create_purge(
+            &tenant("local")?,
+            uuid!(60)?,
+            NewPurge {
+                id: uuid!(61)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: workspace.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let error = err_of(
+        storage
+            .backups()
+            .restore_replacement(&installation, &[archive])
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert!(
+        error.message.contains(&uuid_text(61)),
+        "names the purge: {error}"
+    );
+    assert_eq!(
+        repository_of(&storage, &workspace)?
+            .refname_to_id("refs/heads/main")?
+            .to_string(),
+        moved.as_str(),
+        "the live workspace's history is kept"
+    );
+    let records = directory.path().join("records.sqlite");
+    assert_eq!(
+        count(
+            &records,
+            &format!(
+                "SELECT count(*) FROM workspaces WHERE workspace_id = '{}'",
+                workspace.workspace_id.0
+            )
+        )?,
+        1,
+        "its record is kept"
+    );
+    assert_eq!(
+        draft_bodies(directory.path())?,
+        vec!["Draft by ana".to_owned()],
+        "its draft is kept"
+    );
+    Ok(())
+}
+
+/// Backup round-3 RT: a replacement restore refuses a workspace archive of another tenant than
+/// the installation archive's, before anything of it is written.
+#[tokio::test]
+async fn backup_a_replacement_restore_refuses_another_tenants_workspace_archive() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let foreign = {
+        let storage = Storage::open(directory.path())?;
+        create(&storage, "local", 1, "Notes").await?;
+        let (foreign, head) = create(&storage, "other", 2, "Theirs").await?;
+        commit(
+            &storage,
+            &foreign,
+            3,
+            &head,
+            vec![note(uuid!(10)?, "notes/plan.md", "Their plan.")?],
+        )
+        .await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        foreign
+    };
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let (_, archive) = set_of(output.path(), &foreign);
+    let error = err_of(
+        restored
+            .backups()
+            .restore_replacement(
+                &output.path().join("installation").join("local.zip"),
+                &[archive],
+            )
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+    assert!(error.message.contains("another tenant"), "{error}");
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            "SELECT count(*) FROM workspaces"
+        )?,
+        0,
+        "no workspace written"
+    );
+    assert!(
+        !restored
+            .data()
+            .repositories_path()
+            .join("local")
+            .join(format!("{}.git", foreign.workspace_id.0))
+            .exists(),
+        "no repository written"
     );
     Ok(())
 }
