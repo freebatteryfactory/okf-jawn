@@ -4,6 +4,8 @@
 //! It encodes what the `RecordStore` docs state about jobs:
 //! - `claim_job` claims a queued job under a new lease token and returns `None` otherwise;
 //! - progress, completion and failure need the current, unexpired claim;
+//! - completion and failure also need the job to be running, as storage's `complete` and
+//!   `fail_job` refuse a row another writer cancelled (`lost_claim`);
 //! - `expire_leases` returns expired claims to the queue;
 //! - `pending_jobs` lists unfinished jobs;
 //! - `record_artifact` is unique on the mutation id.
@@ -61,6 +63,8 @@ pub struct FakeRecords {
     artifacts: Mutex<BTreeMap<MutationId, ArtifactRecord>>,
     purges: Mutex<BTreeMap<PurgeId, Purge>>,
     renewals: std::sync::atomic::AtomicUsize,
+    /// A job cancelled the moment it is claimed, as a cancel landing right after the claim.
+    cancel_on_claim: Mutex<Option<JobId>>,
 }
 
 /// One notification as the fake log keeps it: its log, its mutation identity and the event.
@@ -272,6 +276,15 @@ impl FakeRecords {
         Ok(())
     }
 
+    /// Cancel `id` the moment it is next claimed, before its handler does anything.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn cancel_when_claimed(&self, id: JobId) -> Result<(), ApiError> {
+        *self.cancel_on_claim.lock().map_err(|_| poisoned())? = Some(id);
+        Ok(())
+    }
+
     /// Cancel a running job, as `cancel_job` would: the state is `Cancelled` and the claim is
     /// left as it was, so the handler learns it from the next `update_progress`.
     ///
@@ -286,6 +299,18 @@ impl FakeRecords {
         self.entries
             .lock()
             .map_err(|_| ApiError::new(ErrorCode::Internal, "fake record store lock poisoned"))
+    }
+
+    /// The entry the lease currently holds while the job runs, or `Conflict`.
+    fn running_with_lease<T>(
+        &self,
+        lease: &JobLease,
+        change: impl FnOnce(&mut Entry) -> T,
+    ) -> Result<T, ApiError> {
+        self.with_lease(lease, |entry| {
+            (entry.job.state == JobState::Running).then(|| change(entry))
+        })?
+        .ok_or_else(|| ApiError::new(ErrorCode::Conflict, "the job is not running"))
     }
 
     /// The entry the lease currently holds, or `Conflict`.
@@ -325,6 +350,10 @@ impl RecordStore for FakeRecords {
     }
 
     fn claim_job(&self, job: JobId) -> PortFuture<'_, Option<ClaimedJob>> {
+        let cancel = self
+            .cancel_on_claim
+            .lock()
+            .is_ok_and(|mut cancel| cancel.take_if(|id| *id == job).is_some());
         let claimed = self.lock().map(|mut entries| {
             let entry = entries.get_mut(&job)?;
             if entry.job.state != JobState::Queued {
@@ -334,6 +363,10 @@ impl RecordStore for FakeRecords {
             entry.job.attempt = entry.job.attempt.saturating_add(1);
             let token = format!("lease-{}", entry.job.attempt);
             entry.lease = Some((token.clone(), false));
+            let claim_job = entry.job.clone();
+            if cancel {
+                entry.job.state = JobState::Cancelled;
+            }
             Some(ClaimedJob {
                 scope: entry.scope.clone(),
                 lease: JobLease {
@@ -342,7 +375,7 @@ impl RecordStore for FakeRecords {
                     attempt: entry.job.attempt,
                     expires_at: Timestamp::try_from("2026-10-09T00:10:00.000Z".to_owned()).ok()?,
                 },
-                job: entry.job.clone(),
+                job: claim_job,
                 mutation_id: entry.created.mutation_id,
                 initiator: entry.created.initiator.clone(),
                 spec: entry.created.spec.clone(),
@@ -366,7 +399,7 @@ impl RecordStore for FakeRecords {
 
     fn complete_job(&self, completion: JobCompletion) -> PortFuture<'_, Job> {
         let lease = completion.lease.clone();
-        let done = self.with_lease(&lease, |entry| {
+        let done = self.running_with_lease(&lease, |entry| {
             entry.job.state = JobState::Succeeded;
             entry.job.progress = 100;
             entry.job.revision.clone_from(&completion.revision);
@@ -380,7 +413,7 @@ impl RecordStore for FakeRecords {
     }
 
     fn fail_job(&self, lease: JobLease, message: String, retryable: bool) -> PortFuture<'_, Job> {
-        let failed = self.with_lease(&lease, |entry| {
+        let failed = self.running_with_lease(&lease, |entry| {
             entry.job.state = JobState::Failed;
             entry.job.error = Some(ApiError::new(ErrorCode::Internal, message.clone()));
             entry.lease = None;
@@ -662,6 +695,7 @@ mod tests {
         events.fail_on(okf_jawn_contract::events::EventKind::Imported, 1)?;
         assert_eq!(events.appended()?, Vec::new());
         records.set_progress(id, 40)?;
+        records.cancel_when_claimed(id)?;
         assert_eq!(records.entry(id)?.job.progress, 40);
         Ok(())
     }

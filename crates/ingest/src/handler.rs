@@ -15,6 +15,8 @@
 //! is never dropped when the job is found cancelled: storage's write is one transaction that
 //! must not be abandoned mid-call, so the cancellation is observed after it returns, and the job
 //! then stops without a completion. A purge's own record still states what the purge removed.
+//! A restore is the exception: once `restore_import` is called the cancellation is no longer
+//! honoured, and the job goes on to its completion (`restore`).
 //!
 //! What a job commits is announced as core's `announce` does for a request (core
 //! `application::shared::commit`): every revision an ingest job lands (each import commit, the
@@ -320,15 +322,23 @@ impl IngestHandler {
     /// Import a workspace archive into the job's workspace.
     ///
     /// The editors were read from `AccessControl` when the request was accepted; the handler
-    /// passes them on and never consults `AccessControl` itself. The upload is consumed when
-    /// the restore completes (Stage 1b design section 8).
+    /// passes them on and never consults `AccessControl` itself.
+    ///
+    /// The order is fixed (fix-5 ruling 1, superseding the Stage 1b design's "consumed when the
+    /// restore completes"): the job checks for a cancellation, then consumes the archive's
+    /// upload under this job, then calls `restore_import`. A cancellation seen before the
+    /// consume stops the job, consuming and restoring nothing. An upload another job consumed
+    /// refuses the job for good. From the moment `restore_import` is called a cancellation is
+    /// no longer honoured: the job indexes and announces the revision and writes its completion
+    /// with the restore report. Storage's `cancel_job` can still mark a running job cancelled
+    /// meanwhile, and the store then refuses that completion; making `cancel_job` refuse a job
+    /// past this point is request R-I11 (a point-of-no-return call on `RecordStore`), owed with
+    /// core M1.4.
     ///
     /// The completion records the revision the restore wrote (review N9): the commit carrying
     /// the job's mutation, which `restore_import` is idempotent on, and not whatever head stands
-    /// after it, which on a resumed attempt can hold later, unrelated commits.
-    ///
-    /// That revision is indexed and announced, written now or replayed, and also when the job
-    /// was found cancelled while the restore ran: the restore landed all the same.
+    /// after it, which on a resumed attempt can hold later, unrelated commits. That revision is
+    /// indexed and announced, written now or replayed.
     async fn restore(
         &self,
         attempt: &Attempt<'_>,
@@ -339,9 +349,27 @@ impl IngestHandler {
     ) -> Result<Done, ApiError> {
         let ports = &self.ports;
         let claimed = attempt.claimed;
+        if attempt.renew(ports).await?.state == JobState::Cancelled {
+            return Ok(Done::stopped());
+        }
+        match ports
+            .uploads
+            .consume(scope, upload_id, claimed.lease.job_id)
+            .await
+        {
+            Ok(_consumed) => {}
+            Err(error) if error.code == ErrorCode::Conflict => {
+                return Ok(Done {
+                    refused: Some(error),
+                    ..Done::default()
+                });
+            }
+            Err(error) => return Err(error),
+        }
         let before = ports.versions.head(scope).await?;
-        // Under the heartbeat, and never dropped: a cancellation is observed once it returns.
-        let restored = renewing(
+        // Under the heartbeat, never dropped, and past the point of no return: a cancellation
+        // seen while it runs is not honoured.
+        let report = match renewing(
             ports,
             attempt,
             ports.backups.restore_import(
@@ -351,21 +379,16 @@ impl IngestHandler {
                 editors.to_vec(),
             ),
         )
-        .await?;
+        .await?
+        {
+            Renewed::Done(report) | Renewed::Cancelled(report) => report,
+        };
         let revision = self
             .restored_revision(scope, claimed.mutation_id, &before)
             .await?;
         if let Some(revision) = &revision {
             announce_commit(ports, claimed, scope, revision, claimed.mutation_id, None).await?;
         }
-        let report = match restored {
-            Renewed::Done(report) => report,
-            Renewed::Cancelled(_report) => return Ok(Done::stopped()),
-        };
-        let _consumed = ports
-            .uploads
-            .consume(scope, upload_id, claimed.lease.job_id)
-            .await?;
         Ok(Done {
             revision,
             restore: Some(report),

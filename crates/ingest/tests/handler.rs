@@ -44,7 +44,7 @@ mod job_handler {
     use okf_jawn_ingest::runtime::run_one;
     use serde_json::json;
 
-    use crate::check::{TestResult, some};
+    use crate::check::{TestResult, err_of, some};
     use crate::ports::{
         AcceptAll, FakeBackups, FakeBlobs, FakeConverter, FakePurger, FakeSearch, FakeUploads,
         FakeVersions, Hold, RefuseAll,
@@ -1100,15 +1100,14 @@ mod job_handler {
     }
 
     #[tokio::test]
-    async fn a_restore_cancelled_while_it_runs_is_not_abandoned_and_writes_no_completion()
+    async fn a_restore_cancelled_once_it_applies_is_not_stopped_and_the_store_refuses_its_completion()
     -> TestResult {
-        let world = world_full(
-            Some(6),
-            Vec::new(),
-            Arc::new(AcceptAll),
-            Duration::from_millis(10),
-        )?;
+        let world = heartbeat_world()?;
         let id = restore_job(&world, 121)?;
+        let upload_id = match &world.records.entry(id)?.created.spec {
+            JobSpec::RestoreWorkspace { upload_id, .. } => *upload_id,
+            _ => return Err("a restore was expected".into()),
+        };
         let records = Arc::clone(&world.records);
         *world.backups.restore_hold.lock().map_err(|_| "poisoned")? = Some(Arc::new(move || {
             let records = Arc::clone(&records);
@@ -1118,26 +1117,89 @@ mod job_handler {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             })
         }));
-        assert!(tokio::time::timeout(Duration::from_secs(20), run(&world, id)).await??);
-        // The restore ran to its end: its commit is written and its editors were passed on.
-        let mutation = world.records.entry(id)?.created.mutation_id;
-        assert!(
-            world
-                .versions
-                .written()?
-                .iter()
-                .any(|(changes, _)| changes.mutation_id == mutation)
-        );
+        // The handler does not stop for the cancellation: it goes on to write its completion,
+        // which the store refuses because someone cancelled the running job (as storage's
+        // `complete` does). Making `cancel_job` refuse a job past this point is request R-I11.
+        let refused = tokio::time::timeout(Duration::from_secs(20), run(&world, id)).await?;
+        let error = err_of(refused)?;
+        assert!(error.to_string().contains("not running"), "{error}");
+        // The upload was consumed before the restore applied, and the restore ran to its end.
+        assert_eq!(world.uploads.consumed()?, [(upload_id, id)]);
         assert_eq!(
             world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
             1
         );
-        // The cancellation is observed after it returned: no completion, no failure.
+        let mutation = world.records.entry(id)?.created.mutation_id;
+        let restored = some(
+            world
+                .versions
+                .written()?
+                .into_iter()
+                .find(|(changes, _)| changes.mutation_id == mutation),
+            "the restore's commit",
+        )?
+        .1;
+        // Its revision was indexed and announced.
+        assert_eq!(world.search.indexed()?, std::slice::from_ref(&restored));
+        let changed = events_of(&world, &EventKind::Changed)?;
+        assert_eq!(changed.len(), 1);
+        assert_eq!(
+            some(changed.first(), "the changed event")?.2.revision,
+            Some(restored)
+        );
+        // The record stays as the cancel left it: no completion was written, nor a failure.
         assert_stopped(&world, id)?;
-        assert_eq!(world.uploads.consumed()?, Vec::new());
         Ok(())
     }
 
+    #[tokio::test]
+    async fn a_restore_cancelled_before_it_consumes_its_upload_restores_nothing() -> TestResult {
+        let world = world()?;
+        let id = restore_job(&world, 122)?;
+        world.records.cancel_when_claimed(id)?;
+        assert!(run(&world, id).await?);
+        assert_stopped(&world, id)?;
+        assert_eq!(world.uploads.consumed()?, Vec::new());
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            0
+        );
+        assert!(world.versions.written()?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_second_restore_of_the_same_upload_is_refused_and_restores_nothing() -> TestResult {
+        let world = world()?;
+        let first = restore_job(&world, 123)?;
+        assert!(run(&world, first).await?);
+        assert_completed_under(&world, first, 1)?;
+        let created = world.records.entry(first)?.created;
+        // Another job restoring the same upload.
+        let second = job_id(124)?;
+        world.records.insert(
+            second,
+            workspace_scope()?,
+            NewJob {
+                mutation_id: serde_json::from_value::<MutationId>(json!(
+                    "00000000-0000-0000-0000-000000000124"
+                ))?,
+                ..created
+            },
+        )?;
+        assert!(run(&world, second).await?);
+        let entry = world.records.entry(second)?;
+        assert_eq!(entry.job.state, JobState::Failed);
+        let (message, retryable) = some(entry.failures.first(), "the failure")?;
+        assert!(message.contains("another job"), "{message}");
+        assert!(!retryable);
+        // Refused at the consume, before restore_import: one restore applied, by the first job.
+        assert_eq!(
+            world.backups.restored.lock().map_err(|_| "poisoned")?.len(),
+            1
+        );
+        Ok(())
+    }
     #[tokio::test]
     async fn an_import_commits_pending_cards_then_each_converted_card() -> TestResult {
         // Six pages in windows of four; the second window hits the cap.
