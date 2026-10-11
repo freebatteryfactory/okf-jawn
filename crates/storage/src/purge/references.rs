@@ -238,8 +238,10 @@ pub(crate) fn records(
 
 /// The objects of `held` that a survivor's upload slot or pending put may keep: all but the
 /// target's workspace archives (`archives`). A copy of the target's archive that another
-/// workspace holds or is putting is no surviving reference (Stage 1b design section 6), so the
-/// archive goes with the target.
+/// workspace holds in an upload slot or names in a pending put is no surviving reference
+/// (Stage 1b design section 6), so the archive goes with the target. A write of another
+/// workspace that is putting the same bytes during the objects step pins them, and keeps them as
+/// it keeps any pinned object (`pins`); this helper does not apply to pins.
 pub(crate) fn except_archives<'a>(
     held: impl IntoIterator<Item = Digest> + 'a,
     archives: &'a BTreeSet<Digest>,

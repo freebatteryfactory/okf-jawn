@@ -4,13 +4,14 @@
 //! lands only later: a job's outputs when it completes, a card when its commit lands, an
 //! upload's object when it completes. So every workspace-scoped put writes a pending-put row
 //! (tenant, workspace, digest) before it retains the object, in the same transaction as its
-//! purge refusal (`LocalBlobs::put_pinned`). The rows of a digest are deleted (`land`) in the
-//! transaction of a record of the workspace that names the object: a job completion, an
-//! artifact, a derived object, a sandbox capability, an upload completion, an import's rows.
-//! What lands is what the stored record names, read back after the write: a write answered by
-//! an earlier record (a replayed artifact, commit or candidate) lands only the objects that
-//! record names, and an import lands only the archive objects its restored history and rows
-//! name. A commit or candidate is a Git write, so its rows are deleted just after it landed; a
+//! purge refusal (`LocalBlobs::put_pinned`). Apart from the purge of its own workspace, which
+//! clears them (`clear`), the rows of a digest are deleted (`land`) only in the transaction of a
+//! record of the workspace that names the object: a job completion, an artifact, a derived
+//! object, a sandbox capability, an upload completion, an import's rows. What lands is what the
+//! stored record names, read back after the write: a write answered by an earlier record (a
+//! replayed artifact, commit or candidate) lands only the objects that record names, and an
+//! import lands only the archive objects its restored history and rows name, or a conversion
+//! record among them names. A commit or candidate is a Git write, so its rows are deleted just after it landed; a
 //! crash between the two leaves a row naming an object that a record references, which costs
 //! nothing.
 //!
