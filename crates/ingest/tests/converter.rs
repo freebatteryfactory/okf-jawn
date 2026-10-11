@@ -1,10 +1,11 @@
 //! The docling adapter: the child protocol, a window read back from the child's files, and the
 //! production `Converter` running the real conversion child (`okf-jawn-convert`).
 //!
-//! Every test here but the last needs no model: a Markdown original converts through the real
-//! child with docling's pure-Rust Markdown backend. The last converts a PDF with the pinned
-//! models (no pdfium: this build renders and counts pages in pure Rust), so it is ignored by
-//! default and runs locally only:
+//! Every test here but the last two needs no model: a Markdown or DOCX original converts
+//! through the real child with docling's pure-Rust backends, and images are read back from
+//! documents built by hand. The last two convert a PDF with the pinned models (no pdfium: this
+//! build renders and counts pages in pure Rust), so they are ignored by default and run locally
+//! only:
 //! `DOCLING_RS_MODELS_DIR=<pinned models> cargo test -p okf-jawn-ingest --features runtime
 //! --test converter -- --ignored`.
 #![cfg(feature = "runtime")]
@@ -70,6 +71,7 @@ mod conversion_protocol {
                     },
                 ],
                 text_layer: true,
+                assets: Vec::new(),
             };
             assert_eq!(Reply::decode(&reply.encode()?)?, reply);
         }
@@ -103,6 +105,7 @@ mod conversion_protocol {
             issues: Vec::new(),
             blocks: Vec::new(),
             text_layer: false,
+            assets: Vec::new(),
         }
     }
 
@@ -153,6 +156,7 @@ mod conversion_protocol {
                 table: false,
             }],
             text_layer: false,
+            assets: Vec::new(),
         };
         let mut written: serde_json::Value = serde_json::from_slice(&reply.encode()?)?;
         let object = some(written.as_object_mut(), "the reply object")?;
@@ -260,6 +264,7 @@ mod flags_undecodable_text_in_a_window {
                 },
             ],
             text_layer: true,
+            assets: Vec::new(),
         }
     }
 
@@ -535,6 +540,7 @@ mod locates_unlocated_items_in_line_runs {
                 run(7, None, Some(("#/texts/3", "Not exported."))),
             ],
             text_layer: true,
+            assets: Vec::new(),
         };
         let window = PageRange { start: 1, end: 1 };
         let (document, _coverage) = read_window(directory.path(), Some(&window), &reply)?;
@@ -645,6 +651,7 @@ mod locates_unlocated_items_in_line_runs {
                 ),
             ],
             text_layer: true,
+            assets: Vec::new(),
         };
         let window = PageRange { start: 1, end: 3 };
         let (document, _coverage) = read_window(directory.path(), Some(&window), &reply)?;
@@ -790,6 +797,7 @@ mod partial_windows {
             issues: Vec::new(),
             blocks: Vec::new(),
             text_layer: false,
+            assets: Vec::new(),
         };
         let window = PageRange { start: 1, end: 4 };
         let (_document, coverage) = read_window(directory.path(), Some(&window), &reply)?;
@@ -802,6 +810,235 @@ mod partial_windows {
     }
 }
 
+mod retains_images {
+    use std::path::Path;
+
+    use docling::{DoclingDocument, Node, PictureImage};
+    use okf_jawn_contract::common::PageRange;
+    use okf_jawn_contract::error::ErrorCode;
+    use okf_jawn_contract::read::AssetRole;
+    use okf_jawn_contract::source::{
+        BoundingBox, CoordOrigin, SourceLocation, SourceLocator, UnresolvedReason,
+    };
+    use okf_jawn_core::conversion::{ConversionStatus, ConvertedAsset, PixelSize};
+    use okf_jawn_ingest::child::write_assets;
+    use okf_jawn_ingest::converter::read_window;
+    use okf_jawn_ingest::protocol::{EXPORT_FILE, MARKDOWN_FILE, Reply};
+
+    use crate::check::{TestResult, err_of, some};
+
+    fn image(width: u32, height: u32, data: &[u8]) -> PictureImage {
+        PictureImage {
+            mimetype: "image/png".to_owned(),
+            width,
+            height,
+            data: data.to_vec(),
+            dpi: 144,
+        }
+    }
+
+    /// The default of a field type docling does not export by name (`Node::Picture`'s
+    /// caption parent, whose default is docling's own `add_text` placement).
+    fn unnamed_default<T: Default>() -> T {
+        T::default()
+    }
+
+    fn picture(caption: Option<&str>, picture_image: Option<PictureImage>) -> Node {
+        Node::Picture {
+            caption: caption.map(str::to_owned),
+            caption_href: None,
+            image: picture_image,
+            classification: None,
+            caption_parent: unnamed_default(),
+            caption_location: None,
+        }
+    }
+
+    fn on_page_one(bbox: [f32; 4], inner: Node) -> Node {
+        Node::Prov {
+            page_no: 1,
+            bbox,
+            charspan: [0, 0],
+            seq: None,
+            inner: Box::new(inner),
+        }
+    }
+
+    /// One page holding a captioned picture, a picture with no image of its own, and an
+    /// uncaptioned picture; renders of page 1 and of page 2, which the window did not convert.
+    fn figure_document() -> DoclingDocument {
+        let mut document = DoclingDocument::new("figure");
+        document.push(Node::PageInfo {
+            page_no: 1,
+            width: 600.0,
+            height: 800.0,
+        });
+        document.push(on_page_one(
+            [100.0, 100.0, 300.0, 200.0],
+            picture(Some("Figure 1: The plant"), Some(image(40, 20, b"plant"))),
+        ));
+        document.push(picture(Some("An empty frame"), None));
+        document.push(on_page_one(
+            [50.0, 400.0, 150.0, 500.0],
+            picture(None, Some(image(10, 10, b"logo"))),
+        ));
+        let _render = document
+            .page_images
+            .insert(1, image(1200, 1600, b"page one"));
+        let _render = document
+            .page_images
+            .insert(2, image(1200, 1600, b"page two"));
+        document
+    }
+
+    /// What the child writes for `document`, and its reply.
+    fn child_outputs(
+        directory: &Path,
+        document: &DoclingDocument,
+        page_images: bool,
+    ) -> Result<Reply, Box<dyn std::error::Error>> {
+        std::fs::write(directory.join(MARKDOWN_FILE), document.export_to_markdown())?;
+        std::fs::write(directory.join(EXPORT_FILE), document.export_to_json())?;
+        Ok(Reply {
+            status: ConversionStatus::Success,
+            page_count: None,
+            issues: Vec::new(),
+            blocks: Vec::new(),
+            text_layer: false,
+            assets: write_assets(document, directory, page_images)?,
+        })
+    }
+
+    fn page_one() -> PageRange {
+        PageRange { start: 1, end: 1 }
+    }
+
+    fn of_role(assets: &[ConvertedAsset], role: AssetRole) -> Vec<&ConvertedAsset> {
+        assets.iter().filter(|asset| asset.role == role).collect()
+    }
+
+    fn region_on_page_one(l: f64, t: f64, r: f64, b: f64) -> SourceLocation {
+        SourceLocation::Direct {
+            locator: SourceLocator::Region {
+                region: okf_jawn_contract::source::PageRegion {
+                    page_no: 1,
+                    bbox: BoundingBox {
+                        l,
+                        t,
+                        r,
+                        b,
+                        coord_origin: CoordOrigin::TopLeft,
+                    },
+                    page_size: okf_jawn_contract::source::PageSize {
+                        width: 600.0,
+                        height: 800.0,
+                    },
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn a_picture_keeps_its_size_media_type_and_own_caption_and_its_items_region() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let reply = child_outputs(directory.path(), &figure_document(), true)?;
+        let (document, _coverage) = read_window(directory.path(), Some(&page_one()), &reply)?;
+        let pictures = of_role(&document.assets, AssetRole::Picture);
+        // The picture with no image of its own retains nothing; the others keep their place.
+        assert_eq!(pictures.len(), 2);
+        let plant = some(pictures.first(), "the captioned picture")?;
+        assert_eq!(
+            plant.pixel_size,
+            Some(PixelSize {
+                width: 40,
+                height: 20
+            })
+        );
+        assert_eq!(plant.media_type, "image/png");
+        assert_eq!(plant.caption.as_deref(), Some("Figure 1: The plant"));
+        assert_eq!(
+            plant.location,
+            region_on_page_one(100.0, 100.0, 300.0, 200.0)
+        );
+        assert_eq!(std::fs::read(&plant.path)?, b"plant");
+        let logo = some(pictures.get(1), "the uncaptioned picture")?;
+        assert_eq!(logo.caption, None);
+        assert_eq!(logo.location, region_on_page_one(50.0, 400.0, 150.0, 500.0));
+        assert_eq!(std::fs::read(&logo.path)?, b"logo");
+        Ok(())
+    }
+
+    #[test]
+    fn page_images_on_keep_one_render_per_converted_page_and_off_keep_none() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let reply = child_outputs(directory.path(), &figure_document(), true)?;
+        let (document, _coverage) = read_window(directory.path(), Some(&page_one()), &reply)?;
+        let renders = of_role(&document.assets, AssetRole::PageImage);
+        // Page 2 was not converted by this window: its render is not kept.
+        assert_eq!(renders.len(), 1);
+        let render = some(renders.first(), "the page render")?;
+        assert_eq!(
+            render.location,
+            SourceLocation::Direct {
+                locator: SourceLocator::Page { page_no: 1 }
+            }
+        );
+        assert_eq!(
+            render.pixel_size,
+            Some(PixelSize {
+                width: 1200,
+                height: 1600
+            })
+        );
+        assert_eq!(render.caption, None);
+        assert_eq!(std::fs::read(&render.path)?, b"page one");
+
+        // Off: no render is written or kept, whatever the converter held.
+        let off = tempfile::tempdir()?;
+        let reply = child_outputs(off.path(), &figure_document(), false)?;
+        assert!(
+            reply
+                .assets
+                .iter()
+                .all(|asset| asset.role == AssetRole::Picture)
+        );
+        let (document, _coverage) = read_window(off.path(), Some(&page_one()), &reply)?;
+        assert_eq!(of_role(&document.assets, AssetRole::PageImage).len(), 0);
+        assert_eq!(of_role(&document.assets, AssetRole::Picture).len(), 2);
+        assert!(!off.path().join("page-1.png").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_picture_whose_file_is_not_its_items_image_is_not_given_that_items_region() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let reply = child_outputs(directory.path(), &figure_document(), false)?;
+        let first = some(reply.assets.first(), "the first picture's file")?;
+        std::fs::write(directory.path().join(&first.file), b"another image")?;
+        let (document, _coverage) = read_window(directory.path(), Some(&page_one()), &reply)?;
+        let plant = some(document.assets.first(), "the first picture")?;
+        assert_eq!(
+            plant.location,
+            SourceLocation::Unresolved {
+                reason: UnresolvedReason::NotLocatedByConverter
+            }
+        );
+        // What the child reported about the image itself is still kept.
+        assert_eq!(plant.caption.as_deref(), Some("Figure 1: The plant"));
+        Ok(())
+    }
+
+    #[test]
+    fn an_image_named_outside_the_output_directory_is_a_worker_fault() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let mut reply = child_outputs(directory.path(), &figure_document(), false)?;
+        let first = some(reply.assets.first_mut(), "the first picture's file")?;
+        first.file = format!("../{}", first.file);
+        let error = err_of(read_window(directory.path(), Some(&page_one()), &reply))?;
+        assert_eq!(error.code, ErrorCode::Internal);
+        Ok(())
+    }
+}
 mod conversion_child {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -911,6 +1148,71 @@ mod conversion_child {
         assert_eq!(
             (guide.0.as_str(), guide.1, guide.2),
             ("Guide", 1, appendix.1 - 1)
+        );
+        Ok(())
+    }
+
+    /// The fixture document at `name`, under `tests/fixtures/documents`.
+    fn fixture(name: &str) -> Result<Vec<u8>, std::io::Error> {
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/documents")
+                .join(name),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_real_child_retains_a_docx_picture_byte_for_byte() -> TestResult {
+        use std::io::Read as _;
+
+        use okf_jawn_contract::read::AssetRole;
+        use okf_jawn_contract::source::{SourceLocation, UnresolvedReason};
+        use okf_jawn_core::conversion::PixelSize;
+
+        let bytes = fixture("sample_with_image.docx")?;
+        // The image the DOCX embeds, and the size its PNG header states.
+        let mut embedded = Vec::new();
+        let _read = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone()))?
+            .by_name("word/media/image1.png")?
+            .read_to_end(&mut embedded)?;
+        let header = |at: usize| -> Result<u32, Box<dyn std::error::Error>> {
+            let field = some(embedded.get(at..at + 4), "a PNG header field")?;
+            Ok(u32::from_be_bytes(field.try_into()?))
+        };
+        let size = PixelSize {
+            width: header(16)?,
+            height: header(20)?,
+        };
+        let store = tempfile::tempdir()?;
+        let output = tempfile::tempdir()?;
+        let source = retained(store.path(), &bytes)?;
+        let converter = converter(PathBuf::from(env!("CARGO_BIN_EXE_okf-jawn-convert")));
+        let conversion = converter
+            .convert(input(source, "sample_with_image.docx", output.path()))
+            .await?;
+        assert_eq!(
+            conversion.status,
+            ConversionStatus::Success,
+            "{:?}",
+            conversion.issues
+        );
+        let document = some(conversion.document, "the converted document")?;
+        let pictures: Vec<_> = document
+            .assets
+            .iter()
+            .filter(|asset| asset.role == AssetRole::Picture)
+            .collect();
+        assert_eq!(pictures.len(), 1, "{:?}", document.assets);
+        let picture = some(pictures.first(), "the picture")?;
+        assert_eq!(std::fs::read(&picture.path)?, embedded);
+        assert_eq!(picture.media_type, "image/png");
+        assert_eq!(picture.pixel_size, Some(size));
+        // A DOCX has no pages: the picture is kept, not located.
+        assert_eq!(
+            picture.location,
+            SourceLocation::Unresolved {
+                reason: UnresolvedReason::FormatHasNoLocator
+            }
         );
         Ok(())
     }
@@ -1202,6 +1504,68 @@ mod conversion_child {
             "{:?}",
             conversion.issues
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the pinned docling models; run locally with --ignored"]
+    async fn a_pdf_window_keeps_its_pictures_and_one_render_per_page_only_when_asked() -> TestResult
+    {
+        use okf_jawn_contract::read::AssetRole;
+        use okf_jawn_contract::source::{SourceLocation, SourceLocator};
+
+        let bytes = fixture("corpus/redp5110_sampled.pdf")?;
+        let store = tempfile::tempdir()?;
+        let source = retained(store.path(), &bytes)?;
+        let converter = converter(PathBuf::from(env!("CARGO_BIN_EXE_okf-jawn-convert")));
+        let window = okf_jawn_contract::common::PageRange { start: 1, end: 2 };
+        for page_images in [true, false] {
+            let output = tempfile::tempdir()?;
+            let mut request = input(source.clone(), "redp5110_sampled.pdf", output.path());
+            request.window = Some(window.clone());
+            request.timeout = Duration::from_secs(600);
+            request.settings.page_images = page_images;
+            let conversion = converter.convert(request).await?;
+            let coverage = some(conversion.coverage, "the window's coverage")?;
+            let document = some(conversion.document, "the converted document")?;
+            let renders: Vec<u32> = document
+                .assets
+                .iter()
+                .filter(|asset| asset.role == AssetRole::PageImage)
+                .filter_map(|asset| match asset.location {
+                    SourceLocation::Direct {
+                        locator: SourceLocator::Page { page_no },
+                    } => Some(page_no),
+                    _ => None,
+                })
+                .collect();
+            let pages_done: Vec<u32> = coverage
+                .converted
+                .iter()
+                .chain(&coverage.partly_extracted)
+                .flat_map(|range| range.start..=range.end)
+                .collect();
+            if page_images {
+                assert_eq!(renders, pages_done, "{:?}", document.assets);
+            } else {
+                assert_eq!(renders, Vec::<u32>::new());
+            }
+            let pictures: Vec<_> = document
+                .assets
+                .iter()
+                .filter(|asset| asset.role == AssetRole::Picture)
+                .collect();
+            // The cover pages carry pictures the layout model detects.
+            assert!(!pictures.is_empty(), "{:?}", document.assets);
+            for picture in pictures {
+                assert!(picture.pixel_size.is_some(), "{picture:?}");
+                assert_ne!(std::fs::read(&picture.path)?, Vec::<u8>::new());
+                assert!(
+                    matches!(picture.location, SourceLocation::Direct { .. }),
+                    "{picture:?}"
+                );
+            }
+        }
         Ok(())
     }
 

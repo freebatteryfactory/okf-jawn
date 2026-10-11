@@ -11,6 +11,12 @@
 //!   (`docling::pdf_text_layer_pages`, read by the location rule). The original's bytes move
 //!   into the converter, and the text layer reads them again once it is done, so one copy of
 //!   the original counts against the cap at a time.
+//! - The images (`write_assets`): each picture's own image (`Node::Picture.image`, a
+//!   `PictureImage`) and, when the settings ask for page images, each page render
+//!   (`DoclingDocument::page_images`, rendered at `images_scale`), are written as files from
+//!   the bytes the converter already holds, so no second copy is made. Pictures are numbered in
+//!   node order, looking through groups, wrappers and rich table cells; the supervisor checks
+//!   that number against the export's picture item before it takes that item's location.
 //! - The line runs (`protocol::Block`): each top-level node is rendered on its own with
 //!   `MarkdownStreamer::push`, whose chunks concatenate byte for byte to the Markdown export, so
 //!   each node's lines are known. A run is on a page only by the node's own provenance (a
@@ -37,18 +43,19 @@ use std::process::ExitCode;
 
 use docling::{
     ConversionError, DoclingDocument, DocumentConverter, ImageMode, InputFormat, MarkdownStreamer,
-    Node, SourceDocument,
+    Node, PictureImage, SourceDocument,
 };
 use okf_jawn_contract::common::TextRange;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::extraction::{ConverterIssue, FailureReason, OcrPolicy};
+use okf_jawn_contract::read::AssetRole;
 use okf_jawn_core::conversion::ConversionStatus;
 
 use serde_json::Value;
 
 use crate::cap::ALLOCATION_FAILURE_MARKER;
 use crate::protocol::{
-    Block, EXPORT_FILE, MARKDOWN_FILE, Reply, Request, TEXT_LAYER_FILE, Task, Unlocated,
+    AssetFile, Block, EXPORT_FILE, MARKDOWN_FILE, Reply, Request, TEXT_LAYER_FILE, Task, Unlocated,
     write_reply,
 };
 
@@ -201,6 +208,62 @@ pub fn line_blocks(document: &DoclingDocument, markdown: &str) -> Vec<Block> {
     }
 }
 
+/// Write the document's images into `directory` and name each one: every picture that has its
+/// own image, numbered by its position among all pictures in node order, with its size, media
+/// type and its own caption; then, only when `page_images` is set, every page render with its
+/// page. The bytes are written from the document as they are.
+///
+/// # Errors
+/// Returns `Internal` when a file cannot be written.
+pub fn write_assets(
+    document: &DoclingDocument,
+    directory: &Path,
+    page_images: bool,
+) -> Result<Vec<AssetFile>, ApiError> {
+    let mut pictures = Vec::new();
+    collect_pictures(&document.nodes, &mut pictures);
+    let mut assets = Vec::new();
+    for (index, (caption, image)) in pictures.into_iter().enumerate() {
+        let Some(image) = image else {
+            continue;
+        };
+        let file = format!("picture-{index}.{}", extension(&image.mimetype));
+        write_bytes(&directory.join(&file), &image.data)?;
+        assets.push(AssetFile {
+            file,
+            role: AssetRole::Picture,
+            media_type: image.mimetype.clone(),
+            width: image.width,
+            height: image.height,
+            page: None,
+            picture: Some(index),
+            caption: caption
+                .filter(|caption| !caption.trim().is_empty())
+                .cloned(),
+        });
+    }
+    if page_images {
+        for (page, image) in &document.page_images {
+            let Ok(page) = u32::try_from(*page) else {
+                continue;
+            };
+            let file = format!("page-{page}.{}", extension(&image.mimetype));
+            write_bytes(&directory.join(&file), &image.data)?;
+            assets.push(AssetFile {
+                file,
+                role: AssetRole::PageImage,
+                media_type: image.mimetype.clone(),
+                width: image.width,
+                height: image.height,
+                page: Some(page),
+                picture: None,
+                caption: None,
+            });
+        }
+    }
+    Ok(assets)
+}
+
 /// Count the pages of a paginated original.
 fn page_count(request: &Request) -> Result<Reply, Stop> {
     let reply = |status, page_count, issues| Reply {
@@ -209,6 +272,7 @@ fn page_count(request: &Request) -> Result<Reply, Stop> {
         issues,
         blocks: Vec::new(),
         text_layer: false,
+        assets: Vec::new(),
     };
     match format_of(&request.file_name) {
         Some(InputFormat::Pdf) => {
@@ -241,6 +305,7 @@ fn convert(request: &Request, directory: &Path) -> Result<Reply, Stop> {
         issues,
         blocks: Vec::new(),
         text_layer: false,
+        assets: Vec::new(),
     };
     let Some(format) = format_of(&request.file_name) else {
         return Ok(unconverted(ConversionStatus::Unsupported, Vec::new()));
@@ -285,6 +350,7 @@ fn convert(request: &Request, directory: &Path) -> Result<Reply, Stop> {
         &result.document.export_to_json(),
     )?;
     let blocks = line_blocks(&result.document, &markdown);
+    let assets = write_assets(&result.document, directory, request.settings.page_images)?;
     let text_layer = format == InputFormat::Pdf
         && match docling::pdf_text_layer_pages(
             &read_source(request)?,
@@ -310,6 +376,7 @@ fn convert(request: &Request, directory: &Path) -> Result<Reply, Stop> {
         issues,
         blocks,
         text_layer,
+        assets,
     })
 }
 
@@ -427,6 +494,47 @@ fn own_item(alone: &Value, written: &ItemCounts) -> Option<(String, Option<Strin
     Some((format!("#/{array}/{}", before.checked_add(index)?), text))
 }
 
+/// Every picture of `nodes` in node order, with its caption and its own image: a picture
+/// inside a group, a furniture, comment, location or provenance wrapper, or a rich table cell
+/// counts where it stands. A node the JSON export leaves out is not looked into; the
+/// supervisor's check against the export catches any picture numbered otherwise.
+fn collect_pictures<'a>(
+    nodes: &'a [Node],
+    into: &mut Vec<(Option<&'a String>, Option<&'a PictureImage>)>,
+) {
+    for node in nodes {
+        match node {
+            Node::Picture { caption, image, .. } => into.push((caption.as_ref(), image.as_ref())),
+            Node::Group { children, .. } => collect_pictures(children, into),
+            Node::Furniture { inner, .. }
+            | Node::Commented { inner, .. }
+            | Node::Located { inner, .. }
+            | Node::Prov { inner, .. } => {
+                collect_pictures(std::slice::from_ref(inner.as_ref()), into);
+            }
+            Node::Table(table) => {
+                for cell in table.cell_blocks.iter().flatten().flatten() {
+                    collect_pictures(cell, into);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The file extension an image of `media_type` is written with.
+fn extension(media_type: &str) -> &'static str {
+    match media_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/tiff" => "tiff",
+        "image/bmp" => "bmp",
+        _ => "bin",
+    }
+}
+
 /// Whether a node is a table, looking through location wrappers.
 fn is_table(node: &Node) -> bool {
     match node {
@@ -465,6 +573,12 @@ fn issue(component_type: &str, module_name: &str, message: &str) -> ConverterIss
 /// Write a text output.
 fn write_text(path: &Path, text: &str) -> Result<(), ApiError> {
     std::fs::write(path, text)
+        .map_err(|error| fault(&format!("{} could not be written: {error}", path.display())))
+}
+
+/// Write a binary output.
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), ApiError> {
+    std::fs::write(path, bytes)
         .map_err(|error| fault(&format!("{} could not be written: {error}", path.display())))
 }
 
