@@ -5432,5 +5432,126 @@ async fn backup_a_replacement_set_with_a_refused_archive_writes_nothing() -> Tes
     Ok(())
 }
 
+/// B3: a purge of another workspace keeps the structured export and asset that a surviving
+/// workspace's conversion record over 64 MiB names, even when the purged workspace named them
+/// too (`references::record_tokens` past `RECORD_LIMIT`, read for survivors).
+#[tokio::test]
+async fn rr5_a_purge_keeps_what_a_survivors_large_record_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (survivor, created) = create(&storage, "local", 1, "Large").await?;
+    let (target, target_head) = create(&storage, "local", 2, "Purged").await?;
+    let source = put(&storage, &survivor, b"rr5 large original")
+        .await?
+        .digest;
+    let structured = put(&storage, &target, b"{\"rr5\": \"large export\"}")
+        .await?
+        .digest;
+    let asset = put(&storage, &target, b"rr5 large render").await?.digest;
+    let bytes = rr4_record(&structured, &asset, 1_500_000);
+    assert!(
+        bytes.len() > 64 << 20,
+        "the record is {} bytes",
+        bytes.len()
+    );
+    let record = rr4_put_large(&storage, &survivor, bytes).await?;
+    commit(
+        &storage,
+        &survivor,
+        3,
+        &created,
+        vec![rr4_converted_card(
+            uuid!(14)?,
+            "sources/large.md",
+            &source,
+            &record,
+        )?],
+    )
+    .await?;
+    // The target names the same two objects, as cards over them.
+    put(&storage, &target, b"{\"rr5\": \"large export\"}").await?;
+    put(&storage, &target, b"rr5 large render").await?;
+    commit(
+        &storage,
+        &target,
+        4,
+        &target_head,
+        vec![card(uuid!(15)?, &structured)?, {
+            let TreeEdit::WriteSourceCard(mut second) = card(uuid!(16)?, &asset)? else {
+                return Err("a card".into());
+            };
+            second.path = WorkspacePath::try_from("sources/render.md".to_owned())?;
+            TreeEdit::WriteSourceCard(second)
+        }],
+    )
+    .await?;
+    rr5_purge(&storage, &target).await?;
+    for (digest, what) in [(&structured, "structured export"), (&asset, "asset")] {
+        assert!(
+            object_file(directory.path(), digest)?.is_file(),
+            "the purge deleted the {what} a surviving large record names"
+        );
+    }
+    Ok(())
+}
+
+/// Purge the workspace `target` of tenant `local` (purge 61 under mutations 60 and 62).
+async fn rr5_purge(storage: &Storage, target: &StorageScope) -> TestResult {
+    let tenant = tenant("local")?;
+    let purge = storage
+        .records()
+        .create_purge(
+            &tenant,
+            uuid!(60)?,
+            NewPurge {
+                id: uuid!(61)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: target.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    storage
+        .purger()
+        .purge_workspace(&tenant, uuid!(62)?, purge.id, target.workspace_id)
+        .await?;
+    Ok(())
+}
+
+/// B3 bounded reading: an object over 64 MiB is read as a conversion record only when a source
+/// card names it as one. A surviving workspace's large JSON upload that no card names, whose
+/// `assets` and `structured` lists name two objects of the purged workspace, keeps neither:
+/// the purge deletes both.
+#[tokio::test]
+async fn backup_a_large_upload_is_never_read_as_a_conversion_record() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (survivor, _) = create(&storage, "local", 1, "Large").await?;
+    let (target, _) = create(&storage, "local", 2, "Purged").await?;
+    let structured = put(&storage, &target, b"{\"rr5\": \"export an upload names\"}")
+        .await?
+        .digest;
+    let asset = put(&storage, &target, b"rr5 render an upload names")
+        .await?
+        .digest;
+    let bytes = rr4_record(&structured, &asset, 1_500_000);
+    assert!(
+        bytes.len() > 64 << 20,
+        "the upload is {} bytes",
+        bytes.len()
+    );
+    // The survivor's pending put, which a purge reads as a surviving reference; no card names it.
+    rr4_put_large(&storage, &survivor, bytes).await?;
+    rr5_purge(&storage, &target).await?;
+    for (digest, what) in [(&structured, "structured export"), (&asset, "asset")] {
+        assert!(
+            !object_file(directory.path(), digest)?.is_file(),
+            "the {what} was kept because a large upload, read as a record, names it"
+        );
+    }
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;

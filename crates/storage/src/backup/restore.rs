@@ -317,10 +317,15 @@ fn put_back(
     let pack = staging.join(PACK);
     opened.extract(PACK, &pack)?;
     let items = history(storage, runtime, scope, manifest, &pack, mode)?;
-    let restored_history = references::history(&storage.repositories.open(scope)?)?.objects;
+    let restored_history = references::history(&storage.repositories.open(scope)?)?;
     let mut followed = BTreeMap::new();
     for digest in &manifest.objects {
-        let named = references::record_tokens(&storage.blobs, &scope.tenant_id, digest)?;
+        let named = references::record_tokens(
+            &storage.blobs,
+            &scope.tenant_id,
+            digest,
+            restored_history.records.contains(digest),
+        )?;
         if !named.is_empty() {
             followed.insert(digest.clone(), named);
         }
@@ -332,7 +337,7 @@ fn put_back(
             workspace: scope.workspace_id.0.to_string(),
             original: manifest.workspace_id.0.to_string(),
             objects: manifest.objects.clone(),
-            history: restored_history,
+            history: restored_history.objects,
             followed,
             replaced_from: match mode {
                 Mode::Import(..) => None,
