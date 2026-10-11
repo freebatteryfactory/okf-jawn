@@ -659,6 +659,45 @@ async fn a_deleted_card_leaves_no_companion_files() -> TestResult {
     Ok(())
 }
 
+/// Core M1.2 storage-side re-review N1 (mutant 9): a delete clears the whole corrections folder,
+/// files nested below its top level included, not only its top-level files.
+#[tokio::test]
+async fn a_deleted_card_leaves_no_nested_correction_file() -> TestResult {
+    let space = Workspace::new().await?;
+    space
+        .commit(
+            2,
+            &space.initial,
+            vec![
+                card(12, "application/pdf", 'a')?,
+                correction(12, 'a', "Corrected A.")?,
+            ],
+        )
+        .await?;
+    let folder = corrections_folder(12);
+    let nested = format!("{folder}nested/deep/x.json");
+    space.raw_upsert(&nested, b"{\"nested\":true}", 40)?;
+    let held = space.raw_upsert(&format!("{folder}nested/y.json"), b"{}", 41)?;
+    let before = space.files_under(&held, &folder)?;
+    assert_eq!(before.len(), 3, "{before:?}");
+    let deleted = space
+        .commit(
+            3,
+            &held,
+            vec![TreeEdit::DeleteItem {
+                item_id: uuid!(12)?,
+            }],
+        )
+        .await?;
+    assert_eq!(
+        space.files_under(&deleted, &folder)?,
+        Vec::<String>::new(),
+        "every file under the corrections folder goes with the item"
+    );
+    assert_eq!(space.file(&deleted, &nested)?, None);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_card_restored_to_the_revision_that_deleted_it_leaves_no_companion_files() -> TestResult {
     let space = Workspace::new().await?;
