@@ -20,6 +20,7 @@ use okf_jawn_contract::identity::{
     ConfirmationId, Digest, ItemId, MutationId, PurgeId, Revision, TenantId, UploadId,
     WorkspacePath,
 };
+use okf_jawn_contract::import::{Job, JobState};
 use okf_jawn_contract::item::ItemKind;
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::proposal::{Comment, Proposal, ProposalStatus};
@@ -2346,6 +2347,191 @@ async fn purge_refuses_a_new_job_of_the_workspace_it_names() -> TestResult {
     records
         .create_job(&JobScope::Workspace(survivor), new_job(32)?)
         .await?;
+    Ok(())
+}
+
+/// A queued job of `scope` created under mutation `n`.
+async fn queued_job(storage: &Storage, scope: &JobScope, n: u32) -> Fallible<Job> {
+    Ok(storage
+        .records()
+        .create_job(
+            scope,
+            NewJob {
+                mutation_id: uuid!(n)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?)
+}
+
+/// Ruling 3: a claim of a job of a workspace a purge names is refused with the purge's
+/// `Conflict` inside its transaction and leaves the job queued, still listed as pending, for
+/// core to cancel.
+#[tokio::test]
+async fn purge_refuses_a_claim_of_a_job_of_the_workspace_it_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let (survivor, _) = create(&storage, 2, "Garden").await?;
+    let scope = JobScope::Workspace(target.clone());
+    let job = queued_job(&storage, &scope, 30).await?;
+    let other = queued_job(&storage, &JobScope::Workspace(survivor), 31).await?;
+    record_purge_under(&storage, &target, 60, 50).await?;
+    let records = storage.records();
+    refused(
+        records.claim_job(job.id).await,
+        "a claim after the purge is recorded",
+    )?;
+    assert_eq!(
+        records.get_job(&scope, job.id).await?.state,
+        JobState::Queued,
+        "the refused claim leaves the job as it is"
+    );
+    assert!(
+        records
+            .pending_jobs()
+            .await?
+            .iter()
+            .any(|(_, pending)| *pending == job.id),
+        "it is still listed as pending"
+    );
+    let cancelled = records.cancel_job(&scope, uuid!(32)?, job.id).await?;
+    assert_eq!(cancelled.state, JobState::Cancelled, "core can cancel it");
+    some(
+        records.claim_job(other.id).await?,
+        "another workspace's job is claimed",
+    )?;
+    Ok(())
+}
+
+/// Ruling 3 (re-review probe `rr3_retry_of_a_failed_job_after_the_purge_is_recorded`): a
+/// retry of a failed, retryable job of a workspace a purge names is refused with the purge's
+/// `Conflict`, during the purge and after it, and the job stays failed.
+#[tokio::test]
+async fn purge_refuses_a_retry_of_a_failed_job_of_the_workspace_it_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let scope = JobScope::Workspace(target.clone());
+    let job = queued_job(&storage, &scope, 30).await?;
+    let records = storage.records();
+    let claimed = some(records.claim_job(job.id).await?, "the claim")?;
+    records
+        .fail_job(claimed.lease, "disk full".to_owned(), true)
+        .await?;
+    record_purge_under(&storage, &target, 60, 50).await?;
+    refused(
+        records.retry_job(&scope, uuid!(31)?, job.id).await,
+        "a retry during the purge",
+    )?;
+    assert_eq!(
+        records.get_job(&scope, job.id).await?.state,
+        JobState::Failed
+    );
+    storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, uuid!(60)?, target.workspace_id)
+        .await?;
+    refused(
+        records.retry_job(&scope, uuid!(32)?, job.id).await,
+        "a retry after the purge",
+    )?;
+    Ok(())
+}
+
+/// Ruling 3 under a real race: three loopers each retry, claim and fail their own job of the
+/// target while the purge is recorded. Every retry is queued or refused naming the purge, none
+/// is queued after one was refused, a refused retry records no control row, and no job is left
+/// running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn purge_refuses_every_retry_once_recorded_while_retries_race_it() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let scope = JobScope::Workspace(target.clone());
+    let mut tasks = Vec::new();
+    for lane in 0..3_u32 {
+        let job = queued_job(&storage, &scope, 30 + lane).await?;
+        let records = storage.records();
+        let claimed = some(records.claim_job(job.id).await?, "the first claim")?;
+        records
+            .fail_job(claimed.lease, "busy".to_owned(), true)
+            .await?;
+        let scope = scope.clone();
+        tasks.push(tokio::spawn(async move {
+            // Each looper retries until a retry is refused, then tries 20 more.
+            let mut outcomes: Vec<Result<(), ApiError>> = Vec::new();
+            let (mut refusals, mut n) = (0, 0_u32);
+            while refusals < 20 && n < 100_000 {
+                let mutation = serde_json::from_value(json!(uuid_text(100_000 * (lane + 1) + n)))
+                    .map_err(|error| error.to_string())?;
+                n += 1;
+                let retried = records
+                    .retry_job(&scope, mutation, job.id)
+                    .await
+                    .map(|_| ());
+                let queued = retried.is_ok();
+                if !queued {
+                    refusals += 1;
+                }
+                outcomes.push(retried);
+                if !queued {
+                    continue;
+                }
+                match records.claim_job(job.id).await {
+                    Ok(Some(claimed)) => {
+                        records
+                            .fail_job(claimed.lease, "busy".to_owned(), true)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Ok(None) => return Err("a queued job was not claimable".to_owned()),
+                    Err(error) => outcomes.push(Err(error)),
+                }
+            }
+            Ok::<_, String>((job.id, outcomes))
+        }));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    record_purge_under(&storage, &target, 60, 50).await?;
+    let (mut queued, mut refused_count) = (0_i64, 0_i64);
+    let records = storage.records();
+    for task in tasks {
+        let (job, outcomes) = task.await??;
+        let mut seen_refusal = false;
+        for outcome in outcomes {
+            match outcome {
+                Ok(()) => {
+                    assert!(!seen_refusal, "a retry was queued after one was refused");
+                    queued += 1;
+                }
+                Err(error) => {
+                    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+                    assert!(error.message.contains(&uuid_text(60)), "{error}");
+                    seen_refusal = true;
+                    refused_count += 1;
+                }
+            }
+        }
+        let state = records.get_job(&scope, job).await?.state;
+        assert!(
+            matches!(state, JobState::Failed | JobState::Queued),
+            "no job is left running: {state:?}"
+        );
+    }
+    let controls: i64 = rusqlite::Connection::open(directory.path().join("records.sqlite"))?
+        .query_row(
+            "SELECT count(*) FROM job_controls WHERE action = 'retry'",
+            [],
+            |row| row.get(0),
+        )?;
+    eprintln!("retry race: queued {queued}, refused {refused_count}, controls {controls}");
+    assert_eq!(controls, queued, "a refused retry records no control row");
+    assert!(
+        queued > 0 && refused_count >= 60,
+        "a real race: {queued} queued"
+    );
     Ok(())
 }
 

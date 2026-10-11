@@ -93,7 +93,8 @@ impl RecordStore for SqliteRecords {
     fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job> {
         let scope = scope.clone();
         // A job of a workspace a purge names is refused inside the transaction that would
-        // record it (`purge::guard`): core cancels and drains the jobs that already exist.
+        // record it (`purge::guard`), as are its retries and claims: core cancels and drains
+        // the jobs that already run.
         Box::pin(self.db.transaction(move |transaction| {
             let (tenant, workspace) = job_scope_key(&scope);
             if let Some(workspace) = &workspace {
@@ -697,6 +698,11 @@ fn claim(transaction: &Transaction<'_>, job_id: JobId) -> Result<Option<ClaimedJ
     let Some((tenant, workspace, record, mutation, initiator, spec, expires_ms)) = found else {
         return Ok(None);
     };
+    // A job of a workspace a purge names is not started: the claim is refused and the job is
+    // left as it is, for core to cancel (`purge::guard`).
+    if let Some(workspace) = &workspace {
+        guard::refuse(transaction, &tenant, workspace)?;
+    }
     let mut job = decode_job(&record)?;
     let now = seam::now_ms()?;
     if job.state == JobState::Running && expires_ms.is_some_and(|expiry| expiry > now) {
@@ -791,6 +797,13 @@ fn control(
     action: &str,
 ) -> Result<Job, ApiError> {
     let (tenant, workspace) = job_scope_key(scope);
+    // A retry queues job work again, so a workspace a purge names refuses it like a new job;
+    // a cancellation is what core does to that workspace's jobs, and is never refused.
+    if action == "retry"
+        && let Some(workspace) = &workspace
+    {
+        guard::refuse(transaction, &tenant, workspace)?;
+    }
     let record: String = transaction
         .query_row(
             "SELECT record FROM jobs WHERE job_id = ?1 AND tenant_id = ?2 AND workspace_id IS ?3",
