@@ -98,7 +98,7 @@ use okf_jawn_core::storage::{
     TreeEdit, derive_commit_mutation_id, derive_item_id,
 };
 
-use crate::handler::{Attempt, Done, HandlerPorts, announce_commit, job_event};
+use crate::handler::{Attempt, Done, HandlerPorts, Renewed, announce_commit, job_event, renewing};
 use crate::record::{
     Assembled, ConvertedWindow, WindowOutcome, assemble, sha256_digest, windows_of,
 };
@@ -245,7 +245,8 @@ pub(crate) async fn import(
         let item = Some(card.item_id);
         let replay = replayed(ports, attempt, scope, (base, ordinal), item, &check);
         if let Some(committed) = replay.await? {
-            take_committed(ports, scope, card.item_id, committed, Vec::new(), &mut done).await?;
+            let resumed = (card.item_id, committed, Vec::new());
+            take_committed(ports, attempt, scope, resumed, &mut done).await?;
         } else {
             let Some(converted) =
                 convert_document(ports, attempt, scope, &local, &file_name, request.settings)
@@ -274,9 +275,8 @@ pub(crate) async fn import(
             .await?
             {
                 Landed::Committed(committed) => {
-                    let outputs = converted.outputs;
-                    take_committed(ports, scope, card.item_id, committed, outputs, &mut done)
-                        .await?;
+                    let landed = (card.item_id, committed, converted.outputs);
+                    take_committed(ports, attempt, scope, landed, &mut done).await?;
                 }
                 Landed::Refused(error) => return Ok(refused(&error)),
                 // The person's edit stands; this conversion is not written, and not retried.
@@ -335,15 +335,14 @@ fn observed_name(card: &SourceCard) -> String {
 /// references, which are that attempt's.
 async fn take_committed(
     ports: &HandlerPorts,
+    attempt: &Attempt<'_>,
     scope: &StorageScope,
-    item_id: ItemId,
-    committed: Committed,
-    converted: Vec<Digest>,
+    (item_id, committed, converted): (ItemId, Committed, Vec<Digest>),
     done: &mut Done,
 ) -> Result<(), ApiError> {
     if committed.replayed {
-        done.outputs
-            .extend(committed_outputs(ports, scope, &committed.revision, item_id).await?);
+        let outputs = committed_outputs(ports, attempt, scope, &committed.revision, item_id);
+        done.outputs.extend(outputs.await?);
     } else {
         done.outputs.extend(converted);
     }
@@ -480,7 +479,7 @@ pub(crate) async fn redigest(
     .await?
     {
         return Ok(Done {
-            outputs: committed_outputs(ports, scope, &committed.revision, item_id).await?,
+            outputs: committed_outputs(ports, attempt, scope, &committed.revision, item_id).await?,
             revision: Some(committed.revision),
             item_ids: vec![item_id],
             warnings: committed.warnings,
@@ -544,7 +543,7 @@ pub(crate) async fn redigest(
     Ok(match landed {
         Landed::Committed(committed) => Done {
             outputs: if committed.replayed {
-                committed_outputs(ports, scope, &committed.revision, item_id).await?
+                committed_outputs(ports, attempt, scope, &committed.revision, item_id).await?
             } else {
                 converted.outputs
             },
@@ -757,9 +756,34 @@ fn outputs_of(record: &ConversionRecord, digest: Digest) -> Vec<Digest> {
         .collect()
 }
 
+/// The retained outputs a committed card references (`outputs_at`), read under the heartbeat.
+async fn committed_outputs(
+    ports: &HandlerPorts,
+    attempt: &Attempt<'_>,
+    scope: &StorageScope,
+    revision: &Revision,
+    item_id: ItemId,
+) -> Result<Vec<Digest>, ApiError> {
+    renewed(ports, attempt, outputs_at(ports, scope, revision, item_id)).await
+}
+
+/// Run a long storage read under the heartbeat (`handler::renewing`), so the lease stays live
+/// however long it takes. Like the other long storage calls it is not dropped for a
+/// cancellation: one seen meanwhile is acted on at the job's next checkpoint, which reads the
+/// job's state again (a replay with no later checkpoint completes the work that landed).
+async fn renewed<T>(
+    ports: &HandlerPorts,
+    attempt: &Attempt<'_>,
+    work: impl Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+    Ok(match renewing(ports, attempt, work).await? {
+        Renewed::Done(value) | Renewed::Cancelled(value) => value,
+    })
+}
+
 /// The retained outputs a committed card references: those of the conversion record its
 /// extraction names at `revision` (`outputs_of`), or none when it names no record.
-async fn committed_outputs(
+async fn outputs_at(
     ports: &HandlerPorts,
     scope: &StorageScope,
     revision: &Revision,
@@ -889,7 +913,8 @@ async fn replayed(
         return Ok(None);
     };
     announce_commit(ports, claimed, scope, &revision, mutation_id, item).await?;
-    let warnings = checked_again(ports, scope, &revision, Arc::clone(check)).await?;
+    let again = checked_again(ports, scope, &revision, Arc::clone(check));
+    let warnings = renewed(ports, attempt, again).await?;
     Ok(Some(Committed {
         revision,
         replayed: true,
@@ -901,7 +926,8 @@ async fn replayed(
 /// directory: every item file, each folder's maintained `index.md` and the root `log.md`,
 /// which are the Markdown files of the bundle the check reads (storage's side records under
 /// `.okf/` are not Markdown and no OKF check reads them). This is the candidate tree the
-/// check saw when storage wrote that commit.
+/// check saw when storage wrote that commit. It reads the whole tree, so its caller runs it
+/// under the heartbeat.
 async fn checked_again(
     ports: &HandlerPorts,
     scope: &StorageScope,

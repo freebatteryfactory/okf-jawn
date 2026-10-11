@@ -47,7 +47,7 @@ mod job_handler {
     use crate::check::{TestResult, some};
     use crate::ports::{
         AcceptAll, FakeBackups, FakeBlobs, FakeConverter, FakePurger, FakeSearch, FakeUploads,
-        FakeVersions, RefuseAll,
+        FakeVersions, Hold, RefuseAll,
     };
     use crate::records::{Appended, FakeEvents, FakeRecords, job_id};
 
@@ -129,10 +129,12 @@ mod job_handler {
             restored: Mutex::new(Vec::new()),
             versions: Arc::clone(&versions),
             restore_hold: Mutex::new(None),
+            write_hold: Mutex::new(None),
         });
         let purger = Arc::new(FakePurger {
             report: report()?,
             calls: AtomicUsize::new(0),
+            hold: Mutex::new(None),
         });
         let uploads = Arc::new(FakeUploads::default());
         let blobs = Arc::new(FakeBlobs::new()?);
@@ -679,6 +681,205 @@ mod job_handler {
         // Renewals that changed neither progress nor state announced nothing: the only
         // `job_updated` is the completion's.
         assert_eq!(events_of(&world, &EventKind::JobUpdated)?.len(), 1);
+        Ok(())
+    }
+
+    /// A hold that outlasts six lease intervals of 50 ms, in each of which the lease lapses
+    /// unless the job renewed it.
+    fn lapsing(records: &Arc<FakeRecords>) -> Hold {
+        let records = Arc::clone(records);
+        Arc::new(move || {
+            let records = Arc::clone(&records);
+            Box::pin(async move {
+                for _interval in 0..6 {
+                    let before = records.renewals();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if records.renewals() == before {
+                        let _lapsed = records.expire_running();
+                    }
+                }
+            })
+        })
+    }
+
+    /// The job succeeded, completed under the lease of its `attempt`-th claim.
+    fn assert_completed_under(
+        world: &World,
+        id: okf_jawn_contract::identity::JobId,
+        attempt: u32,
+    ) -> TestResult {
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let completion = some(entry.completions.first(), "the completion")?;
+        assert_eq!(
+            (completion.lease.attempt, completion.lease.token.clone()),
+            (attempt, format!("lease-{attempt}"))
+        );
+        Ok(())
+    }
+
+    /// A world with a 10 ms heartbeat, whose lease lapses after 50 ms without a renewal.
+    fn heartbeat_world() -> Built<World> {
+        world_full(
+            Some(3),
+            Vec::new(),
+            Arc::new(AcceptAll),
+            Duration::from_millis(10),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_rebuild_that_outlasts_several_lease_intervals_keeps_its_lease() -> TestResult {
+        let world = heartbeat_world()?;
+        *world.search.rebuild_hold.lock().map_err(|_| "poisoned")? = Some(lapsing(&world.records));
+        let id = job(&world, 170, workspace_scope()?, JobSpec::RebuildIndex)?;
+        assert!(run(&world, id).await?);
+        assert_completed_under(&world, id, 1)?;
+        assert_eq!(world.search.rebuilt()?, [base()?]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn both_backups_that_outlast_several_lease_intervals_keep_their_leases() -> TestResult {
+        let world = heartbeat_world()?;
+        *world.backups.write_hold.lock().map_err(|_| "poisoned")? = Some(lapsing(&world.records));
+        let workspace = job(&world, 171, workspace_scope()?, JobSpec::BackupWorkspace)?;
+        assert!(run(&world, workspace).await?);
+        assert_completed_under(&world, workspace, 1)?;
+        let installation = job(
+            &world,
+            172,
+            JobScope::Tenant(tenant()?),
+            JobSpec::BackupInstallation,
+        )?;
+        assert!(run(&world, installation).await?);
+        assert_completed_under(&world, installation, 1)?;
+        assert_eq!(world.records.artifacts()?.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn both_purges_that_outlast_several_lease_intervals_keep_their_leases() -> TestResult {
+        let world = heartbeat_world()?;
+        *world.purger.hold.lock().map_err(|_| "poisoned")? = Some(lapsing(&world.records));
+        let workspace_id = serde_json::from_value::<WorkspaceId>(json!(WORKSPACE))?;
+        let item = "00000000-0000-0000-0000-0000000000dd";
+        let purges = [
+            (
+                173,
+                "00000000-0000-0000-0000-0000000000c1",
+                json!({ "kind": "workspace", "workspace_id": WORKSPACE }),
+            ),
+            (
+                174,
+                "00000000-0000-0000-0000-0000000000c2",
+                json!({ "kind": "item", "workspace_id": WORKSPACE, "item_id": item }),
+            ),
+        ];
+        for (number, purge, target) in purges {
+            let purge_id = serde_json::from_value::<PurgeId>(json!(purge))?;
+            let spec = if number == 173 {
+                JobSpec::PurgeWorkspace {
+                    purge_id,
+                    workspace_id,
+                }
+            } else {
+                JobSpec::PurgeItem {
+                    purge_id,
+                    workspace_id,
+                    item_id: serde_json::from_value(json!(item))?,
+                }
+            };
+            let id = job(&world, number, JobScope::Tenant(tenant()?), spec)?;
+            world
+                .records
+                .insert_purge(serde_json::from_value::<Purge>(json!({
+                    "id": purge,
+                    "target": target,
+                    "state": "requested",
+                    "job_id": serde_json::to_value(id)?,
+                    "requested_by": "admin",
+                    "requested_at": "2026-10-09T00:00:00.000Z",
+                }))?)?;
+            assert!(run(&world, id).await?);
+            assert_completed_under(&world, id, 1)?;
+            assert_eq!(world.records.purge(purge_id)?.state, PurgeState::Completed);
+        }
+        assert_eq!(world.purger.calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    /// An import of two sources in a world with a 10 ms heartbeat whose first attempt died as
+    /// its first card's commit returned, queued again to resume (the fake ledger queues it
+    /// afresh, so the resumed claim is its first again).
+    async fn resumed_import(number: u128) -> Built<(World, okf_jawn_contract::identity::JobId)> {
+        let world = heartbeat_world()?;
+        let first = upload(&world, number, "first.pdf", b"%PDF first")?;
+        let second = upload(
+            &world,
+            number.saturating_add(1),
+            "second.pdf",
+            b"%PDF second",
+        )?;
+        let id = job(
+            &world,
+            number,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        world.versions.die_after(2)?;
+        assert!(run(&world, id).await?);
+        let died = world.records.entry(id)?;
+        assert_eq!(died.job.state, JobState::Failed);
+        world.records.insert(id, died.scope, died.created)?;
+        Ok((world, id))
+    }
+
+    #[tokio::test]
+    async fn a_replayed_commits_check_that_outlasts_several_lease_intervals_keeps_its_lease()
+    -> TestResult {
+        let (world, id) = resumed_import(175).await?;
+        // The first tree read of the replayed pending commit's check is long.
+        *world.versions.read_hold.lock().map_err(|_| "poisoned")? = Some(lapsing(&world.records));
+        assert!(run(&world, id).await?);
+        assert_completed_under(&world, id, 1)?;
+        assert!(
+            world
+                .versions
+                .read_hold
+                .lock()
+                .map_err(|_| "poisoned")?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_replayed_cards_outputs_read_that_outlasts_several_lease_intervals_keeps_its_lease()
+    -> TestResult {
+        let (world, id) = resumed_import(177).await?;
+        // Reading back the record the replayed first card references is long.
+        let cards = cards(&world)?;
+        let committed = some(cards.get(2), "the first converted card")?;
+        let record = some(
+            committed.appearance.extraction.digest.clone(),
+            "the record digest",
+        )?;
+        *world
+            .blobs
+            .materialize_hold
+            .lock()
+            .map_err(|_| "poisoned")? = Some((record, lapsing(&world.records)));
+        assert!(run(&world, id).await?);
+        assert_completed_under(&world, id, 1)?;
+        assert!(
+            world
+                .blobs
+                .materialize_hold
+                .lock()
+                .map_err(|_| "poisoned")?
+                .is_none()
+        );
         Ok(())
     }
 

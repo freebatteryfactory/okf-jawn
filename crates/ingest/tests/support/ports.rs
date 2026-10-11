@@ -81,6 +81,8 @@ pub struct FakeVersions {
     pub on_commit: Mutex<Option<CommitHook>>,
     /// Items present at the base revision, before any commit.
     pub at_base: Mutex<Vec<SourceCard>>,
+    /// Awaited once, by the next `read_file`, before it answers (a long tree read).
+    pub read_hold: Mutex<Option<Hold>>,
 }
 
 /// An `UploadStore` holding uploads and recording which job consumed each.
@@ -101,6 +103,8 @@ pub struct FakeBlobs {
     pub objects: Mutex<BTreeMap<String, Vec<u8>>>,
     /// Where materialized objects are written.
     pub directory: tempfile::TempDir,
+    /// Awaited once, by the next `materialize` of this digest, before it answers.
+    pub materialize_hold: Mutex<Option<(Digest, Hold)>>,
 }
 
 /// A `Converter` that converts every window of a paginated original, except the windows that
@@ -159,6 +163,8 @@ pub struct FakeSearch {
     pub rebuilt: Mutex<Vec<Revision>>,
     /// Revisions `index_revision` was called with, in order.
     pub indexed: Mutex<Vec<Revision>>,
+    /// Awaited as a rebuild starts (a long rebuild).
+    pub rebuild_hold: Mutex<Option<Hold>>,
 }
 
 /// `Backups` that write one archive per mutation id and count the writes. A restore writes one
@@ -173,12 +179,14 @@ pub struct FakeBackups {
     /// Where a restore commits.
     pub versions: Arc<FakeVersions>,
     /// Awaited as a restore starts, before it writes anything (a long restore).
-    pub restore_hold: Mutex<Option<RestoreHold>>,
+    pub restore_hold: Mutex<Option<Hold>>,
+    /// Awaited as either archive write starts (a long backup).
+    pub write_hold: Mutex<Option<Hold>>,
 }
 
-/// What a restore awaits before it writes: a test makes it outlast several lease intervals.
-pub type RestoreHold =
-    Arc<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+/// What a long storage call awaits before it answers: a test makes it outlast several lease
+/// intervals.
+pub type Hold = Arc<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// A `Purger` that returns one report and counts the calls.
 pub struct FakePurger {
@@ -186,6 +194,8 @@ pub struct FakePurger {
     pub report: PurgeReport,
     /// Calls made.
     pub calls: AtomicUsize,
+    /// Awaited as either purge starts (a long purge).
+    pub hold: Mutex<Option<Hold>>,
 }
 
 impl Drop for DropCount {
@@ -230,6 +240,7 @@ impl FakeVersions {
             calls: Mutex::new((0, Vec::new())),
             on_commit: Mutex::new(None),
             at_base: Mutex::new(Vec::new()),
+            read_hold: Mutex::new(None),
         }
     }
 
@@ -567,6 +578,7 @@ impl FakeBlobs {
         Ok(Self {
             objects: Mutex::new(BTreeMap::new()),
             directory: tempfile::tempdir()?,
+            materialize_hold: Mutex::new(None),
         })
     }
 
@@ -664,7 +676,15 @@ impl VersionStore for FakeVersions {
                 .map(|card| rendered(card).into_bytes())
                 .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such file"))
         });
-        Box::pin(async move { read })
+        let hold = self
+            .read_hold
+            .lock()
+            .map(|mut hold| hold.take())
+            .map_err(|_| poisoned());
+        Box::pin(async move {
+            held(hold).await?;
+            read
+        })
     }
     fn rules<'a>(
         &'a self,
@@ -786,12 +806,14 @@ impl SearchIndex for FakeSearch {
         unused("graph")
     }
     fn rebuild<'a>(&'a self, _scope: &'a StorageScope, head: Revision) -> PortFuture<'a, ()> {
-        let recorded = self
-            .rebuilt
-            .lock()
-            .map(|mut heads| heads.push(head))
-            .map_err(|_| ApiError::new(ErrorCode::Internal, "poisoned"));
-        Box::pin(async move { recorded })
+        let hold = hold_of(&self.rebuild_hold);
+        Box::pin(async move {
+            held(hold).await?;
+            self.rebuilt
+                .lock()
+                .map(|mut heads| heads.push(head))
+                .map_err(|_| poisoned())
+        })
     }
 }
 
@@ -803,7 +825,11 @@ impl Backups for FakeBackups {
     ) -> PortFuture<'a, ObjectInfo> {
         let _previous = self.writes.fetch_add(1, Ordering::SeqCst);
         let archive = self.archive.clone();
-        Box::pin(async move { Ok(archive) })
+        let hold = hold_of(&self.write_hold);
+        Box::pin(async move {
+            held(hold).await?;
+            Ok(archive)
+        })
     }
     fn write_installation_archive<'a>(
         &'a self,
@@ -812,7 +838,11 @@ impl Backups for FakeBackups {
     ) -> PortFuture<'a, ObjectInfo> {
         let _previous = self.writes.fetch_add(1, Ordering::SeqCst);
         let archive = self.archive.clone();
-        Box::pin(async move { Ok(archive) })
+        let hold = hold_of(&self.write_hold);
+        Box::pin(async move {
+            held(hold).await?;
+            Ok(archive)
+        })
     }
     fn open_installation_archive<'a>(
         &'a self,
@@ -830,15 +860,9 @@ impl Backups for FakeBackups {
         mutation_id: MutationId,
         editors: Vec<String>,
     ) -> PortFuture<'a, RestoreReport> {
-        let hold = self
-            .restore_hold
-            .lock()
-            .map(|hold| hold.clone())
-            .map_err(|_| poisoned());
+        let hold = hold_of(&self.restore_hold);
         Box::pin(async move {
-            if let Some(hold) = hold? {
-                hold().await;
-            }
+            held(hold).await?;
             self.restored
                 .lock()
                 .map(|mut restored| restored.push(editors))
@@ -863,7 +887,11 @@ impl Purger for FakePurger {
     ) -> PortFuture<'a, PurgeReport> {
         let _previous = self.calls.fetch_add(1, Ordering::SeqCst);
         let report = self.report.clone();
-        Box::pin(async move { Ok(report) })
+        let hold = hold_of(&self.hold);
+        Box::pin(async move {
+            held(hold).await?;
+            Ok(report)
+        })
     }
     fn purge_item<'a>(
         &'a self,
@@ -874,7 +902,11 @@ impl Purger for FakePurger {
     ) -> PortFuture<'a, PurgeReport> {
         let _previous = self.calls.fetch_add(1, Ordering::SeqCst);
         let report = self.report.clone();
-        Box::pin(async move { Ok(report) })
+        let hold = hold_of(&self.hold);
+        Box::pin(async move {
+            held(hold).await?;
+            Ok(report)
+        })
     }
 }
 
@@ -1003,7 +1035,19 @@ impl BlobStore for FakeBlobs {
         _scope: &'a StorageScope,
         digest: &'a Digest,
     ) -> PortFuture<'a, LocalSource> {
+        let hold = self
+            .materialize_hold
+            .lock()
+            .map(|mut slot| {
+                if slot.as_ref().is_some_and(|(held, _)| held == digest) {
+                    slot.take().map(|(_, hold)| hold)
+                } else {
+                    None
+                }
+            })
+            .map_err(|_| poisoned());
         Box::pin(async move {
+            held(hold).await?;
             let bytes = self.bytes(digest)?;
             let path = self.directory.path().join(digest.as_str());
             std::fs::write(&path, &bytes)
@@ -1266,6 +1310,19 @@ fn document_of(card: &SourceCard, revision: &Revision) -> Result<ItemDocument, A
         source: Some(card.appearance.clone()),
         draft: None,
     })
+}
+
+/// Await `hold`, when one is set.
+async fn held(hold: Result<Option<Hold>, ApiError>) -> Result<(), ApiError> {
+    if let Some(hold) = hold? {
+        hold().await;
+    }
+    Ok(())
+}
+
+/// The hold in `slot`, kept for the next caller too.
+fn hold_of(slot: &Mutex<Option<Hold>>) -> Result<Option<Hold>, ApiError> {
+    slot.lock().map(|hold| hold.clone()).map_err(|_| poisoned())
 }
 
 fn poisoned() -> ApiError {

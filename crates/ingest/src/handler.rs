@@ -9,7 +9,9 @@
 //!
 //! A long storage call runs under the same heartbeat as a conversion, so its lease stays live:
 //! the index rebuild, both archive writes, the restore and both purges each renew the lease
-//! every `HandlerLimits::heartbeat` while they run (`renewing`). Unlike a conversion, such a call
+//! every `HandlerLimits::heartbeat` while they run (`renewing`), and so do an import's two long
+//! reads of a replayed commit (the tree its check runs over again, and the outputs its card
+//! references). Unlike a conversion, such a call
 //! is never dropped when the job is found cancelled: storage's write is one transaction that
 //! must not be abandoned mid-call, so the cancellation is observed after it returns, and the job
 //! then stops without a completion. A purge's own record still states what the purge removed.
@@ -136,7 +138,7 @@ pub(crate) struct Attempt<'a> {
 }
 
 /// How a long storage call under the heartbeat ended.
-enum Renewed<T> {
+pub(crate) enum Renewed<T> {
     /// It returned, and the job is still running.
     Done(T),
     /// It returned, and the job was found cancelled while it ran.
@@ -579,7 +581,7 @@ impl JobHandler for IngestHandler {
 /// mid-call, so a cancellation is only observed, and acted on once the call has returned. A
 /// renewal that fails (the lease was lost) stops the renewals; the call still runs to its end,
 /// and then that error is returned.
-async fn renewing<T>(
+pub(crate) async fn renewing<T>(
     ports: &HandlerPorts,
     attempt: &Attempt<'_>,
     work: impl Future<Output = Result<T, ApiError>>,
