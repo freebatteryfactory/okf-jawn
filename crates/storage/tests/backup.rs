@@ -1881,6 +1881,47 @@ async fn backup_two_sets_of_an_unchanged_installation_restore_each_event_once() 
     Ok(())
 }
 
+/// Backup round-2 ruling 1 (B2): two different installations' events never collide: restoring
+/// the installation archives of two installations, each with one tenant event, keeps both.
+#[tokio::test]
+async fn backup_two_installations_events_never_collide() -> TestResult {
+    let (first, second, output_a, output_b) = (
+        tempfile::tempdir()?,
+        tempfile::tempdir()?,
+        tempfile::tempdir()?,
+        tempfile::tempdir()?,
+    );
+    for (data, output) in [(&first, &output_a), (&second, &output_b)] {
+        let storage = Storage::open(data.path())?;
+        storage.credentials().installation_identity().await?;
+        storage
+            .events()
+            .append(&EventScope::Tenant(tenant("local")?), None, sign_in())
+            .await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+    }
+    let directory = tempfile::tempdir()?;
+    let restored = Storage::open(directory.path())?;
+    for output in [&output_a, &output_b] {
+        restored
+            .backups()
+            .restore_replacement(&output.path().join("installation").join("local.zip"), &[])
+            .await?;
+    }
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            "SELECT count(*) FROM events WHERE workspace_id IS NULL"
+        )?,
+        2,
+        "each installation's event is kept"
+    );
+    Ok(())
+}
+
 /// Backup round-2 ruling 2 (N4b, the reviewer's probe): a replacement restore of two
 /// workspaces that stopped inside the second completes when the same command is run again; the
 /// first, already restored in full, is accepted.
