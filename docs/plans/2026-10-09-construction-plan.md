@@ -826,6 +826,30 @@ from the lanes or the composed server.
     `application-operations` (its CLI part) to name both commands. `records.test.mjs` pins neither
     today.
 
+### Carried items (from the Wave 1 review loops)
+
+Findings that were judged not load-bearing at merge, each with its home. They are recorded here so they live in the repository and do not depend on any working notes.
+
+**Carry-over sweep: one package after storage M2 merges, before core M1.3, through the full review loop.**
+
+- **R-I15.** The Timeline cursor carries the tip that the first page resolved. Today a Snapshot landing between pages of an `at: latest` Timeline can repeat a commit on the next page. The cursor is opaque, so the contract does not change.
+- **N1.** A Rewind whose only difference is in companion files (`.okf/sources/<id>.json`, `.okf/supplied/<id>.json`, `.okf/corrections/<id>/`) is refused today. The item comparison must count companions.
+- **R-I14.** A Rewind that restores a deleted item at an older path relinks its referrers from the item's last path before the delete.
+- **R-I10.** Storage keeps a commit's check warnings with the commit and answers them on replay. This replaces core's re-check of the committed tree (`shared::checked_again`, core's only filesystem write) and ingest's `checked_again`.
+- **R-I12.** The paths a move rewrites (`okf_core::move_concept` referrers) are reported to the `CandidateCheck` as touched, for `MoveItem` and Rewind alike.
+- **R-I13.** An atomic batch consume of uploads (`UploadStore`), so two imports that share uploads cannot strand them.
+- **Test gaps the reviewers left open:**
+  - a Rewind with an item listed twice, and the occupied temporary path;
+  - the temporary directory's cleanup;
+  - a link cited from a source card;
+  - the `/upload_ids` field of an invalid card path;
+  - the event-failure hook in the ingest fakes.
+
+**With their features.**
+
+- **Asset retention (ingest M2, its main body).** Page renders when `page_images` is set, and pictures with `pixel_size`, `media_type` and a source caption. Originals are retained, so a redigest regenerates the assets of documents imported before it.
+- **R-I11 (core M1.4, with the cancel operation).** A point-of-no-return seal on `RecordStore`: `cancel_job` refuses with `Conflict` once a restore has called `restore_import`. Until M1.4, no production path cancels a running job.
+
 ## 7. Risks by wave
 
 | Wave | Risk | What detects it |
