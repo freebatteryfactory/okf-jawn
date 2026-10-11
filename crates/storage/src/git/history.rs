@@ -3,10 +3,14 @@
 //!
 //! A comparison's patch numbers lines of the whole item file, frontmatter included; blame and
 //! reads number lines of the body. `body_offset` is the one count between the two: blame adds
-//! it to a body line, and `body_start` states it so a caller can map a patch's lines back.
+//! it to a body line, and `body_start` states it so a caller can map a patch's lines back. It
+//! counts the file as stored, not as the serializer would write it again: an item restored
+//! from an archive may hold frontmatter the serializer does not reproduce (a comment line, no
+//! blank line after the closing delimiter, CRLF line endings).
 
-use git2::{BlameOptions, Commit, DiffFindOptions, DiffOptions, Oid, Patch, Repository, Sort};
-use okf_core::Document;
+use git2::{
+    BlameOptions, Commit, DiffFindOptions, DiffOptions, Oid, Patch, Repository, Sort, Tree,
+};
 use okf_jawn_contract::common::TextRange;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::history::{
@@ -21,6 +25,9 @@ use okf_jawn_core::storage::{BlameQuery, DiffQuery, LogQuery, StorageScope};
 use super::read::find;
 use super::repo::{commit_of, git, internal, revision_of, split_trailer_block};
 use crate::seam;
+
+/// The line that opens and closes an item file's frontmatter, as `okf_core` reads it.
+const FRONTMATTER_DELIMITER: &str = "---";
 
 pub(crate) fn log(repository: &Repository, query: &LogQuery) -> Result<LogResponse, ApiError> {
     let tip = commit_of(repository, &query.tip)?;
@@ -155,7 +162,7 @@ pub(crate) fn blame(
     let (path, file) = find(repository, &tree, query.item_id)?
         .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "No item with that identity here"))?;
     let body_lines: Vec<&str> = file.document.body.lines().collect();
-    let offset = body_offset(&file.document);
+    let offset = body_offset(&stored_text(repository, &tree, path.as_str())?);
     let mut options = BlameOptions::new();
     options.newest_commit(commit.id());
     let blame = repository
@@ -218,21 +225,56 @@ pub(crate) fn body_start(
     let tree = commit_of(repository, revision)?
         .tree()
         .map_err(|error| git(&error))?;
-    let (_, file) = find(repository, &tree, item)?
+    let (path, _) = find(repository, &tree, item)?
         .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "No item with that identity here"))?;
-    u32::try_from(body_offset(&file.document).saturating_add(1))
+    u32::try_from(body_offset(&stored_text(repository, &tree, path.as_str())?).saturating_add(1))
         .map_err(|_| internal("a line number does not fit"))
 }
 
-/// How many lines of an item's file come before its body: the frontmatter block and the blank
-/// line after it, or 0 for a file without frontmatter. Blame and `body_start` both count with
-/// it, so a body line one of them names is the file line the other names.
-pub(crate) fn body_offset(document: &Document) -> usize {
-    document
-        .serialize()
-        .lines()
-        .count()
-        .saturating_sub(document.body.lines().count())
+/// How many lines of an item's file, as stored, come before its body; blame and `body_start`
+/// both count with it, so a body line one of them names is the file line the other names.
+///
+/// It follows `okf_core::Document::parse` line for line over the stored text: frontmatter
+/// exists only when the first line trims to `---`; it ends at the next line that trims to
+/// `---`; and parse strips exactly one empty line right after that delimiter. So the count is
+/// 0 without frontmatter, otherwise the lines up to and including the closing delimiter, plus
+/// that one empty line when it is there. Lines are split as `str::lines` splits them (on `\n`,
+/// a trailing `\r` dropped), as parse and libgit2's blame both count them. For an empty body
+/// the count still names the line where a body would begin.
+pub(crate) fn body_offset(stored: &str) -> usize {
+    let mut lines = stored.lines();
+    if lines
+        .next()
+        .is_none_or(|first| first.trim() != FRONTMATTER_DELIMITER)
+    {
+        return 0;
+    }
+    let mut before = 1_usize;
+    for line in lines.by_ref() {
+        before = before.saturating_add(1);
+        if line.trim() == FRONTMATTER_DELIMITER {
+            return if lines.next() == Some("") {
+                before.saturating_add(1)
+            } else {
+                before
+            };
+        }
+    }
+    // Unterminated frontmatter does not parse, so no item file reaches here; such a text is
+    // all body to the reader that keeps it.
+    0
+}
+
+/// The stored text of the file at `path` in `tree`.
+fn stored_text(repository: &Repository, tree: &Tree<'_>, path: &str) -> Result<String, ApiError> {
+    let entry = tree
+        .get_path(std::path::Path::new(path))
+        .map_err(|error| git(&error))?;
+    let blob = repository
+        .find_blob(entry.id())
+        .map_err(|error| git(&error))?;
+    String::from_utf8(blob.content().to_vec())
+        .map_err(|_| internal("an item file is not UTF-8 text"))
 }
 
 /// The committer and time of the newest commit, at or before `revision`, that changed `path`.
@@ -322,9 +364,9 @@ mod tests {
 
     #[test]
     fn a_file_without_frontmatter_has_its_body_on_line_one() -> TestResult {
-        let document = Document::parse("First.\nSecond.\n")?;
-        assert!(document.frontmatter.is_empty());
-        assert_eq!(body_offset(&document), 0, "{:?}", document.serialize());
+        let text = "First.\nSecond.\n";
+        assert!(Document::parse(text)?.frontmatter.is_empty());
+        assert_eq!(body_offset(text), 0, "{text:?}");
         Ok(())
     }
 
@@ -337,12 +379,31 @@ mod tests {
                 text.push_str(": value\n");
                 text
             });
-            let document = Document::parse(&format!("---\n{properties}---\n\nFirst.\nSecond.\n"))?;
-            let text = document.serialize();
-            let offset = body_offset(&document);
+            let text = format!("---\n{properties}---\n\nFirst.\nSecond.\n");
+            let offset = body_offset(&text);
             // `---`, one line per key, `---`, the blank line.
             assert_eq!(offset, keys + 3, "{text:?}");
             assert_eq!(text.lines().nth(offset), Some("First."), "{text:?}");
+        }
+        Ok(())
+    }
+
+    /// Stored shapes the serializer does not write: the line `body_offset` names is the first
+    /// line of the body `Document::parse` reads from the same text.
+    #[test]
+    fn the_offset_names_the_first_body_line_parse_reads_from_the_stored_text() -> TestResult {
+        let shapes = [
+            "---\ntype: Note\n---\n\nFirst.\nSecond.\n",
+            "---\ntype: Note\n---\nFirst.\nSecond.\n",
+            "---\n# a comment\ntype: Note\n---\n\nFirst.\nSecond.\n",
+            "---\r\ntype: Note\r\n---\r\n\r\nFirst.\r\nSecond.\r\n",
+            "---\ntype: Note\n---\n\n\nFirst.\n",
+            "  ---  \ntype: Note\n ---\n\nFirst.\n",
+        ];
+        for text in shapes {
+            let body = Document::parse(text)?.body;
+            let first = body.lines().next();
+            assert_eq!(text.lines().nth(body_offset(text)), first, "{text:?}");
         }
         Ok(())
     }
