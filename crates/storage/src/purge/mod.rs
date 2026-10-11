@@ -35,7 +35,9 @@
 //!    indexing reads and stores under the same lock).
 //! 6. **Objects**: a sweep of the in-flight pins begins (`pins`), then what every surviving
 //!    workspace and tenant record references is read, other workspaces' pending puts included
-//!    (`puts`); the step waits for the target's running writes, adds the objects the target's
+//!    (`puts`), except that a survivor's upload slot or pending put holding one of the target's
+//!    workspace archives keeps nothing (`references::except_archives`); the step waits for the
+//!    target's running writes, adds the objects the target's
 //!    pending puts name, deletes each planned object that no surviving reference names and no
 //!    other workspace pinned since the sweep began, and clears the target's pending puts; the
 //!    others are counted as kept.
@@ -48,16 +50,18 @@
 //!
 //! What a write in flight can and cannot leave behind (the `Purger` contract in core):
 //!
-//! - Storage refuses every write to the workspace that the `guard` header lists, new jobs
-//!   included, from the moment the purge is recorded; a Git write checks under the workspace's
-//!   lock, under which step 1 reads. An object put pins, then records a durable pending put
-//!   (`puts`) in the transaction of its second refusal check, before it retains. Step 6 waits
-//!   for the target's running writes (at most ten minutes, then `Unavailable`; repeating the
-//!   purge resumes it) and deletes the objects the target's pending puts name, the bytes of a
-//!   refused, failed or crashed write among them; pending puts have no lifetime.
+//! - Storage refuses every write to the workspace that the `guard` header lists, new jobs,
+//!   job retries and job claims included, from the moment the purge is recorded; a Git write
+//!   checks under the workspace's lock, under which step 1 reads. An object put pins, then
+//!   records a durable pending put (`puts`) in the transaction of its second refusal check,
+//!   before it retains; only a record of the workspace that names the object deletes it. Step 6
+//!   waits for the target's running writes (at most ten minutes, then `Unavailable` having
+//!   deleted none of the target's objects; repeating the purge resumes it) and deletes the
+//!   objects the target's pending puts name, the bytes of a refused, failed, crashed or
+//!   replayed write among them; pending puts have no lifetime.
 //! - Another workspace's object is deleted only when no reference step 6 read names it (that
-//!   workspace's pending puts included) and no write of another workspace pinned it since
-//!   step 6 began (`pins`).
+//!   workspace's pending puts included, a copy of the target's archive excepted) and no write
+//!   of another workspace pinned it since step 6 began (`pins`).
 //! - Known limit: job work core did not drain before calling the purger can still store what
 //!   the plan does not name: a workspace archive and a written history put their objects
 //!   without a pending put, and an import copies its rows without the refusal.
@@ -525,7 +529,8 @@ impl StoragePurger {
     ///
     /// The sweep (`pins`) begins before any surviving reference is read. An object is deleted
     /// only when no durable reference the step read names it (another workspace's pending puts
-    /// included, `puts`) and no other workspace's write pinned it at any moment from the start
+    /// included, `puts`, but no survivor's copy of the target's archive) and no other
+    /// workspace's write pinned it at any moment from the start
     /// of that read until the delete, which runs under the pin table's lock. The target's own
     /// pending puts, read once its running writes have ended, name bytes no record of it names:
     /// they are deleted with it, and the rows are cleared.
