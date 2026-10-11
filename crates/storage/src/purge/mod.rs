@@ -586,9 +586,10 @@ impl StoragePurger {
                     records.extend(history.records);
                 }
                 // The objects other workspaces were putting when the sweep began, and those of
-                // their pending puts, are about to be referenced: the assets their conversion
-                // records name are kept too (a large record only once a card names it; until
-                // then its assets are pending puts of that write, kept as such).
+                // their pending puts, are about to be referenced, and kept. A conversion record
+                // is followed only once a card names it; until then its exports and assets are
+                // pending puts of the same write, kept as such, and its job's completion then
+                // names each as a job output.
                 found.extend(pinned);
                 found.extend(pending);
                 references::follow_records(&blobs, &scope.tenant_id, &mut found, &records)?;

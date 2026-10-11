@@ -863,11 +863,12 @@ async fn an_import_keeps_the_pending_put_of_an_object_no_imported_record_names()
 }
 
 /// Round 4 re-review N1 (probe
-/// `rr4_an_import_keeps_the_pending_put_of_an_asset_only_an_uncopied_record_names`): the
-/// archive holds a conversion record that only a row an import does not copy names (the
-/// source's completed upload), and the asset it names. The restored workspace names neither, so
-/// an import follows no conversion record it does not name: both keep their pending puts, and
-/// the workspace's purge deletes both.
+/// `rr4_an_import_keeps_the_pending_put_of_an_asset_only_an_uncopied_record_names`), as B1-R
+/// round 2 rules it: the source's completed upload holds JSON naming an asset, and no card
+/// names the upload as its conversion record, so nothing ever opens it for references. The
+/// archive copies the upload (a completed upload's object is required) but not the asset;
+/// before round 2 it copied the asset too, followed from the upload. The import, which copies
+/// no upload row, leaves the upload a pending put, and the workspace's purge deletes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_import_keeps_the_pending_put_of_an_asset_only_an_uncopied_record_names()
 -> Result<(), ApiError> {
@@ -912,18 +913,18 @@ async fn an_import_keeps_the_pending_put_of_an_asset_only_an_uncopied_record_nam
         .restore_import(&target, archive, mutation(73), vec!["ana".to_owned()])
         .await?;
     assert!(
-        held(&storage, &target, &asset).await?,
-        "the archive held the asset, followed from the upload's record"
+        !held(&storage, &target, &asset).await?,
+        "the archive copied an asset only an upload names"
     );
     assert_eq!(
         pending_of(&storage, &target, &record).await?,
         1,
-        "no imported record names the loose record"
+        "no imported record names the upload"
     );
     assert_eq!(
         pending_of(&storage, &target, &asset).await?,
-        1,
-        "no imported record names the asset"
+        0,
+        "the asset was never put back"
     );
     record_purge(&storage, &target).await?;
     let report = spawn_purge(&storage, &target)

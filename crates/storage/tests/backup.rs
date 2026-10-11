@@ -11,6 +11,7 @@ use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::EventKind;
+use okf_jawn_contract::extraction::ConversionSettings;
 use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, WorkspacePath};
 use okf_jawn_contract::item::ItemKind;
 use okf_jawn_contract::purge::{PurgeState, PurgeTarget};
@@ -19,8 +20,8 @@ use okf_jawn_core::credentials::{CredentialStore, NewConnector};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 use okf_jawn_core::jobs::{
-    DerivedKind, DerivedObject, JobCompletion, JobScope, JobSpec, NewArtifact, NewJob, NewPurge,
-    RecordStore,
+    ClaimedJob, DerivedKind, DerivedObject, JobCompletion, JobScope, JobSpec, NewArtifact, NewJob,
+    NewPurge, RecordStore,
 };
 use okf_jawn_core::storage::{
     Backups, BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, ObjectInfo,
@@ -5495,9 +5496,9 @@ async fn rr5_a_purge_keeps_what_a_survivors_large_record_names() -> TestResult {
     Ok(())
 }
 
-/// Purge the workspace `target` of tenant `local` (purge 61 under mutations 60 and 62).
+/// Purge the workspace `target` (purge 61 under mutations 60 and 62).
 async fn rr5_purge(storage: &Storage, target: &StorageScope) -> TestResult {
-    let tenant = tenant("local")?;
+    let tenant = target.tenant_id.clone();
     let purge = storage
         .records()
         .create_purge(
@@ -5550,6 +5551,233 @@ async fn backup_a_large_upload_is_never_read_as_a_conversion_record() -> TestRes
             "the {what} was kept because a large upload, read as a record, names it"
         );
     }
+    Ok(())
+}
+
+/// A completed upload of `workspace` holding `body` (mutation 63); returns its object.
+async fn rr6_uploaded(
+    storage: &Storage,
+    workspace: &StorageScope,
+    body: &[u8],
+) -> Fallible<Digest> {
+    let object = put(storage, workspace, body).await?.digest;
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            workspace,
+            uuid!(63)?,
+            NewUpload {
+                filename: "notes.json".to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(body.len())?,
+                expected_sha256: None,
+                supplied_by: person("ana"),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            workspace,
+            slot.id,
+            Box::pin(std::io::Cursor::new(body.to_vec())),
+            1 << 20,
+        )
+        .await?;
+    uploads.complete(workspace, slot.id, object.clone()).await?;
+    Ok(object)
+}
+
+/// B1-R round 2 (MSMALLUP): a small JSON upload is never read as a conversion record. A member
+/// of workspace A uploads a few bytes of JSON holding the digest of an object only workspace B
+/// holds (the original of B's card): A's workspace archive does not copy that object, and a
+/// purge of B deletes it.
+#[tokio::test]
+async fn backup_a_small_upload_naming_another_workspaces_object_keeps_and_copies_nothing()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (uploader, _) = create(&storage, "local", 1, "Uploader").await?;
+    let (target, head) = create(&storage, "local", 2, "Target").await?;
+    let hidden = put(&storage, &target, b"rr6 an original only the target holds")
+        .await?
+        .digest;
+    commit(
+        &storage,
+        &target,
+        3,
+        &head,
+        vec![card(uuid!(15)?, &hidden)?],
+    )
+    .await?;
+    let text = format!(
+        "{{\"structured\": [{{\"digest\": \"{0}\"}}], \"assets\": [{{\"digest\": \"{0}\"}}], \
+         \"note\": \"{0}\"}}",
+        hidden.as_str()
+    );
+    rr6_uploaded(&storage, &uploader, text.as_bytes()).await?;
+    let archive = storage
+        .backups()
+        .write_workspace_archive(&uploader, uuid!(40)?)
+        .await?;
+    let names = entries(&object_file(directory.path(), &archive.digest)?)?;
+    assert!(
+        !names.contains(&format!("objects/{}", hidden.as_str())),
+        "the uploader's archive copied another workspace's object an upload names"
+    );
+    rr5_purge(&storage, &target).await?;
+    assert!(
+        !object_file(directory.path(), &hidden)?.is_file(),
+        "the purged workspace's original survived because an upload names it"
+    );
+    Ok(())
+}
+
+/// A workspace of tenant `local` in the window of a conversion job (mutation 30): its original,
+/// structured export, asset and a small conversion record are put, and its card naming the
+/// record is committed, but the job has not completed, so its export and asset are still the
+/// workspace's pending puts and no job output names them. Returns the workspace, the claimed
+/// job, and (original, export, asset, record).
+async fn rr6_conversion_before_its_completion(
+    storage: &Storage,
+) -> Fallible<(StorageScope, ClaimedJob, [Digest; 4])> {
+    let (workspace, created) = create(storage, "local", 1, "Converted").await?;
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &JobScope::Workspace(workspace.clone()),
+            NewJob {
+                mutation_id: uuid!(30)?,
+                initiator: person("ana"),
+                spec: JobSpec::Import {
+                    base_revision: created.clone(),
+                    upload_ids: Vec::new(),
+                    destination: None,
+                    apply_naming_rules: false,
+                    settings: ConversionSettings::default(),
+                },
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+    let original = put(storage, &workspace, b"rr6 converted original")
+        .await?
+        .digest;
+    let export = put(storage, &workspace, b"{\"rr6\": \"docling export\"}")
+        .await?
+        .digest;
+    let asset = put(storage, &workspace, b"rr6 page render").await?.digest;
+    let record = put(storage, &workspace, &rr4_record(&export, &asset, 3))
+        .await?
+        .digest;
+    commit(
+        storage,
+        &workspace,
+        31,
+        &created,
+        vec![rr4_converted_card(
+            uuid!(14)?,
+            "sources/report.md",
+            &original,
+            &record,
+        )?],
+    )
+    .await?;
+    Ok((workspace, claimed, [original, export, asset, record]))
+}
+
+/// The pending puts of `workspace` in the records at `data` that name one of `digests`.
+fn rr6_pending(data: &Path, workspace: &StorageScope, digests: &[&Digest]) -> Fallible<i64> {
+    let names = digests
+        .iter()
+        .map(|digest| format!("'{}'", digest.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    count(
+        &data.join("records.sqlite"),
+        &format!(
+            "SELECT count(*) FROM pending_puts WHERE workspace_id = '{}' AND digest IN ({names})",
+            workspace.workspace_id.0
+        ),
+    )
+}
+
+/// B1-R round 2 (MWINDOW): a conversion whose card is committed but whose job has not completed
+/// (ingest lists its outputs only after the card's commit lands, and the completion then names
+/// each as a job output) is backed up, restored by replacement and by import, then completed.
+/// The archive holds the export and asset its card-named record names; each restore lands them
+/// with the workspace; a purge of another workspace naming the asset keeps it for the imported
+/// one; and the completion then names all three outputs and lands them.
+#[tokio::test]
+async fn backup_a_conversion_before_its_completion_restores_with_its_exports_and_assets()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (workspace, claimed, [_, export, asset, record]) =
+        rr6_conversion_before_its_completion(&storage).await?;
+    let named = [&export, &asset, &record];
+    storage
+        .backups()
+        .write_backup_set(output.path(), None)
+        .await?;
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let held = entries(&archive)?;
+    for digest in named {
+        assert!(held.contains(&format!("objects/{}", digest.as_str())));
+    }
+    // By replacement, over a fresh data directory.
+    let replaced = tempfile::tempdir()?;
+    Storage::open(replaced.path())?
+        .backups()
+        .restore_replacement(&installation, std::slice::from_ref(&archive))
+        .await?;
+    for digest in named {
+        assert!(object_file(replaced.path(), digest)?.is_file());
+    }
+    assert_eq!(
+        rr6_pending(replaced.path(), &workspace, &named)?,
+        0,
+        "landed"
+    );
+    // By import, into a blank workspace of another tenant.
+    let (target, _, imported) = import_crafted(&storage, std::fs::read(&archive)?).await?;
+    imported?;
+    for digest in named {
+        assert!(storage.blobs().open(&target, digest, 0, 1).await.is_ok());
+    }
+    assert_eq!(rr6_pending(directory.path(), &target, &named)?, 0, "landed");
+    // A purge of another workspace of that tenant whose card names the asset keeps it.
+    let (other, other_head) = create(&storage, "elsewhere", 90, "Other").await?;
+    put(&storage, &other, b"rr6 page render").await?;
+    commit(
+        &storage,
+        &other,
+        91,
+        &other_head,
+        vec![card(uuid!(16)?, &asset)?],
+    )
+    .await?;
+    rr5_purge(&storage, &other).await?;
+    assert!(
+        storage.blobs().open(&target, &asset, 0, 1).await.is_ok(),
+        "kept"
+    );
+    // Then the job completes: its outputs are named and landed.
+    storage
+        .records()
+        .complete_job(JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: None,
+            restore: None,
+            outputs: vec![export.clone(), asset.clone(), record.clone()],
+            warnings: Vec::new(),
+        })
+        .await?;
+    let live = directory.path().join("records.sqlite");
+    assert_eq!(count(&live, "SELECT count(*) FROM job_outputs")?, 3);
+    assert_eq!(rr6_pending(directory.path(), &workspace, &named)?, 0);
     Ok(())
 }
 
