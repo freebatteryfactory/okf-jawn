@@ -42,6 +42,13 @@ rlimit = { workspace = true, optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = { workspace = true, optional = true }
 
+# The conversion child (construction plan I4): built only with the runtime feature, shipped
+# beside the server executable; its path is configuration.
+[[bin]]
+name = "okf-jawn-convert"
+path = "src/bin/okf-jawn-convert.rs"
+required-features = ["runtime"]
+
 [features]
 default = []
 runtime = ["dep:docling", "dep:okf-core", "dep:calamine", "dep:zip", "dep:csv", "dep:infer", "dep:unicode-normalization", "dep:convert_case", "dep:regex", "dep:sha2", "dep:tokio", "dep:tokio-util", "dep:serde_json", "dep:tempfile", "dep:bytes", "dep:processkit", "dep:rlimit", "dep:libproc", "dep:serde"]

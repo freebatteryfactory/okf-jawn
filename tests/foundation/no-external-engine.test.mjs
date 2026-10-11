@@ -61,7 +61,10 @@ test('no tracked text file contains the rejected engine name as a whole word', (
     if (/^LICENSE/i.test(basename(path))) continue; // the Apache text has a roman-numeral list item that matches
     const bytes = read(path);
     if (isBinary(bytes)) continue;
-    hits.push(...lineHits(path, bytes.toString('utf8'), line => wholeWord.test(line)));
+    const text = bytes.toString('utf8');
+    // A DoclingDocument export carries a third-party document's own text (a roman-numeral page number matches).
+    if (/^\s*\{\s*"schema_name"\s*:\s*"DoclingDocument"/.test(text)) continue;
+    hits.push(...lineHits(path, text, line => wholeWord.test(line)));
   }
   assert.deepEqual(hits, [], `${advice}\n${hits.join('\n')}`);
 });
