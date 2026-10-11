@@ -887,7 +887,7 @@ async fn get_graph_reads_a_bounded_graph_of_one_folder_and_refuses_no_room() -> 
     world.search.mark_indexed(&at)?;
     world
         .search
-        .put_entry(&at, summary(NOTE, "notes/a.md")?, "a")?;
+        .put_entry(&at, summary(NOTE, "notes/plan.md")?, "a")?;
     world
         .search
         .put_entry(&at, summary(OTHER, "notes/b.md")?, "b")?;
@@ -895,6 +895,7 @@ async fn get_graph_reads_a_bounded_graph_of_one_folder_and_refuses_no_room() -> 
         .search
         .put_entry(&at, summary(THIRD, "elsewhere/c.md")?, "c")?;
     world.search.put_link(&at, link(NOTE, OTHER, 1))?;
+    linking_items(&world, &at)?;
     let caller = alice(OperationName::GetGraph, None)?;
     let whole = world
         .service
@@ -904,6 +905,25 @@ async fn get_graph_reads_a_bounded_graph_of_one_folder_and_refuses_no_room() -> 
     assert_eq!(whole.nodes.len(), 2);
     assert_eq!(whole.edges.len(), 1);
     assert!(!whole.truncated);
+    // Its receipt cites each node whole, as a search hit cites an item, and the edge, which
+    // carries a label and a source line, as a link: its linking item by that body line.
+    assert_eq!(
+        cited(&world)?,
+        vec![
+            (item(NOTE), at.clone(), Selection::All),
+            (item(OTHER), at.clone(), Selection::All),
+            (item(NOTE), at.clone(), line(1)),
+        ]
+    );
+    let receipts = world.records.receipts()?;
+    let (_, receipt) = some(receipts.first(), "the graph's receipt")?;
+    assert_eq!(receipt.operation_id, OperationName::GetGraph);
+    let paths: Vec<&str> = receipt
+        .sources
+        .iter()
+        .map(|source| source.path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["notes/plan.md", "notes/b.md", "notes/plan.md"]);
     let cut = world
         .service
         .get_graph(&caller, graph(Some("notes"), 1, At::Latest)?)

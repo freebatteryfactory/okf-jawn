@@ -26,7 +26,8 @@
 //! be empty only with an extraction filter (`SearchQuery::check`, the contract's
 //! `require_text_or_filter`). The hits a search returns are recorded in a receipt, as every read
 //! of content is, and so are the links `get_links` returns: each cites its linking item at the
-//! resolved revision, by the body line the link is on.
+//! resolved revision, by the body line the link is on. A graph's edges are links and are cited
+//! so; its nodes are cited whole, as a search hit cites an item.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -36,7 +37,7 @@ use std::sync::Arc;
 use okf_jawn_contract::common::TextRange;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{ItemId, Revision, WorkspacePath};
-use okf_jawn_contract::item::ItemDocument;
+use okf_jawn_contract::item::{ItemDocument, ItemSummary};
 use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::search::{
     GetGraphRequest, GetGraphResponse, GetLinksRequest, GetLinksResponse, Link, SearchRequest,
@@ -126,7 +127,8 @@ pub(super) async fn get_links(
     })
 }
 
-/// A bounded graph of one resolved revision, optionally of one folder.
+/// A bounded graph of one resolved revision, optionally of one folder, recorded in a receipt
+/// that cites each node whole and each edge as a link (`link_citations`).
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/max_nodes` for a limit of zero, on `/folder` for a folder that is
@@ -155,6 +157,15 @@ pub(super) async fn get_graph(
         index.graph(&scope, query.clone())
     })
     .await?;
+    // The edges carry labels and source lines, so they are cited as links are; the nodes, as a
+    // search hit cites an item.
+    let mut sources: Vec<SourceReference> = response
+        .nodes
+        .iter()
+        .map(|node| node_citation(&scope, &revision, node))
+        .collect();
+    sources.extend(link_citations(service, &scope, &revision, &response.edges).await?);
+    record_receipt(service, context, &scope, None, sources).await?;
     Ok(GetGraphResponse {
         revision,
         ..response
@@ -203,6 +214,20 @@ async fn link_citations(
         ));
     }
     Ok(sources)
+}
+
+/// The citation of a graph node, as the index cites a search hit's item: the whole item at
+/// `revision`, with no digest and no locations.
+fn node_citation(scope: &StorageScope, revision: &Revision, node: &ItemSummary) -> SourceReference {
+    SourceReference {
+        workspace_id: scope.workspace_id,
+        item_id: node.id,
+        path: node.path.clone(),
+        revision: revision.clone(),
+        digest: None,
+        selection: Selection::All,
+        locations: Vec::new(),
+    }
 }
 
 /// The request's folder as a workspace path; absent or empty is the whole workspace.
