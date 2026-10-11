@@ -120,6 +120,34 @@ pub fn bounding_box(bbox: &Value) -> Option<BoundingBox> {
     })
 }
 
+/// The bytes of an exported picture item's image: its `data:` URI, decoded with docling's own
+/// codec. `None` when the item has no image or its URI is not base64 data.
+#[must_use]
+pub fn picture_image_bytes(item: &Value) -> Option<Vec<u8>> {
+    item.get("image")?
+        .get("uri")?
+        .as_str()?
+        .split_once(";base64,")
+        .and_then(|(_, payload)| docling::base64::decode(payload))
+}
+
+/// An exported picture item's caption: the text of each caption item it names, as the export
+/// holds it (the document's own words, not Markdown-escaped), joined by line breaks. `None`
+/// when it names none, or only blank text.
+#[must_use]
+pub fn picture_caption(export: &Value, item: &Value) -> Option<String> {
+    let texts: Vec<&str> = item
+        .get("captions")?
+        .as_array()?
+        .iter()
+        .filter_map(|caption| caption.get("$ref").and_then(Value::as_str))
+        .filter_map(|reference| resolve(export, reference))
+        .filter_map(|text| text.get("text").and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .collect();
+    (!texts.is_empty()).then(|| texts.join("\n"))
+}
+
 /// The region a provenance entry names, when its box and its page's size are both known.
 #[must_use]
 pub fn region(export: &Value, entry: &Value) -> Option<PageRegion> {

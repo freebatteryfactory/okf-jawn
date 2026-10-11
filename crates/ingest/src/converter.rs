@@ -34,11 +34,17 @@
 //!   locates a run;
 //! - tables pair the export's tables with the table line runs, in order, only when both
 //!   counts agree;
-//! - the outline carries the section-span rule (`outline::outline_of`).
+//! - the outline carries the section-span rule (`outline::outline_of`);
+//! - the images the child wrote become the document's assets (`assets_of`): each picture with
+//!   its own bytes, pixel size, media type and its plain caption text; one the child paired
+//!   with an export item takes that item's own provenance, after the item's image is checked to
+//!   be the docling encoding the child named (a mismatch is a worker fault, never another
+//!   item's box); one paired with none stays unresolved; each page render of a converted page
+//!   is located on its page. A render of a page the window did not convert is not kept. An
+//!   image file name must be a safe plain name (`asset_path`).
 //!
-//! Construction limitations, stated rather than hidden: line locations are page-level (a line
-//! run is not yet paired with its export item's box), and no page render or picture asset is
-//! retained yet (`ConvertedDocument::assets` is empty).
+//! Construction limitation, stated rather than hidden: line locations are page-level (a line
+//! run is not yet paired with its export item's box).
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -53,11 +59,12 @@ use okf_jawn_contract::extraction::{
     ConverterIdentity, ConverterIssue, ConverterPackage, FailureReason, ModelIdentity,
 };
 use okf_jawn_contract::identity::Digest;
+use okf_jawn_contract::read::AssetRole;
 use okf_jawn_contract::source::{SourceLocation, SourceLocator, UnresolvedReason};
 use okf_jawn_core::conversion::{
-    Conversion, ConversionInput, ConversionSettings, ConversionStatus, ConvertedCell,
-    ConvertedDocument, ConvertedTable, Converter, ConverterLimits, LineLocation, PageCount,
-    WindowCoverage,
+    Conversion, ConversionInput, ConversionSettings, ConversionStatus, ConvertedAsset,
+    ConvertedCell, ConvertedDocument, ConvertedTable, Converter, ConverterLimits, LineLocation,
+    PageCount, PixelSize, WindowCoverage,
 };
 use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::LocalSource;
@@ -66,14 +73,15 @@ use tokio::sync::OnceCell;
 
 use crate::cap::{ChildVerdict, classify, spawn_capped, supervise};
 use crate::child::format_of;
-use crate::export::{provenance, region, resolve};
+use crate::export::{page_no, provenance, region, resolve};
 use crate::glyphs::{scrub_placeholders, undecoded_glyphs};
 use crate::locate::{Locations, locate_items, pages_by_item};
 use crate::outline::outline_of;
 use crate::protocol::{
-    Block, EXPORT_FILE, MARKDOWN_FILE, REQUEST_FILE, RESULT_FILE, Reply, Request, TEXT_LAYER_FILE,
-    Task, Unlocated,
+    AssetFile, Block, EXPORT_FILE, MARKDOWN_FILE, REQUEST_FILE, RESULT_FILE, Reply, Request,
+    TEXT_LAYER_FILE, Task, Unlocated,
 };
+use crate::record::sha256_digest;
 
 /// How the production converter runs its child.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +139,11 @@ pub const CHILD_INHERITED_DOCLING_ENV: [&str; 10] = [
 
 /// The prefix of the variables docling reads.
 const DOCLING_ENV_PREFIX: &str = "DOCLING_";
+
+/// The prefix of the variables ONNX Runtime reads (its thread pools, logging, execution
+/// providers and the library it loads): none is recorded in the converter identity, so every
+/// one is removed from the child's environment.
+const ORT_ENV_PREFIX: &str = "ORT_";
 
 impl DoclingConverter {
     /// A converter that runs `config.child` under `config.limits`.
@@ -309,7 +322,8 @@ impl Converter for DoclingConverter {
 }
 
 /// The conversion child's command: `program`, with every `DOCLING_` variable of `environment`
-/// (the supervisor's own) removed except those in `CHILD_INHERITED_DOCLING_ENV`.
+/// (the supervisor's own) removed except those in `CHILD_INHERITED_DOCLING_ENV`, and every
+/// `ORT_` variable removed.
 #[must_use]
 pub fn child_command(
     program: &Path,
@@ -318,9 +332,9 @@ pub fn child_command(
     let mut command = tokio::process::Command::new(program);
     for (name, _value) in environment {
         let upper = name.to_string_lossy().to_ascii_uppercase();
-        if upper.starts_with(DOCLING_ENV_PREFIX)
-            && !CHILD_INHERITED_DOCLING_ENV.contains(&upper.as_str())
-        {
+        let docling = upper.starts_with(DOCLING_ENV_PREFIX)
+            && !CHILD_INHERITED_DOCLING_ENV.contains(&upper.as_str());
+        if docling || upper.starts_with(ORT_ENV_PREFIX) {
             let _configured = command.env_remove(&name);
         }
     }
@@ -358,8 +372,8 @@ pub fn read_window(
     let page_of = located.as_ref().map(pages_by_item).unwrap_or_default();
     let glyphs = undecoded_glyphs(&export, |item| page_of.get(item).copied());
     warnings.extend(glyphs.warning());
+    let present = exported_pages(&export);
     let coverage = window.map(|window| {
-        let present = exported_pages(&export);
         let partly: BTreeSet<u32> = glyphs
             .pages
             .keys()
@@ -382,14 +396,149 @@ pub fn read_window(
         outline: outline_of(&markdown),
         locations: line_locations(&reply.blocks, &export, located.as_ref()),
         tables: tables(&export, &reply.blocks),
+        assets: assets_of(directory, &export, &present, &reply.assets)?,
         markdown,
         structured,
-        assets: Vec::new(),
         warnings,
     };
     Ok((document, coverage))
 }
 
+/// The images the child wrote, as the window's assets, in the reply's order.
+///
+/// A picture keeps its pixel size, media type and caption as the child read them; its location
+/// is its paired export item's (`picture_location`). A page render is located on its page, and
+/// only a page the window converted (one the export holds) keeps its render.
+///
+/// # Errors
+/// Returns `Internal` when an entry's file is not a safe plain name (`asset_path`), a page
+/// render names no page, or a picture is paired with an item that is missing or holds another
+/// image: a child that reports such files is a worker fault.
+fn assets_of(
+    directory: &Path,
+    export: &Value,
+    present: &BTreeSet<u32>,
+    files: &[AssetFile],
+) -> Result<Vec<ConvertedAsset>, ApiError> {
+    let mut assets = Vec::new();
+    for file in files {
+        let path = asset_path(directory, &file.file)?;
+        let (location, caption) = match file.role {
+            AssetRole::PageImage => {
+                let page = file
+                    .page
+                    .ok_or_else(|| fault("a page render names no page"))?;
+                if !present.contains(&page) {
+                    continue;
+                }
+                let on_page = SourceLocation::Direct {
+                    locator: SourceLocator::Page { page_no: page },
+                };
+                (on_page, None)
+            }
+            AssetRole::Picture => {
+                let location = match file.picture {
+                    Some(index) => picture_location(export, index, file.encoding.as_deref())?,
+                    // A picture paired with no export item has no provenance to take.
+                    None => SourceLocation::Unresolved {
+                        reason: UnresolvedReason::NotLocatedByConverter,
+                    },
+                };
+                (location, file.caption.clone())
+            }
+        };
+        assets.push(ConvertedAsset {
+            path,
+            media_type: file.media_type.clone(),
+            role: file.role,
+            location,
+            pixel_size: Some(PixelSize {
+                width: file.width,
+                height: file.height,
+            }),
+            caption,
+        });
+    }
+    Ok(assets)
+}
+
+/// The path of an image file the child named. Only a plain name of ASCII letters, digits,
+/// `-`, `_` and `.` is taken: no separator, drive, stream or traversal, no leading dot, no
+/// trailing dot, and no name Windows reserves for a device (`CON`, `PRN`, `AUX`, `NUL`,
+/// `COM0`-`COM9`, `LPT0`-`LPT9`, with or without an extension), on every platform.
+fn asset_path(directory: &Path, file: &str) -> Result<PathBuf, ApiError> {
+    let plain = !file.is_empty()
+        && file
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+        && !file.starts_with('.')
+        && !file.ends_with('.');
+    let device = file
+        .split('.')
+        .next()
+        .map(str::to_ascii_uppercase)
+        .is_some_and(|stem| {
+            ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+                || (stem.len() == 4
+                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && stem.ends_with(|last: char| last.is_ascii_digit()))
+        });
+    if plain && !device {
+        Ok(directory.join(file))
+    } else {
+        Err(fault(&format!(
+            "the child named an image {file:?} that is not a plain file name"
+        )))
+    }
+}
+
+/// The location of the picture the child paired with the export item `#/pictures/{index}`:
+/// that item's own first provenance entry (its region, or its page when the page's size is
+/// unknown). An item with no provenance is unresolved: the format has no pages, or the
+/// converter gave it none.
+///
+/// # Errors
+/// Returns `Internal` when the item is missing or its image is not the docling encoding the
+/// child named (`encoding`, the SHA-256 of the item's image data URI): a child that pairs a
+/// picture with another item is a worker fault, and no box is taken from it.
+fn picture_location(
+    export: &Value,
+    index: usize,
+    encoding: Option<&str>,
+) -> Result<SourceLocation, ApiError> {
+    let unresolved = |reason| SourceLocation::Unresolved { reason };
+    let item = export
+        .get("pictures")
+        .and_then(Value::as_array)
+        .and_then(|pictures| pictures.get(index))
+        .ok_or_else(|| fault("the child paired a picture with an export item that is not there"))?;
+    let exported = item
+        .get("image")
+        .and_then(|image| image.get("uri"))
+        .and_then(Value::as_str)
+        .map(|uri| sha256_digest(uri.as_bytes()))
+        .transpose()?;
+    if exported.as_ref().map(Digest::as_str) != encoding || encoding.is_none() {
+        return Err(fault(
+            "the child paired a picture with an export item of another image",
+        ));
+    }
+    Ok(match provenance(item).first() {
+        Some(entry) => match (region(export, entry), page_no(entry)) {
+            (Some(region), _) => SourceLocation::Direct {
+                locator: SourceLocator::Region { region },
+            },
+            (None, Some(page)) => SourceLocation::Direct {
+                locator: SourceLocator::Page { page_no: page },
+            },
+            (None, None) => unresolved(UnresolvedReason::NotLocatedByConverter),
+        },
+        None if exported_pages(export).is_empty() => {
+            unresolved(UnresolvedReason::FormatHasNoLocator)
+        }
+        None => unresolved(UnresolvedReason::NotLocatedByConverter),
+    })
+}
 /// The identity of a conversion run with the pinned `packages`, `settings` and `models`, in
 /// windows of `page_window` pages or whole.
 fn identity_of(
