@@ -174,6 +174,22 @@ pub(crate) fn restore(
     restored
 }
 
+/// Check the archive at `archive` as a restore does before it writes anything (`checked`),
+/// staging under `staging`; returns its manifest. A replacement restore checks every workspace
+/// archive of its set this way before it writes the installation archive's rows, so a set with
+/// a refused archive writes nothing. Blocking.
+///
+/// # Errors
+/// Returns `InvalidInput` for an archive a restore refuses.
+pub(crate) fn check(
+    storage: &Storage,
+    runtime: &Handle,
+    archive: &Path,
+    staging: &Path,
+) -> Result<WorkspaceManifest, ApiError> {
+    checked(storage, runtime, archive, staging).map(|checked| checked.manifest)
+}
+
 /// Open the archive at `archive` and check everything a restore reads from it, before anything
 /// is written (an archive may be a caller's file):
 /// - its entries (`Opened::open`: compression methods, sizes, and each object's bytes against

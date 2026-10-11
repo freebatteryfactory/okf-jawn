@@ -5353,5 +5353,84 @@ async fn rr5_an_object_entry_whose_bytes_are_not_its_digest_is_refused() -> Test
     assert_import_refused(&storage, outcome, "digest").await
 }
 
+/// Gap 1: a replacement checks every workspace archive before it writes the installation
+/// archive's rows, so a set whose second archive is refused writes nothing at all: no tenant
+/// event, no workspace and no repository. The good set then restores in full.
+#[tokio::test]
+async fn backup_a_replacement_set_with_a_refused_archive_writes_nothing() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let (first, second) = {
+        let storage = Storage::open(directory.path())?;
+        let first = notes_workspace(&storage).await?;
+        let (second, _) = create(&storage, "local", 2, "Second").await?;
+        storage
+            .events()
+            .append(&EventScope::Tenant(tenant("local")?), None, sign_in())
+            .await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        (first, second)
+    };
+    let (installation, first_archive) = set_of(output.path(), &first);
+    let (_, second_archive) = set_of(output.path(), &second);
+    let good = std::fs::read(&second_archive)?;
+    let records = rr4_forged_records(
+        &good,
+        "INSERT INTO grants VALUES ('local', 'WS99', 'mallory', '[\"read\"]')",
+    )?;
+    std::fs::write(
+        &second_archive,
+        rebuilt(
+            &good,
+            &|_| zip::CompressionMethod::Stored,
+            &|name| (name == "records.sqlite").then(|| records.clone()),
+            &[],
+        )?,
+    )?;
+    std::fs::remove_dir_all(directory.path())?;
+    let archives = [first_archive, second_archive.clone()];
+    {
+        let restored = Storage::open(directory.path())?;
+        let error = err_of(
+            restored
+                .backups()
+                .restore_replacement(&installation, &archives)
+                .await,
+        )?;
+        assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+        assert!(error.message.contains("grants"), "{error}");
+    }
+    let live = directory.path().join("records.sqlite");
+    for table in ["events", "workspaces"] {
+        assert_eq!(
+            count(&live, &format!("SELECT count(*) FROM {table}"))?,
+            0,
+            "no {table} row written"
+        );
+    }
+    assert!(
+        !directory
+            .path()
+            .join("repositories")
+            .join("local")
+            .join(format!("{}.git", first.workspace_id.0))
+            .exists(),
+        "the first workspace's repository is not written"
+    );
+    std::fs::write(&second_archive, &good)?;
+    let restored = Storage::open(directory.path())?;
+    let reports = restored
+        .backups()
+        .restore_replacement(&installation, &archives)
+        .await?;
+    assert_eq!(reports.len(), 2);
+    assert_eq!(count(&live, "SELECT count(*) FROM workspaces")?, 2);
+    assert_eq!(count(&live, "SELECT count(*) FROM events")?, 1);
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
