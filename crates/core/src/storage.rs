@@ -586,10 +586,13 @@ pub trait VersionStore: Send + Sync {
         scope: &'a StorageScope,
         query: BlameQuery,
     ) -> PortFuture<'a, BlameResponse>;
-    /// The 1-based line of the item file at `revision` on which the item's body starts: the line
-    /// after the frontmatter, or 1 for a file without frontmatter. Lines a diff's patch numbers
-    /// from this line on are body lines `line - start + 1`, the lines a read and a blame cite.
-    /// `NotFound` when no item with that identity is at `revision`.
+    /// The 1-based line of the item file at `revision`, counted in the stored bytes, on which the
+    /// item's body starts: 1 for a file without frontmatter; otherwise the line after the closing
+    /// `---`, or the line after that when it is empty (the one blank line a parse strips). For an
+    /// empty body it is the line where a body would begin, which can be past the end of the file.
+    /// Lines a diff's patch numbers from this line on are body lines `line - start + 1`, the
+    /// lines a read and a blame cite; a line before it is frontmatter. `NotFound` when no item
+    /// with that identity is at `revision`.
     fn body_start<'a>(
         &'a self,
         scope: &'a StorageScope,
@@ -837,6 +840,11 @@ pub trait Backups: Send + Sync {
     /// Import a workspace archive into `scope`. `editors` are the subjects with `write` on
     /// the target, computed by core from `AccessControl`: a draft whose editor is not among them
     /// stays in the archive and is counted as unassigned. Idempotent on the mutation id.
+    ///
+    /// After installing the archive's history it writes one commit on top of the restored head
+    /// carrying `mutation_id` (the restored head's tree, no content change), so
+    /// `VersionStore::find_commit(scope, mutation_id, None)` finds the revision the restore
+    /// produced, on a first or a resumed attempt alike; a repeat writes no second commit.
     fn restore_import<'a>(
         &'a self,
         scope: &'a StorageScope,
