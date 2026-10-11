@@ -15,7 +15,7 @@ use std::sync::Arc;
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::events::Receipt;
+use okf_jawn_contract::events::{EventKind, Receipt};
 use okf_jawn_contract::identity::{
     ConfirmationId, Digest, ItemId, MutationId, PurgeId, Revision, TenantId, UploadId,
     WorkspacePath,
@@ -30,6 +30,7 @@ use okf_jawn_contract::workspace::ArtifactKind;
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::credentials::{ConnectorIssue, CredentialStore, NewConnector};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
+use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 use okf_jawn_core::jobs::{
     ClaimedJob, DerivedKind, DerivedObject, JobCompletion, JobScope, JobSpec, NewArtifact, NewJob,
     NewPurge, RecordStore,
@@ -2403,6 +2404,82 @@ async fn purge_refuses_a_claim_of_a_job_of_the_workspace_it_names() -> TestResul
         records.claim_job(other.id).await?,
         "another workspace's job is claimed",
     )?;
+    Ok(())
+}
+
+/// Round 4 re-review N2 (probe `rr4_an_expired_running_job_is_not_reclaimed_after_the_purge`):
+/// a running job of a workspace a purge names whose lease expired is not reclaimed. The claim
+/// is refused with the purge's `Conflict`, and the job stays running in its first attempt.
+#[tokio::test]
+async fn purge_refuses_a_reclaim_of_a_running_job_whose_lease_expired() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let scope = JobScope::Workspace(target.clone());
+    let job = queued_job(&storage, &scope, 30).await?;
+    let records = storage.records();
+    some(records.claim_job(job.id).await?, "the first claim")?;
+    rusqlite::Connection::open(directory.path().join("records.sqlite"))?.execute(
+        "UPDATE jobs SET lease_expires_ms = 1 WHERE job_id = ?1",
+        [job.id.0.to_string()],
+    )?;
+    record_purge_under(&storage, &target, 60, 50).await?;
+    refused(records.claim_job(job.id).await, "a reclaim after the purge")?;
+    let now = records.get_job(&scope, job.id).await?;
+    assert_eq!(now.state, JobState::Running);
+    assert_eq!(now.attempt, 1, "no second attempt");
+    Ok(())
+}
+
+/// Round 4 re-review R3c: a claim of a running job under a live lease answers `None` before
+/// the purge is recorded and the purge's `Conflict` after it (core's `claim_job` doc still says
+/// `None`; request to the integration owner).
+#[tokio::test]
+async fn purge_refuses_a_claim_of_a_running_job_under_a_live_lease() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let scope = JobScope::Workspace(target.clone());
+    let job = queued_job(&storage, &scope, 30).await?;
+    let records = storage.records();
+    some(records.claim_job(job.id).await?, "the first claim")?;
+    assert!(
+        records.claim_job(job.id).await?.is_none(),
+        "before the purge a live claim answers None"
+    );
+    record_purge_under(&storage, &target, 60, 50).await?;
+    refused(
+        records.claim_job(job.id).await,
+        "a live running job after the purge",
+    )?;
+    Ok(())
+}
+
+/// Port doc, "Events are not refused" (round 4 re-review probe
+/// `rr4_an_event_after_the_purge_is_recorded_is_not_refused`): an event of a workspace a purge
+/// names is stored after the purge is recorded, since an event carries identities only.
+#[tokio::test]
+async fn purge_does_not_refuse_an_event_of_the_workspace_it_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    record_purge_under(&storage, &target, 60, 50).await?;
+    storage
+        .events()
+        .append(
+            &EventScope::Workspace(target.clone()),
+            None,
+            NewEvent {
+                kind: EventKind::JobUpdated,
+                revision: None,
+                item_id: None,
+                job_id: None,
+                connector_id: None,
+                actor: None,
+                operation: None,
+            },
+        )
+        .await?;
     Ok(())
 }
 

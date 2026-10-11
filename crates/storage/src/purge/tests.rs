@@ -786,6 +786,78 @@ async fn an_import_keeps_the_pending_put_of_an_object_no_imported_record_names()
     Ok(())
 }
 
+/// Round 4 re-review N1 (probe
+/// `rr4_an_import_keeps_the_pending_put_of_an_asset_only_an_uncopied_record_names`): the
+/// archive holds a conversion record that only a row an import does not copy names (the
+/// source's completed upload), and the asset it names. The restored workspace names neither, so
+/// an import follows no conversion record it does not name: both keep their pending puts, and
+/// the workspace's purge deletes both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_import_keeps_the_pending_put_of_an_asset_only_an_uncopied_record_names()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (source, _) = create(&storage, "local", 70, "Source").await?;
+    let asset = put(
+        &storage,
+        &source,
+        b"zanzibar asset only a loose record names",
+    )
+    .await?;
+    let record_bytes = format!("{{\"assets\":[\"{}\"]}}", asset.as_str()).into_bytes();
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            &source,
+            mutation(74),
+            NewUpload {
+                filename: "record.json".to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(record_bytes.len()).map_err(|error| fault(&error))?,
+                expected_sha256: None,
+                supplied_by: person(),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            &source,
+            slot.id,
+            Box::pin(std::io::Cursor::new(record_bytes.clone())),
+            1 << 20,
+        )
+        .await?;
+    let record = digest_of(&record_bytes)?;
+    uploads.complete(&source, slot.id, record.clone()).await?;
+    let (target, _) = create(&storage, "elsewhere", 1, "Copy").await?;
+    let archive = archive_into(&storage, &source, &target).await?;
+    storage
+        .backups()
+        .restore_import(&target, archive, mutation(73), vec!["ana".to_owned()])
+        .await?;
+    assert!(
+        held(&storage, &target, &asset).await?,
+        "the archive held the asset, followed from the upload's record"
+    );
+    assert_eq!(
+        pending_of(&storage, &target, &record).await?,
+        1,
+        "no imported record names the loose record"
+    );
+    assert_eq!(
+        pending_of(&storage, &target, &asset).await?,
+        1,
+        "no imported record names the asset"
+    );
+    record_purge(&storage, &target).await?;
+    let report = spawn_purge(&storage, &target)
+        .await
+        .map_err(|error| fault(&error))??;
+    assert!(!held(&storage, &target, &asset).await?, "{report:?}");
+    assert!(!held(&storage, &target, &record).await?, "{report:?}");
+    Ok(())
+}
+
 /// A source card for `object` whose extraction names the conversion record `record`.
 fn card_with_record(
     item: ItemId,
