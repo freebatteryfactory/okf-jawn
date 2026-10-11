@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::{PageRequest, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-use okf_jawn_contract::events::EventKind;
+use okf_jawn_contract::events::{EventKind, ReceiptAudience};
 use okf_jawn_contract::history::{
     BlameLine, BlameRequest, Commit, CommitRequest, DiffRequest, FileChange, FileChangeKind,
     LogRequest, LogResponse, RestoreRequest,
@@ -209,6 +209,226 @@ async fn diff_items_compares_the_two_named_revisions_of_one_item() -> TestResult
         (&query.from, &query.to, query.item_id),
         (&revision('a')?, &revision('b')?, Some(item(NOTE)))
     );
+    Ok(())
+}
+
+fn patched(kind: FileChangeKind, old: Option<&str>, new: Option<&str>, patch: &str) -> FileChange {
+    FileChange {
+        patch: patch.to_owned(),
+        ..change(kind, old, new)
+    }
+}
+
+#[tokio::test]
+async fn diff_items_records_a_receipt_citing_each_hunk_side_it_returned() -> TestResult {
+    let world = World::new()?;
+    note_at(&world, NOTE, "notes/plan.md", &['a', 'b'])?;
+    let changes = vec![
+        patched(
+            FileChangeKind::Modified,
+            Some("notes/plan.md"),
+            Some("notes/plan.md"),
+            "--- a\n+++ b\n@@ -2,3 +2,4 @@\n x\n@@ -10 +11,0 @@\n-y\n",
+        ),
+        // A companion file holds no item, so nothing of it is cited.
+        patched(
+            FileChangeKind::Modified,
+            Some(".okf/card.json"),
+            Some(".okf/card.json"),
+            "@@ -1 +1 @@\n",
+        ),
+    ];
+    world
+        .versions
+        .put_diff(&revision('a')?, &revision('b')?, None, changes)?;
+    let agent = context(
+        OperationName::DiffItems,
+        "agent",
+        AccessRoute::McpDelegation,
+        None,
+    )?;
+    world
+        .service
+        .diff_items(
+            &agent,
+            DiffRequest {
+                workspace_id: scope()?.workspace_id,
+                from: revision('a')?,
+                to: revision('b')?,
+                item_id: None,
+            },
+        )
+        .await?;
+    let receipts = world.records.receipts()?;
+    let (under, receipt) = some(receipts.first(), "the diff's receipt")?;
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(*under, None);
+    assert_eq!(receipt.operation_id, OperationName::DiffItems);
+    assert_eq!(receipt.audience, ReceiptAudience::AgentContext);
+    let cited: Vec<_> = receipt
+        .sources
+        .iter()
+        .map(|source| {
+            (
+                source.item_id,
+                source.revision.clone(),
+                source.selection.clone(),
+            )
+        })
+        .collect();
+    let lines = |start, end| Selection::Lines {
+        range: TextRange { start, end },
+    };
+    assert_eq!(
+        cited,
+        vec![
+            (item(NOTE), revision('a')?, lines(2, 4)),
+            (item(NOTE), revision('a')?, lines(10, 10)),
+            (item(NOTE), revision('b')?, lines(2, 5)),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn diff_items_cites_only_the_to_side_of_an_added_item() -> TestResult {
+    let world = World::new()?;
+    note_at(&world, NOTE, "notes/new.md", &['b'])?;
+    world.versions.put_diff(
+        &revision('a')?,
+        &revision('b')?,
+        None,
+        vec![patched(
+            FileChangeKind::Added,
+            None,
+            Some("notes/new.md"),
+            "@@ -0,0 +1,3 @@\n+a\n+b\n+c\n",
+        )],
+    )?;
+    world
+        .service
+        .diff_items(
+            &alice(OperationName::DiffItems, None)?,
+            DiffRequest {
+                workspace_id: scope()?.workspace_id,
+                from: revision('a')?,
+                to: revision('b')?,
+                item_id: None,
+            },
+        )
+        .await?;
+    let receipts = world.records.receipts()?;
+    let (_, receipt) = some(receipts.first(), "the diff's receipt")?;
+    assert_eq!(receipt.audience, ReceiptAudience::HumanDisplay);
+    assert_eq!(receipt.sources.len(), 1);
+    let only = some(receipt.sources.first(), "the added item's citation")?;
+    assert_eq!(only.revision, revision('b')?);
+    assert_eq!(
+        only.selection,
+        Selection::Lines {
+            range: TextRange { start: 1, end: 3 }
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn diff_items_cites_a_binary_change_whole() -> TestResult {
+    let world = World::new()?;
+    note_at(&world, NOTE, "notes/plan.md", &['a'])?;
+    world.versions.put_diff(
+        &revision('a')?,
+        &revision('b')?,
+        None,
+        vec![FileChange {
+            binary: true,
+            patch: String::new(),
+            ..change(FileChangeKind::Removed, Some("notes/plan.md"), None)
+        }],
+    )?;
+    world
+        .service
+        .diff_items(
+            &alice(OperationName::DiffItems, None)?,
+            DiffRequest {
+                workspace_id: scope()?.workspace_id,
+                from: revision('a')?,
+                to: revision('b')?,
+                item_id: None,
+            },
+        )
+        .await?;
+    let receipts = world.records.receipts()?;
+    let (_, receipt) = some(receipts.first(), "the diff's receipt")?;
+    let only = some(receipt.sources.first(), "the citation")?;
+    assert_eq!(receipt.sources.len(), 1);
+    assert_eq!(only.selection, Selection::All);
+    assert_eq!(only.revision, revision('a')?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_diff_records_no_receipt() -> TestResult {
+    let world = World::new()?;
+    let purge_id = purge(&world, 'c')?;
+    let refused = err_of(
+        world
+            .service
+            .diff_items(
+                &alice(OperationName::DiffItems, None)?,
+                DiffRequest {
+                    workspace_id: scope()?.workspace_id,
+                    from: revision('c')?,
+                    to: revision('a')?,
+                    item_id: None,
+                },
+            )
+            .await,
+    )?;
+    assert_invalidated(&refused, purge_id);
+    assert_eq!(world.records.receipts()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn log_items_records_a_receipt_with_the_callers_audience_and_no_sources() -> TestResult {
+    let world = World::new()?;
+    world.versions.put_log(
+        &revision('a')?,
+        None,
+        LogResponse {
+            commits: vec![wire_commit('a')?],
+            next_cursor: None,
+        },
+    )?;
+    let agent = context(
+        OperationName::LogItems,
+        "agent",
+        AccessRoute::McpDelegation,
+        None,
+    )?;
+    world
+        .service
+        .log_items(
+            &agent,
+            LogRequest {
+                workspace_id: scope()?.workspace_id,
+                item_id: None,
+                at: At::Latest,
+                page: PageRequest {
+                    cursor: None,
+                    limit: 20,
+                },
+            },
+        )
+        .await?;
+    let receipts = world.records.receipts()?;
+    let (under, receipt) = some(receipts.first(), "the log's receipt")?;
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(*under, None);
+    assert_eq!(receipt.operation_id, OperationName::LogItems);
+    assert_eq!(receipt.audience, ReceiptAudience::AgentContext);
+    assert!(receipt.sources.is_empty());
     Ok(())
 }
 
@@ -551,6 +771,85 @@ async fn commit_items_conflict_of_a_moved_and_rewritten_item_is_not_a_deletion()
     assert_eq!(world.versions.commits()?.len(), 0);
     Ok(())
 }
+#[tokio::test]
+async fn commit_items_conflict_of_a_replaced_item_is_a_deletion_whatever_sits_at_its_path()
+-> TestResult {
+    let world = World::new()?;
+    let base = revision('a')?;
+    let head = revision('c')?;
+    note_at(&world, NOTE, "notes/plan.md", &['a'])?;
+    // A different item was created at the drafted item's path.
+    note_at(&world, OTHER, "notes/plan.md", &['c'])?;
+    world.versions.set_head(head.clone())?;
+    world
+        .drafts
+        .put_draft(draft_of(NOTE, ALICE, &base, "# Mine\n")?)?;
+    let shown = vec![change(
+        FileChangeKind::Modified,
+        Some("notes/plan.md"),
+        Some("notes/plan.md"),
+    )];
+    world
+        .versions
+        .put_diff(&base, &head, Some(item(NOTE)), shown.clone())?;
+    let refused = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(1)))?,
+                snapshot(&[NOTE])?,
+            )
+            .await,
+    )?;
+    let Some(ErrorDetail::DraftConflict { items }) = refused.detail.as_deref() else {
+        return Err(format!("not a draft conflict: {refused:?}").into());
+    };
+    let only = some(items.first(), "the replaced item")?;
+    assert_eq!(items.len(), 1);
+    assert!(only.deleted, "the item no longer exists: {only:?}");
+    assert_eq!(only.changes, shown);
+    assert_eq!(world.versions.commits()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn commit_items_conflict_of_a_moved_and_edited_item_is_not_a_deletion() -> TestResult {
+    let world = World::new()?;
+    let base = revision('a')?;
+    let head = revision('c')?;
+    note_at(&world, NOTE, "notes/plan.md", &['a'])?;
+    note_at(&world, NOTE, "archive/plan.md", &['c'])?;
+    world.versions.set_head(head.clone())?;
+    world
+        .drafts
+        .put_draft(draft_of(NOTE, ALICE, &base, "# Mine\n")?)?;
+    world.versions.put_diff(
+        &base,
+        &head,
+        Some(item(NOTE)),
+        vec![change(
+            FileChangeKind::Moved,
+            Some("notes/plan.md"),
+            Some("archive/plan.md"),
+        )],
+    )?;
+    let refused = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(1)))?,
+                snapshot(&[NOTE])?,
+            )
+            .await,
+    )?;
+    let Some(ErrorDetail::DraftConflict { items }) = refused.detail.as_deref() else {
+        return Err(format!("not a draft conflict: {refused:?}").into());
+    };
+    let only = some(items.first(), "the moved item")?;
+    assert!(!only.deleted, "the item still exists: {only:?}");
+    Ok(())
+}
+
 /// NOTE at `a` and at each of `heads`, Alice's draft based on `a`, `d` queued, and an unrelated
 /// commit landing before each of the next commits, one per revision of `heads`.
 fn landing_mid_snapshot(heads: &[char]) -> Built<World> {

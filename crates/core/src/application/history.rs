@@ -47,8 +47,8 @@ use std::collections::BTreeSet;
 use okf_jawn_contract::common::{MutationResult, TextRange};
 use okf_jawn_contract::error::{ApiError, DraftConflictItem, ErrorCode, ErrorDetail};
 use okf_jawn_contract::history::{
-    BlameRequest, BlameResponse, CommitRequest, DiffRequest, DiffResponse, FileChangeKind,
-    LogRequest, LogResponse, RestoreRequest,
+    BlameRequest, BlameResponse, CommitRequest, DiffRequest, DiffResponse, FileChange, LogRequest,
+    LogResponse, RestoreRequest,
 };
 use okf_jawn_contract::identity::{Digest, ItemId, MutationId, Revision, WorkspacePath};
 use okf_jawn_contract::item::{Draft, DraftContent, ItemDocument};
@@ -66,11 +66,29 @@ use crate::conversion::ConversionRecord;
 use crate::portable::item_content_digest;
 use crate::storage::{BlameQuery, Committed, DiffQuery, LogQuery, StorageScope, TreeEdit};
 
+/// Which side of a comparison a citation is of.
+#[derive(Clone, Copy)]
+enum Side {
+    From,
+    To,
+}
+
+/// What one side of a unified hunk header covers.
+enum Hunk {
+    /// The lines the side holds.
+    Lines(TextRange),
+    /// A count of 0: the side holds no line of this hunk.
+    Empty,
+    /// A header that does not parse.
+    Unparsed,
+}
+
 /// How many heads a Snapshot tries while unrelated commits keep landing before its commit.
 const HEAD_ATTEMPTS: usize = 3;
 
 /// Content snapshots of the workspace or of one item (following its moves), newest first,
-/// walking back from the resolved revision.
+/// walking back from the resolved revision. The commits carry metadata and no item content, so
+/// the receipt it records cites no source.
 ///
 /// # Errors
 /// Returns the typed `NotFound` of an invalidated revision, or any port error.
@@ -81,7 +99,7 @@ pub(super) async fn log_items(
 ) -> Result<LogResponse, ApiError> {
     let scope = workspace_scope(context)?;
     let tip = resolve(service, &scope, &request.at).await?;
-    service
+    let response = service
         .ports()
         .versions
         .log(
@@ -92,10 +110,16 @@ pub(super) async fn log_items(
                 page: request.page.into(),
             },
         )
-        .await
+        .await?;
+    // Commit metadata only: the receipt names no item content.
+    record_receipt(service, context, &scope, None, Vec::new()).await?;
+    Ok(response)
 }
 
 /// Compare two named revisions, optionally only one item (following its moves).
+///
+/// The comparison returns content, so a receipt records what it returned: for each side of each
+/// change that holds an item, one citation per hunk of that side (`diff_citations`).
 ///
 /// # Errors
 /// Returns the typed `NotFound` of an invalidated revision at either end, or any port error.
@@ -107,7 +131,7 @@ pub(super) async fn diff_items(
     let scope = workspace_scope(context)?;
     check_named(service, &scope, &request.from).await?;
     check_named(service, &scope, &request.to).await?;
-    service
+    let response = service
         .ports()
         .versions
         .diff(
@@ -118,7 +142,10 @@ pub(super) async fn diff_items(
                 item_id: request.item_id,
             },
         )
-        .await
+        .await?;
+    let sources = diff_citations(service, &scope, &response).await?;
+    record_receipt(service, context, &scope, None, sources).await?;
+    Ok(response)
 }
 
 /// The commit that last changed each selected line of an item at the resolved revision.
@@ -167,7 +194,13 @@ pub(super) async fn blame_item(
         (Some(start), Some(end)) => TextRange { start, end },
         _ => request.lines,
     };
-    let source = lines_citation(&scope, &revision, &document, record.as_ref(), range);
+    let source = citation(
+        &scope,
+        &revision,
+        &document,
+        record.as_ref(),
+        Selection::Lines { range },
+    );
     record_receipt(service, context, &scope, None, vec![source.clone()]).await?;
     Ok(BlameResponse {
         source,
@@ -447,7 +480,8 @@ async fn held_draft(
 }
 
 /// The conflict of one draft whose item changed or was deleted between its base and the head;
-/// `None` when the item's comparison lists no change.
+/// `None` when the item's comparison lists no change. The conflict is decided by that
+/// comparison, `deleted` by the item's identity at the head.
 async fn conflict_of(
     service: &ApplicationService,
     scope: &StorageScope,
@@ -473,10 +507,18 @@ async fn conflict_of(
     if changes.is_empty() {
         return Ok(None);
     }
-    // Nothing of the item is present at the head (`FileChangeKind::Removed`).
-    let deleted = changes
-        .iter()
-        .all(|change| change.kind == FileChangeKind::Removed);
+    // Deleted means the item no longer exists at the head, whatever the comparison shows at its
+    // path: a different item may have been created there.
+    let deleted = match service
+        .ports()
+        .versions
+        .show(scope, head, draft.item_id)
+        .await
+    {
+        Ok(_) => false,
+        Err(error) if error.code == ErrorCode::NotFound => true,
+        Err(error) => return Err(error),
+    };
     Ok(Some(DraftConflictItem {
         item_id: draft.item_id,
         draft_base: draft.base_revision.clone(),
@@ -529,20 +571,120 @@ async fn finish(
     })
 }
 
-/// The server's citation of `range` of an item's shown text at one revision: a source card's
+/// The citations of what a comparison returned: for each change, the item at `old_path` at
+/// `from` and the item at `new_path` at `to`, each cited once per hunk of its side, or whole
+/// for a binary change, a side without a hunk or a hunk header that does not parse. A path that
+/// holds no item (a companion file) cites nothing.
+async fn diff_citations(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    response: &DiffResponse,
+) -> Result<Vec<SourceReference>, ApiError> {
+    let versions = &service.ports().versions;
+    let mut sources = Vec::new();
+    for change in &response.changes {
+        for (side, revision, path) in [
+            (Side::From, &response.from, change.old_path.as_ref()),
+            (Side::To, &response.to, change.new_path.as_ref()),
+        ] {
+            let Some(path) = path.and_then(|path| WorkspacePath::try_from(path.clone()).ok())
+            else {
+                continue;
+            };
+            let Some(found) = versions.item_at_path(scope, revision, &path).await? else {
+                continue;
+            };
+            let document = versions.show(scope, revision, found.id).await?;
+            let record = record_of(service, scope, document.source.as_ref()).await?;
+            for selection in side_selections(change, side) {
+                sources.push(citation(
+                    scope,
+                    revision,
+                    &document,
+                    record.as_ref(),
+                    selection,
+                ));
+            }
+        }
+    }
+    Ok(sources)
+}
+
+/// What one side of a change returned: the lines of each hunk of that side, or everything.
+fn side_selections(change: &FileChange, side: Side) -> Vec<Selection> {
+    if change.binary {
+        return vec![Selection::All];
+    }
+    let headers: Vec<&str> = change
+        .patch
+        .lines()
+        .filter(|line| line.starts_with("@@"))
+        .collect();
+    if headers.is_empty() {
+        return vec![Selection::All];
+    }
+    let mut selections = Vec::new();
+    for header in headers {
+        match hunk_side(header, side) {
+            Hunk::Empty => {}
+            Hunk::Lines(range) => selections.push(Selection::Lines { range }),
+            Hunk::Unparsed => return vec![Selection::All],
+        }
+    }
+    selections
+}
+
+/// The lines one side of a unified hunk header `@@ -a,b +c,d @@` covers.
+fn hunk_side(header: &str, side: Side) -> Hunk {
+    let parsed = parse_side(header, side);
+    match parsed {
+        Some((_, 0)) => Hunk::Empty,
+        Some((start, count)) => match start
+            .checked_add(count)
+            .and_then(|next| next.checked_sub(1))
+        {
+            Some(end) => Hunk::Lines(TextRange { start, end }),
+            None => Hunk::Unparsed,
+        },
+        None => Hunk::Unparsed,
+    }
+}
+
+/// `start` and `count` of one side of a header.
+fn parse_side(header: &str, side: Side) -> Option<(u32, u32)> {
+    let mut parts = header.split_whitespace();
+    if parts.next()? != "@@" {
+        return None;
+    }
+    let from = parts.next()?.strip_prefix('-')?;
+    let to = parts.next()?.strip_prefix('+')?;
+    span(match side {
+        Side::From => from,
+        Side::To => to,
+    })
+}
+
+/// `start,count` of one side of a hunk header; a missing count is 1.
+fn span(text: &str) -> Option<(u32, u32)> {
+    match text.split_once(',') {
+        Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
+        None => Some((text.parse().ok()?, 1)),
+    }
+}
+
+/// The server's citation of `selection` of an item's shown text at one revision: a source card's
 /// lines are cited by its conversion record's digest and located in the original.
-fn lines_citation(
+fn citation(
     scope: &StorageScope,
     revision: &Revision,
     document: &ItemDocument,
     record: Option<&ConversionRecord>,
-    range: TextRange,
+    selection: Selection,
 ) -> SourceReference {
     let digest = document
         .source
         .as_ref()
         .and_then(|source| source.extraction.digest.clone());
-    let selection = Selection::Lines { range };
     let locations = computed_locations(
         document.source.as_ref(),
         record,
