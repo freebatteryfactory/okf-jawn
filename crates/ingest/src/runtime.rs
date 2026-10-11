@@ -216,8 +216,11 @@ async fn work(
         let Some((_scope, job)) = delivery else {
             return;
         };
-        // Taken: a sweep may deliver the job again from now on. A poisoned lock only means the
-        // bookkeeping is lost; the delivery still runs, as a repeated delivery is harmless.
+        // Taken: a sweep may deliver the job again from now on. If the bookkeeping lock is
+        // poisoned (a panic while it was held), this delivery still runs, but its id is not
+        // removed, and every later `deliver` fails with `Internal`: from then on this process
+        // enqueues and re-delivers no job, each sweep failing, until it restarts. Nothing is
+        // lost: the jobs stay in the record store, and the next process reconciles them.
         if let Ok(mut waiting) = waiting.lock() {
             let _was_waiting = waiting.jobs.remove(&job);
             waiting.deliveries = waiting.deliveries.saturating_sub(1);
