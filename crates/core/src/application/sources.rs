@@ -285,6 +285,37 @@ pub(super) fn whole_citation(
     }
 }
 
+/// The server's citation of `selection` of an item's shown text at one revision: a source card's
+/// lines are cited by its conversion record's digest and located in the original. Who (blame),
+/// Changes (diff) and links all cite through it.
+pub(super) fn citation(
+    scope: &StorageScope,
+    revision: &Revision,
+    document: &ItemDocument,
+    record: Option<&ConversionRecord>,
+    selection: Selection,
+) -> SourceReference {
+    let digest = document
+        .source
+        .as_ref()
+        .and_then(|source| source.extraction.digest.clone());
+    let locations = computed_locations(
+        document.source.as_ref(),
+        record,
+        digest.as_ref(),
+        &selection,
+    );
+    SourceReference {
+        workspace_id: scope.workspace_id,
+        item_id: document.summary.id,
+        path: document.summary.path.clone(),
+        revision: revision.clone(),
+        digest,
+        selection,
+        locations,
+    }
+}
+
 /// The locations the server computes for a citation of `digest` with the selection `located`
 /// (a section already resolved to its lines) of an item whose appearance is `appearance`
 /// (Stage 1b design section 2: from item, revision, digest and selection).

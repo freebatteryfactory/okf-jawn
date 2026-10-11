@@ -1,7 +1,12 @@
 //! Retained history: the log of a workspace or one item (following its moves), comparisons
 //! and last-change attribution.
+//!
+//! A comparison's patch numbers lines of the whole item file, frontmatter included; blame and
+//! reads number lines of the body. `body_offset` is the one count between the two: blame adds
+//! it to a body line, and `body_start` states it so a caller can map a patch's lines back.
 
 use git2::{BlameOptions, Commit, DiffFindOptions, DiffOptions, Oid, Patch, Repository, Sort};
+use okf_core::Document;
 use okf_jawn_contract::common::TextRange;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::history::{
@@ -149,9 +154,8 @@ pub(crate) fn blame(
     let tree = commit.tree().map_err(|error| git(&error))?;
     let (path, file) = find(repository, &tree, query.item_id)?
         .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "No item with that identity here"))?;
-    let text = file.text();
     let body_lines: Vec<&str> = file.document.body.lines().collect();
-    let offset = text.lines().count().saturating_sub(body_lines.len());
+    let offset = body_offset(&file.document);
     let mut options = BlameOptions::new();
     options.newest_commit(commit.id());
     let blame = repository
@@ -202,6 +206,33 @@ pub(crate) fn blame(
         },
         lines,
     })
+}
+
+/// The 1-based file line on which the item's body starts at `revision` (`body_offset` plus
+/// one); `NotFound` when no item with that identity is there.
+pub(crate) fn body_start(
+    repository: &Repository,
+    revision: &Revision,
+    item: ItemId,
+) -> Result<u32, ApiError> {
+    let tree = commit_of(repository, revision)?
+        .tree()
+        .map_err(|error| git(&error))?;
+    let (_, file) = find(repository, &tree, item)?
+        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "No item with that identity here"))?;
+    u32::try_from(body_offset(&file.document).saturating_add(1))
+        .map_err(|_| internal("a line number does not fit"))
+}
+
+/// How many lines of an item's file come before its body: the frontmatter block and the blank
+/// line after it, or 0 for a file without frontmatter. Blame and `body_start` both count with
+/// it, so a body line one of them names is the file line the other names.
+pub(crate) fn body_offset(document: &Document) -> usize {
+    document
+        .serialize()
+        .lines()
+        .count()
+        .saturating_sub(document.body.lines().count())
 }
 
 /// The committer and time of the newest commit, at or before `revision`, that changed `path`.
@@ -279,4 +310,40 @@ pub(crate) fn wire_commit(commit: &Commit<'_>) -> Result<WireCommit, ApiError> {
         author: commit.author().name().unwrap_or_default().to_owned(),
         committed_at: seam::unix_instant(commit.time().seconds())?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use okf_core::Document;
+
+    use super::body_offset;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn a_file_without_frontmatter_has_its_body_on_line_one() -> TestResult {
+        let document = Document::parse("First.\nSecond.\n")?;
+        assert!(document.frontmatter.is_empty());
+        assert_eq!(body_offset(&document), 0, "{:?}", document.serialize());
+        Ok(())
+    }
+
+    #[test]
+    fn the_body_starts_after_the_frontmatter_and_its_blank_line() -> TestResult {
+        for keys in [1_usize, 2, 5] {
+            let properties = (0..keys).fold(String::new(), |mut text, key| {
+                text.push_str("key");
+                text.push_str(&key.to_string());
+                text.push_str(": value\n");
+                text
+            });
+            let document = Document::parse(&format!("---\n{properties}---\n\nFirst.\nSecond.\n"))?;
+            let text = document.serialize();
+            let offset = body_offset(&document);
+            // `---`, one line per key, `---`, the blank line.
+            assert_eq!(offset, keys + 3, "{text:?}");
+            assert_eq!(text.lines().nth(offset), Some("First."), "{text:?}");
+        }
+        Ok(())
+    }
 }

@@ -37,8 +37,9 @@ pub(crate) use read::items as items_of;
 
 use edit::{Staged, apply, maintain};
 use repo::{
-    HEAD_REF, Repositories, commit_of, find_trailer, git, head, internal, materialize,
-    message_with_trailer, reference_target, revision_of, signature, staged_tree, sync_directories,
+    HEAD_REF, Repositories, commit_of, find_on_line, find_trailer, git, head, internal,
+    materialize, message_with_trailer, reference_target, revision_of, signature, staged_tree,
+    sync_directories,
 };
 
 /// `VersionStore` over one Git repository per workspace.
@@ -290,16 +291,31 @@ impl VersionStore for GitVersions {
         Box::pin(self.guarded(scope, commit))
     }
 
+    /// `Some(since)` walks the head's history after `since`, as a commit's replay scan does; a
+    /// `since` the repository does not hold is `NotFound`.
+    ///
+    /// `None` walks `refs/heads/main` from the head back through first parents, newest first,
+    /// to the root commit, with no time bound: a mutation whose lease expired without
+    /// completion or release is kept until it is reconciled (SPEC section 8), however old its
+    /// commit. Proposal candidates and every other reference are never examined. Core asks
+    /// this only on a resumed attempt, so the walk's cost falls on resumes.
     fn find_commit<'a>(
         &'a self,
         scope: &'a StorageScope,
         mutation_id: MutationId,
-        since: &'a Revision,
+        since: Option<&'a Revision>,
     ) -> PortFuture<'a, Option<Revision>> {
-        let since = since.clone();
+        let since = since.cloned();
         Box::pin(self.blocking(scope, move |repositories, scope| {
             let repository = repositories.open(scope)?;
-            let found = find_trailer(&repository, head(&repository)?, oid(&since)?, mutation_id)?;
+            let tip = head(&repository)?;
+            let found = if let Some(since) = since {
+                // A `since` this repository never held is the caller's error: `NotFound`.
+                let since = commit_of(&repository, &since)?.id();
+                find_trailer(&repository, tip, since, mutation_id)?
+            } else {
+                find_on_line(&repository, tip, mutation_id)?
+            };
             found.map(revision_of).transpose()
         }))
     }
@@ -399,6 +415,18 @@ impl VersionStore for GitVersions {
     ) -> PortFuture<'a, BlameResponse> {
         Box::pin(self.blocking(scope, move |repositories, scope| {
             history::blame(&repositories.open(scope)?, scope, &query)
+        }))
+    }
+
+    fn body_start<'a>(
+        &'a self,
+        scope: &'a StorageScope,
+        revision: &'a Revision,
+        item_id: ItemId,
+    ) -> PortFuture<'a, u32> {
+        let revision = revision.clone();
+        Box::pin(self.blocking(scope, move |repositories, scope| {
+            history::body_start(&repositories.open(scope)?, &revision, item_id)
         }))
     }
 

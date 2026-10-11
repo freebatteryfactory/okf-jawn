@@ -33,7 +33,7 @@ use okf_jawn_contract::workspace::{RestoreReport, Workspace};
 use okf_jawn_core::confirmations::{ConfirmationConsume, ConfirmationCreate, ConfirmationStore};
 use okf_jawn_core::conversion::{
     ConversionInput, ConversionSettings, ConversionStatus, ConvertedAsset, Converter,
-    ConverterLimits, OcrPolicy, PixelSize, RetainedAsset,
+    ConverterLimits, OcrPolicy, PageCount, PixelSize, RetainedAsset,
 };
 use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, InstallationIdentity, NewConnector, SessionRecord, secret_hash,
@@ -186,7 +186,10 @@ async fn version_writes(
     let base = changes.expected_head.clone();
     let author = changes.author.clone();
     let edits = changes.edits.clone();
-    if let Some(found) = versions.find_commit(scope, mutation_id, &base).await? {
+    if let Some(found) = versions
+        .find_commit(scope, mutation_id, Some(&base))
+        .await?
+    {
         return Ok(Committed {
             revision: found,
             replayed: true,
@@ -322,10 +325,14 @@ async fn converter_calls(
 ) -> Result<ConversionStatus, ApiError> {
     let pages = converter.page_count(&source, "report.pdf").await?;
     let ConverterLimits { window_pages, .. } = converter.limits();
-    let window = pages.map(|count| PageRange {
-        start: 1,
-        end: count.min(window_pages),
-    });
+    let window = match pages {
+        PageCount::Pages(count) => Some(PageRange {
+            start: 1,
+            end: count.min(window_pages),
+        }),
+        PageCount::Whole => None,
+        PageCount::Failed(conversion) => return Ok(conversion.status),
+    };
     let conversion = converter
         .convert(ConversionInput {
             source,
@@ -608,7 +615,9 @@ async fn draft_calls(
     drafts.save(scope, mutation_id, draft).await?;
     drafts.get(scope, item, &editor).await?;
     drafts.list(scope, &editor).await?;
-    drafts.discard(scope, mutation_id, item, &editor).await
+    drafts
+        .discard(scope, mutation_id, item, &editor, None)
+        .await
 }
 
 async fn proposal_calls(
