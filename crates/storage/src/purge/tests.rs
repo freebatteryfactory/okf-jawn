@@ -786,6 +786,94 @@ async fn an_import_keeps_the_pending_put_of_an_object_no_imported_record_names()
     Ok(())
 }
 
+/// A source card for `object` whose extraction names the conversion record `record`.
+fn card_with_record(
+    item: ItemId,
+    at: &str,
+    object: &Digest,
+    record: &Digest,
+) -> Result<TreeEdit, ApiError> {
+    let mut edit = card(item, at, object)?;
+    if let TreeEdit::WriteSourceCard(source) = &mut edit {
+        let mut appearance =
+            serde_json::to_value(&source.appearance).map_err(|error| fault(&error))?;
+        if let Some(extraction) = appearance
+            .get_mut("extraction")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            extraction.insert("digest".to_owned(), json!(record.as_str()));
+        }
+        source.appearance = serde_json::from_value(appearance).map_err(|error| fault(&error))?;
+    }
+    Ok(edit)
+}
+
+/// Ruling 4 (mutant X05): an import lands the pending puts of the archive's objects that the
+/// restored workspace names: through its history (a card's original and the conversion record
+/// its extraction names), through its rows (a derived dataset), and through that conversion
+/// record (its asset).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_import_lands_the_pending_puts_of_the_objects_the_restored_workspace_names()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (source, source_head) = create(&storage, "local", 70, "Source").await?;
+    let original = put(&storage, &source, b"zanzibar imported original").await?;
+    let asset = put(&storage, &source, b"zanzibar imported asset").await?;
+    let record = put(
+        &storage,
+        &source,
+        format!("{{\"assets\":[\"{}\"]}}", asset.as_str()).as_bytes(),
+    )
+    .await?;
+    let revision = commit(
+        &storage,
+        &source,
+        71,
+        &source_head,
+        vec![card_with_record(
+            item(13),
+            "sources/c.md",
+            &original,
+            &record,
+        )?],
+    )
+    .await?;
+    let dataset = put(&storage, &source, b"zanzibar imported dataset").await?;
+    storage
+        .records()
+        .record_derived_object(
+            &source,
+            okf_jawn_core::jobs::DerivedObject {
+                item_id: item(13),
+                revision,
+                digest: dataset.clone(),
+                kind: okf_jawn_core::jobs::DerivedKind::Dataset,
+                media_type: "text/csv".to_owned(),
+            },
+        )
+        .await?;
+    let (target, _) = create(&storage, "elsewhere", 1, "Copy").await?;
+    let archive = archive_into(&storage, &source, &target).await?;
+    storage
+        .backups()
+        .restore_import(&target, archive, mutation(73), vec!["ana".to_owned()])
+        .await?;
+    for (digest, what) in [
+        (&original, "the card's original"),
+        (&record, "the conversion record"),
+        (&asset, "the record's asset"),
+        (&dataset, "the derived dataset"),
+    ] {
+        assert!(
+            held(&storage, &target, digest).await?,
+            "{what} was put back"
+        );
+        assert_eq!(pending_of(&storage, &target, digest).await?, 0, "{what}");
+    }
+    Ok(())
+}
+
 /// A candidate of `target` on `head` under proposal 20, mutation `n`.
 async fn candidate(
     storage: &Storage,

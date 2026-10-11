@@ -2181,10 +2181,11 @@ fn pending_puts(data: &Path, workspace: &StorageScope) -> Fallible<i64> {
     )?)
 }
 
-/// Re-review B2 (the 25 h probe): a job of the target stored a derivative and failed more than
-/// a day before the purge. Its pending put has no lifetime, so the purge deletes the bytes.
+/// Re-review B2 (the 25 h probe): a job of the target stored a derivative and failed, so no
+/// record names it. The purge deletes the bytes its pending put names. The row's time plays no
+/// part (rows have no lifetime): it is set a day back only to show that.
 #[tokio::test]
-async fn purge_deletes_the_bytes_of_a_put_whose_record_never_landed_a_day_earlier() -> TestResult {
+async fn purge_deletes_the_bytes_of_a_put_whose_record_never_landed() -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
     let (target, _) = create(&storage, 1, "Trip").await?;
@@ -2934,6 +2935,59 @@ async fn a_repeated_job_completion_lands_no_pending_put() -> TestResult {
     let second = put(&storage, &target, b"zanzibar output two").await?;
     err_of(records.complete_job(completion(vec![second.digest])).await)?;
     assert_eq!(pending_puts(directory.path(), &target)?, 1);
+    Ok(())
+}
+
+/// Ruling 4 (mutant X02): a candidate lands the pending puts of the objects its cards name.
+#[tokio::test]
+async fn a_candidate_lands_the_pending_puts_of_the_objects_its_cards_name() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (workspace, head) = create(&storage, 1, "Trip").await?;
+    let object = put(&storage, &workspace, b"zanzibar proposed original").await?;
+    assert_eq!(pending_puts(directory.path(), &workspace)?, 1);
+    storage
+        .versions()
+        .create_candidate(
+            &workspace,
+            uuid!(20)?,
+            CandidateChanges {
+                mutation_id: uuid!(41)?,
+                base: head,
+                author: person("ana"),
+                message: "Propose".to_owned(),
+                edits: vec![card(uuid!(12)?, "sources/b.md", &object.digest, None)?],
+            },
+            Arc::new(Accept),
+        )
+        .await?;
+    assert_eq!(pending_puts(directory.path(), &workspace)?, 0);
+    Ok(())
+}
+
+/// Ruling 4 (mutant X09): a sandbox capability lands the pending put of the object it binds.
+#[tokio::test]
+async fn a_sandbox_capability_lands_the_pending_put_of_its_object() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (workspace, head) = create(&storage, 1, "Trip").await?;
+    let rendered = put(&storage, &workspace, b"zanzibar sandbox render").await?;
+    assert_eq!(pending_puts(directory.path(), &workspace)?, 1);
+    storage
+        .sandbox()
+        .mint(
+            &workspace,
+            [7; 32],
+            okf_jawn_core::sandbox::SandboxMint {
+                item_id: uuid!(11)?,
+                revision: head,
+                object: rendered.digest,
+                media_type: "text/html".to_owned(),
+                expires_at: serde_json::from_value(json!("2099-01-01T00:00:00.000Z"))?,
+            },
+        )
+        .await?;
+    assert_eq!(pending_puts(directory.path(), &workspace)?, 0);
     Ok(())
 }
 
