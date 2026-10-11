@@ -3953,8 +3953,8 @@ async fn rr4_a_large_conversion_record_keeps_what_it_names() -> TestResult {
         .await
     {
         Err(error) => {
-            // Refusing loudly would satisfy SPEC section 12 too.
-            assert!(error.message.contains(structured.as_str()), "{error}");
+            // This build copies everything a record names: the archive is written, not refused.
+            return Err(format!("the archive was refused: {error}").into());
         }
         Ok(archive) => {
             let names = entries(&object_file(directory.path(), &archive.digest)?)?;
