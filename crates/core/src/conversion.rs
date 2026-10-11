@@ -281,7 +281,9 @@ pub enum PageCount {
     /// A format converted whole.
     Whole,
     /// The count itself ended the document (its cap, time bound or crash): the failed
-    /// whole-document `Conversion` to record. No second child runs.
+    /// whole-document `Conversion` to record. No second child runs. Its converter identity is
+    /// the count's own (default settings, no models), the process that actually failed, not
+    /// the settings a conversion of the job would have applied.
     Failed(Box<Conversion>),
 }
 
