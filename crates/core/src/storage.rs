@@ -724,10 +724,12 @@ pub trait WorkspaceCatalog: Send + Sync {
 ///   wait until none is running (the drain). From the moment the purge is recorded storage
 ///   refuses to create, retry or claim a job of the workspace (`RecordStore::create_job`,
 ///   `retry_job`, `claim_job`, each with `Conflict` naming the purge; a refused claim leaves
-///   the job as it is, for the caller to cancel), but it cannot stop a job that already runs:
-///   a workspace archive and a written history store their files without a pending put and
-///   check the refusal only before they take the workspace's lock, and an import copies its
-///   rows without the refusal.
+///   the job as it is, for the caller to cancel), but it cannot stop a job that already runs.
+///   A workspace archive and a written history check the refusal before and again under the
+///   workspace's lock, and store their files as workspace-scoped puts: a pending put is
+///   recorded before the bytes are retained, and their record lands it, so a stop before the
+///   record leaves bytes the objects step deletes. An import copies its rows without the
+///   refusal.
 ///
 /// What storage guarantees on its own, from the moment the purge is recorded and after the
 /// purge completes:

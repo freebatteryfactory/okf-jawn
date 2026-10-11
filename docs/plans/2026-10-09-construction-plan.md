@@ -843,11 +843,15 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
   - the temporary directory's cleanup;
   - a link cited from a source card;
   - the `/upload_ids` field of an invalid card path;
-  - the event-failure hook in the ingest fakes.
+  - the event-failure hook in the ingest fakes;
+  - a second import of the same archive under another mutation, after the first stopped past its restore commit, is refused (storage F1 review, mutant MT);
+  - the export-only picture fallback in the ingest child, which today would write docling's PNG for a JPEG.
+- **`FormatHasNoLocator`** for an unmatched picture in a pageless format, which today records `NotLocatedByConverter`.
 
 **With their features.**
 
 - **Asset retention (ingest M2, its main body).** Page renders when `page_images` is set, and pictures with `pixel_size`, `media_type` and a source caption. Originals are retained, so a redigest regenerates the assets of documents imported before it.
+- **Restored View bindings (core M1.6, with the View file layout).** An archive imported into a workspace with another id keeps the archive's tree. So once Views are stored in Git, the import's restore commit must rewrite each View's `bindings[].source.workspace_id` to the target and nothing else, or `require_own_workspace` rejects them. This ships in the same change that lands the View layout. Its test: a View restored into another id validates and opens with `get_view`.
 - **R-I11 (core M1.4, with the cancel operation).** A point-of-no-return seal on `RecordStore`: `cancel_job` refuses with `Conflict` once a restore has called `restore_import`. Until M1.4, no production path cancels a running job.
 
 ## 7. Risks by wave
