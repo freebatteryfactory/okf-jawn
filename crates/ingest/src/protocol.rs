@@ -101,10 +101,16 @@ pub struct AssetFile {
     pub height: u32,
     /// A page render's one-based page; `None` for a picture.
     pub page: Option<u32>,
-    /// A picture's identity in the JSON export: its index `n` in `#/pictures/{n}`, the item
-    /// whose image the file was written from. `None` for a picture the export does not hold,
+    /// A picture's item in the JSON export, `#/pictures/{n}`, when the child paired it with
+    /// one by docling's own encoding of the picture; `None` for a picture paired with none,
     /// and for a page render.
     pub picture: Option<usize>,
+    /// For a paired picture, the SHA-256 of docling's encoding of it (the image data URI its
+    /// own export writes), which the item's image must have; `None` otherwise.
+    pub encoding: Option<String>,
+    /// A picture's caption: docling's plain export text for it, the document's own words.
+    /// `None` when the document gives it none, and always for a page render.
+    pub caption: Option<String>,
 }
 
 /// What the child reports in `RESULT_FILE`.

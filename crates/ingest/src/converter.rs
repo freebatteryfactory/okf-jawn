@@ -36,12 +36,12 @@
 //!   counts agree;
 //! - the outline carries the section-span rule (`outline::outline_of`);
 //! - the images the child wrote become the document's assets (`assets_of`): each picture with
-//!   its pixel size and media type, and, for one the child wrote from an export picture item,
-//!   that item's own location and caption text, checked again byte for byte (otherwise
-//!   unresolved and uncaptioned, never another item's box or words); a picture the export does
-//!   not hold stays unresolved; each page render of a converted page is located on its page. A
-//!   render of a page the window did not convert is not kept. An image file name must be a
-//!   safe plain name (`asset_path`).
+//!   its own bytes, pixel size, media type and its plain caption text; one the child paired
+//!   with an export item takes that item's own provenance, after the item's image is checked to
+//!   be the docling encoding the child named (a mismatch is a worker fault, never another
+//!   item's box); one paired with none stays unresolved; each page render of a converted page
+//!   is located on its page. A render of a page the window did not convert is not kept. An
+//!   image file name must be a safe plain name (`asset_path`).
 //!
 //! Construction limitation, stated rather than hidden: line locations are page-level (a line
 //! run is not yet paired with its export item's box).
@@ -73,7 +73,7 @@ use tokio::sync::OnceCell;
 
 use crate::cap::{ChildVerdict, classify, spawn_capped, supervise};
 use crate::child::format_of;
-use crate::export::{page_no, picture_caption, picture_image_bytes, provenance, region, resolve};
+use crate::export::{page_no, provenance, region, resolve};
 use crate::glyphs::{scrub_placeholders, undecoded_glyphs};
 use crate::locate::{Locations, locate_items, pages_by_item};
 use crate::outline::outline_of;
@@ -81,6 +81,7 @@ use crate::protocol::{
     AssetFile, Block, EXPORT_FILE, MARKDOWN_FILE, REQUEST_FILE, RESULT_FILE, Reply, Request,
     TEXT_LAYER_FILE, Task, Unlocated,
 };
+use crate::record::sha256_digest;
 
 /// How the production converter runs its child.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,14 +406,14 @@ pub fn read_window(
 
 /// The images the child wrote, as the window's assets, in the reply's order.
 ///
-/// A picture keeps its pixel size and media type; its location and caption are its export
-/// item's (`picture_of`). A page render is located on its page, and only a page the window
-/// converted (one the export holds) keeps its render.
+/// A picture keeps its pixel size, media type and caption as the child read them; its location
+/// is its paired export item's (`picture_location`). A page render is located on its page, and
+/// only a page the window converted (one the export holds) keeps its render.
 ///
 /// # Errors
 /// Returns `Internal` when an entry's file is not a safe plain name (`asset_path`), a page
-/// render names no page, or a picture's file cannot be read: a child that reports such files
-/// is a worker fault.
+/// render names no page, or a picture is paired with an item that is missing or holds another
+/// image: a child that reports such files is a worker fault.
 fn assets_of(
     directory: &Path,
     export: &Value,
@@ -435,16 +436,16 @@ fn assets_of(
                 };
                 (on_page, None)
             }
-            AssetRole::Picture => match file.picture {
-                Some(index) => picture_of(export, index, &path)?,
-                // A picture the export does not hold has no item to locate it or caption it.
-                None => (
-                    SourceLocation::Unresolved {
+            AssetRole::Picture => {
+                let location = match file.picture {
+                    Some(index) => picture_location(export, index, file.encoding.as_deref())?,
+                    // A picture paired with no export item has no provenance to take.
+                    None => SourceLocation::Unresolved {
                         reason: UnresolvedReason::NotLocatedByConverter,
                     },
-                    None,
-                ),
-            },
+                };
+                (location, file.caption.clone())
+            }
         };
         assets.push(ConvertedAsset {
             path,
@@ -491,32 +492,38 @@ fn asset_path(directory: &Path, file: &str) -> Result<PathBuf, ApiError> {
     }
 }
 
-/// The location and caption of the picture whose file the child wrote from the export item
-/// `#/pictures/{index}`: that item's own provenance (its region, or its page when the page's
-/// size is unknown) and its own caption text. As a second guard the item's image must be byte
-/// for byte the file; otherwise, or when the item is missing, the picture is unresolved and
-/// uncaptioned, never given another item's box or words. An item with no provenance is
-/// unresolved: the format has no pages, or the converter gave it none.
+/// The location of the picture the child paired with the export item `#/pictures/{index}`:
+/// that item's own first provenance entry (its region, or its page when the page's size is
+/// unknown). An item with no provenance is unresolved: the format has no pages, or the
+/// converter gave it none.
 ///
 /// # Errors
-/// Returns `Internal` when the file cannot be read.
-fn picture_of(
+/// Returns `Internal` when the item is missing or its image is not the docling encoding the
+/// child named (`encoding`, the SHA-256 of the item's image data URI): a child that pairs a
+/// picture with another item is a worker fault, and no box is taken from it.
+fn picture_location(
     export: &Value,
     index: usize,
-    path: &Path,
-) -> Result<(SourceLocation, Option<String>), ApiError> {
+    encoding: Option<&str>,
+) -> Result<SourceLocation, ApiError> {
     let unresolved = |reason| SourceLocation::Unresolved { reason };
     let item = export
         .get("pictures")
         .and_then(Value::as_array)
-        .and_then(|pictures| pictures.get(index));
-    let Some(item) = item else {
-        return Ok((unresolved(UnresolvedReason::NotLocatedByConverter), None));
-    };
-    if !same_image(item, path)? {
-        return Ok((unresolved(UnresolvedReason::NotLocatedByConverter), None));
+        .and_then(|pictures| pictures.get(index))
+        .ok_or_else(|| fault("the child paired a picture with an export item that is not there"))?;
+    let exported = item
+        .get("image")
+        .and_then(|image| image.get("uri"))
+        .and_then(Value::as_str)
+        .map(|uri| sha256_digest(uri.as_bytes()))
+        .transpose()?;
+    if exported.as_ref().map(Digest::as_str) != encoding || encoding.is_none() {
+        return Err(fault(
+            "the child paired a picture with an export item of another image",
+        ));
     }
-    let location = match provenance(item).first() {
+    Ok(match provenance(item).first() {
         Some(entry) => match (region(export, entry), page_no(entry)) {
             (Some(region), _) => SourceLocation::Direct {
                 locator: SourceLocator::Region { region },
@@ -530,18 +537,7 @@ fn picture_of(
             unresolved(UnresolvedReason::FormatHasNoLocator)
         }
         None => unresolved(UnresolvedReason::NotLocatedByConverter),
-    };
-    Ok((location, picture_caption(export, item)))
-}
-
-/// Whether an export picture item's image is byte for byte, in full, the file at `path`.
-fn same_image(item: &Value, path: &Path) -> Result<bool, ApiError> {
-    let Some(exported) = picture_image_bytes(item) else {
-        return Ok(false);
-    };
-    let written = std::fs::read(path)
-        .map_err(|error| fault(&format!("{} could not be read: {error}", path.display())))?;
-    Ok(exported == written)
+    })
 }
 /// The identity of a conversion run with the pinned `packages`, `settings` and `models`, in
 /// windows of `page_window` pages or whole.

@@ -1069,6 +1069,8 @@ mod retains_images {
         assert_eq!(
             seen(&pictures_of(&document)?),
             [
+                // Kept with its own caption, and with no export item to locate it.
+                (not_located(), Some("An icon".to_owned()), b"icon".to_vec()),
                 (
                     region_of(LEFT),
                     Some("Left logo".to_owned()),
@@ -1079,8 +1081,6 @@ mod retains_images {
                     Some("Right logo".to_owned()),
                     b"logo".to_vec()
                 ),
-                // Kept, but with no export item to locate or caption it.
-                (not_located(), None, b"icon".to_vec()),
             ]
         );
         Ok(())
@@ -1106,12 +1106,17 @@ mod retains_images {
         assert_eq!(
             seen(&pictures_of(&document)?),
             [
+                // The furniture logo keeps its own caption, docling's plain text for it.
+                (
+                    not_located(),
+                    Some("Header logo".to_owned()),
+                    b"logo".to_vec()
+                ),
                 (
                     region_of(LEFT),
                     Some("Body logo".to_owned()),
                     b"logo".to_vec()
                 ),
-                (not_located(), None, b"logo".to_vec()),
             ]
         );
         Ok(())
@@ -1261,17 +1266,86 @@ mod retains_images {
     }
 
     #[test]
-    fn a_picture_whose_file_is_not_its_items_image_takes_neither_its_box_nor_its_words()
-    -> TestResult {
+    fn a_picture_paired_with_an_item_of_another_image_is_a_worker_fault() -> TestResult {
         let directory = tempfile::tempdir()?;
         let reply = child_outputs(directory.path(), &figure_document(), false)?;
-        let first = some(reply.assets.first(), "the first picture's file")?;
-        // The same length as the exported image, and different bytes.
-        std::fs::write(directory.path().join(&first.file), b"plank")?;
-        let (document, _coverage) = read_window(directory.path(), Some(&page_one()), &reply)?;
-        let plant = some(document.assets.first(), "the first picture")?;
-        assert_eq!(plant.location, not_located());
-        assert_eq!(plant.caption, None);
+        // The first picture claims the export item of the second, whose image differs.
+        let mut crossed = reply.clone();
+        let second = some(crossed.assets.get(1), "the second picture")?.clone();
+        let first = some(crossed.assets.first_mut(), "the first picture")?;
+        first.picture = second.picture;
+        let refused = read_window(directory.path(), Some(&page_one()), &crossed);
+        assert_eq!(err_of(refused)?.code, ErrorCode::Internal);
+        // An item with no encoding named is not taken either.
+        let mut unnamed = reply;
+        let first = some(unnamed.assets.first_mut(), "the first picture")?;
+        first.encoding = None;
+        let refused = read_window(directory.path(), Some(&page_one()), &unnamed);
+        assert_eq!(err_of(refused)?.code, ErrorCode::Internal);
+        Ok(())
+    }
+
+    /// The JPEG fixture: `rgb_420.jpg` from docling.rs (MIT),
+    /// `crates/docling-pdf/tests/data/jpeg/`, a baseline 4:2:0 JPEG.
+    fn jpeg() -> Result<Vec<u8>, std::io::Error> {
+        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rgb_420.jpg"))
+    }
+
+    fn jpeg_image(data: &[u8]) -> PictureImage {
+        PictureImage {
+            mimetype: "image/jpeg".to_owned(),
+            ..image(16, 16, data)
+        }
+    }
+
+    #[test]
+    fn a_jpeg_picture_is_one_asset_with_its_own_bytes_media_type_and_box() -> TestResult {
+        let original = jpeg()?;
+        let mut document = one_page();
+        document.push(at(
+            LEFT,
+            None,
+            picture(Some("Photo"), Some(jpeg_image(&original))),
+        ));
+        let pictures = pictures_of(&document)?;
+        // The export re-encodes the JPEG as a PNG; the asset keeps the source's own image.
+        assert_eq!(pictures.len(), 1);
+        let (photo, bytes) = some(pictures.first(), "the photo")?;
+        assert_eq!(photo.media_type, "image/jpeg");
+        assert_eq!(*bytes, original);
+        assert_eq!(photo.location, region_of(LEFT));
+        assert_eq!(photo.caption.as_deref(), Some("Photo"));
+        Ok(())
+    }
+
+    #[test]
+    fn pictures_of_one_encoding_but_different_bytes_are_not_paired_in_order() -> TestResult {
+        // The same JPEG twice, one copy with a comment segment: docling encodes both as the
+        // same PNG, but they are not the same file. Created in reverse order, the export
+        // numbers the right one first, so pairing by order would cross their boxes.
+        let original = jpeg()?;
+        let mut commented = original.clone();
+        let tail = commented.split_off(2);
+        commented.extend_from_slice(&[0xFF, 0xFE, 0x00, 0x04, b'h', b'i']);
+        commented.extend(tail);
+        let mut document = one_page();
+        document.push(at(
+            LEFT,
+            Some(1),
+            picture(None, Some(jpeg_image(&original))),
+        ));
+        document.push(at(
+            RIGHT,
+            Some(0),
+            picture(None, Some(jpeg_image(&commented))),
+        ));
+        assert_eq!(
+            seen(&pictures_of(&document)?),
+            [
+                (not_located(), None, original),
+                (not_located(), None, commented),
+            ]
+        );
         Ok(())
     }
 
@@ -1485,6 +1559,90 @@ mod conversion_child {
         assert_eq!(picture.media_type, "image/png");
         assert_eq!(picture.pixel_size, Some(size));
         // A DOCX has no pages: the picture is kept, not located.
+        assert_eq!(
+            picture.location,
+            SourceLocation::Unresolved {
+                reason: UnresolvedReason::FormatHasNoLocator
+            }
+        );
+        Ok(())
+    }
+
+    /// `sample_with_image.docx` with its PNG replaced by the JPEG fixture (`rgb_420.jpg` from
+    /// docling.rs, MIT): the image part, its content type and its relationship.
+    fn docx_with_a_jpeg(jpeg: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        use std::io::{Read as _, Write as _};
+
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(fixture("sample_with_image.docx")?))?;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index)?;
+            let name = entry.name().to_owned();
+            let mut bytes = Vec::new();
+            let _read = entry.read_to_end(&mut bytes)?;
+            match name.as_str() {
+                "word/media/image1.png" => {
+                    writer.start_file("word/media/image1.jpeg", options)?;
+                    writer.write_all(jpeg)?;
+                }
+                "[Content_Types].xml" | "word/_rels/document.xml.rels" => {
+                    let text = String::from_utf8(bytes)?
+                        .replace(
+                            r#"Extension="png" ContentType="image/png""#,
+                            r#"Extension="jpeg" ContentType="image/jpeg""#,
+                        )
+                        .replace("media/image1.png", "media/image1.jpeg");
+                    writer.start_file(name, options)?;
+                    writer.write_all(text.as_bytes())?;
+                }
+                _ => {
+                    writer.start_file(name, options)?;
+                    writer.write_all(&bytes)?;
+                }
+            }
+        }
+        Ok(writer.finish()?.into_inner())
+    }
+
+    #[tokio::test]
+    async fn the_real_child_retains_a_docx_jpeg_once_with_its_own_bytes() -> TestResult {
+        use okf_jawn_contract::read::AssetRole;
+        use okf_jawn_contract::source::{SourceLocation, UnresolvedReason};
+
+        let jpeg = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rgb_420.jpg"),
+        )?;
+        let bytes = docx_with_a_jpeg(&jpeg)?;
+        let store = tempfile::tempdir()?;
+        let output = tempfile::tempdir()?;
+        let source = retained(store.path(), &bytes)?;
+        let converter = converter(PathBuf::from(env!("CARGO_BIN_EXE_okf-jawn-convert")));
+        let conversion = converter
+            .convert(input(source, "photo.docx", output.path()))
+            .await?;
+        assert_eq!(
+            conversion.status,
+            ConversionStatus::Success,
+            "{:?}",
+            conversion.issues
+        );
+        let document = some(conversion.document, "the converted document")?;
+        let pictures: Vec<_> = document
+            .assets
+            .iter()
+            .filter(|asset| asset.role == AssetRole::Picture)
+            .collect();
+        // One picture, one asset: the source's own JPEG, not docling's PNG re-encoding.
+        assert_eq!(pictures.len(), 1, "{:?}", document.assets);
+        let picture = some(pictures.first(), "the picture")?;
+        assert_eq!(picture.media_type, "image/jpeg");
+        assert_eq!(std::fs::read(&picture.path)?, jpeg);
+        assert!(picture.pixel_size.is_some(), "{picture:?}");
+        // Paired with its export item, whose format has no pages (an unpaired picture would be
+        // `NotLocatedByConverter`).
         assert_eq!(
             picture.location,
             SourceLocation::Unresolved {
