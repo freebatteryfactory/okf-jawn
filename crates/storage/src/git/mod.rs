@@ -108,23 +108,24 @@ impl GitVersions {
     }
 
     /// Run a Git write: refused while a purge names the workspace (checked here, before the
-    /// write is staged, and again by the write under the workspace's lock, `refuse_locked`);
-    /// on success the pending puts of the objects its cards name land (`puts`), since the
-    /// commit that references them is durable. A crash between the two leaves pending puts of
-    /// referenced objects, which cost nothing.
+    /// write is staged, and again by the write under the workspace's lock, `refuse_locked`).
+    /// On success the write returns, beside its value, the objects whose pending puts land
+    /// (`puts`): those the stored commit's cards name, since that commit is durable. A replay
+    /// answered by an earlier commit lands only the objects that commit names, so a retry's
+    /// different bytes keep their pending puts. A crash between the commit and the landing
+    /// leaves pending puts of referenced objects, which cost nothing.
     async fn guarded<T>(
         &self,
         scope: &StorageScope,
-        named: Vec<Digest>,
-        write: impl std::future::Future<Output = Result<T, ApiError>>,
+        write: impl std::future::Future<Output = Result<(T, Vec<Digest>), ApiError>>,
     ) -> Result<T, ApiError> {
         crate::purge::guard::refuse_scope(&self.records, scope).await?;
-        let written = write.await?;
-        if !named.is_empty() {
+        let (written, landed) = write.await?;
+        if !landed.is_empty() {
             let (tenant, workspace) = crate::db::scope_key(scope);
             self.records
                 .transaction(move |transaction| {
-                    crate::puts::land(transaction, &tenant, &workspace, &named)
+                    crate::puts::land(transaction, &tenant, &workspace, &landed)
                 })
                 .await?;
         }
@@ -262,7 +263,7 @@ impl VersionStore for GitVersions {
                 if let Some(found) =
                     find_trailer(&repository, current, expected, changes.mutation_id)?
                 {
-                    return replayed(found);
+                    return Ok((replayed(found)?, named_by(&repository, found, named)?));
                 }
                 if current != expected {
                     return Err(moved_head());
@@ -278,14 +279,15 @@ impl VersionStore for GitVersions {
                 let (commit, warnings) =
                     stage_and_commit(repositories, scope, &repository, write, &*check)?;
                 move_reference(&repository, HEAD_REF, commit, Some(current))?;
-                Ok(Committed {
+                let committed = Committed {
                     revision: revision_of(commit)?,
                     replayed: false,
                     warnings,
-                })
+                };
+                Ok((committed, named))
             })
         });
-        Box::pin(self.guarded(scope, named, commit))
+        Box::pin(self.guarded(scope, commit))
     }
 
     fn find_commit<'a>(
@@ -323,7 +325,10 @@ impl VersionStore for GitVersions {
                     if find_trailer(&repository, retained, base, changes.mutation_id)?
                         == Some(retained)
                     {
-                        return revision_of(retained);
+                        return Ok((
+                            revision_of(retained)?,
+                            named_by(&repository, retained, named)?,
+                        ));
                     }
                     return Err(ApiError::new(
                         ErrorCode::Conflict,
@@ -345,10 +350,10 @@ impl VersionStore for GitVersions {
                     &repository,
                     &["refs", "refs/okf-jawn", "refs/okf-jawn/proposals"],
                 )?;
-                revision_of(commit)
+                Ok((revision_of(commit)?, named))
             })
         });
-        Box::pin(self.guarded(scope, named, candidate))
+        Box::pin(self.guarded(scope, candidate))
     }
 
     fn promote_candidate<'a>(
@@ -360,10 +365,15 @@ impl VersionStore for GitVersions {
         let promoted = self.blocking(scope, move |repositories, scope| {
             repositories.locked(scope, || {
                 refuse_locked(&records, scope)?;
-                promote(&repositories.open_durable(scope)?, &promotion)
+                // A promotion stores the candidate's tree, whose objects landed with the
+                // candidate.
+                Ok((
+                    promote(&repositories.open_durable(scope)?, &promotion)?,
+                    Vec::new(),
+                ))
             })
         });
-        Box::pin(self.guarded(scope, Vec::new(), promoted))
+        Box::pin(self.guarded(scope, promoted))
     }
 
     fn log<'a>(&'a self, scope: &'a StorageScope, query: LogQuery) -> PortFuture<'a, LogResponse> {
@@ -413,6 +423,20 @@ fn card_objects(edits: &[TreeEdit]) -> Vec<Digest> {
         }
     }
     found.into_iter().collect()
+}
+
+/// The objects of `named` (a write's cards) that the stored commit `stored` names, for a write
+/// answered by that earlier commit: a retry that put different bytes keeps their pending puts.
+fn named_by(
+    repository: &Repository,
+    stored: Oid,
+    named: Vec<Digest>,
+) -> Result<Vec<Digest>, ApiError> {
+    let appearances = crate::purge::references::appearances(repository, stored)?;
+    Ok(named
+        .into_iter()
+        .filter(|digest| appearances.contains(digest))
+        .collect())
 }
 
 /// Stage `write.base`, apply the edits, check, and write the commit (no reference moves).

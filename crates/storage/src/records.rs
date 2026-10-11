@@ -281,11 +281,14 @@ impl RecordStore for SqliteRecords {
                     ],
                 )
                 .map_err(|error| sql(&error))?;
+            let stored = read_artifact(transaction, "mutation_id", &mutation_id.0.to_string())?
+                .ok_or_else(|| internal("an artifact row vanished after its insert"))?;
+            // The stored record lands its object: a repeated mutation is answered by the first
+            // record, so a retry that put other bytes keeps their pending put.
             if let Some(workspace) = &workspace {
-                puts::land(transaction, &tenant, workspace, [&artifact.object.digest])?;
+                puts::land(transaction, &tenant, workspace, [&stored.object.digest])?;
             }
-            read_artifact(transaction, "mutation_id", &mutation_id.0.to_string())?
-                .ok_or_else(|| internal("an artifact row vanished after its insert"))
+            Ok(stored)
         }))
     }
 
@@ -452,7 +455,6 @@ impl RecordStore for SqliteRecords {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
             guard::refuse(transaction, &tenant, &workspace)?;
-            puts::land(transaction, &tenant, &workspace, [&object.digest])?;
             transaction
                 .execute(
                     "INSERT INTO derived_objects (tenant_id, workspace_id, item_id, revision,
@@ -468,7 +470,7 @@ impl RecordStore for SqliteRecords {
                     ],
                 )
                 .map_err(|error| sql(&error))?;
-            read_derived(
+            let stored = read_derived(
                 transaction,
                 &tenant,
                 &workspace,
@@ -476,7 +478,11 @@ impl RecordStore for SqliteRecords {
                 &object.revision,
                 &object.digest,
             )?
-            .ok_or_else(|| internal("a derived object row vanished after its insert"))
+            .ok_or_else(|| internal("a derived object row vanished after its insert"))?;
+            // The digest is part of the row's key, so the stored row names this object even
+            // when it was recorded before.
+            puts::land(transaction, &tenant, &workspace, [&stored.digest])?;
+            Ok(stored)
         }))
     }
 
@@ -767,6 +773,9 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
             )
             .map_err(|error| sql(&error))?;
     }
+    // Every output is stored above (or already was, for this job), so the stored completion
+    // names each one. A completion is never replayed: a repeated one finds the job no longer
+    // running under its claim and is refused before this point.
     if let Some(workspace) = &row.workspace_id {
         puts::land(transaction, &row.tenant_id, workspace, &completion.outputs)?;
     }

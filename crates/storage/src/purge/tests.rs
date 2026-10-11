@@ -663,6 +663,129 @@ async fn a_failed_import_leaves_pending_puts_a_purge_deletes() -> Result<(), Api
     Ok(())
 }
 
+/// The pending puts of `digest` in `scope`.
+async fn pending_of(
+    storage: &Storage,
+    scope: &StorageScope,
+    digest: &Digest,
+) -> Result<i64, ApiError> {
+    let (tenant, workspace) = crate::db::scope_key(scope);
+    let digest = digest.as_str().to_owned();
+    storage
+        .records
+        .call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM pending_puts
+                     WHERE tenant_id = ?1 AND workspace_id = ?2 AND digest = ?3",
+                    [tenant, workspace, digest],
+                    |row| row.get(0),
+                )
+                .map_err(|error| fault(&error))
+        })
+        .await
+}
+
+/// Write a workspace archive of `source` and put its bytes into `target`, as an upload of it
+/// would; returns the digest to import.
+async fn archive_into(
+    storage: &Storage,
+    source: &StorageScope,
+    target: &StorageScope,
+) -> Result<Digest, ApiError> {
+    let archive = storage
+        .backups()
+        .write_workspace_archive(source, mutation(72))
+        .await?;
+    let bytes = std::fs::read(
+        storage
+            .blobs
+            .local_path(&source.tenant_id, &archive.digest)?,
+    )
+    .map_err(|error| fault(&error))?;
+    let uploaded = storage
+        .blobs()
+        .put(target, Box::pin(std::io::Cursor::new(bytes)), 1 << 30, None)
+        .await?;
+    Ok(uploaded.digest)
+}
+
+/// Ruling B3 (imports): an import lands only the pending puts of the archive's objects that the
+/// restored workspace names. An object the archive holds for a row an import does not copy (a
+/// completed upload of the source) keeps its pending put, so a purge of the workspace deletes
+/// it, while the object its restored card names lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_import_keeps_the_pending_put_of_an_object_no_imported_record_names()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (source, source_head) = create(&storage, "local", 70, "Source").await?;
+    let carded = put(&storage, &source, b"zanzibar carded bytes").await?;
+    commit(
+        &storage,
+        &source,
+        71,
+        &source_head,
+        vec![card(item(13), "sources/c.md", &carded)?],
+    )
+    .await?;
+    let only_uploaded = b"zanzibar bytes only an upload names";
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            &source,
+            mutation(74),
+            NewUpload {
+                filename: "loose.bin".to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(only_uploaded.len()).map_err(|error| fault(&error))?,
+                expected_sha256: None,
+                supplied_by: person(),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            &source,
+            slot.id,
+            Box::pin(std::io::Cursor::new(only_uploaded.to_vec())),
+            1 << 20,
+        )
+        .await?;
+    let loose = digest_of(only_uploaded)?;
+    uploads.complete(&source, slot.id, loose.clone()).await?;
+    let (target, _) = create(&storage, "elsewhere", 1, "Copy").await?;
+    let archive = archive_into(&storage, &source, &target).await?;
+    storage
+        .backups()
+        .restore_import(&target, archive, mutation(73), vec!["ana".to_owned()])
+        .await?;
+    assert!(
+        held(&storage, &target, &loose).await?,
+        "the archive held it"
+    );
+    assert_eq!(
+        pending_of(&storage, &target, &carded).await?,
+        0,
+        "the restored card names it"
+    );
+    assert_eq!(
+        pending_of(&storage, &target, &loose).await?,
+        1,
+        "no imported record names it"
+    );
+    record_purge(&storage, &target).await?;
+    let report = spawn_purge(&storage, &target)
+        .await
+        .map_err(|error| fault(&error))??;
+    assert!(
+        !held(&storage, &target, &loose).await?,
+        "the purge deletes it: {report:?}"
+    );
+    assert!(!held(&storage, &target, &carded).await?, "{report:?}");
+    Ok(())
+}
+
 /// A candidate of `target` on `head` under proposal 20, mutation `n`.
 async fn candidate(
     storage: &Storage,

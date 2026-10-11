@@ -21,6 +21,7 @@
 //! Known gap: a View's bindings name its workspace, and the on-disk form of a View document
 //! is not decided yet (core-cli M1.6), so an import does not rewrite them.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use git2::Repository;
@@ -38,6 +39,7 @@ use crate::data::io_error;
 use crate::db::{conflict, internal, sql};
 use crate::git::repo::{HEAD_REF, git, head, sync_directories};
 use crate::pins::Pinned;
+use crate::purge::references::{self, Rows};
 use crate::puts;
 use crate::storage::Storage;
 
@@ -57,6 +59,11 @@ struct Target {
     original: String,
     /// The archive's objects, put back before the rows.
     objects: Vec<Digest>,
+    /// The objects the restored history's cards name.
+    history: BTreeSet<Digest>,
+    /// For each of the archive's objects that reads as a conversion record, the objects it
+    /// names.
+    followed: BTreeMap<Digest, BTreeSet<Digest>>,
 }
 
 /// Tables an import copies into the target workspace.
@@ -129,6 +136,14 @@ fn put_back(
     let pack = staging.join(PACK);
     opened.extract(PACK, &pack)?;
     let items = history(storage, scope, manifest, &pack, mode)?;
+    let restored_history = references::history(&storage.repositories.open(scope)?)?.objects;
+    let mut followed = BTreeMap::new();
+    for digest in &manifest.objects {
+        let named = references::record_tokens(&storage.blobs, &scope.tenant_id, digest)?;
+        if !named.is_empty() {
+            followed.insert(digest.clone(), named);
+        }
+    }
     let records = staging.join(RECORDS);
     opened.extract(RECORDS, &records)?;
     let mut archived = Connection::open(&records).map_err(|error| sql(&error))?;
@@ -147,6 +162,8 @@ fn put_back(
             workspace: scope.workspace_id.0.to_string(),
             original: manifest.workspace_id.0.to_string(),
             objects: manifest.objects.clone(),
+            history: restored_history,
+            followed,
         };
         let editors = match mode {
             Mode::Import(editors, _) => {
@@ -387,14 +404,34 @@ fn write_tables(
             )
             .map_err(|error| sql(&error))?;
     }
-    // The archive's objects are referenced now: their pending puts land with the rows. A
-    // failed import rolls this back with the rows, so its pending puts stay and a purge of
-    // the workspace deletes the bytes.
+    // The archive's objects that the workspace now names land with the rows: those its
+    // restored history's cards and its rows name, and those a conversion record among them
+    // names, as a purge's plan reads them. An object only rows an import does not copy named
+    // (an upload's or a job output's) keeps its pending put, so a purge of the workspace
+    // deletes it. A failed import rolls this back with the rows, so its pending puts stay.
+    let mut named = target.history.clone();
+    named.extend(references::records(
+        transaction,
+        &target.tenant,
+        &target.workspace,
+        Rows::Target,
+        &BTreeSet::new(),
+    )?);
+    let followed: Vec<Digest> = named
+        .iter()
+        .filter_map(|digest| target.followed.get(digest))
+        .flatten()
+        .cloned()
+        .collect();
+    named.extend(followed);
     puts::land(
         transaction,
         &target.tenant,
         &target.workspace,
-        &target.objects,
+        target
+            .objects
+            .iter()
+            .filter(|digest| named.contains(*digest)),
     )?;
     Ok(report)
 }

@@ -77,29 +77,60 @@ pub(crate) fn history(repository: &Repository) -> Result<History, ApiError> {
     for oid in walk {
         let oid = oid.map_err(|error| git(&error))?;
         found.revisions.push(oid);
-        let tree = repository
-            .find_commit(oid)
-            .and_then(|commit| commit.tree())
-            .map_err(|error| git(&error))?;
-        let sources = match tree.get_path(Path::new(SOURCES_TREE)) {
-            Ok(entry) => entry.id(),
-            Err(error) if error.code() == git2::ErrorCode::NotFound => continue,
-            Err(error) => return Err(git(&error)),
-        };
-        if !trees.insert(sources) {
+        let Some(sources) = sources_tree(repository, oid)? else {
             continue;
-        }
-        let sources = repository.find_tree(sources).map_err(|error| git(&error))?;
-        for entry in &sources {
-            if entry.kind() == Some(ObjectType::Blob) && files.insert(entry.id()) {
-                let blob = repository
-                    .find_blob(entry.id())
-                    .map_err(|error| git(&error))?;
-                tokens(blob.content(), &mut found.objects);
-            }
+        };
+        if trees.insert(sources) {
+            scan(repository, sources, &mut files, &mut found.objects)?;
         }
     }
     Ok(found)
+}
+
+/// The digest tokens of every source appearance on the one commit `commit`: the objects a
+/// record of the workspace names once that commit is stored.
+pub(crate) fn appearances(
+    repository: &Repository,
+    commit: Oid,
+) -> Result<BTreeSet<Digest>, ApiError> {
+    let mut found = BTreeSet::new();
+    if let Some(sources) = sources_tree(repository, commit)? {
+        scan(repository, sources, &mut BTreeSet::new(), &mut found)?;
+    }
+    Ok(found)
+}
+
+/// The tree of source appearances on `commit`, when it has one.
+fn sources_tree(repository: &Repository, commit: Oid) -> Result<Option<Oid>, ApiError> {
+    let tree = repository
+        .find_commit(commit)
+        .and_then(|commit| commit.tree())
+        .map_err(|error| git(&error))?;
+    match tree.get_path(Path::new(SOURCES_TREE)) {
+        Ok(entry) => Ok(Some(entry.id())),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(git(&error)),
+    }
+}
+
+/// Add to `objects` the digest tokens of every file of the appearance tree `sources` not
+/// already in `files`.
+fn scan(
+    repository: &Repository,
+    sources: Oid,
+    files: &mut BTreeSet<Oid>,
+    objects: &mut BTreeSet<Digest>,
+) -> Result<(), ApiError> {
+    let sources = repository.find_tree(sources).map_err(|error| git(&error))?;
+    for entry in &sources {
+        if entry.kind() == Some(ObjectType::Blob) && files.insert(entry.id()) {
+            let blob = repository
+                .find_blob(entry.id())
+                .map_err(|error| git(&error))?;
+            tokens(blob.content(), objects);
+        }
+    }
+    Ok(())
 }
 
 /// Add to `objects` the digest tokens of every held object of `objects` that reads as a
@@ -111,27 +142,39 @@ pub(crate) fn follow_records(
 ) -> Result<(), ApiError> {
     let mut found = BTreeSet::new();
     for digest in objects.iter() {
-        let path = blobs.local_path(tenant, digest)?;
-        let Ok(metadata) = std::fs::metadata(&path) else {
-            continue;
-        };
-        if metadata.len() > RECORD_LIMIT {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        std::fs::File::open(&path)
-            .and_then(|mut file| file.read_to_end(&mut bytes))
-            .map_err(|error| crate::data::io_error("read", &path, &error))?;
-        if bytes
-            .iter()
-            .find(|byte| !byte.is_ascii_whitespace())
-            .is_some_and(|byte| *byte == b'{')
-        {
-            tokens(&bytes, &mut found);
-        }
+        found.extend(record_tokens(blobs, tenant, digest)?);
     }
     objects.extend(found);
     Ok(())
+}
+
+/// The digest tokens of the held object `digest` when it reads as a conversion record (at most
+/// `RECORD_LIMIT` bytes, starting with `{`); none otherwise. Blocking.
+pub(crate) fn record_tokens(
+    blobs: &LocalBlobs,
+    tenant: &TenantId,
+    digest: &Digest,
+) -> Result<BTreeSet<Digest>, ApiError> {
+    let mut found = BTreeSet::new();
+    let path = blobs.local_path(tenant, digest)?;
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return Ok(found);
+    };
+    if metadata.len() > RECORD_LIMIT {
+        return Ok(found);
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)
+        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .map_err(|error| crate::data::io_error("read", &path, &error))?;
+    if bytes
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| *byte == b'{')
+    {
+        tokens(&bytes, &mut found);
+    }
+    Ok(found)
 }
 
 /// The objects the records of `rows` reference. A survivor's upload slot whose object is in

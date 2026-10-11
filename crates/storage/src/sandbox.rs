@@ -59,6 +59,8 @@ impl SandboxCapabilityStore for SqliteSandbox {
             if inserted == 0 {
                 return Err(conflict("a capability with this token hash already exists"));
             }
+            // Only a capability this call stored lands its object; a repeat is refused above
+            // and rolls back.
             puts::land(transaction, &tenant, &workspace, [&mint.object])
         }))
     }

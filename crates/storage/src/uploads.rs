@@ -313,11 +313,16 @@ impl SqliteUploads {
                         ],
                     )
                     .map_err(|error| sql(&error))?;
-                puts::land(transaction, &tenant, &workspace, [&object.digest])?;
+                let stored = read(transaction, &tenant, &workspace, upload)?
+                    .ok_or_else(|| not_found("upload"))?;
+                // The stored record lands the object it names.
+                if let Some(named) = &stored.object {
+                    puts::land(transaction, &tenant, &workspace, [&named.digest])?;
+                }
                 // Last in the transaction, so a purge recorded at any moment before it commits
                 // refuses the record (`purge::guard`).
                 guard::refuse(transaction, &tenant, &workspace)?;
-                read(transaction, &tenant, &workspace, upload)?.ok_or_else(|| not_found("upload"))
+                Ok(stored)
             })
             .await;
         // The write ends only now that the transaction has ended, committed or rolled back.

@@ -2519,5 +2519,237 @@ async fn every_record_that_references_a_put_object_lands_its_pending_put() -> Te
     Ok(())
 }
 
+/// Commit `edits` to `scope` on `head` under mutation `mutation`, returning whether it was
+/// answered by an earlier commit.
+async fn commit_replayed(
+    storage: &Storage,
+    scope: &StorageScope,
+    mutation: u32,
+    head: &Revision,
+    edits: Vec<TreeEdit>,
+) -> Fallible<bool> {
+    Ok(storage
+        .versions()
+        .commit(
+            scope,
+            CommitChanges {
+                mutation_id: uuid!(mutation)?,
+                expected_head: head.clone(),
+                author: person("ana"),
+                message: "Convert".to_owned(),
+                edits,
+            },
+            Arc::new(Accept),
+        )
+        .await?
+        .replayed)
+}
+
+/// Purge `target` (purge 60, mutations 50 and 61) and return the report.
+async fn purge_now(storage: &Storage, target: &StorageScope) -> Fallible<PurgeReport> {
+    record_purge_under(storage, target, 60, 50).await?;
+    Ok(storage
+        .purger()
+        .purge_workspace(&tenant()?, uuid!(61)?, uuid!(60)?, target.workspace_id)
+        .await?)
+}
+
+/// Re-review B3 (probe `rr3_replayed_artifact_keeps_the_pending_put_of_bytes_it_does_not_name`):
+/// a repeated artifact mutation whose retry put different bytes is answered by the first record,
+/// which does not name them, so their pending put stays and the purge deletes them.
+#[tokio::test]
+async fn purge_deletes_the_bytes_of_a_retry_a_replayed_artifact_does_not_name() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let scope = JobScope::Workspace(target.clone());
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &scope,
+            NewJob {
+                mutation_id: uuid!(30)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    let new = |object: ObjectInfo| NewArtifact {
+        kind: ArtifactKind::Export,
+        object,
+        media_type: "application/zip".to_owned(),
+        created_by_job: job.id,
+    };
+    let first = put(&storage, &target, b"zanzibar export attempt one").await?;
+    records
+        .record_artifact(&scope, uuid!(31)?, new(first.clone()))
+        .await?;
+    let second = put(&storage, &target, b"zanzibar export attempt two").await?;
+    let replayed = records
+        .record_artifact(&scope, uuid!(31)?, new(second.clone()))
+        .await?;
+    assert_eq!(
+        replayed.object.digest, first.digest,
+        "the first record answers"
+    );
+    assert_eq!(
+        pending_puts(directory.path(), &target)?,
+        1,
+        "the retry's pending put stays"
+    );
+    let report = purge_now(&storage, &target).await?;
+    assert!(
+        !held(&storage, &target, &second.digest).await?,
+        "a completed purge leaves none of the retry's bytes: {report:?}"
+    );
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
+/// Re-review B3 (probe `rr3_replayed_commit_keeps_the_pending_put_of_bytes_it_does_not_name`):
+/// a repeated commit mutation whose retry's card names different bytes is answered by the
+/// first commit, so the retry's pending put stays and the purge deletes the bytes.
+#[tokio::test]
+async fn purge_deletes_the_bytes_of_a_retry_a_replayed_commit_does_not_name() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, 1, "Trip").await?;
+    let first = put(&storage, &target, b"zanzibar conversion attempt one").await?;
+    let card_of = |object: &Digest| card(uuid!(11)?, "sources/a.md", object, None);
+    commit_replayed(&storage, &target, 40, &head, vec![card_of(&first.digest)?]).await?;
+    let second = put(&storage, &target, b"zanzibar conversion attempt two").await?;
+    let replayed =
+        commit_replayed(&storage, &target, 40, &head, vec![card_of(&second.digest)?]).await?;
+    assert!(replayed, "the repeated mutation is a replay");
+    assert_eq!(
+        pending_puts(directory.path(), &target)?,
+        1,
+        "the retry's pending put stays"
+    );
+    let report = purge_now(&storage, &target).await?;
+    assert!(
+        !held(&storage, &target, &second.digest).await?,
+        "a completed purge leaves none of the retry's bytes: {report:?}"
+    );
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
+/// Ruling B3: a repeated candidate mutation answered by the retained candidate keeps the
+/// pending put of the retry's different bytes, and the purge deletes them.
+#[tokio::test]
+async fn purge_deletes_the_bytes_of_a_retry_a_replayed_candidate_does_not_name() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, 1, "Trip").await?;
+    let candidate = |object: &Digest| -> Fallible<CandidateChanges> {
+        Ok(CandidateChanges {
+            mutation_id: uuid!(41)?,
+            base: head.clone(),
+            author: person("ana"),
+            message: "Propose".to_owned(),
+            edits: vec![card(uuid!(12)?, "sources/b.md", object, None)?],
+        })
+    };
+    let first = put(&storage, &target, b"zanzibar proposed attempt one").await?;
+    let retained = storage
+        .versions()
+        .create_candidate(
+            &target,
+            uuid!(20)?,
+            candidate(&first.digest)?,
+            Arc::new(Accept),
+        )
+        .await?;
+    let second = put(&storage, &target, b"zanzibar proposed attempt two").await?;
+    let answered = storage
+        .versions()
+        .create_candidate(
+            &target,
+            uuid!(20)?,
+            candidate(&second.digest)?,
+            Arc::new(Accept),
+        )
+        .await?;
+    assert_eq!(answered, retained, "the retained candidate answers");
+    assert_eq!(
+        pending_puts(directory.path(), &target)?,
+        1,
+        "the retry's pending put stays"
+    );
+    let report = purge_now(&storage, &target).await?;
+    assert!(
+        !held(&storage, &target, &second.digest).await?,
+        "a completed purge leaves none of the retry's bytes: {report:?}"
+    );
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    Ok(())
+}
+
+/// Ruling B3: a replay lands the pending puts of the objects the stored commit does name, so
+/// a retry that put the same bytes again leaves no row behind.
+#[tokio::test]
+async fn a_replayed_commit_lands_the_pending_put_of_bytes_it_names() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, head) = create(&storage, 1, "Trip").await?;
+    let bytes = b"zanzibar deterministic conversion";
+    let object = put(&storage, &target, bytes).await?;
+    let edits = || -> Fallible<Vec<TreeEdit>> {
+        Ok(vec![card(
+            uuid!(11)?,
+            "sources/a.md",
+            &object.digest,
+            None,
+        )?])
+    };
+    commit_replayed(&storage, &target, 40, &head, edits()?).await?;
+    put(&storage, &target, bytes).await?;
+    assert_eq!(pending_puts(directory.path(), &target)?, 1);
+    assert!(commit_replayed(&storage, &target, 40, &head, edits()?).await?);
+    assert_eq!(
+        pending_puts(directory.path(), &target)?,
+        0,
+        "the stored commit names the retry's object"
+    );
+    Ok(())
+}
+
+/// Ruling B3: a job completion is never replayed. A second completion under the same claim is
+/// refused, so the pending put of an output only it names stays.
+#[tokio::test]
+async fn a_repeated_job_completion_lands_no_pending_put() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, 1, "Trip").await?;
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &JobScope::Workspace(target.clone()),
+            NewJob {
+                mutation_id: uuid!(30)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+    let completion = |outputs: Vec<Digest>| JobCompletion {
+        lease: claimed.lease.clone(),
+        revision: None,
+        item_ids: Vec::new(),
+        artifact: None,
+        restore: None,
+        outputs,
+        warnings: Vec::new(),
+    };
+    let first = put(&storage, &target, b"zanzibar output one").await?;
+    records.complete_job(completion(vec![first.digest])).await?;
+    let second = put(&storage, &target, b"zanzibar output two").await?;
+    err_of(records.complete_job(completion(vec![second.digest])).await)?;
+    assert_eq!(pending_puts(directory.path(), &target)?, 1);
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
