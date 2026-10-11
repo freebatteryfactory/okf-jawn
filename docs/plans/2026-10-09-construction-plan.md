@@ -852,6 +852,13 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
 
 - **Asset retention (ingest M2, its main body).** Page renders when `page_images` is set, and pictures with `pixel_size`, `media_type` and a source caption. Originals are retained, so a redigest regenerates the assets of documents imported before it.
 - **Restored View bindings (core M1.6, with the View file layout).** An archive imported into a workspace with another id keeps the archive's tree. So once Views are stored in Git, the import's restore commit must rewrite each View's `bindings[].source.workspace_id` to the target and nothing else, or `require_own_workspace` rejects them. This ships in the same change that lands the View layout. Its test: a View restored into another id validates and opens with `get_view`.
+- **The purge job drains first (core M1.4, with the purge operation).** The `Purger` caller duty requires cancelling and draining the target workspace's jobs before the first call. The purge job's handler in ingest, which is the purger's caller, must therefore:
+  - list the workspace's queued and running jobs;
+  - cancel each, under a mutation id derived per job;
+  - wait, bounded, until none is running, failing retryable past the bound;
+  - only then call `purge_workspace`.
+
+  Nothing creates a purge until M1.4's purge operation.
 - **R-I11 (core M1.4, with the cancel operation).** A point-of-no-return seal on `RecordStore`: `cancel_job` refuses with `Conflict` once a restore has called `restore_import`. Until M1.4, no production path cancels a running job.
 
 ## 7. Risks by wave
