@@ -3355,5 +3355,263 @@ async fn backup_an_archive_missing_an_object_a_row_names_fails_and_records_nothi
     Ok(())
 }
 
+/// The bytes of a workspace archive of `source`, written under mutation 40.
+async fn archive_bytes(storage: &Storage, source: &StorageScope) -> Fallible<Vec<u8>> {
+    let archive = storage
+        .backups()
+        .write_workspace_archive(source, uuid!(40)?)
+        .await?;
+    Ok(std::fs::read(object_file(
+        storage.data().root(),
+        &archive.digest,
+    )?)?)
+}
+
+/// The archive `bytes` rebuilt entry by entry: each entry compressed with `method(name)` and
+/// holding `replace(name)` when that gives bytes, then the `extra` entries, stored.
+fn rebuilt(
+    bytes: &[u8],
+    method: &dyn Fn(&str) -> zip::CompressionMethod,
+    replace: &dyn Fn(&str) -> Option<Vec<u8>>,
+    extra: &[(&str, &[u8])],
+) -> Fallible<Vec<u8>> {
+    use std::io::Write as _;
+    let mut source = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec()))?;
+    let mut target = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for index in 0..source.len() {
+        let mut entry = source.by_index(index)?;
+        let name = entry.name().to_owned();
+        let mut content = Vec::new();
+        entry.read_to_end(&mut content)?;
+        let content = replace(&name).unwrap_or(content);
+        target.start_file(
+            name.as_str(),
+            zip::write::SimpleFileOptions::default().compression_method(method(&name)),
+        )?;
+        target.write_all(&content)?;
+    }
+    for (name, content) in extra {
+        target.start_file(
+            *name,
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )?;
+        target.write_all(content)?;
+    }
+    Ok(target.finish()?.into_inner())
+}
+
+/// Set the decompressed size the entry `name` of the archive `bytes` declares, in its local
+/// header and its central directory record, to `size`.
+fn declare_size(bytes: &mut [u8], name: &str, size: u32) -> TestResult {
+    // (signature, offset of the name length, offset of the name, offset of the size)
+    let headers: [([u8; 4], usize, usize, usize); 2] = [
+        ([0x50, 0x4b, 0x03, 0x04], 26, 30, 22),
+        ([0x50, 0x4b, 0x01, 0x02], 28, 46, 24),
+    ];
+    let mut patched = 0_u32;
+    for (signature, length_at, name_at, size_at) in headers {
+        for position in 0..bytes.len() {
+            if bytes.get(position..position.saturating_add(4)) != Some(&signature[..]) {
+                continue;
+            }
+            let at = |offset: usize| position.saturating_add(offset);
+            let length = some(
+                bytes.get(at(length_at)..at(length_at.saturating_add(2))),
+                "a length",
+            )?;
+            let length = usize::from(u16::from_le_bytes(length.try_into()?));
+            if bytes.get(at(name_at)..at(name_at.saturating_add(length))) != Some(name.as_bytes()) {
+                continue;
+            }
+            some(
+                bytes.get_mut(at(size_at)..at(size_at.saturating_add(4))),
+                "the size field",
+            )?
+            .copy_from_slice(&size.to_le_bytes());
+            patched = patched.saturating_add(1);
+        }
+    }
+    assert_eq!(patched, 2, "the local header and the central record");
+    Ok(())
+}
+
+/// `length` bytes that do not compress (a xorshift stream).
+fn incompressible(length: usize) -> Vec<u8> {
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes().first().copied().unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Import the archive `bytes` into a blank workspace of another tenant, as an upload of it
+/// would; returns the target and the result.
+async fn import_crafted(
+    storage: &Storage,
+    bytes: Vec<u8>,
+) -> Fallible<(
+    StorageScope,
+    Revision,
+    Result<okf_jawn_contract::workspace::RestoreReport, ApiError>,
+)> {
+    let (target, blank) = create(storage, "elsewhere", 80, "Copy").await?;
+    let uploaded = storage
+        .blobs()
+        .put(
+            &target,
+            Box::pin(std::io::Cursor::new(bytes)),
+            1 << 30,
+            None,
+        )
+        .await?
+        .digest;
+    let result = storage
+        .backups()
+        .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
+        .await;
+    Ok((target, blank, result))
+}
+
+/// A notes-only workspace of tenant `local`, with ana's draft.
+async fn notes_workspace(storage: &Storage) -> Fallible<StorageScope> {
+    let (workspace, created) = create(storage, "local", 1, "Notes").await?;
+    let head = commit(
+        storage,
+        &workspace,
+        3,
+        &created,
+        vec![note(uuid!(10)?, "notes/plan.md", "The plan.")?],
+    )
+    .await?;
+    draft(storage, &workspace, 6, "ana", &head).await?;
+    Ok(workspace)
+}
+
+/// Assert that an import was refused as `InvalidInput` mentioning `what`, and wrote nothing:
+/// the target's head is still blank and no import is recorded.
+async fn assert_import_refused(
+    storage: &Storage,
+    (target, blank, result): (
+        StorageScope,
+        Revision,
+        Result<okf_jawn_contract::workspace::RestoreReport, ApiError>,
+    ),
+    what: &str,
+) -> TestResult {
+    let error = err_of(result)?;
+    assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+    assert!(error.message.contains(what), "{error}");
+    assert_eq!(
+        storage.versions().head(&target).await?,
+        blank,
+        "no history written"
+    );
+    assert_eq!(
+        count(
+            &storage.data().root().join("records.sqlite"),
+            "SELECT count(*) FROM restores"
+        )?,
+        0,
+        "no import recorded"
+    );
+    Ok(())
+}
+
+/// PR #20 Codex P2 (`archive.rs:145`): an uploaded archive whose manifest decompresses past the
+/// 64 MiB cap (a small deflated entry; the archive carries 10 MiB of incompressible padding, so
+/// the cap and not the expansion bound refuses it) is refused before anything is written. The
+/// manifest is a real one, padded with whitespace, so without the cap the import would succeed.
+#[tokio::test]
+async fn backup_an_archive_whose_manifest_expands_past_its_cap_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let padding = incompressible(10 << 20);
+    let crafted = rebuilt(
+        &bytes,
+        &|name| {
+            if name == "manifest.json" {
+                zip::CompressionMethod::Deflated
+            } else {
+                zip::CompressionMethod::Stored
+            }
+        },
+        &|name| {
+            (name == "manifest.json").then(|| {
+                let mut manifest = entry_bytes_of(&bytes, "manifest.json").unwrap_or_default();
+                manifest.resize(65 << 20, b' ');
+                manifest
+            })
+        },
+        &[("padding", &padding)],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "manifest.json").await
+}
+
+/// The bytes of the entry `name` of the archive `bytes`.
+fn entry_bytes_of(bytes: &[u8], name: &str) -> Fallible<Vec<u8>> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec()))?;
+    let mut content = Vec::new();
+    archive.by_name(name)?.read_to_end(&mut content)?;
+    Ok(content)
+}
+
+/// PR #20 Codex P2 (`archive.rs:145`): an entry whose decompressed size is more than it
+/// declares (a deflated `records.sqlite` declaring 1 KiB) is refused before anything is
+/// written.
+#[tokio::test]
+async fn backup_an_archive_entry_that_lies_about_its_size_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let mut crafted = rebuilt(
+        &bytes,
+        &|name| {
+            if name == "records.sqlite" {
+                zip::CompressionMethod::Deflated
+            } else {
+                zip::CompressionMethod::Stored
+            }
+        },
+        &|_| None,
+        &[],
+    )?;
+    declare_size(&mut crafted, "records.sqlite", 1024)?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "records.sqlite").await
+}
+
+/// PR #20 Codex P2 (`archive.rs:145`): an entry compressed with a method this build does not
+/// read (bzip2; only stored and deflated are) is refused before anything is written.
+#[tokio::test]
+async fn backup_an_archive_entry_of_an_unknown_compression_method_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let crafted = rebuilt(
+        &bytes,
+        &|name| {
+            if name == "records.sqlite" {
+                zip::CompressionMethod::Bzip2
+            } else {
+                zip::CompressionMethod::Stored
+            }
+        },
+        &|_| None,
+        &[],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, "compression method").await
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
