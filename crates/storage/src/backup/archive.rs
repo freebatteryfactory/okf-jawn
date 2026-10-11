@@ -64,6 +64,12 @@ pub(crate) struct InstallationManifest {
     pub(crate) purges: Vec<(String, String, String, String, String)>,
     /// Tenant-level event records, oldest first.
     pub(crate) events: Vec<String>,
+    /// Each event's permanent key (`events.event_key`), in the order of `events`, copied
+    /// verbatim: a restore inserts each event once under it, whatever archive file or
+    /// installation carries it. Empty in an archive written before keys existed (or from a
+    /// records database older than them); a restore then keys each event by its position.
+    #[serde(default)]
+    pub(crate) event_keys: Vec<String>,
 }
 
 /// An opened archive.
@@ -209,7 +215,8 @@ pub(crate) fn replace_records(
     finish(zip, target)
 }
 
-/// Write the installation archive `target` from the live records of `tenant`.
+/// Write an installation archive `target` holding `manifest`: a tenant's
+/// (`installation_of`) or the installation-level one (`installation_level_of`).
 pub(crate) fn write_installation(
     target: &Path,
     manifest: &InstallationManifest,
@@ -222,9 +229,10 @@ pub(crate) fn write_installation(
 }
 
 /// Read the installation records of `tenant` from a records database.
-pub(crate) fn installation_of(
+/// The installation-level manifest: the installation identity and the connectors, which carry no
+/// tenant, with no tenant, purge or event. Every backup set holds one, whatever tenants exist.
+pub(crate) fn installation_level_of(
     connection: &Connection,
-    tenant: &TenantId,
 ) -> Result<InstallationManifest, ApiError> {
     let identity = connection
         .query_row("SELECT subject, created_at FROM installation", [], |row| {
@@ -240,6 +248,29 @@ pub(crate) fn installation_of(
         "SELECT connector_id, mutation_id, record FROM connectors ORDER BY rowid",
         params![],
     )?;
+    Ok(InstallationManifest {
+        format: INSTALLATION_FORMAT.to_owned(),
+        version: ARCHIVE_VERSION,
+        tenant_id: None,
+        identity,
+        connectors,
+        purges: Vec::new(),
+        events: Vec::new(),
+        event_keys: Vec::new(),
+    })
+}
+
+/// The installation archive of `tenant`: the installation-level rows, and the tenant's purge
+/// records and tenant events.
+pub(crate) fn installation_of(
+    connection: &Connection,
+    tenant: &TenantId,
+) -> Result<InstallationManifest, ApiError> {
+    let InstallationManifest {
+        identity,
+        connectors,
+        ..
+    } = installation_level_of(connection)?;
     let mut statement = connection
         .prepare(
             "SELECT purge_id, target_key, state, mutation_id, record FROM purges
@@ -259,16 +290,29 @@ pub(crate) fn installation_of(
         .map_err(|error| sql(&error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| sql(&error))?;
-    let mut statement = connection
-        .prepare(
-            "SELECT record FROM events WHERE tenant_id = ?1 AND workspace_id IS NULL ORDER BY seq",
+    // A records database older than event keys (the pre-migration set reads one) has none: its
+    // archive is written without keys, as an archive of that build was.
+    let keyed: bool = connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('events') WHERE name = 'event_key')",
+            [],
+            |row| row.get(0),
         )
         .map_err(|error| sql(&error))?;
-    let events = statement
-        .query_map([tenant.as_str()], |row| row.get(0))
+    let key = if keyed { "event_key" } else { "NULL" };
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT {key}, record FROM events WHERE tenant_id = ?1 AND workspace_id IS NULL
+             ORDER BY seq"
+        ))
+        .map_err(|error| sql(&error))?;
+    let rows: Vec<(Option<String>, String)> = statement
+        .query_map([tenant.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(|error| sql(&error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| sql(&error))?;
+    let (keys, events): (Vec<Option<String>>, Vec<String>) = rows.into_iter().unzip();
+    let event_keys = keys.into_iter().flatten().collect();
     Ok(InstallationManifest {
         format: INSTALLATION_FORMAT.to_owned(),
         version: ARCHIVE_VERSION,
@@ -277,6 +321,7 @@ pub(crate) fn installation_of(
         connectors,
         purges,
         events,
+        event_keys,
     })
 }
 
@@ -383,11 +428,13 @@ fn manifest_of(
     })
 }
 
-/// Objects the filtered records reference: derived datasets, completed uploads, job outputs.
+/// Objects the filtered records reference: derived datasets, completed uploads, job outputs and
+/// retained artifacts (the filtered records hold no workspace archive).
 fn record_objects(records: &Path) -> Result<BTreeSet<Digest>, ApiError> {
     let connection = super::snapshot::read_only(records)?;
     let mut found = BTreeSet::new();
     for query in [
+        "SELECT digest FROM artifacts",
         "SELECT digest FROM derived_objects",
         "SELECT object_digest FROM uploads WHERE object_digest IS NOT NULL",
         "SELECT digest FROM job_outputs",

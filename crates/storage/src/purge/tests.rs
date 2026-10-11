@@ -20,7 +20,6 @@ use okf_jawn_core::storage::{
     SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadStore};
-use rusqlite::OptionalExtension;
 use serde_json::json;
 use tokio::task::JoinHandle;
 
@@ -35,6 +34,9 @@ type Holder = (
     std::sync::mpsc::Sender<()>,
     std::thread::JoinHandle<Result<(), ApiError>>,
 );
+
+/// The bytes of the target's large upload; each run of them carries the marker `zanzibar`.
+const UPLOADED: &[u8] = b"zanzibar upload bytes ";
 
 impl CandidateCheck for Accept {
     fn check(&self, _root: &std::path::Path) -> Result<Vec<Warning>, ApiError> {
@@ -230,34 +232,6 @@ async fn until_held(storage: &Storage, target: &StorageScope) -> Result<(), ApiE
     Ok(())
 }
 
-/// Wait until the purge has recorded `step` as done.
-async fn until_step(storage: &Storage, step: i64) -> Result<(), ApiError> {
-    let started = Instant::now();
-    loop {
-        let purge = purge_id().0.to_string();
-        let found: Option<i64> = storage
-            .records
-            .call(move |connection| {
-                connection
-                    .query_row(
-                        "SELECT step FROM purge_progress WHERE purge_id = ?1",
-                        [purge],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(|error| fault(&error))
-            })
-            .await?;
-        if found.is_some_and(|found| found >= step) {
-            return Ok(());
-        }
-        if started.elapsed() > Duration::from_secs(60) {
-            return Err(fault(&"the purge never reached the step"));
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-}
-
 /// Whether the tenant's object store holds `digest`.
 async fn held(storage: &Storage, scope: &StorageScope, digest: &Digest) -> Result<bool, ApiError> {
     match storage.blobs().open(scope, digest, 0, 1).await {
@@ -315,8 +289,8 @@ async fn the_object_step_waits_for_a_write_of_the_target_that_began_before_the_p
     }
     record_purge(&storage, &target).await?;
     let purging = spawn_purge(&storage, &target);
-    until_step(&storage, 5).await?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The objects step drains the target's writes: it waits for the running write's pin.
+    until_held(&storage, &target).await?;
     assert!(
         !purging.is_finished(),
         "the purge does not delete the target's objects while its write runs"
@@ -439,6 +413,91 @@ async fn an_import_of_another_workspace_inside_the_object_step_keeps_its_objects
     Ok(())
 }
 
+/// Re-review probe Q1 (window 2 with a job), held deterministically: the survivor's job stores
+/// an object identical to one of the target's before the purge, and completes (its output row
+/// lands, its pending put is deleted) while the purge is held inside its objects step, after it
+/// read every surviving reference. The object stays: the survivor's pending put, read by the
+/// step, kept it. (Was a timing test in tests/purge.rs; flaky on a fast runner.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_output_completed_inside_the_objects_step_keeps_its_object() -> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let shared = b"commonplace identical bytes";
+    let (target, survivor, _, digest) = target_with(&storage, "local", shared).await?;
+    let job_scope = okf_jawn_core::jobs::JobScope::Workspace(survivor.clone());
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &job_scope,
+            okf_jawn_core::jobs::NewJob {
+                mutation_id: mutation(30),
+                initiator: person(),
+                spec: okf_jawn_core::jobs::JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    let claimed = records
+        .claim_job(job.id)
+        .await?
+        .ok_or_else(|| fault(&"the job was not claimed"))?;
+    let stored = put(&storage, &survivor, shared).await?;
+    assert_eq!(stored, digest);
+    record_purge(&storage, &target).await?;
+    let holding = hold_the_object_step(&storage, &target)?;
+    let purging = spawn_purge(&storage, &target);
+    until_held(&storage, &target).await?;
+    records
+        .complete_job(okf_jawn_core::jobs::JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: None,
+            restore: None,
+            outputs: vec![stored],
+            warnings: Vec::new(),
+        })
+        .await?;
+    holding.end()?;
+    let report = purging.await.map_err(|error| fault(&error))??;
+    assert!(
+        held(&storage, &survivor, &digest).await?,
+        "the survivor's completed job output stays: {report:?}"
+    );
+    Ok(())
+}
+
+/// Re-review probe Q2 (window 2 with a commit), held deterministically: the survivor stores an
+/// object identical to one of the target's before the purge and commits the card naming it
+/// while the purge is held inside its objects step. The object stays. (Was a timing test in
+/// tests/purge.rs.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_object_a_commit_names_inside_the_objects_step_stays() -> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let shared = b"commonplace identical bytes";
+    let (target, survivor, survivor_head, digest) = target_with(&storage, "local", shared).await?;
+    let stored = put(&storage, &survivor, shared).await?;
+    record_purge(&storage, &target).await?;
+    let holding = hold_the_object_step(&storage, &target)?;
+    let purging = spawn_purge(&storage, &target);
+    until_held(&storage, &target).await?;
+    commit(
+        &storage,
+        &survivor,
+        4,
+        &survivor_head,
+        vec![card(item(12), "sources/b.md", &stored)?],
+    )
+    .await?;
+    holding.end()?;
+    let report = purging.await.map_err(|error| fault(&error))??;
+    assert!(
+        held(&storage, &survivor, &digest).await?,
+        "the object the survivor's new card names stays: {report:?}"
+    );
+    Ok(())
+}
+
 /// Ruling 3: another workspace's upload completion inside the object step stores an object
 /// identical to one of the target's; it pins the object until its record is durable, so the
 /// object stays.
@@ -504,6 +563,22 @@ fn hold_the_workspace(storage: &Storage, scope: &StorageScope) -> Result<Holder,
     Ok((release.0, holder))
 }
 
+/// Wait until a caller of scope's write lock besides the test's own holder has taken the lock's
+/// handle: it passed every check it makes before the lock, and it waits for the lock.
+async fn until_waiting_for_the_lock(
+    storage: &Storage,
+    scope: &StorageScope,
+) -> Result<(), ApiError> {
+    let started = Instant::now();
+    while storage.repositories.lock_users(scope)? < 2 {
+        if started.elapsed() > Duration::from_secs(120) {
+            return Err(fault(&"no write began to wait for the workspace's lock"));
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    Ok(())
+}
+
 /// A Git write that passed the purge refusal before the purge was recorded, and waits for the
 /// workspace's lock while it is recorded, is refused under the lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -533,8 +608,8 @@ async fn a_commit_waiting_for_the_workspace_lock_when_the_purge_is_recorded_is_r
                 .await
         })
     };
-    // The commit passes the first check at once and then waits for the lock.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The commit passed its first check and waits for the lock.
+    until_waiting_for_the_lock(&storage, &target).await?;
     record_purge(&storage, &target).await?;
     release.send(()).map_err(|error| fault(&error))?;
     holder
@@ -559,7 +634,8 @@ async fn the_plan_waits_for_a_write_that_holds_the_workspace_lock() -> Result<()
     record_purge(&storage, &target).await?;
     let (release, holder) = hold_the_workspace(&storage, &target)?;
     let purging = spawn_purge(&storage, &target);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The purge waits for the lock to plan.
+    until_waiting_for_the_lock(&storage, &target).await?;
     let purge = purge_id().0.to_string();
     let planned: bool = storage
         .records
@@ -979,8 +1055,8 @@ async fn refused_under_the_lock<T: std::fmt::Debug + Send + 'static>(
     holder: Holder,
 ) -> Result<(), ApiError> {
     let (release, holding) = holder;
-    // The write passes its first check at once and then waits for the lock.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The write passed its first check and waits for the lock.
+    until_waiting_for_the_lock(storage, target).await?;
     record_purge(storage, target).await?;
     release.send(()).map_err(|error| fault(&error))?;
     holding
@@ -1061,7 +1137,7 @@ async fn an_indexing_waits_for_the_workspace_lock() -> Result<(), ApiError> {
         let target = target.clone();
         tokio::spawn(async move { search.index_revision(&target, head).await })
     };
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    until_waiting_for_the_lock(&storage, &target).await?;
     assert!(
         !indexing.is_finished(),
         "no indexing runs while another write holds the workspace"
@@ -1194,6 +1270,164 @@ async fn the_drain_limit_stops_the_purge_with_unavailable_and_a_repeat_resumes_i
     assert!(
         !held(&storage, &target, &digest).await?,
         "the stuck write's bytes go: {report:?}"
+    );
+    Ok(())
+}
+
+/// An upload slot of `target`, under mutation 8, that has received `bytes` in full.
+async fn received_upload(
+    storage: &Storage,
+    target: &StorageScope,
+    bytes: &[u8],
+) -> Result<okf_jawn_contract::identity::UploadId, ApiError> {
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            target,
+            mutation(8),
+            NewUpload {
+                filename: "big.bin".to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(bytes.len()).map_err(|error| fault(&error))?,
+                expected_sha256: None,
+                supplied_by: person(),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            target,
+            slot.id,
+            Box::pin(std::io::Cursor::new(bytes.to_vec())),
+            1 << 28,
+        )
+        .await?;
+    Ok(slot.id)
+}
+
+/// Complete upload `slot` of `target` with `digest` in the background.
+fn spawn_completion(
+    storage: &Storage,
+    target: &StorageScope,
+    slot: okf_jawn_contract::identity::UploadId,
+    digest: &Digest,
+) -> JoinHandle<Result<okf_jawn_core::uploads::UploadRecord, ApiError>> {
+    let (uploads, target, digest) = (storage.uploads(), target.clone(), digest.clone());
+    tokio::spawn(async move { uploads.complete(&target, slot, digest).await })
+}
+
+/// The files under `directory` that hold the marker `zanzibar` (the lock file excepted: this
+/// process holds it, and it is empty).
+fn marked_files(directory: &std::path::Path) -> Result<Vec<String>, ApiError> {
+    let marker = b"zanzibar";
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(directory).map_err(|error| fault(&error))? {
+        let path = entry.map_err(|error| fault(&error))?.path();
+        if path.file_name().is_some_and(|name| name == "okf-jawn.lock") {
+            continue;
+        }
+        if path.is_dir() {
+            found.extend(marked_files(&path)?);
+        } else if std::fs::read(&path)
+            .map_err(|error| fault(&error))?
+            .windows(marker.len())
+            .any(|window| window == marker)
+        {
+            found.push(path.display().to_string());
+        }
+    }
+    Ok(found)
+}
+
+/// Assert that `result` is the purge's refusal: `Conflict` naming the purge.
+fn assert_refused<T: std::fmt::Debug>(result: Result<T, ApiError>) -> Result<(), ApiError> {
+    let error = match result {
+        Ok(value) => return Err(fault(&format!("not refused: {value:?}"))),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+    assert!(
+        error.message.contains(&purge_id().0.to_string()),
+        "the refusal names the purge: {error}"
+    );
+    Ok(())
+}
+
+/// Re-review probe Q3 (window 1, an upload completion in flight), held deterministically: the
+/// completion passed its first refusal and staged and hashed the part file before the purge was
+/// recorded, and is held there, before its pin, while the whole purge runs (an upload
+/// completion is no job, so no drain covers it). Released, it is refused by the purge check
+/// that follows its pin, and no byte of the target remains. (Was a timing test in
+/// tests/purge.rs, `purge_leaves_nothing_of_an_upload_completion_in_flight`.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_upload_completion_staged_before_the_purge_is_refused_and_leaves_nothing()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, "local", 1, "Trip").await?;
+    create(&storage, "local", 2, "Garden").await?;
+    let bytes = UPLOADED.repeat(1 << 16);
+    let slot = received_upload(&storage, &target, &bytes).await?;
+    let digest = digest_of(&bytes)?;
+    let (arrival, release) = crate::pause::hold(storage.blobs.pause_point(&digest, "received"))?;
+    let finishing = spawn_completion(&storage, &target, slot, &digest);
+    crate::pause::arrived(arrival).await?;
+    record_purge(&storage, &target).await?;
+    let report = spawn_purge(&storage, &target)
+        .await
+        .map_err(|error| fault(&error))??;
+    release.send(()).map_err(|error| fault(&error))?;
+    assert_refused(finishing.await.map_err(|error| fault(&error))?)?;
+    assert!(
+        !held(&storage, &target, &digest).await?,
+        "the completion stored nothing: {report:?}"
+    );
+    assert_eq!(
+        marked_files(directory.path())?,
+        Vec::<String>::new(),
+        "no byte of the target's upload remains"
+    );
+    Ok(())
+}
+
+/// Re-review probe Q3-hard, held deterministically: the completion is past its second refusal
+/// (pinned, its pending put recorded) when the purge is recorded, and is held before it
+/// retains. The purge's objects step waits for its pin. Released, the completion retains its
+/// bytes, its record is refused in its transaction and its pin ends; the purge then deletes the
+/// bytes its pending put names. Nothing of the target stays. (Was a timing test in
+/// tests/purge.rs, `purge_leaves_nothing_of_an_upload_completion_past_its_second_check`, which
+/// failed under load.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_upload_completion_pinned_before_the_purge_is_waited_for_and_its_bytes_removed()
+-> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let (target, _) = create(&storage, "local", 1, "Trip").await?;
+    create(&storage, "local", 2, "Garden").await?;
+    let bytes = UPLOADED.repeat(1 << 16);
+    let slot = received_upload(&storage, &target, &bytes).await?;
+    let digest = digest_of(&bytes)?;
+    let (arrival, release) = crate::pause::hold(storage.blobs.pause_point(&digest, "pinned"))?;
+    let finishing = spawn_completion(&storage, &target, slot, &digest);
+    crate::pause::arrived(arrival).await?;
+    record_purge(&storage, &target).await?;
+    let purging = spawn_purge(&storage, &target);
+    until_held(&storage, &target).await?;
+    assert!(
+        !purging.is_finished(),
+        "the objects step waits for the completion's pin"
+    );
+    release.send(()).map_err(|error| fault(&error))?;
+    assert_refused(finishing.await.map_err(|error| fault(&error))?)?;
+    let report = purging.await.map_err(|error| fault(&error))??;
+    assert!(
+        !held(&storage, &target, &digest).await?,
+        "the retained bytes go with the target: {report:?}"
+    );
+    assert_eq!(
+        marked_files(directory.path())?,
+        Vec::<String>::new(),
+        "no byte of the target's upload remains"
     );
     Ok(())
 }

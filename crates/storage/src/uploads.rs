@@ -302,6 +302,10 @@ impl SqliteUploads {
         let stored = self
             .db
             .transaction(move |transaction| {
+                // Checked first, so a purge recorded before the transaction began refuses the
+                // record with the purge's `Conflict` also once the purge's rows step removed this
+                // upload's row (which the read below would otherwise answer as not found).
+                guard::refuse(transaction, &tenant, &workspace)?;
                 transaction
                     .execute(
                         "UPDATE uploads SET object_digest = ?1, object_size = ?2
@@ -319,8 +323,8 @@ impl SqliteUploads {
                 if let Some(named) = &stored.object {
                     puts::land(transaction, &tenant, &workspace, [&named.digest])?;
                 }
-                // Last in the transaction, so a purge recorded at any moment before it commits
-                // refuses the record (`purge::guard`).
+                // And last, so nothing written in the transaction itself before it lets a
+                // purge through (`purge::guard`).
                 guard::refuse(transaction, &tenant, &workspace)?;
                 Ok(stored)
             })

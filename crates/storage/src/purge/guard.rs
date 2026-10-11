@@ -22,9 +22,11 @@
 //! transaction that records its pending put (`LocalBlobs::put_pinned`, `puts`), so a put that
 //! passed the first check before the purge was recorded either is waited for by the purge's
 //! objects step or records and stores nothing. Written histories and workspace archives check
-//! only before they take the workspace's lock. An import puts its objects through
-//! `put_pinned`, so each is checked again in its pending-put transaction, but it copies its
-//! rows without the check. These are job work, which core drains before it calls the purger.
+//! before they take the workspace's lock and again under it, and record themselves before they
+//! release it, so the purge's plan either refuses them or reads their record. An import puts
+//! its objects through `put_pinned`, so each is checked again in its pending-put transaction,
+//! and its Git writes are refused under the lock, but it copies its rows without the check;
+//! that is job work, which core drains before it calls the purger.
 //!
 //! Events are not refused. An event carries identities only (its kind, revision, item, job,
 //! connector, actor and operation), and one appended after the rows step is tenant-level data

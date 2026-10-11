@@ -62,9 +62,10 @@
 //! - Another workspace's object is deleted only when no reference step 6 read names it (that
 //!   workspace's pending puts included, a copy of the target's archive excepted) and no write
 //!   of another workspace pinned it since step 6 began (`pins`).
+//! - A workspace archive and a written history are refused under the workspace's lock and
+//!   record themselves before they release it, so step 1 either refused them or reads them.
 //! - Known limit: job work core did not drain before calling the purger can still store what
-//!   the plan does not name: a workspace archive and a written history put their objects
-//!   without a pending put, and an import copies its rows without the refusal.
+//!   the plan does not name: an import copies its rows without the refusal.
 
 use std::collections::BTreeSet;
 

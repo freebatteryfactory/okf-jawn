@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::Digest;
+use okf_jawn_contract::workspace::ArtifactKind;
 use rusqlite::{Connection, OpenFlags, params};
 
 use crate::data::io_error;
@@ -26,8 +27,12 @@ pub(crate) struct FullCopy {
     pub(crate) path: PathBuf,
 }
 
-/// Records tables a workspace archive keeps, filtered to the workspace's rows.
+/// Records tables a workspace archive keeps, filtered to the workspace's rows. Artifacts are
+/// application records with retained bytes (SPEC section 12: "a consistent checkpoint of its
+/// versions, retained objects and application records"), so the workspace's exports and View
+/// exports are kept; its own workspace archives are not, so an archive never embeds a backup.
 pub(crate) const WORKSPACE_TABLES: &[&str] = &[
+    "artifacts",
     "comments",
     "derived_objects",
     "drafts",
@@ -46,11 +51,11 @@ pub(crate) const WORKSPACE_TABLES: &[&str] = &[
 
 /// Records tables a workspace archive leaves empty: tenant and installation records (the
 /// installation archive carries them); retry records, which mean something only to the live
-/// ledger; short-lived capabilities and challenges; the records of export and backup archives
-/// and restores, whose bytes an archive never holds; and pending puts, which belong to writes
-/// of this installation.
+/// ledger; short-lived capabilities and challenges; the records of backup archives, written
+/// histories and restores, whose bytes an archive never holds; the archive each replacement
+/// restore restored a workspace from, which means something only to this directory; and pending
+/// puts, which belong to writes of this installation.
 pub(crate) const NOT_IN_WORKSPACE_ARCHIVE: &[&str] = &[
-    "artifacts",
     "backup_archives",
     "confirmations",
     "connectors",
@@ -61,6 +66,7 @@ pub(crate) const NOT_IN_WORKSPACE_ARCHIVE: &[&str] = &[
     "pending_puts",
     "purge_progress",
     "purges",
+    "replacement_restores",
     "restores",
     "sandbox_capabilities",
     "sessions",
@@ -78,18 +84,28 @@ pub(crate) fn copy_live(live: &Connection, directory: &Path) -> Result<FullCopy,
     Ok(FullCopy { path })
 }
 
-/// The digests of retained export and backup archives and written histories in a full copy:
-/// an archive never holds them, even where a record of the workspace names one.
+/// The digests of backup archives (workspace and installation) and written histories in a full
+/// copy: an archive never holds them, even where a record of the workspace names one, so no
+/// backup embeds another. Retained exports and View exports are not among them.
 pub(crate) fn archive_objects(full: &FullCopy, tenant: &str) -> Result<BTreeSet<Digest>, ApiError> {
     let connection = read_only(&full.path)?;
     let mut found = BTreeSet::new();
     let present = tables(&connection)?;
+    let backups = format!(
+        "kind IN ('{}', '{}')",
+        variant_text!(&ArtifactKind::WorkspaceBackup)?,
+        variant_text!(&ArtifactKind::InstallationBackup)?
+    );
     // An older copy (before a migration) may lack a table; it then holds none of those.
-    for table in ["artifacts", "history_exports", "backup_archives"] {
+    for (table, only) in [
+        ("artifacts", backups.as_str()),
+        ("history_exports", "1"),
+        ("backup_archives", "1"),
+    ] {
         if !present.iter().any(|name| name == table) {
             continue;
         }
-        let query = format!("SELECT digest FROM {table} WHERE tenant_id = ?1");
+        let query = format!("SELECT digest FROM {table} WHERE tenant_id = ?1 AND {only}");
         let mut statement = connection.prepare(&query).map_err(|error| sql(&error))?;
         let values = statement
             .query_map([tenant], |row| row.get::<_, String>(0))
@@ -118,8 +134,13 @@ pub(crate) fn filter(
             "SELECT job_id FROM jobs WHERE tenant_id = ?1 AND workspace_id IS ?2
                AND state IN {FINISHED_JOBS}"
         );
+        let workspace_backup = variant_text!(&ArtifactKind::WorkspaceBackup)?;
         for table in tables(&transaction)? {
             let query = match table.as_str() {
+                "artifacts" => format!(
+                    "DELETE FROM artifacts WHERE NOT (tenant_id = ?1 AND workspace_id IS ?2)
+                       OR kind = '{workspace_backup}'"
+                ),
                 "job_controls" | "job_outputs" => {
                     format!("DELETE FROM \"{table}\" WHERE job_id NOT IN ({kept_jobs})")
                 }
