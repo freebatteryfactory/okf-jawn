@@ -55,6 +55,8 @@ pub struct StorageBackups {
 pub(crate) const PRE_MIGRATION_WORKSPACES: &str = "workspaces";
 /// The directory of a backup set that holds its installation archives.
 const INSTALLATIONS: &str = "installation";
+/// The installation-level archive of a backup set (identity and connectors, no tenant).
+const INSTALLATION_LEVEL: &str = "installation.zip";
 
 impl StorageBackups {
     pub(crate) const fn new(storage: Storage) -> Self {
@@ -112,10 +114,13 @@ impl StorageBackups {
         workspaces: &[PathBuf],
     ) -> Result<Vec<RestoreReport>, ApiError> {
         let manifest = archive::Opened::open(installation)?.installation()?;
-        let tenant = manifest
-            .tenant_id
-            .clone()
-            .ok_or_else(|| archive::invalid("the installation archive names no tenant"))?;
+        // An installation-level archive (no tenant) restores the identity and connectors only.
+        let tenant = manifest.tenant_id.clone();
+        if tenant.is_none() && !workspaces.is_empty() {
+            return Err(archive::invalid(
+                "an installation-level archive restores no workspace; give the tenant's archive",
+            ));
+        }
         // The archive's own identity keys its events, so restoring another archive later never
         // drops one at the same position.
         let identity = {
@@ -132,7 +137,9 @@ impl StorageBackups {
         for path in workspaces {
             let mut opened = archive::Opened::open(path)?;
             let scope = StorageScope {
-                tenant_id: tenant.clone(),
+                tenant_id: tenant
+                    .clone()
+                    .ok_or_else(|| archive::invalid("the installation archive names no tenant"))?,
                 workspace_id: opened.workspace()?.workspace_id,
             };
             let storage = self.storage.clone();
@@ -167,6 +174,8 @@ impl StorageBackups {
             return Ok(object);
         }
         crate::purge::guard::refuse_scope(&self.storage.records, scope).await?;
+        #[cfg(test)]
+        pause::point(scope).await?;
         let storage = self.storage.clone();
         let runtime = Handle::current();
         let locked_scope = scope.clone();
@@ -572,6 +581,12 @@ fn write_set(
         archive::write_installation(&target, &archive::installation_of(connection, &tenant)?)?;
         written.push(target);
     }
+    // The installation identity and connectors carry no tenant: one installation-level archive
+    // holds them in every set, whatever tenants exist (even none).
+    std::fs::create_dir_all(output).map_err(|error| io_error("create", output, &error))?;
+    let level = output.join(INSTALLATION_LEVEL);
+    archive::write_installation(&level, &archive::installation_level_of(connection)?)?;
+    written.push(level);
     Ok(written)
 }
 
@@ -605,11 +620,17 @@ fn install(
     manifest: &InstallationManifest,
     archive: &str,
 ) -> Result<(), ApiError> {
+    // Purge records and tenant events belong to a tenant; an installation-level archive has none.
+    if manifest.tenant_id.is_none() && !(manifest.purges.is_empty() && manifest.events.is_empty()) {
+        return Err(archive::invalid(
+            "an archive with purges or events names no tenant",
+        ));
+    }
     let tenant = manifest
         .tenant_id
         .as_ref()
         .map(|tenant| tenant.as_str().to_owned())
-        .ok_or_else(|| archive::invalid("the installation archive names no tenant"))?;
+        .unwrap_or_default();
     if let Some((subject, created_at)) = &manifest.identity {
         transaction
             .execute(
@@ -672,6 +693,54 @@ pub(crate) mod archive;
 mod restore;
 pub(crate) mod snapshot;
 
+/// A test-only pause point in `write_workspace_archive`, after its first checks and before it
+/// takes the workspace's lock: a test holds the next archive call of a workspace there, so a
+/// second call under the same mutation can run to completion first, deterministically.
+#[cfg(test)]
+mod pause {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+
+    use okf_jawn_contract::error::ApiError;
+    use okf_jawn_core::storage::StorageScope;
+
+    use crate::db::internal;
+
+    /// The held workspace's arrival signal and release, by workspace identity.
+    type Held = BTreeMap<String, (Sender<()>, Receiver<()>)>;
+
+    static HELD: Mutex<Held> = Mutex::new(BTreeMap::new());
+
+    /// Hold the next archive call of `scope`; returns (told when it arrives, its release).
+    pub(super) fn hold(scope: &StorageScope) -> Result<(Receiver<()>, Sender<()>), ApiError> {
+        let (arrived, arrival) = channel();
+        let (release, released) = channel();
+        HELD.lock()
+            .map_err(|_| internal("the pause table was poisoned"))?
+            .insert(scope.workspace_id.0.to_string(), (arrived, released));
+        Ok((arrival, release))
+    }
+
+    /// Where an archive call of `scope` waits while a test holds it (once per hold).
+    pub(super) async fn point(scope: &StorageScope) -> Result<(), ApiError> {
+        let held = HELD
+            .lock()
+            .map_err(|_| internal("the pause table was poisoned"))?
+            .remove(&scope.workspace_id.0.to_string());
+        if let Some((arrived, released)) = held {
+            arrived
+                .send(())
+                .map_err(|error| internal(error.to_string()))?;
+            tokio::task::spawn_blocking(move || released.recv())
+                .await
+                .map_err(|error| internal(error.to_string()))?
+                .map_err(|error| internal(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
 /// Unit tests here, not in `tests/`: they hold a workspace's write lock, which is private.
 /// They return `ApiError` like core's unit tests.
 #[cfg(test)]
@@ -716,6 +785,68 @@ mod tests {
             tenant_id: tenant,
             workspace_id: created.id,
         })
+    }
+
+    /// Backup re-review B1, deterministic: the first archive call under mutation 40 is held
+    /// after its first checks (the pause point), a second call under the same mutation runs to
+    /// completion and records its archive, a record of the workspace then changes, and the first
+    /// is released. It re-reads the record under the lock and stores nothing: one archive object.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_held_archive_call_under_a_recorded_mutation_stores_nothing() -> Result<(), ApiError>
+    {
+        use okf_jawn_core::drafts::{DraftStore, DraftWrite};
+        use okf_jawn_core::storage::VersionStore;
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let scope = notes(&storage).await?;
+        let mutation = MutationId(uuid::Uuid::from_u128(40));
+        let (arrival, release) = super::pause::hold(&scope)?;
+        let first = {
+            let (backups, scope) = (storage.backups(), scope.clone());
+            tokio::spawn(async move { backups.write_workspace_archive(&scope, mutation).await })
+        };
+        tokio::task::spawn_blocking(move || arrival.recv())
+            .await
+            .map_err(|error| fault(&error))?
+            .map_err(|error| fault(&error))?;
+        let second = storage
+            .backups()
+            .write_workspace_archive(&scope, mutation)
+            .await?;
+        // A record of the workspace changes, so an archive written now would be another object.
+        storage
+            .drafts()
+            .save(
+                &scope,
+                MutationId(uuid::Uuid::from_u128(41)),
+                DraftWrite {
+                    item_id: okf_jawn_contract::identity::ItemId(uuid::Uuid::from_u128(10)),
+                    editor: "ana".to_owned(),
+                    base_revision: storage.versions().head(&scope).await?,
+                    body: "changed between the two lock holds".to_owned(),
+                    properties: std::collections::BTreeMap::new(),
+                    content_digest: okf_jawn_contract::identity::Digest::try_from("e".repeat(64))
+                        .map_err(|error| fault(&error))?,
+                },
+            )
+            .await?;
+        release.send(()).map_err(|error| fault(&error))?;
+        let first = first.await.map_err(|error| fault(&error))??;
+        assert_eq!(first, second, "both answer the recorded archive");
+        let mut pending = vec![storage.data().objects_path()];
+        let mut stored = 0_usize;
+        while let Some(path) = pending.pop() {
+            for entry in std::fs::read_dir(&path).map_err(|error| fault(&error))? {
+                let path = entry.map_err(|error| fault(&error))?.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    stored = stored.saturating_add(1);
+                }
+            }
+        }
+        assert_eq!(stored, 1, "one archive object is stored");
+        Ok(())
     }
 
     /// PR #20 finding (`CodeRabbit`, `backup/mod.rs:382`): a second record under the same mutation

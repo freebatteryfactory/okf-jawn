@@ -612,8 +612,8 @@ async fn backup_replacement_restore_after_deleting_the_data_directory() -> TestR
         .await?;
     assert_eq!(
         written.len(),
-        3,
-        "two workspace archives and one installation archive"
+        4,
+        "two workspace archives, the tenant's installation archive and the installation-level one"
     );
     let Fixture {
         storage,
@@ -1125,7 +1125,11 @@ async fn backup_an_empty_installation_still_writes_its_installation_archive() ->
             .write_backup_set(output.path(), Some(&tenant("local")?))
             .await?;
         let installation = output.path().join("installation").join("local.zip");
-        assert_eq!(written, vec![installation], "one installation archive");
+        assert_eq!(
+            written,
+            vec![installation, output.path().join("installation.zip")],
+            "the tenant's installation archive and the installation-level one"
+        );
     }
     std::fs::remove_dir_all(directory.path())?;
     let restored = Storage::open(directory.path())?;
@@ -1594,7 +1598,10 @@ async fn backup_an_unfiltered_set_writes_the_archive_of_a_tenant_only_an_event_n
         .await?;
     assert_eq!(
         written,
-        vec![output.path().join("installation").join("local.zip")]
+        vec![
+            output.path().join("installation").join("local.zip"),
+            output.path().join("installation.zip")
+        ]
     );
     Ok(())
 }
@@ -1701,6 +1708,81 @@ async fn backup_a_replacement_restore_stopped_inside_a_workspace_completes_on_re
         .await?;
     restored.catalog().open(&workspace).await?;
     Ok(())
+}
+
+/// The names directly under `directory`, sorted.
+fn entries_of(directory: &Path) -> Fallible<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()?;
+    names.sort();
+    Ok(names)
+}
+
+/// Coordinator decision (ruling 2): an installation with only an identity and a connector, and
+/// no tenant anywhere, backs up through the pre-migration path into the installation-level
+/// archive, and a replacement restore from it brings both back.
+#[tokio::test]
+async fn backup_a_tenantless_installation_survives_the_pre_migration_set() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let subject = {
+        let storage = Storage::open(directory.path())?;
+        let subject = storage.credentials().installation_identity().await?.subject;
+        storage
+            .credentials()
+            .create_connector(
+                uuid!(50)?,
+                NewConnector {
+                    label: "Desk".to_owned(),
+                    workspace_ids: Vec::new(),
+                    allow_propose: false,
+                },
+            )
+            .await?;
+        subject
+    };
+    {
+        // The directory as records schema 1 left it: opening it takes a pre-migration set.
+        let connection = rusqlite::Connection::open(directory.path().join("records.sqlite"))?;
+        connection.execute_batch(
+            "DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
+             DROP TABLE pending_puts; PRAGMA user_version = 1;",
+        )?;
+    }
+    let level = {
+        let storage = Storage::open(directory.path())?;
+        let sets: Vec<_> = std::fs::read_dir(storage.data().pre_migration_path())?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        let set = some(sets.first(), "the pre-migration set")?.clone();
+        let level = set.join("installation.zip");
+        assert!(
+            level.is_file(),
+            "the installation-level archive is in the set: {set:?} holds {:?}",
+            entries_of(&set)?
+        );
+        let copy = tempfile::NamedTempFile::new()?;
+        std::fs::copy(&level, copy.path())?;
+        copy
+    };
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    restored
+        .backups()
+        .restore_replacement(level.path(), &[])
+        .await?;
+    assert_eq!(
+        restored
+            .credentials()
+            .installation_identity()
+            .await?
+            .subject,
+        subject,
+        "the installation identity comes back"
+    );
+    assert_connector_revoked(&restored).await
 }
 
 /// Write a workspace archive of `source` under mutation 40 and put its bytes into `target`, as

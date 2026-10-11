@@ -222,9 +222,10 @@ pub(crate) fn write_installation(
 }
 
 /// Read the installation records of `tenant` from a records database.
-pub(crate) fn installation_of(
+/// The installation-level manifest: the installation identity and the connectors, which carry no
+/// tenant, with no tenant, purge or event. Every backup set holds one, whatever tenants exist.
+pub(crate) fn installation_level_of(
     connection: &Connection,
-    tenant: &TenantId,
 ) -> Result<InstallationManifest, ApiError> {
     let identity = connection
         .query_row("SELECT subject, created_at FROM installation", [], |row| {
@@ -240,6 +241,28 @@ pub(crate) fn installation_of(
         "SELECT connector_id, mutation_id, record FROM connectors ORDER BY rowid",
         params![],
     )?;
+    Ok(InstallationManifest {
+        format: INSTALLATION_FORMAT.to_owned(),
+        version: ARCHIVE_VERSION,
+        tenant_id: None,
+        identity,
+        connectors,
+        purges: Vec::new(),
+        events: Vec::new(),
+    })
+}
+
+/// The installation archive of `tenant`: the installation-level rows, and the tenant's purge
+/// records and tenant events.
+pub(crate) fn installation_of(
+    connection: &Connection,
+    tenant: &TenantId,
+) -> Result<InstallationManifest, ApiError> {
+    let InstallationManifest {
+        identity,
+        connectors,
+        ..
+    } = installation_level_of(connection)?;
     let mut statement = connection
         .prepare(
             "SELECT purge_id, target_key, state, mutation_id, record FROM purges
