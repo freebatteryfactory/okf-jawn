@@ -81,6 +81,18 @@ impl LocalBlobs {
         self
     }
 
+    /// The name of a test-only pause point (`crate::pause`) of a put of `digest` in this store:
+    /// at `received` the body is staged and hashed, before the pin and the second purge check;
+    /// at `pinned` the pin is taken and the pending put recorded, before the retain.
+    #[cfg(test)]
+    pub(crate) fn pause_point(&self, digest: &Digest, stage: &str) -> String {
+        format!(
+            "put|{}|{}|{stage}",
+            self.incoming.display(),
+            digest.as_str()
+        )
+    }
+
     /// The in-flight pins this store records.
     pub(crate) const fn pins(&self) -> &Pins {
         &self.pins
@@ -159,12 +171,16 @@ impl LocalBlobs {
         scope: Option<&StorageScope>,
     ) -> Result<(ObjectInfo, Option<Pinned>), ApiError> {
         let (digest, size) = receive(body, staged, limit).await?;
+        #[cfg(test)]
+        crate::pause::point(&self.pause_point(&digest, "received")).await?;
         // Pinned before it is retained, and before the object is looked for: a purge's delete
         // either ran before (and this stores the object again) or sees the pin.
         let pinned = match scope {
             Some(scope) => Some(self.pin_unless_purged(scope, &digest).await?),
             None => None,
         };
+        #[cfg(test)]
+        crate::pause::point(&self.pause_point(&digest, "pinned")).await?;
         // On a failed retain the pin ends with the write (dropped) and the pending put stays.
         let object = self.retain(tenant, staged, digest, size, expected).await?;
         Ok((object, pinned))

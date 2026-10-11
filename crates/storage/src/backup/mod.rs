@@ -173,7 +173,7 @@ impl StorageBackups {
         }
         crate::purge::guard::refuse_scope(&self.storage.records, scope).await?;
         #[cfg(test)]
-        pause::point(&self.storage, scope).await?;
+        crate::pause::point(&pause_point(&self.storage, scope)).await?;
         let storage = self.storage.clone();
         let runtime = Handle::current();
         let locked_scope = scope.clone();
@@ -716,62 +716,18 @@ pub(crate) mod archive;
 mod restore;
 pub(crate) mod snapshot;
 
-/// A test-only pause point in `write_workspace_archive`, after its first checks and before it
-/// takes the workspace's lock: a test holds the next archive call of a workspace there, so a
-/// second call under the same mutation can run to completion first, deterministically.
+/// The name of the test-only pause point in `write_workspace_archive` (`crate::pause`), after
+/// its first checks and before it takes the workspace's lock: a test holds the next archive
+/// call of a workspace there, so a second call under the same mutation can run to completion
+/// first, deterministically. It names the data directory (a temporary directory unique to each
+/// test) and the workspace, so parallel tests whose workspaces share an identity never meet.
 #[cfg(test)]
-mod pause {
-    use std::collections::BTreeMap;
-    use std::sync::Mutex;
-    use std::sync::mpsc::{Receiver, Sender, channel};
-
-    use okf_jawn_contract::error::ApiError;
-    use okf_jawn_core::storage::StorageScope;
-
-    use crate::db::internal;
-    use crate::storage::Storage;
-
-    /// The held workspace's arrival signal and release, by data directory and workspace.
-    type Held = BTreeMap<String, (Sender<()>, Receiver<()>)>;
-
-    static HELD: Mutex<Held> = Mutex::new(BTreeMap::new());
-
-    /// The held call's key: the data directory (a temporary directory unique to each test) and
-    /// the workspace, so parallel tests whose workspaces share an identity never meet.
-    fn key(storage: &Storage, scope: &StorageScope) -> String {
-        format!("{}|{}", storage.data.root().display(), scope.workspace_id.0)
-    }
-
-    /// Hold the next archive call of `scope`; returns (told when it arrives, its release).
-    pub(super) fn hold(
-        storage: &Storage,
-        scope: &StorageScope,
-    ) -> Result<(Receiver<()>, Sender<()>), ApiError> {
-        let (arrived, arrival) = channel();
-        let (release, released) = channel();
-        HELD.lock()
-            .map_err(|_| internal("the pause table was poisoned"))?
-            .insert(key(storage, scope), (arrived, released));
-        Ok((arrival, release))
-    }
-
-    /// Where an archive call of `scope` waits while a test holds it (once per hold).
-    pub(super) async fn point(storage: &Storage, scope: &StorageScope) -> Result<(), ApiError> {
-        let held = HELD
-            .lock()
-            .map_err(|_| internal("the pause table was poisoned"))?
-            .remove(&key(storage, scope));
-        if let Some((arrived, released)) = held {
-            arrived
-                .send(())
-                .map_err(|error| internal(error.to_string()))?;
-            tokio::task::spawn_blocking(move || released.recv())
-                .await
-                .map_err(|error| internal(error.to_string()))?
-                .map_err(|error| internal(error.to_string()))?;
-        }
-        Ok(())
-    }
+fn pause_point(storage: &Storage, scope: &StorageScope) -> String {
+    format!(
+        "archive|{}|{}",
+        storage.data.root().display(),
+        scope.workspace_id.0
+    )
 }
 
 /// Unit tests here, not in `tests/`: they hold a workspace's write lock, which is private.
@@ -833,15 +789,12 @@ mod tests {
         let storage = Storage::open(directory.path())?;
         let scope = notes(&storage).await?;
         let mutation = MutationId(uuid::Uuid::from_u128(40));
-        let (arrival, release) = super::pause::hold(&storage, &scope)?;
+        let (arrival, release) = crate::pause::hold(super::pause_point(&storage, &scope))?;
         let first = {
             let (backups, scope) = (storage.backups(), scope.clone());
             tokio::spawn(async move { backups.write_workspace_archive(&scope, mutation).await })
         };
-        tokio::task::spawn_blocking(move || arrival.recv())
-            .await
-            .map_err(|error| fault(&error))?
-            .map_err(|error| fault(&error))?;
+        crate::pause::arrived(arrival).await?;
         let second = storage
             .backups()
             .write_workspace_archive(&scope, mutation)

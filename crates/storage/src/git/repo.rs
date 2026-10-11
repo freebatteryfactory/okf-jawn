@@ -156,6 +156,23 @@ impl Repositories {
         work()
     }
 
+    /// How many hold the workspace's write lock or wait for it (or are about to): the callers
+    /// of `locked` that took the lock's handle and have not ended. A test that holds the lock
+    /// itself sees a second caller as 2, once that caller passed every check it makes before
+    /// `locked`.
+    #[cfg(test)]
+    pub(crate) fn lock_users(&self, scope: &StorageScope) -> Result<usize, ApiError> {
+        let key = format!("{}/{}", scope.tenant_id.as_str(), scope.workspace_id.0);
+        let locks = self
+            .locks
+            .lock()
+            .map_err(|_| internal("the workspace lock table was poisoned"))?;
+        // The table holds one handle of its own.
+        Ok(locks
+            .get(&key)
+            .map_or(0, |lock| Arc::strong_count(lock).saturating_sub(1)))
+    }
+
     /// A fresh staging directory for one mutation, removed when the guard drops.
     pub(crate) fn stage(
         &self,
