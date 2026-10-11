@@ -3083,5 +3083,93 @@ async fn backup_a_replacement_restore_refuses_another_tenants_workspace_archive(
     Ok(())
 }
 
+/// Backup round-4 re-review MMIGPART (the reviewer's probe
+/// `rr4_c_migration_positions_ignore_workspace_events`): workspace events interleaved with the
+/// tenant events of a schema-1 directory do not shift the positions the migration keys tenant
+/// events by, so the pre-migration set restored over the upgraded directory repeats nothing.
+#[tokio::test]
+async fn backup_migration_positions_ignore_workspace_events() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("records.sqlite");
+    {
+        let storage = Storage::open(directory.path())?;
+        storage.credentials().installation_identity().await?;
+        let (workspace, _) = create(&storage, "local", 1, "Notes").await?;
+        let in_workspace = EventScope::Workspace(workspace.clone());
+        for scope in [
+            EventScope::Tenant(tenant("local")?),
+            in_workspace.clone(),
+            EventScope::Tenant(tenant("local")?),
+            EventScope::Tenant(tenant("other")?),
+            in_workspace,
+            EventScope::Tenant(tenant("local")?),
+        ] {
+            storage.events().append(&scope, None, sign_in()).await?;
+        }
+    }
+    as_records_schema_1(&records)?;
+    let storage = Storage::open(directory.path())?;
+    let sets: Vec<_> = std::fs::read_dir(storage.data().pre_migration_path())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    let set = some(sets.first(), "the pre-migration set")?.clone();
+    let tenant_level = "SELECT count(*) FROM events WHERE workspace_id IS NULL";
+    assert_eq!(count(&records, tenant_level)?, 4);
+    for name in ["local", "other"] {
+        storage
+            .backups()
+            .restore_replacement(&set.join("installation").join(format!("{name}.zip")), &[])
+            .await?;
+    }
+    assert_eq!(
+        count(&records, tenant_level)?,
+        4,
+        "no tenant event is repeated: {:?}",
+        tenant_events(&records)?
+    );
+    Ok(())
+}
+
+/// Backup round-4 re-review MORD: a replacement restore brings the tenant log back in its
+/// original order (the archive holds it oldest first).
+#[tokio::test]
+async fn backup_restored_tenant_events_keep_their_order() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let original = {
+        let storage = Storage::open(directory.path())?;
+        storage.credentials().installation_identity().await?;
+        for _ in 0..3 {
+            // Each event's instant (in milliseconds) is its own, so the records differ.
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            storage
+                .events()
+                .append(&EventScope::Tenant(tenant("local")?), None, sign_in())
+                .await?;
+        }
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        tenant_events(&directory.path().join("records.sqlite"))?
+    };
+    let distinct: std::collections::BTreeSet<&String> =
+        original.iter().map(|(_, record)| record).collect();
+    assert_eq!(distinct.len(), 3, "three distinct events: {original:?}");
+    let target = tempfile::tempdir()?;
+    Storage::open(target.path())?
+        .backups()
+        .restore_replacement(&output.path().join("installation").join("local.zip"), &[])
+        .await?;
+    assert_eq!(
+        tenant_events(&target.path().join("records.sqlite"))?,
+        original,
+        "the restored log is the original, in its order"
+    );
+    Ok(())
+}
+
 #[path = "../../../tests/support/check.rs"]
 mod check;
