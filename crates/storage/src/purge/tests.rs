@@ -439,6 +439,91 @@ async fn an_import_of_another_workspace_inside_the_object_step_keeps_its_objects
     Ok(())
 }
 
+/// Re-review probe Q1 (window 2 with a job), held deterministically: the survivor's job stores
+/// an object identical to one of the target's before the purge, and completes (its output row
+/// lands, its pending put is deleted) while the purge is held inside its objects step, after it
+/// read every surviving reference. The object stays: the survivor's pending put, read by the
+/// step, kept it. (Was a timing test in tests/purge.rs; flaky on a fast runner.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_output_completed_inside_the_objects_step_keeps_its_object() -> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let shared = b"commonplace identical bytes";
+    let (target, survivor, _, digest) = target_with(&storage, "local", shared).await?;
+    let job_scope = okf_jawn_core::jobs::JobScope::Workspace(survivor.clone());
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &job_scope,
+            okf_jawn_core::jobs::NewJob {
+                mutation_id: mutation(30),
+                initiator: person(),
+                spec: okf_jawn_core::jobs::JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    let claimed = records
+        .claim_job(job.id)
+        .await?
+        .ok_or_else(|| fault(&"the job was not claimed"))?;
+    let stored = put(&storage, &survivor, shared).await?;
+    assert_eq!(stored, digest);
+    record_purge(&storage, &target).await?;
+    let holding = hold_the_object_step(&storage, &target)?;
+    let purging = spawn_purge(&storage, &target);
+    until_held(&storage, &target).await?;
+    records
+        .complete_job(okf_jawn_core::jobs::JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: None,
+            restore: None,
+            outputs: vec![stored],
+            warnings: Vec::new(),
+        })
+        .await?;
+    holding.end()?;
+    let report = purging.await.map_err(|error| fault(&error))??;
+    assert!(
+        held(&storage, &survivor, &digest).await?,
+        "the survivor's completed job output stays: {report:?}"
+    );
+    Ok(())
+}
+
+/// Re-review probe Q2 (window 2 with a commit), held deterministically: the survivor stores an
+/// object identical to one of the target's before the purge and commits the card naming it
+/// while the purge is held inside its objects step. The object stays. (Was a timing test in
+/// tests/purge.rs.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_object_a_commit_names_inside_the_objects_step_stays() -> Result<(), ApiError> {
+    let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+    let storage = Storage::open(directory.path())?;
+    let shared = b"commonplace identical bytes";
+    let (target, survivor, survivor_head, digest) = target_with(&storage, "local", shared).await?;
+    let stored = put(&storage, &survivor, shared).await?;
+    record_purge(&storage, &target).await?;
+    let holding = hold_the_object_step(&storage, &target)?;
+    let purging = spawn_purge(&storage, &target);
+    until_held(&storage, &target).await?;
+    commit(
+        &storage,
+        &survivor,
+        4,
+        &survivor_head,
+        vec![card(item(12), "sources/b.md", &stored)?],
+    )
+    .await?;
+    holding.end()?;
+    let report = purging.await.map_err(|error| fault(&error))??;
+    assert!(
+        held(&storage, &survivor, &digest).await?,
+        "the object the survivor's new card names stays: {report:?}"
+    );
+    Ok(())
+}
+
 /// Ruling 3: another workspace's upload completion inside the object step stores an object
 /// identical to one of the target's; it pins the object until its record is durable, so the
 /// object stays.

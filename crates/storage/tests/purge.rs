@@ -1158,10 +1158,16 @@ async fn purge_leaves_nothing_of_an_upload_completion_in_flight() -> TestResult 
         .purger()
         .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
         .await?;
-    let finished_before = finishing.is_finished();
     let completion = finishing.await?;
-    eprintln!("Q3: completion finished before the purge: {finished_before}; report {report:?}");
-    refused(completion, "the completion in flight")?;
+    // Either order may happen on a given machine: the completion is refused in its record's
+    // transaction (the usual case), or its record landed before the purge was recorded and the
+    // purge removed it with the workspace. Nothing of the target stays in either; the refusal
+    // inside the transaction is held deterministically by
+    // `purge_refuses_an_upload_record_inside_its_transaction`.
+    if completion.is_err() {
+        refused(completion, "the completion in flight")?;
+    }
+    eprintln!("Q3: report {report:?}");
     assert_eq!(
         marked_files(&data)?,
         Vec::<String>::new(),
@@ -1339,178 +1345,6 @@ async fn purge_keeps_an_object_whose_identical_pin_another_workspace_released() 
         vec![card(uuid!(12)?, "sources/scan.md", &pending.digest, None)?],
     )
     .await?;
-    Ok(())
-}
-
-/// Many other (empty) repositories, named to sort after every real workspace, so the objects
-/// step's walk of the other repositories takes a measurable time, as on a large installation.
-fn widen(data: &Path, count: u32) -> Fallible<()> {
-    let root = data.join("repositories").join("local");
-    for n in 0..count {
-        git2::Repository::init_bare(root.join(format!("ffffffff-0000-4000-8000-{n:012}.git")))?;
-    }
-    Ok(())
-}
-
-/// Wait until purge 60 has recorded `step` as done.
-async fn until_step(data: &Path, step: i64) -> Fallible<()> {
-    let connection = rusqlite::Connection::open_with_flags(
-        data.join("records.sqlite"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
-    let started = std::time::Instant::now();
-    loop {
-        let found: Option<i64> = connection
-            .query_row(
-                "SELECT step FROM purge_progress WHERE purge_id = ?1",
-                [uuid_text(60)],
-                |row| row.get(0),
-            )
-            .ok();
-        if found.is_some_and(|found| found >= step) {
-            return Ok(());
-        }
-        if started.elapsed() > std::time::Duration::from_secs(60) {
-            return Err("the purge never reached the step".into());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
-}
-
-/// Run purge 60 (mutation 61) of `target` in the background.
-fn spawn_purge(
-    storage: &Storage,
-    target: &StorageScope,
-) -> Fallible<tokio::task::JoinHandle<Result<PurgeReport, ApiError>>> {
-    let purger = storage.purger();
-    let workspace = target.workspace_id;
-    let tenant = target.tenant_id.clone();
-    let (mutation, purge): (MutationId, PurgeId) = (uuid!(61)?, uuid!(60)?);
-    Ok(tokio::spawn(async move {
-        purger
-            .purge_workspace(&tenant, mutation, purge, workspace)
-            .await
-    }))
-}
-
-/// Re-review probe Q1 (window 2 with a job): the survivor's job stores X before the purge;
-/// the job completes (its output row lands, its pin is released) while the objects step reads
-/// the other repositories. X must stay.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn purge_keeps_a_job_output_completed_inside_the_objects_step() -> TestResult {
-    let directory = tempfile::tempdir()?;
-    let data = directory.path().to_path_buf();
-    let storage = Storage::open(&data)?;
-    let (target, head) = create(&storage, 1, "Trip").await?;
-    let (survivor, _) = create(&storage, 2, "Garden").await?;
-    let x = put(&storage, &target, b"commonplace identical bytes").await?;
-    commit(
-        &storage,
-        &target,
-        3,
-        &head,
-        vec![card(uuid!(11)?, "sources/a.md", &x.digest, None)?],
-    )
-    .await?;
-    let job_scope = JobScope::Workspace(survivor.clone());
-    let records = storage.records();
-    let job = records
-        .create_job(
-            &job_scope,
-            NewJob {
-                mutation_id: uuid!(30)?,
-                initiator: person("ana"),
-                spec: JobSpec::BackupWorkspace,
-            },
-        )
-        .await?;
-    widen(&data, 600)?;
-    let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
-    let stored = put(&storage, &survivor, b"commonplace identical bytes").await?;
-    assert_eq!(stored.digest, x.digest);
-    record_purge_of(&storage, &target, uuid!(60)?).await?;
-    let started = std::time::Instant::now();
-    let running = spawn_purge(&storage, &target)?;
-    until_step(&data, 5).await?;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    let finished_before = running.is_finished();
-    records
-        .complete_job(JobCompletion {
-            lease: claimed.lease,
-            revision: None,
-            item_ids: Vec::new(),
-            artifact: None,
-            restore: None,
-            outputs: vec![stored.digest.clone()],
-            warnings: Vec::new(),
-        })
-        .await?;
-    let completed_at = started.elapsed();
-    let report = running.await??;
-    eprintln!(
-        "Q1: completion at {completed_at:?}; purge took {:?}; report {report:?}",
-        started.elapsed()
-    );
-    assert!(
-        !finished_before,
-        "inconclusive: the purge ended before the job completed"
-    );
-    assert!(
-        held(&storage, &survivor, &x.digest).await?,
-        "the survivor's completed job output X stays"
-    );
-    Ok(())
-}
-
-/// Re-review probe Q2 (window 2 with a commit): the survivor stores X before the purge and
-/// commits its card while the objects step walks the other repositories, after it walked the
-/// survivor's.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn purge_keeps_an_object_a_commit_names_inside_the_objects_step() -> TestResult {
-    let directory = tempfile::tempdir()?;
-    let data = directory.path().to_path_buf();
-    let storage = Storage::open(&data)?;
-    let (target, head) = create(&storage, 1, "Trip").await?;
-    let (survivor, survivor_head) = create(&storage, 2, "Garden").await?;
-    let x = put(&storage, &target, b"commonplace identical bytes").await?;
-    commit(
-        &storage,
-        &target,
-        3,
-        &head,
-        vec![card(uuid!(11)?, "sources/a.md", &x.digest, None)?],
-    )
-    .await?;
-    let stored = put(&storage, &survivor, b"commonplace identical bytes").await?;
-    widen(&data, 1500)?;
-    record_purge_of(&storage, &target, uuid!(60)?).await?;
-    let started = std::time::Instant::now();
-    let running = spawn_purge(&storage, &target)?;
-    until_step(&data, 5).await?;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    let finished_before = running.is_finished();
-    commit(
-        &storage,
-        &survivor,
-        4,
-        &survivor_head,
-        vec![card(uuid!(12)?, "sources/b.md", &stored.digest, None)?],
-    )
-    .await?;
-    let committed_at = started.elapsed();
-    running.await??;
-    eprintln!(
-        "Q2: commit at {committed_at:?}; purge took {:?}",
-        started.elapsed()
-    );
-    assert!(
-        !finished_before,
-        "inconclusive: the purge ended before the commit"
-    );
-    assert!(
-        held(&storage, &survivor, &x.digest).await?,
-        "the original the survivor's new card names stays"
-    );
     Ok(())
 }
 
@@ -2528,6 +2362,7 @@ async fn purge_refuses_every_retry_once_recorded_while_retries_race_it() -> Test
     let storage = Storage::open(directory.path())?;
     let (target, _) = create(&storage, 1, "Trip").await?;
     let scope = JobScope::Workspace(target.clone());
+    let queued_so_far = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let mut tasks = Vec::new();
     for lane in 0..3_u32 {
         let job = queued_job(&storage, &scope, 30 + lane).await?;
@@ -2537,6 +2372,7 @@ async fn purge_refuses_every_retry_once_recorded_while_retries_race_it() -> Test
             .fail_job(claimed.lease, "busy".to_owned(), true)
             .await?;
         let scope = scope.clone();
+        let queued_so_far = std::sync::Arc::clone(&queued_so_far);
         tasks.push(tokio::spawn(async move {
             // Each looper retries until a retry is refused, then tries 20 more.
             let mut outcomes: Vec<Result<(), ApiError>> = Vec::new();
@@ -2550,7 +2386,9 @@ async fn purge_refuses_every_retry_once_recorded_while_retries_race_it() -> Test
                     .await
                     .map(|_| ());
                 let queued = retried.is_ok();
-                if !queued {
+                if queued {
+                    queued_so_far.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                } else {
                     refusals += 1;
                 }
                 outcomes.push(retried);
@@ -2571,7 +2409,14 @@ async fn purge_refuses_every_retry_once_recorded_while_retries_race_it() -> Test
             Ok::<_, String>((job.id, outcomes))
         }));
     }
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    // The purge is recorded once retries have been queued, whatever the machine's speed.
+    let started = std::time::Instant::now();
+    while queued_so_far.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+        if started.elapsed() > std::time::Duration::from_secs(60) {
+            return Err("the loopers never queued a retry".into());
+        }
+        tokio::task::yield_now().await;
+    }
     record_purge_under(&storage, &target, 60, 50).await?;
     let (mut queued, mut refused_count) = (0_i64, 0_i64);
     let records = storage.records();
