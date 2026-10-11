@@ -291,22 +291,37 @@ fn history(
         }
         _ => false,
     };
-    if current != Some(main) && !committed {
-        if let Some(current) = current {
-            refuse_unless_blank(&repository, current)?;
+    if !committed {
+        if current != Some(main) {
+            if let Some(current) = current {
+                refuse_unless_blank(&repository, current, &manifest.references)?;
+            }
+            // Once the head is at the archive's, the pack was indexed before any reference
+            // was set, so a resumed restore does not index it again.
+            read_pack(&repository, pack)?;
         }
-        read_pack(&repository, pack)?;
-        for (name, commit) in &manifest.references {
-            let target = oid(commit)?;
-            let moved = match (name.as_str(), current) {
-                (HEAD_REF, Some(current)) => {
-                    repository.reference_matching(name, target, true, current, "okf-jawn restore")
+        // Every other reference first, each write repeatable, and the accepted head last: a
+        // restore that stopped part way left the head where it was (or already at the
+        // archive's), and a resumed one sets every reference again before moving it.
+        for (name, commit) in manifest
+            .references
+            .iter()
+            .filter(|(name, _)| name.as_str() != HEAD_REF)
+        {
+            repository
+                .reference(name, oid(commit)?, true, "okf-jawn restore")
+                .map_err(|error| git(&error))?;
+        }
+        if current != Some(main) {
+            let moved = match current {
+                Some(current) => {
+                    repository.reference_matching(HEAD_REF, main, true, current, "okf-jawn restore")
                 }
-                _ => repository.reference(name, target, true, "okf-jawn restore"),
+                None => repository.reference(HEAD_REF, main, true, "okf-jawn restore"),
             };
             moved.map_err(|error| git(&error))?;
+            repository.set_head(HEAD_REF).map_err(|error| git(&error))?;
         }
-        repository.set_head(HEAD_REF).map_err(|error| git(&error))?;
         sync_directories(&repository, &["objects", "refs", "refs/heads"])?;
     }
     if let Mode::Import(_, mutation) = mode
@@ -367,17 +382,36 @@ fn restore_commit(
     sync_directories(repository, &["refs", "refs/heads"])
 }
 
-/// Refuse a target workspace that holds anything beyond its creation commit.
-fn refuse_unless_blank(repository: &Repository, current: git2::Oid) -> Result<(), ApiError> {
+/// Refuse a target workspace that holds anything beyond its creation commit. A reference the
+/// archive names, already at the archive's commit, is what a stopped restore set; it does not
+/// make the workspace less blank.
+fn refuse_unless_blank(
+    repository: &Repository,
+    current: git2::Oid,
+    archived: &[(String, String)],
+) -> Result<(), ApiError> {
     let commit = repository
         .find_commit(current)
         .map_err(|error| git(&error))?;
     let tree = commit.tree().map_err(|error| git(&error))?;
-    let references = repository
-        .references()
-        .map_err(|error| git(&error))?
-        .count();
-    if commit.parent_count() == 0 && tree.is_empty() && references == 1 {
+    let mut foreign = 0_usize;
+    for reference in repository.references().map_err(|error| git(&error))? {
+        let reference = reference.map_err(|error| git(&error))?;
+        let name = reference.name().unwrap_or_default();
+        let restored = archived.iter().any(|(archived_name, commit)| {
+            archived_name.as_str() != HEAD_REF
+                && archived_name == name
+                && reference
+                    .target()
+                    .map(|target| target.to_string())
+                    .as_deref()
+                    == Some(commit.as_str())
+        });
+        if name != HEAD_REF && !restored {
+            foreign = foreign.saturating_add(1);
+        }
+    }
+    if commit.parent_count() == 0 && tree.is_empty() && foreign == 0 {
         Ok(())
     } else {
         Err(ApiError::new(
@@ -539,7 +573,6 @@ fn insert(
         .map(|column| match column.as_str() {
             "tenant_id" if rewrite => "?1".to_owned(),
             "workspace_id" if rewrite => "?2".to_owned(),
-            "record" if rewrite => "replace(record, ?3, ?2)".to_owned(),
             other => format!("\"{other}\""),
         })
         .collect();
@@ -560,7 +593,6 @@ fn insert(
     );
     connection
         .execute(&query, params![tenant, workspace, original, editors])
-        .map(|_| ())
         .map_err(|error| match error {
             rusqlite::Error::SqliteFailure(failure, _)
                 if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -570,5 +602,77 @@ fn insert(
                 ))
             }
             other => sql(&other),
-        })
+        })?;
+    if rewrite && columns.iter().any(|column| column == "record") {
+        rewrite_records(connection, table, target)?;
+    }
+    Ok(())
+}
+
+/// Rewrite the workspace identity inside the stored JSON of `table`'s rows of the target
+/// workspace: only the structured identity fields (`workspace_id`, and the items of
+/// `workspace_ids`) that hold the archive's workspace. User-authored text (a comment, a proposal
+/// title or body) keeps every identity it quotes.
+fn rewrite_records(connection: &Connection, table: &str, target: &Target) -> Result<(), ApiError> {
+    let rows: Vec<(i64, String)> = {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT rowid, record FROM main.\"{table}\" WHERE tenant_id = ?1 AND workspace_id = ?2"
+            ))
+            .map_err(|error| sql(&error))?;
+        statement
+            .query_map(params![target.tenant, target.workspace], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|error| sql(&error))?
+            .collect::<Result<_, _>>()
+            .map_err(|error| sql(&error))?
+    };
+    for (rowid, record) in rows {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&record).map_err(|error| crate::db::json(&error))?;
+        if rewrite_identity(&mut value, &target.original, &target.workspace) {
+            connection
+                .execute(
+                    &format!("UPDATE main.\"{table}\" SET record = ?1 WHERE rowid = ?2"),
+                    params![value.to_string(), rowid],
+                )
+                .map_err(|error| sql(&error))?;
+        }
+    }
+    Ok(())
+}
+
+/// Replace `original` with `workspace` in every `workspace_id` field and `workspace_ids` item of
+/// `value`, recursively; whether anything changed.
+fn rewrite_identity(value: &mut serde_json::Value, original: &str, workspace: &str) -> bool {
+    let mut changed = false;
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, field) in fields.iter_mut() {
+                match (key.as_str(), &mut *field) {
+                    ("workspace_id", serde_json::Value::String(text)) if text == original => {
+                        workspace.clone_into(text);
+                        changed = true;
+                    }
+                    ("workspace_ids", serde_json::Value::Array(items)) => {
+                        for item in items.iter_mut() {
+                            if item.as_str() == Some(original) {
+                                *item = serde_json::Value::String(workspace.to_owned());
+                                changed = true;
+                            }
+                        }
+                    }
+                    _ => changed |= rewrite_identity(field, original, workspace),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                changed |= rewrite_identity(item, original, workspace);
+            }
+        }
+        _ => {}
+    }
+    changed
 }

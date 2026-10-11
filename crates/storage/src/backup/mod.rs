@@ -162,9 +162,13 @@ impl StorageBackups {
         let storage = self.storage.clone();
         let runtime = Handle::current();
         let locked_scope = scope.clone();
-        let object = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let scope = &locked_scope;
             storage.repositories.locked(scope, || {
+                // Checked again under the lock, under which a purge plans the workspace, and the
+                // archive is recorded before the lock is released: a purge either refuses this
+                // archive or finds its record in the plan (`purge::archives`).
+                runtime.block_on(crate::purge::guard::refuse_scope(&storage.records, scope))?;
                 let staging = storage.repositories.stage(scope, mutation)?;
                 let zip = staging.path.join("archive.zip");
                 let directory = staging.path.clone();
@@ -184,18 +188,23 @@ impl StorageBackups {
                 let size = std::fs::metadata(&zip)
                     .map_err(|error| io_error("read", &zip, &error))?
                     .len();
-                runtime.block_on(storage.blobs.put_for(
+                let object = runtime.block_on(storage.blobs.put_for(
                     &scope.tenant_id,
                     file_reader(Some(zip.clone()), 0, size),
                     size,
                     None,
+                ))?;
+                runtime.block_on(record(
+                    &storage.records,
+                    mutation,
+                    &scope.tenant_id,
+                    Some(scope),
+                    object,
                 ))
             })
         })
         .await
-        .map_err(|error| internal(format!("a backup task stopped: {error}")))??;
-        self.record(mutation, &scope.tenant_id, Some(scope), object)
-            .await
+        .map_err(|error| internal(format!("a backup task stopped: {error}")))?
     }
 
     async fn installation_archive(
@@ -213,12 +222,17 @@ impl StorageBackups {
                 .call(move |connection| archive::installation_of(connection, &tenant))
                 .await?
         };
+        // One staging directory per call: two calls under one mutation never share a file.
         let directory = self
             .storage
             .data
             .staging_path()
             .join(INSTALLATIONS)
-            .join(mutation.0.to_string());
+            .join(format!(
+                "{}-{}",
+                mutation.0,
+                seam::hex(&seam::random_bytes::<8>()?)
+            ));
         let zip = directory.join("installation.zip");
         let size = {
             let (directory, zip) = (directory.clone(), zip.clone());
@@ -239,7 +253,7 @@ impl StorageBackups {
             .put_for(tenant, file_reader(Some(zip), 0, size), size, None)
             .await;
         let _ = std::fs::remove_dir_all(&directory);
-        self.record(mutation, tenant, None, object?).await
+        record(&self.storage.records, mutation, tenant, None, object?).await
     }
 
     async fn open_installation(
@@ -350,38 +364,6 @@ impl StorageBackups {
             })
             .await
     }
-
-    async fn record(
-        &self,
-        mutation: MutationId,
-        tenant: &TenantId,
-        scope: Option<&StorageScope>,
-        object: ObjectInfo,
-    ) -> Result<ObjectInfo, ApiError> {
-        let tenant = tenant.as_str().to_owned();
-        let workspace = scope.map(|scope| scope.workspace_id.0.to_string());
-        let key = mutation.0.to_string();
-        self.storage
-            .records
-            .transaction(move |transaction| {
-                transaction
-                    .execute(
-                        "INSERT INTO backup_archives (mutation_id, tenant_id, workspace_id, digest,
-                             size)
-                         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (mutation_id) DO NOTHING",
-                        params![
-                            key,
-                            tenant,
-                            workspace,
-                            object.digest.as_str(),
-                            to_i64(object.size)?
-                        ],
-                    )
-                    .map_err(|error| sql(&error))?;
-                Ok(object)
-            })
-            .await
-    }
 }
 
 impl Backups for StorageBackups {
@@ -420,6 +402,50 @@ impl Backups for StorageBackups {
     ) -> PortFuture<'a, RestoreReport> {
         Box::pin(self.import(scope, archive, mutation_id, editors))
     }
+}
+
+/// Record the archive `object` a backup wrote under `mutation` and return the recorded archive:
+/// the first writer's, when another call under the same mutation recorded one first, so every
+/// caller answers the archive the store keeps (and a purge reaches).
+async fn record(
+    records: &crate::db::Db,
+    mutation: MutationId,
+    tenant: &TenantId,
+    scope: Option<&StorageScope>,
+    object: ObjectInfo,
+) -> Result<ObjectInfo, ApiError> {
+    let tenant = tenant.as_str().to_owned();
+    let workspace = scope.map(|scope| scope.workspace_id.0.to_string());
+    let key = mutation.0.to_string();
+    records
+        .transaction(move |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO backup_archives (mutation_id, tenant_id, workspace_id, digest,
+                         size)
+                     VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (mutation_id) DO NOTHING",
+                    params![
+                        key,
+                        tenant,
+                        workspace,
+                        object.digest.as_str(),
+                        to_i64(object.size)?
+                    ],
+                )
+                .map_err(|error| sql(&error))?;
+            let (digest, size): (String, i64) = transaction
+                .query_row(
+                    "SELECT digest, size FROM backup_archives WHERE mutation_id = ?1",
+                    [&key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| sql(&error))?;
+            Ok(ObjectInfo {
+                digest: from_text!(digest.as_str())?,
+                size: to_u64(size)?,
+            })
+        })
+        .await
 }
 
 /// Write the pre-migration backup set of the locked `data` directory before its records are
@@ -462,10 +488,14 @@ fn write_set(
     output: &Path,
     only: Option<&TenantId>,
 ) -> Result<Vec<PathBuf>, ApiError> {
+    // Every tenant a record names: an installation archive is written for each, even one with
+    // no workspace and no purge, so its identity and connectors survive.
     let mut statement = connection
         .prepare(
             "SELECT tenant_id, workspace_id FROM workspaces
-             UNION SELECT tenant_id, NULL FROM purges ORDER BY 1, 2",
+             UNION SELECT tenant_id, NULL FROM purges
+             UNION SELECT tenant_id, NULL FROM events
+             UNION SELECT tenant_id, NULL FROM grants ORDER BY 1, 2",
         )
         .map_err(|error| sql(&error))?;
     let rows: Vec<(String, Option<String>)> = statement
@@ -474,7 +504,8 @@ fn write_set(
         .collect::<Result<_, _>>()
         .map_err(|error| sql(&error))?;
     let mut written = Vec::new();
-    let mut tenants = BTreeSet::new();
+    // The requested tenant always gets its installation archive.
+    let mut tenants: BTreeSet<TenantId> = only.into_iter().cloned().collect();
     for (tenant, workspace) in rows {
         let tenant: TenantId = from_text!(tenant.as_str())?;
         if only.is_some_and(|only| *only != tenant) {
@@ -584,12 +615,18 @@ fn install(
             )
             .map_err(|error| sql(&error))?;
     }
-    for record in &manifest.events {
+    // Each archived tenant event carries a replay key (its tenant and its position in the
+    // archive), so a replacement restore run again inserts it once.
+    for (position, record) in manifest.events.iter().enumerate() {
         transaction
             .execute(
                 "INSERT INTO events (tenant_id, workspace_id, replay_key, record)
-                 VALUES (?1, NULL, NULL, ?2)",
-                params![tenant, record],
+                 VALUES (?1, NULL, ?3, ?2) ON CONFLICT (replay_key) DO NOTHING",
+                params![
+                    tenant,
+                    record,
+                    format!("installation-restore/{tenant}/{position}")
+                ],
             )
             .map_err(|error| sql(&error))?;
     }
@@ -610,14 +647,184 @@ mod tests {
     use okf_jawn_contract::access::AccessRoute;
     use okf_jawn_contract::error::{ApiError, ErrorCode};
     use okf_jawn_contract::identity::{MutationId, TenantId};
+    use okf_jawn_core::jobs::RecordStore;
     use okf_jawn_core::storage::{
-        Backups, NewWorkspace, Provenance, StorageScope, WorkspaceCatalog,
+        Backups, NewWorkspace, ObjectInfo, Provenance, StorageScope, WorkspaceCatalog,
     };
 
     use crate::storage::Storage;
 
     fn fault(message: &dyn std::fmt::Display) -> ApiError {
         ApiError::new(ErrorCode::Internal, message.to_string())
+    }
+
+    /// A workspace "Notes" of tenant `local` created under mutation 1.
+    async fn notes(storage: &Storage) -> Result<StorageScope, ApiError> {
+        let tenant = TenantId::try_from("local".to_owned()).map_err(|error| fault(&error))?;
+        let created = storage
+            .catalog()
+            .create(
+                &tenant,
+                MutationId(uuid::Uuid::from_u128(1)),
+                NewWorkspace {
+                    name: "Notes".to_owned(),
+                    description: String::new(),
+                    creator: Provenance {
+                        subject: "ana".to_owned(),
+                        route: AccessRoute::LocalOwner,
+                        client_id: None,
+                    },
+                },
+            )
+            .await?;
+        Ok(StorageScope {
+            tenant_id: tenant,
+            workspace_id: created.id,
+        })
+    }
+
+    /// PR #20 finding (`CodeRabbit`, `backup/mod.rs:382`): a second record under the same mutation
+    /// (two concurrent writes of one archive mutation) answers the archive recorded first, not
+    /// the object it wrote itself.
+    #[tokio::test]
+    async fn a_second_record_under_one_mutation_answers_the_first_archive() -> Result<(), ApiError>
+    {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let tenant = TenantId::try_from("local".to_owned()).map_err(|error| fault(&error))?;
+        let object = |fill: &str, size: u64| -> Result<ObjectInfo, ApiError> {
+            Ok(ObjectInfo {
+                digest: okf_jawn_contract::identity::Digest::try_from(fill.repeat(64))
+                    .map_err(|error| fault(&error))?,
+                size,
+            })
+        };
+        let mutation = MutationId(uuid::Uuid::from_u128(7));
+        let first =
+            super::record(&storage.records, mutation, &tenant, None, object("a", 1)?).await?;
+        let second =
+            super::record(&storage.records, mutation, &tenant, None, object("b", 2)?).await?;
+        assert_eq!(first, object("a", 1)?);
+        assert_eq!(
+            second, first,
+            "the recorded archive, not the second caller's"
+        );
+        Ok(())
+    }
+
+    /// PR #20 finding (`CodeRabbit`, `backup/mod.rs:161`): the archive is recorded before the
+    /// workspace's lock is released, so a purge that plans under the lock right after it finds
+    /// the record. The test takes the lock as soon as the archive lets it go (the archive is seen
+    /// to hold it by its staging directory) and reads the record there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_workspace_archive_is_recorded_before_it_releases_the_lock() -> Result<(), ApiError> {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let scope = notes(&storage).await?;
+        let mutation = MutationId(uuid::Uuid::from_u128(2));
+        let staging = storage
+            .data()
+            .staging_path()
+            .join("local")
+            .join(scope.workspace_id.0.to_string())
+            .join(mutation.0.to_string());
+        let writer = {
+            let (backups, scope) = (storage.backups(), scope.clone());
+            tokio::spawn(async move { backups.write_workspace_archive(&scope, mutation).await })
+        };
+        let started = std::time::Instant::now();
+        while !staging.exists() {
+            if writer.is_finished() || started.elapsed() > Duration::from_secs(60) {
+                return Err(fault(&"the archive was never seen holding the lock"));
+            }
+            tokio::task::yield_now().await;
+        }
+        let recorded = {
+            let (storage, scope) = (storage.clone(), scope.clone());
+            tokio::task::spawn_blocking(move || {
+                storage.repositories.locked(&scope, || {
+                    let key = mutation.0.to_string();
+                    tokio::runtime::Handle::current().block_on(storage.records.call(
+                        move |connection| {
+                            connection
+                                .query_row(
+                                    "SELECT count(*) FROM backup_archives WHERE mutation_id = ?1",
+                                    [key],
+                                    |row| row.get::<_, i64>(0),
+                                )
+                                .map_err(|error| fault(&error))
+                        },
+                    ))
+                })
+            })
+            .await
+            .map_err(|error| fault(&error))??
+        };
+        writer.await.map_err(|error| fault(&error))??;
+        assert_eq!(recorded, 1, "recorded while the lock was still held");
+        Ok(())
+    }
+
+    /// PR #20 finding (`CodeRabbit`, `backup/mod.rs:161`): an archive that passed its first check
+    /// and waits for the workspace's lock while the purge is recorded is refused under the lock.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_workspace_archive_waiting_for_the_lock_when_the_purge_is_recorded_is_refused()
+    -> Result<(), ApiError> {
+        let directory = tempfile::tempdir().map_err(|error| fault(&error))?;
+        let storage = Storage::open(directory.path())?;
+        let scope = notes(&storage).await?;
+        let (held, release) = (mpsc::channel(), mpsc::channel::<()>());
+        let holder = {
+            let repositories = storage.repositories.clone();
+            let scope = scope.clone();
+            std::thread::spawn(move || {
+                repositories.locked(&scope, || {
+                    held.0.send(()).map_err(|error| fault(&error))?;
+                    release.1.recv().map_err(|error| fault(&error))
+                })
+            })
+        };
+        held.1.recv().map_err(|error| fault(&error))?;
+        let writer = {
+            let (backups, scope) = (storage.backups(), scope.clone());
+            tokio::spawn(async move {
+                backups
+                    .write_workspace_archive(&scope, MutationId(uuid::Uuid::from_u128(2)))
+                    .await
+            })
+        };
+        // The archive passes its first check at once and then waits for the lock (if it did
+        // not get there first, it is refused by that first check instead).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        storage
+            .records()
+            .create_purge(
+                &scope.tenant_id,
+                MutationId(uuid::Uuid::from_u128(50)),
+                okf_jawn_core::jobs::NewPurge {
+                    id: okf_jawn_contract::identity::PurgeId(uuid::Uuid::from_u128(60)),
+                    target: okf_jawn_contract::purge::PurgeTarget::Workspace {
+                        workspace_id: scope.workspace_id,
+                    },
+                    initiator: Provenance {
+                        subject: "ana".to_owned(),
+                        route: AccessRoute::LocalOwner,
+                        client_id: None,
+                    },
+                },
+            )
+            .await?;
+        release.0.send(()).map_err(|error| fault(&error))?;
+        holder
+            .join()
+            .map_err(|_| fault(&"the lock holder stopped"))??;
+        let error = match writer.await.map_err(|error| fault(&error))? {
+            Ok(object) => return Err(fault(&format!("the archive was written: {object:?}"))),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::Conflict, "{error}");
+        assert!(error.message.contains("purged by purge"), "{error}");
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]

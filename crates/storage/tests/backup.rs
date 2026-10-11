@@ -357,6 +357,29 @@ async fn assert_connector_revoked(restored: &Storage) -> TestResult {
     Ok(())
 }
 
+/// PR #20 finding (Codex P1): after a replacement restore the retained export is back, its
+/// artifact record and its bytes.
+async fn assert_export_restored(
+    restored: &Storage,
+    workspace: &StorageScope,
+    export: &Digest,
+    data: &Path,
+) -> TestResult {
+    restored.blobs().open(workspace, export, 0, 1).await?;
+    assert_eq!(
+        count(
+            &data.join("records.sqlite"),
+            &format!(
+                "SELECT count(*) FROM artifacts WHERE kind = 'export' AND digest = '{}'",
+                export.as_str()
+            )
+        )?,
+        1,
+        "the export's artifact record comes back"
+    );
+    Ok(())
+}
+
 /// A replacement restore into a directory that holds only the repository directory of the
 /// archived workspace, with no record of it, is refused (review B7, M09).
 async fn refuse_a_leftover_repository(
@@ -407,9 +430,15 @@ async fn backup_a_workspace_archive_holds_its_history_drafts_and_objects_only() 
         .join(object.digest.as_str());
     let names = entries(&path)?;
     assert!(names.contains(&format!("objects/{}", fixture.original.as_str())));
+    // PR #20 finding (Codex P1, snapshot.rs:53), owner ruling: a retained export is an
+    // application record with retained bytes, so the archive keeps both (SPEC section 12).
     assert!(
-        !names.contains(&format!("objects/{}", fixture.export.as_str())),
-        "an archive never holds a retained export"
+        names.contains(&format!("objects/{}", fixture.export.as_str())),
+        "an archive holds the workspace's retained export"
+    );
+    assert!(
+        !names.contains(&format!("objects/{}", object.digest.as_str())),
+        "an archive never holds a backup archive"
     );
     for name in ["history.pack", "manifest.json", "records.sqlite"] {
         assert!(
@@ -429,7 +458,19 @@ async fn backup_a_workspace_archive_holds_its_history_drafts_and_objects_only() 
         "drafts are included"
     );
     assert_eq!(count(&records, "SELECT count(*) FROM workspaces")?, 1);
-    assert_eq!(count(&records, "SELECT count(*) FROM artifacts")?, 0);
+    assert_eq!(
+        count(&records, "SELECT count(*) FROM artifacts")?,
+        1,
+        "the export's artifact record is kept"
+    );
+    assert_eq!(
+        count(
+            &records,
+            "SELECT count(*) FROM artifacts WHERE kind = 'workspace_backup'"
+        )?,
+        0,
+        "no workspace archive record"
+    );
     assert_eq!(count(&records, "SELECT count(*) FROM connectors")?, 0);
     let manifest = entry(
         &path,
@@ -584,6 +625,7 @@ async fn backup_replacement_restore_after_deleting_the_data_directory() -> TestR
         head,
         candidate,
         original,
+        export,
         ..
     } = fixture;
     drop(storage);
@@ -624,6 +666,7 @@ async fn backup_replacement_restore_after_deleting_the_data_directory() -> TestR
     )?;
     assert_eq!(draft.body, "Draft by bea");
     restored.blobs().open(&workspace, &original, 0, 1).await?;
+    assert_export_restored(&restored, &workspace, &export, directory.path()).await?;
     restored
         .versions()
         .show(&workspace, &candidate, uuid!(12)?)
@@ -1061,6 +1104,185 @@ async fn backup_an_import_stopped_before_its_record_leaves_nothing_and_completes
     Ok(())
 }
 
+/// PR #20 finding (Codex P1, `backup/mod.rs:469`): an installation with no workspace and no purge
+/// still gets the installation archive of the requested tenant, and a replacement restore from
+/// it brings the connector back (revoked, since no secret is kept).
+#[tokio::test]
+async fn backup_an_empty_installation_still_writes_its_installation_archive() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    {
+        let storage = Storage::open(directory.path())?;
+        storage
+            .credentials()
+            .create_connector(
+                uuid!(50)?,
+                NewConnector {
+                    label: "Desk".to_owned(),
+                    workspace_ids: Vec::new(),
+                    allow_propose: false,
+                },
+            )
+            .await?;
+        let written = storage
+            .backups()
+            .write_backup_set(output.path(), Some(&tenant("local")?))
+            .await?;
+        let installation = output.path().join("installation").join("local.zip");
+        assert_eq!(written, vec![installation], "one installation archive");
+    }
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    restored
+        .backups()
+        .restore_replacement(&output.path().join("installation").join("local.zip"), &[])
+        .await?;
+    assert_connector_revoked(&restored).await
+}
+
+/// PR #20 finding (Codex P2, `restore.rs:542`): an import into another installation rewrites the
+/// workspace identity only in structured fields. A proposal's `workspace_id` becomes the
+/// target's; its description and a comment's text that quote the source workspace's UUID keep
+/// it.
+#[tokio::test]
+async fn backup_an_import_rewrites_only_structured_workspace_identity_fields() -> TestResult {
+    use okf_jawn_core::proposals::ProposalStore;
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let source = fixture.workspace.workspace_id.0.to_string();
+    let proposal: okf_jawn_contract::proposal::Proposal = serde_json::from_value(json!({
+        "id": uuid_text(24),
+        "workspace_id": source,
+        "base_revision": fixture.head,
+        "proposal_revision": fixture.head,
+        "content_digest": "d".repeat(64),
+        "title": "Move the plan",
+        "description": format!("copied from workspace {source}"),
+        "changes": [],
+        "kind": "content",
+        "status": "open",
+        "created_by": "agent",
+        "created_via": "mcp_delegation",
+        "created_at": "2026-10-09T12:00:00.000Z"
+    }))?;
+    let proposals = storage.proposals();
+    proposals
+        .insert(&fixture.workspace, uuid!(23)?, proposal.clone())
+        .await?;
+    let comment: okf_jawn_contract::proposal::Comment = serde_json::from_value(json!({
+        "id": "c1",
+        "author": "ana",
+        "text": format!("see {source} for the original"),
+        "created_at": "2026-10-09T12:00:00.000Z"
+    }))?;
+    proposals
+        .add_comment(&fixture.workspace, uuid!(25)?, proposal.id, comment)
+        .await?;
+    // Another installation, as SPEC section 12 imports: a second data directory.
+    let archive = storage
+        .backups()
+        .write_workspace_archive(&fixture.workspace, uuid!(40)?)
+        .await?;
+    let bytes = std::fs::read(
+        storage
+            .data()
+            .objects_path()
+            .join("local")
+            .join(archive.digest.as_str().get(..2).unwrap_or_default())
+            .join(archive.digest.as_str()),
+    )?;
+    let elsewhere = tempfile::tempdir()?;
+    let other = Storage::open(elsewhere.path())?;
+    let (target, _) = create(&other, "local", 80, "Copy").await?;
+    let uploaded = other
+        .blobs()
+        .put(
+            &target,
+            Box::pin(std::io::Cursor::new(bytes)),
+            1 << 30,
+            None,
+        )
+        .await?;
+    other
+        .backups()
+        .restore_import(&target, uploaded.digest, uuid!(84)?, vec!["ana".to_owned()])
+        .await?;
+    let proposals = other.proposals();
+    let imported = proposals.get(&target, proposal.id).await?;
+    assert_eq!(
+        imported.workspace_id, target.workspace_id,
+        "the structured field is rewritten"
+    );
+    assert_eq!(
+        imported.description,
+        format!("copied from workspace {source}"),
+        "user-authored text keeps the identity it quotes"
+    );
+    let comments = proposals
+        .list_comments(
+            &target,
+            proposal.id,
+            okf_jawn_core::storage::Page {
+                cursor: None,
+                limit: 10,
+            },
+        )
+        .await?;
+    let text = &some(comments.items.first(), "the imported comment")?.text;
+    assert_eq!(text, &format!("see {source} for the original"));
+    Ok(())
+}
+
+/// PR #20 finding (`CodeRabbit`, `backup/mod.rs:595`): a replacement restore run again (after a
+/// later workspace archive failed, say) does not append the archived tenant events twice.
+#[tokio::test]
+async fn backup_a_replacement_restore_run_again_restores_each_tenant_event_once() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    {
+        let storage = Storage::open(directory.path())?;
+        storage
+            .events()
+            .append(
+                &EventScope::Tenant(tenant("local")?),
+                None,
+                NewEvent {
+                    kind: EventKind::SignedIn,
+                    revision: None,
+                    item_id: None,
+                    job_id: None,
+                    connector_id: None,
+                    actor: None,
+                    operation: None,
+                },
+            )
+            .await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), Some(&tenant("local")?))
+            .await?;
+    }
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let installation = output.path().join("installation").join("local.zip");
+    for _ in 0..2 {
+        restored
+            .backups()
+            .restore_replacement(&installation, &[])
+            .await?;
+    }
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            "SELECT count(*) FROM events WHERE workspace_id IS NULL"
+        )?,
+        1,
+        "the tenant event is restored once"
+    );
+    Ok(())
+}
+
 /// Write a workspace archive of `source` under mutation 40 and put its bytes into `target`, as
 /// an upload of it would; returns the digest to import.
 async fn archive_into(
@@ -1247,6 +1469,137 @@ async fn backup_an_import_stopped_after_its_commit_writes_no_second_one_on_retry
         .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
         .await?;
     assert_eq!(storage.versions().head(&target).await?, stopped);
+    assert_one_restore_commit(storage, &target, &fixture.head)?;
+    Ok(())
+}
+
+/// Every reference of `repository` but the accepted head, with its commit, sorted.
+fn other_references(repository: &git2::Repository) -> Fallible<Vec<(String, String)>> {
+    let mut found = Vec::new();
+    for reference in repository.references()? {
+        let reference = reference?;
+        let name = reference.name().unwrap_or_default().to_owned();
+        if name != "refs/heads/main" {
+            found.push((
+                name,
+                reference
+                    .target()
+                    .map(|oid| oid.to_string())
+                    .unwrap_or_default(),
+            ));
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// Fetch the references `refspec` names from `source`'s repository into `target`'s, as a
+/// restore that stopped while setting references left them.
+fn fetch_into(
+    storage: &Storage,
+    source: &StorageScope,
+    target: &StorageScope,
+    refspec: &str,
+) -> TestResult {
+    let path = storage
+        .data()
+        .repositories_path()
+        .join(source.tenant_id.as_str())
+        .join(format!("{}.git", source.workspace_id.0));
+    repository_of(storage, target)?
+        .remote_anonymous(some(path.to_str(), "a UTF-8 repository path")?)?
+        .fetch(&[refspec], None, None)?;
+    Ok(())
+}
+
+/// PR #20 finding (`CodeRabbit`, `restore.rs:311`): an import that stopped after it set the accepted
+/// head and before a candidate reference sets the candidate when resumed.
+#[tokio::test]
+async fn backup_an_import_stopped_after_main_before_a_candidate_reference_sets_it_on_retry()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let (target, _) = create(storage, "elsewhere", 80, "Copy").await?;
+    let uploaded = archive_into(storage, &fixture.workspace, &target).await?;
+    // The pack is indexed (every object fetched under a scratch namespace), the accepted head
+    // set, and no other reference yet.
+    fetch_into(
+        storage,
+        &fixture.workspace,
+        &target,
+        "+refs/*:refs/fetched/*",
+    )?;
+    {
+        let repository = repository_of(storage, &target)?;
+        repository.reference(
+            "refs/heads/main",
+            git2::Oid::from_str(fixture.head.as_str())?,
+            true,
+            "a restore stopped after main",
+        )?;
+        let fetched: Vec<String> = repository
+            .references_glob("refs/fetched/*")?
+            .filter_map(|reference| reference.ok()?.name().ok().map(str::to_owned))
+            .collect();
+        for name in fetched {
+            repository.find_reference(&name)?.delete()?;
+        }
+    }
+    let source = other_references(&repository_of(storage, &fixture.workspace)?)?;
+    assert_ne!(
+        source,
+        Vec::new(),
+        "the archive holds a candidate reference"
+    );
+    assert_eq!(
+        other_references(&repository_of(storage, &target)?)?,
+        Vec::new()
+    );
+    storage
+        .backups()
+        .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
+        .await?;
+    assert_eq!(
+        other_references(&repository_of(storage, &target)?)?,
+        source,
+        "the candidate reference is set"
+    );
+    assert_one_restore_commit(storage, &target, &fixture.head)?;
+    Ok(())
+}
+
+/// PR #20 finding (`CodeRabbit`, `restore.rs:311`): an import that stopped after it set a candidate
+/// reference and before the accepted head is not refused as a non-blank workspace when resumed.
+#[tokio::test]
+async fn backup_an_import_stopped_after_a_candidate_reference_before_main_completes_on_retry()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let (target, blank) = create(storage, "elsewhere", 80, "Copy").await?;
+    let uploaded = archive_into(storage, &fixture.workspace, &target).await?;
+    fetch_into(
+        storage,
+        &fixture.workspace,
+        &target,
+        "+refs/okf-jawn/*:refs/okf-jawn/*",
+    )?;
+    let repository = repository_of(storage, &target)?;
+    assert_eq!(
+        repository.refname_to_id("refs/heads/main")?.to_string(),
+        blank.as_str(),
+        "the accepted head is still the blank one"
+    );
+    assert_ne!(
+        other_references(&repository)?,
+        Vec::new(),
+        "a candidate reference is set"
+    );
+    storage
+        .backups()
+        .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
+        .await?;
     assert_one_restore_commit(storage, &target, &fixture.head)?;
     Ok(())
 }

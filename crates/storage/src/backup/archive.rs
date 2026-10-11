@@ -383,11 +383,13 @@ fn manifest_of(
     })
 }
 
-/// Objects the filtered records reference: derived datasets, completed uploads, job outputs.
+/// Objects the filtered records reference: derived datasets, completed uploads, job outputs and
+/// retained artifacts (the filtered records hold no workspace archive).
 fn record_objects(records: &Path) -> Result<BTreeSet<Digest>, ApiError> {
     let connection = super::snapshot::read_only(records)?;
     let mut found = BTreeSet::new();
     for query in [
+        "SELECT digest FROM artifacts",
         "SELECT digest FROM derived_objects",
         "SELECT object_digest FROM uploads WHERE object_digest IS NOT NULL",
         "SELECT digest FROM job_outputs",
