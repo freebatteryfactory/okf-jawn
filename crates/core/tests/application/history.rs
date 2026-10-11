@@ -560,6 +560,59 @@ async fn diff_items_cites_a_side_whole_when_a_hunk_returns_frontmatter_as_contex
     Ok(())
 }
 
+/// NOTE moved from `notes/plan.md` at `a` to `archive/plan.md` at `b` and its body line 16
+/// edited; the comparison is scripted for `only` (an unfiltered or an item-filtered request).
+fn moved_and_edited(only: Option<u128>) -> Built<World> {
+    let world = World::new()?;
+    let old = filed(
+        &world,
+        NOTE,
+        'a',
+        "notes/plan.md",
+        &numbered(20, &[]),
+        &HEADER,
+    )?;
+    let new = filed(
+        &world,
+        NOTE,
+        'b',
+        "archive/plan.md",
+        &numbered(20, &[16]),
+        &HEADER,
+    )?;
+    world.versions.put_diff(
+        &revision('a')?,
+        &revision('b')?,
+        only.map(item),
+        vec![patched(
+            FileChangeKind::Moved,
+            Some("notes/plan.md"),
+            Some("archive/plan.md"),
+            &file_patch(Some(&old), Some(&new)),
+        )],
+    )?;
+    Ok(world)
+}
+
+#[tokio::test]
+async fn diff_items_cites_a_moved_item_at_its_old_path_and_its_new_path() -> TestResult {
+    for only in [None, Some(NOTE)] {
+        let world = moved_and_edited(only)?;
+        assert_eq!(
+            cited_by_diff(&world, only).await?,
+            vec![
+                (item(NOTE), 'a', "notes/plan.md".to_owned(), lines(13, 19)),
+                (item(NOTE), 'b', "archive/plan.md".to_owned(), lines(13, 19)),
+            ],
+            "item filter {only:?}"
+        );
+        let queries = world.versions.diff_queries()?;
+        let query = some(queries.first(), "the comparison")?;
+        assert_eq!(query.item_id, only.map(item));
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_failed_diff_records_no_receipt() -> TestResult {
     let world = World::new()?;
@@ -1040,6 +1093,48 @@ async fn commit_items_conflict_of_a_moved_and_edited_item_is_not_a_deletion() ->
     };
     let only = some(items.first(), "the moved item")?;
     assert!(!only.deleted, "the item still exists: {only:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn commit_items_fails_on_a_store_fault_reading_the_item_at_the_head() -> TestResult {
+    let world = World::new()?;
+    let base = revision('a')?;
+    let head = revision('c')?;
+    note_at(&world, NOTE, "notes/plan.md", &['a', 'c'])?;
+    world.versions.set_head(head.clone())?;
+    world
+        .drafts
+        .put_draft(draft_of(NOTE, ALICE, &base, "# Mine\n")?)?;
+    world.versions.put_diff(
+        &base,
+        &head,
+        Some(item(NOTE)),
+        vec![change(
+            FileChangeKind::Modified,
+            Some("notes/plan.md"),
+            Some("notes/plan.md"),
+        )],
+    )?;
+    world.versions.queue_revision(revision('d')?)?;
+    // The read that decides `deleted` fails with something other than `NotFound`.
+    world.versions.fail_next_show(ErrorCode::Unavailable)?;
+    let failed = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(1)))?,
+                snapshot(&[NOTE])?,
+            )
+            .await,
+    )?;
+    assert_eq!(failed.code, ErrorCode::Unavailable, "{failed:?}");
+    assert!(
+        failed.detail.is_none(),
+        "the fault is not folded into a conflict: {failed:?}"
+    );
+    assert_eq!(world.versions.commits()?.len(), 0);
+    assert_eq!(world.drafts.held()?.len(), 1);
     Ok(())
 }
 

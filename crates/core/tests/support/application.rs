@@ -9,7 +9,8 @@
 //! store would, so what `show` reads at the revision a commit produced follows them: an
 //! `EditItem` (the item's document at the commit's base, with the edit's body and properties)
 //! and a `RestoreItem` (the item as `from` holds it, its source appearance included, with the
-//! port's `NotFound` and `Conflict`). `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
+//! port's `NotFound` and `Conflict`). A test may make the next `show` fail with a code it
+//! names (`fail_next_show`), as a store fault would. `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
 //! a known revision, `NotFound` only for an unknown revision. A port the operations
 //! under test do not call answers `Internal` ("not used by this test").
 //!
@@ -148,6 +149,7 @@ pub struct FakeVersions {
     stage: Staged,
     shows: AtomicUsize,
     fail_next_lookup: AtomicBool,
+    fail_next_show: Mutex<Option<ErrorCode>>,
 }
 
 #[derive(Default)]
@@ -346,6 +348,7 @@ impl FakeVersions {
             stage: Staged::conformant()?,
             shows: AtomicUsize::new(0),
             fail_next_lookup: AtomicBool::new(false),
+            fail_next_show: Mutex::new(None),
         })
     }
 
@@ -437,6 +440,15 @@ impl FakeVersions {
     /// Make the next `item_at_path` answer `NotFound`, as it does for an unknown revision.
     pub fn fail_next_lookup(&self) {
         self.fail_next_lookup.store(true, Ordering::SeqCst);
+    }
+
+    /// Make the next `show` fail with `code`, as a store fault would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_next_show(&self, code: ErrorCode) -> Built<()> {
+        *lock(&self.fail_next_show)? = Some(code);
+        Ok(())
     }
 
     /// How many times `show` was called.
@@ -955,6 +967,9 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, ItemDocument> {
         self.shows.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
+            if let Some(code) = lock_api(&self.fail_next_show)?.take() {
+                return Err(ApiError::new(code, "the store failed"));
+            }
             lock_api(&self.state)?
                 .documents
                 .iter()
