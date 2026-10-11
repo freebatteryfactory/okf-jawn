@@ -16,7 +16,8 @@
 //!   and paired with the JSON export's item of the same docling encoding (its lone export's
 //!   image data URI) only when that pairing gives the same assets every way; and, when the
 //!   settings ask for page images, each page render (`DoclingDocument::page_images`, rendered
-//!   at `images_scale`).
+//!   at `images_scale`). The parsed export is dropped once the images are written, before the
+//!   text layer reads the original again.
 //! - The line runs (`protocol::Block`): each top-level node is rendered on its own with
 //!   `MarkdownStreamer::push`, whose chunks concatenate byte for byte to the Markdown export, so
 //!   each node's lines are known. A run is on a page only by the node's own provenance (a
@@ -513,6 +514,8 @@ fn convert(request: &Request, directory: &Path) -> Result<Reply, Stop> {
         directory,
         request.settings.page_images,
     )?;
+    // One copy at a time: the parsed export goes before the text layer reads the original.
+    drop(export);
     let text_layer = format == InputFormat::Pdf
         && match docling::pdf_text_layer_pages(
             &read_source(request)?,
