@@ -40,6 +40,7 @@ import {
   type TreeApi,
 } from 'react-arborist';
 import type { ItemSummary, Revision } from '../../api/generated/types.gen';
+import { type DraftMark, useDraftMarks } from '../drafts/marks';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
@@ -61,6 +62,8 @@ interface TreeEntry {
   kind: 'folder' | 'item' | 'status';
   folder: string;
   item: ItemSummary | null;
+  /** How the item's draft stands, when it has one. */
+  mark: DraftMark | null;
   status: StatusKind | null;
   error: unknown;
   children: TreeEntry[] | null;
@@ -123,6 +126,7 @@ function statusEntry(folder: string, status: StatusKind, error: unknown = null):
     kind: 'status',
     folder,
     item: null,
+    mark: null,
     status,
     error,
     children: null,
@@ -134,6 +138,7 @@ function entriesOf(
   listings: ReadonlyMap<string, UseQueryResult<FolderListing>>,
   expanded: Record<string, true>,
   revision: Revision,
+  markOf: (itemId: string) => DraftMark | null,
 ): TreeEntry[] {
   const result = listings.get(folder);
   if (result === undefined) return [];
@@ -148,9 +153,10 @@ function entriesOf(
         kind: 'folder',
         folder: child,
         item: null,
+        mark: null,
         status: null,
         error: null,
-        children: expanded[child] ? entriesOf(child, listings, expanded, revision) : [],
+        children: expanded[child] ? entriesOf(child, listings, expanded, revision, markOf) : [],
       });
     }
     for (const item of page.items) {
@@ -160,6 +166,7 @@ function entriesOf(
         kind: 'item',
         folder,
         item,
+        mark: markOf(item.id),
         status: null,
         error: null,
         children: null,
@@ -313,7 +320,8 @@ export function FolderTree({
     if (result !== undefined) listings.set(folder, result);
   });
   const root = listings.get('');
-  const entries = entriesOf('', listings, view.expanded, revision);
+  const markOf = useDraftMarks(workspaceId);
+  const entries = entriesOf('', listings, view.expanded, revision, markOf);
   // A root listing that failed keeps its notice through a retry, which ends with keyboard focus
   // on the tree's tab-stop entry (the empty-workspace line, when it listed nothing).
   const rootFailure = useRetry({
@@ -507,7 +515,8 @@ function entryLabel(entry: TreeEntry): string {
   if (entry.item === null) return entry.name;
   const extraction = extractionWord(entry.item);
   const type = `${entry.name}, type ${entry.item.type_name}`;
-  return extraction === null ? type : `${type}, ${extraction}`;
+  const converted = extraction === null ? type : `${type}, ${extraction}`;
+  return entry.mark === null ? converted : `${converted}, ${entry.mark}`;
 }
 
 /**
@@ -608,6 +617,7 @@ function TreeEntryContent({ node, style }: NodeRendererProps<TreeEntry>) {
         <span className="tree-name">{entry.name}</span>
         {item === null ? null : <span className="tree-type">{item.type_name}</span>}
         {extraction === null ? null : <span className="tree-flag">{extraction}</span>}
+        {entry.mark === null ? null : <span className="tree-flag">{entry.mark}</span>}
       </span>
     </div>
   );

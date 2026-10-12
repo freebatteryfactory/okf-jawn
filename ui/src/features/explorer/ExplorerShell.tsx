@@ -21,6 +21,8 @@ import { zItemId } from '../../api/generated/zod.gen';
 import { Instant } from '../../lib/instant';
 import { itemOptions } from '../documents/DocumentView';
 import { short } from '../documents/describe';
+import { DraftsPanel } from '../drafts/DraftsPanel';
+import { useLeaveGuard } from '../drafts/leave-guard';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { SearchForm, SearchResults } from '../search/SearchPanel';
@@ -82,6 +84,8 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   const splitRight = useExplorerStore((state) => state.splitRight);
   const setLayout = useExplorerStore((state) => state.setLayout);
   const requestFocus = useExplorerStore((state) => state.requestFocus);
+  const canWrite = workspace.permissions.includes('write');
+  useLeaveGuard();
 
   // The URL is the truth for the focused pane: whatever item it names is open there, at the
   // selection and cited revision it names. The pane remembers them for when it loses focus.
@@ -189,6 +193,11 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
                 onClear={() => setQuery(undefined)}
               />
             )}
+            <DraftsPanel
+              workspaceId={workspaceId}
+              head={head}
+              onOpenItem={(target) => goToItem(target)}
+            />
           </div>
         </Panel>
         <Separator className="separator" aria-label="Resize the navigation column" />
@@ -227,6 +236,8 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
             }}
             onSelect={(target, location) => goToItem(target, location)}
             onReadLatest={(target, location) => goToItem(target, location)}
+            canWrite={canWrite}
+            onOpenCurrent={(target) => goToItem(target)}
           />
         </Panel>
         <Separator className="separator" aria-label="Resize the source panel" />

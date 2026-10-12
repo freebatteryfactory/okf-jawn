@@ -8,6 +8,10 @@
  * the tab list, not in it, so the tab list holds only tabs. react-resizable-panels separators resize panes with the
  * keyboard as well as the pointer. The focused pane is the one the URL describes; with several
  * panes its region name ends in ", focused", so assistive technology can tell which one it is.
+ *
+ * A tab's name carries how the item's draft stands, in brackets after its title: "(draft)",
+ * "(unsaved)" or "(not saved)". The mark is the item's, so a tab that shows a cited revision has it
+ * too.
  */
 import { Tabs } from '@base-ui/react/tabs';
 import { useQuery } from '@tanstack/react-query';
@@ -15,6 +19,7 @@ import { Fragment, useEffect, useRef } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import type { Revision } from '../../api/generated/types.gen';
 import { DocumentView, itemOptions } from '../documents/DocumentView';
+import { useDraftMarks } from '../drafts/marks';
 import type { ItemSelection } from './search-params';
 import {
   MAX_PANES,
@@ -48,6 +53,10 @@ export interface DocumentPanesProps {
   onSelect: (itemId: string, location: PaneLocation) => void;
   /** The latest version was read: pin the pane to the revision the server resolved. */
   onReadLatest: (itemId: string, location: PaneLocation) => void;
+  /** The person may write in this workspace. */
+  canWrite: boolean;
+  /** Open an item as the workspace shows it, without a cited revision. */
+  onOpenCurrent: (itemId: string) => void;
 }
 
 const PANES_GROUP = 'document-panes';
@@ -113,6 +122,8 @@ function DocumentPane({
   onSplit,
   onSelect,
   onReadLatest,
+  canWrite,
+  onOpenCurrent,
 }: DocumentPanesProps & { pane: Pane; index: number }) {
   const focused = pane.id === focusedPaneId;
   // With several panes, the name says which one the URL describes, not only the inset line.
@@ -244,6 +255,9 @@ function DocumentPane({
                     rev: resolved,
                   })
                 }
+                head={head}
+                canWrite={canWrite}
+                onOpenCurrent={() => onOpenCurrent(active)}
               />
             </Tabs.Panel>
           )}
@@ -253,7 +267,11 @@ function DocumentPane({
   );
 }
 
-/** A tab's name is the item's title from the cache; until it is known, a short identity. */
+/**
+ * A tab's name is the item's title from the cache (until it is known, a short identity), then how
+ * the item's draft stands. Both are read at the head the workspace shows, whatever revision the
+ * tab reads.
+ */
 function TabLabel({
   workspaceId,
   itemId,
@@ -266,5 +284,13 @@ function TabLabel({
   const item = useQuery(itemOptions(workspaceId, itemId, head));
   const summary = item.data?.summary;
   const name = summary ? summary.title || summary.path : `Item ${itemId.slice(0, 8)}`;
-  return <span className="tab-label">{name}</span>;
+  // The service holds a draft when `get_item` carries one or `list_drafts` lists the item.
+  const listed = useDraftMarks(workspaceId)(itemId);
+  const mark = listed ?? ((item.data?.draft ?? null) !== null ? 'draft' : null);
+  return (
+    <span className="tab-label">
+      {name}
+      {mark === null ? null : <span className="tab-mark"> ({mark})</span>}
+    </span>
+  );
 }

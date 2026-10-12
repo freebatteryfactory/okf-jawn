@@ -81,6 +81,7 @@ describe('the CSRF header', () => {
     const paths = new Set(api.calls.map((call) => call.path));
     expect([...paths].sort()).toEqual([
       '/api/items/get-item',
+      '/api/items/list-drafts',
       '/api/items/list-items',
       '/api/reads/get-sources',
       '/api/reads/read-item',
