@@ -125,7 +125,11 @@ describe('search', () => {
             hits: [
               {
                 ...hit(NOTE, 'Meeting notes', 'notes/meeting.md', 4),
-                extraction: { status: 'partial', text_origin: 'supplied_by_agent', corrected: false },
+                extraction: {
+                  status: 'partial',
+                  text_origin: 'supplied_by_agent',
+                  corrected: false,
+                },
               },
             ],
             revision: HEAD,
@@ -146,7 +150,11 @@ describe('search', () => {
             hits: [
               {
                 ...hit(NOTE, 'Meeting notes', 'notes/meeting.md', 4),
-                extraction: { status: 'partial', text_origin: 'supplied_by_agent', corrected: true },
+                extraction: {
+                  status: 'partial',
+                  text_origin: 'supplied_by_agent',
+                  corrected: true,
+                },
               },
               {
                 ...hit(OTHER, 'Plan', 'notes/plan.md', 1),
