@@ -11,9 +11,13 @@
 # RUSTSEC-2026-0192 (ttf-parser): docling-pdf 2.3.0 declares it (optional; Cargo.lock lists it).
 # No CVE. Removal: docling-pdf drops ttf-parser. RUSTSEC-2026-0206 (rustybuzz) left the lock
 # when Docling 2.3.0 moved to resvg 0.48.
+#
+# RUSTSEC-2023-0071 (rsa): jsonwebtoken 11.1.0 rust_crypto → rsa (server). Marvin timing affects
+# RSA private-key decryption; okf-jawn only verifies JWT signatures with public JWKS keys
+# (jsonwebtoken rust_crypto). Removal: rsa ships a constant-time release or jsonwebtoken moves off it.
 
 [advisories]
-ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2026-0192"]
+ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2026-0192", "RUSTSEC-2023-0071"]
 
 [output]
 deny = ["unmaintained", "unsound", "yanked"]
