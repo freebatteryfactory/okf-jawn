@@ -497,6 +497,39 @@ describe('the tree from the keyboard, however focus enters it (B5)', () => {
     await waitFor(() => expect(focusedRow()).toBe('notes'));
   });
 
+  it('enters on the selected entry, not on the one last focused (WAI-ARIA tree pattern, N25)', async () => {
+    const { tree, row } = await linkedTree();
+    act(() => tree.focus());
+    await waitFor(() => expect(focusedRow()).toMatch(/^Meeting notes,/));
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(focusedRow()).toMatch(/^Plan,/));
+    act(() => screen.getByRole('searchbox', { name: 'Search this workspace' }).focus());
+    // Shift+Tab's target, the row in the Tab order, is the selected one.
+    expect(row.tabIndex).toBe(0);
+    expect(within(tree).getByRole('treeitem', { name: /Plan/ }).tabIndex).toBe(-1);
+    // Tab onto the tree goes there too.
+    act(() => tree.focus());
+    await waitFor(() => expect(focusedRow()).toMatch(/^Meeting notes,/));
+  });
+
+  it('enters on the first entry when the tree does not show the selected one', async () => {
+    const { tree } = await linkedTree();
+    act(() => tree.focus());
+    await waitFor(() => expect(focusedRow()).toMatch(/^Meeting notes,/));
+    // Left to the folder, Left again to close it: the selected entry is hidden inside.
+    await userEvent.keyboard('{ArrowLeft}');
+    await waitFor(() => expect(focusedRow()).toBe('notes'));
+    await userEvent.keyboard('{ArrowLeft}');
+    await waitFor(() =>
+      expect(within(tree).queryByRole('treeitem', { name: /Meeting notes/ })).toBeNull(),
+    );
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(focusedRow()).toMatch(/^Annual report,/));
+    act(() => screen.getByRole('searchbox', { name: 'Search this workspace' }).focus());
+    act(() => tree.focus());
+    await waitFor(() => expect(focusedRow()).toBe('notes'));
+  });
+
   it('leaves a pointer press on the scrolling list to arborist, so it never scrolls the list away', async () => {
     const many = Array.from({ length: 80 }, (_, index) =>
       summary(

@@ -401,15 +401,16 @@ test.describe('Explorer from the keyboard', () => {
     await expect(row(page, /Item number 0,/)).toBeInViewport();
     await page.keyboard.press('ArrowDown');
     await expect(row(page, /Item number 1,/)).toBeFocused();
-    // Tab from before the tree, wheeled away again: back on the entry that last had focus.
+    // Tab from before the tree, wheeled away again: the tab stop again (nothing is selected, so
+    // the WAI-ARIA tree pattern says the first entry), scrolled back into view.
     await wheelTree(page, 'bottom');
     await expectNoAxeViolations(page, 'tree wheeled away again');
     await page.getByRole('button', { name: 'Search', exact: true }).focus();
     await page.keyboard.press('Tab');
-    await expect(row(page, /Item number 1,/)).toBeFocused();
-    await expect(row(page, /Item number 1,/)).toBeInViewport();
+    await expect(row(page, /Item number 0,/)).toBeFocused();
+    await expect(row(page, /Item number 0,/)).toBeInViewport();
     await page.keyboard.press('ArrowDown');
-    await expect(row(page, /Item number 2,/)).toBeFocused();
+    await expect(row(page, /Item number 1,/)).toBeFocused();
   });
 
   test('Q2b the selected row deep in the list, wheeled to the top: axe, and Shift+Tab lands on it', async ({
@@ -522,10 +523,11 @@ test.describe('a newer head moves nothing until Refresh', () => {
     await expect(page.getByRole('button', { name: 'Refresh' })).toBeFocused();
     expect(await treeScrollTop(page)).toBe(scrolled);
     expect(page.url()).toContain(`rev=${OLD}`);
-    // Back into the tree from the keyboard: the same entry.
+    // Back into the tree from the keyboard: the tab stop, which the WAI-ARIA tree pattern puts on
+    // the first entry here, since the open item is not in this folder.
     await page.getByRole('button', { name: 'Search', exact: true }).focus();
     await page.keyboard.press('Tab');
-    await expect(row(page, /Item number 40,/)).toBeFocused();
+    await expect(row(page, /Item number 0,/)).toBeFocused();
   });
 
   test('Q3b window focus while reading part 2 of an unpinned item: nothing reloads, and Refresh keeps the focus', async ({

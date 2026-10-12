@@ -236,34 +236,10 @@ describe('the shell head is shown as of when it was resolved', () => {
     // The tree was never taken off screen, and Refresh kept keyboard focus.
     expect(screen.getByRole('tree', { name: 'Folders' })).toBe(tree);
     expect(document.activeElement).toBe(refresh);
-    // Back in the tree, focus returns to the entry that had it.
+    // Back in the tree, focus lands where the WAI-ARIA tree pattern says: nothing is selected,
+    // so the first entry.
     act(() => tree.focus());
-    await waitFor(() => expect(focusedName()).toMatch(/^Annual report,/));
-  });
-
-  it('hands the tab stop to the entry now in its place when a refresh no longer lists the focused one', async () => {
-    mockApi(
-      explorerHandlers({
-        [OPEN]: headMovesOn(),
-        [LIST]: (body) => {
-          const revision = String((body.at as Json).revision);
-          const items = revision === NEW ? [otherSummary] : [sourceSummary, otherSummary];
-          return ok({ ...listing(['notes'], items), revision });
-        },
-      }),
-    );
-    renderAt(`/w/${WS}`);
-    const tree = await screen.findByRole('tree', { name: 'Folders' });
-    await within(tree).findByRole('treeitem', { name: /Plan/ });
-    act(() => tree.focus());
-    await userEvent.keyboard('{ArrowDown}');
-    await waitFor(() => expect(focusedName()).toMatch(/^Annual report,/));
-    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await waitFor(() =>
-      expect(within(tree).queryByRole('treeitem', { name: /Annual report/ })).toBeNull(),
-    );
-    act(() => tree.focus());
-    await waitFor(() => expect(focusedName()).toMatch(/^Plan,/));
+    await waitFor(() => expect(focusedName()).toBe('notes'));
   });
 
   it('says quietly that the newer-head check failed, in plain words, never as an alert (N20)', async () => {
