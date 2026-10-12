@@ -13,7 +13,7 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { useRef } from 'react';
+import { type ReactNode, useRef } from 'react';
 import { openWorkspaceOptions } from '../api/generated/@tanstack/react-query.gen';
 import { zWorkspaceId } from '../api/generated/zod.gen';
 import { FailureNotice } from '../features/errors/FailureNotice';
@@ -25,6 +25,20 @@ export const Route = createFileRoute('/w/$workspaceId')({
   validateSearch: validateWorkspaceSearch,
   component: WorkspaceRoute,
 });
+
+/**
+ * The page while there is no Explorer: the workspace is opening, did not open, or the link is not
+ * valid. Like every page it has a level-one heading, read out but not drawn; the Explorer's is the
+ * workspace's name.
+ */
+function BeforeTheExplorer({ children }: { children: ReactNode }) {
+  return (
+    <div className="page-status">
+      <h1 className="sr-only">Workspace</h1>
+      {children}
+    </div>
+  );
+}
 
 function WorkspaceRoute() {
   const { workspaceId } = Route.useParams();
@@ -46,7 +60,7 @@ function WorkspaceRoute() {
   });
   if (!valid) {
     return (
-      <div className="page-status">
+      <BeforeTheExplorer>
         <div role="alert" className="failure-notice">
           <p>
             <strong>This link is not valid.</strong>
@@ -54,21 +68,21 @@ function WorkspaceRoute() {
           <p>The address does not name a workspace. Nothing was requested.</p>
           <Link to="/">Go to your workspaces</Link>
         </div>
-      </div>
+      </BeforeTheExplorer>
     );
   }
   if (workspace.data === undefined) {
     if (opening.shown) {
       return (
-        <div className="page-status">
+        <BeforeTheExplorer>
           <FailureNotice context="Opening this workspace" error={opening.error} retry={opening} />
-        </div>
+        </BeforeTheExplorer>
       );
     }
     return (
-      <p role="status" className="page-status">
-        Opening the workspace…
-      </p>
+      <BeforeTheExplorer>
+        <p role="status">Opening the workspace…</p>
+      </BeforeTheExplorer>
     );
   }
   return (
