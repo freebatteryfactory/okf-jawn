@@ -2,8 +2,8 @@
  * Ephemeral Explorer state: open tabs and panes, expanded folders, pane sizes and where keyboard
  * focus goes next.
  *
- * It holds references only: item ids, folder paths, and for each pane the selection and cited
- * revision its URL last named (what the pane shows when it is not the focused one). Titles,
+ * It holds references only: item ids, folder paths, and for each open tab the selection and cited
+ * revision its URL last named (what the tab shows when it is not the one the URL names). Titles,
  * paths, the workspace head and content live in the Query cache and are read from there; nothing
  * the server owns is copied here. The router owns what the focused pane shows; this store
  * remembers the rest. Nothing here is persisted: it lasts as long as the page.
@@ -22,8 +22,11 @@ export interface Pane {
   /** Item identities, in tab order. */
   tabs: string[];
   active: string | null;
-  /** The selection and cited revision of the active item, as the pane's URL last named them. */
-  location: PaneLocation;
+  /**
+   * For each open tab, by item id: the selection and cited revision its URL last named. A tab
+   * returned to reads where it read, so a revision a link resolved is never dropped on the way.
+   */
+  locations: Record<string, PaneLocation>;
 }
 
 export interface WorkspaceView {
@@ -83,11 +86,16 @@ const FIRST_PANE = 'pane-1';
 
 export function emptyView(): WorkspaceView {
   return {
-    panes: [{ id: FIRST_PANE, tabs: [], active: null, location: {} }],
+    panes: [{ id: FIRST_PANE, tabs: [], active: null, locations: {} }],
     focusedPaneId: FIRST_PANE,
     expanded: {},
     folderPages: {},
   };
+}
+
+/** Where a pane's tab for `itemId` reads: its selection and cited revision ({} for none). */
+export function tabLocation(pane: Pane, itemId: string | null): PaneLocation {
+  return itemId === null ? {} : (pane.locations[itemId] ?? {});
 }
 
 function updatePane(view: WorkspaceView, paneId: string, change: (pane: Pane) => Pane) {
@@ -124,7 +132,7 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
         pane !== undefined &&
         pane.active === itemId &&
         pane.tabs.includes(itemId) &&
-        sameLocation(pane.location, location)
+        sameLocation(tabLocation(pane, itemId), location)
       ) {
         return;
       }
@@ -132,7 +140,7 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
         ...focused,
         tabs: focused.tabs.includes(itemId) ? focused.tabs : [...focused.tabs, itemId],
         active: itemId,
-        location: cleanLocation(location),
+        locations: { ...focused.locations, [itemId]: cleanLocation(location) },
       }));
       write(workspaceId, { ...current, panes });
     },
@@ -154,7 +162,7 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
       const following = tabs[index] ?? tabs[index - 1] ?? null;
       const closedActive = pane.active === itemId;
       const active = closedActive ? following : pane.active;
-      const location = closedActive ? {} : pane.location;
+      const { [itemId]: _closed, ...locations } = pane.locations;
       const wasFocused = current.focusedPaneId === paneId;
 
       if (tabs.length === 0 && current.panes.length > 1) {
@@ -169,7 +177,7 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
           focusedChanged: wasFocused,
           show:
             focusedPane && shown !== null
-              ? { itemId: shown, location: focusedPane.location }
+              ? { itemId: shown, location: tabLocation(focusedPane, shown) }
               : null,
           focus:
             neighbour !== undefined && neighbour.active !== null
@@ -180,8 +188,9 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
 
       write(workspaceId, {
         ...current,
-        panes: updatePane(current, paneId, () => ({ id: paneId, tabs, active, location })),
+        panes: updatePane(current, paneId, () => ({ id: paneId, tabs, active, locations })),
       });
+      const location = active === null ? {} : (locations[active] ?? {});
       return {
         focusedPaneId: current.focusedPaneId,
         focusedChanged: wasFocused && closedActive,
@@ -203,7 +212,7 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
         id,
         tabs: [itemId],
         active: itemId,
-        location: cleanLocation(location),
+        locations: { [itemId]: cleanLocation(location) },
       });
       set((state) => ({ nextPane: state.nextPane + 1 }));
       write(workspaceId, { ...current, panes, focusedPaneId: id });

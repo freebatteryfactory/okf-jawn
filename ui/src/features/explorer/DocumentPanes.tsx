@@ -21,6 +21,7 @@ import {
   type Pane,
   type PaneLocation,
   type PanelLayout,
+  tabLocation,
   useExplorerStore,
 } from './store';
 
@@ -121,8 +122,8 @@ function DocumentPane({
       : 'Documents';
   const active = focused ? urlItemId : pane.active;
   // The focused pane shows what the URL names; another pane keeps showing what it showed.
-  const shownSelection = focused ? selection : pane.location.sel;
-  const citedRevision = focused ? revision : pane.location.rev;
+  const shownSelection = focused ? selection : tabLocation(pane, pane.active).sel;
+  const citedRevision = focused ? revision : tabLocation(pane, pane.active).rev;
   const canSplit = active !== null && panes.length < MAX_PANES;
 
   // After a tab or pane closes, keyboard focus goes to the tab or empty area chosen for it,

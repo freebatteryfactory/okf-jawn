@@ -1,8 +1,9 @@
 /**
  * Workspace search: a search form whose query lives in the URL, and the results of the search
  * operation, pinned to one resolved revision and paged through the operation's cursor. Each
- * result opens its item at the exact cited selection, and a result from partly converted,
- * agent-supplied or corrected text carries the same labels the reader shows.
+ * result opens its item at the exact cited selection and the revision its hit was resolved at
+ * (SPEC section 3), and a result from partly converted, agent-supplied or corrected text carries
+ * the same labels the reader shows.
  */
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -166,7 +167,9 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
                 search={{
                   q: query,
                   ...(hit.source.selection.kind === 'all' ? {} : { sel: hit.source.selection }),
-                  ...(hit.source.revision === head ? {} : { rev: hit.source.revision }),
+                  // Always the revision the hit was resolved at, even when it is the listed head:
+                  // reopened after the head moves, the link still reads the same commit.
+                  rev: hit.source.revision,
                 }}
                 className="hit"
               >

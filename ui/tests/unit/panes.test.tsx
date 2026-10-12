@@ -252,6 +252,38 @@ describe('each pane keeps what it shows', () => {
   });
 });
 
+describe('a tab keeps the revision its link resolved', () => {
+  /** Meeting notes opened pinned at OLD; then Plan from the tree, which reads the item now. */
+  async function pinnedThenUnpinned() {
+    const api = mockApi(explorerHandlers());
+    const view = renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    await screen.findByRole('tab', { name: 'Meeting notes', selected: true });
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    await userEvent.click(await within(tree).findByRole('treeitem', { name: /Plan/ }));
+    await screen.findByRole('tab', { name: 'Plan', selected: true });
+    await waitFor(() => expect(view.router.state.location.search).toEqual({}));
+    return { ...view, api };
+  }
+
+  it('reads a tab returned to at the revision it was opened at', async () => {
+    const { router, api } = await pinnedThenUnpinned();
+    screen.getByRole('tab', { name: 'Plan' }).focus();
+    await userEvent.keyboard('{ArrowLeft}{Enter}');
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    expect(router.state.location.search).toEqual({ rev: OLD });
+    await screen.findByText(/You are reading revision/);
+    const noteReads = api.callsTo(READ).filter((body) => body.item_id === NOTE);
+    for (const body of noteReads) expect(body.at).toEqual({ kind: 'revision', revision: OLD });
+  });
+
+  it('shows the tab after a closed one at the revision it was opened at', async () => {
+    const { router } = await pinnedThenUnpinned();
+    await userEvent.click(screen.getByRole('button', { name: 'Close tab' }));
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    expect(router.state.location.search).toEqual({ rev: OLD });
+  });
+});
+
 describe('failures keep the workspace open', () => {
   it('keeps the open tabs when a not_found sends the reader back to the workspace', async () => {
     const base = explorerHandlers();
