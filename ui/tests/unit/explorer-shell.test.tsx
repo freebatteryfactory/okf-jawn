@@ -208,3 +208,16 @@ describe('deep links', () => {
     });
   });
 });
+
+describe('malformed links', () => {
+  it('never sends a selection or revision the generated schemas reject', async () => {
+    const api = mockApi(workspaceHandlers());
+    renderAt(`/w/${WS}/i/${NOTE}?sel=${encodeURIComponent('"lines 2 to 3"')}&rev=HEAD`);
+    expect(await screen.findByText('Whole text')).toBeTruthy();
+    const read = api.callsTo(READ)[0];
+    expect(read?.selection).toEqual({ kind: 'all' });
+    expect(read?.at).toEqual({ kind: 'revision', revision: HEAD });
+    expect(screen.queryByText(/Showing/)).toBeNull();
+    expect(api.violations).toEqual([]);
+  });
+});

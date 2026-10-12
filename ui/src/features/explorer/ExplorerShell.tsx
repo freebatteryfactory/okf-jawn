@@ -16,7 +16,7 @@ import { SearchForm, SearchResults } from '../search/SearchPanel';
 import { DocumentPanes, matchingLayout } from './DocumentPanes';
 import { FolderTree } from './FolderTree';
 import { SourcePanel } from './SourcePanel';
-import type { ItemSelection } from './search-params';
+import { type ItemSelection, validateItemSearch, validateWorkspaceSearch } from './search-params';
 import { useExplorerStore, useWorkspaceView } from './store';
 
 export interface ExplorerShellProps {
@@ -36,7 +36,10 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
   const workspaceId = workspace.id;
   const head = workspace.head;
   const params = useParams({ strict: false });
-  const search = useSearch({ strict: false });
+  // The router passes unvalidated parameters through to child routes, so the values used
+  // here are validated again: nothing malformed in a URL reaches the server.
+  const raw: Record<string, unknown> = useSearch({ strict: false });
+  const search = { ...validateWorkspaceSearch(raw), ...validateItemSearch(raw) };
   const navigate = useNavigate();
   const itemId = params.itemId ?? null;
   const query = search.q;
