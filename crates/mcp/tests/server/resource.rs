@@ -1,6 +1,6 @@
 //! The MCP App resource: declared by `api/mcp-apps.json`, read from the bundle at runtime.
 
-use okf_jawn_contract::access::Permission;
+use okf_jawn_contract::access::{AccessRoute, Permission};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_mcp::{APP_MIME_TYPE, APP_URI, McpServer};
 use rmcp::model::ResourceContents;
@@ -9,7 +9,8 @@ use serde_json::json;
 use crate::check::{TestResult, err_of, some};
 use crate::support::fakes::{FakeAccess, World};
 use crate::support::fixtures::{
-    HOST, agent, bundle, committed, http_service, missing_bundle, post, result_of, rpc,
+    HOST, agent, bundle, committed, http_service, missing_bundle, post, principal, result_of, rpc,
+    rpc_refusal,
 };
 
 const HTML: &str = "<!doctype html><html><body><div id=\"root\"></div></body></html>";
@@ -124,6 +125,40 @@ async fn a_missing_or_empty_bundle_is_unavailable() -> TestResult {
     let data = some(reply.body.pointer("/error/data"), "the error's data")?;
     let carried: ApiError = serde_json::from_value(data.clone())?;
     assert_eq!(carried.code, ErrorCode::Unavailable);
+    Ok(())
+}
+
+/// An anonymous or browser-session App read is refused for its identity before the server reads
+/// the bundle or the URI, so it learns neither whether the bundle is built nor which URIs exist.
+#[tokio::test]
+async fn identity_is_checked_before_the_app_read() -> TestResult {
+    let world = World::new(FakeAccess::default());
+    let service = http_service(&world, missing_bundle("resource-identity-first.html")?)?;
+    let browser = principal("owner", AccessRoute::BrowserSession)?;
+    for uri in [APP_URI, "ui://okf-jawn/other.html"] {
+        let anonymous = post(
+            &service,
+            None,
+            HOST,
+            &[],
+            &rpc(1, "resources/read", &json!({"uri": uri})),
+        )
+        .await?;
+        assert_eq!(
+            rpc_refusal(&anonymous)?.code,
+            ErrorCode::Unauthenticated,
+            "{uri}"
+        );
+        let session = post(
+            &service,
+            Some(browser.clone()),
+            HOST,
+            &[],
+            &rpc(2, "resources/read", &json!({"uri": uri})),
+        )
+        .await?;
+        assert_eq!(rpc_refusal(&session)?.code, ErrorCode::Forbidden, "{uri}");
+    }
     Ok(())
 }
 

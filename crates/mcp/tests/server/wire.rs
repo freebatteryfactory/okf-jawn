@@ -20,8 +20,8 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::check::{TestResult, err_of, some};
 use crate::support::fakes::{FakeAccess, World};
 use crate::support::fixtures::{
-    HOST, Outcome, agent, bundle, call, committed, http_service, initialize, missing_bundle, post,
-    rpc, workspaces_input, workspaces_response,
+    HOST, Outcome, agent, bundle, call, call_result, committed, http_service, initialize,
+    missing_bundle, post, rpc, workspaces_input, workspaces_response,
 };
 
 /// One HTTP/1.1 exchange's status and JSON body (`Null` when empty).
@@ -187,6 +187,34 @@ async fn a_request_over_the_configured_body_limit_is_refused() -> TestResult {
         1,
         "only the small call ran"
     );
+    Ok(())
+}
+
+/// The configured limit can be raised, not only lowered: an 8 MiB limit admits a call over the
+/// 4 MiB default.
+#[tokio::test]
+async fn a_raised_body_limit_admits_a_larger_request() -> TestResult {
+    let world = World::new(FakeAccess::default().granting("alice", &[Permission::Read]));
+    world
+        .application
+        .answer_with("list_workspaces", workspaces_response())?;
+    let service = streamable_http_service(
+        world.ports.clone(),
+        McpConfig {
+            app_bundle: missing_bundle("wire-raised.html")?,
+            allowed_hosts: vec![HOST.to_owned()],
+            max_request_body_bytes: 2 * DEFAULT_MAX_REQUEST_BODY_BYTES,
+        },
+    )?;
+    let large = call(
+        1,
+        "workspaces",
+        &json!({"page": {"limit": 10, "cursor": "a".repeat(DEFAULT_MAX_REQUEST_BODY_BYTES)}}),
+    );
+    let reply = post(&service, Some(agent("alice")?), HOST, &[], &large).await?;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(call_result(&reply)?.is_error, Some(false));
+    assert_eq!(world.application.calls()?.len(), 1);
     Ok(())
 }
 
