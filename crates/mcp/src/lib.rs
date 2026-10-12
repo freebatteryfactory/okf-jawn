@@ -1,6 +1,8 @@
-//! MCP transport helpers preserve generated tool schemas and application-level content.
+//! The production MCP server over the application, and the result helpers it answers through.
 //!
-//! This is not a JSON-RPC implementation. `rmcp` owns protocol and transport behavior.
+//! This is not a JSON-RPC implementation. `rmcp` owns protocol and transport behavior;
+//! `server` is the `ServerHandler` over core's dispatch, `http` the Streamable HTTP service the
+//! server crate mounts, and `catalog` the committed tool and App catalogs.
 //! A successful result always carries text a host can show without reading
 //! `structuredContent`: the document Markdown for a read, the serialized response otherwise.
 //! A failed call is reported as text with `isError` set and no structured content: a tool's
@@ -10,6 +12,10 @@ use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::read::ReadItemResponse;
 use rmcp::model::{CallToolResult, ContentBlock, Tool};
 use serde_json::Value;
+
+pub use catalog::{APP_MIME_TYPE, APP_URI, operation_of_tool};
+pub use http::{McpConfig, McpHttpService, streamable_http_service};
+pub use server::{McpPorts, McpServer};
 
 /// Largest text block a helper writes; equal to the largest `max_bytes` a read may request.
 pub const MAX_TEXT_BYTES: usize = 1_048_576;
@@ -109,3 +115,7 @@ fn within_budget(text: &str, max_bytes: usize) -> (String, bool) {
         .collect();
     (kept, true)
 }
+
+mod catalog;
+mod http;
+mod server;
