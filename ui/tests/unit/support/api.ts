@@ -6,7 +6,8 @@
  * answer must parse with its generated response schema, so no test is driven by an answer the
  * server could not give. An operation without a handler answers `not_implemented`, as the real
  * service does for unbuilt operations. A handler may answer later (a promise), so a test can look
- * at the page while a request is in flight.
+ * at the page while a request is in flight. A request aborted meanwhile rejects, as `fetch` does:
+ * a cancelled query's request, or one that outlived the client's bounded wait, does not go on.
  */
 import { vi } from 'vitest';
 import type { ZodType } from 'zod';
@@ -120,7 +121,15 @@ export function mockApi(handlers: Record<string, Handler>): MockedApi {
       }
     }
     const handler = handlers[path];
-    const reply = handler === undefined ? notImplemented(path) : await handler(body);
+    // Like `fetch`, a request that is aborted while it waits for its answer rejects.
+    const signal = init?.signal ?? request.signal;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const abort = () => reject(new DOMException('The request was aborted', 'AbortError'));
+      if (signal.aborted) abort();
+      else signal.addEventListener('abort', abort, { once: true });
+    });
+    const reply =
+      handler === undefined ? notImplemented(path) : await Promise.race([handler(body), aborted]);
     if (reply.status === 200 && contract !== undefined) {
       const checked = contract.response.safeParse(reply.body);
       if (!checked.success) violations.push(`${path} response: ${checked.error.message}`);
