@@ -72,9 +72,13 @@ async fn the_bundle_is_read_again_on_every_read() -> TestResult {
     let world = world();
     let path = bundle("resource-reread.html", HTML)?;
     let server = McpServer::new(world.ports, path.clone())?;
-    let first = server.read_resource_at(APP_URI).await?;
+    let first = server
+        .read_resource_as(Some(&agent("alice")?), APP_URI)
+        .await?;
     std::fs::write(&path, "<p>rebuilt</p>")?;
-    let second = server.read_resource_at(APP_URI).await?;
+    let second = server
+        .read_resource_as(Some(&agent("alice")?), APP_URI)
+        .await?;
     let texts = [first, second].map(|read| match read.contents.first() {
         Some(ResourceContents::TextResourceContents { text, .. }) => Some(text.clone()),
         _ => None,
@@ -93,10 +97,18 @@ async fn a_missing_or_empty_bundle_is_unavailable() -> TestResult {
         world.ports.clone(),
         missing_bundle("resource-missing.html")?,
     )?;
-    let refused: ApiError = err_of(missing.read_resource_at(APP_URI).await)?;
+    let refused: ApiError = err_of(
+        missing
+            .read_resource_as(Some(&agent("alice")?), APP_URI)
+            .await,
+    )?;
     assert_eq!(refused.code, ErrorCode::Unavailable);
     let empty = McpServer::new(world.ports.clone(), bundle("resource-empty.html", " \n")?)?;
-    let refused: ApiError = err_of(empty.read_resource_at(APP_URI).await)?;
+    let refused: ApiError = err_of(
+        empty
+            .read_resource_as(Some(&agent("alice")?), APP_URI)
+            .await,
+    )?;
     assert_eq!(refused.code, ErrorCode::Unavailable);
     // Over the wire the refusal is a JSON-RPC error carrying the serialized `ApiError`.
     let service = http_service(&world, missing_bundle("resource-missing-wire.html")?)?;
@@ -119,7 +131,11 @@ async fn a_missing_or_empty_bundle_is_unavailable() -> TestResult {
 async fn any_other_uri_is_not_found() -> TestResult {
     let world = world();
     let server = McpServer::new(world.ports, bundle("resource-other.html", HTML)?)?;
-    let refused: ApiError = err_of(server.read_resource_at("ui://okf-jawn/other.html").await)?;
+    let refused: ApiError = err_of(
+        server
+            .read_resource_as(Some(&agent("alice")?), "ui://okf-jawn/other.html")
+            .await,
+    )?;
     assert_eq!(refused.code, ErrorCode::NotFound);
     Ok(())
 }

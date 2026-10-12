@@ -157,12 +157,6 @@ pub fn workspaces_response() -> Value {
     })
 }
 
-/// `list_drafts` arguments: a draft-bearing operation, never a tool.
-#[must_use]
-pub fn list_drafts_input() -> Value {
-    json!({"workspace_id": WORKSPACE, "page": {"limit": 10}})
-}
-
 /// `propose` (`open_proposal`) arguments: a keyed mutation.
 #[must_use]
 pub fn propose_input() -> Value {
@@ -348,6 +342,18 @@ pub fn result_of(reply: &Reply) -> Outcome<&Value> {
         return Err(format!("expected 200, got {}: {}", reply.status, reply.body).into());
     }
     Ok(some(reply.body.get("result"), "a JSON-RPC result")?)
+}
+
+/// The `ApiError` a refused JSON-RPC request carries in its error's `data`.
+///
+/// # Errors
+/// Returns an error when the reply has a result or its error carries no `ApiError`.
+pub fn rpc_refusal(reply: &Reply) -> Outcome<ApiError> {
+    if reply.body.get("result").is_some() {
+        return Err(format!("expected a refusal, got {}", reply.body).into());
+    }
+    let data = some(reply.body.pointer("/error/data"), "the error's data")?;
+    Ok(serde_json::from_value(data.clone())?)
 }
 
 /// The tool result of a `tools/call` reply.

@@ -1,18 +1,18 @@
-//! Permissions apply independently of visibility hints, and the agent route never sees drafts.
+//! Permissions apply independently of visibility hints.
+//!
+//! The draft rule is tested where `call_operation` can be named: `src/server.rs`.
 
 use okf_jawn_contract::access::Permission;
 use okf_jawn_contract::error::ErrorCode;
 use okf_jawn_contract::events::EventKind;
 use okf_jawn_contract::metadata::OperationName;
-use okf_jawn_contract::operations::DRAFT_BEARING;
 use okf_jawn_mcp::McpServer;
 use serde_json::json;
 
 use crate::check::{TestResult, some};
 use crate::support::fakes::{FakeAccess, World};
 use crate::support::fixtures::{
-    agent, arguments, bundle, list_drafts_input, object_response, read_object_input, refusal_of,
-    text_of,
+    agent, arguments, bundle, object_response, read_object_input, refusal_of, text_of,
 };
 
 #[tokio::test]
@@ -80,38 +80,5 @@ async fn an_app_only_tool_refuses_a_caller_without_the_permission() -> TestResul
             .all(|(_, event)| event.kind == EventKind::PermissionDenied
                 && event.operation == Some(OperationName::GetObject))
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_draft_bearing_operation_named_through_the_handler_is_forbidden() -> TestResult {
-    assert!(DRAFT_BEARING.contains(&OperationName::ListDrafts));
-    // alice holds every permission dispatch could ask for; the route alone refuses.
-    let world = World::new(FakeAccess::default().granting(
-        "alice",
-        &[Permission::Read, Permission::Write, Permission::Admin],
-    ));
-    world
-        .application
-        .answer_with("list_drafts", json!({"items": []}))?;
-    let application = world.application.clone();
-    let server = McpServer::new(
-        world.ports,
-        bundle("permissions-drafts.html", "<p>app</p>")?,
-    )?;
-    let result = server
-        .call_operation(
-            Some(&agent("alice")?),
-            OperationName::ListDrafts,
-            list_drafts_input(),
-        )
-        .await?;
-    let refused = refusal_of(&result)?;
-    assert_eq!(refused.code, ErrorCode::Forbidden);
-    assert_eq!(
-        refused.message,
-        "Drafts are visible only in a human browser session"
-    );
-    assert_eq!(application.calls()?, Vec::new());
     Ok(())
 }
