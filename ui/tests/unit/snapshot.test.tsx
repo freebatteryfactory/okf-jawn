@@ -482,6 +482,47 @@ describe('taking a Snapshot', () => {
     expect(await within(panel()).findByText('notes/meeting.md has no description')).toBeDefined();
   });
 
+  it('leaves a head someone else made after it to Refresh', async () => {
+    const { state } = service({
+      [COMMIT]: () => {
+        state.drafts.clear();
+        // Someone else's commit landed right after the person's.
+        state.head = THEIRS;
+        return committed();
+      },
+    });
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('region', { name: 'Drafts (2)' });
+    await pressSnapshot('Tidy');
+    await screen.findByRole('region', { name: 'Drafts (0)' });
+    await eventuallyReal(() =>
+      expect(headLine()).toContain('A newer version of this workspace exists'),
+    );
+    // The shell shows the person's own revision; the other one is announced, not adopted.
+    expect(headLine()).toContain(`revision ${MADE.slice(0, 10)}`);
+    expect(headLine()).not.toContain(THEIRS.slice(0, 10));
+  });
+
+  it('moves a background tab that cited the old head as well', async () => {
+    service();
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
+    await findTextBox('Text of Meeting notes');
+    act(() => {
+      void router.navigate({
+        to: '/w/$workspaceId/i/$itemId',
+        params: { workspaceId: WS, itemId: OTHER },
+        search: { rev: HEAD },
+      });
+    });
+    await findTextBox('Text of Plan');
+    await pressSnapshot('Tidy');
+    await screen.findByRole('region', { name: 'Drafts (0)' });
+    await eventuallyReal(() => expect(router.state.location.search).toEqual({ rev: MADE }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Meeting notes' }));
+    await eventuallyReal(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    expect(router.state.location.search).toEqual({ rev: MADE });
+  });
+
   it('moves a tab that cited the old head to the revision the Snapshot made', async () => {
     service();
     const { router } = renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
