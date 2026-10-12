@@ -156,4 +156,5 @@ async fn respond(
 
 okf_jawn_contract::for_each_operation!(bind_routes);
 
+pub mod config;
 pub mod errors;
