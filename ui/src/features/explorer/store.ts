@@ -75,6 +75,11 @@ interface ExplorerState {
   closeTab: (workspaceId: string, paneId: string, itemId: string) => CloseResult | null;
   /** Open `itemId` at `location` in a new pane to the right of `paneId` and focus it. */
   splitRight: (workspaceId: string, paneId: string, itemId: string, location: PaneLocation) => void;
+  /**
+   * After a Snapshot: every tab of these items that cited revision `from` cites `to`, so it reads
+   * what was just committed instead of the version before it.
+   */
+  repin: (workspaceId: string, itemIds: readonly string[], from: string, to: string) => void;
   setExpanded: (workspaceId: string, folder: string, open: boolean) => void;
   showMore: (workspaceId: string, folder: string) => void;
   setLayout: (group: string, layout: PanelLayout) => void;
@@ -216,6 +221,19 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
       });
       set((state) => ({ nextPane: state.nextPane + 1 }));
       write(workspaceId, { ...current, panes, focusedPaneId: id });
+    },
+    repin: (workspaceId, itemIds, from, to) => {
+      const current = view(workspaceId);
+      const panes = current.panes.map((pane) => ({
+        ...pane,
+        locations: Object.fromEntries(
+          Object.entries(pane.locations).map(([itemId, location]) => [
+            itemId,
+            itemIds.includes(itemId) && location.rev === from ? { ...location, rev: to } : location,
+          ]),
+        ),
+      }));
+      write(workspaceId, { ...current, panes });
     },
     setExpanded: (workspaceId, folder, open) => {
       const current = view(workspaceId);

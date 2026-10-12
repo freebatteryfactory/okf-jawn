@@ -40,9 +40,11 @@ import type {
 } from '../../api/generated/types.gen';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
+import { ConflictNotice } from '../drafts/ConflictNotice';
 import { DraftEditor } from '../drafts/DraftEditor';
 import { beginSession } from '../drafts/saving';
-import { saveStateOf, useDraftSession } from '../drafts/sessions';
+import { saveStateOf, useConflict, useDraftSession } from '../drafts/sessions';
+import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
 import { type FailureRetry, useRetry } from '../errors/retry';
 import type { ItemSelection } from '../explorer/search-params';
@@ -71,6 +73,8 @@ export interface DocumentViewProps {
   canWrite: boolean;
   /** Open this item as the workspace shows it, without a cited revision. */
   onOpenCurrent: () => void;
+  /** A Snapshot of this item was taken here ("keep mine"). */
+  onSnapshotted: (snapshotted: Snapshotted) => void;
 }
 
 /** The words for a draft that is not on screen: the reader shows the committed text. */
@@ -273,10 +277,12 @@ export function DocumentView({
   head,
   canWrite,
   onOpenCurrent,
+  onSnapshotted,
 }: DocumentViewProps) {
   const titleId = useId();
   const item = useQuery(itemOptions(workspaceId, itemId, revision));
   const document = item.data;
+  const conflict = useConflict(workspaceId, itemId);
 
   // Reading or editing. Until the person chooses, an item with a draft opens on the draft.
   const session = useDraftSession(workspaceId, itemId);
@@ -454,6 +460,26 @@ export function DocumentView({
             {editing ? 'Read the committed text' : hasDraft ? 'Edit your draft' : 'Edit'}
           </button>
         </p>
+      )}
+      {editable && conflict !== undefined && (
+        <ConflictNotice
+          workspaceId={workspaceId}
+          itemId={itemId}
+          title={title}
+          conflict={conflict}
+          text={
+            session !== undefined
+              ? { body: session.body, properties: session.properties }
+              : heldDraft !== null
+                ? { body: heldDraft.body, properties: heldDraft.properties }
+                : null
+          }
+          onSnapshotted={onSnapshotted}
+          onResolved={() => {
+            focusNext.current = 'switch';
+            setChosen('read');
+          }}
+        />
       )}
       {editable && !editing && session !== undefined && (
         <p role="note" className="notice">

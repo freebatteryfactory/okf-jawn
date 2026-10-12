@@ -23,6 +23,7 @@ import { itemOptions } from '../documents/DocumentView';
 import { short } from '../documents/describe';
 import { DraftsPanel } from '../drafts/DraftsPanel';
 import { useLeaveGuard } from '../drafts/leave-guard';
+import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { SearchForm, SearchResults } from '../search/SearchPanel';
@@ -84,6 +85,7 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   const splitRight = useExplorerStore((state) => state.splitRight);
   const setLayout = useExplorerStore((state) => state.setLayout);
   const requestFocus = useExplorerStore((state) => state.requestFocus);
+  const repin = useExplorerStore((state) => state.repin);
   const canWrite = workspace.permissions.includes('write');
   useLeaveGuard();
 
@@ -131,6 +133,25 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
         return next === undefined ? rest : { ...rest, q: next };
       },
     });
+
+  /**
+   * A Snapshot moved the shown head to the revision it made (`snapshot.ts`). A tab that reads the
+   * shown head follows by itself. One that cited the head as it was (a search result's link, the
+   * latest version read) would go on reading the version before the person's own change, so each
+   * such tab of a snapshotted item now cites the revision the Snapshot made: in the store, and in
+   * the URL when it is the item the URL names.
+   */
+  const followSnapshot = (taken: Snapshotted) => {
+    const before = taken.previousHead ?? head;
+    repin(workspaceId, taken.itemIds, before, taken.revision);
+    if (itemId !== null && taken.itemIds.includes(itemId) && rev === before) {
+      goToItem(itemId, {
+        ...(sel === undefined ? {} : { sel }),
+        rev: taken.revision,
+        replace: true,
+      });
+    }
+  };
 
   const revision = search.rev ?? head;
   // The tree lists the head, so the item is revealed where it is at the head, found by its
@@ -196,6 +217,8 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
             <DraftsPanel
               workspaceId={workspaceId}
               head={head}
+              canWrite={canWrite}
+              onSnapshotted={followSnapshot}
               onOpenItem={(target) => goToItem(target)}
             />
           </div>
@@ -238,6 +261,7 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
             onReadLatest={(target, location) => goToItem(target, location)}
             canWrite={canWrite}
             onOpenCurrent={(target) => goToItem(target)}
+            onSnapshotted={followSnapshot}
           />
         </Panel>
         <Separator className="separator" aria-label="Resize the source panel" />

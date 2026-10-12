@@ -204,6 +204,8 @@ export async function discardSession(
   }
   cancelTimer(key);
   sessions().remove(key);
+  // A conflict of this draft is over with it: there is nothing left to keep.
+  sessions().clearConflict(key);
   rememberDraft(client, workspaceId, itemId, null);
 }
 
@@ -220,5 +222,5 @@ export function resetDraftSessions() {
   for (const key of [...timers.keys()]) cancelTimer(key);
   changedMeanwhile.clear();
   inFlight.clear();
-  useDraftSessions.setState({ sessions: {} });
+  useDraftSessions.setState({ sessions: {}, conflicts: {}, said: {} });
 }

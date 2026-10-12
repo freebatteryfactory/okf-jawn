@@ -3,11 +3,11 @@
  * `save_draft` with the base revision, the save state always said, typed text never lost, the
  * person's draft shown when an item is reopened, the drafts listed and marked, and discarding.
  */
-import { act, cleanup, fireEvent, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { REQUEST_TIMEOUT_MS } from '../../src/app/api-client';
 import { itemOptions } from '../../src/features/documents/DocumentView';
-import { draftsOptions } from '../../src/features/drafts/drafts-list';
+import { draftsOptions, rememberDraft } from '../../src/features/drafts/drafts-list';
 import {
   AUTOSAVE_DELAY_MS,
   MAX_BODY_BYTES,
@@ -27,6 +27,7 @@ import {
   OTHER,
   otherSummary,
   renderAt,
+  SOURCE,
   WS,
   workspace,
   writableWorkspace,
@@ -567,7 +568,7 @@ describe('the drafts of a workspace', () => {
     expect(
       within(drafts)
         .getAllByRole('listitem')
-        .map((row) => row.textContent),
+        .map((row) => row.textContent?.trim()),
     ).toEqual([
       expect.stringMatching(/^Meeting notes saved /),
       expect.stringMatching(/^Plan saved /),
@@ -650,6 +651,81 @@ describe('the drafts of a workspace', () => {
       within(drafts).getByRole('button', { name: 'Meeting notes' }),
     );
   });
+
+  // `retry.ts` named one limit: an invalidation that replaces a request in flight. A first save,
+  // a discard and a Snapshot list the drafts again, so here it is reachable.
+  it.each([
+    ['answers', 'the first draft'],
+    ['fails', 'the retry button'],
+  ] as const)(
+    'follows the listing that replaces a further page’s retry in flight: when it %s, focus is on %s',
+    async (outcome, _focus) => {
+      let further: 'fail' | 'hold' = 'fail';
+      let first: 'ok' | 'fail' = 'ok';
+      const held: Array<() => void> = [];
+      writable({
+        [DRAFTS]: (body) => {
+          const page = body.page;
+          const cursor =
+            page !== null && typeof page === 'object' && 'cursor' in page ? page.cursor : null;
+          if (cursor !== 'next') {
+            return first === 'ok'
+              ? ok({ items: [draftOf(NOTE, HEAD, LATER)], next_cursor: 'next' })
+              : fail(500, 'internal', 'the store is unwell again');
+          }
+          if (further === 'fail') return fail(500, 'internal', 'the store is unwell');
+          return new Promise<Reply>((resolve) =>
+            held.push(() => resolve(ok({ items: [draftOf(OTHER, HEAD, NOW)], next_cursor: null }))),
+          );
+        },
+      });
+      const { queryClient } = renderAt(`/w/${WS}`);
+      const drafts = await screen.findByRole('region', { name: 'Drafts (1)' });
+      const retry = await within(drafts).findByRole('button', { name: 'Try again' });
+      further = 'hold';
+      first = outcome === 'answers' ? 'ok' : 'fail';
+      act(() => retry.focus());
+      fireEvent.click(retry);
+      await within(drafts).findByRole('button', { name: 'Trying again…' });
+      expect(held).toHaveLength(1);
+
+      // What a first save of another item does: the drafts are listed again, from the first page,
+      // in place of the request in flight.
+      act(() =>
+        rememberDraft(queryClient, WS, SOURCE, {
+          body: '',
+          properties: {},
+          draft: draftOf(SOURCE, HEAD, NOW),
+        }),
+      );
+      // The retry is not over yet: it follows the listing that replaced its request.
+      expect(within(drafts).getByRole('button', { name: 'Trying again…' })).toBe(retry);
+      expect(document.activeElement).toBe(retry);
+
+      if (outcome === 'answers') {
+        const row = within(drafts).getByRole('button', { name: 'Meeting notes' });
+        await waitFor(() => expect(document.activeElement).toBe(row));
+        expect(within(drafts).queryByRole('button', { name: /Try again|Trying again/ })).toBeNull();
+        // The further page is asked for again by the panel, and arrives.
+        await waitFor(() => expect(held).toHaveLength(2));
+        for (const answer of held.splice(0)) answer();
+        await screen.findByRole('region', { name: 'Drafts (2)' });
+        expect(document.activeElement).toBe(row);
+      } else {
+        await within(drafts).findByText(
+          'Listing the rest of your drafts: Something went wrong in the service.',
+        );
+        await waitFor(() =>
+          expect(document.activeElement).toBe(
+            within(drafts).getByRole('button', { name: 'Try again' }),
+          ),
+        );
+        // What was listed stays listed.
+        expect(within(drafts).getByRole('button', { name: 'Meeting notes' })).toBeDefined();
+      }
+      expect(document.activeElement).not.toBe(document.body);
+    },
+  );
 
   it('shows a failed listing in plain words, never as "no drafts"', async () => {
     const { [DRAFTS]: _unbuilt, ...handlers } = explorerHandlers();

@@ -76,9 +76,21 @@ function readsItem(queryKey: readonly unknown[], workspaceId: string, itemId: st
   );
 }
 
+/** Tell the cache that the person has no draft of these items any more: they were snapshotted. */
+export function forgetDrafts(client: QueryClient, workspaceId: string, itemIds: readonly string[]) {
+  client.setQueriesData<ItemDocument>(
+    {
+      predicate: (query) =>
+        itemIds.some((itemId) => readsItem(query.queryKey, workspaceId, itemId)),
+    },
+    (document) => (document === undefined ? document : { ...document, draft: null }),
+  );
+  void client.invalidateQueries({ queryKey: draftsQueryKey(workspaceId) });
+}
+
 /**
  * Tell the cache what the server now holds as the person's draft of an item: `draft`, or null
- * once it is discarded or snapshotted.
+ * once it is discarded.
  */
 export function rememberDraft(
   client: QueryClient,

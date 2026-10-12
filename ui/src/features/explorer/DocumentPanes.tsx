@@ -20,6 +20,7 @@ import { Group, Panel, Separator } from 'react-resizable-panels';
 import type { Revision } from '../../api/generated/types.gen';
 import { DocumentView, itemOptions } from '../documents/DocumentView';
 import { useDraftMarks } from '../drafts/marks';
+import type { Snapshotted } from '../drafts/snapshot';
 import type { ItemSelection } from './search-params';
 import {
   MAX_PANES,
@@ -57,6 +58,8 @@ export interface DocumentPanesProps {
   canWrite: boolean;
   /** Open an item as the workspace shows it, without a cited revision. */
   onOpenCurrent: (itemId: string) => void;
+  /** A Snapshot was taken from a pane ("keep mine"). */
+  onSnapshotted: (snapshotted: Snapshotted) => void;
 }
 
 const PANES_GROUP = 'document-panes';
@@ -124,6 +127,7 @@ function DocumentPane({
   onReadLatest,
   canWrite,
   onOpenCurrent,
+  onSnapshotted,
 }: DocumentPanesProps & { pane: Pane; index: number }) {
   const focused = pane.id === focusedPaneId;
   // With several panes, the name says which one the URL describes, not only the inset line.
@@ -258,6 +262,7 @@ function DocumentPane({
                 head={head}
                 canWrite={canWrite}
                 onOpenCurrent={() => onOpenCurrent(active)}
+                onSnapshotted={onSnapshotted}
               />
             </Tabs.Panel>
           )}

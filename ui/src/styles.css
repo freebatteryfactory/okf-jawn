@@ -519,3 +519,60 @@ main.app-main:has(.explorer) {
   display: grid;
   gap: 0.35rem;
 }
+.snapshot-form {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.5rem 0;
+}
+.snapshot-form label {
+  font-size: 0.85rem;
+}
+.app-main input[type="text"],
+.app-main input[type="number"] {
+  font: inherit;
+  padding: 0.4rem;
+  border: 1px solid GrayText;
+  border-radius: 0.25rem;
+  background: Field;
+  color: FieldText;
+}
+.app-main input[type="checkbox"] {
+  appearance: auto;
+}
+.field-error {
+  margin: 0;
+  border-left: 3px solid currentColor;
+  padding-left: 0.5rem;
+}
+.snapshot-said {
+  margin: 0.25rem 0;
+}
+/* What changed underneath a draft. A changed line carries its own sign and a rule at its edge,
+   so the difference does not rest on color. */
+.conflict h3,
+.conflict h4 {
+  font-weight: 700;
+  margin: 0.25rem 0;
+}
+.conflict h3 {
+  font-size: 1.1rem;
+}
+.patch-lines {
+  margin: 0.25rem 0;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+}
+.patch-lines ins,
+.patch-lines del {
+  display: block;
+  text-decoration: none;
+  font-weight: 700;
+  border-left: 3px solid currentColor;
+  padding-left: 0.25rem;
+}
+.patch-lines del {
+  border-left-style: dashed;
+}
+.patch-lines > span {
+  padding-left: calc(0.25rem + 3px);
+}

@@ -8,9 +8,15 @@
  * server holds is server state and lives in the Query cache (`get_item`'s `draft`, `list_drafts`);
  * a session keeps the content the server last confirmed only to tell whether the editor differs
  * from it. Nothing here is called saved unless `save_draft` answered for exactly that content.
+ *
+ * Beside the sessions: the items of a Snapshot that conflicted, each until the person resolves it
+ * (the answer of `commit_items`, kept only to show it), and what the last Snapshot did, as words.
  */
+
+import type { z } from 'zod';
 import { create } from 'zustand';
 import type { Draft, Revision } from '../../api/generated/types.gen';
+import type { zDraftConflictItem } from '../../api/generated/zod.gen';
 
 /** An item's editable content: its Markdown body and its complete property map. */
 export interface DraftText {
@@ -46,17 +52,64 @@ export interface DraftSession extends DraftText {
 /** How a session's save stands, as the person is told. */
 export type SaveState = 'unchanged' | 'unsaved' | 'saving' | 'saved' | 'failed' | 'too-long';
 
+/** One item of a `draft_conflict` answer, as the generated schema reads it off the wire. */
+export type ConflictItem = z.infer<typeof zDraftConflictItem>;
+
+/** A Snapshot did not include this item: its content changed since the draft's base. */
+export interface SnapshotConflict {
+  /** What the service answered about the item: the two revisions and what changed between. */
+  conflict: ConflictItem;
+  /** The name of the Snapshot that did not include it; "keep mine" snapshots it under that name. */
+  message: string;
+}
+
+/** What the last Snapshot or resolution did, said politely where the drafts are listed. */
+export interface Said {
+  text: string;
+  /** Non-fatal issues the service recorded with it. */
+  warnings: string[];
+}
+
 interface SessionsState {
   sessions: Record<string, DraftSession>;
+  /** By session key: the items of a conflicting Snapshot the person has not resolved yet. */
+  conflicts: Record<string, SnapshotConflict>;
+  /** By workspace. */
+  said: Record<string, Said>;
   put: (session: DraftSession) => void;
   change: (key: string, change: Partial<DraftSession>) => void;
   remove: (key: string) => void;
+  setConflicts: (workspaceId: string, message: string, items: ConflictItem[]) => void;
+  clearConflict: (key: string) => void;
+  say: (workspaceId: string, text: string, warnings?: string[]) => void;
 }
 
 export const sessionKey = (workspaceId: string, itemId: string) => `${workspaceId}/${itemId}`;
 
 export const useDraftSessions = create<SessionsState>()((set) => ({
   sessions: {},
+  conflicts: {},
+  said: {},
+  setConflicts: (workspaceId, message, items) =>
+    set((state) => ({
+      conflicts: {
+        ...state.conflicts,
+        ...Object.fromEntries(
+          items.map((conflict) => [
+            sessionKey(workspaceId, conflict.item_id),
+            { conflict, message },
+          ]),
+        ),
+      },
+    })),
+  clearConflict: (key) =>
+    set((state) => {
+      if (state.conflicts[key] === undefined) return state;
+      const { [key]: _resolved, ...conflicts } = state.conflicts;
+      return { conflicts };
+    }),
+  say: (workspaceId, text, warnings = []) =>
+    set((state) => ({ said: { ...state.said, [workspaceId]: { text, warnings } } })),
   put: (session) =>
     set((state) => ({
       sessions: { ...state.sessions, [sessionKey(session.workspaceId, session.itemId)]: session },
@@ -77,6 +130,10 @@ export const useDraftSessions = create<SessionsState>()((set) => ({
 
 export function useDraftSession(workspaceId: string, itemId: string): DraftSession | undefined {
   return useDraftSessions((state) => state.sessions[sessionKey(workspaceId, itemId)]);
+}
+
+export function useConflict(workspaceId: string, itemId: string): SnapshotConflict | undefined {
+  return useDraftSessions((state) => state.conflicts[sessionKey(workspaceId, itemId)]);
 }
 
 function ordered(value: unknown): unknown {
