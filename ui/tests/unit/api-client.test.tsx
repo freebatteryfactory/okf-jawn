@@ -49,7 +49,8 @@ afterEach(() => {
 });
 
 describe('the CSRF names', () => {
-  it('are the names of their security schemes in api/openapi.json', () => {
+  // The document is large; on a loaded machine reading it has taken longer than the default 5 s.
+  it('are the names of their security schemes in api/openapi.json', { timeout: 60_000 }, () => {
     const scheme = z.object({ in: z.string(), name: z.string() });
     const published = z
       .object({
