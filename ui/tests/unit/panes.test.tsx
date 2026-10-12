@@ -60,13 +60,16 @@ describe('tabs and panes', () => {
     mockApi(explorerHandlers());
     const { router } = await openTwoTabs();
     await userEvent.click(screen.getByRole('button', { name: 'Split right' }));
+    // The new pane is focused, and its name says so for assistive technology.
     const first = await screen.findByRole('region', { name: 'Documents, pane 1 of 2' });
-    const second = screen.getByRole('region', { name: 'Documents, pane 2 of 2' });
+    const second = screen.getByRole('region', { name: 'Documents, pane 2 of 2, focused' });
     expect(screen.getByRole('separator', { name: 'Resize panes 1 and 2' })).toBeTruthy();
     expect(within(second).getByRole('tab', { name: 'Plan', selected: true })).toBeTruthy();
     within(first).getByRole('tab', { name: 'Plan' }).focus();
     await userEvent.keyboard('{ArrowLeft}{Enter}');
     await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    expect(first.getAttribute('aria-label')).toBe('Documents, pane 1 of 2, focused');
+    expect(second.getAttribute('aria-label')).toBe('Documents, pane 2 of 2');
     expect(within(first).getByRole('tab', { name: 'Meeting notes', selected: true })).toBeTruthy();
     expect(within(second).getByRole('tab', { name: 'Plan', selected: true })).toBeTruthy();
     within(second).getByRole('tab', { name: 'Plan' }).focus();

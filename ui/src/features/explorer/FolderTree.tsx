@@ -278,9 +278,14 @@ function entryLabel(entry: TreeEntry): string {
   return extraction === null ? type : `${type}, ${extraction}`;
 }
 
-/** Arborist's row, with `aria-expanded` only on folders and Enter opening the entry. */
+/**
+ * Arborist's row, with `aria-expanded` only on folders and Enter opening the entry. The tree is
+ * virtualized, so not every entry is in the DOM: each row states its place among its siblings
+ * (`aria-posinset` of `aria-setsize`), as the WAI-ARIA tree pattern asks.
+ */
 function TreeRow({ node, attrs, innerRef, children }: RowRendererProps<TreeEntry>) {
   const { 'aria-expanded': _expanded, ...rest } = attrs;
+  const siblings = node.parent?.children?.length ?? 1;
   return (
     <div
       {...rest}
@@ -288,6 +293,8 @@ function TreeRow({ node, attrs, innerRef, children }: RowRendererProps<TreeEntry
       tabIndex={-1}
       aria-label={entryLabel(node.data)}
       aria-expanded={node.data.kind === 'folder' ? node.isOpen : undefined}
+      aria-setsize={siblings}
+      aria-posinset={node.childIndex + 1}
       ref={innerRef}
       onFocus={(event) => event.stopPropagation()}
       onClick={node.handleClick}

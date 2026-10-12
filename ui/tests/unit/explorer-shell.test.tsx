@@ -105,6 +105,21 @@ describe('folder tree', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('gives every virtualized row its place among its siblings (WAI-ARIA tree)', async () => {
+    mockApi(workspaceHandlers());
+    renderAt(`/w/${WS}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    const folder = await within(tree).findByRole('treeitem', { name: 'notes' });
+    const place = (row: HTMLElement) =>
+      `${row.getAttribute('aria-level')}:${row.getAttribute('aria-posinset')}/${row.getAttribute('aria-setsize')}`;
+    expect(place(folder)).toBe('1:1/2');
+    expect(place(within(tree).getByRole('treeitem', { name: /Annual report/ }))).toBe('1:2/2');
+    await userEvent.click(folder);
+    const note = await within(tree).findByRole('treeitem', { name: /Meeting notes/ });
+    expect(place(note)).toBe('2:1/2');
+    expect(place(within(tree).getByRole('treeitem', { name: /Plan/ }))).toBe('2:2/2');
+  });
+
   it('pages a long folder through the listing cursor', async () => {
     const api = mockApi({
       ...workspaceHandlers(),

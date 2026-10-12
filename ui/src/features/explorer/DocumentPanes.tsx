@@ -4,7 +4,8 @@
  * Base UI Tabs give each pane a tab list with arrow-key movement and Enter/Space activation;
  * Delete closes the focused tab. The close and split buttons sit beside the tab list, not in it,
  * so the tab list holds only tabs. react-resizable-panels separators resize panes with the
- * keyboard as well as the pointer. The focused pane is the one the URL describes.
+ * keyboard as well as the pointer. The focused pane is the one the URL describes; with several
+ * panes its region name ends in ", focused", so assistive technology can tell which one it is.
  */
 import { Tabs } from '@base-ui/react/tabs';
 import { useQuery } from '@tanstack/react-query';
@@ -100,7 +101,11 @@ function DocumentPane({
   onReadLatest,
 }: DocumentPanesProps & { pane: Pane; index: number }) {
   const focused = pane.id === focusedPaneId;
-  const label = panes.length > 1 ? `Documents, pane ${index + 1} of ${panes.length}` : 'Documents';
+  // With several panes, the name says which one the URL describes, not only the inset line.
+  const label =
+    panes.length > 1
+      ? `Documents, pane ${index + 1} of ${panes.length}${focused ? ', focused' : ''}`
+      : 'Documents';
   const active = focused ? urlItemId : pane.active;
   return (
     <section
