@@ -171,6 +171,38 @@ describe('search', () => {
     expect(within(results).getByText('1 result shown; more could not be loaded.')).toBeTruthy();
   });
 
+  it('shows a failed "more results" page, keeping the results already shown (P3)', async () => {
+    mockApi(
+      explorerHandlers({
+        [SEARCH]: (body) =>
+          (body.page as { cursor: string | null }).cursor === 'more'
+            ? fail(500, 'internal', 'index stumbled')
+            : ok({
+                hits: [hit(NOTE, 'Meeting notes', 'notes/meeting.md', 4)],
+                revision: HEAD,
+                next_cursor: 'more',
+              }),
+      }),
+    );
+    renderAt(`/w/${WS}?q=budget`);
+    const results = await screen.findByRole('region', { name: 'Results for “budget”' });
+    await userEvent.click(
+      await within(results).findByRole('button', { name: 'Show more results' }),
+    );
+    const alert = await within(results).findByRole('alert');
+    expect(alert.textContent).toContain('Loading more results: Something went wrong');
+    expect(within(results).getByRole('link', { name: /Meeting notes/ })).toBeTruthy();
+  });
+
+  it('round-trips a query that looks like JSON (a year) as text (P4)', async () => {
+    const api = mockApi(explorerHandlers({ [SEARCH]: () => ok({ hits: [], revision: HEAD }) }));
+    renderAt(`/w/${WS}`);
+    const input = await screen.findByRole('searchbox', { name: 'Search this workspace' });
+    await userEvent.type(input, '2026{Enter}');
+    await screen.findByText('No matches for “2026”.');
+    expect(api.callsTo(SEARCH)[0]?.query).toBe('2026');
+  });
+
   it('says there are no matches, and goes back to the folders', async () => {
     mockApi(explorerHandlers({ [SEARCH]: () => ok({ hits: [], revision: HEAD }) }));
     const { router } = renderAt(`/w/${WS}?q=nothing`);

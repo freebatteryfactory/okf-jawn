@@ -201,6 +201,24 @@ describe('reading', () => {
     expect(within(article).getByText('The rest of this reading could not be read.')).toBeTruthy();
   });
 
+  it('shows a failed continuation, keeping the part already read (P3)', async () => {
+    mockApi(
+      explorerHandlers({
+        [READ]: (body) =>
+          body.cursor === 'part-2'
+            ? fail(500, 'internal', 'storage stumbled')
+            : ok(readResponse(noteSummary, 'Part one', { truncated: true, next_cursor: 'part-2' })),
+      }),
+    );
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    const article = await screen.findByRole('article', { name: 'Meeting notes' });
+    await within(article).findByText('Part one');
+    await userEvent.click(within(article).getByRole('button', { name: 'Continue reading' }));
+    const alert = await within(article).findByRole('alert');
+    expect(alert.textContent).toContain('Continuing this reading: Something went wrong');
+    expect(within(article).getByText('Part one')).toBeTruthy();
+  });
+
   it('says when a source is partly converted, agent-supplied or corrected', async () => {
     mockApi(
       explorerHandlers({

@@ -346,6 +346,64 @@ describe('deep links', () => {
   });
 });
 
+describe('P3 failures: an unbuilt listing is never an empty workspace', () => {
+  it('shows a NotImplemented root listing as not available, never as "no folders or items"', async () => {
+    mockApi({ ...workspaceHandlers(), [LIST]: () => notImplemented('list_items') });
+    renderAt(`/w/${WS}`);
+    const tree = await screen.findByRole('region', { name: 'Folders' });
+    const alert = await within(tree).findByRole('alert');
+    expect(alert.textContent).toContain('Listing this workspace: Not available in this build.');
+    expect(within(tree).queryByText(/no folders or items/)).toBeNull();
+  });
+
+  it('shows an unbuilt open_workspace as not available', async () => {
+    mockApi({
+      ...workspaceHandlers(),
+      '/api/workspaces/open-workspace': () => notImplemented('open_workspace'),
+    });
+    renderAt(`/w/${WS}`);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Opening this workspace: Not available in this build.');
+    expect(screen.queryByRole('tree')).toBeNull();
+  });
+});
+
+describe('P4 state: revision and selection travel together in the URL', () => {
+  it('reopens a deep link with both a cited revision and a selection, and keeps the revision when the whole item is shown', async () => {
+    const api = mockApi(workspaceHandlers());
+    const selection = { kind: 'lines', range: { start: 2, end: 3 } };
+    const { router } = renderAt(
+      `/w/${WS}/i/${NOTE}?sel=${encodeURIComponent(JSON.stringify(selection))}&rev=${OLD}`,
+    );
+    // Adapted: the cited-revision notice now reads "You are reading revision …".
+    await screen.findByText(/You are reading revision/);
+    await waitFor(() => expect(api.callsTo(READ).length).toBeGreaterThan(0));
+    expect(api.callsTo(READ)[0]?.at).toEqual({ kind: 'revision', revision: OLD });
+    expect(api.callsTo(READ)[0]?.selection).toEqual(selection);
+    await userEvent.click(screen.getByRole('button', { name: 'Show the whole item' }));
+    await waitFor(() => expect(router.state.location.search).toEqual({ rev: OLD }));
+    expect(api.callsTo(READ).at(-1)?.at).toEqual({ kind: 'revision', revision: OLD });
+  });
+
+  it('writes an outline choice into the URL selection', async () => {
+    const section = { kind: 'section', heading: 'Budget' } as const;
+    mockApi({
+      ...workspaceHandlers(),
+      [READ]: () =>
+        ok(
+          readResponse(noteSummary, '# Meeting notes\n\n## Budget\n\nText', {
+            outline: [{ kind: 'heading', label: 'Budget', level: 2, selection: section }],
+          }),
+        ),
+    });
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}`);
+    const article = await screen.findByRole('article', { name: 'Meeting notes' });
+    await userEvent.click(await within(article).findByText('Outline (1)'));
+    await userEvent.click(within(article).getByRole('button', { name: 'Budget' }));
+    await waitFor(() => expect(router.state.location.search).toEqual({ sel: section }));
+  });
+});
+
 describe('revealing a linked item', () => {
   it('reveals a cited item where the listed head holds it, found by id, and lists only the head', async () => {
     // At the cited revision the note lived in archive/; at the head it is in notes/.
