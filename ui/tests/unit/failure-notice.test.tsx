@@ -56,7 +56,8 @@ type Answer = 'content' | ErrorCode;
 
 /**
  * An operation as a query with nothing loaded behaves: it leaves its failed state the moment it
- * is asked again, and holds each answer until the test gives it.
+ * is asked again, and holds each answer until the test gives it. Pressing "Elsewhere" renders the
+ * caller again, as any change of its state does, and counts the presses.
  */
 function Operation({
   asked,
@@ -65,6 +66,7 @@ function Operation({
   asked: Array<(answer: Answer) => void>;
   request?: string;
 }) {
+  const [presses, setPresses] = useState(0);
   const [state, setState] = useState<{ status: 'failed' | 'asking' | 'loaded'; error: unknown }>({
     status: 'failed',
     error: apiError('internal'),
@@ -89,7 +91,9 @@ function Operation({
   });
   return (
     <>
-      <button type="button">Elsewhere</button>
+      <button type="button" data-presses={presses} onClick={() => setPresses(presses + 1)}>
+        Elsewhere
+      </button>
       {state.status === 'asking' && !retry.retrying && <p>Asking…</p>}
       {retry.shown && <FailureNotice context="Opening" error={retry.error} retry={retry} />}
       {state.status === 'loaded' && (
@@ -357,6 +361,25 @@ describe('a retry never unmounts the focused control', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(document.activeElement).toBe(elsewhere);
   });
+
+  it.each([
+    ['succeeded', 'content', 'The content'],
+    ['failed again', 'unavailable', 'Try again'],
+  ] as const)(
+    'follows a retry that %s once: when the caller renders again, focus the person has moved stays where it is',
+    async (_outcome, given, followedTo) => {
+      const { answer } = failedWithFocus();
+      await userEvent.keyboard('{Enter}');
+      answer(1, given);
+      await waitFor(() => expect(document.activeElement?.textContent).toBe(followedTo));
+      // The person moves on, and each press renders the caller again.
+      const elsewhere = screen.getByRole('button', { name: 'Elsewhere' });
+      await userEvent.click(elsewhere);
+      await userEvent.click(elsewhere);
+      expect(elsewhere.getAttribute('data-presses')).toBe('2');
+      expect(document.activeElement).toBe(elsewhere);
+    },
+  );
 
   it('does not show a retry in flight for another request as this one’s', async () => {
     const { asked, rerender, answer } = failedWithFocus('one');
