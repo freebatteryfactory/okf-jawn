@@ -1226,6 +1226,54 @@ mod retains_images {
     }
 
     #[test]
+    fn an_unmatched_picture_in_a_format_without_pages_has_no_locator_to_take() -> TestResult {
+        let no_locator = SourceLocation::Unresolved {
+            reason: UnresolvedReason::FormatHasNoLocator,
+        };
+        // A document with no page (a DOCX): a picture in a rich table cell, which the export
+        // does not list, and a body picture, which it does.
+        let rich_cell = || Table {
+            rows: vec![vec!["a".to_owned()]],
+            cell_blocks: Some(vec![vec![vec![picture(
+                Some("An icon"),
+                Some(image(4, 4, b"icon")),
+            )]]]),
+            ..Table::default()
+        };
+        let mut pageless = DoclingDocument::new("letter");
+        pageless.push(Node::Table(rich_cell()));
+        pageless.push(picture(Some("A logo"), Some(image(8, 8, b"logo"))));
+        let directory = tempfile::tempdir()?;
+        let reply = child_outputs(directory.path(), &pageless, false)?;
+        // The icon is the unmatched picture: the child paired it with no export item.
+        let paired: Vec<Option<usize>> = reply.assets.iter().map(|asset| asset.picture).collect();
+        assert_eq!(paired, [None, Some(0)]);
+        let (converted, _coverage) = read_window(directory.path(), None, &reply)?;
+        let located: Vec<(Option<&str>, &SourceLocation)> = converted
+            .assets
+            .iter()
+            .map(|asset| (asset.caption.as_deref(), &asset.location))
+            .collect();
+        assert_eq!(
+            located,
+            [
+                (Some("An icon"), &no_locator),
+                (Some("A logo"), &no_locator)
+            ]
+        );
+
+        // The same unmatched picture on a page: the format has a locator, and the converter
+        // gave this picture none.
+        let mut paged = one_page();
+        paged.push(Node::Table(rich_cell()));
+        let pictures = pictures_of(&paged)?;
+        let (icon, _bytes) = some(pictures.first(), "the icon")?;
+        assert_eq!(pictures.len(), 1);
+        assert_eq!(icon.location, not_located());
+        Ok(())
+    }
+
+    #[test]
     fn page_images_on_keep_one_render_per_converted_page_and_off_keep_none() -> TestResult {
         let directory = tempfile::tempdir()?;
         let reply = child_outputs(directory.path(), &figure_document(), true)?;
@@ -1461,7 +1509,7 @@ mod conversion_child {
     use okf_jawn_ingest::converter::{
         CHILD_INHERITED_DOCLING_ENV, ConverterConfig, DoclingConverter, child_command,
     };
-    use okf_jawn_ingest::protocol::{REQUEST_FILE, RESULT_FILE, Request, Task};
+    use okf_jawn_ingest::protocol::{REQUEST_FILE, RESULT_FILE, Reply, Request, Task};
     use okf_jawn_ingest::record::sha256_digest;
 
     use crate::check::{TestResult, some};
@@ -1697,14 +1745,23 @@ mod conversion_child {
         assert_eq!(picture.media_type, "image/jpeg");
         assert_eq!(std::fs::read(&picture.path)?, jpeg);
         assert!(picture.pixel_size.is_some(), "{picture:?}");
-        // Paired with its export item, whose format has no pages (an unpaired picture would be
-        // `NotLocatedByConverter`).
+        // A DOCX has no pages, so the picture has no locator to take, paired or not.
         assert_eq!(
             picture.location,
             SourceLocation::Unresolved {
                 reason: UnresolvedReason::FormatHasNoLocator
             }
         );
+        // The location no longer tells a paired picture from an unpaired one in such a format;
+        // the child's own reply does: it paired the picture with the export's one item.
+        let reply = Reply::decode(&std::fs::read(output.path().join(RESULT_FILE))?)?;
+        let paired: Vec<Option<usize>> = reply
+            .assets
+            .iter()
+            .filter(|asset| asset.role == AssetRole::Picture)
+            .map(|asset| asset.picture)
+            .collect();
+        assert_eq!(paired, [Some(0)]);
         Ok(())
     }
 
