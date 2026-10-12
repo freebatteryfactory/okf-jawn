@@ -146,6 +146,15 @@ pub enum At {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityError(pub &'static str);
 
+/// The fixed tenant of a local installation (`TenantId::local`).
+///
+/// Every local principal, the local owner and every local connector alike, carries this
+/// tenant. Workspace backups and installation archives record it, and storage scopes by it, so
+/// the value must never change once shipped: an archive written under one value would not
+/// restore under another. A hosted tenant id is the WorkOS organization id and is never this
+/// value.
+pub const LOCAL_TENANT_ID: &str = "local";
+
 /// The part of the workspace-path rule a regular expression can state: `/`-separated
 /// segments, none empty, none containing `\`, `:`, `<`, `>`, `"`, `|`, `?`, `*` or a C0
 /// control. Not expressible by the pattern, and enforced by `TryFrom<String>`: the `.`, `..`
@@ -251,6 +260,12 @@ impl JsonSchema for TenantId {
     }
 }
 impl TenantId {
+    /// The fixed tenant of a local installation, [`LOCAL_TENANT_ID`].
+    #[must_use]
+    pub fn local() -> Self {
+        Self(LOCAL_TENANT_ID.to_owned())
+    }
+
     /// Return the validated tenant identifier.
     #[must_use]
     pub fn as_str(&self) -> &str {

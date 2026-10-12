@@ -9,6 +9,7 @@
 use check::{TestResult, err_of, some};
 use okf_jawn_contract::access::{CSRF_COOKIE, CSRF_HEADER};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::{LOCAL_TENANT_ID, TenantId};
 use okf_jawn_contract::import::CorrectDigestRequest;
 use okf_jawn_contract::item::{CreateItemRequest, MAX_ITEM_TEXT_BYTES, SaveDraftRequest};
 use okf_jawn_contract::proposal::OpenProposalRequest;
@@ -121,6 +122,21 @@ fn the_csrf_double_submit_names_are_pinned() {
             .all(|byte| byte.is_ascii_lowercase() || byte == b'-'),
         "an HTTP header name, written in lowercase as HTTP/2 sends it"
     );
+}
+
+/// Backups and archives carry the local tenant, so its value never changes; `TenantId::local`
+/// builds it without parsing, so it must equal the validated parse of the same value.
+#[test]
+fn the_local_tenant_is_pinned_and_is_a_valid_tenant_id() -> TestResult {
+    assert_eq!(LOCAL_TENANT_ID, "local");
+    let parsed = TenantId::try_from(LOCAL_TENANT_ID.to_owned())?;
+    assert_eq!(TenantId::local(), parsed);
+    assert_eq!(TenantId::local().as_str(), LOCAL_TENANT_ID);
+    assert_eq!(
+        serde_json::to_value(TenantId::local())?,
+        json!(LOCAL_TENANT_ID)
+    );
+    Ok(())
 }
 
 #[test]
