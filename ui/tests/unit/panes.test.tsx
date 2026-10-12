@@ -90,3 +90,19 @@ describe('tabs and panes', () => {
     expect(stored).toContain(OTHER);
   });
 });
+
+describe('the URL owns the focused pane', () => {
+  it('shows no document when the URL names no item, keeping the tab to return to', async () => {
+    mockApi(explorerHandlers());
+    const { router } = renderAt(`/w/${WS}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    await userEvent.click(await within(tree).findByRole('treeitem', { name: 'notes' }));
+    await userEvent.click(await within(tree).findByRole('treeitem', { name: /Meeting notes/ }));
+    expect(await screen.findByRole('article', { name: 'Meeting notes' })).toBeTruthy();
+    router.history.back();
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}`));
+    await waitFor(() => expect(screen.queryByRole('article')).toBeNull());
+    expect(screen.getByRole('tab', { name: 'Meeting notes', selected: false })).toBeTruthy();
+    expect(screen.getByText('Choose one of the open items, or open another.')).toBeTruthy();
+  });
+});

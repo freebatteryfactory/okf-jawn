@@ -136,6 +136,7 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
             head={head}
             panes={view.panes}
             focusedPaneId={view.focusedPaneId}
+            urlItemId={itemId}
             selection={search.sel}
             revision={search.rev}
             onActivate={(paneId, target) => {

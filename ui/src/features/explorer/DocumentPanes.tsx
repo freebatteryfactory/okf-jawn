@@ -20,6 +20,8 @@ export interface DocumentPanesProps {
   head: Revision;
   panes: readonly Pane[];
   focusedPaneId: string;
+  /** The item the URL names: what the focused pane shows, whatever tab it last had open. */
+  urlItemId: string | null;
   /** The URL's selection and cited revision, which apply to the focused pane's open item. */
   selection: ItemSelection | undefined;
   revision: Revision | undefined;
@@ -82,6 +84,7 @@ function DocumentPane({
   head,
   panes,
   focusedPaneId,
+  urlItemId,
   selection,
   revision,
   pane,
@@ -95,7 +98,7 @@ function DocumentPane({
 }: DocumentPanesProps & { pane: Pane; index: number }) {
   const focused = pane.id === focusedPaneId;
   const label = panes.length > 1 ? `Documents, pane ${index + 1} of ${panes.length}` : 'Documents';
-  const active = pane.active;
+  const active = focused ? urlItemId : pane.active;
   return (
     <section
       aria-label={label}
@@ -104,7 +107,7 @@ function DocumentPane({
         if (!focused) onFocusPane(pane.id);
       }}
     >
-      {active === null ? (
+      {pane.tabs.length === 0 && active === null ? (
         <p className="empty-pane">Open an item from the folders or the search results.</p>
       ) : (
         <Tabs.Root
@@ -134,28 +137,40 @@ function DocumentPane({
             <div className="pane-actions">
               <button
                 type="button"
-                disabled={panes.length >= MAX_PANES}
-                onClick={() => onSplit(pane.id, active)}
+                disabled={active === null || panes.length >= MAX_PANES}
+                onClick={() => {
+                  if (active !== null) onSplit(pane.id, active);
+                }}
               >
                 Split right
               </button>
-              <button type="button" onClick={() => onClose(pane.id, active)}>
+              <button
+                type="button"
+                disabled={active === null}
+                onClick={() => {
+                  if (active !== null) onClose(pane.id, active);
+                }}
+              >
                 Close tab
               </button>
             </div>
           </div>
-          <Tabs.Panel value={active} className="tab-panel">
-            <DocumentView
-              key={active}
-              workspaceId={workspaceId}
-              itemId={active}
-              head={head}
-              revision={focused && revision !== undefined ? revision : head}
-              selection={focused ? selection : undefined}
-              onSelect={(next) => onSelect(active, next)}
-              onReadLatest={() => onReadLatest(active)}
-            />
-          </Tabs.Panel>
+          {active === null ? (
+            <p className="empty-pane">Choose one of the open items, or open another.</p>
+          ) : (
+            <Tabs.Panel value={active} className="tab-panel">
+              <DocumentView
+                key={active}
+                workspaceId={workspaceId}
+                itemId={active}
+                head={head}
+                revision={focused && revision !== undefined ? revision : head}
+                selection={focused ? selection : undefined}
+                onSelect={(next) => onSelect(active, next)}
+                onReadLatest={() => onReadLatest(active)}
+              />
+            </Tabs.Panel>
+          )}
         </Tabs.Root>
       )}
     </section>
