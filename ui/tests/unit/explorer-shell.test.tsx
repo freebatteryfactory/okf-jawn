@@ -164,8 +164,33 @@ describe('folder tree', () => {
       { name: /Could not list this folder: Something went wrong in the service/ },
       { timeout: 3000 },
     );
+    expect(failed.getAttribute('aria-label')).toBe(
+      'Could not list this folder: Something went wrong in the service. The service said: “storage stumbled”. Press Enter to try again.',
+    );
     await userEvent.click(failed);
     expect(await within(tree).findByRole('treeitem', { name: /Meeting notes/ })).toBeTruthy();
+  });
+
+  it('offers no retry in a failed folder row the failure does not allow, and keeps the server words', async () => {
+    const api = mockApi({
+      ...workspaceHandlers(),
+      [LIST]: (body) =>
+        body.folder === 'notes' ? notImplemented('list_items') : ok(listing(['notes'], [])),
+    });
+    renderAt(`/w/${WS}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    await userEvent.click(await within(tree).findByRole('treeitem', { name: 'notes' }));
+    const failed = await within(tree).findByRole('treeitem', {
+      name: /Could not list this folder: Not available in this build/,
+    });
+    expect(failed.getAttribute('aria-label')).toBe(
+      'Could not list this folder: Not available in this build. The service said: “list_items is not implemented in this build”.',
+    );
+    const before = api.callsTo(LIST).length;
+    failed.focus();
+    await userEvent.keyboard('{Enter}');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(api.callsTo(LIST).length).toBe(before);
   });
 });
 

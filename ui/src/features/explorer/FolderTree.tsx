@@ -66,14 +66,30 @@ const folderId = (folder: string) => `folder:${folder}`;
 const itemNodeId = (itemId: string) => `item:${itemId}`;
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
 
+/** Whether a failed listing may pass when repeated, so its row offers Enter to try again. */
+function retryable(error: unknown): boolean {
+  return messageFor(classifyFailure(error)).action.kind === 'retry';
+}
+
+/** A failure in the tree's words: what happened, the server's own message, and what Enter does. */
+function describeListingFailure(error: unknown): string {
+  const failure = classifyFailure(error);
+  const said =
+    failure.kind === 'api' && failure.error.message.length > 0
+      ? ` The service said: “${failure.error.message}”.`
+      : '';
+  const retry = retryable(error) ? ' Press Enter to try again.' : '';
+  return `${messageFor(failure).title}${said}${retry}`;
+}
+
 function statusEntry(folder: string, status: StatusKind, error: unknown = null): TreeEntry {
-  const failure = error === null ? null : messageFor(classifyFailure(error)).title;
+  const failure = error === null ? '' : describeListingFailure(error);
   const name = {
     loading: 'Loading…',
-    error: `Could not list this folder: ${failure ?? ''} Press Enter to try again.`,
+    error: `Could not list this folder: ${failure}`,
     more: 'Show more entries',
     'more-loading': 'Loading more entries…',
-    'more-error': `Could not list more entries: ${failure ?? ''} Press Enter to try again.`,
+    'more-error': `Could not list more entries: ${failure}`,
   }[status];
   return {
     id: `${status}:${folder}`,
@@ -186,7 +202,10 @@ export function FolderTree({
     if (entry.kind === 'item' && entry.item !== null) onOpenItem(entry.item.id);
     else if (entry.kind === 'folder') node.toggle();
     else if (entry.status === 'more') showMore(workspaceId, entry.folder);
-    else if (entry.status === 'error' || entry.status === 'more-error') {
+    else if (
+      (entry.status === 'error' || entry.status === 'more-error') &&
+      retryable(entry.error)
+    ) {
       void listings.get(entry.folder)?.refetch();
     }
   };
