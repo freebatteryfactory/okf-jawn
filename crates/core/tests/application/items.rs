@@ -135,7 +135,87 @@ async fn list_items_lists_one_folder_at_the_head_resolved_once() -> TestResult {
     assert_eq!(response.revision, revision('a')?);
     assert_eq!(response.items.len(), 2);
     assert_eq!(response.folders, vec!["notes/old".to_owned()]);
-    assert_eq!(response.next_cursor.as_deref(), Some("next"));
+    // The continuation is this service's cursor, not the store's own.
+    let next = some(response.next_cursor, "a continuation")?;
+    assert_ne!(next, "next");
+    Ok(())
+}
+
+/// A listing of `notes` at `at`, 50 entries a page.
+fn listing_of_notes(at: At, cursor: Option<String>) -> Built<ListItemsRequest> {
+    Ok(ListItemsRequest {
+        workspace_id: scope()?.workspace_id,
+        at,
+        folder: "notes".to_owned(),
+        extraction: None,
+        page: PageRequest { cursor, limit: 50 },
+    })
+}
+
+#[tokio::test]
+async fn a_listing_continues_at_the_revision_its_first_page_resolved() -> TestResult {
+    let world = World::new()?;
+    let mut archived = listed(2, None)?;
+    archived.archived = true;
+    world.versions.put_listing(
+        &revision('a')?,
+        Some(path("notes")?),
+        FolderListing {
+            items: vec![listed(1, None)?, archived],
+            folders: Vec::new(),
+            next_cursor: Some("next".to_owned()),
+        },
+    )?;
+    let caller = alice(OperationName::ListItems, None)?;
+    let first = world
+        .service
+        .list_items(&caller, listing_of_notes(At::Latest, None)?)
+        .await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    // A write lands: `latest` is `b` now, which holds no `notes` folder.
+    world.versions.set_head(revision('b')?)?;
+    let second = world
+        .service
+        .list_items(&caller, listing_of_notes(At::Latest, Some(cursor.clone()))?)
+        .await?;
+    assert_eq!(second.revision, revision('a')?);
+    // Still the current listing it began as: its archived item stays hidden.
+    let ids: Vec<ItemId> = second.items.iter().map(|item| item.id).collect();
+    assert_eq!(ids, vec![ItemId(Uuid::from_u128(1))]);
+    // Both pages listed the first page's revision, and the store got its own cursor back.
+    let asked: Vec<_> = world
+        .versions
+        .list_queries()?
+        .into_iter()
+        .map(|(at, folder, page)| (at, folder, page.cursor, page.limit))
+        .collect();
+    assert_eq!(
+        asked,
+        vec![
+            (revision('a')?, Some(path("notes")?), None, 50),
+            (
+                revision('a')?,
+                Some(path("notes")?),
+                Some("next".to_owned()),
+                50
+            ),
+        ]
+    );
+    // A cursor this operation did not issue, and one that continues another revision's listing.
+    let named_b = At::Revision {
+        revision: revision('b')?,
+    };
+    for (at, text) in [(At::Latest, "next".to_owned()), (named_b, cursor)] {
+        let refused = err_of(
+            world
+                .service
+                .list_items(&caller, listing_of_notes(at, Some(text))?)
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert_eq!(refused.field.as_deref(), Some("/page/cursor"));
+    }
+    assert_eq!(world.versions.list_queries()?.len(), 2);
     Ok(())
 }
 

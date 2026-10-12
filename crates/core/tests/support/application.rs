@@ -39,6 +39,9 @@
 //! answers `Unavailable` for a revision it has not indexed, as its port documents, and applies
 //! the query's filters to the entries a test scripted (`put_entry`, `put_link`): the archived
 //! flag unless archived items are included, the extraction filter, the folder and the text.
+//! Search hits and links are paged as storage pages them: from the offset the decimal cursor
+//! names, with the next offset as the cursor while entries remain. `list` records the page each
+//! call asked for (`list_queries`) and answers the scripted listing whatever the page.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -172,6 +175,7 @@ struct VersionState {
     log_queries: Vec<LogQuery>,
     diff_queries: Vec<DiffQuery>,
     blame_queries: Vec<BlameQuery>,
+    list_queries: Vec<(Revision, Option<WorkspacePath>, Page)>,
 }
 
 /// `BlobStore` over a map of digests to bytes.
@@ -533,6 +537,14 @@ impl FakeVersions {
     /// Returns when the lock is poisoned.
     pub fn log_queries(&self) -> Built<Vec<LogQuery>> {
         Ok(lock(&self.state)?.log_queries.clone())
+    }
+
+    /// Every `list` call, in order: the revision, the folder and the page asked for.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn list_queries(&self) -> Built<Vec<(Revision, Option<WorkspacePath>, Page)>> {
+        Ok(lock(&self.state)?.list_queries.clone())
     }
 
     /// Every `diff` query, in order.
@@ -993,10 +1005,13 @@ impl VersionStore for FakeVersions {
         _scope: &'a StorageScope,
         revision: &'a Revision,
         folder: Option<&'a WorkspacePath>,
-        _page: Page,
+        page: Page,
     ) -> PortFuture<'a, FolderListing> {
         Box::pin(async move {
-            let state = lock_api(&self.state)?;
+            let mut state = lock_api(&self.state)?;
+            state
+                .list_queries
+                .push((revision.clone(), folder.cloned(), page));
             if let Some((_, _, listing)) = state
                 .listings
                 .iter()
@@ -1609,7 +1624,7 @@ impl SearchIndex for FakeSearch {
         Box::pin(async move {
             lock_api(&self.link_queries)?.push(query.clone());
             self.require_indexed(&query.revision)?;
-            let links = lock_api(&self.links)?
+            let matching: Vec<Link> = lock_api(&self.links)?
                 .iter()
                 .filter(|(at, _)| *at == query.revision)
                 .map(|(_, link)| link)
@@ -1622,13 +1637,20 @@ impl SearchIndex for FakeSearch {
                         LinkDirection::Both => outgoing || incoming,
                     }
                 })
-                .take(usize::from(query.page.limit.max(1)))
                 .cloned()
                 .collect();
+            let start = query
+                .page
+                .cursor
+                .as_deref()
+                .map_or(Ok(0), str::parse::<usize>)
+                .map_err(internal)?;
+            let limit = usize::from(query.page.limit.max(1));
+            let end = start.saturating_add(limit);
             Ok(GetLinksResponse {
                 revision: query.revision,
-                links,
-                next_cursor: None,
+                next_cursor: (end < matching.len()).then(|| end.to_string()),
+                links: matching.into_iter().skip(start).take(limit).collect(),
             })
         })
     }

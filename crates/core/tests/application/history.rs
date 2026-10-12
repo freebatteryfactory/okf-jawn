@@ -4,6 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::{PageRequest, TextRange};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
@@ -153,30 +155,204 @@ async fn log_items_walks_back_from_the_head_resolved_once_for_one_item() -> Test
             next_cursor: Some("1".to_owned()),
         },
     )?;
-    let response = world
-        .service
-        .log_items(
-            &alice(OperationName::LogItems, None)?,
-            LogRequest {
-                workspace_id: scope()?.workspace_id,
-                item_id: Some(item(NOTE)),
-                at: At::Latest,
-                page: PageRequest {
-                    cursor: Some("0".to_owned()),
-                    limit: 20,
-                },
-            },
-        )
-        .await?;
+    let request = |cursor: Option<String>| -> Built<LogRequest> {
+        Ok(LogRequest {
+            workspace_id: scope()?.workspace_id,
+            item_id: Some(item(NOTE)),
+            at: At::Latest,
+            page: PageRequest { cursor, limit: 20 },
+        })
+    };
+    let caller = alice(OperationName::LogItems, None)?;
+    let response = world.service.log_items(&caller, request(None)?).await?;
     assert_eq!(response.commits.len(), 1);
-    assert_eq!(response.next_cursor.as_deref(), Some("1"));
+    // The continuation is this service's cursor, not the store's own.
+    let next = some(response.next_cursor, "a continuation")?;
+    assert_ne!(next, "1");
     let queries = world.versions.log_queries()?;
     let query = some(queries.first(), "the log query")?;
     assert_eq!(queries.len(), 1);
     assert_eq!(query.tip, head);
     assert_eq!(query.item_id, Some(item(NOTE)));
-    assert_eq!(query.page.cursor.as_deref(), Some("0"));
+    assert_eq!(query.page.cursor, None);
     assert_eq!(query.page.limit, 20);
+    // The store gets its own cursor back, and the same tip.
+    world
+        .service
+        .log_items(&caller, request(Some(next))?)
+        .await?;
+    let queries = world.versions.log_queries()?;
+    let query = some(queries.get(1), "the second log query")?;
+    assert_eq!(query.tip, head);
+    assert_eq!(query.page.cursor.as_deref(), Some("1"));
+    assert_eq!(query.page.limit, 20);
+    Ok(())
+}
+
+/// A Timeline of the workspace at `at`, `limit` commits a page.
+fn timeline(at: At, cursor: Option<String>, limit: u16) -> Built<LogRequest> {
+    Ok(LogRequest {
+        workspace_id: scope()?.workspace_id,
+        item_id: None,
+        at,
+        page: PageRequest { cursor, limit },
+    })
+}
+
+/// A world whose head `a` has the history `3`, `2`, `1`, newest first, read two commits a page;
+/// once the head is `b`, a Snapshot on top of `a`, its history is `b`, `3`, `2`, `1`.
+fn paged_timeline() -> Built<World> {
+    let world = World::new()?;
+    let history = |fills: &[char]| -> Built<LogResponse> {
+        Ok(LogResponse {
+            commits: fills
+                .iter()
+                .map(|fill| wire_commit(*fill))
+                .collect::<Built<_>>()?,
+            next_cursor: None,
+        })
+    };
+    world
+        .versions
+        .put_log(&revision('a')?, None, history(&['3', '2', '1'])?)?;
+    world
+        .versions
+        .put_log(&revision('b')?, None, history(&['b', '3', '2', '1'])?)?;
+    world.versions.page_log(2)?;
+    Ok(world)
+}
+
+#[tokio::test]
+async fn a_snapshot_between_two_pages_of_a_timeline_repeats_and_skips_no_commit() -> TestResult {
+    let world = paged_timeline()?;
+    let caller = alice(OperationName::LogItems, None)?;
+    let first = world
+        .service
+        .log_items(&caller, timeline(At::Latest, None, 2)?)
+        .await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    // A Snapshot lands: `latest` is `b` now, whose second page starts one commit earlier.
+    world.versions.set_head(revision('b')?)?;
+    let second = world
+        .service
+        .log_items(&caller, timeline(At::Latest, Some(cursor), 2)?)
+        .await?;
+    assert_eq!(second.next_cursor, None);
+    let listed: Vec<_> = first
+        .commits
+        .iter()
+        .chain(&second.commits)
+        .map(|commit| commit.revision.clone())
+        .collect();
+    assert_eq!(
+        listed,
+        vec![revision('3')?, revision('2')?, revision('1')?],
+        "each commit of the Timeline once"
+    );
+    // Both pages walked back from the tip the first page resolved.
+    let tips: Vec<_> = world
+        .versions
+        .log_queries()?
+        .into_iter()
+        .map(|query| (query.tip, query.page.cursor))
+        .collect();
+    assert_eq!(
+        tips,
+        vec![
+            (revision('a')?, None),
+            (revision('a')?, Some("2".to_owned()))
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_timeline_cursor_is_refused_unless_this_operation_issued_it_for_the_revision_named()
+-> TestResult {
+    let world = paged_timeline()?;
+    let caller = alice(OperationName::LogItems, None)?;
+    let first = world
+        .service
+        .log_items(&caller, timeline(At::Latest, None, 2)?)
+        .await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    let asked = world.versions.log_queries()?.len();
+    let named = |fill: char| -> Built<At> {
+        Ok(At::Revision {
+            revision: revision(fill)?,
+        })
+    };
+    // Not a cursor at all; the store's own cursor; JSON of another shape; a cursor with a field
+    // this service never wrote; and a real cursor cut short.
+    let shaped = |value: serde_json::Value| URL_SAFE_NO_PAD.encode(value.to_string());
+    let tampered = [
+        "not-a-cursor".to_owned(),
+        "2".to_owned(),
+        shaped(json!({})),
+        shaped(json!({ "tip": "a".repeat(40), "next": "2", "limit": 500 })),
+        shaped(json!({ "tip": "not a revision", "next": "2" })),
+        cursor
+            .chars()
+            .take(cursor.len().saturating_sub(3))
+            .collect(),
+    ];
+    for text in tampered {
+        let refused = err_of(
+            world
+                .service
+                .log_items(&caller, timeline(At::Latest, Some(text.clone()), 2)?)
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput, "{text}");
+        assert_eq!(refused.field.as_deref(), Some("/page/cursor"), "{text}");
+    }
+    // A real cursor, with another revision named than the one it continues.
+    world.versions.set_head(revision('b')?)?;
+    let elsewhere = err_of(
+        world
+            .service
+            .log_items(&caller, timeline(named('b')?, Some(cursor.clone()), 2)?)
+            .await,
+    )?;
+    assert_eq!(elsewhere.code, ErrorCode::InvalidInput);
+    assert_eq!(elsewhere.field.as_deref(), Some("/page/cursor"));
+    assert_eq!(
+        world.versions.log_queries()?.len(),
+        asked,
+        "no refused cursor reached the store"
+    );
+    // Naming the revision it continues is the same read.
+    let continued = world
+        .service
+        .log_items(&caller, timeline(named('a')?, Some(cursor), 2)?)
+        .await?;
+    let listed: Vec<_> = continued
+        .commits
+        .iter()
+        .map(|commit| commit.revision.clone())
+        .collect();
+    assert_eq!(listed, vec![revision('1')?]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_timeline_cursor_minted_before_a_purge_does_not_read_the_purged_revision() -> TestResult {
+    let world = paged_timeline()?;
+    let caller = alice(OperationName::LogItems, None)?;
+    let first = world
+        .service
+        .log_items(&caller, timeline(At::Latest, None, 2)?)
+        .await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    let purge_id = purge(&world, 'a')?;
+    let refused = err_of(
+        world
+            .service
+            .log_items(&caller, timeline(At::Latest, Some(cursor), 2)?)
+            .await,
+    )?;
+    assert_invalidated(&refused, purge_id);
+    assert_eq!(world.versions.log_queries()?.len(), 1);
     Ok(())
 }
 

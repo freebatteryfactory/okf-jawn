@@ -2,7 +2,8 @@
 //! immediate commits SPEC section 8 names (create, move, archive or status, delete, a folder,
 //! a type).
 //!
-//! Reads resolve their selector once (`shared::resolve`) and never see a draft, except that
+//! Reads resolve their selector once (`shared::resolve`; a listing's later pages read the
+//! revision its first page resolved, `shared::resolve_page`) and never see a draft, except that
 //! `get_item` adds the caller's own draft, read for the authenticated subject and nobody else
 //! (dispatch has already refused it on every route that is not a human session). Every
 //! returned `ItemDocument` carries the server's content digest. Writes refuse a caller's
@@ -23,8 +24,8 @@ use okf_jawn_contract::item::{
 
 use super::ApplicationService;
 use super::shared::{
-    Touched, Write, commit, commit_with_receipt, invalid, mutation_id, resolve,
-    with_content_digest, workspace_scope,
+    Touched, Write, commit, commit_with_receipt, invalid, mutation_id, next_page, resolve,
+    resolve_page, with_content_digest, workspace_scope,
 };
 use crate::context::OperationContext;
 use crate::echo::bounded;
@@ -40,11 +41,19 @@ use crate::storage::{TreeEdit, derive_item_id};
 /// findable through search with `include_archived`.
 ///
 /// The filters apply to the page the store returned, so a filtered page may hold fewer items
-/// than asked; its continuation is the store's. Child folders are listed either way.
+/// than asked; its continuation is the store's position in that listing. Child folders are
+/// listed either way.
+///
+/// A continuation lists the revision its first page resolved (`shared::resolve_page`), so a
+/// write that lands between two pages of a listing at `latest` neither repeats nor skips an
+/// entry. A listing begun at `latest` stays a current listing on every page: its archived items
+/// stay hidden, though the head has moved on.
 ///
 /// # Errors
-/// Returns `InvalidInput` on `/folder` for a folder that is not a workspace path, the typed
-/// `NotFound` of an invalidated revision, or any port error.
+/// Returns `InvalidInput` on `/folder` for a folder that is not a workspace path, on
+/// `/page/cursor` for a cursor this operation did not issue or one that continues a read of
+/// another revision than `at` names; the typed `NotFound` of an invalidated revision; or any
+/// port error.
 pub(super) async fn list_items(
     service: &ApplicationService,
     context: &OperationContext,
@@ -56,7 +65,7 @@ pub(super) async fn list_items(
     } else {
         Some(WorkspacePath::try_from(request.folder).map_err(|error| invalid(error.0, "/folder"))?)
     };
-    let revision = resolve(service, &scope, &request.at).await?;
+    let (revision, page) = resolve_page(service, &scope, &request.at, request.page).await?;
     let ports = service.ports();
     // `latest` is the head by resolution; a named revision is current when it is the head now.
     let current = match &request.at {
@@ -65,7 +74,7 @@ pub(super) async fn list_items(
     };
     let listing = ports
         .versions
-        .list(&scope, &revision, folder.as_ref(), request.page.into())
+        .list(&scope, &revision, folder.as_ref(), page)
         .await?;
     let items = listing
         .items
@@ -78,6 +87,7 @@ pub(super) async fn list_items(
         })
         .collect();
     Ok(ListItemsResponse {
+        next_cursor: next_page(&revision, listing.next_cursor)?,
         revision,
         items,
         folders: listing
@@ -85,7 +95,6 @@ pub(super) async fn list_items(
             .iter()
             .map(|folder| folder.as_str().to_owned())
             .collect(),
-        next_cursor: listing.next_cursor,
     })
 }
 

@@ -3,7 +3,9 @@
 //!
 //! Every revision a request names is checked against the revision map a purge wrote before
 //! anything is read at it (`shared::resolve`, `shared::check_named`): `at`, both ends of a
-//! comparison, a Rewind's base and target, and the base of every draft a Snapshot commits.
+//! comparison, a Rewind's base and target, and the base of every draft a Snapshot commits. A
+//! Timeline's later pages read at the tip its first page resolved, which its cursor carries
+//! (`shared::resolve_page`), and that tip is checked again on every page.
 //!
 //! A Snapshot commits the caller's own drafts of the selected items in one commit, on the head
 //! it reads. It is blocked only when an item being snapshotted was itself changed or deleted
@@ -60,8 +62,8 @@ use okf_jawn_contract::source::SourceReference;
 
 use super::ApplicationService;
 use super::shared::{
-    Touched, Write, announce, check_named, commit_with_receipt, invalid, mutation_id,
-    record_receipt, replay_warnings, resolve, store_commit, workspace_scope,
+    Touched, Write, announce, check_named, commit_with_receipt, invalid, mutation_id, next_page,
+    record_receipt, replay_warnings, resolve, resolve_page, store_commit, workspace_scope,
 };
 use super::sources::{citation, record_of};
 use crate::conformance::EditCheck;
@@ -93,30 +95,38 @@ const HEAD_ATTEMPTS: usize = 3;
 /// walking back from the resolved revision. The commits carry metadata and no item content, so
 /// the receipt it records cites no source.
 ///
+/// A continuation walks back from the tip its first page resolved (`shared::resolve_page`), so
+/// a Snapshot that lands between two pages of a Timeline at `latest` repeats no commit.
+///
 /// # Errors
-/// Returns the typed `NotFound` of an invalidated revision, or any port error.
+/// Returns `InvalidInput` on `/page/cursor` for a cursor this operation did not issue or one
+/// that continues a read of another revision than `at` names, the typed `NotFound` of an
+/// invalidated revision, or any port error.
 pub(super) async fn log_items(
     service: &ApplicationService,
     context: &OperationContext,
     request: LogRequest,
 ) -> Result<LogResponse, ApiError> {
     let scope = workspace_scope(context)?;
-    let tip = resolve(service, &scope, &request.at).await?;
+    let (tip, page) = resolve_page(service, &scope, &request.at, request.page).await?;
     let response = service
         .ports()
         .versions
         .log(
             &scope,
             LogQuery {
-                tip,
+                tip: tip.clone(),
                 item_id: request.item_id,
-                page: request.page.into(),
+                page,
             },
         )
         .await?;
     // Commit metadata only: the receipt names no item content.
     record_receipt(service, context, &scope, None, Vec::new()).await?;
-    Ok(response)
+    Ok(LogResponse {
+        next_cursor: next_page(&tip, response.next_cursor)?,
+        commits: response.commits,
+    })
 }
 
 /// Compare two named revisions, optionally only one item (following its moves).

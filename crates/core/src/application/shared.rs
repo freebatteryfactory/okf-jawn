@@ -1,6 +1,13 @@
 //! Steps every handler of this service shares: the authorized scope, revision resolution with
 //! the purge check, the commit path of a content write, and receipts.
 //!
+//! A paginated read that resolves `at` (`log_items`, `list_items`, `search_items`, `get_links`)
+//! resolves it for its first page only. Its cursor is this service's, not the store's: it
+//! carries the tip that page resolved beside the store's own position, and every later page
+//! reads at that tip (`resolve_page`, `next_page`), so a write that lands between two pages of
+//! a read at `latest` cannot repeat or skip an entry. `read_item` has its own cursor, which
+//! carries its revision the same way.
+//!
 //! A content write is one path: the request's base revision is checked against the revision
 //! map first (`reading::check_revision`), the edits are committed on top of it with the edit
 //! check (`conformance::EditCheck`: OKF conformance refuses; the validator's warnings and OKF
@@ -17,8 +24,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use okf_jawn_contract::access::Principal;
-use okf_jawn_contract::common::{MutationResult, Warning};
+use okf_jawn_contract::common::{MutationResult, PageRequest, Warning};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::{EventKind, Receipt, ReceiptAudience};
 use okf_jawn_contract::identity::{
@@ -26,6 +35,7 @@ use okf_jawn_contract::identity::{
 };
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::source::SourceReference;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::ApplicationService;
@@ -64,6 +74,18 @@ pub(super) struct Touched {
     pub(super) of_type: Option<String>,
 }
 
+/// Where a paginated read that resolves `at` resumes; opaque to the caller (base64url of this
+/// JSON). The store's own cursor is only a position in a listing, so it is carried with the
+/// revision that listing was read at.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageCursor {
+    /// The revision the first page resolved; every later page reads at it.
+    tip: Revision,
+    /// The store's own continuation within the listing at `tip`.
+    next: String,
+}
+
 /// A private directory the tree of a replayed commit is written to for its check; a guard
 /// that removes it when dropped, so it goes on every path out of the check: a success, an
 /// error of a write or of the check, and a panic, whose unwinding drops it (the workspace
@@ -79,6 +101,8 @@ const CHANGE_LOG: &str = "log.md";
 /// The code of the warning a replayed write answers when its first attempt's warnings could
 /// not be rebuilt (`replay_warnings`).
 const REPLAY_WARNINGS_UNAVAILABLE: &str = "replay_warnings_unavailable";
+/// The request field a page cursor is refused on.
+const PAGE_CURSOR: &str = "/page/cursor";
 
 impl Scratch {
     /// A new, empty private directory under the system's temporary directory.
@@ -153,6 +177,65 @@ pub(super) async fn resolve(
             Ok(revision.clone())
         }
     }
+}
+
+/// The revision one page of a paginated read is read at, and the page to ask the store for.
+///
+/// The first page (no cursor) resolves the selector once (`resolve`). A continuation reads at
+/// the tip its cursor carries, whatever `latest` is now, so a write that lands between two pages
+/// neither repeats nor skips an entry: the store's cursor is a position in the listing of one
+/// revision, and means nothing in another's. The tip is checked against the revision map again,
+/// so a continuation never reads a revision a purge invalidated meanwhile.
+///
+/// # Errors
+/// Returns `InvalidInput` on `/page/cursor` for a cursor this service did not issue, or one
+/// whose tip is not the revision `at` names; the typed `NotFound` of an invalidated revision; or
+/// any port error.
+pub(super) async fn resolve_page(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    at: &At,
+    page: PageRequest,
+) -> Result<(Revision, Page), ApiError> {
+    let Some(text) = page.cursor.as_deref() else {
+        return Ok((resolve(service, scope, at).await?, page.into()));
+    };
+    let cursor: PageCursor = URL_SAFE_NO_PAD
+        .decode(text)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .ok_or_else(|| invalid("the cursor was not issued by this operation", PAGE_CURSOR))?;
+    if matches!(at, At::Revision { revision } if revision != &cursor.tip) {
+        return Err(invalid(
+            "the cursor continues a read of another revision than the one named",
+            PAGE_CURSOR,
+        ));
+    }
+    check_named(service, scope, &cursor.tip).await?;
+    Ok((
+        cursor.tip,
+        Page {
+            cursor: Some(cursor.next),
+            limit: page.limit,
+        },
+    ))
+}
+
+/// The cursor of the page after one read at `tip`: the store's continuation, bound to `tip`
+/// (`resolve_page` reads it back). `None` when the store has no more.
+///
+/// # Errors
+/// Returns `Internal` when the cursor cannot be serialized.
+pub(super) fn next_page(tip: &Revision, next: Option<String>) -> Result<Option<String>, ApiError> {
+    next.map(|next| {
+        serde_json::to_vec(&PageCursor {
+            tip: tip.clone(),
+            next,
+        })
+        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))
+    })
+    .transpose()
 }
 
 /// Check a revision the request names (a base revision, a cited revision) against the

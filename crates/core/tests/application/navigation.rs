@@ -770,6 +770,139 @@ async fn get_links_reads_one_direction_of_one_item_at_the_resolved_revision() ->
     Ok(())
 }
 
+#[tokio::test]
+async fn a_search_continues_at_the_revision_its_first_page_resolved() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    for (id, location) in [
+        (NOTE, "notes/a.md"),
+        (OTHER, "notes/b.md"),
+        (THIRD, "notes/c.md"),
+    ] {
+        world
+            .search
+            .put_entry(&at, summary(id, location)?, "the plan")?;
+    }
+    let page = |at: At, cursor: Option<String>| -> Built<SearchRequest> {
+        let mut request = search("plan", false)?;
+        request.at = at;
+        request.page = PageRequest { cursor, limit: 2 };
+        Ok(request)
+    };
+    let caller = alice(OperationName::SearchItems, None)?;
+    let first = world
+        .service
+        .search_items(&caller, page(At::Latest, None)?)
+        .await?;
+    let cursor = some(first.next_cursor.clone(), "a continuation")?;
+    // A write lands: `latest` is `b` now, which the index has not built.
+    world.versions.set_head(revision('b')?)?;
+    let second = world
+        .service
+        .search_items(&caller, page(At::Latest, Some(cursor.clone()))?)
+        .await?;
+    assert_eq!(second.revision, at);
+    assert_eq!(second.next_cursor, None);
+    let mut hits = hit_items(&first);
+    hits.extend(hit_items(&second));
+    assert_eq!(
+        hits,
+        vec![item(NOTE), item(OTHER), item(THIRD)],
+        "each hit once"
+    );
+    let asked: Vec<_> = world
+        .search
+        .queries()?
+        .into_iter()
+        .map(|query| (query.revision, query.page.cursor, query.page.limit))
+        .collect();
+    assert_eq!(
+        asked,
+        vec![(at.clone(), None, 2), (at, Some("2".to_owned()), 2)]
+    );
+    assert_eq!(world.search.builds(), 0, "`b` was never asked for");
+    // A cursor this operation did not issue, and one that continues another revision's search.
+    let named_b = At::Revision {
+        revision: revision('b')?,
+    };
+    for (at, text) in [(At::Latest, "2".to_owned()), (named_b, cursor)] {
+        let refused = err_of(
+            world
+                .service
+                .search_items(&caller, page(at, Some(text))?)
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert_eq!(refused.field.as_deref(), Some("/page/cursor"));
+    }
+    assert_eq!(world.search.queries()?.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_items_links_continue_at_the_revision_their_first_page_resolved() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    world.search.put_link(&at, link(NOTE, OTHER, 3))?;
+    world.search.put_link(&at, link(THIRD, NOTE, 7))?;
+    world.search.put_link(&at, link(NOTE, THIRD, 2))?;
+    linking_items(&world, &at)?;
+    let page = |at: At, cursor: Option<String>| -> Built<GetLinksRequest> {
+        let mut request = links(LinkDirection::Both, at)?;
+        request.page = PageRequest { cursor, limit: 2 };
+        Ok(request)
+    };
+    let caller = alice(OperationName::GetLinks, None)?;
+    let first = world
+        .service
+        .get_links(&caller, page(At::Latest, None)?)
+        .await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    // A write lands: `latest` is `b` now, which the index has not built.
+    world.versions.set_head(revision('b')?)?;
+    let second = world
+        .service
+        .get_links(&caller, page(At::Latest, Some(cursor.clone()))?)
+        .await?;
+    assert_eq!(second.revision, at);
+    assert_eq!(second.next_cursor, None);
+    let lines: Vec<u32> = first
+        .links
+        .iter()
+        .chain(&second.links)
+        .map(|link| link.line)
+        .collect();
+    assert_eq!(lines, vec![3, 7, 2], "each link once");
+    let asked: Vec<_> = world
+        .search
+        .link_queries()?
+        .into_iter()
+        .map(|query| (query.revision, query.page.cursor, query.page.limit))
+        .collect();
+    assert_eq!(
+        asked,
+        vec![(at.clone(), None, 2), (at, Some("2".to_owned()), 2)]
+    );
+    // A cursor this operation did not issue, and one that continues another revision's links.
+    let named_b = At::Revision {
+        revision: revision('b')?,
+    };
+    for (at, text) in [(At::Latest, "2".to_owned()), (named_b, cursor)] {
+        let refused = err_of(
+            world
+                .service
+                .get_links(&caller, page(at, Some(text))?)
+                .await,
+        )?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert_eq!(refused.field.as_deref(), Some("/page/cursor"));
+    }
+    assert_eq!(world.search.link_queries()?.len(), 2);
+    Ok(())
+}
+
 /// NOTE at `notes/plan.md`, with frontmatter of its type and two more properties, and THIRD at
 /// `notes/third.md`, both readable at `at`: the items the fixture links come from.
 fn linking_items(world: &World, at: &Revision) -> Built<()> {
