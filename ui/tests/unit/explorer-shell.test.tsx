@@ -220,4 +220,35 @@ describe('malformed links', () => {
     expect(screen.queryByText(/Showing/)).toBeNull();
     expect(api.violations).toEqual([]);
   });
+
+  it('never sends an item id that is not a UUID (P5)', async () => {
+    const api = mockApi(workspaceHandlers());
+    renderAt(`/w/${WS}/i/not-an-item`);
+    await screen.findByRole('tree', { name: 'Folders' });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(api.violations).toEqual([]);
+  });
+
+  it('says a malformed item link is not valid, and requests nothing for it', async () => {
+    const api = mockApi(workspaceHandlers());
+    renderAt(`/w/${WS}/i/not-an-item`);
+    const documents = await screen.findByRole('region', { name: 'Documents' });
+    const alert = await within(documents).findByRole('alert');
+    expect(alert.textContent).toContain('This link is not valid.');
+    expect(alert.textContent).toContain('nothing was requested');
+    await screen.findByRole('tree', { name: 'Folders' });
+    expect(api.callsTo('/api/items/get-item')).toEqual([]);
+    expect(api.callsTo(READ)).toEqual([]);
+    expect(api.callsTo('/api/reads/get-sources')).toEqual([]);
+    expect(screen.queryByRole('tab')).toBeNull();
+  });
+
+  it('says a malformed workspace link is not valid, and opens nothing', async () => {
+    const api = mockApi(workspaceHandlers());
+    renderAt('/w/not-a-workspace');
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('This link is not valid.');
+    expect(screen.getByRole('link', { name: 'Go to your workspaces' })).toBeTruthy();
+    expect(api.calls).toEqual([]);
+  });
 });

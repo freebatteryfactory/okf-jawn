@@ -22,6 +22,8 @@ export interface DocumentPanesProps {
   focusedPaneId: string;
   /** The item the URL names: what the focused pane shows, whatever tab it last had open. */
   urlItemId: string | null;
+  /** The URL names an item id the contract rejects; nothing was requested for it. */
+  invalidItemLink: boolean;
   /** The URL's selection and cited revision, which apply to the focused pane's open item. */
   selection: ItemSelection | undefined;
   revision: Revision | undefined;
@@ -85,6 +87,7 @@ function DocumentPane({
   panes,
   focusedPaneId,
   urlItemId,
+  invalidItemLink,
   selection,
   revision,
   pane,
@@ -107,6 +110,17 @@ function DocumentPane({
         if (!focused) onFocusPane(pane.id);
       }}
     >
+      {focused && invalidItemLink && (
+        <div role="alert" className="failure-notice">
+          <p>
+            <strong>This link is not valid.</strong>
+          </p>
+          <p>
+            The address does not name an item in this workspace, so nothing was requested. Open an
+            item from the folders or the search results.
+          </p>
+        </div>
+      )}
       {pane.tabs.length === 0 && active === null ? (
         <p className="empty-pane">Open an item from the folders or the search results.</p>
       ) : (

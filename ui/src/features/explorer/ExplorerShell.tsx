@@ -11,6 +11,7 @@ import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-route
 import { useEffect } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import type { Workspace } from '../../api/generated/types.gen';
+import { zItemId } from '../../api/generated/zod.gen';
 import { itemOptions } from '../documents/DocumentView';
 import { SearchForm, SearchResults } from '../search/SearchPanel';
 import { DocumentPanes, matchingLayout } from './DocumentPanes';
@@ -36,12 +37,17 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
   const workspaceId = workspace.id;
   const head = workspace.head;
   const params = useParams({ strict: false });
-  // The router passes unvalidated parameters through to child routes, so the values used
-  // here are validated again: nothing malformed in a URL reaches the server.
+  // The router passes unvalidated search values through to child routes, so the values used
+  // here are validated again with the generated schemas. The item id in the path is checked
+  // the same way: a malformed one is reported and never sent. (The workspace id was checked by
+  // the workspace route before this shell rendered.)
   const raw: Record<string, unknown> = useSearch({ strict: false });
   const search = { ...validateWorkspaceSearch(raw), ...validateItemSearch(raw) };
   const navigate = useNavigate();
-  const itemId = params.itemId ?? null;
+  const linkedItemId = params.itemId ?? null;
+  const itemIdValid = linkedItemId !== null && zItemId.safeParse(linkedItemId).success;
+  const itemId = itemIdValid ? linkedItemId : null;
+  const invalidItemLink = linkedItemId !== null && !itemIdValid;
   const query = search.q;
   const view = useWorkspaceView(workspaceId);
   const openInStore = useExplorerStore((state) => state.openItem);
@@ -137,6 +143,7 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
             panes={view.panes}
             focusedPaneId={view.focusedPaneId}
             urlItemId={itemId}
+            invalidItemLink={invalidItemLink}
             selection={search.sel}
             revision={search.rev}
             onActivate={(paneId, target) => {
