@@ -5317,7 +5317,9 @@ components:
       description: Current identity and capability summary without credentials.
       properties:
         csrf_required:
-          description: Browser writes require a same-origin anti-CSRF token.
+          description: |-
+            Browser writes require a same-origin anti-CSRF token: the double-submit pair published
+            as the `csrfCookie` and `csrfHeader` security schemes.
           type: boolean
         principal:
           $ref: '#/components/schemas/Principal'
@@ -6084,9 +6086,19 @@ components:
       scheme: bearer
       type: http
     browserSession:
-      description: Local-owner or WorkOS browser session; cookie-authenticated writes also require the CSRF token.
+      description: Local-owner or WorkOS browser session. A cookie-authenticated request that is not a GET also carries the csrfCookie and csrfHeader pair.
       in: cookie
       name: okf-session
+      type: apiKey
+    csrfCookie:
+      description: 'Anti-CSRF token the server sets at sign-in beside the session cookie: not HttpOnly, SameSite=Strict, Secure under HTTPS. Double-submit rule: every cookie-authenticated mutation sends its value in the csrfHeader header, in addition to the server''s Origin and Sec-Fetch-Site check. Every canonical operation is a POST, so every route that is not a GET asks for the pair.'
+      in: cookie
+      name: okf-csrf
+      type: apiKey
+    csrfHeader:
+      description: The csrfCookie value, sent back on every cookie-authenticated request that is not a GET; a missing header, or one that differs from the cookie, is refused.
+      in: header
+      name: x-okf-csrf
       type: apiKey
 info:
   description: Complete intended API. A declared route is not a claim of implemented application behavior.
@@ -6129,6 +6141,9 @@ paths:
               schema:
                 type: string
           description: Download a completed installation archive; only a tenant administrator in a human browser session.
+      security:
+      - bearerAuth: []
+      - browserSession: []
       summary: download_tenant_artifact
       tags:
       - transport
@@ -10893,6 +10908,9 @@ paths:
             application/schema+json:
               schema: {}
           description: Read a generated application schema by its allowed name.
+      security:
+      - bearerAuth: []
+      - browserSession: []
       summary: get_form_schema
       tags:
       - transport
@@ -13338,6 +13356,9 @@ paths:
               schema:
                 type: string
           description: Download a completed workspace export, View export or workspace archive. The artifact kind decides the permission and the routes (ArtifactKind::download_permission and download_routes); an archive is served only to a workspace administrator in a human browser session.
+      security:
+      - bearerAuth: []
+      - browserSession: []
       summary: download_artifact
       tags:
       - transport
@@ -13360,6 +13381,9 @@ paths:
               schema:
                 type: string
           description: Resume workspace notifications with Last-Event-ID; notifications are projections, not canonical content.
+      security:
+      - bearerAuth: []
+      - browserSession: []
       summary: stream_events
       tags:
       - transport
@@ -13397,6 +13421,9 @@ paths:
               schema:
                 type: string
           description: Read original or derived bytes authorized through an exact item revision. Support HTTP Range without accepting hash knowledge as permission. Never serves a backup artifact's object.
+      security:
+      - bearerAuth: []
+      - browserSession: []
       summary: download_object
       tags:
       - transport
@@ -13551,6 +13578,9 @@ paths:
               schema:
                 type: string
           description: Optional MCP server event stream managed by the SDK.
+      security:
+      - bearerAuth: []
+      - browserSession: []
       summary: mcp_events
       tags:
       - transport
@@ -13593,6 +13623,9 @@ paths:
               schema:
                 type: string
           description: 'Serve a sandboxed HTML or hostile-artifact representation from the configured separate origin. The capability from create_sandbox_capability is the only credential: it binds workspace, item, revision and representation, is stored hashed, expires, and is never logged. No ambient session cookies, credentials, or privileged APIs; respond with no-store, no-referrer and a strict CSP (SPEC sections 7 and 11).'
+      security:
+      - bearerAuth: []
+      - browserSession: []
       summary: serve_sandbox_representation
       tags:
       - transport
@@ -13601,3 +13634,5 @@ paths:
 security:
 - bearerAuth: []
 - browserSession: []
+  csrfCookie: []
+  csrfHeader: []
