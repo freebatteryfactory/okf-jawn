@@ -136,29 +136,29 @@ async fn images_over_the_budget_are_described_not_inlined() -> TestResult {
             ],
         ),
     )?;
-    let first = zeros_base64(200);
+    let first = zeros_base64(900);
     world.application.serve_object(
         &fits,
-        Ok(object_block(&fits, "image/png", &first, 200, false)),
+        Ok(object_block(&fits, "image/png", &first, 900, false)),
     )?;
-    // Complete, but larger than the 56 bytes it was asked for.
+    // Complete, but larger than the 124 bytes it was asked for.
     world.application.serve_object(
         &complete,
         Ok(object_block(
             &complete,
             "image/png",
-            &zeros_base64(200),
-            200,
+            &zeros_base64(900),
+            900,
             false,
         )),
     )?;
-    // Exactly the 56 bytes it was asked for, of a 5000-byte object: never inlined in part.
+    // Exactly the 124 bytes it was asked for, of a 5000-byte object: never inlined in part.
     world.application.serve_object(
         &partial,
         Ok(object_block(
             &partial,
             "image/png",
-            &zeros_base64(56),
+            &zeros_base64(124),
             5000,
             true,
         )),
@@ -166,7 +166,7 @@ async fn images_over_the_budget_are_described_not_inlined() -> TestResult {
     let result = show(
         &world,
         "images-budget.html",
-        image_read_input("multimodal", 256, 3),
+        image_read_input("multimodal", 1024, 3),
     )
     .await?;
     let images = images_of(&result)?;
@@ -177,20 +177,20 @@ async fn images_over_the_budget_are_described_not_inlined() -> TestResult {
         described(&[
             format!(
                 "[Image not inlined: picture \"Margins\", page 3, object {complete}: \
-                 too large (200 bytes; 56 bytes of the image budget left)]"
+                 too large (900 bytes; 124 bytes of the image budget left)]"
             ),
             format!(
                 "[Image not inlined: picture, page 4, object {partial}: \
-                 too large (5000 bytes; 56 bytes of the image budget left)]"
+                 too large (5000 bytes; 124 bytes of the image budget left)]"
             ),
         ])
     );
     assert_eq!(
         world.application.requests("get_object")?,
         vec![
-            object_request(WORKSPACE, &fits, 256),
-            object_request(WORKSPACE, &complete, 56),
-            object_request(WORKSPACE, &partial, 56),
+            object_request(WORKSPACE, &fits, 1024),
+            object_request(WORKSPACE, &complete, 124),
+            object_request(WORKSPACE, &partial, 124),
         ]
     );
     Ok(())
