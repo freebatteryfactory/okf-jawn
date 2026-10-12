@@ -742,6 +742,37 @@ describe('a failure that goes away without a retry', () => {
     },
   );
 
+  it('keeps focus in the reader’s revision notice when the check that failed allowed no retry and focus was on its way out', async () => {
+    // The first request opens the workspace, the second is the reader's check, the rest answer.
+    let opens = 0;
+    mockApi(
+      explorerHandlers({
+        [OPEN]: () => {
+          opens += 1;
+          return opens === 2 ? fail(404, 'not_found', 'gone') : ok(workspace);
+        },
+      }),
+    );
+    renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    const words = await screen.findByText(
+      'Checking for the latest version: This could not be found.',
+    );
+    const notice = words.closest<HTMLElement>('[role="alert"]')?.parentElement;
+    const revisionNotice = focusableAround(notice?.parentElement ?? null);
+    if (notice === null || notice === undefined || revisionNotice === null) {
+      throw new Error('the failure is not shown in a notice inside the revision notice');
+    }
+    // The failure allows no retry: its way out is the only control in the notice.
+    expect(within(notice).queryByRole('button')).toBeNull();
+    const wayOut = within(notice).getByRole('link', { name: 'Go to this workspace' });
+    act(() => wayOut.focus());
+
+    windowRefocus();
+    await waitFor(() => expect(wayOut.isConnected).toBe(false));
+    await within(revisionNotice).findByText(/it is not the latest version/);
+    expectFocusOn(revisionNotice);
+  });
+
   it('moves focus to the page’s level-one heading when another workspace is opened while focus is on the retry button of the one that did not open', async () => {
     const opening = studied(() => ok(workspace));
     mockApi(explorerHandlers({ [OPEN]: opening.handler }));

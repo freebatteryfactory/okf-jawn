@@ -9,7 +9,7 @@ import {
   createRouter,
   RouterProvider,
 } from '@tanstack/react-router';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { type ReactNode, StrictMode, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -209,6 +209,46 @@ async function retryOutlived() {
   return { runs, button, notice, end };
 }
 
+/**
+ * A failure that allows no retry and offers a way out, in a page with a router. A press of
+ * "Change" from script moves no focus: the operation's state changes by itself.
+ */
+function WayOut({ becomes }: { becomes: 'loaded' | ErrorCode }) {
+  const [state, setState] = useState<'loaded' | ErrorCode>('not_found');
+  const retry = useRetry({
+    request: 'one',
+    failed: state !== 'loaded',
+    error: apiError(state === 'loaded' ? 'not_found' : state),
+    run: () => Promise.resolve(),
+    loaded: () => document.getElementById('content'),
+  });
+  return (
+    <>
+      <button type="button" onClick={() => setState(becomes)}>
+        Change
+      </button>
+      {retry.shown && <FailureNotice context="Reading" error={retry.error} retry={retry} />}
+      {state === 'loaded' && (
+        <h2 id="content" tabIndex={-1}>
+          The content
+        </h2>
+      )}
+    </>
+  );
+}
+
+/** Render that failure with keyboard focus on its way out, the only control it has. */
+async function wayOutWithFocus(becomes: 'loaded' | ErrorCode) {
+  await renderNotice(<WayOut becomes={becomes} />);
+  const link = screen.getByRole('link', { name: 'Go to your workspaces' });
+  const notice = screen.getByRole('alert').parentElement;
+  if (notice === null) throw new Error('the alert is not in a notice');
+  expect(screen.queryByRole('button', { name: /Try/ })).toBeNull();
+  act(() => link.focus());
+  const change = () => fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+  return { link, notice, change };
+}
+
 /** Render the watched operation, failed, with keyboard focus on its retry button. */
 function watchedWithFocus() {
   const view = render(<Watched status="failed" />);
@@ -277,16 +317,17 @@ describe('failure messages', () => {
     }
   });
 
-  it('shows a failure that allows no retry as the alert alone, as before, where a retry could be offered', () => {
+  it('shows a failure that allows no retry with no retry button and no status, where a retry could be offered', () => {
     const run = vi.fn(async () => undefined);
     render(<Retried context="Reading" error={apiError('forbidden')} run={run} />);
     const alert = screen.getByRole('alert');
-    expect(alert.className).toBe('failure-notice');
-    expect(alert.hasAttribute('tabindex')).toBe(false);
-    expect(alert.parentElement?.className).not.toBe('failure-notice');
     expect(alert.textContent).toContain('Reading: You do not have permission to do this.');
     expect(screen.queryByRole('button')).toBeNull();
     expect(screen.queryByRole('status')).toBeNull();
+    // The notice around the alert is the hook's whatever the failure allows: script can focus it.
+    const notice = alert.parentElement;
+    expect(notice?.className).toBe('failure-notice');
+    expect(notice?.getAttribute('tabindex')).toBe('-1');
   });
 
   it('offers no retry without the retry that keeps the notice on screen', () => {
@@ -582,6 +623,26 @@ describe('a failure that changes without a retry', () => {
     rerender(<Watched status="loaded" />);
     expect(notice.isConnected).toBe(false);
     expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'The content' }));
+  });
+
+  it('follows focus on the way out of a failure that allows no retry when that failure goes away by itself', async () => {
+    const { link, notice, change } = await wayOutWithFocus('loaded');
+    expect(document.activeElement).toBe(link);
+    change();
+    expect(notice.isConnected).toBe(false);
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'The content' }));
+  });
+
+  it('moves focus from the way out to the notice itself when the failure is replaced by one with nothing to focus', async () => {
+    const { link, notice, change } = await wayOutWithFocus('forbidden');
+    change();
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Reading: You do not have permission to do this.',
+    );
+    expect(link.isConnected).toBe(false);
+    expect(notice.isConnected).toBe(true);
+    expect(notice.getAttribute('tabindex')).toBe('-1');
+    expect(document.activeElement).toBe(notice);
   });
 
   it('moves focus to the retry button of the notice that replaces the one shown', () => {

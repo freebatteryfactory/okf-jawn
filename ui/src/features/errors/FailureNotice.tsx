@@ -11,12 +11,15 @@
  * says so. The button and that status sit beside the alert, not inside it, so a change of the
  * button's label is not announced as an alert; the words after a retry that failed are a new alert.
  *
- * A notice that has offered a retry can take keyboard focus from script for as long as it is on
- * screen: when the failure it then shows allows none, the button goes and `useRetry` moves the
- * focus that was on it to the notice itself.
+ *
+ * A notice given the hook's result is followed by it whatever its failure allows: its root carries
+ * the hook's ref and takes focus from script (`tabindex="-1"`). So keyboard focus on its retry
+ * button or on its way out is seen when the notice leaves, and the notice itself can take focus
+ * when the failure it then shows has taken the button away. A failure that allows no retry is
+ * shown with no retry button and no status. Without the hook's result the notice is the alert
+ * alone, and nothing follows focus out of it.
  */
 import { Link } from '@tanstack/react-router';
-import { useState } from 'react';
 import { classifyFailure, messageFor } from './failure';
 import type { FailureRetry } from './retry';
 
@@ -34,12 +37,6 @@ export interface FailureNoticeProps {
 export function FailureNotice({ context, error, retry, workspaceId }: FailureNoticeProps) {
   const failure = classifyFailure(error);
   const message = messageFor(failure);
-  const retryLabel =
-    retry !== undefined && message.action.kind === 'retry' ? message.action.label : null;
-  // Remembered from the render that offered a retry, so the render that takes the button away
-  // already has the element focus moves to.
-  const [offered, setOffered] = useState(false);
-  if (retryLabel !== null && !offered) setOffered(true);
   const api = failure.kind === 'api' ? failure.error : null;
   const words = (
     <>
@@ -66,46 +63,51 @@ export function FailureNotice({ context, error, retry, workspaceId }: FailureNot
         </p>
       ) : null}
       {message.action.kind === 'home' ? (
-        workspaceId === undefined ? (
-          <Link to="/">{message.action.label}</Link>
-        ) : (
-          <Link to="/w/$workspaceId" params={{ workspaceId }}>
-            Go to this workspace
-          </Link>
-        )
+        // Watched by the hook: focus on the link is followed when the link goes.
+        <span ref={retry?.wayOutRef}>
+          {workspaceId === undefined ? (
+            <Link to="/">{message.action.label}</Link>
+          ) : (
+            <Link to="/w/$workspaceId" params={{ workspaceId }}>
+              Go to this workspace
+            </Link>
+          )}
+        </span>
       ) : null}
     </>
   );
-  // A failure that allows no retry, in a notice that has offered none, is the alert alone, as it
-  // always was.
-  if (retry === undefined || (retryLabel === null && !offered)) {
+  if (retry === undefined) {
     return (
       <div role="alert" className="failure-notice">
         {words}
       </div>
     );
   }
+  const retryLabel = message.action.kind === 'retry' ? message.action.label : null;
   return (
-    // Focusable from script only: where keyboard focus rests when the failure now shown allows no
-    // retry (a retry ended in it, or it replaced the one shown), so the button it was on is gone.
+    // The hook's ref on the root whatever the failure allows, and focusable from script only:
+    // where keyboard focus rests when the failure now shown allows no retry (a retry ended in it,
+    // or it replaced the one shown), so the button it was on is gone.
     <div ref={retry.noticeRef} tabIndex={-1} className="failure-notice">
       <div key={retry.settled} role="alert">
         {words}
       </div>
       {retryLabel !== null && (
-        <button
-          type="button"
-          ref={retry.buttonRef}
-          aria-disabled={retry.retrying}
-          onClick={retry.start}
-        >
-          {retry.retrying ? 'Trying again…' : retryLabel}
-        </button>
+        <>
+          <button
+            type="button"
+            ref={retry.buttonRef}
+            aria-disabled={retry.retrying}
+            onClick={retry.start}
+          >
+            {retry.retrying ? 'Trying again…' : retryLabel}
+          </button>
+          {/* Present with the button, before a retry starts, so the retry is announced when it does. */}
+          <p role="status" className="sr-only">
+            {retry.retrying ? `${context}: trying again…` : ''}
+          </p>
+        </>
       )}
-      {/* Present from the start, so the retry is announced when it begins. */}
-      <p role="status" className="sr-only">
-        {retry.retrying ? `${context}: trying again…` : ''}
-      </p>
     </div>
   );
 }

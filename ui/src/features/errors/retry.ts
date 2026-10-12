@@ -46,8 +46,8 @@
  * A notice that leaves because the component calling the hook is itself unmounted is not followed:
  * the hook goes with it.
  */
-import { type RefCallback, useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { pageHeading } from '../../lib/focus';
+import { type RefCallback, useLayoutEffect, useRef, useState } from 'react';
+import { pageHeading, takeHeld, useWatchedPart } from '../../lib/focus';
 
 export interface RetriedOperation {
   /**
@@ -87,6 +87,8 @@ export interface FailureRetry {
   noticeRef: RefCallback<HTMLDivElement>;
   /** For the notice's retry button: where keyboard focus is put while a failure is shown. */
   buttonRef: RefCallback<HTMLButtonElement>;
+  /** For what holds the notice's way out, the link a `not_found` offers: focus on it is followed too. */
+  wayOutRef: RefCallback<HTMLElement>;
 }
 
 /** The last retry asked for: in flight until `outcome` says where keyboard focus was at its end. */
@@ -98,46 +100,23 @@ interface Attempt {
   outcome: { focusWasInNotice: boolean } | null;
 }
 
-/**
- * A ref of the notice goes from `previous` to `next`. React clears a ref before it removes the
- * element, while keyboard focus is still in it: an element cleared with focus in it is held. An
- * element whose ref is set again has not left the page, and is let go: in development, StrictMode
- * clears and sets again the refs of a notice that has just mounted.
- */
-function refChanged(
-  held: { current: HTMLElement | null },
-  previous: HTMLElement | null,
-  next: HTMLElement | null,
-) {
-  if (previous?.contains(document.activeElement)) held.current = previous;
-  if (next === held.current) held.current = null;
-}
-
 export function useRetry({ request, failed, error, run, loaded }: RetriedOperation): FailureRetry {
   const [attempt, setAttempt] = useState<Attempt | null>(null);
-  const notice = useRef<HTMLDivElement | null>(null);
-  const button = useRef<HTMLButtonElement | null>(null);
   const followed = useRef(0);
   const mine = attempt !== null && attempt.request === request;
   const retrying = mine && attempt.outcome === null;
 
-  // The notice, or its button, that left the page with keyboard focus in it (see `refChanged`).
+  // The notice, its retry button or its way out, when one left the page with keyboard focus in it.
   const heldFocus = useRef<HTMLElement | null>(null);
-  const noticeRef = useCallback((element: HTMLDivElement | null) => {
-    refChanged(heldFocus, notice.current, element);
-    notice.current = element;
-  }, []);
-  const buttonRef = useCallback((element: HTMLButtonElement | null) => {
-    refChanged(heldFocus, button.current, element);
-    button.current = element;
-  }, []);
+  const [notice, noticeRef] = useWatchedPart<HTMLDivElement>(heldFocus);
+  const [button, buttonRef] = useWatchedPart<HTMLButtonElement>(heldFocus);
+  const [, wayOutRef] = useWatchedPart<HTMLElement>(heldFocus);
 
   // In each commit, before the browser paints it: `failed` is the operation's state as the commit
-  // shows it, and what it loaded is on the page. Focus follows a settled retry once, and a notice
-  // or button that left the page with focus in it.
+  // shows it, and what it loaded is on the page. Focus follows a settled retry once, and a notice,
+  // a button or a way out that left the page with focus in it.
   useLayoutEffect(() => {
-    const left = heldFocus.current !== null;
-    heldFocus.current = null;
+    const left = takeHeld(heldFocus);
     let settledWithFocus = false;
     if (attempt !== null && attempt.outcome !== null && followed.current !== attempt.number) {
       followed.current = attempt.number;
@@ -172,5 +151,6 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
     start,
     noticeRef,
     buttonRef,
+    wayOutRef,
   };
 }
