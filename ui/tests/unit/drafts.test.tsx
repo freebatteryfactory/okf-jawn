@@ -6,6 +6,8 @@
 import { act, cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { REQUEST_TIMEOUT_MS } from '../../src/app/api-client';
+import { itemOptions } from '../../src/features/documents/DocumentView';
+import { draftsOptions } from '../../src/features/drafts/drafts-list';
 import {
   AUTOSAVE_DELAY_MS,
   MAX_BODY_BYTES,
@@ -113,6 +115,9 @@ describe('who may edit, and where', () => {
     const describedBy = box.getAttribute('aria-describedby') ?? '';
     expect(document.getElementById(describedBy)?.getAttribute('role')).toBe('status');
     expect(api.callsTo(SAVE)).toHaveLength(0);
+    // Nothing typed is not a draft: no mark, and nothing listed.
+    expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+    expect(screen.getByRole('region', { name: 'Drafts (0)' })).toBeDefined();
   });
 
   it('starts a draft only from the version the workspace shows, and offers that version', async () => {
@@ -212,6 +217,37 @@ describe('autosave', () => {
     await pass(AUTOSAVE_DELAY_MS);
     expect(api.callsTo(SAVE).map((sent) => sent.base_revision)).toEqual([HEAD, OLD]);
     expect(screen.getByText('Draft.').parentElement?.textContent).toContain(OLD.slice(0, 7));
+  });
+
+  it('tells the cache what the service now holds, and lists the drafts again only for a new one', async () => {
+    const api = writable();
+    const { box, queryClient } = await startEditing();
+    const cached = () => queryClient.getQueryData(itemOptions(WS, NOTE, HEAD).queryKey)?.draft;
+    expect(cached() ?? null).toBeNull();
+    expect(api.callsTo(DRAFTS)).toHaveLength(1);
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(cached()?.body).toBe(`${COMMITTED} one`));
+    expect(cached()?.draft).toEqual(draftOf(NOTE, HEAD, LATER));
+    // A draft the list did not have: it is listed again.
+    await eventually(() => expect(api.callsTo(DRAFTS)).toHaveLength(2));
+  });
+
+  it('takes a later save of a listed draft into the list in place', async () => {
+    let savedAt = NOW;
+    const api = writable({
+      [SAVE]: (body) => ok(draftOf(String(body.item_id), HEAD, savedAt)),
+      [DRAFTS]: () => ok({ items: [draftOf(NOTE, HEAD, NOW)], next_cursor: null }),
+    });
+    const { box, queryClient } = await startEditing();
+    const listed = () =>
+      queryClient.getQueryData(draftsOptions(WS).queryKey)?.pages.flatMap((page) => page.items);
+    expect(listed()).toEqual([draftOf(NOTE, HEAD, NOW)]);
+    savedAt = LATER;
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(listed()).toEqual([draftOf(NOTE, HEAD, LATER)]));
+    expect(api.callsTo(DRAFTS)).toHaveLength(1);
   });
 
   it('does not save text that is back to what it was', async () => {
@@ -488,12 +524,14 @@ describe('typed text is never lost silently', () => {
     expect(leaving()).toBe(false);
   });
 
-  it('asks while a save is still in flight', async () => {
+  it('asks while a save is still in flight, even with the text back to what it was', async () => {
     writable({ [SAVE]: () => new Promise<never>(() => {}) });
     const { box } = await startEditing();
     typeInto(box, ' kept');
     await pass(AUTOSAVE_DELAY_MS);
     expect(saveState()).toBe('Saving…');
+    // The request in flight would leave the service holding text the editor no longer shows.
+    replaceText(box, COMMITTED);
     const event = new Event('beforeunload', { cancelable: true });
     window.dispatchEvent(event);
     expect(event.defaultPrevented).toBe(true);

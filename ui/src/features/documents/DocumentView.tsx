@@ -288,10 +288,10 @@ export function DocumentView({
   // the person presses "Edit": a discarded draft is not started again behind their back.
   const heldDraft = document?.draft ?? null;
   useEffect(() => {
-    if (editable && chosen === null && session === undefined && document && heldDraft !== null) {
+    if (editable && session === undefined && document && heldDraft !== null) {
       beginSession(workspaceId, revision, document);
     }
-  }, [editable, chosen, session, document, heldDraft, workspaceId, revision]);
+  }, [editable, session, document, heldDraft, workspaceId, revision]);
   const editing = wantsEdit && session !== undefined;
   // Whether this pane opens on a draft is known once `get_item` has answered. Until then the
   // committed text is neither read nor shown, so it never stands where the draft will.
