@@ -638,6 +638,31 @@ test.describe('a newer head moves nothing until Refresh', () => {
     await expect(page.getByRole('button', { name: 'Refresh' })).toBeFocused();
   });
 
+  test('N20 a failed newer-head check says so quietly, never as an alert', async ({ page }) => {
+    let opens = 0;
+    await routeApi(page, {
+      '/api/workspaces/open-workspace': () => {
+        opens += 1;
+        return opens <= 1
+          ? ok(workspace)
+          : { status: 503, body: { code: 'unavailable', message: 'service restarting' } };
+      },
+    });
+    await page.goto(`${server.origin()}/w/${WS}`);
+    await expect(row(page, /^notes$/)).toBeVisible();
+    await windowRefocus(page);
+    const failed = page.getByRole('status').filter({
+      hasText: 'Could not check for a newer version: The service is temporarily unavailable.',
+    });
+    await expect(failed).toBeVisible();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByText(/Showing the workspace as of/).locator('code')).toHaveAttribute(
+      'title',
+      HEAD,
+    );
+    await expectNoAxeViolations(page, 'failed newer-head check');
+  });
+
   test('"Read the latest version" from the keyboard keeps focus at the revision notice', async ({
     page,
   }) => {

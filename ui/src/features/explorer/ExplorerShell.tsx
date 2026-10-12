@@ -22,6 +22,7 @@ import { Instant } from '../../lib/instant';
 import { itemOptions } from '../documents/DocumentView';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
+import { classifyFailure, messageFor } from '../errors/failure';
 import { SearchForm, SearchResults } from '../search/SearchPanel';
 import { DocumentPanes, matchingLayout } from './DocumentPanes';
 import { FolderTree } from './FolderTree';
@@ -225,7 +226,8 @@ export function ExplorerShell({ workspace, head: headState }: ExplorerShellProps
  *
  * Whether a newer head exists is checked apart from the listed head, when the window regains focus
  * (and when the line mounts after its last check grew old). A newer head never replaces the listed
- * one: a polite notice says it exists, and only Refresh moves the shell to it.
+ * one: a polite notice says it exists, and only Refresh moves the shell to it. A check that fails
+ * says so in the same polite line, with the failure's plain words; it is never silent.
  */
 function HeadLine({ workspace, state }: { workspace: Workspace; state: HeadState }) {
   const head = workspace.head;
@@ -243,6 +245,12 @@ function HeadLine({ workspace, state }: { workspace: Workspace; state: HeadState
     refetchOnWindowFocus: 'always',
   });
   const newer = check.data.head !== head && check.dataUpdatedAt > state.resolvedAt ? check : null;
+  // A failed check is said quietly, in plain words, never as an alert: the line above stays true.
+  // A Refresh since then resolved the head itself, so the failure no longer applies.
+  const checkFailed =
+    check.isError && check.errorUpdatedAt > state.resolvedAt
+      ? messageFor(classifyFailure(check.error)).title
+      : null;
   const [outcome, setOutcome] = useState('');
   const refresh = async () => {
     if (state.refreshing) return;
@@ -271,6 +279,8 @@ function HeadLine({ workspace, state }: { workspace: Workspace; state: HeadState
             ).
           </>
         )}
+        {newer !== null && checkFailed !== null ? ' ' : null}
+        {checkFailed === null ? null : <>Could not check for a newer version: {checkFailed}</>}
       </p>
       <button type="button" aria-disabled={state.refreshing} onClick={() => void refresh()}>
         {state.refreshing ? 'Refreshing…' : 'Refresh'}

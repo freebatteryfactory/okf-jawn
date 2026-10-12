@@ -266,6 +266,32 @@ describe('the shell head is shown as of when it was resolved', () => {
     await waitFor(() => expect(focusedName()).toMatch(/^Plan,/));
   });
 
+  it('says quietly that the newer-head check failed, in plain words, never as an alert (N20)', async () => {
+    let opens = 0;
+    mockApi(
+      explorerHandlers({
+        [OPEN]: () => {
+          opens += 1;
+          if (opens === 2) return fail(500, 'internal', 'storage stumbled');
+          return ok({ ...workspace, head: opens === 1 ? HEAD : NEW });
+        },
+      }),
+    );
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('tree', { name: 'Folders' });
+    windowRefocus();
+    const failed = await screen.findByText(
+      'Could not check for a newer version: Something went wrong in the service.',
+    );
+    expect(failed.closest('[role="status"]')).toBe(failed);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(within(screen.getByText(/Showing the workspace as of/)).getByTitle(HEAD)).toBeTruthy();
+    // A Refresh resolves the head itself, so the failed check no longer applies.
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText(`Refreshed: now showing revision ${NEW.slice(0, 10)}.`);
+    expect(screen.queryByText(/Could not check for a newer version/)).toBeNull();
+  });
+
   it('says nothing of a check older than the head Refresh resolved since', async () => {
     const NEWER = 'f'.repeat(40);
     const heads = [HEAD, NEW, NEWER];
