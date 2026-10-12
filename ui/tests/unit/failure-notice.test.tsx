@@ -440,6 +440,8 @@ describe('a retry never unmounts the focused control', () => {
     );
     expect(screen.queryByRole('button', { name: /Try|Trying/ })).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(notice));
+    // Script can focus it: without the attribute a browser ignores the call, and happy-dom does not.
+    expect(notice.getAttribute('tabindex')).toBe('-1');
   });
 
   it('leaves focus the person moved elsewhere during the retry where it is', async () => {

@@ -131,6 +131,32 @@ interface Caller {
 const focusableAround = (words: HTMLElement | null) =>
   words?.closest<HTMLElement>('[tabindex="-1"]') ?? null;
 
+/**
+ * Whether a browser lets script focus this element: a link, a button, a disclosure's summary, the
+ * tree's tab-stop row, or an element that carries `tabindex="-1"`. On anything else `focus()` does
+ * nothing in a browser and focus stays on the page body, while happy-dom focuses any element; so
+ * where focus is moved to is checked for this as well as for being the focused element.
+ */
+const takesFocus = (element: Element | null) =>
+  element?.matches('a[href], button, summary, [role="treeitem"][tabindex="0"], [tabindex="-1"]') ??
+  false;
+
+/** A short name for an element in a failure message. */
+const named = (element: Element | null) =>
+  element === null
+    ? 'nothing'
+    : `<${element.tagName.toLowerCase()}> "${(element.textContent ?? '').slice(0, 40)}"`;
+
+/** Keyboard focus is on `element`, and a browser would have let script put it there. */
+function expectFocusOn(element: HTMLElement | null | undefined) {
+  expect(element).toBeTruthy();
+  expect(document.activeElement).toBe(element);
+  expect(
+    takesFocus(document.activeElement),
+    `${named(document.activeElement)} cannot take focus from script in a browser`,
+  ).toBe(true);
+}
+
 /** The words of every status on the page, or of every note. */
 const linesOf = (role: 'status' | 'note') =>
   screen.queryAllByRole(role).map((line) => line.textContent ?? '');
@@ -344,11 +370,7 @@ describe.each(callers)('a keyboard retry at $name', (caller) => {
 
     operation.end('answers');
     await waitFor(() => expect(notice.isConnected).toBe(false));
-    await waitFor(() => {
-      const loaded = caller.loaded();
-      expect(loaded).toBeTruthy();
-      expect(document.activeElement).toBe(loaded);
-    });
+    await waitFor(() => expectFocusOn(caller.loaded()));
     expect(document.activeElement).not.toBe(document.body);
     // The operation's own status says what the retry brought, as it does without a retry.
     const after = caller.saidAfter;
@@ -486,11 +508,7 @@ describe('a keyboard retry that loads nothing new', () => {
     const { operation, notice } = await retryFromTheKeyboard(caller);
     operation.end('answers');
     await waitFor(() => expect(notice.isConnected).toBe(false));
-    await waitFor(() => {
-      const loaded = caller.loaded();
-      expect(loaded).toBeTruthy();
-      expect(document.activeElement).toBe(loaded);
-    });
+    await waitFor(() => expectFocusOn(caller.loaded()));
   });
 });
 
