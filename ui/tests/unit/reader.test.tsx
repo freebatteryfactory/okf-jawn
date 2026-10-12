@@ -1,8 +1,9 @@
 /** Reading an item: sanitized Markdown, read-only properties, continuation, extraction state, failures. */
 
-import { screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SafeMarkdown } from '../../src/features/documents/SafeMarkdown';
 import { mockApi, notImplemented, ok } from './support/api';
 import {
   explorerHandlers,
@@ -57,6 +58,31 @@ describe('reading', () => {
       expect(element.id.startsWith('user-content-')).toBe(true);
     }
     expect(Reflect.get(window, 'okfHacked')).toBeUndefined();
+  });
+
+  it('says once that embedded HTML is not shown, wherever raw HTML was removed', async () => {
+    mockApi(explorerHandlers({ [READ]: () => ok(readResponse(noteSummary, hostile)) }));
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    const article = await openDocument();
+    await within(article).findByText(/Plain words with a footnote/);
+    const notices = within(article).getAllByText('Embedded HTML is not shown here.');
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.getAttribute('role')).toBe('note');
+  });
+
+  it('adds no notice where the Markdown holds no raw HTML, even HTML-looking code', () => {
+    const { container } = render(
+      <SafeMarkdown markdown={'Use `<b>` for bold.\n\n```html\n<div>an example</div>\n```'} />,
+    );
+    expect(container.textContent).toContain('<div>an example</div>');
+    expect(container.textContent).not.toContain('Embedded HTML is not shown here.');
+  });
+
+  it('notices inline HTML inside a paragraph too', () => {
+    const { container } = render(<SafeMarkdown markdown={'Some <span>inline</span> markup.'} />);
+    expect(container.querySelector('span')).toBeNull();
+    expect(container.textContent).toContain('Embedded HTML is not shown here.');
+    expect(container.textContent).toContain('inline');
   });
 
   it('shows GFM task boxes as named checkboxes nobody can change', async () => {
