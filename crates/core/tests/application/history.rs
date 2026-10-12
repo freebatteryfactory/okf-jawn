@@ -2290,6 +2290,181 @@ async fn restore_items_refuses_to_restore_nothing_and_never_brings_back_or_overw
     Ok(())
 }
 
+/// A world whose head `b` no longer holds NOTE: `a` holds it at `first`, `d` at `last`, and
+/// `e`, whose parent is `d`, removed it. A Rewind of it commits `c`.
+fn deleted_since(first: &str, last: &str) -> Built<World> {
+    let world = World::new()?;
+    note_at(&world, NOTE, first, &['a'])?;
+    note_at(&world, NOTE, last, &['d'])?;
+    world.versions.set_head(revision('b')?)?;
+    world.versions.put_diff(
+        &revision('b')?,
+        &revision('a')?,
+        Some(item(NOTE)),
+        vec![change(FileChangeKind::Added, None, Some(first))],
+    )?;
+    // The item's history from the head, newest first: the commit that removed it.
+    world.versions.put_log(
+        &revision('b')?,
+        Some(item(NOTE)),
+        LogResponse {
+            commits: vec![Commit {
+                parents: vec![revision('d')?],
+                ..wire_commit('e')?
+            }],
+            next_cursor: Some("1".to_owned()),
+        },
+    )?;
+    world.versions.queue_revision(revision('c')?)?;
+    Ok(world)
+}
+
+/// The edits of the one commit a Rewind of NOTE from `b` to `a` wrote in `world`.
+async fn rewound(world: &World) -> Built<Vec<TreeEdit>> {
+    world
+        .service
+        .restore_items(
+            &alice(OperationName::RestoreItems, Some(mutation(1)))?,
+            rewind('b', 'a', Some(NOTE))?,
+        )
+        .await?;
+    let commits = world.versions.commits()?;
+    assert_eq!(commits.len(), 1);
+    Ok(some(commits.into_iter().next(), "the rewind")?.edits)
+}
+
+/// Whether `edits` are the one `RestoreItem` of NOTE from `a`.
+fn one_restore(edits: &[TreeEdit]) -> Built<bool> {
+    let target = revision('a')?;
+    Ok(matches!(
+        edits,
+        [TreeEdit::RestoreItem { item_id, from }] if *item_id == item(NOTE) && *from == target
+    ))
+}
+
+#[tokio::test]
+async fn restoring_a_deleted_item_at_an_older_path_moves_it_there_from_its_last_path() -> TestResult
+{
+    // NOTE was at `notes/old.md` at the target, moved to `notes/new.md`, then deleted: the
+    // links that pointed at it still name `notes/new.md`.
+    let world = deleted_since("notes/old.md", "notes/new.md")?;
+    let edits = rewound(&world).await?;
+    let (last, target) = (revision('d')?, revision('a')?);
+    // Back where it last was, moved to its path at the target (which rewrites the links that
+    // point at it, as a move does), then restored from the target.
+    assert!(
+        matches!(
+            edits.as_slice(),
+            [
+                TreeEdit::RestoreItem { item_id: put_back, from: held },
+                TreeEdit::MoveItem { item_id: moved, destination },
+                TreeEdit::RestoreItem { item_id: restored, from },
+            ] if [put_back, moved, restored].iter().all(|id| **id == item(NOTE))
+                && *held == last
+                && destination.as_str() == "notes/old.md"
+                && *from == target
+        ),
+        "{edits:?}"
+    );
+    let shown = world
+        .versions
+        .show(&scope()?, &revision('c')?, item(NOTE))
+        .await?;
+    assert_eq!(shown.summary.path.as_str(), "notes/old.md");
+    // The last holder was asked of the item's own history from the base: its newest commit.
+    let queries = world.versions.log_queries()?;
+    let [query] = queries.as_slice() else {
+        return Err(format!("not one history query: {queries:?}").into());
+    };
+    assert_eq!(query.tip, revision('b')?);
+    assert_eq!(query.item_id, Some(item(NOTE)));
+    assert_eq!((query.page.cursor.as_deref(), query.page.limit), (None, 1));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rewind_moves_no_links_when_they_have_nothing_to_follow() -> TestResult {
+    // The base still holds the item: the store moves it back itself, and no history is read.
+    let world = World::new()?;
+    note_at(&world, NOTE, "notes/old.md", &['a'])?;
+    note_at(&world, NOTE, "notes/new.md", &['b'])?;
+    world.versions.set_head(revision('b')?)?;
+    world.versions.put_diff(
+        &revision('b')?,
+        &revision('a')?,
+        Some(item(NOTE)),
+        vec![change(
+            FileChangeKind::Moved,
+            Some("notes/new.md"),
+            Some("notes/old.md"),
+        )],
+    )?;
+    world.versions.queue_revision(revision('c')?)?;
+    assert!(one_restore(&rewound(&world).await?)?, "still held");
+    assert_eq!(world.versions.log_queries()?.len(), 0);
+
+    // Deleted where the target holds it: its links already name the restored path.
+    let world = deleted_since("notes/old.md", "notes/old.md")?;
+    assert!(one_restore(&rewound(&world).await?)?, "the same path");
+
+    // Deleted, and since then its last path was taken: by another item, by one whose path
+    // differs only in letter case, or by a folder. The links that name it are that one's now.
+    for holder in ["notes/new.md", "notes/New.md", "notes/new.md/inner.md"] {
+        let world = deleted_since("notes/old.md", "notes/new.md")?;
+        note_at(&world, OTHER, holder, &['b'])?;
+        assert!(one_restore(&rewound(&world).await?)?, "{holder}");
+    }
+
+    // The history of the base never held the item, or its newest commit has no parent.
+    for commits in [Vec::new(), vec![wire_commit('e')?]] {
+        let world = deleted_since("notes/old.md", "notes/new.md")?;
+        world.versions.put_log(
+            &revision('f')?,
+            Some(item(NOTE)),
+            LogResponse {
+                commits,
+                next_cursor: None,
+            },
+        )?;
+        world.versions.set_head(revision('f')?)?;
+        world.versions.put_diff(
+            &revision('f')?,
+            &revision('a')?,
+            Some(item(NOTE)),
+            vec![change(FileChangeKind::Added, None, Some("notes/old.md"))],
+        )?;
+        world
+            .service
+            .restore_items(
+                &alice(OperationName::RestoreItems, Some(mutation(1)))?,
+                rewind('f', 'a', Some(NOTE))?,
+            )
+            .await?;
+        let commits = world.versions.commits()?;
+        let commit = some(commits.first(), "the rewind")?;
+        assert!(one_restore(&commit.edits)?, "{:?}", commit.edits);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rewind_that_cannot_read_where_the_item_is_writes_nothing() -> TestResult {
+    let world = deleted_since("notes/old.md", "notes/new.md")?;
+    world.versions.fail_next_show(ErrorCode::Unavailable)?;
+    let failed = err_of(
+        world
+            .service
+            .restore_items(
+                &alice(OperationName::RestoreItems, Some(mutation(1)))?,
+                rewind('b', 'a', Some(NOTE))?,
+            )
+            .await,
+    )?;
+    assert_eq!(failed.code, ErrorCode::Unavailable);
+    assert_eq!(world.versions.commits()?.len(), 0);
+    Ok(())
+}
+
 #[tokio::test]
 async fn restoring_a_moved_item_touches_its_path_at_the_base_and_its_restored_path() -> TestResult {
     let world = World::new()?;

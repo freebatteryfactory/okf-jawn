@@ -41,6 +41,10 @@
 //! the target, which follows its moves, lists nothing. The store restores the item by identity,
 //! so another item's file is never brought back, and restoring over another item's path fails
 //! the commit with `Conflict`. The files that comparison shows at the target count as touched.
+//! The store moves an item the base still holds back with its links. An item deleted since has
+//! no path at the base for its links to follow from, so its Rewind first puts it back at its
+//! last path before the delete and moves it from there (`item_restore`, R-I14): the links that
+//! pointed at that last path end pointing at the restored path.
 //!
 //! Both writes commit through `shared::commit` with the production edit check: OKF conformance
 //! refuses, and the validator's warnings and OKF lint about the files the write touches come
@@ -69,7 +73,7 @@ use super::sources::{citation, record_of};
 use crate::conformance::EditCheck;
 use crate::context::{Attempt, OperationContext};
 use crate::portable::item_content_digest;
-use crate::storage::{BlameQuery, Committed, DiffQuery, LogQuery, StorageScope, TreeEdit};
+use crate::storage::{BlameQuery, Committed, DiffQuery, LogQuery, Page, StorageScope, TreeEdit};
 
 /// Which side of a comparison a citation is of.
 #[derive(Clone, Copy)]
@@ -90,6 +94,8 @@ enum Hunk {
 
 /// How many heads a Snapshot tries while unrelated commits keep landing before its commit.
 const HEAD_ATTEMPTS: usize = 3;
+/// How many entries of a folder are read at a time when a Rewind asks whether a path is taken.
+const FOLDER_PAGE: u16 = 500;
 
 /// Content snapshots of the workspace or of one item (following its moves), newest first,
 /// walking back from the resolved revision. The commits carry metadata and no item content, so
@@ -347,14 +353,20 @@ pub(super) async fn restore_items(
         .flatten()
         .filter_map(|path| WorkspacePath::try_from(path).ok())
         .collect();
-    let edit = match request.item_id {
-        None => TreeEdit::RestoreWorkspace {
+    let edits = match request.item_id {
+        None => vec![TreeEdit::RestoreWorkspace {
             from: request.target.clone(),
-        },
-        Some(item) => TreeEdit::RestoreItem {
-            item_id: item,
-            from: request.target.clone(),
-        },
+        }],
+        Some(item) => {
+            item_restore(
+                service,
+                &scope,
+                item,
+                &request.base_revision,
+                &request.target,
+            )
+            .await?
+        }
     };
     commit_with_receipt(
         service,
@@ -362,7 +374,7 @@ pub(super) async fn restore_items(
         Write {
             base: request.base_revision,
             message: request.message,
-            edits: vec![edit],
+            edits,
             item: request.item_id,
             touched: Touched {
                 paths: restored,
@@ -371,6 +383,146 @@ pub(super) async fn restore_items(
         },
     )
     .await
+}
+
+/// The edits that restore `item` to its state at `target` on top of `base`.
+///
+/// One `RestoreItem` is the whole restore for an item the base still holds: the store moves it
+/// back from its path there with its links. An item the base does not hold (deleted since) has
+/// no path there to be moved from, so the links that pointed at it still name its last path
+/// before the delete. When that path is not the one `target` holds it at, and nothing holds it
+/// now, the Rewind is three edits (R-I14):
+///
+/// 1. `RestoreItem` from the last revision that held the item (`last_held`), which puts it
+///    back where the links still point;
+/// 2. `MoveItem` to its path at `target`, which rewrites every link that points at it, as a
+///    move does;
+/// 3. `RestoreItem` from `target`, which sets the item and its companions to their state there.
+///
+/// The move separates the two restores, so the store applies them in order and not as one
+/// group. In every other case the links have nothing to follow, and the Rewind is the one
+/// `RestoreItem`: the item's last path is its path at `target`; another item, or a folder, took
+/// that last path since (its links are that one's now); or the history of `base` never held
+/// the item.
+///
+/// # Errors
+/// Returns any port error of reading the item, its history or the folder of its last path.
+async fn item_restore(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    item: ItemId,
+    base: &Revision,
+    target: &Revision,
+) -> Result<Vec<TreeEdit>, ApiError> {
+    let restore = TreeEdit::RestoreItem {
+        item_id: item,
+        from: target.clone(),
+    };
+    let versions = &service.ports().versions;
+    if path_at(service, scope, base, item).await?.is_some() {
+        return Ok(vec![restore]);
+    }
+    let Some(destination) = path_at(service, scope, target, item).await? else {
+        return Ok(vec![restore]);
+    };
+    // The newest commit at or before the base that changed the item removed it, since the base
+    // does not hold it; that commit's first parent is the last revision that held it.
+    let newest = versions
+        .log(
+            scope,
+            LogQuery {
+                tip: base.clone(),
+                item_id: Some(item),
+                page: Page {
+                    cursor: None,
+                    limit: 1,
+                },
+            },
+        )
+        .await?
+        .commits
+        .into_iter()
+        .next();
+    let Some(last) = newest.and_then(|commit| commit.parents.into_iter().next()) else {
+        return Ok(vec![restore]);
+    };
+    let Some(last_path) = path_at(service, scope, &last, item).await? else {
+        return Ok(vec![restore]);
+    };
+    if last_path == destination || taken(service, scope, base, &last_path).await? {
+        return Ok(vec![restore]);
+    }
+    Ok(vec![
+        TreeEdit::RestoreItem {
+            item_id: item,
+            from: last,
+        },
+        TreeEdit::MoveItem {
+            item_id: item,
+            destination,
+        },
+        restore,
+    ])
+}
+
+/// The path `revision` holds `item` at; `None` when it does not hold the item.
+async fn path_at(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    item: ItemId,
+) -> Result<Option<WorkspacePath>, ApiError> {
+    match service.ports().versions.show(scope, revision, item).await {
+        Ok(document) => Ok(Some(document.summary.path)),
+        Err(error) if error.code == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether `revision` holds an item or a folder at `path`, compared as the store compares
+/// paths for a collision (`WorkspacePath::collision_key`), so a path differing only in letter
+/// case counts as taken. The folder `path` lies in is listed; a folder the revision does not
+/// hold has nothing in it.
+async fn taken(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    revision: &Revision,
+    path: &WorkspacePath,
+) -> Result<bool, ApiError> {
+    let key = path.collision_key();
+    let folder = match path.as_str().rsplit_once('/') {
+        Some((folder, _)) => Some(
+            WorkspacePath::try_from(folder.to_owned())
+                .map_err(|error| ApiError::new(ErrorCode::Internal, error.0))?,
+        ),
+        None => None,
+    };
+    let versions = &service.ports().versions;
+    let mut cursor = None;
+    loop {
+        let page = Page {
+            cursor: cursor.take(),
+            limit: FOLDER_PAGE,
+        };
+        let listing = match versions.list(scope, revision, folder.as_ref(), page).await {
+            Ok(listing) => listing,
+            Err(error) if error.code == ErrorCode::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let collides = listing
+            .items
+            .iter()
+            .map(|item| &item.path)
+            .chain(&listing.folders)
+            .any(|held| held.collision_key() == key);
+        if collides {
+            return Ok(true);
+        }
+        match listing.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(false),
+        }
+    }
 }
 
 /// Commit the drafts on the head when no selected item changed since its draft's base.
