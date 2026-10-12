@@ -144,6 +144,52 @@ describe('folder tree', () => {
     expect(cursors).toEqual([null, 'next-page']);
   });
 
+  it('moves focus to the first entry "Show more entries" brought, and says so', async () => {
+    mockApi({
+      ...workspaceHandlers(),
+      [LIST]: (body) => {
+        const page = body.page as { cursor: string | null };
+        return page.cursor === 'next-page'
+          ? ok(listing([], [otherSummary]))
+          : ok(listing([], [noteSummary], 'next-page'));
+      },
+    });
+    renderAt(`/w/${WS}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    await within(tree).findByRole('treeitem', { name: 'Show more entries' });
+    tree.focus();
+    await userEvent.keyboard('{End}');
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute('aria-label')).toBe('Show more entries'),
+    );
+    await userEvent.keyboard('{Enter}');
+    const plan = await within(tree).findByRole('treeitem', { name: /Plan/ });
+    await waitFor(() => expect(document.activeElement).toBe(plan));
+    expect(screen.getByText('1 entry shown.').getAttribute('role')).toBe('status');
+  });
+
+  it('keeps focus on the row when more entries fail to list, and says so', async () => {
+    mockApi({
+      ...workspaceHandlers(),
+      [LIST]: (body) => {
+        const page = body.page as { cursor: string | null };
+        return page.cursor === 'next-page'
+          ? fail(500, 'internal', 'storage stumbled')
+          : ok(listing([], [noteSummary], 'next-page'));
+      },
+    });
+    renderAt(`/w/${WS}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    await within(tree).findByRole('treeitem', { name: 'Show more entries' });
+    tree.focus();
+    await userEvent.keyboard('{End}{Enter}');
+    const failed = await within(tree).findByRole('treeitem', {
+      name: /Could not list more entries/,
+    });
+    await waitFor(() => expect(document.activeElement).toBe(failed));
+    expect(screen.getByText('The entries could not be listed.')).toBeTruthy();
+  });
+
   it('opens an item from the keyboard and shows it in a tab', async () => {
     mockApi(workspaceHandlers());
     const { router } = renderAt(`/w/${WS}`);

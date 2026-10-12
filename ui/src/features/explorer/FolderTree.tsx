@@ -5,11 +5,13 @@
  * user type name (an open vocabulary); its rendering role (Note, Source or View) picks the icon.
  * Arborist supplies the tree semantics and keyboard model (arrows, Home/End, type-ahead, Space);
  * Enter also opens the focused entry. The open item of the URL is the tree's selection, and its
- * folders are expanded when it is opened from a link.
+ * folders are expanded when it is opened from a link. "Show more entries" and a retry move
+ * keyboard focus to the first entry they brought (or keep it on a row still there), and a live
+ * region says what happened.
  */
 import { type UseQueryResult, useQueries, useQueryClient } from '@tanstack/react-query';
 import { ChartColumn, FileBox, FileText, Folder, FolderOpen } from 'lucide-react';
-import { useEffect, useId, useRef } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import {
   type NodeApi,
   type NodeRendererProps,
@@ -92,7 +94,9 @@ function statusEntry(folder: string, status: StatusKind, error: unknown = null):
     'more-error': `Could not list more entries: ${failure}`,
   }[status];
   return {
-    id: `${status}:${folder}`,
+    // One id per row through its states (loading, failed; more, loading more, failed), so a
+    // row that has keyboard focus keeps it while it changes.
+    id: statusRowId(folder, status),
     name,
     kind: 'status',
     folder,
@@ -151,6 +155,32 @@ function contains(entries: readonly TreeEntry[], id: string): boolean {
   return entries.some((entry) => entry.id === id || contains(entry.children ?? [], id));
 }
 
+function statusRowId(folder: string, status: StatusKind): string {
+  return status === 'loading' || status === 'error' ? `listing:${folder}` : `more:${folder}`;
+}
+
+/** The entries listed in `folder` (the root's for ''), as the tree shows them. */
+function childrenOf(entries: readonly TreeEntry[], folder: string): readonly TreeEntry[] {
+  if (folder === '') return entries;
+  for (const entry of entries) {
+    if (entry.id === folderId(folder)) return entry.children ?? [];
+    const found = childrenOf(entry.children ?? [], folder);
+    if (found.length > 0) return found;
+  }
+  return [];
+}
+
+/** A listing the person asked for ("Show more entries", or a retry), awaiting its answer. */
+interface PendingLoad {
+  folder: string;
+  /** How many entries the folder showed when asked: the first new one is at this index. */
+  from: number;
+  /** For "more": the larger page count is a new query, settled once it is not a placeholder. */
+  more: boolean;
+  /** For a retry: settled once the query has answered after this instant. */
+  since: number;
+}
+
 export function FolderTree({
   workspaceId,
   revision,
@@ -197,15 +227,61 @@ export function FolderTree({
       ? itemNodeId(selectedItemId)
       : undefined;
 
+  // A listing asked for from the keyboard moves focus to the first entry it brought. If none
+  // came, focus stays on a row that is still there, and the status says what happened.
+  const pending = useRef<PendingLoad | null>(null);
+  const [loadNote, setLoadNote] = useState('');
+  useEffect(() => {
+    const load = pending.current;
+    if (load === null) return;
+    const result = listings.get(load.folder);
+    if (result === undefined) {
+      pending.current = null;
+      return;
+    }
+    const settled = load.more
+      ? !result.isPlaceholderData && !result.isPending && !result.isFetching
+      : !result.isFetching && Math.max(result.dataUpdatedAt, result.errorUpdatedAt) >= load.since;
+    if (!settled) return;
+    pending.current = null;
+    const tree = treeRef.current;
+    const shown = childrenOf(entries, load.folder);
+    const listed = shown.filter((entry) => entry.kind !== 'status');
+    const firstNew = listed.at(load.from);
+    if (firstNew !== undefined) {
+      const arrived = listed.length - load.from;
+      tree?.focus(firstNew.id);
+      setLoadNote(`${arrived} ${arrived === 1 ? 'entry' : 'entries'} shown.`);
+      return;
+    }
+    const stillThere = shown.find((entry) => entry.kind === 'status') ?? listed.at(-1);
+    if (stillThere !== undefined) tree?.focus(stillThere.id);
+    setLoadNote(
+      result.isError || (result.data?.moreError ?? null) !== null
+        ? 'The entries could not be listed.'
+        : 'No more entries.',
+    );
+  });
+
   const activate = (node: NodeApi<TreeEntry>) => {
     const entry = node.data;
+    const shownCount = () =>
+      childrenOf(entries, entry.folder).filter((child) => child.kind !== 'status').length;
     if (entry.kind === 'item' && entry.item !== null) onOpenItem(entry.item.id);
     else if (entry.kind === 'folder') node.toggle();
-    else if (entry.status === 'more') showMore(workspaceId, entry.folder);
-    else if (
+    else if (entry.status === 'more') {
+      pending.current = { folder: entry.folder, from: shownCount(), more: true, since: 0 };
+      showMore(workspaceId, entry.folder);
+    } else if (
       (entry.status === 'error' || entry.status === 'more-error') &&
       retryable(entry.error)
     ) {
+      pending.current = {
+        folder: entry.folder,
+        from: shownCount(),
+        more: false,
+        since: Date.now(),
+      };
       void listings.get(entry.folder)?.refetch();
     }
   };
@@ -226,6 +302,9 @@ export function FolderTree({
       {root?.isSuccess && entries.length === 0 && (
         <p>This workspace has no folders or items yet.</p>
       )}
+      <p role="status" className="sr-only">
+        {loadNote}
+      </p>
       <div ref={boxRef} className="tree-box">
         {root?.isSuccess && entries.length > 0 && (
           <Tree<TreeEntry>

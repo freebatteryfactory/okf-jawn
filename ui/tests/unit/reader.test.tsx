@@ -4,7 +4,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SafeMarkdown } from '../../src/features/documents/SafeMarkdown';
-import { mockApi, notImplemented, ok } from './support/api';
+import { fail, mockApi, notImplemented, ok } from './support/api';
 import {
   explorerHandlers,
   NOTE,
@@ -147,6 +147,58 @@ describe('reading', () => {
     expect(reads[1]?.selection).toEqual(reads[0]?.selection);
     expect(reads[1]?.view).toBe('text');
     expect(api.violations).toEqual([]);
+  });
+
+  it('moves keyboard focus to the part "Continue reading" loaded, and says so', async () => {
+    mockApi(
+      explorerHandlers({
+        [READ]: (body) =>
+          body.cursor === 'part-2'
+            ? ok(readResponse(noteSummary, 'Part two of the text'))
+            : ok(
+                readResponse(noteSummary, 'Part one of the text', {
+                  truncated: true,
+                  next_cursor: 'part-2',
+                }),
+              ),
+      }),
+    );
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    const article = await openDocument();
+    await within(article).findByText('Part one of the text');
+    within(article).getByRole('button', { name: 'Continue reading' }).focus();
+    await userEvent.keyboard('{Enter}');
+    const part = await within(article).findByRole('group', { name: 'Part 2 of this reading' });
+    expect(part.textContent).toContain('Part two of the text');
+    await waitFor(() => expect(document.activeElement).toBe(part));
+    expect(within(article).getByText('Part 2 read.').getAttribute('role')).toBe('status');
+  });
+
+  it('keeps focus on "Continue reading" when nothing more arrived, and says why', async () => {
+    mockApi(
+      explorerHandlers({
+        [READ]: (body) =>
+          body.cursor === 'part-2'
+            ? fail(500, 'internal', 'storage stumbled')
+            : ok(
+                readResponse(noteSummary, 'Part one of the text', {
+                  truncated: true,
+                  next_cursor: 'part-2',
+                }),
+              ),
+      }),
+    );
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    const article = await openDocument();
+    await within(article).findByText('Part one of the text');
+    const button = within(article).getByRole('button', { name: 'Continue reading' });
+    button.focus();
+    await userEvent.keyboard('{Enter}');
+    await within(article).findByRole('alert');
+    expect(document.activeElement).toBe(
+      within(article).getByRole('button', { name: 'Continue reading' }),
+    );
+    expect(within(article).getByText('The rest of this reading could not be read.')).toBeTruthy();
   });
 
   it('says when a source is partly converted, agent-supplied or corrected', async () => {

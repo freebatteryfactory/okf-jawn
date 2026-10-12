@@ -4,7 +4,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SearchHit } from '../../src/api/generated/types.gen';
-import { mockApi, notImplemented, ok } from './support/api';
+import { fail, mockApi, notImplemented, ok } from './support/api';
 import { explorerHandlers, HEAD, NOTE, OTHER, renderAt, WS } from './support/workspace';
 
 afterEach(() => {
@@ -106,6 +106,69 @@ describe('search', () => {
     expect(within(results).queryByRole('button', { name: 'Show more results' })).toBeNull();
     const cursors = api.callsTo(SEARCH).map((body) => (body.page as { cursor: unknown }).cursor);
     expect(cursors).toEqual([null, 'more']);
+  });
+
+  it('keeps keyboard focus in the search box on submit, and announces the count politely', async () => {
+    mockApi(
+      explorerHandlers({
+        [SEARCH]: () =>
+          ok({ hits: [hit(NOTE, 'Meeting notes', 'notes/meeting.md', 4)], revision: HEAD }),
+      }),
+    );
+    renderAt(`/w/${WS}`);
+    const input = await screen.findByRole('searchbox', { name: 'Search this workspace' });
+    await userEvent.type(input, 'budget{Enter}');
+    const results = await screen.findByRole('region', { name: 'Results for “budget”' });
+    const status = await within(results).findByText('1 result shown.');
+    expect(status.getAttribute('role')).toBe('status');
+    expect(document.activeElement).toBe(input);
+    expect(screen.getByRole('searchbox', { name: 'Search this workspace' })).toBe(input);
+  });
+
+  it('moves focus to the first newly loaded result after "Show more results"', async () => {
+    mockApi(
+      explorerHandlers({
+        [SEARCH]: (body) =>
+          (body.page as { cursor: string | null }).cursor === 'more'
+            ? ok({ hits: [hit(OTHER, 'Plan', 'notes/plan.md', 1)], revision: HEAD })
+            : ok({
+                hits: [hit(NOTE, 'Meeting notes', 'notes/meeting.md', 4)],
+                revision: HEAD,
+                next_cursor: 'more',
+              }),
+      }),
+    );
+    renderAt(`/w/${WS}?q=budget`);
+    const results = await screen.findByRole('region', { name: 'Results for “budget”' });
+    (await within(results).findByRole('button', { name: 'Show more results' })).focus();
+    await userEvent.keyboard('{Enter}');
+    const plan = await within(results).findByRole('link', { name: /Plan/ });
+    await waitFor(() => expect(document.activeElement).toBe(plan));
+    expect(within(results).getByText('2 results shown.')).toBeTruthy();
+  });
+
+  it('keeps focus on "Show more results" when the next page fails, and says so', async () => {
+    mockApi(
+      explorerHandlers({
+        [SEARCH]: (body) =>
+          (body.page as { cursor: string | null }).cursor === 'more'
+            ? fail(500, 'internal', 'index stumbled')
+            : ok({
+                hits: [hit(NOTE, 'Meeting notes', 'notes/meeting.md', 4)],
+                revision: HEAD,
+                next_cursor: 'more',
+              }),
+      }),
+    );
+    renderAt(`/w/${WS}?q=budget`);
+    const results = await screen.findByRole('region', { name: 'Results for “budget”' });
+    (await within(results).findByRole('button', { name: 'Show more results' })).focus();
+    await userEvent.keyboard('{Enter}');
+    await within(results).findByRole('alert');
+    expect(document.activeElement).toBe(
+      within(results).getByRole('button', { name: 'Show more results' }),
+    );
+    expect(within(results).getByText('1 result shown; more could not be loaded.')).toBeTruthy();
   });
 
   it('says there are no matches, and goes back to the folders', async () => {

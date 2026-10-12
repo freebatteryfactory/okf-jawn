@@ -2,14 +2,16 @@
  * The document area: tabs of open items that split into side-by-side resizable panes.
  *
  * Base UI Tabs give each pane a tab list with arrow-key movement and Enter/Space activation;
- * Delete closes the focused tab. The close and split buttons sit beside the tab list, not in it,
- * so the tab list holds only tabs. react-resizable-panels separators resize panes with the
+ * Delete closes the focused tab. Closing never drops keyboard focus to the page: it moves to the
+ * tab after the closed one, else the one before; when a pane closes, to its neighbour's active
+ * tab; when nothing is open, to the empty documents area. The close and split buttons sit beside
+ * the tab list, not in it, so the tab list holds only tabs. react-resizable-panels separators resize panes with the
  * keyboard as well as the pointer. The focused pane is the one the URL describes; with several
  * panes its region name ends in ", focused", so assistive technology can tell which one it is.
  */
 import { Tabs } from '@base-ui/react/tabs';
 import { useQuery } from '@tanstack/react-query';
-import { Fragment } from 'react';
+import { Fragment, useEffect, useRef } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import type { Revision } from '../../api/generated/types.gen';
 import { DocumentView, itemOptions } from '../documents/DocumentView';
@@ -120,8 +122,28 @@ function DocumentPane({
   // The focused pane shows what the URL names; another pane keeps showing what it showed.
   const shownSelection = focused ? selection : pane.location.sel;
   const citedRevision = focused ? revision : pane.location.rev;
+
+  // After a tab or pane closes, keyboard focus goes to the tab or empty area chosen for it,
+  // once that element is on screen (the URL may still be catching up).
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const focusRequest = useExplorerStore((state) => state.focusRequest);
+  const clearFocusRequest = useExplorerStore((state) => state.clearFocusRequest);
+  useEffect(() => {
+    if (focusRequest === null || focusRequest.paneId !== pane.id) return;
+    const selector =
+      focusRequest.kind === 'tab'
+        ? `[role="tab"][data-item-id="${focusRequest.itemId}"]`
+        : '[data-empty-documents]';
+    const target = sectionRef.current?.querySelector(selector);
+    if (target instanceof HTMLElement) {
+      target.focus();
+      clearFocusRequest();
+    }
+  });
+
   return (
     <section
+      ref={sectionRef}
       aria-label={label}
       className={focused ? 'pane pane-focused' : 'pane'}
       onFocusCapture={() => {
@@ -140,7 +162,9 @@ function DocumentPane({
         </div>
       )}
       {pane.tabs.length === 0 && active === null ? (
-        <p className="empty-pane">Open an item from the folders or the search results.</p>
+        <p className="empty-pane" tabIndex={-1} data-empty-documents>
+          Open an item from the folders or the search results.
+        </p>
       ) : (
         <Tabs.Root
           value={active}
@@ -155,6 +179,7 @@ function DocumentPane({
                 <Tabs.Tab
                   key={itemId}
                   value={itemId}
+                  data-item-id={itemId}
                   className="tab"
                   onKeyDown={(event) => {
                     if (event.key !== 'Delete') return;
@@ -188,7 +213,9 @@ function DocumentPane({
             </div>
           </div>
           {active === null ? (
-            <p className="empty-pane">Choose one of the open items, or open another.</p>
+            <p className="empty-pane" tabIndex={-1} data-empty-documents>
+              Choose one of the open items, or open another.
+            </p>
           ) : (
             <Tabs.Panel value={active} className="tab-panel">
               <DocumentView

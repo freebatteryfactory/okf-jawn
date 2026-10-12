@@ -6,7 +6,7 @@
  */
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useId } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { searchItemsQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { searchItems } from '../../api/generated/sdk.gen';
 import type { Revision, SearchRequest } from '../../api/generated/types.gen';
@@ -22,26 +22,62 @@ export interface SearchFormProps {
   onSearch: (query: string | undefined) => void;
 }
 
+/**
+ * The search box. It is never remounted, so submitting keeps keyboard focus in it; its text
+ * follows the URL's query when that changes from elsewhere (back, "Back to folders").
+ */
 export function SearchForm({ query, onSearch }: SearchFormProps) {
   const inputId = useId();
+  const [text, setText] = useState(query ?? '');
+  const [followed, setFollowed] = useState(query);
+  if (followed !== query) {
+    setFollowed(query);
+    setText(query ?? '');
+  }
   return (
     <search aria-label="Search this workspace" className="search-form">
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          const value = new FormData(event.currentTarget).get('q');
-          const text = typeof value === 'string' ? value.trim() : '';
-          onSearch(text.length > 0 ? text : undefined);
+          const trimmed = text.trim();
+          onSearch(trimmed.length > 0 ? trimmed : undefined);
         }}
       >
         <label htmlFor={inputId}>Search this workspace</label>
         <div className="search-row">
-          <input id={inputId} key={query ?? ''} name="q" type="search" defaultValue={query ?? ''} />
+          <input
+            id={inputId}
+            name="q"
+            type="search"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+          />
           <button type="submit">Search</button>
         </div>
       </form>
     </search>
   );
+}
+
+/** The words of the results' live region: searching, failed, none, or how many are shown. */
+function searchStatus(
+  results: {
+    isPending: boolean;
+    isError: boolean;
+    isFetchNextPageError: boolean;
+    isFetchingNextPage: boolean;
+    hasNextPage: boolean;
+  },
+  shown: number,
+  query: string,
+): string {
+  if (results.isPending) return 'Searching…';
+  if (results.isError && !results.isFetchNextPageError) return 'The search did not complete.';
+  if (shown === 0) return `No matches for “${query}”.`;
+  if (results.isFetchingNextPage) return 'Loading more results…';
+  const count = `${shown} ${shown === 1 ? 'result' : 'results'} shown`;
+  if (results.isFetchNextPageError) return `${count}; more could not be loaded.`;
+  return `${count}${results.hasNextPage ? '; more are available' : ''}.`;
 }
 
 export interface SearchResultsProps {
@@ -75,6 +111,32 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
     staleTime: Number.POSITIVE_INFINITY,
   });
   const hits = results.data?.pages.flatMap((page) => page.hits) ?? [];
+
+  // "Show more results" moves keyboard focus to the first newly loaded result. If nothing new
+  // arrived, focus stays on a control that is still there, and the status says what happened.
+  const listRef = useRef<HTMLOListElement | null>(null);
+  const moreRef = useRef<HTMLButtonElement | null>(null);
+  const focusFrom = useRef<{ hits: number; pages: number } | null>(null);
+  const loadingMore = results.isFetchingNextPage;
+  const moreFailed = results.isFetchNextPageError;
+  const pageCount = results.data?.pages.length ?? 0;
+  useEffect(() => {
+    const asked = focusFrom.current;
+    // Settled once another page is here (even an empty one), or the next page failed.
+    if (asked === null || !(pageCount > asked.pages || (moreFailed && !loadingMore))) return;
+    focusFrom.current = null;
+    const links = listRef.current?.querySelectorAll<HTMLElement>('a.hit');
+    const first = links?.item(asked.hits);
+    if (first) first.focus();
+    else if (moreRef.current) moreRef.current.focus();
+    else links?.item(links.length - 1)?.focus();
+  }, [pageCount, loadingMore, moreFailed]);
+  const loadMore = () => {
+    if (loadingMore) return;
+    focusFrom.current = { hits: hits.length, pages: pageCount };
+    void results.fetchNextPage();
+  };
+
   return (
     <section className="search-results" aria-labelledby={headingId}>
       <div className="panel-title-row">
@@ -85,7 +147,8 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
           Back to folders
         </button>
       </div>
-      {results.isPending && <p role="status">Searching…</p>}
+      {/* One polite live region, present from the start, announces what the search found. */}
+      <p role="status">{searchStatus(results, hits.length, query)}</p>
       {results.isError && !results.isFetchNextPageError && (
         <FailureNotice
           context="Searching"
@@ -93,14 +156,9 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
           onRetry={() => void results.refetch()}
         />
       )}
-      {results.isSuccess && hits.length === 0 && <p role="status">No matches for “{query}”.</p>}
       {hits.length > 0 && (
         <>
-          <p role="status">
-            {hits.length} {hits.length === 1 ? 'result' : 'results'} shown
-            {results.hasNextPage ? '; more are available' : ''}.
-          </p>
-          <ol className="hit-list">
+          <ol className="hit-list" ref={listRef}>
             {keyed(hits, (hit) => JSON.stringify(hit.source)).map(({ key, value: hit }) => (
               <li key={key}>
                 <Link
@@ -130,12 +188,9 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
         </>
       )}
       {results.hasNextPage && (
-        <button
-          type="button"
-          disabled={results.isFetchingNextPage}
-          onClick={() => void results.fetchNextPage()}
-        >
-          {results.isFetchingNextPage ? 'Loading more results…' : 'Show more results'}
+        // aria-disabled, not disabled, while loading: a disabled button would drop focus.
+        <button type="button" ref={moreRef} aria-disabled={loadingMore} onClick={loadMore}>
+          {loadingMore ? 'Loading more results…' : 'Show more results'}
         </button>
       )}
       {results.isFetchNextPageError && (

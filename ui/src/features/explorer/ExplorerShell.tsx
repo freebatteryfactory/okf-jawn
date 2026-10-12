@@ -55,6 +55,7 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
   const closeTab = useExplorerStore((state) => state.closeTab);
   const splitRight = useExplorerStore((state) => state.splitRight);
   const setLayout = useExplorerStore((state) => state.setLayout);
+  const requestFocus = useExplorerStore((state) => state.requestFocus);
 
   // The URL is the truth for the focused pane: whatever item it names is open there, at the
   // selection and cited revision it names. The pane remembers them for when it loses focus.
@@ -166,7 +167,10 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
             }}
             onClose={(paneId, target) => {
               const result = closeTab(workspaceId, paneId, target);
-              if (result === null || !result.focusedChanged) return;
+              if (result === null) return;
+              // Keyboard focus never drops to the page: it goes where WAI-ARIA tabs put it.
+              requestFocus(result.focus);
+              if (!result.focusedChanged) return;
               if (result.show === null) goToWorkspace();
               else goToItem(result.show.itemId, { ...result.show.location, replace: true });
             }}

@@ -96,6 +96,63 @@ describe('tabs and panes', () => {
   });
 });
 
+describe('closing keeps keyboard focus (WAI-ARIA tabs)', () => {
+  it('moves focus to the next tab after Delete (P8)', async () => {
+    mockApi(explorerHandlers());
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    await screen.findByRole('tab', { name: 'Meeting notes', selected: true });
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    await userEvent.click(await within(tree).findByRole('treeitem', { name: /Plan/ }));
+    await screen.findByRole('tab', { name: 'Plan', selected: true });
+    screen.getByRole('tab', { name: 'Plan' }).focus();
+    await userEvent.keyboard('{Delete}');
+    await waitFor(() => expect(screen.queryByRole('tab', { name: 'Plan' })).toBeNull());
+    await waitFor(() => expect(document.activeElement?.getAttribute('role')).toBe('tab'));
+  });
+
+  it('moves focus to the tab after a closed one that was not active, and keeps the active tab', async () => {
+    mockApi(explorerHandlers());
+    const { router } = await openTwoTabs();
+    // Meeting notes is focused but not active; Plan is active.
+    screen.getByRole('tab', { name: 'Plan' }).focus();
+    await userEvent.keyboard('{ArrowLeft}');
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Meeting notes' }));
+    await userEvent.keyboard('{Delete}');
+    await waitFor(() => expect(screen.queryByRole('tab', { name: 'Meeting notes' })).toBeNull());
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Plan' })),
+    );
+    expect(router.state.location.pathname).toBe(`/w/${WS}/i/${OTHER}`);
+  });
+
+  it('moves focus to the empty documents area when "Close tab" closes the last tab', async () => {
+    mockApi(explorerHandlers());
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}`);
+    await screen.findByRole('tab', { name: 'Meeting notes', selected: true });
+    screen.getByRole('button', { name: 'Close tab' }).focus();
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}`));
+    const empty = await screen.findByText('Open an item from the folders or the search results.');
+    await waitFor(() => expect(document.activeElement).toBe(empty));
+  });
+
+  it("moves focus to the neighbouring pane's active tab when a pane closes", async () => {
+    mockApi(explorerHandlers());
+    await openTwoTabs();
+    await userEvent.click(screen.getByRole('button', { name: 'Split right' }));
+    const second = await screen.findByRole('region', { name: 'Documents, pane 2 of 2, focused' });
+    within(second).getByRole('button', { name: 'Close tab' }).focus();
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(screen.queryByRole('region', { name: /pane 2 of 2/ })).toBeNull());
+    const remaining = screen.getByRole('region', { name: 'Documents' });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        within(remaining).getByRole('tab', { name: 'Plan', selected: true }),
+      ),
+    );
+  });
+});
+
 describe('each pane keeps what it shows', () => {
   const lines = { kind: 'lines', range: { start: 2, end: 3 } } as const;
   const deepLink = `/w/${WS}/i/${NOTE}?sel=${encodeURIComponent(JSON.stringify(lines))}&rev=${OLD}`;

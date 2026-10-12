@@ -2,12 +2,13 @@
  * Read one item: its identity and properties from `get_item`, its text from `read_item` as
  * sanitized Markdown, at one resolved revision and the selection the URL names.
  *
- * A partial read says so and offers its continuation, which resumes the same resolved read.
+ * A partial read says so and offers its continuation, which resumes the same resolved read;
+ * continuing moves keyboard focus to the part it loaded, and a live region says what happened.
  * Warnings, partial extraction and agent-supplied text are shown, never smoothed over. Each
  * operation's failure is shown where its content would have been.
  */
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { useId } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import {
   getItemOptions,
   readItemInfiniteOptions,
@@ -38,6 +39,17 @@ export interface DocumentViewProps {
 }
 
 const ROLE = { note: 'Note', source: 'Source', view: 'View' } as const;
+
+/** The words of the reading's live region: what the last continuation did. */
+function readingStatus(
+  read: { isFetchingNextPage: boolean; isFetchNextPageError: boolean; hasNextPage: boolean },
+  parts: number,
+): string {
+  if (read.isFetchingNextPage) return 'Reading more…';
+  if (read.isFetchNextPageError) return 'The rest of this reading could not be read.';
+  if (parts > 1) return `Part ${parts} read${read.hasNextPage ? '; more can be read' : ''}.`;
+  return '';
+}
 
 export function itemOptions(workspaceId: string, itemId: string, revision: Revision) {
   return getItemOptions({
@@ -80,6 +92,33 @@ export function DocumentView({
   const title = summary?.title || path || 'Item';
   const warnings = pages.flatMap((page) => page.warnings);
   const extraction = first?.extraction;
+
+  // "Continue reading" moves keyboard focus to the part it loaded. If none arrived, focus stays
+  // on the button, which is still there, and the status says what happened.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const continueRef = useRef<HTMLButtonElement | null>(null);
+  const focusPart = useRef<number | null>(null);
+  const continuing = read.isFetchingNextPage;
+  const continuationFailed = read.isFetchNextPageError;
+  const partCount = pages.length;
+  useEffect(() => {
+    const part = focusPart.current;
+    if (part === null) return;
+    // Settled once the asked-for part is here, or the continuation failed.
+    if (partCount > part) {
+      focusPart.current = null;
+      const loaded = bodyRef.current?.children.item(part);
+      if (loaded instanceof HTMLElement) loaded.focus();
+    } else if (continuationFailed && !continuing) {
+      focusPart.current = null;
+      continueRef.current?.focus();
+    }
+  }, [partCount, continuing, continuationFailed]);
+  const continueReading = () => {
+    if (continuing) return;
+    focusPart.current = pages.length;
+    void read.fetchNextPage();
+  };
 
   return (
     <article className="document" aria-labelledby={titleId}>
@@ -174,12 +213,24 @@ export function DocumentView({
         />
       )}
       {pages.length > 0 && (
-        <div className="document-body">
-          {pages.map((page) => (
-            <SafeMarkdown key={page.receipt_id} markdown={page.markdown} />
+        <div className="document-body" ref={bodyRef}>
+          {keyed(pages, (page) => page.receipt_id).map(({ key, value: page }, index) => (
+            <div
+              key={key}
+              data-part
+              tabIndex={-1}
+              {...(pages.length > 1
+                ? { role: 'group', 'aria-label': `Part ${index + 1} of this reading` }
+                : {})}
+            >
+              <SafeMarkdown markdown={page.markdown} />
+            </div>
           ))}
         </div>
       )}
+      <p role="status" className="sr-only">
+        {readingStatus(read, pages.length)}
+      </p>
       {keyed(warnings, (warning) => JSON.stringify(warning)).map(({ key, value: warning }) => (
         <p key={key} role="note" className="notice">
           {warning.message}
@@ -187,18 +238,20 @@ export function DocumentView({
         </p>
       ))}
       {last?.truncated && (
-        <div role="status" className="notice">
+        <div role="note" className="notice">
           <p>
             Partial reading: this is not all of {describeSelection(request.selection)}.
             {last.next_cursor ? '' : ' The rest cannot be continued from here.'}
           </p>
           {read.hasNextPage && (
+            // aria-disabled, not disabled, while reading: a disabled button would drop focus.
             <button
               type="button"
-              disabled={read.isFetchingNextPage}
-              onClick={() => void read.fetchNextPage()}
+              ref={continueRef}
+              aria-disabled={continuing}
+              onClick={continueReading}
             >
-              {read.isFetchingNextPage ? 'Reading more…' : 'Continue reading'}
+              {continuing ? 'Reading more…' : 'Continue reading'}
             </button>
           )}
         </div>
