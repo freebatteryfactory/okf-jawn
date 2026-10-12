@@ -27,9 +27,15 @@
  * How the hook knows: React clears an element's ref before it removes the element, so the refs
  * given to the notice and to its button are cleared while focus is still where it was.
  *
+ * Focus is moved in a layout effect: in the commit that changes the page, before the browser
+ * paints it. A passive effect runs after the paint, so a frame could be drawn with focus on the
+ * page body.
+ *
  * Call the hook where the operation is read, not inside the notice: settling re-renders that
  * component, which reads the operation's state as it is then and renders what it loaded in the
- * same commit the focus moves in. The retry button exists only through this hook.
+ * same commit the focus moves in. A ref `loaded` reads must be on an element that component
+ * renders, itself or through its children: those refs are set before its layout effects run. The
+ * retry button exists only through this hook.
  *
  * Limits. The retry is over when `run` settles. A refetch that replaces a request still in flight
  * for content already on screen (an invalidation; nothing does that yet) settles `run` early,
@@ -37,7 +43,7 @@
  * A notice that leaves because the component calling the hook is itself unmounted is not followed:
  * the hook goes with it.
  */
-import { type RefCallback, useCallback, useEffect, useRef, useState } from 'react';
+import { type RefCallback, useCallback, useLayoutEffect, useRef, useState } from 'react';
 
 export interface RetriedOperation {
   /**
@@ -110,10 +116,10 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
     button.current = element;
   }, []);
 
-  // After each commit: `failed` is the operation's state as that commit shows it, and what it
-  // loaded is on the page. Focus follows a settled retry once, and a notice or button that left
-  // the page with focus in it.
-  useEffect(() => {
+  // In each commit, before the browser paints it: `failed` is the operation's state as the commit
+  // shows it, and what it loaded is on the page. Focus follows a settled retry once, and a notice
+  // or button that left the page with focus in it.
+  useLayoutEffect(() => {
     const left = heldFocus.current !== null && !heldFocus.current.isConnected;
     heldFocus.current = null;
     let settledWithFocus = false;
