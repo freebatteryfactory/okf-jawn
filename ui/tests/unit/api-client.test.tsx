@@ -97,7 +97,15 @@ describe('the CSRF header', () => {
     expect(api.calls.at(0)?.headers[CSRF_HEADER]).toBe('a%41b');
   });
 
-  it('is not sent when there is no cookie', async () => {
+  it.each([
+    ['no cookie at all', ''],
+    ['only other cookies', 'theme=dark; lang=en'],
+    ['the cookie emptied', `theme=dark; ${CSRF_COOKIE}=`],
+    ['a cookie whose name only begins like it', `${CSRF_COOKIE}-old=${TOKEN}`],
+    ['a cookie whose name only ends like it', `x-${CSRF_COOKIE}=${TOKEN}`],
+    ['a nameless cookie that reads like the name', `${CSRF_COOKIE}x; theme=dark`],
+  ])('is not sent with %s', async (_what, cookies) => {
+    browserHolds(cookies);
     const api = mockApi({ [OPEN]: () => ok(workspace) });
     await openWorkspace({ body: { workspace_id: WS }, throwOnError: true });
     expect(api.calls).toHaveLength(1);
@@ -191,17 +199,20 @@ describe('the bounded wait', () => {
     expect(signals.at(0)?.aborted).toBe(true);
   });
 
-  it('fails a JSON answer whose body never ends', async () => {
-    vi.useFakeTimers();
-    const { answers, signals } = heldFetch();
-    const outcome = outcomeOf(sendRequest('/api/items/save-draft', { method: 'POST' }));
-    answers.at(0)?.(new Response(endlessBody(), { headers: json }));
-    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
-    expect(outcome.settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(outcome.error).toBeInstanceOf(RequestTimedOut);
-    expect(signals.at(0)?.aborted).toBe(true);
-  });
+  it.each(['application/json', 'application/json; charset=utf-8', 'application/schema+json'])(
+    'fails a JSON answer (%s) whose body never ends',
+    async (type) => {
+      vi.useFakeTimers();
+      const { answers, signals } = heldFetch();
+      const outcome = outcomeOf(sendRequest('/api/items/save-draft', { method: 'POST' }));
+      answers.at(0)?.(new Response(endlessBody(), { headers: { 'Content-Type': type } }));
+      await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
+      expect(outcome.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(outcome.error).toBeInstanceOf(RequestTimedOut);
+      expect(signals.at(0)?.aborted).toBe(true);
+    },
+  );
 
   it('hands over an answer that is not JSON once it begins, and never cuts it', async () => {
     vi.useFakeTimers();

@@ -41,9 +41,6 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 /** Methods the server accepts from a cookie session without the CSRF header. */
 const SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-/** Statuses whose answer has no body to wait for. */
-const NO_BODY: ReadonlySet<number> = new Set([101, 204, 205, 304]);
-
 /** A request went unanswered for the whole bounded wait and was aborted. */
 export class RequestTimedOut extends Error {
   readonly waitedMs: number;
@@ -67,8 +64,9 @@ export function csrfToken(): string | null {
 }
 
 function needsCsrfHeader(request: Request): boolean {
-  if (SAFE_METHODS.has(request.method.toUpperCase())) return false;
-  return new URL(request.url, window.location.href).origin === window.location.origin;
+  // A Request's method is already in upper case, and its URL absolute.
+  if (SAFE_METHODS.has(request.method)) return false;
+  return new URL(request.url).origin === window.location.origin;
 }
 
 function isJson(response: Response): boolean {
@@ -96,7 +94,7 @@ export async function sendRequest(input: RequestInfo | URL, init?: RequestInit):
   try {
     const signal = AbortSignal.any([request.signal, deadline.signal]);
     const response = await Promise.race([globalThis.fetch(request, { signal }), timedOut]);
-    if (!isJson(response) || NO_BODY.has(response.status)) return response;
+    if (!isJson(response)) return response;
     // Reading a copy to its end holds the whole body here, so the caller's own read of the answer
     // cannot stall after the wait is over.
     await Promise.race([response.clone().text(), timedOut]);
