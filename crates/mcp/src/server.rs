@@ -18,6 +18,11 @@
 //! Results leave only through this crate's helpers: the read operation through `read_result`
 //! within its request's `max_bytes`, every other success through `structured_result`, and every
 //! failure through `error_result`.
+//!
+//! A read's selected images are fetched after the read succeeds, each through `read_object`
+//! (`get_object`) by dispatch as the read's own principal, so each fetch is authorized like any
+//! other call and a refusal is reported, never worked around. A fetch that fails, is refused or
+//! cannot be inlined never fails the read: that image is described in the text instead.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,7 +32,8 @@ use okf_jawn_contract::access::{AccessRoute, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::{EventActor, EventKind};
 use okf_jawn_contract::metadata::OperationName;
-use okf_jawn_contract::read::ReadItemResponse;
+use okf_jawn_contract::read::{MediaReference, ReadItemResponse, Selection};
+use okf_jawn_contract::source::{GetObjectRequest, GetObjectResponse, SourceReference};
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
@@ -44,7 +50,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler};
 use serde_json::Value;
 
 use crate::catalog::{Catalog, operation_of_tool};
-use crate::{MAX_TEXT_BYTES, error_result, read_result, structured_result};
+use crate::{MAX_TEXT_BYTES, NotInlined, ReadImage, error_result, read_result, structured_result};
 
 /// The ports one MCP server holds for its whole life; the application and dispatch's own.
 #[derive(Clone)]
@@ -77,6 +83,11 @@ struct Shared {
 const INSTRUCTIONS: &str = "okf-jawn document workspaces. Call `workspaces` first and pin later \
      reads to a workspace's head revision. Every result carries readable text and \
      structuredContent; a failed call is text with isError set.";
+
+/// The only media types a read's selected image is inlined as: raster formats, which carry no
+/// active content. SVG can carry script and the document is untrusted input, so it and every
+/// other type, `image/*` or not, are described in the text instead.
+const INLINE_IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 impl McpServer {
     /// A server over `ports` that serves the App bundle at `app_bundle`.
@@ -152,6 +163,24 @@ impl McpServer {
             Err(refusal) => return failure(&refusal),
         };
         let budget = (operation == OperationName::ReadItem).then(|| read_budget(&input));
+        match (self.run(principal, operation, input).await, budget) {
+            (Ok(response), None) => Ok(structured_result(&response, MAX_TEXT_BYTES)),
+            (Ok(response), Some(budget)) => self.read_success(principal, response, budget).await,
+            (Err(error), _) => failure(&error),
+        }
+    }
+
+    /// Dispatch `operation` as `principal`, already admitted: validation, authorization and
+    /// the ledger are dispatch's.
+    ///
+    /// # Errors
+    /// Returns dispatch's error.
+    async fn run(
+        &self,
+        principal: &Principal,
+        operation: OperationName,
+        input: Value,
+    ) -> Result<Value, ApiError> {
         let ports = &self.shared.ports;
         let dispatch_ports = DispatchPorts {
             access: ports.access.as_ref(),
@@ -162,19 +191,177 @@ impl McpServer {
             principal,
             session_id: None,
         };
-        let outcome = dispatch(
+        dispatch(
             ports.application.as_ref(),
             &dispatch_ports,
             &caller,
             operation.as_str(),
             input,
         )
-        .await;
-        match (outcome, budget) {
-            (Ok(response), None) => Ok(structured_result(&response, MAX_TEXT_BYTES)),
-            (Ok(response), Some(budget)) => read_success(response, budget),
-            (Err(error), _) => failure(&error),
+        .await
+    }
+
+    /// A successful read, through `read_result` within the request's budget, with its selected
+    /// images (`selected_images`).
+    ///
+    /// # Errors
+    /// Returns an rmcp error only when an `ApiError` cannot be serialized into its result.
+    async fn read_success(
+        &self,
+        principal: &Principal,
+        response: Value,
+        budget: Option<usize>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(budget) = budget else {
+            return failure(&ApiError::new(
+                ErrorCode::Internal,
+                "A read succeeded without a byte budget",
+            ));
+        };
+        let Ok(response) = serde_json::from_value::<ReadItemResponse>(response) else {
+            return failure(&ApiError::new(
+                ErrorCode::Internal,
+                "The read response does not decode as a read response",
+            ));
+        };
+        let images = self.selected_images(principal, &response, budget).await;
+        match read_result(&response, budget, &images) {
+            Ok(result) => Ok(result),
+            Err(_) => failure(&ApiError::new(
+                ErrorCode::Internal,
+                "The read response cannot be serialized",
+            )),
         }
+    }
+
+    /// What becomes of each image the read selected, in media order. Core has already applied
+    /// `max_images`, so every entry of `media` is one the caller asked for.
+    ///
+    /// An image is inlined when its media type, as declared and as served, is an inline raster
+    /// type (`INLINE_IMAGE_TYPES`), its fetch is complete (`has_more` false) and it fits what
+    /// is left of the image budget. The image budget is the
+    /// read's own `budget` (its `max_bytes`, capped at `MAX_TEXT_BYTES`), counted again and
+    /// separately from the text's: the text and the images may each use all of it. It counts
+    /// image bytes, the decoded size of each inlined image, so the base64 on the wire is about
+    /// four thirds of it. Each fetch asks for no more than is left, so a complete answer from
+    /// the application always fits; the size check guards the rest.
+    async fn selected_images<'read>(
+        &self,
+        principal: &Principal,
+        response: &'read ReadItemResponse,
+        budget: usize,
+    ) -> Vec<ReadImage<'read>> {
+        let mut left = budget;
+        let mut images = Vec::with_capacity(response.media.len());
+        for media in &response.media {
+            images.push(
+                match self
+                    .fetch_image(principal, &response.source, media, left)
+                    .await
+                {
+                    Ok((image, size)) => {
+                        left = left.saturating_sub(size);
+                        image
+                    }
+                    Err(reason) => ReadImage::NotInlined { media, reason },
+                },
+            );
+        }
+        images
+    }
+
+    /// One selected image, inlined with its decoded size, or the reason it is not.
+    ///
+    /// A media type the read declares as no inline image type is not fetched, nor is any image
+    /// once the budget is spent.
+    ///
+    /// # Errors
+    /// Returns why the image is not inlined: not an inline image type (declared or served),
+    /// too large, or the fetch refused with its `ApiError` code.
+    async fn fetch_image(
+        &self,
+        principal: &Principal,
+        read: &SourceReference,
+        media: &MediaReference,
+        left: usize,
+    ) -> Result<(ReadImage<'static>, usize), NotInlined> {
+        if !is_inline_image_type(&media.media_type) {
+            return Err(NotInlined::NotInlineType {
+                media_type: media.media_type.clone(),
+            });
+        }
+        if left == 0 {
+            return Err(NotInlined::TooLarge { size: None, left });
+        }
+        let block = self
+            .fetch_object(principal, read, media, left)
+            .await
+            .map_err(|refusal| NotInlined::Refused { code: refusal.code })?;
+        if !is_inline_image_type(&block.media_type) {
+            return Err(NotInlined::NotInlineType {
+                media_type: block.media_type,
+            });
+        }
+        let size = decoded_size(&block.data_base64);
+        if block.has_more || size > left {
+            return Err(NotInlined::TooLarge {
+                size: Some(block.total_size),
+                left,
+            });
+        }
+        Ok((
+            ReadImage::Inline {
+                data_base64: block.data_base64,
+                mime_type: block.media_type,
+            },
+            size,
+        ))
+    }
+
+    /// Fetch an image's bytes through `read_object` (`get_object`), never from a store.
+    ///
+    /// The request cites the read's own resolution: its workspace, item, path and resolved
+    /// revision, with the image's digest as the citation's digest and the object. Locations are
+    /// omitted, so the server fills them; a caller never supplies one. It asks for at most
+    /// `left` bytes from the start of the object.
+    ///
+    /// # Errors
+    /// Returns dispatch's refusal or the application's error, or `Internal` when the request
+    /// or the response does not convert.
+    async fn fetch_object(
+        &self,
+        principal: &Principal,
+        read: &SourceReference,
+        media: &MediaReference,
+        left: usize,
+    ) -> Result<GetObjectResponse, ApiError> {
+        let request = GetObjectRequest {
+            source: SourceReference {
+                workspace_id: read.workspace_id,
+                item_id: read.item_id,
+                path: read.path.clone(),
+                revision: read.revision.clone(),
+                digest: Some(media.object.clone()),
+                selection: Selection::All,
+                locations: Vec::new(),
+            },
+            object: media.object.clone(),
+            offset: None,
+            length: Some(u32::try_from(left).unwrap_or(u32::MAX)),
+        };
+        let input = serde_json::to_value(&request).map_err(|_| {
+            ApiError::new(
+                ErrorCode::Internal,
+                "An object request cannot be serialized",
+            )
+        })?;
+        let response = self.run(principal, OperationName::GetObject, input).await?;
+        serde_json::from_value(response).map_err(|_| {
+            ApiError::new(
+                ErrorCode::Internal,
+                "The object response does not decode as an object response",
+            )
+        })
     }
 
     /// Read the resource at `uri` as `principal`, the way `resources/read` does: the App
@@ -367,31 +554,26 @@ fn read_budget(input: &Value) -> Option<usize> {
         .map(|bytes| bytes.min(MAX_TEXT_BYTES))
 }
 
-/// A successful read, through `read_result` within the request's budget.
-fn read_success(response: Value, budget: Option<usize>) -> Result<CallToolResult, ErrorData> {
-    let Some(budget) = budget else {
-        return failure(&ApiError::new(
-            ErrorCode::Internal,
-            "A read succeeded without a byte budget",
-        ));
-    };
-    let decoded = serde_json::from_value::<ReadItemResponse>(response).map_err(|_| {
-        ApiError::new(
-            ErrorCode::Internal,
-            "The read response does not decode as a read response",
-        )
-    });
-    match decoded.and_then(|response| {
-        read_result(&response, budget).map_err(|_| {
-            ApiError::new(
-                ErrorCode::Internal,
-                "The read response cannot be serialized",
-            )
-        })
-    }) {
-        Ok(result) => Ok(result),
-        Err(error) => failure(&error),
-    }
+/// Whether `media_type` is one of `INLINE_IMAGE_TYPES`, ignoring case and any parameters.
+fn is_inline_image_type(media_type: &str) -> bool {
+    let essence = media_type
+        .split_once(';')
+        .map_or(media_type, |(essence, _)| essence)
+        .trim();
+    INLINE_IMAGE_TYPES
+        .iter()
+        .any(|inline| essence.eq_ignore_ascii_case(inline))
+}
+
+/// The number of bytes padded base64 text decodes to: three per four characters, less the
+/// padding.
+fn decoded_size(base64: &str) -> usize {
+    let padding = base64
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'=')
+        .count();
+    base64.len().saturating_sub(padding).saturating_mul(3) / 4
 }
 
 /// A failed call: the serialized `ApiError` as text with `isError`, through `error_result`.

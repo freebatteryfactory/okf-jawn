@@ -128,7 +128,7 @@ Ship the cure.
         false,
         None,
     )?;
-    let result = read_result(&response, MAX_TEXT_BYTES)?;
+    let result = read_result(&response, MAX_TEXT_BYTES, &[])?;
     assert_eq!(
         text_of(&result)?,
         "# Plan
@@ -148,7 +148,7 @@ Ship the cure.
 fn read_result_cuts_text_at_a_character_boundary_and_says_so() -> TestResult {
     let markdown = "é".repeat(10);
     let response = read_response(&markdown, false, None)?;
-    let result = read_result(&response, 5)?;
+    let result = read_result(&response, 5, &[])?;
     let text = text_of(&result)?;
     assert!(
         text.starts_with(
@@ -172,7 +172,7 @@ fn read_result_cuts_text_at_a_character_boundary_and_says_so() -> TestResult {
 #[test]
 fn read_result_reports_a_partial_read_with_its_cursor() -> TestResult {
     let response = read_response("First page.", true, Some("cursor-2"))?;
-    let result = read_result(&response, MAX_TEXT_BYTES)?;
+    let result = read_result(&response, MAX_TEXT_BYTES, &[])?;
     assert_eq!(
         text_of(&result)?,
         "First page.

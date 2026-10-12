@@ -16,12 +16,14 @@ use okf_jawn_mcp::{APP_URI, DEFAULT_MAX_REQUEST_BODY_BYTES, McpConfig, streamabl
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
 
 use crate::check::{TestResult, err_of, some};
 use crate::support::fakes::{FakeAccess, World};
 use crate::support::fixtures::{
-    HOST, Outcome, agent, bundle, call, call_result, committed, http_service, initialize,
-    missing_bundle, post, rpc, workspaces_input, workspaces_response,
+    HOST, Outcome, REPORT_MARKDOWN, WORKSPACE, agent, bundle, call, call_result, committed,
+    digest_of, http_service, image_read_input, image_read_response, initialize, media,
+    missing_bundle, object_block, on_page, post, rpc, workspaces_input, workspaces_response,
 };
 
 /// One HTTP/1.1 exchange's status and JSON body (`Null` when empty).
@@ -68,16 +70,15 @@ fn result(exchange: &Exchange) -> Outcome<&Value> {
     Ok(some(exchange.body.get("result"), "a JSON-RPC result")?)
 }
 
-#[tokio::test]
-async fn initialize_list_call_and_read_over_real_http() -> TestResult {
-    let world = World::new(FakeAccess::default().granting("alice", &[Permission::Read]));
-    world
-        .application
-        .answer_with("list_workspaces", workspaces_response())?;
+/// Serve `world` at `/mcp` on a loopback port as alice, with the App bundle `name`.
+async fn serve(
+    world: &World,
+    name: &str,
+) -> Outcome<(SocketAddr, JoinHandle<std::io::Result<()>>)> {
     let service = streamable_http_service(
         world.ports.clone(),
         McpConfig {
-            app_bundle: bundle("wire-app.html", HTML)?,
+            app_bundle: bundle(name, HTML)?,
             allowed_hosts: vec!["127.0.0.1".to_owned()],
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
         },
@@ -87,7 +88,19 @@ async fn initialize_list_call_and_read_over_real_http() -> TestResult {
         .layer(Extension(agent("alice")?));
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    Ok((
+        address,
+        tokio::spawn(async move { axum::serve(listener, router).await }),
+    ))
+}
+
+#[tokio::test]
+async fn initialize_list_call_and_read_over_real_http() -> TestResult {
+    let world = World::new(FakeAccess::default().granting("alice", &[Permission::Read]));
+    world
+        .application
+        .answer_with("list_workspaces", workspaces_response())?;
+    let (address, server) = serve(&world, "wire-app.html").await?;
 
     let opened = exchange(address, &initialize(1)).await?;
     let info = result(&opened)?;
@@ -121,6 +134,44 @@ async fn initialize_list_call_and_read_over_real_http() -> TestResult {
         result(&read)?.pointer("/contents/0/text"),
         Some(&json!(HTML))
     );
+    server.abort();
+    Ok(())
+}
+
+/// A read that selects a page image answers, on the wire, with its text and then the image
+/// block, typed as served.
+#[tokio::test]
+async fn a_read_carries_its_image_block_over_real_http() -> TestResult {
+    let world = World::new(FakeAccess::default().granting("alice", &[Permission::Read]));
+    let page = digest_of('c');
+    let response = image_read_response(
+        WORKSPACE,
+        "pages",
+        &[media(&page, "image/png", Some("Page 1"), &on_page(1))],
+    );
+    world
+        .application
+        .answer_with("read_item", response.clone())?;
+    world.application.serve_object(
+        &page,
+        Ok(object_block(&page, "image/png", "iVBORw0KGgo=", 8, false)),
+    )?;
+    let (address, server) = serve(&world, "wire-images.html").await?;
+    let called = exchange(
+        address,
+        &call(1, "show", &image_read_input("pages", 1024, 1)),
+    )
+    .await?;
+    let outcome = result(&called)?;
+    assert_eq!(outcome.get("isError"), Some(&json!(false)));
+    assert_eq!(
+        outcome.get("content"),
+        Some(&json!([
+            {"type": "text", "text": REPORT_MARKDOWN},
+            {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
+        ]))
+    );
+    assert_eq!(outcome.get("structuredContent"), Some(&response));
     server.abort();
     Ok(())
 }
