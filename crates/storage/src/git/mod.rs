@@ -467,14 +467,18 @@ impl VersionStore for GitVersions {
     }
 }
 
-/// The objects the source cards of `edits` name: every digest token of their appearances.
+/// The objects the source cards of `edits` name, read structurally as a purge reads them
+/// (`purge::references`): each appearance's original (`object`) and its conversion record
+/// (`extraction.digest`). A digest only in a card's text names nothing, so it lands no pending
+/// put, and a purge of the workspace still deletes that put's bytes.
 fn card_objects(edits: &[TreeEdit]) -> Vec<Digest> {
     let mut found = std::collections::BTreeSet::new();
     for edit in edits {
-        if let TreeEdit::WriteSourceCard(card) = edit
-            && let Ok(text) = serde_json::to_vec(&card.appearance)
-        {
-            crate::purge::references::tokens(&text, &mut found);
+        if let TreeEdit::WriteSourceCard(card) = edit {
+            found.insert(card.appearance.object.clone());
+            if let Some(record) = &card.appearance.extraction.digest {
+                found.insert(record.clone());
+            }
         }
     }
     found.into_iter().collect()

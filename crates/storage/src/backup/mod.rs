@@ -654,7 +654,7 @@ fn workspace_zip(
 ) -> Result<(), ApiError> {
     let (tenant, workspace) = crate::db::scope_key(scope);
     let excluded = snapshot::archive_objects(full, &tenant)?;
-    let records = snapshot::filter(full, directory, &tenant, &workspace)?;
+    let records = snapshot::filter(full, directory, (&tenant, &workspace), &excluded)?;
     let repository = repositories.open(scope)?;
     archive::write_workspace(
         target,

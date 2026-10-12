@@ -5,8 +5,12 @@
 //! may be a caller's file. Its entries, its manifest and every object's bytes against its
 //! digest; then its records: a UTF-8 database SQLite reads, intact, migrated to this build's
 //! schema, whose tables and indexes are exactly this build's, and whose rows are all of its own
-//! tenant, workspace and jobs, each `record` JSON. Then the objects are put back, then the Git
-//! history (the pack is indexed and every reference set), then the records in one transaction.
+//! tenant, workspace and jobs, each `record` JSON; then that it holds every object its history
+//! and the rows the restore copies name, read structurally (`refuse_unheld`), so a caller who
+//! knows only a digest cannot make the restored workspace name an object the archive did not
+//! bring (SPEC section 4: hash possession does not authorize a read). Then the objects are put
+//! back, then the Git history (the pack is indexed and every reference set), then the records
+//! in one transaction.
 //! An import then writes one commit on the archive head carrying its mutation (same tree), so
 //! its revision is found by that mutation like any job's write. A resumed import finds the
 //! accepted head already at the archive's, or at that commit, and skips what is done; the
@@ -69,10 +73,10 @@ struct Target {
     original: String,
     /// The archive's objects, put back before the rows.
     objects: Vec<Digest>,
-    /// The objects the restored history's cards name.
+    /// The objects the restored history's cards name (`Named::history`).
     history: BTreeSet<Digest>,
-    /// For each of the archive's objects that a restored card names as its conversion record,
-    /// the objects it names (`references::record_tokens`).
+    /// For each conversion record a restored card names, the objects its two lists name
+    /// (`Named::followed`).
     followed: BTreeMap<Digest, BTreeSet<Digest>>,
     /// For a replacement restore, the SHA-256 of the archive file, recorded with the rows.
     replaced_from: Option<Digest>,
@@ -95,8 +99,21 @@ struct Checked {
     manifest: WorkspaceManifest,
     /// The archived records, extracted, migrated and checked.
     records: PathBuf,
+    /// The archived history, extracted.
+    pack: PathBuf,
+    /// What the archive's history names, every object of it held by the archive.
+    named: Named,
     /// This build's schema, which the records were checked against and are copied with.
     live: Live,
+}
+
+/// What an archive's history names, read structurally (`references`), every object of it an
+/// `objects/` entry of the archive (`refuse_unheld`).
+struct Named {
+    /// Every object its cards name: each original and each conversion record.
+    history: BTreeSet<Digest>,
+    /// For each conversion record a card names, the objects its two lists name.
+    followed: BTreeMap<Digest, BTreeSet<Digest>>,
 }
 
 /// One table of a records database as its schema states it. Statements are kept with every run
@@ -146,39 +163,32 @@ pub(crate) fn restore(
     staging: &Path,
     mode: &Mode,
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
-    let Checked {
-        mut opened,
-        manifest,
-        records,
-        live,
-    } = checked(storage, runtime, archive, staging)?;
+    let checked = checked(
+        storage,
+        runtime,
+        archive,
+        staging,
+        matches!(mode, Mode::Replace(_)),
+    )?;
     // A replacement restore run again after a crash in a later workspace accepts a workspace
     // this same archive already restored in full, and leaves it as it is.
-    if let Some(report) = refuse(storage, runtime, scope, &manifest, mode)? {
-        return Ok((report, manifest));
+    if let Some(report) = refuse(storage, runtime, scope, &checked.manifest, mode)? {
+        return Ok((report, checked.manifest));
     }
     // Each object is pinned to the restored workspace while the import runs, and recorded as a
     // pending put (`puts`) until the import's rows land.
     let mut pinned = Vec::new();
-    let restored = put_back(
-        storage,
-        runtime,
-        scope,
-        (&mut opened, &mut pinned),
-        (&manifest, &records, live),
-        staging,
-        mode,
-    );
+    let restored = put_back(storage, runtime, scope, checked, &mut pinned, staging, mode);
     for pin in pinned {
         pin.end()?;
     }
     restored
 }
 
-/// Check the archive at `archive` as a restore does before it writes anything (`checked`),
-/// staging under `staging`; returns its manifest. A replacement restore checks every workspace
-/// archive of its set this way before it writes the installation archive's rows, so a set with
-/// a refused archive writes nothing. Blocking.
+/// Check the archive at `archive` as a replacement restore does before it writes anything
+/// (`checked`), staging under `staging`; returns its manifest. A replacement restore checks
+/// every workspace archive of its set this way before it writes the installation archive's
+/// rows, so a set with a refused archive writes nothing. Blocking.
 ///
 /// # Errors
 /// Returns `InvalidInput` for an archive a restore refuses.
@@ -188,7 +198,7 @@ pub(crate) fn check(
     archive: &Path,
     staging: &Path,
 ) -> Result<WorkspaceManifest, ApiError> {
-    checked(storage, runtime, archive, staging).map(|checked| checked.manifest)
+    checked(storage, runtime, archive, staging, true).map(|checked| checked.manifest)
 }
 
 /// Open the archive at `archive` and check everything a restore reads from it, before anything
@@ -200,7 +210,10 @@ pub(crate) fn check(
 ///   intact, and brought to this build's schema;
 /// - their schema (`refuse_other_schema`) and then their rows (`refuse_foreign_rows`), against
 ///   this build's schema read from the live database: the one schema the rows are then copied
-///   with.
+///   with;
+/// - that it holds every object its history names, and every object a row the restore copies
+///   names (`refuse_unheld`; a `replacement` copies every workspace table, an import only
+///   `IMPORTED`).
 ///
 /// # Errors
 /// Returns `InvalidInput` for an archive that fails a check.
@@ -209,6 +222,7 @@ fn checked(
     runtime: &Handle,
     archive: &Path,
     staging: &Path,
+    replacement: bool,
 ) -> Result<Checked, ApiError> {
     let mut opened = Opened::open(archive)?;
     let mut manifest = opened.workspace()?;
@@ -226,11 +240,115 @@ fn checked(
     refuse_other_schema(&connection, &live.schema)?;
     refuse_foreign_rows(&connection, &manifest, &live.schema)?;
     drop(connection);
+    let pack = staging.join(PACK);
+    opened.extract(PACK, &pack)?;
+    let named = refuse_unheld(
+        &mut opened,
+        &manifest,
+        (&records, &pack),
+        staging,
+        replacement,
+    )?;
     Ok(Checked {
         opened,
         manifest,
         records,
+        pack,
+        named,
         live,
+    })
+}
+
+/// Refuse an archive that does not hold an object its history names, or one a row the restore
+/// copies names, read structurally as `purge::references` reads a workspace (nothing a token
+/// only seems to name): an archive whose card names another workspace's object as its own
+/// would otherwise give the restored workspace that object, which the caller only knew the
+/// digest of (SPEC section 4), and keep it past that workspace's purge (SPEC section 8). The
+/// writer refuses to write such an archive (`archive::refuse_missing`).
+///
+/// - Its pack is indexed into a scratch bare repository under `staging`, walked from the
+///   commits its manifest names (`references::history_from`): every card's original and
+///   conversion record must be an `objects/` entry;
+/// - each such conversion record is read from its entry, streamed (`references::read_record`):
+///   every structured export and asset it names must be one too;
+/// - and every object a row of `archive::ROW_OBJECTS` names, in the tables the restore copies:
+///   a `replacement` copies every workspace table; an import copies only `IMPORTED`, so of those
+///   only derived datasets, and leaves aside artifacts, uploads and job outputs (an import
+///   copies no job row, `IMPORTED`), which it never copies.
+///
+/// # Errors
+/// Returns `InvalidInput` naming the digest and what names it, or naming an appearance or
+/// conversion record that does not read; otherwise what the history names.
+fn refuse_unheld(
+    opened: &mut Opened,
+    manifest: &WorkspaceManifest,
+    (records, pack): (&Path, &Path),
+    staging: &Path,
+    replacement: bool,
+) -> Result<Named, ApiError> {
+    let held: BTreeSet<&Digest> = manifest.objects.iter().collect();
+    let refuse = |digest: &Digest, what: &str| -> Result<(), ApiError> {
+        if held.contains(digest) {
+            Ok(())
+        } else {
+            Err(invalid(&format!(
+                "{what} names the object {}, which it does not hold",
+                digest.as_str()
+            )))
+        }
+    };
+    let scratch_path = staging.join("history-check.git");
+    let history = {
+        let scratch = Repository::init_bare(&scratch_path).map_err(|error| git(&error))?;
+        read_pack(&scratch, pack)?;
+        let tips = manifest
+            .references
+            .iter()
+            .map(|(_, commit)| oid(commit))
+            .collect::<Result<Vec<_>, _>>()?;
+        references::history_from(&scratch, &tips, invalid)?
+    };
+    let _ = std::fs::remove_dir_all(&scratch_path);
+    for (digest, what) in &history.objects {
+        refuse(digest, what)?;
+    }
+    let mut followed = BTreeMap::new();
+    for record in &history.records {
+        let name = format!("objects/{}", record.as_str());
+        let mut named = BTreeSet::new();
+        opened.read_entry(&name, |reader| {
+            references::read_record(
+                reader,
+                (Path::new(&name), record),
+                &mut |digest, what| {
+                    refuse(&digest, what)?;
+                    named.insert(digest);
+                    Ok(())
+                },
+                invalid,
+            )
+        })?;
+        if !named.is_empty() {
+            followed.insert(record.clone(), named);
+        }
+    }
+    let connection = super::snapshot::read_only(records)?;
+    for row in super::archive::ROW_OBJECTS {
+        if !replacement && !IMPORTED.contains(&row.0) {
+            continue;
+        }
+        for (text, what) in super::archive::row_objects(&connection, *row)? {
+            let digest = Digest::try_from(text.clone()).map_err(|_| {
+                invalid(&format!(
+                    "{what} names {text:?}, which is not an object's digest"
+                ))
+            })?;
+            refuse(&digest, &what)?;
+        }
+    }
+    Ok(Named {
+        history: history.objects.into_keys().collect(),
+        followed,
     })
 }
 
@@ -300,17 +418,25 @@ fn is_fault(error: &rusqlite::Error) -> bool {
     })
 }
 
-/// Put the archive's objects back (each pin kept in `pinned`), then its history and the rows of
-/// the checked records at `records`.
+/// Put the checked archive's objects back (each pin kept in `pinned`), then its history and the
+/// rows of its checked records.
 fn put_back(
     storage: &Storage,
     runtime: &Handle,
     scope: &StorageScope,
-    (opened, pinned): (&mut Opened, &mut Vec<Pinned>),
-    (manifest, records, live): (&WorkspaceManifest, &Path, Live),
+    checked: Checked,
+    pinned: &mut Vec<Pinned>,
     staging: &Path,
     mode: &Mode,
 ) -> Result<(RestoreReport, WorkspaceManifest), ApiError> {
+    let Checked {
+        mut opened,
+        manifest,
+        records,
+        pack,
+        named,
+        live,
+    } = checked;
     for digest in &manifest.objects {
         let file = staging.join(digest.as_str());
         opened.extract(&format!("objects/{}", digest.as_str()), &file)?;
@@ -326,31 +452,19 @@ fn put_back(
         pinned.push(pin);
         std::fs::remove_file(&file).map_err(|error| io_error("remove", &file, &error))?;
     }
-    let pack = staging.join(PACK);
-    opened.extract(PACK, &pack)?;
-    let items = history(storage, runtime, scope, manifest, &pack, mode)?;
-    let restored_history = references::history(&storage.repositories.open(scope)?)?;
-    let mut followed = BTreeMap::new();
-    for digest in &manifest.objects {
-        let named = references::record_tokens(
-            &storage.blobs,
-            &scope.tenant_id,
-            digest,
-            restored_history.records.contains(digest),
-        )?;
-        if !named.is_empty() {
-            followed.insert(digest.clone(), named);
-        }
-    }
+    // The history restored is the checked one: the archive's commits on exactly the references
+    // its manifest names (and an import's restore commit, which keeps the head's tree), so what
+    // its cards and records name is what the check read (`refuse_unheld`).
+    let items = history(storage, runtime, scope, &manifest, &pack, mode)?;
     let report = {
-        let path = text(records)?.to_owned();
+        let path = text(&records)?.to_owned();
         let target = Target {
             tenant: scope.tenant_id.as_str().to_owned(),
             workspace: scope.workspace_id.0.to_string(),
             original: manifest.workspace_id.0.to_string(),
             objects: manifest.objects.clone(),
-            history: restored_history.objects,
-            followed,
+            history: named.history,
+            followed: named.followed,
             replaced_from: match mode {
                 Mode::Import(..) => None,
                 Mode::Replace(digest) => Some(digest.clone()),
@@ -378,7 +492,7 @@ fn put_back(
             )
         }))?
     };
-    Ok((report, manifest.clone()))
+    Ok((report, manifest))
 }
 
 /// The report of a workspace that a replacement restore of the archive file `archive` already

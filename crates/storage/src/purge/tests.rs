@@ -969,10 +969,12 @@ async fn an_import_lands_the_pending_puts_of_the_objects_the_restored_workspace_
     let (source, source_head) = create(&storage, "local", 70, "Source").await?;
     let original = put(&storage, &source, b"zanzibar imported original").await?;
     let asset = put(&storage, &source, b"zanzibar imported asset").await?;
+    // A conversion record names each asset as an object with its `digest`
+    // (`ConversionRecord::assets`), and only that field is read.
     let record = put(
         &storage,
         &source,
-        format!("{{\"assets\":[\"{}\"]}}", asset.as_str()).as_bytes(),
+        format!("{{\"assets\":[{{\"digest\":\"{}\"}}]}}", asset.as_str()).as_bytes(),
     )
     .await?;
     let revision = commit(

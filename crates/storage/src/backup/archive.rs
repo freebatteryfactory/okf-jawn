@@ -4,8 +4,9 @@
 //! entry, references, objects), `records.sqlite` (the filtered snapshot, `snapshot`),
 //! `history.pack` (a Git pack, written by libgit2's `PackBuilder`, of every commit on every
 //! reference: the accepted line and each proposal candidate) and `objects/<digest>` (a copy of
-//! every retained object the workspace references, never a reference into the live store, and
-//! never an export, backup or written-history object).
+//! exactly the retained objects the workspace references, read structurally as
+//! `purge::references` reads them, never a reference into the live store, and never a backup or
+//! written-history object: a workspace that references one is not archived).
 //!
 //! An **installation archive** holds only `installation.json`: the installation identity,
 //! connector rows without any secret or secret hash, purge records and tenant-level events. It
@@ -103,6 +104,17 @@ pub(crate) const INSTALLATION: &str = "installation.json";
 /// whole into memory; the largest real one is an installation archive's, whose tenant events
 /// (a few hundred bytes each) would reach this only past about 200 000 events.
 const MANIFEST_LIMIT: u64 = 64 << 20;
+/// The records tables a workspace archive keeps whose rows name stored objects: (table, the
+/// column naming the object, what such a row is). Every object one of them names is copied
+/// (`refuse_missing`); a row naming a backup or written history is left out of the archive with
+/// it (`snapshot::filter`); and a restore refuses an archive that does not hold an object a row
+/// its copy writes names (`restore::refuse_unheld`).
+pub(crate) const ROW_OBJECTS: &[(&str, &str, &str)] = &[
+    ("artifacts", "digest", "artifact"),
+    ("derived_objects", "digest", "a derived dataset"),
+    ("uploads", "object_digest", "a completed upload"),
+    ("job_outputs", "digest", "a job output"),
+];
 /// How many times its own size an archive may expand to in all (`expansion_bound`).
 const EXPANSION: u64 = 8;
 /// Bytes every archive may expand to beyond `EXPANSION` times its size, for a small archive.
@@ -235,6 +247,22 @@ impl Opened {
             .map_err(|error| io_error("sync", target, &error))
     }
 
+    /// Give `read` the entry `name` through a buffer, never more than the size it declares,
+    /// which `open` checked; nothing of it is held beyond the buffer.
+    pub(crate) fn read_entry<T>(
+        &mut self,
+        name: &str,
+        read: impl FnOnce(&mut dyn std::io::BufRead) -> Result<T, ApiError>,
+    ) -> Result<T, ApiError> {
+        let entry = self
+            .zip
+            .by_name(name)
+            .map_err(|error| invalid(&format!("{name}: {error}")))?;
+        let declared = entry.size();
+        let mut reader = std::io::BufReader::with_capacity(64 << 10, entry.take(declared));
+        read(&mut reader)
+    }
+
     /// The bytes of a manifest entry, never more than `MANIFEST_LIMIT`.
     fn bytes(&mut self, name: &str) -> Result<Vec<u8>, ApiError> {
         let entry = self
@@ -278,7 +306,10 @@ fn expansion_bound(size: u64) -> u64 {
 }
 
 /// Write the workspace archive `target` from the repository at `repository`, the filtered
-/// records at `records` and the tenant's objects; `excluded` objects are never copied.
+/// records at `records` and the tenant's objects. It copies exactly the objects the workspace
+/// references structurally (`refuse_missing`, read as `purge::references` reads them), each one
+/// held, and nothing a token only seems to name; an `excluded` object (a backup or a written
+/// history) that it references fails it instead.
 pub(crate) fn write_workspace(
     target: &Path,
     repository: &Repository,
@@ -287,38 +318,13 @@ pub(crate) fn write_workspace(
     tenant: &TenantId,
     excluded: &BTreeSet<Digest>,
 ) -> Result<WorkspaceManifest, ApiError> {
-    let required = refuse_missing(repository, records, blobs, tenant, excluded)?;
+    // A set: the archive's objects are looked up by digest, never searched.
+    let held: BTreeSet<Digest> = refuse_missing(repository, records, blobs, tenant, excluded)?
+        .into_keys()
+        .collect();
     let staged_pack = target.with_extension("pack");
     let references = write_pack(repository, &staged_pack)?;
     let mut manifest = manifest_of(records, tenant, references)?;
-    let history = references::history(repository)?;
-    let mut objects = history.objects;
-    objects.extend(record_objects(records)?);
-    references::follow_records(blobs, tenant, &mut objects, &history.records)?;
-    // Every object a row names is copied, whatever found it.
-    objects.extend(required.keys().cloned());
-    let mut held = Vec::new();
-    for digest in objects {
-        if !excluded.contains(&digest) && blobs.local_path(tenant, &digest)?.is_file() {
-            held.push(digest);
-        }
-    }
-    // The archive copies every required object, not only the store holding it: an archive
-    // that claims success is independently recoverable.
-    if let Some((digest, what)) = required
-        .iter()
-        .find(|&(digest, _)| !excluded.contains(digest) && !held.contains(digest))
-    {
-        let _ = std::fs::remove_file(&staged_pack);
-        return Err(ApiError::new(
-            ErrorCode::Internal,
-            format!(
-                "the workspace archive was not written: {what} names the object {}, which it \
-                 would not copy",
-                digest.as_str()
-            ),
-        ));
-    }
     // The archive's `objects/<digest>` entries list its objects; the manifest does not repeat
     // them, so its size does not grow with the workspace's objects (`MANIFEST_LIMIT`).
     let manifest_text = {
@@ -330,7 +336,7 @@ pub(crate) fn write_workspace(
         let _ = std::fs::remove_file(&staged_pack);
         return Err(error);
     }
-    manifest.objects.clone_from(&held);
+    manifest.objects = held.iter().cloned().collect();
     let file = File::create(target).map_err(|error| io_error("create", target, &error))?;
     let mut zip = ZipWriter::new(file);
     entry_bytes(&mut zip, MANIFEST, &manifest_text)?;
@@ -588,43 +594,57 @@ fn manifest_of(
     })
 }
 
-/// Objects the filtered records reference: derived datasets, completed uploads, job outputs and
-/// retained artifacts (the filtered records hold no workspace archive).
-fn record_objects(records: &Path) -> Result<BTreeSet<Digest>, ApiError> {
-    let connection = super::snapshot::read_only(records)?;
-    let mut found = BTreeSet::new();
-    for query in [
-        "SELECT digest FROM artifacts",
-        "SELECT digest FROM derived_objects",
-        "SELECT object_digest FROM uploads WHERE object_digest IS NOT NULL",
-        "SELECT digest FROM job_outputs",
-    ] {
-        let mut statement = connection.prepare(query).map_err(|error| sql(&error))?;
-        let values = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|error| sql(&error))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| sql(&error))?;
-        for value in values {
-            found.insert(from_text!(value.as_str())?);
-        }
-    }
-    Ok(found)
+/// The (digest text, what names it) of every row of one `ROW_OBJECTS` table in the records
+/// `connection` opens that names an object: an artifact is named with its kind.
+pub(crate) fn row_objects(
+    connection: &Connection,
+    (table, column, what): (&str, &str, &str),
+) -> Result<Vec<(String, String)>, ApiError> {
+    let kind = if table == "artifacts" { "kind" } else { "NULL" };
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT \"{column}\", {kind} FROM \"{table}\" WHERE \"{column}\" IS NOT NULL"
+        ))
+        .map_err(|error| sql(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|error| sql(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sql(&error))?;
+    Ok(rows
+        .into_iter()
+        .map(|(digest, kind)| {
+            let what = kind.map_or_else(
+                || format!("{what} ({table})"),
+                |kind| format!("an {what} of kind {kind}"),
+            );
+            (digest, what)
+        })
+        .collect())
 }
 
-/// Refuse to write an archive that would leave out an object a row it holds names (SPEC section
-/// 12: an archive must be independently recoverable): a source card's original or conversion
-/// record (on any commit), a conversion record's structured exports and assets, a retained
-/// artifact (an export, a View export), a derived dataset, a completed upload or a job output.
-/// Backup and written-history objects (`excluded`) are never archived and are not required.
-/// Objects named only as digest-shaped tokens are copied when held and are not required: a token
-/// need not name an object. Each named object is checked as it is read, so what this holds is
-/// bounded by the objects the store holds, not by a conversion record's size. Blocking.
+/// Refuse to write an archive that would leave out an object the workspace references (SPEC
+/// section 12: an archive must be independently recoverable), read structurally as
+/// `purge::references` reads it: a source card's original or conversion record (on any
+/// commit), a conversion record's structured exports and assets, and every object a row of
+/// `ROW_OBJECTS` names (a retained artifact, a derived dataset, a completed upload, a job
+/// output). Nothing a token only seems to name is ever required or copied. A backup or written
+/// history (`excluded`) is never archived (SPEC section 12: no object read returns a backup).
+/// A row naming one is left out of the archive with it (`snapshot::filter`: a backup job's
+/// output, an upload slot holding an archive to import). A card naming one cannot be left out,
+/// so it makes the archive unrestorable, and it is refused like a missing object: a restore
+/// would refuse it (`restore::refuse_unheld`). Each
+/// named object is checked as it is read, so what this holds is bounded by the objects the store
+/// holds, not by a conversion record's size. Blocking.
 ///
 /// # Errors
-/// Returns `Internal` naming the missing digest and the row kind that names it; nothing is
-/// written. Otherwise the required objects the store holds (all of them), each with what first
-/// names it.
+/// Returns `Internal` naming the digest and what names it (the card's item, the record list or
+/// the row kind), for an object the store does not hold or one that is `excluded`, and for a
+/// card or conversion record that does not read (`references::damaged`); nothing is written.
+/// Otherwise every object the workspace references, each with what first names it: exactly
+/// what the archive copies.
 fn refuse_missing(
     repository: &Repository,
     records: &Path,
@@ -634,60 +654,37 @@ fn refuse_missing(
 ) -> Result<BTreeMap<Digest, String>, ApiError> {
     let mut required: BTreeMap<Digest, String> = BTreeMap::new();
     let mut require = |digest: Digest, what: &str| -> Result<(), ApiError> {
-        if excluded.contains(&digest) || required.contains_key(&digest) {
+        if required.contains_key(&digest) {
             return Ok(());
         }
-        if !blobs.local_path(tenant, &digest)?.is_file() {
-            return Err(ApiError::new(
-                ErrorCode::Internal,
-                format!(
-                    "the workspace archive was not written: {what} names the object {}, which \
-                     the store does not hold",
-                    digest.as_str()
-                ),
-            ));
-        }
-        required.insert(digest, what.to_owned());
-        Ok(())
+        let reason = if excluded.contains(&digest) {
+            "a backup or written history, which an archive never holds"
+        } else if !blobs.local_path(tenant, &digest)?.is_file() {
+            "which the store does not hold"
+        } else {
+            required.insert(digest, what.to_owned());
+            return Ok(());
+        };
+        Err(ApiError::new(
+            ErrorCode::Internal,
+            format!(
+                "the workspace archive was not written: {what} names the object {}, {reason}",
+                digest.as_str()
+            ),
+        ))
     };
-    let (originals, conversions) = references::card_objects(repository)?;
-    for digest in originals {
-        require(digest, "a source card's original")?;
+    let history = references::history(repository)?;
+    for (digest, what) in history.objects {
+        require(digest, &what)?;
     }
-    for record in &conversions {
+    for record in &history.records {
         references::conversion_objects(blobs, tenant, record, &mut |digest, what| {
             require(digest, what)
         })?;
     }
-    for record in conversions {
-        require(record, "a source card's conversion record")?;
-    }
     let connection = super::snapshot::read_only(records)?;
-    for (query, what) in [
-        ("SELECT digest, kind FROM artifacts", "artifact"),
-        (
-            "SELECT digest, NULL FROM derived_objects",
-            "a derived dataset",
-        ),
-        (
-            "SELECT object_digest, NULL FROM uploads WHERE object_digest IS NOT NULL",
-            "a completed upload",
-        ),
-        ("SELECT digest, NULL FROM job_outputs", "a job output"),
-    ] {
-        let mut statement = connection.prepare(query).map_err(|error| sql(&error))?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-            })
-            .map_err(|error| sql(&error))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| sql(&error))?;
-        for (digest, kind) in rows {
-            let what = kind.map_or_else(
-                || what.to_owned(),
-                |kind| format!("an {what} of kind {kind}"),
-            );
+    for row in ROW_OBJECTS {
+        for (digest, what) in row_objects(&connection, *row)? {
             require(from_text!(digest.as_str())?, &what)?;
         }
     }
