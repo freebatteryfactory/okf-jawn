@@ -395,6 +395,16 @@ pub(crate) fn refusing_in(workspace: &str) -> impl FnMut(String) -> Result<(), A
     move |message| Err(damaged(&format!("in the workspace {workspace}, {message}")))
 }
 
+/// `error`, a failure opening or listing the surviving workspace `workspace` during another
+/// workspace's purge, naming the workspace as `refusing_in` names damage, so an operator knows
+/// where to look; its code is kept.
+pub(crate) fn naming(workspace: &str, error: ApiError) -> ApiError {
+    ApiError {
+        message: format!("in the workspace {workspace}, {}", error.message),
+        ..error
+    }
+}
+
 /// Walk every commit on every reference of `repository`, collecting the commits and what the
 /// source appearances on them name (`scan`). Each distinct appearance tree and file is read
 /// once, so a long history with few changed cards costs little more than the walk.
@@ -408,7 +418,7 @@ pub(crate) fn history(repository: &Repository) -> Result<History, ApiError> {
 }
 
 /// As `history`, for the surviving workspace `workspace` read during another workspace's
-/// purge: a failure names the workspace (`refusing_in`).
+/// purge: a failure names the workspace (`refusing_in`; `naming`, for its references).
 ///
 /// # Errors
 /// As `history`, naming the workspace.
@@ -416,7 +426,8 @@ pub(crate) fn history_naming(
     repository: &Repository,
     workspace: &str,
 ) -> Result<History, ApiError> {
-    walk(repository, &tips(repository)?, &mut refusing_in(workspace))
+    let tips = tips(repository).map_err(|error| naming(workspace, error))?;
+    walk(repository, &tips, &mut refusing_in(workspace))
 }
 
 /// As `history`, for the workspace a purge removes: damage does not stop the walk. Each unread
