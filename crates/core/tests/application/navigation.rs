@@ -21,6 +21,7 @@ use okf_jawn_contract::search::{
     GetGraphRequest, GetGraphResponse, GetLinksRequest, GetLinksResponse, Link, LinkDirection,
     SearchRequest, SearchResponse,
 };
+use okf_jawn_contract::source::{SourceLocation, SourceLocator};
 use okf_jawn_core::application::{ApplicationService, Ports};
 use okf_jawn_core::jobs::RevisionMapping;
 use okf_jawn_core::ports::{Application, PortFuture};
@@ -31,8 +32,8 @@ use uuid::Uuid;
 
 use crate::check::{TestResult, err_of, some};
 use crate::fixture::{
-    ALICE, Built, FakeSearch, NOTE, Unused, World, alice, config, draft_of, instant, note, path,
-    revision, scope,
+    ALICE, Built, CARD_BODY, FakeSearch, NOTE, Unused, World, alice, config, converted, digest,
+    draft_of, instant, note, path, record, revision, scope, source_card,
 };
 
 /// How many index builds started, are running, and ran at most at once.
@@ -55,6 +56,7 @@ struct DetachedSearch {
 
 const OTHER: u128 = 21;
 const THIRD: u128 = 22;
+const CARD: u128 = 10;
 
 impl SearchIndex for DetachedSearch {
     fn index_revision<'a>(
@@ -988,6 +990,68 @@ async fn get_links_records_one_reference_per_link_by_its_body_line() -> TestResu
     let (_, receipt) = some(receipts.first(), "the receipt")?;
     assert_eq!(receipt.operation_id, OperationName::GetLinks);
     assert_eq!(receipt.audience, ReceiptAudience::HumanDisplay);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_link_cited_from_a_source_card_carries_the_cards_computed_locations() -> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    // The linking item is a source card showing its converter's text (`CARD_BODY`), whose
+    // record puts lines 1 to 3 on page 1 and lines 5 to 8 on page 2.
+    world.versions.put_document(
+        &at,
+        source_card(
+            CARD,
+            &at,
+            "sources/report-pdf.md",
+            CARD_BODY,
+            converted(&digest('b')?),
+        )?,
+    )?;
+    world
+        .blobs
+        .put_object(digest('b')?, serde_json::to_vec(&record(Vec::new())?)?)?;
+    world.search.put_link(&at, link(CARD, NOTE, 6))?;
+    world.search.put_link(&at, link(CARD, NOTE, 2))?;
+    // Line 4 is the blank line between the two pages: the record locates nothing there.
+    world.search.put_link(&at, link(CARD, NOTE, 4))?;
+    let response = world
+        .service
+        .get_links(
+            &alice(OperationName::GetLinks, None)?,
+            links(LinkDirection::Incoming, At::Latest)?,
+        )
+        .await?;
+    assert_eq!(response.links.len(), 3);
+    let on_page = |page_no: u32| SourceLocation::Direct {
+        locator: SourceLocator::Page { page_no },
+    };
+    let receipts = world.records.receipts()?;
+    let (_, receipt) = some(receipts.first(), "the receipt")?;
+    let cited: Vec<_> = receipt
+        .sources
+        .iter()
+        .map(|source| {
+            (
+                source.item_id,
+                source.digest.clone(),
+                source.selection.clone(),
+                source.locations.clone(),
+            )
+        })
+        .collect();
+    // Each link cites the card by its conversion record, located as a read of that line is.
+    let record_digest = Some(digest('b')?);
+    assert_eq!(
+        cited,
+        vec![
+            (item(CARD), record_digest.clone(), line(6), vec![on_page(2)]),
+            (item(CARD), record_digest.clone(), line(2), vec![on_page(1)]),
+            (item(CARD), record_digest, line(4), Vec::new()),
+        ]
+    );
     Ok(())
 }
 
