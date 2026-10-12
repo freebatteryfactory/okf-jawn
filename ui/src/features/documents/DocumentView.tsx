@@ -300,10 +300,12 @@ export function DocumentView({
 
   // Each operation's failure keeps its notice through a retry, which ends with keyboard focus on
   // what it loaded: the properties' disclosure, the first part of the text, or the part continued.
+  // A retry belongs to what this view reads: once the revision or the selection changes, a retry
+  // still in flight is no longer shown.
   const articleRef = useRef<HTMLElement | null>(null);
   const reading = JSON.stringify(request);
   const itemFailure = useRetry({
-    request: revision,
+    request: reading,
     failed: item.isError,
     error: item.error,
     run: () => item.refetch(),

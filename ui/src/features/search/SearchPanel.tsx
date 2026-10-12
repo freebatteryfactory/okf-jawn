@@ -170,8 +170,7 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
     loaded: () =>
       hitLink(listRef.current, hits.length - lastPageSize) ??
       moreRef.current ??
-      hitLink(listRef.current, hits.length - 1) ??
-      headingRef.current,
+      hitLink(listRef.current, hits.length - 1),
   });
 
   return (

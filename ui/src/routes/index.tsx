@@ -88,8 +88,7 @@ function Home() {
     loaded: () =>
       workspaceLink(listRef.current, shownCount - lastPageSize) ??
       moreRef.current ??
-      workspaceLink(listRef.current, shownCount - 1) ??
-      headingRef.current,
+      workspaceLink(listRef.current, shownCount - 1),
   });
   // Once a later page has come, however it was asked for: how many are shown now.
   const shownNote =

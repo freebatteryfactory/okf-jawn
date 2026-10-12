@@ -323,7 +323,6 @@ export function FolderTree({
     run: () => root?.refetch() ?? Promise.resolve(),
     loaded: () =>
       boxRef.current?.querySelector<HTMLElement>('[role="treeitem"][tabindex="0"]') ??
-      boxRef.current?.querySelector<HTMLElement>('[role="tree"]') ??
       emptyRef.current,
   });
   const selected =
