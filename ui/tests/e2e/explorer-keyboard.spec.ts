@@ -10,6 +10,7 @@
 
 import { expect, type Page, test } from '@playwright/test';
 import {
+  expectNoAxeViolations,
   focused,
   HEAD,
   NOTE,
@@ -19,9 +20,32 @@ import {
   plan,
   readAnswer,
   routeApi,
+  summary,
   useExplorerServer,
   WS,
 } from './support/explorer';
+
+/** A folder of 80 entries: taller than the column, so the tree scrolls. */
+const items = Array.from({ length: 80 }, (_, index) =>
+  summary(
+    `${String(index).padStart(8, '0')}-1111-4111-8111-111111111111`,
+    `item-${index}.md`,
+    `Item number ${index}`,
+    'note',
+  ),
+);
+
+/** Roll the mouse wheel over the tree until its first or last entry is on screen. */
+async function wheelTree(page: Page, to: 'top' | 'bottom') {
+  const tree = page.getByRole('tree', { name: 'Folders' });
+  await tree.hover();
+  await page.mouse.wheel(0, to === 'top' ? -20_000 : 20_000);
+  const end = to === 'top' ? 'Item number 0,' : 'Item number 79,';
+  await expect(tree.getByRole('treeitem', { name: new RegExp(end) })).toBeInViewport();
+}
+
+const row = (page: Page, name: RegExp) =>
+  page.getByRole('tree', { name: 'Folders' }).getByRole('treeitem', { name });
 
 function luminance(rgb: number[]): number {
   const [r, g, b] = rgb.map((value) => {
@@ -296,5 +320,82 @@ test.describe('Explorer from the keyboard', () => {
     await expect(tree.getByRole('treeitem', { name: 'Show more entries' })).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(tree.getByRole('treeitem', { name: /Plan/ })).toBeFocused();
+  });
+
+  test('Q2a the tree wheeled far from its tab-stop row: axe, and the keyboard lands on a row', async ({
+    page,
+  }) => {
+    await routeApi(page, {
+      '/api/items/list-items': () => ok({ folders: [], items, revision: HEAD }),
+    });
+    await page.goto(`${server.origin()}/w/${WS}`);
+    await expect(row(page, /Item number 0,/)).toBeVisible();
+    await wheelTree(page, 'bottom');
+    await expectNoAxeViolations(page, 'tree wheeled away from its tab stop');
+    // Shift+Tab from after the tree: the tab stop (the first entry) is scrolled back and focused.
+    await page.getByRole('separator', { name: 'Resize the navigation column' }).focus();
+    await page.keyboard.press('Shift+Tab');
+    await expect(row(page, /Item number 0,/)).toBeFocused();
+    await expect(row(page, /Item number 0,/)).toBeInViewport();
+    await page.keyboard.press('ArrowDown');
+    await expect(row(page, /Item number 1,/)).toBeFocused();
+    // Tab from before the tree, wheeled away again: back on the entry that last had focus.
+    await wheelTree(page, 'bottom');
+    await expectNoAxeViolations(page, 'tree wheeled away again');
+    await page.getByRole('button', { name: 'Search', exact: true }).focus();
+    await page.keyboard.press('Tab');
+    await expect(row(page, /Item number 1,/)).toBeFocused();
+    await expect(row(page, /Item number 1,/)).toBeInViewport();
+    await page.keyboard.press('ArrowDown');
+    await expect(row(page, /Item number 2,/)).toBeFocused();
+  });
+
+  test('Q2b the selected row deep in the list, wheeled to the top: axe, and Shift+Tab lands on it', async ({
+    page,
+  }) => {
+    const item70 = items[70];
+    if (item70 === undefined) throw new Error('no 71st entry');
+    await routeApi(page, {
+      '/api/items/list-items': () => ok({ folders: [], items, revision: HEAD }),
+      '/api/items/get-item': () =>
+        ok({ summary: item70, body: 'x', content_digest: 'c'.repeat(64), properties: {} }),
+    });
+    await page.goto(`${server.origin()}/w/${WS}/i/${item70.id}`);
+    await expect(row(page, /Item number 70,/)).toHaveAttribute('aria-selected', 'true');
+    await wheelTree(page, 'top');
+    await expectNoAxeViolations(page, 'selected row wheeled out of the rendered window');
+    await page.getByRole('separator', { name: 'Resize the navigation column' }).focus();
+    await page.keyboard.press('Shift+Tab');
+    await expect(row(page, /Item number 70,/)).toBeFocused();
+    await expect(row(page, /Item number 70,/)).toBeInViewport();
+    await page.keyboard.press('ArrowUp');
+    await expect(row(page, /Item number 69,/)).toBeFocused();
+  });
+
+  test('Q2c Shift+Tab onto the selected row: arrows, End, Home, type-ahead and Enter work from it', async ({
+    page,
+  }) => {
+    await routeApi(page);
+    await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}`);
+    await expect(row(page, /Meeting notes/)).toHaveAttribute('aria-selected', 'true');
+    await page.getByRole('separator', { name: 'Resize the navigation column' }).focus();
+    await page.keyboard.press('Shift+Tab');
+    await expect(row(page, /Meeting notes/)).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await expect(row(page, /^Plan,/)).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await expect(row(page, /^Annual report 2025,/)).toBeFocused();
+    await page.keyboard.press('ArrowUp');
+    await expect(row(page, /^Plan,/)).toBeFocused();
+    await page.keyboard.press('ArrowLeft');
+    await expect(row(page, /^notes$/)).toBeFocused();
+    await page.keyboard.press('End');
+    await expect(row(page, /^Annual report 2025,/)).toBeFocused();
+    await page.keyboard.press('Home');
+    await expect(row(page, /^notes$/)).toBeFocused();
+    await page.keyboard.press('p');
+    await expect(row(page, /^Plan,/)).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('tab', { name: 'Plan', selected: true })).toBeVisible();
   });
 });

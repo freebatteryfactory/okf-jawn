@@ -1,6 +1,6 @@
 /** The Explorer shell: workspace list, lazily listed tree, and deep links that reopen an item and selection. */
 
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fail, mockApi, notImplemented, ok } from './support/api';
@@ -436,6 +436,109 @@ describe('revealing a linked item', () => {
     for (const body of api.callsTo(LIST)) {
       expect(body.at).toEqual({ kind: 'revision', revision: HEAD });
     }
+  });
+});
+
+describe('the tree from the keyboard, however focus enters it (B5)', () => {
+  /** A deep link selects Meeting notes, in notes/, between the folder and Plan. */
+  async function linkedTree() {
+    mockApi(workspaceHandlers());
+    const view = renderAt(`/w/${WS}/i/${NOTE}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    const row = await within(tree).findByRole('treeitem', { name: /Meeting notes/ });
+    await waitFor(() => expect(row.getAttribute('aria-selected')).toBe('true'));
+    await within(tree).findByRole('treeitem', { name: /Plan/ });
+    return { ...view, tree, row };
+  }
+  const focusedRow = () => document.activeElement?.getAttribute('aria-label') ?? '';
+
+  it('lands on the tab-stop row and moves from it with arrows, Home, End, type-ahead and Enter (Q2c)', async () => {
+    const { tree, row, router } = await linkedTree();
+    // Shift+Tab from after the tree lands on the tab-stop row itself: the selected entry.
+    expect(row.tabIndex).toBe(0);
+    act(() => row.focus());
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(focusedRow()).toMatch(/^Plan,/));
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(focusedRow()).toMatch(/^Annual report,/));
+    await userEvent.keyboard('{ArrowUp}');
+    await waitFor(() => expect(focusedRow()).toMatch(/^Plan,/));
+    await userEvent.keyboard('{ArrowLeft}');
+    await waitFor(() => expect(focusedRow()).toBe('notes'));
+    await userEvent.keyboard('{End}');
+    await waitFor(() => expect(focusedRow()).toMatch(/^Annual report,/));
+    await userEvent.keyboard('{Home}');
+    await waitFor(() => expect(focusedRow()).toBe('notes'));
+    await userEvent.keyboard('p');
+    await waitFor(() => expect(focusedRow()).toMatch(/^Plan,/));
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${OTHER}`));
+    expect(within(tree).getByRole('treeitem', { name: /Plan/ })).toBeTruthy();
+  });
+
+  it('moves Tab onto the tree container on to the selected entry, which the arrows move from', async () => {
+    const { tree } = await linkedTree();
+    act(() => tree.focus());
+    await waitFor(() => expect(focusedRow()).toMatch(/^Meeting notes,/));
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(focusedRow()).toMatch(/^Plan,/));
+  });
+
+  it('keeps the scrolling list in the Tab order, as a group of the tree, and moves focus from it to the tab stop', async () => {
+    const { tree } = await linkedTree();
+    const scroller = tree.firstElementChild;
+    if (!(scroller instanceof HTMLElement)) throw new Error('the tree has no scrolling list');
+    expect(scroller.getAttribute('role')).toBe('group');
+    expect(scroller.getAttribute('tabindex')).toBe('0');
+    expect(within(scroller).getAllByRole('treeitem').length).toBeGreaterThan(0);
+    act(() => scroller.focus());
+    await waitFor(() => expect(focusedRow()).toMatch(/^Meeting notes,/));
+    await userEvent.keyboard('{ArrowUp}');
+    await waitFor(() => expect(focusedRow()).toBe('notes'));
+  });
+
+  it('leaves a pointer press on the scrolling list to arborist, so it never scrolls the list away', async () => {
+    const many = Array.from({ length: 80 }, (_, index) =>
+      summary(
+        `${String(index).padStart(8, '0')}-1111-4111-8111-111111111111`,
+        `item-${index}.md`,
+        `Item number ${index}`,
+        'note',
+      ),
+    );
+    const item70 = many[70];
+    if (item70 === undefined) throw new Error('no 71st entry');
+    mockApi({
+      ...workspaceHandlers(),
+      [LIST]: () => ok(listing([], many)),
+      '/api/items/get-item': () => ok(itemDocument(item70)),
+    });
+    renderAt(`/w/${WS}/i/${item70.id}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    const selected = await within(tree).findByRole('treeitem', { name: /Item number 70,/ });
+    await waitFor(() => expect(selected.getAttribute('aria-selected')).toBe('true'));
+    const scroller = tree.firstElementChild;
+    if (!(scroller instanceof HTMLElement)) throw new Error('the tree has no scrolling list');
+    // The wheel takes the list back to the top, far from the selected entry.
+    const wheelToTop = async () => {
+      act(() => {
+        scroller.scrollTop = 0;
+        fireEvent.scroll(scroller);
+      });
+      await within(tree).findByRole('treeitem', { name: /Item number 0,/ });
+    };
+    await wheelToTop();
+    // The keyboard is taken to the tab stop, scrolled into view.
+    act(() => scroller.focus());
+    await waitFor(() => expect(focusedRow()).toMatch(/^Item number 70,/));
+    expect(scroller.scrollTop).toBeGreaterThan(0);
+    // A pointer press on the list is not: the list stays where the wheel left it.
+    act(() => screen.getByRole('searchbox', { name: 'Search this workspace' }).focus());
+    await wheelToTop();
+    fireEvent.pointerDown(scroller);
+    act(() => scroller.focus());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(scroller.scrollTop).toBe(0);
   });
 });
 

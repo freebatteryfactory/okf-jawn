@@ -8,20 +8,31 @@
  * folders are expanded when it is opened from a link. "Show more entries" and a retry move
  * keyboard focus to the first entry they brought (or keep it on a row still there), and a live
  * region says what happened.
+ *
+ * However keyboard focus enters the tree (Tab onto its container, Shift+Tab onto its tab-stop row
+ * or its scrolling list, a click, a screen reader), arborist is told which entry has it, because
+ * its arrow keys move from the entry it knows is focused. The tab stop is the entry that last had
+ * focus, else the selected one, else the first.
  */
 import { type UseQueryResult, useQueries, useQueryClient } from '@tanstack/react-query';
 import { ChartColumn, FileBox, FileText, Folder, FolderOpen } from 'lucide-react';
 import {
   createContext,
+  forwardRef,
+  type HTMLProps,
+  type FocusEvent as ReactFocusEvent,
+  type RefObject,
   useCallback,
   useContext,
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
 import {
+  ListOuterElement,
   type NodeApi,
   type NodeRendererProps,
   type RowRendererProps,
@@ -180,6 +191,25 @@ function childrenOf(entries: readonly TreeEntry[], folder: string): readonly Tre
   return [];
 }
 
+/**
+ * The entry keyboard focus enters the tree on: the one arborist last had focused, else the
+ * selected one, else the first. When the entry that had focus is no longer listed (a refresh at a
+ * newer head dropped it), the entry now at its place takes over.
+ */
+function tabStopOf(
+  tree: TreeApi<TreeEntry>,
+  lastFocusIndex: number | null,
+): NodeApi<TreeEntry> | null {
+  const focused = tree.focusedNode;
+  if (focused !== null) return focused;
+  const count = tree.visibleNodes.length;
+  if (tree.state.nodes.focus.id !== null && lastFocusIndex !== null && count > 0) {
+    const near = tree.at(Math.min(lastFocusIndex, count - 1));
+    if (near !== null) return near;
+  }
+  return tree.selectedNodes.at(0) ?? tree.firstNode;
+}
+
 /** A listing the person asked for ("Show more entries", or a retry), awaiting its answer. */
 interface PendingLoad {
   folder: string;
@@ -221,6 +251,27 @@ export function FolderTree({
     rowHeights.current.set(id, next);
     treeRef.current?.redrawList(index);
   }, []);
+
+  // Where the entry arborist last focused stood, for when a refresh no longer lists it.
+  const lastFocusIndex = useRef<number | null>(null);
+  const rowContext = useMemo(() => ({ measure: measureRow, lastFocusIndex }), [measureRow]);
+
+  // Keyboard focus that lands on the tree itself (Tab onto its container) or on its scrolling
+  // list (Shift+Tab while the tab-stop row is scrolled out of the rendered window) moves on to the
+  // tab-stop entry, scrolled into view, and arborist is told it is focused. A press of the pointer
+  // is left to arborist, so clicking the list or its scrollbar never scrolls it away.
+  const pointing = useRef(false);
+  const enterTree = (event: ReactFocusEvent<HTMLElement>) => {
+    const tree = treeRef.current;
+    const box = boxRef.current;
+    if (tree === undefined || box === null || pointing.current) return;
+    const from = event.relatedTarget;
+    if (from instanceof Node && box.contains(from)) return;
+    const target = event.target;
+    if (!box.contains(target) || target.getAttribute('role') === 'treeitem') return;
+    const stop = tabStopOf(tree, lastFocusIndex.current);
+    if (stop !== null) tree.focus(stop.id);
+  };
 
   // Opening an item from a link expands the folders above it, so the tree can show it selected.
   useEffect(() => {
@@ -312,7 +363,18 @@ export function FolderTree({
   };
 
   return (
-    <section className="folder-tree" aria-labelledby={heading}>
+    <section
+      className="folder-tree"
+      aria-labelledby={heading}
+      onPointerDownCapture={() => {
+        // Focus a pointer press causes happens before this task ends; the flag lasts no longer.
+        pointing.current = true;
+        window.setTimeout(() => {
+          pointing.current = false;
+        });
+      }}
+      onFocusCapture={enterTree}
+    >
       <h2 id={heading} className="panel-heading">
         Folders
       </h2>
@@ -332,7 +394,7 @@ export function FolderTree({
       </p>
       <div ref={boxRef} className="tree-box">
         {root?.isSuccess && entries.length > 0 && (
-          <RowMeasure.Provider value={measureRow}>
+          <TreeRowContext.Provider value={rowContext}>
             <Tree<TreeEntry>
               ref={treeRef}
               data={entries}
@@ -355,15 +417,19 @@ export function FolderTree({
                 setExpanded(workspaceId, id.slice('folder:'.length), open);
               }}
               onActivate={activate}
+              onFocus={(node) => {
+                lastFocusIndex.current = node.rowIndex;
+              }}
               rowHeight={rowHeight}
               indent={16}
               width="100%"
               height={height}
               renderRow={TreeRow}
+              outerElementType={TreeScroller}
             >
               {TreeEntryContent}
             </Tree>
-          </RowMeasure.Provider>
+          </TreeRowContext.Provider>
         )}
       </div>
     </section>
@@ -389,16 +455,16 @@ function entryLabel(entry: TreeEntry): string {
  * virtualized, so not every entry is in the DOM: each row states its place among its siblings
  * (`aria-posinset` of `aria-setsize`), as the WAI-ARIA tree pattern asks.
  *
- * One row is the tree's tab stop (roving tabindex): the focused row, else the selected one, else
- * the first. Arborist keeps Tab to one stop for the whole tree, and the stop also gives the
- * scrolling list a tabbable row, so the region a keyboard scrolls is reachable (axe
- * scrollable-region-focusable).
+ * One row is the tree's tab stop (roving tabindex): see `tabStopOf`. Shift+Tab lands on it
+ * directly when it is rendered; arborist keeps Tab inside the tree to one stop. Focus that reaches
+ * a row directly is told to arborist, whose arrow keys move from the entry it knows is focused.
  */
 function TreeRow({ node, attrs, innerRef, children }: RowRendererProps<TreeEntry>) {
   const { 'aria-expanded': _expanded, style, ...rest } = attrs;
+  const { lastFocusIndex } = useContext(TreeRowContext);
   const siblings = node.parent?.children?.length ?? 1;
   const tree = node.tree;
-  const stop = tree.focusedNode ?? tree.selectedNodes.at(0) ?? tree.firstNode;
+  const stop = tabStopOf(tree, lastFocusIndex.current);
   return (
     <div
       {...rest}
@@ -412,7 +478,11 @@ function TreeRow({ node, attrs, innerRef, children }: RowRendererProps<TreeEntry
       aria-setsize={siblings}
       aria-posinset={node.childIndex + 1}
       ref={innerRef}
-      onFocus={(event) => event.stopPropagation()}
+      onFocus={(event) => {
+        if (event.target === event.currentTarget && !node.isFocused) {
+          tree.focus(node.id, { scroll: false });
+        }
+      }}
       onClick={node.handleClick}
       onKeyDown={(event) => {
         if (event.key !== 'Enter') return;
@@ -426,14 +496,30 @@ function TreeRow({ node, attrs, innerRef, children }: RowRendererProps<TreeEntry
 }
 
 /**
- * Reports a row's measured height to the tree. Rows wrap long names inside the column instead of
- * scrolling sideways, so their heights vary; each entry measures itself and the virtualized list
- * re-lays out from that row on.
+ * The tree's scrolling list (react-window's outer element). It is in the Tab order itself, so the
+ * region a keyboard scrolls is reachable at every scroll offset, even when the tab-stop row is
+ * scrolled out of the rendered window (axe scrollable-region-focusable). Its role is `group`,
+ * which a tree may own, so the rows inside keep their tree semantics (axe aria-required-children).
+ * Focus arriving here moves on to the tab-stop entry (`enterTree`).
  */
-const RowMeasure = createContext<(id: string, index: number, height: number) => void>(() => {});
+const TreeScroller = forwardRef<HTMLDivElement, HTMLProps<HTMLDivElement>>(
+  function TreeScroller(props, ref) {
+    return <ListOuterElement {...props} ref={ref} role="group" tabIndex={0} />;
+  },
+);
+
+/**
+ * What rows share with the tree: `measure` reports a row's measured height (rows wrap long names
+ * inside the column instead of scrolling sideways, so their heights vary, and the virtualized list
+ * re-lays out from that row on); `lastFocusIndex` is where the entry arborist last focused stood.
+ */
+const TreeRowContext = createContext<{
+  measure: (id: string, index: number, height: number) => void;
+  lastFocusIndex: RefObject<number | null>;
+}>({ measure: () => {}, lastFocusIndex: { current: null } });
 
 function TreeEntryContent({ node, style }: NodeRendererProps<TreeEntry>) {
-  const measure = useContext(RowMeasure);
+  const { measure } = useContext(TreeRowContext);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const { id, rowIndex } = node;
   useLayoutEffect(() => {
