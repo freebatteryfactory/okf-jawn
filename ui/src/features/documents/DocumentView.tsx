@@ -8,7 +8,14 @@
  * Warnings, partial extraction and agent-supplied text are shown, never smoothed over. Each
  * operation's failure is shown where its content would have been.
  */
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  type UseMutationResult,
+  type UseQueryResult,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import { useEffect, useId, useRef } from 'react';
 import {
   getItemOptions,
@@ -16,7 +23,12 @@ import {
   readItemInfiniteOptions,
 } from '../../api/generated/@tanstack/react-query.gen';
 import { openWorkspace, readItem } from '../../api/generated/sdk.gen';
-import type { ReadItemRequest, Revision } from '../../api/generated/types.gen';
+import type {
+  ReadItemRequest,
+  ReadItemResponse,
+  Revision,
+  Workspace,
+} from '../../api/generated/types.gen';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -79,6 +91,7 @@ function PinnedRevision({
   onReadLatest: (resolved: Revision) => void;
 }) {
   const client = useQueryClient();
+  const noticeRef = useRef<HTMLDivElement | null>(null);
   const body = { workspace_id: workspaceId };
   const latestHead = useQuery({
     queryKey: [{ ...openWorkspaceQueryKey({ body })[0], _comparedWith: revision }],
@@ -104,10 +117,37 @@ function PinnedRevision({
         pages: [response],
         pageParams: [{ body: pinned }],
       });
+      // The button goes once the pane reads that revision; keyboard focus stays at this notice,
+      // which then says which revision is read, instead of dropping to the page.
+      const notice = noticeRef.current;
+      if (notice?.contains(document.activeElement)) notice.focus();
       onReadLatest(resolved);
     },
   });
 
+  return (
+    <div ref={noticeRef} tabIndex={-1} className="pinned-revision">
+      <PinnedRevisionState
+        workspaceId={workspaceId}
+        revision={revision}
+        latestHead={latestHead}
+        readLatest={readLatest}
+      />
+    </div>
+  );
+}
+
+function PinnedRevisionState({
+  workspaceId,
+  revision,
+  latestHead,
+  readLatest,
+}: {
+  workspaceId: string;
+  revision: Revision;
+  latestHead: UseQueryResult<Workspace>;
+  readLatest: UseMutationResult<ReadItemResponse, Error, void>;
+}) {
   const reading = <code title={revision}>{short(revision)}</code>;
   if (latestHead.isPending) {
     return (

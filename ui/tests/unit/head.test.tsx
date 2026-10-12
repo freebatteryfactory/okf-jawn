@@ -13,11 +13,14 @@ import { fail, type Json, mockApi, ok } from './support/api';
 import {
   explorerHandlers,
   HEAD,
+  listing,
   NOTE,
   noteSummary,
   OLD,
+  otherSummary,
   readResponse,
   renderAt,
+  sourceSummary,
   WS,
   workspace,
 } from './support/workspace';
@@ -29,7 +32,20 @@ afterEach(() => {
 const OPEN = '/api/workspaces/open-workspace';
 const LIST = '/api/items/list-items';
 const READ = '/api/reads/read-item';
+const GET = '/api/items/get-item';
+const SOURCES = '/api/reads/get-sources';
 const NEW = 'e'.repeat(40);
+
+/** The window loses and regains focus, as TanStack Query's focus manager sees it. */
+function windowRefocus() {
+  act(() => {
+    focusManager.setFocused(false);
+    focusManager.setFocused(true);
+  });
+  act(() => focusManager.setFocused(undefined));
+}
+
+const focusedName = () => document.activeElement?.getAttribute('aria-label') ?? '';
 
 /** open_workspace answers HEAD the first time and NEW from then on. */
 function headMovesOn() {
@@ -106,6 +122,21 @@ describe('the "latest version" is the latest the server resolved for that reques
     expect(screen.queryByRole('button', { name: 'Read the latest version' })).toBeNull();
   });
 
+  it('keeps keyboard focus at the revision notice when "Read the latest version" has read it', async () => {
+    mockApi(explorerHandlers({ [OPEN]: headMovesOn(), [READ]: readAt() }));
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    const button = await screen.findByRole('button', { name: 'Read the latest version' });
+    act(() => button.focus());
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(router.state.location.search).toEqual({ rev: NEW }));
+    await waitFor(() => expect(button.isConnected).toBe(false));
+    const focused = document.activeElement;
+    expect(focused).not.toBe(document.body);
+    await waitFor(() =>
+      expect(focused?.textContent).toContain(`reading revision ${NEW.slice(0, 10)}`),
+    );
+  });
+
   it('shows a failed latest read, and keeps the pinned revision', async () => {
     mockApi(
       explorerHandlers({
@@ -145,17 +176,115 @@ describe('the shell head is shown as of when it was resolved', () => {
     );
   });
 
-  it('re-resolves the head when the window regains focus', async () => {
+  it('checks for a newer head when the window regains focus, says so politely, and moves nothing (Q3)', async () => {
     const api = mockApi(explorerHandlers({ [OPEN]: headMovesOn() }));
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    const article = await screen.findByRole('article', { name: 'Meeting notes' });
+    await within(article).findByText('Text of Meeting notes');
+    await within(tree).findByRole('treeitem', { name: /Plan/ });
+    expect(api.callsTo(OPEN).length).toBe(1);
+    const asked = () => [LIST, READ, GET, SOURCES].map((path) => api.callsTo(path).length);
+    const before = asked();
+    windowRefocus();
+    const notice = await screen.findByText(/A newer version of this workspace exists/);
+    expect(notice.closest('[role="status"]')).toBeTruthy();
+    expect(notice.querySelector('time')).toBeTruthy();
+    expect(api.callsTo(OPEN).length).toBe(2);
+    // Nothing reloads: the tree, the reading and the sources stay on the head they were opened at.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(asked()).toEqual(before);
+    for (const path of [LIST, READ, GET, SOURCES]) {
+      for (const body of api.callsTo(path)) {
+        expect(body.at).toEqual({ kind: 'revision', revision: HEAD });
+      }
+    }
+    expect(within(screen.getByText(/Showing the workspace as of/)).getByTitle(HEAD)).toBeTruthy();
+    expect(screen.getByRole('tree', { name: 'Folders' })).toBe(tree);
+    expect(within(article).getByText('Text of Meeting notes')).toBeTruthy();
+  });
+
+  it('moves to the newer head only on Refresh, keeping the tree on screen, its focused entry and the focus (Q3a)', async () => {
+    const api = mockApi(
+      explorerHandlers({
+        [OPEN]: headMovesOn(),
+        [LIST]: (body) => {
+          const revision = String((body.at as Json).revision);
+          const answer =
+            body.folder === 'notes'
+              ? listing([], [noteSummary, otherSummary])
+              : listing(['notes'], [sourceSummary]);
+          return ok({ ...answer, revision });
+        },
+      }),
+    );
     renderAt(`/w/${WS}`);
-    await screen.findByText(/Showing the workspace as of/);
-    const before = api.callsTo(OPEN).length;
-    act(() => {
-      focusManager.setFocused(false);
-      focusManager.setFocused(true);
-    });
-    await waitFor(() => expect(api.callsTo(OPEN).length).toBeGreaterThan(before));
-    act(() => focusManager.setFocused(undefined));
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    await within(tree).findByRole('treeitem', { name: /Annual report/ });
+    act(() => tree.focus());
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(focusedName()).toMatch(/^Annual report,/));
+    windowRefocus();
+    await screen.findByText(/A newer version of this workspace exists/);
+    const refresh = screen.getByRole('button', { name: 'Refresh' });
+    await userEvent.click(refresh);
+    await screen.findByText(`Refreshed: now showing revision ${NEW.slice(0, 10)}.`);
+    await waitFor(() =>
+      expect(api.callsTo(LIST).some((body) => (body.at as Json).revision === NEW)).toBe(true),
+    );
+    expect(screen.queryByText(/A newer version of this workspace exists/)).toBeNull();
+    // The tree was never taken off screen, and Refresh kept keyboard focus.
+    expect(screen.getByRole('tree', { name: 'Folders' })).toBe(tree);
+    expect(document.activeElement).toBe(refresh);
+    // Back in the tree, focus returns to the entry that had it.
+    act(() => tree.focus());
+    await waitFor(() => expect(focusedName()).toMatch(/^Annual report,/));
+  });
+
+  it('hands the tab stop to the entry now in its place when a refresh no longer lists the focused one', async () => {
+    mockApi(
+      explorerHandlers({
+        [OPEN]: headMovesOn(),
+        [LIST]: (body) => {
+          const revision = String((body.at as Json).revision);
+          const items = revision === NEW ? [otherSummary] : [sourceSummary, otherSummary];
+          return ok({ ...listing(['notes'], items), revision });
+        },
+      }),
+    );
+    renderAt(`/w/${WS}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    await within(tree).findByRole('treeitem', { name: /Plan/ });
+    act(() => tree.focus());
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(focusedName()).toMatch(/^Annual report,/));
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() =>
+      expect(within(tree).queryByRole('treeitem', { name: /Annual report/ })).toBeNull(),
+    );
+    act(() => tree.focus());
+    await waitFor(() => expect(focusedName()).toMatch(/^Plan,/));
+  });
+
+  it('says nothing of a check older than the head Refresh resolved since', async () => {
+    const NEWER = 'f'.repeat(40);
+    const heads = [HEAD, NEW, NEWER];
+    let opens = 0;
+    mockApi(
+      explorerHandlers({
+        [OPEN]: () => {
+          opens += 1;
+          return ok({ ...workspace, head: heads[Math.min(opens, heads.length) - 1] ?? HEAD });
+        },
+      }),
+    );
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('tree', { name: 'Folders' });
+    windowRefocus();
+    await screen.findByText(/A newer version of this workspace exists/);
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`);
+    expect(screen.queryByText(/A newer version of this workspace exists/)).toBeNull();
   });
 
   it('keeps the Explorer when a refresh fails, and says so', async () => {

@@ -5,13 +5,17 @@
  * The URL says which item the focused pane shows, at which selection and cited revision; the
  * Explorer store remembers the other tabs. Listings, search and reads are pinned to one resolved
  * workspace head, so their pages agree, unless a link names an exact revision. That head is
- * shown "as of" the moment it was resolved, never as "the latest": Refresh (or returning to the
- * window) re-resolves it. (SPEC section 3: a latest selector is resolved once, by a request.)
+ * shown "as of" the moment it was resolved, never as "the latest". Returning to the window checks
+ * for a newer head and says so; only Refresh re-resolves the listed head, and then the tree keeps
+ * its place. (SPEC section 3: a latest selector is resolved once, by a request; section 7:
+ * pagination stays tied to the same revision.)
  */
 import { useQuery } from '@tanstack/react-query';
 import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
+import { openWorkspaceQueryKey } from '../../api/generated/@tanstack/react-query.gen';
+import { openWorkspace } from '../../api/generated/sdk.gen';
 import type { Workspace } from '../../api/generated/types.gen';
 import { zItemId } from '../../api/generated/zod.gen';
 import { Instant } from '../../lib/instant';
@@ -41,6 +45,8 @@ export interface ExplorerShellProps {
   head: HeadState;
 }
 
+/** A newer-head check older than this is repeated when the head line mounts again. */
+const NEWER_HEAD_CHECK_AGE = 30_000;
 const COLUMNS_GROUP = 'explorer-columns';
 const COLUMN_IDS = ['navigation', 'documents', 'sources'] as const;
 
@@ -134,7 +140,7 @@ export function ExplorerShell({ workspace, head: headState }: ExplorerShellProps
       <div className="explorer-bar">
         <h1 className="workspace-name">{workspace.name}</h1>
         {workspace.description ? <p className="meta">{workspace.description}</p> : null}
-        <HeadLine head={head} state={headState} />
+        <HeadLine workspace={workspace} state={headState} />
       </div>
       <Group
         orientation="horizontal"
@@ -216,8 +222,27 @@ export function ExplorerShell({ workspace, head: headState }: ExplorerShellProps
 /**
  * The head the shell lists, "as of" when it was resolved, with Refresh to resolve it again.
  * Refresh keeps keyboard focus (aria-disabled while it runs) and a live region says the outcome.
+ *
+ * Whether a newer head exists is checked apart from the listed head, when the window regains focus
+ * (and when the line mounts after its last check grew old). A newer head never replaces the listed
+ * one: a polite notice says it exists, and only Refresh moves the shell to it.
  */
-function HeadLine({ head, state }: { head: string; state: HeadState }) {
+function HeadLine({ workspace, state }: { workspace: Workspace; state: HeadState }) {
+  const head = workspace.head;
+  const body = { workspace_id: workspace.id };
+  const check = useQuery({
+    queryKey: [{ ...openWorkspaceQueryKey({ body })[0], _check: 'newer-head' }],
+    queryFn: async ({ signal }) => {
+      const { data } = await openWorkspace({ body, signal, throwOnError: true });
+      return data;
+    },
+    // Seeded with the listed head's own answer, so opening the workspace sends one request.
+    initialData: workspace,
+    initialDataUpdatedAt: state.resolvedAt,
+    staleTime: NEWER_HEAD_CHECK_AGE,
+    refetchOnWindowFocus: 'always',
+  });
+  const newer = check.data.head !== head && check.dataUpdatedAt > state.resolvedAt ? check : null;
   const [outcome, setOutcome] = useState('');
   const refresh = async () => {
     if (state.refreshing) return;
@@ -236,6 +261,16 @@ function HeadLine({ head, state }: { head: string; state: HeadState }) {
       <p className="meta">
         Showing the workspace as of <Instant value={new Date(state.resolvedAt).toISOString()} />,
         revision <code title={head}>{short(head)}</code>.
+      </p>
+      {/* Present from the start, so the notice is announced when it appears. */}
+      <p role="status" className="meta newer-head">
+        {newer === null ? null : (
+          <>
+            A newer version of this workspace exists (checked at{' '}
+            <Instant value={new Date(newer.dataUpdatedAt).toISOString()} />
+            ).
+          </>
+        )}
       </p>
       <button type="button" aria-disabled={state.refreshing} onClick={() => void refresh()}>
         {state.refreshing ? 'Refreshing…' : 'Refresh'}

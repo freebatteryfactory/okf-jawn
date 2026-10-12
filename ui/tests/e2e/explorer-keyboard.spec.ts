@@ -20,10 +20,45 @@ import {
   plan,
   readAnswer,
   routeApi,
+  shot,
   summary,
   useExplorerServer,
   WS,
+  workspace,
 } from './support/explorer';
+
+const NEW = 'e'.repeat(40);
+const OLD = 'b'.repeat(40);
+
+/** The window regains focus, as TanStack Query's focus manager hears it. */
+async function windowRefocus(page: Page) {
+  await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')));
+}
+
+async function treeScrollTop(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const scroller = document.querySelector('[role="tree"] > div');
+    return scroller instanceof HTMLElement ? scroller.scrollTop : -1;
+  });
+}
+
+/** open_workspace answers HEAD when the workspace opens and NEW from then on. */
+function headMovesOn() {
+  let opens = 0;
+  return () => {
+    opens += 1;
+    return ok({ ...workspace, head: opens <= 1 ? HEAD : NEW });
+  };
+}
+
+/** A promise the test resolves, to hold an answer back. */
+function held(): { wait: Promise<void>; release: () => void } {
+  let release: () => void = () => {};
+  const wait = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { wait, release };
+}
 
 /** A folder of 80 entries: taller than the column, so the tree scrolls. */
 const items = Array.from({ length: 80 }, (_, index) =>
@@ -397,5 +432,201 @@ test.describe('Explorer from the keyboard', () => {
     await expect(row(page, /^Plan,/)).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(page.getByRole('tab', { name: 'Plan', selected: true })).toBeVisible();
+  });
+});
+
+test.describe('a newer head moves nothing until Refresh', () => {
+  const server = useExplorerServer();
+
+  test('Q3a window focus with a newer head: nothing reloads, a notice appears, and Refresh keeps the tree’s place and the focus', async ({
+    page,
+  }) => {
+    const listed: string[] = [];
+    const newer = held();
+    await routeApi(page, {
+      '/api/workspaces/open-workspace': headMovesOn(),
+      '/api/items/list-items': async (body) => {
+        const revision = String((body.at as { revision: string }).revision);
+        listed.push(revision);
+        if (revision === NEW) await newer.wait;
+        return ok({ folders: [], items, revision });
+      },
+    });
+    await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    await expect(page.getByRole('tab', { selected: true })).toBeVisible();
+    const tree = page.getByRole('tree', { name: 'Folders' });
+    await expect(row(page, /Item number 0,/)).toBeVisible();
+    await page.keyboard.press('Shift');
+    await tree.focus();
+    for (let index = 0; index < 40; index += 1) await page.keyboard.press('ArrowDown');
+    await expect(row(page, /Item number 40,/)).toBeFocused();
+    const scrolled = await treeScrollTop(page);
+    expect(scrolled).toBeGreaterThan(0);
+    const listedBefore = listed.length;
+
+    await windowRefocus(page);
+    const notice = page
+      .getByRole('status')
+      .filter({ hasText: 'A newer version of this workspace exists' });
+    await expect(notice).toBeVisible();
+    await expectNoAxeViolations(page, 'newer-head notice');
+    await shot(page, '09-newer-head-notice');
+    await page.waitForTimeout(300);
+    expect(listed.length).toBe(listedBefore);
+    await expect(row(page, /Item number 40,/)).toBeFocused();
+    expect(await treeScrollTop(page)).toBe(scrolled);
+    expect(page.url()).toContain(`rev=${OLD}`);
+
+    // Refresh from the keyboard. While the newer listing loads, the tree keeps the one shown.
+    const refresh = page.getByRole('button', { name: /^Refresh/ });
+    await refresh.focus();
+    await page.keyboard.press('Enter');
+    await expect.poll(() => listed.includes(NEW)).toBe(true);
+    await expect(row(page, /Item number 40,/)).toBeVisible();
+    await expect(tree.getByRole('treeitem', { name: /Loading/ })).toHaveCount(0);
+    newer.release();
+    await expect(page.getByText(/Showing the workspace as of/).locator('code')).toHaveAttribute(
+      'title',
+      NEW,
+    );
+    await expect(notice).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Refresh' })).toBeFocused();
+    expect(await treeScrollTop(page)).toBe(scrolled);
+    expect(page.url()).toContain(`rev=${OLD}`);
+    // Back into the tree from the keyboard: the same entry.
+    await page.getByRole('button', { name: 'Search', exact: true }).focus();
+    await page.keyboard.press('Tab');
+    await expect(row(page, /Item number 40,/)).toBeFocused();
+  });
+
+  test('Q3b window focus while reading part 2 of an unpinned item: nothing reloads, and Refresh keeps the focus', async ({
+    page,
+  }) => {
+    const reads: string[] = [];
+    await routeApi(page, {
+      '/api/workspaces/open-workspace': headMovesOn(),
+      '/api/reads/read-item': (body) => {
+        const at = String((body.at as { revision: string }).revision);
+        const second = body.cursor === 'part-2';
+        reads.push(`${at.slice(0, 1)}:${second ? 2 : 1}`);
+        return ok(
+          readAnswer(note, body, {
+            markdown: second ? 'Part two' : `Part one at ${at.slice(0, 1)}`,
+            outline: [],
+            receipt_id: second
+              ? '66666666-6666-4666-8666-666666666666'
+              : '55555555-5555-4555-8555-555555555555',
+            source: {
+              workspace_id: WS,
+              item_id: NOTE,
+              path: note.path,
+              revision: at,
+              selection: body.selection,
+              locations: [],
+            },
+            truncated: !second,
+            ...(second ? {} : { next_cursor: 'part-2' }),
+          }),
+        );
+      },
+    });
+    await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}`);
+    await page.getByRole('button', { name: 'Continue reading' }).focus();
+    await page.keyboard.press('Enter');
+    const part2 = page.getByRole('group', { name: 'Part 2 of this reading' });
+    await expect(part2).toBeFocused();
+    const readsBefore = reads.length;
+
+    await windowRefocus(page);
+    await expect(
+      page.getByRole('status').filter({ hasText: 'A newer version of this workspace exists' }),
+    ).toBeVisible();
+    await page.waitForTimeout(300);
+    expect(reads.length).toBe(readsBefore);
+    await expect(part2).toBeFocused();
+    await expect(page.getByText('Part two')).toBeVisible();
+
+    // Refresh reads the item at the newer head from its start (a continuation belongs to its
+    // revision), and keyboard focus stays on Refresh.
+    await page.getByRole('button', { name: 'Refresh' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByText('Part one at e')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Refresh' })).toBeFocused();
+  });
+
+  test('Q3c window focus with page 2 of search results focused: nothing reloads, and Refresh keeps the focus', async ({
+    page,
+  }) => {
+    const searched: string[] = [];
+    const hit = (id: string, title: string, revision: string) => ({
+      title,
+      snippet: `…${title}…`,
+      score: 1,
+      source: {
+        workspace_id: WS,
+        item_id: id,
+        path: `notes/${title}.md`,
+        revision,
+        selection: { kind: 'lines', range: { start: 1, end: 1 } },
+        locations: [],
+      },
+    });
+    await routeApi(page, {
+      '/api/workspaces/open-workspace': headMovesOn(),
+      '/api/search/search-items': (body) => {
+        const at = String((body.at as { revision: string }).revision);
+        const more = (body.page as { cursor: string | null }).cursor === 'more';
+        searched.push(`${at.slice(0, 1)}:${more ? 2 : 1}`);
+        return more
+          ? ok({ revision: at, hits: [hit(PLAN, 'Second', at)] })
+          : ok({
+              revision: at,
+              hits: [hit(NOTE, `First at ${at.slice(0, 1)}`, at)],
+              next_cursor: 'more',
+            });
+      },
+    });
+    await page.goto(`${server.origin()}/w/${WS}?q=budget`);
+    await page.getByRole('button', { name: 'Show more results' }).focus();
+    await page.keyboard.press('Enter');
+    const second = page.getByRole('link', { name: /Second/ });
+    await expect(second).toBeFocused();
+    const searchedBefore = searched.length;
+
+    await windowRefocus(page);
+    await expect(
+      page.getByRole('status').filter({ hasText: 'A newer version of this workspace exists' }),
+    ).toBeVisible();
+    await page.waitForTimeout(300);
+    expect(searched.length).toBe(searchedBefore);
+    await expect(second).toBeFocused();
+
+    // Refresh searches the newer head from its first page, and keyboard focus stays on Refresh.
+    await page.getByRole('button', { name: 'Refresh' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('link', { name: /First at e/ })).toBeVisible();
+    expect(searched.at(-1)).toBe('e:1');
+    await expect(page.getByRole('button', { name: 'Refresh' })).toBeFocused();
+  });
+
+  test('"Read the latest version" from the keyboard keeps focus at the revision notice', async ({
+    page,
+  }) => {
+    await routeApi(page, {
+      '/api/workspaces/open-workspace': headMovesOn(),
+      '/api/reads/read-item': (body) => {
+        const at = body.at as { kind: string; revision?: string };
+        const resolved = at.kind === 'latest' ? NEW : String(at.revision);
+        const answer = readAnswer(note, body);
+        return ok({ ...answer, source: { ...answer.source, revision: resolved } });
+      },
+    });
+    await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    const latest = page.getByRole('button', { name: 'Read the latest version' });
+    await latest.focus();
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(new RegExp(`rev=${NEW}`));
+    await expect(latest).toHaveCount(0);
+    await expect.poll(() => focused(page)).toContain(`reading revision ${NEW.slice(0, 10)}`);
   });
 });

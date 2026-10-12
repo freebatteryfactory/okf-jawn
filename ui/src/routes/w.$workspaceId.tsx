@@ -4,8 +4,11 @@
  * The workspace id in the path is checked with the generated schema before anything is sent: a
  * malformed one gets a plain-language message and no request.
  *
- * The head is re-resolved whenever the window regains focus, and on Refresh; the shell shows it
- * "as of" when it was resolved. A failed refresh keeps the Explorer and says so there.
+ * The shell lists the head resolved when the workspace opened, "as of" that moment, and moves to
+ * another head only on Refresh: tree, unpinned reads and search pages stay on the revision they
+ * were opened at (SPEC section 7: "pagination stays tied to the same revision and
+ * representation"). Whether a newer head exists is checked apart, on window focus (the shell's
+ * head line). A failed refresh keeps the Explorer and says so there.
  */
 import { useQuery } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
@@ -23,11 +26,12 @@ export const Route = createFileRoute('/w/$workspaceId')({
 function WorkspaceRoute() {
   const { workspaceId } = Route.useParams();
   const valid = zWorkspaceId.safeParse(workspaceId).success;
+  // The pinned head: resolved once when the workspace opens, again only on Refresh.
   const workspace = useQuery({
     ...openWorkspaceOptions({ body: { workspace_id: workspaceId } }),
     enabled: valid,
-    staleTime: 0,
-    refetchOnWindowFocus: true,
+    staleTime: Number.POSITIVE_INFINITY,
+    refetchOnWindowFocus: false,
   });
   if (!valid) {
     return (

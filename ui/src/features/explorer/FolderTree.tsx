@@ -132,6 +132,7 @@ function entriesOf(
   folder: string,
   listings: ReadonlyMap<string, UseQueryResult<FolderListing>>,
   expanded: Record<string, true>,
+  revision: Revision,
 ): TreeEntry[] {
   const result = listings.get(folder);
   if (result === undefined) return [];
@@ -148,7 +149,7 @@ function entriesOf(
         item: null,
         status: null,
         error: null,
-        children: expanded[child] ? entriesOf(child, listings, expanded) : [],
+        children: expanded[child] ? entriesOf(child, listings, expanded, revision) : [],
       });
     }
     for (const item of page.items) {
@@ -165,7 +166,10 @@ function entriesOf(
     }
   }
   const last = result.data.pages.at(-1);
-  if (result.isPlaceholderData) entries.push(statusEntry(folder, 'more-loading'));
+  // A placeholder at this revision is one more page loading; one listed at an older head is the
+  // listing shown before a refresh, kept as it was until the newer one arrives.
+  if (result.isPlaceholderData && result.data.revision === revision)
+    entries.push(statusEntry(folder, 'more-loading'));
   else if (result.data.moreError !== null) {
     entries.push(statusEntry(folder, 'more-error', result.data.moreError));
   } else if (last?.next_cursor) entries.push(statusEntry(folder, 'more'));
@@ -297,7 +301,7 @@ export function FolderTree({
     if (result !== undefined) listings.set(folder, result);
   });
   const root = listings.get('');
-  const entries = entriesOf('', listings, view.expanded);
+  const entries = entriesOf('', listings, view.expanded, revision);
   const selected =
     selectedItemId !== null && contains(entries, itemNodeId(selectedItemId))
       ? itemNodeId(selectedItemId)

@@ -5,6 +5,9 @@
  * Each page is its own generated `list_items` query; a folder's view is the pages it shows,
  * fetched in cursor order. Every page is pinned to one resolved revision, so pages never mix
  * two states of the workspace. A later page that fails keeps the pages already shown.
+ *
+ * While a folder is listed at a newer head (after Refresh), the listing shown before stays on
+ * screen, marked with the revision it was listed at, so the tree keeps its place and focus.
  */
 import { type QueryClient, queryOptions } from '@tanstack/react-query';
 import { listItemsOptions } from '../../api/generated/@tanstack/react-query.gen';
@@ -14,6 +17,8 @@ import type { ListItemsResponse, Revision } from '../../api/generated/types.gen'
 export const LISTING_PAGE = 200;
 
 export interface FolderListing {
+  /** The revision every page was listed at. */
+  revision: Revision;
   pages: ListItemsResponse[];
   /** The failure of the page after the last one shown, if it failed. */
   moreError: unknown;
@@ -62,18 +67,40 @@ export function folderListingOptions(
           cursor = page.next_cursor;
         } catch (error) {
           if (index === 0) throw error;
-          return { pages: shown, moreError: error };
+          return { revision, pages: shown, moreError: error };
         }
       }
-      return { pages: shown, moreError: null };
+      return { revision, pages: shown, moreError: null };
     },
-    // While one more page loads, the pages already shown stay on screen (and keep focus).
+    // While one more page loads, the pages already shown stay on screen (and keep focus); while
+    // the folder is listed at a newer head, the listing shown before does.
     placeholderData: () =>
       client.getQueryData<FolderListing>(
         folderListingKey(workspaceId, revision, folder, pages - 1),
-      ),
+      ) ?? listedBefore(client, workspaceId, folder, pages),
     staleTime: Number.POSITIVE_INFINITY,
   });
+}
+
+/** The folder's most recent listing at another revision, with as many pages. */
+function listedBefore(
+  client: QueryClient,
+  workspaceId: string,
+  folder: string,
+  pages: number,
+): FolderListing | undefined {
+  let latest: { at: number; data: FolderListing } | undefined;
+  for (const query of client
+    .getQueryCache()
+    .findAll({ queryKey: ['explorer-folder', workspaceId] })) {
+    const [, , , listedFolder, listedPages] = query.queryKey;
+    const data = client.getQueryData<FolderListing>(query.queryKey);
+    if (listedFolder !== folder || listedPages !== pages || data === undefined) continue;
+    if (latest === undefined || query.state.dataUpdatedAt > latest.at) {
+      latest = { at: query.state.dataUpdatedAt, data };
+    }
+  }
+  return latest?.data;
 }
 
 /** The folders whose children are on screen: the root, and expanded folders under expanded parents. */
