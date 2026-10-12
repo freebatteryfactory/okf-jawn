@@ -10,8 +10,9 @@
 //! that stopped resumes by repeating the call (it is never cancelled: a half-removed target is
 //! worse than either end):
 //!
-//! 1. **Plan**, before anything is removed: the objects the workspace references (its whole Git
-//!    history on every reference, the conversion records its cards name, its records), its
+//! 1. **Plan**, before anything is removed: the objects the workspace references, read
+//!    structurally (`references`: what the cards of its whole Git history on every reference
+//!    name, what the conversion records among them name, and its records), its
 //!    workspace archives (recorded as artifacts or only written), its uploads, the
 //!    pre-migration backups that hold it, and the counts of the report. Its records and
 //!    history are read under the workspace's write lock, under which every Git write checks
@@ -276,13 +277,15 @@ impl StoragePurger {
                     };
                     Ok((target, archives, uploads, history))
                 })?;
+                // The same structural sets a survivor is read by (`objects`): what the cards
+                // name, and what the conversion records among them name.
                 let mut objects = target;
-                objects.extend(history.objects.iter().cloned());
+                objects.extend(history.objects.keys().cloned());
                 references::follow_records(
                     &blobs,
                     &scope.tenant_id,
-                    &mut objects,
                     &history.records,
+                    &mut objects,
                 )?;
                 let mut held = BTreeSet::new();
                 for digest in objects {
@@ -581,8 +584,11 @@ impl StoragePurger {
                 for path in repositories.others(&scope.tenant_id, &scope)? {
                     let repository = git2::Repository::open_bare(&path)
                         .map_err(|error| crate::git::repo::git(&error))?;
+                    // Read structurally, as the plan reads the target: a survivor's card or
+                    // conversion record that does not read fails the purge (`damaged`) rather
+                    // than risk deleting what it names.
                     let history = references::history(&repository)?;
-                    found.extend(history.objects);
+                    found.extend(history.objects.into_keys());
                     records.extend(history.records);
                 }
                 // The objects other workspaces were putting when the sweep began, and those of
@@ -592,7 +598,7 @@ impl StoragePurger {
                 // names each as a job output.
                 found.extend(pinned);
                 found.extend(pending);
-                references::follow_records(&blobs, &scope.tenant_id, &mut found, &records)?;
+                references::follow_records(&blobs, &scope.tenant_id, &records, &mut found)?;
                 surviving.extend(found);
                 Ok(surviving)
             })

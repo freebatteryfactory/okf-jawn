@@ -4695,56 +4695,75 @@ async fn backup_a_replacement_restore_refuses_an_archive_table_with_a_generated_
 // The PR #20 pass-4b re-review's probes (lane-storage-m2-pass4b-rereview.md), adopted, and the
 // tests of its rulings.
 
-/// The archive `drafts` table rebuilt as `definition`, its rows copied by `copy`.
+/// SQL that takes the quotes `ALTER TABLE ... RENAME` puts around the table `name` off its
+/// stored statement (`CREATE TABLE "name"` becomes `CREATE TABLE name`), as this build writes it.
+fn rr5_unquoted(name: &str) -> String {
+    format!(
+        "PRAGMA writable_schema = ON;
+         UPDATE sqlite_schema
+             SET sql = replace(sql, 'CREATE TABLE \"{name}\"', 'CREATE TABLE {name}')
+             WHERE name = '{name}';
+         PRAGMA writable_schema = OFF;"
+    )
+}
+
+/// The archive `drafts` table rebuilt as `definition`, its rows copied by `copy`. The rename
+/// stores the statement as `CREATE TABLE "drafts" ...`; the quotes are taken off (`rr5_unquoted`),
+/// so the stored statement is this build's, up to whitespace, but for what `definition` changes:
+/// the same rebuild with nothing changed restores
+/// (`rr5_control_a_rebuild_with_no_change_restores`).
 fn rr5_drafts_as(definition: &str, copy: &str) -> String {
     format!(
         "CREATE TABLE drafts_new {definition};
          INSERT INTO drafts_new {copy};
          DROP TABLE drafts;
-         ALTER TABLE drafts_new RENAME TO drafts;"
+         ALTER TABLE drafts_new RENAME TO drafts;
+         {}",
+        rr5_unquoted("drafts")
     )
 }
 
-/// Each schema variant of `drafts` that is not this build's, with its rows all of the archive's
-/// own tenant and workspace.
+/// This build's `drafts` statement after `CREATE TABLE drafts`, its `columns` replaced and with
+/// `tail` after the closing parenthesis, token for token as the live schema states it.
+fn rr5_definition(columns: &str, tail: &str) -> String {
+    format!("( {columns}, {RR5_KEY} ){tail}")
+}
+
+/// Each schema variant of `drafts` that is not this build's, each changing exactly one
+/// property, with its rows all of the archive's own tenant and workspace.
 fn rr5_variants() -> Vec<(&'static str, String)> {
+    let all = "SELECT * FROM drafts";
     vec![
         (
             "collation",
             rr5_drafts_as(
-                &format!(
-                    "({}, {RR5_KEY}) STRICT",
-                    RR5_COLUMNS.replace(
+                &rr5_definition(
+                    &RR5_COLUMNS.replace(
                         "workspace_id TEXT NOT NULL",
-                        "workspace_id TEXT NOT NULL COLLATE NOCASE"
-                    )
+                        "workspace_id TEXT NOT NULL COLLATE NOCASE",
+                    ),
+                    " STRICT",
                 ),
-                "SELECT * FROM drafts",
+                all,
             ),
         ),
         (
             "not strict",
-            rr5_drafts_as(
-                &format!("({RR5_COLUMNS}, {RR5_KEY})"),
-                "SELECT * FROM drafts",
-            ),
+            rr5_drafts_as(&rr5_definition(RR5_COLUMNS, ""), all),
         ),
         (
             "without rowid",
-            rr5_drafts_as(
-                &format!("({RR5_COLUMNS}, {RR5_KEY}) STRICT, WITHOUT ROWID"),
-                "SELECT * FROM drafts",
-            ),
+            rr5_drafts_as(&rr5_definition(RR5_COLUMNS, " STRICT, WITHOUT ROWID"), all),
         ),
         (
             "stored generated",
             rr5_drafts_as(
-                &format!(
-                    "({}, {RR5_KEY}) STRICT",
-                    RR5_COLUMNS.replace(
+                &rr5_definition(
+                    &RR5_COLUMNS.replace(
                         "body TEXT NOT NULL",
-                        "body TEXT GENERATED ALWAYS AS ('forged') STORED"
-                    )
+                        "body TEXT GENERATED ALWAYS AS ('forged') STORED",
+                    ),
+                    " STRICT",
                 ),
                 "(tenant_id, workspace_id, item_id, editor, saved_at, record, properties)
                  SELECT tenant_id, workspace_id, item_id, editor, saved_at, record, properties
@@ -4754,16 +4773,16 @@ fn rr5_variants() -> Vec<(&'static str, String)> {
         (
             "extra column",
             rr5_drafts_as(
-                &format!("({RR5_COLUMNS}, extra TEXT, {RR5_KEY}) STRICT"),
+                &rr5_definition(&format!("{RR5_COLUMNS}, extra TEXT"), " STRICT"),
                 "SELECT *, NULL FROM drafts",
             ),
         ),
         (
             "missing column",
             rr5_drafts_as(
-                &format!(
-                    "({}, {RR5_KEY}) STRICT",
-                    RR5_COLUMNS.replace(", properties TEXT NOT NULL", "")
+                &rr5_definition(
+                    &RR5_COLUMNS.replace(", properties TEXT NOT NULL", ""),
+                    " STRICT",
                 ),
                 "SELECT tenant_id, workspace_id, item_id, editor, saved_at, record, body
                  FROM drafts",
@@ -4772,33 +4791,39 @@ fn rr5_variants() -> Vec<(&'static str, String)> {
         (
             "other type",
             rr5_drafts_as(
-                &format!(
-                    "({}, {RR5_KEY}) STRICT",
-                    RR5_COLUMNS.replace("saved_at TEXT NOT NULL", "saved_at ANY NOT NULL")
+                &rr5_definition(
+                    &RR5_COLUMNS.replace("saved_at TEXT NOT NULL", "saved_at ANY NOT NULL"),
+                    " STRICT",
                 ),
-                "SELECT * FROM drafts",
+                all,
             ),
         ),
         (
             "other default",
             rr5_drafts_as(
-                &format!(
-                    "({}, {RR5_KEY}) STRICT",
-                    RR5_COLUMNS.replace("body TEXT NOT NULL", "body TEXT NOT NULL DEFAULT ''")
+                &rr5_definition(
+                    &RR5_COLUMNS.replace("body TEXT NOT NULL", "body TEXT NOT NULL DEFAULT ''"),
+                    " STRICT",
                 ),
-                "SELECT * FROM drafts",
+                all,
             ),
         ),
         (
             "other case table",
-            "ALTER TABLE drafts RENAME TO drafts_tmp; ALTER TABLE drafts_tmp RENAME TO Drafts;"
-                .to_owned(),
+            format!(
+                "ALTER TABLE drafts RENAME TO drafts_tmp; ALTER TABLE drafts_tmp RENAME TO Drafts;
+                 {}",
+                rr5_unquoted("Drafts")
+            ),
         ),
         (
             "check",
             rr5_drafts_as(
-                &format!("({RR5_COLUMNS}, CHECK (length(body) >= 0), {RR5_KEY}) STRICT"),
-                "SELECT * FROM drafts",
+                &rr5_definition(
+                    &format!("{RR5_COLUMNS}, CHECK (length(body) >= 0)"),
+                    " STRICT",
+                ),
+                all,
             ),
         ),
         (
@@ -5778,6 +5803,1728 @@ async fn backup_a_conversion_before_its_completion_restores_with_its_exports_and
     let live = directory.path().join("records.sqlite");
     assert_eq!(count(&live, "SELECT count(*) FROM job_outputs")?, 3);
     assert_eq!(rr6_pending(directory.path(), &workspace, &named)?, 0);
+    Ok(())
+}
+
+// The PR #20 B1-R re-review's probes (lane-storage-m2-b1r-rereview.md, `rr7_`), adopted, and the
+// tests of its round-3 rulings.
+
+/// The records entry of the archive `bytes`, with each of `steps` run on a fresh connection,
+/// foreign keys off (`WS99` stands for another workspace id). A fresh connection per step reads
+/// the schema a `writable_schema` step left on disk.
+fn rr7_forged_steps(bytes: &[u8], steps: &[&str]) -> Fallible<Vec<u8>> {
+    let staged = tempfile::tempdir()?;
+    let records = staged.path().join("records.sqlite");
+    std::fs::write(&records, entry_bytes_of(bytes, "records.sqlite")?)?;
+    for step in steps {
+        let connection = rusqlite::Connection::open(&records)?;
+        connection.execute_batch(&format!(
+            "PRAGMA foreign_keys = OFF; {}",
+            step.replace("WS99", &uuid_text(99))
+        ))?;
+    }
+    Ok(std::fs::read(&records)?)
+}
+
+/// The stored statement of the schema object `name` in the records at `records`.
+fn rr7_statement(records: &Path, name: &str) -> Fallible<String> {
+    let connection = rusqlite::Connection::open(records)?;
+    Ok(connection.query_row(
+        "SELECT sql FROM sqlite_schema WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )?)
+}
+
+/// The records entry of the archive `bytes` with the stored statement of `name` rewritten in
+/// place (`writable_schema`): every `from` replaced by `to`, nothing else. Refuses a rewrite that
+/// would change nothing, so a probe never passes vacuously.
+fn rr7_rewritten(bytes: &[u8], name: &str, from: &str, to: &str) -> Fallible<Vec<u8>> {
+    let staged = tempfile::tempdir()?;
+    let records = staged.path().join("records.sqlite");
+    std::fs::write(&records, entry_bytes_of(bytes, "records.sqlite")?)?;
+    let before = rr7_statement(&records, name)?;
+    if !before.contains(from) {
+        return Err(format!("{name}'s statement holds no {from:?}: {before}").into());
+    }
+    {
+        let connection = rusqlite::Connection::open(&records)?;
+        connection.execute_batch("PRAGMA writable_schema = ON")?;
+        connection.execute(
+            "UPDATE sqlite_schema SET sql = replace(sql, ?1, ?2) WHERE name = ?3",
+            rusqlite::params![from, to, name],
+        )?;
+        connection.execute_batch("PRAGMA writable_schema = OFF")?;
+    }
+    let after = rr7_statement(&records, name)?;
+    if after == before {
+        return Err(format!("{name}'s statement did not change").into());
+    }
+    Ok(std::fs::read(&records)?)
+}
+
+/// The records entry of the archive `bytes` copied, row for row, into a new database whose text
+/// encoding is UTF-16le, built by this build's own migrations: the same statements, the same
+/// rows.
+fn rr7_utf16(bytes: &[u8]) -> Fallible<Vec<u8>> {
+    let staged = tempfile::tempdir()?;
+    let source = staged.path().join("source.sqlite");
+    std::fs::write(&source, entry_bytes_of(bytes, "records.sqlite")?)?;
+    let target = staged.path().join("utf16.sqlite");
+    {
+        let from = rusqlite::Connection::open(&source)?;
+        let mut to = rusqlite::Connection::open(&target)?;
+        to.execute_batch("PRAGMA encoding = 'UTF-16le'")?;
+        okf_jawn_storage::schema::RECORDS.to_latest(&mut to)?;
+        to.execute_batch("PRAGMA foreign_keys = OFF")?;
+        let tables: Vec<String> = {
+            let mut statement = from.prepare(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )?;
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        for table in tables {
+            let mut select = from.prepare(&format!("SELECT * FROM \"{table}\""))?;
+            let width = select.column_count();
+            let rows: Vec<Vec<rusqlite::types::Value>> = select
+                .query_map([], |row| {
+                    (0..width)
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect()
+                })?
+                .collect::<Result<_, _>>()?;
+            let marks = (1..=width)
+                .map(|n| format!("?{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            for row in rows {
+                to.execute(
+                    &format!("INSERT INTO \"{table}\" VALUES ({marks})"),
+                    rusqlite::params_from_iter(row),
+                )?;
+            }
+        }
+        let encoding: String = to.query_row("PRAGMA encoding", [], |row| row.get(0))?;
+        assert_eq!(encoding, "UTF-16le");
+        let integrity: String = to.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        assert_eq!(integrity, "ok");
+        for name in ["drafts", "events", "job_controls"] {
+            assert_eq!(
+                rr7_statement(&target, name)?,
+                rr7_statement(&source, name)?,
+                "{name}: the same statement"
+            );
+        }
+    }
+    Ok(std::fs::read(&target)?)
+}
+
+/// A backup set of a notes workspace (with a cancelled job and its control when `job`) whose
+/// workspace archive's records are replaced by `forge(archive bytes)`, restored by replacement
+/// over the deleted directory.
+async fn rr7_replace(
+    job: bool,
+    forge: &dyn Fn(&[u8]) -> Fallible<Vec<u8>>,
+) -> Fallible<(tempfile::TempDir, tempfile::TempDir, StorageScope, Restored)> {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let workspace = {
+        let storage = Storage::open(directory.path())?;
+        let workspace = notes_workspace(&storage).await?;
+        if job {
+            let records = storage.records();
+            let job_scope = JobScope::Workspace(workspace.clone());
+            let created = records
+                .create_job(
+                    &job_scope,
+                    NewJob {
+                        mutation_id: uuid!(61)?,
+                        initiator: person("ana"),
+                        spec: JobSpec::BackupWorkspace,
+                    },
+                )
+                .await?;
+            records
+                .cancel_job(&job_scope, uuid!(62)?, created.id)
+                .await?;
+        }
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        workspace
+    };
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let bytes = std::fs::read(&archive)?;
+    let forged = forge(&bytes)?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    std::fs::write(&archive, crafted)?;
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let result = restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await;
+    drop(restored);
+    Ok((directory, output, workspace, result))
+}
+
+/// A forged replacement is refused as `InvalidInput` naming `table`, before any workspace row
+/// or repository was written.
+async fn rr7_replace_refused(
+    job: bool,
+    forge: &dyn Fn(&[u8]) -> Fallible<Vec<u8>>,
+    table: &str,
+) -> TestResult {
+    let (directory, _output, workspace, result) = rr7_replace(job, forge).await?;
+    if let Err(error) = &result {
+        assert!(error.message.contains(table), "{table}: {error}");
+    }
+    rr5_refused_before_writing(directory.path(), &workspace, result, table)
+}
+
+/// A forged replacement restores as any other: the workspace and its draft are live.
+async fn rr7_replace_restores(forge: &dyn Fn(&[u8]) -> Fallible<Vec<u8>>) -> TestResult {
+    let (directory, _output, workspace, result) = rr7_replace(false, forge).await?;
+    result?;
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            &format!(
+                "SELECT count(*) FROM drafts WHERE workspace_id = '{}'",
+                workspace.workspace_id.0
+            )
+        )?,
+        1
+    );
+    Ok(())
+}
+
+/// A notes workspace's archive whose records are replaced by `forge(archive bytes)`, imported
+/// into a blank workspace of another tenant: refused as `InvalidInput` naming `table`, nothing
+/// written.
+async fn rr7_import_refused(forge: &dyn Fn(&[u8]) -> Fallible<Vec<u8>>, table: &str) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let forged = forge(&bytes)?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, table).await
+}
+
+/// An import of a notes workspace's archive whose records are `forge(archive bytes)`: refused as
+/// `InvalidInput` with the target's head still blank, naming what was written otherwise.
+async fn rr7_import_reported(forge: &dyn Fn(&[u8]) -> Fallible<Vec<u8>>) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let forged = forge(&bytes)?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    let (target, blank, result) = import_crafted(&storage, crafted).await?;
+    let moved = storage.versions().head(&target).await? != blank;
+    let pending = count(
+        &directory.path().join("records.sqlite"),
+        &format!(
+            "SELECT count(*) FROM pending_puts WHERE workspace_id = '{}'",
+            target.workspace_id.0
+        ),
+    )?;
+    match result {
+        Ok(report) => Err(format!("imported: {report:?}").into()),
+        Err(error) => {
+            // The one pending put is the crafted archive this test uploaded, not the restore's.
+            assert!(
+                error.code == ErrorCode::InvalidInput && !moved && pending == 1,
+                "refused as {:?} ({}); the target's head moved: {moved}; its pending puts: \
+                 {pending}",
+                error.code,
+                error.message
+            );
+            Ok(())
+        }
+    }
+}
+
+// N-4: each property changed alone, in place, every other byte of the statement this build's.
+
+/// R7SPACED: a statement that differs from this build's only in whitespace is this build's.
+#[tokio::test]
+async fn rr7_control_a_whitespace_only_rewrite_restores() -> TestResult {
+    rr7_replace_restores(&|bytes| rr7_rewritten(bytes, "drafts", "\n", "\n \t  ")).await
+}
+
+#[tokio::test]
+async fn rr7_replace_column_collation_alone() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "drafts",
+                "workspace_id TEXT NOT NULL,",
+                "workspace_id TEXT NOT NULL COLLATE NOCASE,",
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_column_collation_alone() -> TestResult {
+    rr7_import_refused(
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "drafts",
+                "workspace_id TEXT NOT NULL,",
+                "workspace_id TEXT NOT NULL COLLATE NOCASE,",
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_strict_dropped_alone() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| rr7_rewritten(bytes, "drafts", ") STRICT", ")"),
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_strict_dropped_alone() -> TestResult {
+    rr7_import_refused(
+        &|bytes| rr7_rewritten(bytes, "drafts", ") STRICT", ")"),
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_check_added_alone() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "drafts",
+                "body TEXT NOT NULL,",
+                "body TEXT NOT NULL CHECK (length(body) >= 0),",
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_check_removed_alone() -> TestResult {
+    rr7_replace_refused(
+        true,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "job_controls",
+                " CHECK (action IN ('cancel', 'retry'))",
+                "",
+            )
+        },
+        "job_controls",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_check_removed_alone() -> TestResult {
+    rr7_import_refused(
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "job_controls",
+                " CHECK (action IN ('cancel', 'retry'))",
+                "",
+            )
+        },
+        "job_controls",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_references_removed_alone() -> TestResult {
+    rr7_replace_refused(
+        true,
+        &|bytes| rr7_rewritten(bytes, "job_outputs", " REFERENCES jobs (job_id)", ""),
+        "job_outputs",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_references_removed_alone() -> TestResult {
+    rr7_import_refused(
+        &|bytes| rr7_rewritten(bytes, "job_outputs", " REFERENCES jobs (job_id)", ""),
+        "job_outputs",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_index_collation_alone() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "events_by_log",
+                "(tenant_id,",
+                "(tenant_id COLLATE NOCASE,",
+            )
+        },
+        "events",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_index_collation_alone() -> TestResult {
+    rr7_import_refused(
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "events_by_log",
+                "(tenant_id,",
+                "(tenant_id COLLATE NOCASE,",
+            )
+        },
+        "events",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_partial_index_alone() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "jobs_by_state",
+                "ON jobs (state)",
+                "ON jobs (state) WHERE state <> 'rr7'",
+            )
+        },
+        "jobs",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_missing_index() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| rr7_forged_steps(bytes, &["DROP INDEX reviews_by_item;"]),
+        "reviews",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_missing_index() -> TestResult {
+    rr7_import_refused(
+        &|bytes| rr7_forged_steps(bytes, &["DROP INDEX reviews_by_item;"]),
+        "reviews",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_keyword_case_game() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| rr7_rewritten(bytes, "drafts", "NOT NULL", "not null"),
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_quoted_table_name() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "drafts",
+                "CREATE TABLE drafts",
+                "CREATE TABLE \"drafts\"",
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_bracketed_table_name() -> TestResult {
+    rr7_import_refused(
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "drafts",
+                "CREATE TABLE drafts",
+                "CREATE TABLE [drafts]",
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+/// An extra table and a view under other names: never read, so the restore goes ahead, and the
+/// extra table does not appear in the live database.
+#[tokio::test]
+async fn rr7_an_extra_table_and_view_are_never_read() -> TestResult {
+    let (directory, _output, _workspace, result) =
+        rr7_replace(false, &|bytes| {
+            rr7_forged_steps(
+            bytes,
+            &["CREATE TABLE rr7_extra (workspace_id TEXT); INSERT INTO rr7_extra VALUES ('WS99');
+               CREATE VIEW rr7_view AS SELECT tenant_id, 'WS99' AS workspace_id FROM drafts;"],
+        )
+        })
+        .await?;
+    result?;
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            "SELECT count(*) FROM sqlite_schema WHERE name IN ('rr7_extra', 'rr7_view')"
+        )?,
+        0
+    );
+    Ok(())
+}
+
+/// N-4 control: a rename rebuild with nothing changed is refused. SQLite stores the renamed
+/// table's statement as `CREATE TABLE "drafts" (...`, and a quoted name is not whitespace, so
+/// the statement is not this build's text: the in-place quoted name's case
+/// (`rr7_replace_quoted_table_name`). No archive this build writes is renamed after it is built;
+/// the one rename of the schema (`keyed_events` to `events`, schema 2) runs in the migrations
+/// every records database goes through, live and archived alike, so both store the same text.
+#[tokio::test]
+async fn rr7_control_a_rename_rebuild_with_no_change_is_refused() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_forged_steps(
+                bytes,
+                &[&format!(
+                    "CREATE TABLE drafts_new {};
+                     INSERT INTO drafts_new SELECT * FROM drafts;
+                     DROP TABLE drafts;
+                     ALTER TABLE drafts_new RENAME TO drafts;",
+                    rr5_definition(RR5_COLUMNS, " STRICT")
+                )],
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+/// N-4 control: the same rebuild with the rename's quotes taken off (`rr5_drafts_as`) is this
+/// build's statement up to whitespace, and restores; so each `rr5_` variant differs from this
+/// build's schema in its one property only.
+#[tokio::test]
+async fn rr5_control_a_rebuild_with_no_change_restores() -> TestResult {
+    rr7_replace_restores(&|bytes| {
+        rr7_forged_steps(
+            bytes,
+            &[&rr5_drafts_as(
+                &rr5_definition(RR5_COLUMNS, " STRICT"),
+                "SELECT * FROM drafts",
+            )],
+        )
+    })
+    .await
+}
+
+/// N-1: records in UTF-16, with this build's statements and rows, intact and migrated, are
+/// refused before anything is written: the copy attaches them to the UTF-8 live database, which
+/// SQLite refuses for another encoding.
+#[tokio::test]
+async fn rr7_replace_utf16_records() -> TestResult {
+    rr7_replace_refused(false, &rr7_utf16, "UTF-8").await
+}
+
+#[tokio::test]
+async fn rr7_import_utf16_records() -> TestResult {
+    rr7_import_reported(&rr7_utf16).await
+}
+
+/// `drafts` made loose, a draft's body stored as a BLOB, then its statement put back byte for
+/// byte: a STRICT table holding a value of another type, every statement this build's.
+#[tokio::test]
+async fn rr7_a_blob_in_a_strict_table_under_its_own_statement_is_refused_before_any_write()
+-> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            let forged = rr7_forged_steps(
+                bytes,
+                &[
+                    "PRAGMA writable_schema = ON;
+                     UPDATE sqlite_schema SET sql = replace(sql, ') STRICT', ')') WHERE name = 'drafts';
+                     PRAGMA writable_schema = OFF;",
+                    "UPDATE drafts SET body = CAST(body AS BLOB);",
+                    "PRAGMA writable_schema = ON;
+                     UPDATE sqlite_schema SET sql = sql || ' STRICT' WHERE name = 'drafts';
+                     PRAGMA writable_schema = OFF;",
+                ],
+            )?;
+            let staged = tempfile::tempdir()?;
+            let path = staged.path().join("f.sqlite");
+            std::fs::write(&path, &forged)?;
+            let original = staged.path().join("o.sqlite");
+            std::fs::write(&original, entry_bytes_of(bytes, "records.sqlite")?)?;
+            assert_eq!(
+                rr7_statement(&path, "drafts")?,
+                rr7_statement(&original, "drafts")?
+            );
+            assert_eq!(
+                count(&path, "SELECT count(*) FROM drafts WHERE typeof(body) = 'blob'")?,
+                1
+            );
+            Ok(forged)
+        },
+        "drafts",
+    )
+    .await
+}
+
+/// `jobs` made loose, a job of the archive's own workspace with no id added, a control of a job
+/// the archive does not hold added, then `jobs`' statement put back byte for byte. The job-keyed
+/// row check reads `job_id NOT IN (SELECT job_id FROM jobs)`, which a NULL id makes unknown.
+#[tokio::test]
+async fn rr7_a_job_without_an_id_is_refused_before_any_write() -> TestResult {
+    rr7_replace_refused(
+        true,
+        &|bytes| {
+            rr7_forged_steps(
+                bytes,
+                &[
+                    "PRAGMA writable_schema = ON;
+                     UPDATE sqlite_schema SET sql = replace(sql, ') STRICT', ')') WHERE name = 'jobs';
+                     PRAGMA writable_schema = OFF;",
+                    "INSERT INTO jobs (job_id, tenant_id, workspace_id, mutation_id, initiator, spec,
+                         record, state)
+                         SELECT NULL, tenant_id, workspace_id, 'rr7-null-job', '{}', '{}', '{}',
+                         'cancelled' FROM workspaces;
+                     INSERT INTO job_controls VALUES ('rr7-control', 'rr7-elsewhere-job', 'cancel');",
+                    "PRAGMA writable_schema = ON;
+                     UPDATE sqlite_schema SET sql = sql || ' STRICT' WHERE name = 'jobs';
+                     PRAGMA writable_schema = OFF;",
+                ],
+            )
+        },
+        "jobs",
+    )
+    .await
+}
+
+/// N-2: a draft whose stored `record` is not JSON (an import rewrites the workspace identity
+/// inside it) is refused before anything is written.
+#[tokio::test]
+async fn rr7_an_import_of_a_draft_whose_record_is_not_json_is_refused_before_any_write()
+-> TestResult {
+    rr7_import_reported(&|bytes| {
+        rr7_forged_steps(bytes, &["UPDATE drafts SET record = 'rr7 not json';"])
+    })
+    .await
+}
+
+/// N-2, by replacement: the application reads every `record` as JSON, so one that is not is
+/// refused before anything is written.
+#[tokio::test]
+async fn backup_a_replacement_refuses_a_record_that_is_not_json() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| rr7_forged_steps(bytes, &["UPDATE drafts SET record = 'rr7 not json';"]),
+        "drafts",
+    )
+    .await
+}
+
+/// R7QUICK: an index whose entry count matches its table but whose content does not. The event
+/// row is the archive's own while `events_by_log` is built, then the index is made partial (so
+/// an update leaves its entry alone), the row is moved to another workspace, and the statement
+/// is put back. `quick_check` counts entries; only `integrity_check` compares their content. A
+/// row check that counts through the covering index would see the old workspace.
+#[tokio::test]
+async fn rr7_an_index_that_lies_about_its_rows_is_refused_before_any_write() -> TestResult {
+    let (directory, _output, workspace, result) = rr7_replace(false, &|bytes| {
+        rr7_forged_steps(
+            bytes,
+            &[
+                "INSERT INTO events (tenant_id, workspace_id, event_key, record)
+                     SELECT tenant_id, workspace_id, 'rr7-lying-index', '{}' FROM workspaces;",
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_schema SET sql = sql || ' WHERE seq < 0'
+                     WHERE name = 'events_by_log';
+                 PRAGMA writable_schema = OFF;",
+                "UPDATE events SET workspace_id = 'WS99' WHERE event_key = 'rr7-lying-index';",
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_schema SET sql = replace(sql, ' WHERE seq < 0', '')
+                     WHERE name = 'events_by_log';
+                 PRAGMA writable_schema = OFF;",
+            ],
+        )
+    })
+    .await?;
+    let foreign = count(
+        &directory.path().join("records.sqlite"),
+        &format!(
+            "SELECT count(*) FROM events WHERE workspace_id = '{}'",
+            uuid_text(99)
+        ),
+    )?;
+    if let Err(error) = &result {
+        assert!(error.message.contains("damaged"), "{error}");
+    }
+    assert_eq!(foreign, 0, "an event of another workspace was restored");
+    rr5_refused_before_writing(directory.path(), &workspace, result, "lying index")
+}
+
+// B-1: a reference to a stored object is read structurally, never as a token of free text.
+
+/// A conversion record naming `structured` and `asset`, with `locations` line locations, whose
+/// one converted table has one cell of text `cell` (a document's own words).
+fn rr7_record_with_cell(
+    structured: &Digest,
+    asset: &Digest,
+    cell: &str,
+    locations: usize,
+) -> Fallible<Vec<u8>> {
+    let table = format!(
+        "\"tables\":[{{\"lines\":{{\"start\":1,\"end\":1}},\"location\":{{\"page_no\":1}},\
+         \"num_rows\":1,\"num_cols\":1,\"cells\":[{{\"row\":0,\"column\":0,\"row_span\":1,\
+         \"column_span\":1,\"text\":\"{cell}\",\"column_header\":false,\"row_header\":false}}]}}]"
+    );
+    let text = String::from_utf8(rr4_record(structured, asset, locations))?;
+    if !text.contains("\"tables\":[]") {
+        return Err("the record has no empty tables list".into());
+    }
+    Ok(text.replacen("\"tables\":[]", &table, 1).into_bytes())
+}
+
+/// Workspace B holds an original no other workspace holds (`hidden`); workspace A converts a
+/// document of its own whose one table cell reads as `hidden`'s digest (its record, of
+/// `locations` locations, named by A's card). Returns (storage dir, storage, A, B, hidden,
+/// record size).
+async fn rr7_a_record_quoting(
+    locations: usize,
+) -> Fallible<(
+    tempfile::TempDir,
+    Storage,
+    StorageScope,
+    StorageScope,
+    Digest,
+    usize,
+)> {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (a, a_head) = create(&storage, "local", 1, "A").await?;
+    let (b, b_head) = create(&storage, "local", 2, "B").await?;
+    let hidden = put(&storage, &b, b"rr7 an original only workspace B holds")
+        .await?
+        .digest;
+    commit(&storage, &b, 3, &b_head, vec![card(uuid!(15)?, &hidden)?]).await?;
+    let source = put(&storage, &a, b"rr7 A's spreadsheet").await?.digest;
+    let export = put(&storage, &a, b"{\"rr7\": \"A's docling export\"}")
+        .await?
+        .digest;
+    let asset = put(&storage, &a, b"rr7 A's page render").await?.digest;
+    let bytes = rr7_record_with_cell(&export, &asset, hidden.as_str(), locations)?;
+    let size = bytes.len();
+    let record = rr4_put_large(&storage, &a, bytes).await?;
+    commit(
+        &storage,
+        &a,
+        4,
+        &a_head,
+        vec![rr4_converted_card(
+            uuid!(14)?,
+            "sources/sheet.md",
+            &source,
+            &record,
+        )?],
+    )
+    .await?;
+    Ok((directory, storage, a, b, hidden, size))
+}
+
+/// Whether A's archive copies `hidden`, then whether B's purge keeps it.
+async fn rr7_copied_and_kept(
+    directory: &Path,
+    storage: &Storage,
+    a: &StorageScope,
+    b: &StorageScope,
+    hidden: &Digest,
+) -> Fallible<(bool, bool)> {
+    let archive = storage
+        .backups()
+        .write_workspace_archive(a, uuid!(40)?)
+        .await?;
+    let copied = entries(&object_file(directory, &archive.digest)?)?
+        .contains(&format!("objects/{}", hidden.as_str()));
+    rr5_purge(storage, b).await?;
+    let kept = object_file(directory, hidden)?.is_file();
+    Ok((copied, kept))
+}
+
+/// B-1: a small conversion record is read structurally, as a large one is: a table cell quoting
+/// B's digest neither copies B's original into A's archive nor keeps it past B's purge.
+#[tokio::test]
+async fn rr7_a_small_records_text_copies_and_keeps_nothing() -> TestResult {
+    let (directory, storage, a, b, hidden, size) = rr7_a_record_quoting(3).await?;
+    let (copied, kept) = rr7_copied_and_kept(directory.path(), &storage, &a, &b, &hidden).await?;
+    assert!(
+        !copied && !kept,
+        "a {size}-byte record whose table cell quotes B's digest: copied into A's archive: \
+         {copied}; kept past B's purge: {kept}"
+    );
+    Ok(())
+}
+
+/// The same record past 64 MiB: its cell names nothing either. The control for the probe above.
+#[tokio::test]
+async fn rr7_control_a_large_records_text_copies_and_keeps_nothing() -> TestResult {
+    let (directory, storage, a, b, hidden, size) = rr7_a_record_quoting(1_500_000).await?;
+    assert!(size > 64 << 20, "the record is {size} bytes");
+    let (copied, kept) = rr7_copied_and_kept(directory.path(), &storage, &a, &b, &hidden).await?;
+    assert!(
+        !copied && !kept,
+        "a {size}-byte record: copied {copied}, kept {kept}"
+    );
+    Ok(())
+}
+
+/// A source card over `object` at `at`, whose supplied file name is `filename`.
+fn rr7_card_named(item: ItemId, at: &str, object: &Digest, filename: &str) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::WriteSourceCard(Box::new(SourceCard {
+        item_id: item,
+        path: WorkspacePath::try_from(at.to_owned())?,
+        title: filename.to_owned(),
+        type_name: "Source".to_owned(),
+        body: String::new(),
+        properties: BTreeMap::new(),
+        appearance: serde_json::from_value(json!({
+            "object": object.as_str(),
+            "names": [{
+                "filename": filename,
+                "folder": "",
+                "observed_at": "2026-10-09T12:00:00.000Z",
+                "supplied_by": "ana"
+            }],
+            "media_type": "text/csv",
+            "size": "10",
+            "metadata": {},
+            "extraction": {
+                "outcome": { "status": "unsupported" },
+                "text_origin": "none",
+                "corrected": false,
+                "warnings": []
+            }
+        }))?,
+    })))
+}
+
+/// B-1, through a card: A uploads a file of its own named after B's digest. The card records
+/// the supplied name, which names no object, so A's archive does not copy B's original and B's
+/// purge deletes it.
+#[tokio::test]
+async fn rr7_a_cards_file_name_copies_and_keeps_nothing() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (a, a_head) = create(&storage, "local", 1, "A").await?;
+    let (b, b_head) = create(&storage, "local", 2, "B").await?;
+    let hidden = put(&storage, &b, b"rr7 an original only workspace B holds")
+        .await?
+        .digest;
+    commit(&storage, &b, 3, &b_head, vec![card(uuid!(15)?, &hidden)?]).await?;
+    let own = put(&storage, &a, b"rr7 A's own small file").await?.digest;
+    commit(
+        &storage,
+        &a,
+        4,
+        &a_head,
+        vec![rr7_card_named(
+            uuid!(14)?,
+            "sources/named.md",
+            &own,
+            &format!("{}.csv", hidden.as_str()),
+        )?],
+    )
+    .await?;
+    let (copied, kept) = rr7_copied_and_kept(directory.path(), &storage, &a, &b, &hidden).await?;
+    assert!(
+        !copied && !kept,
+        "A's card whose file name is B's digest: copied into A's archive: {copied}; kept past \
+         B's purge: {kept}"
+    );
+    Ok(())
+}
+
+/// B-1, when a commit lands its pending puts: a card lands only the puts of the objects it names
+/// structurally. Bytes a workspace put and named only in a card's file name keep their pending
+/// put, so a purge of the workspace deletes them: a token never lands a put that no record would
+/// then name (which no purge would reach).
+#[tokio::test]
+async fn backup_a_put_a_card_names_only_in_its_text_goes_with_its_workspace() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (a, head) = create(&storage, "local", 1, "A").await?;
+    let own = put(&storage, &a, b"rr8 A's original").await?.digest;
+    let typed = put(
+        &storage,
+        &a,
+        b"rr8 bytes A put and named only in a file name",
+    )
+    .await?
+    .digest;
+    commit(
+        &storage,
+        &a,
+        3,
+        &head,
+        vec![rr7_card_named(
+            uuid!(14)?,
+            "sources/named.md",
+            &own,
+            &format!("{}.csv", typed.as_str()),
+        )?],
+    )
+    .await?;
+    assert_eq!(
+        rr6_pending(directory.path(), &a, &[&own, &typed])?,
+        1,
+        "only the original's put landed"
+    );
+    rr5_purge(&storage, &a).await?;
+    for (digest, what) in [(&own, "the original"), (&typed, "the named-in-text bytes")] {
+        assert!(
+            !object_file(directory.path(), digest)?.is_file(),
+            "the purge left {what}"
+        );
+    }
+    Ok(())
+}
+
+/// Commit on `scope`'s accepted head, straight through Git, the head's tree with the file `path`
+/// holding `bytes`: a file only a damaged store (or a crafted archive) holds.
+fn rr8_commit_raw_file(
+    storage: &Storage,
+    scope: &StorageScope,
+    path: &str,
+    bytes: &[u8],
+) -> TestResult {
+    let repository = repository_of(storage, scope)?;
+    let head = repository
+        .find_reference("refs/heads/main")?
+        .peel_to_commit()?;
+    let blob = repository.blob(bytes)?;
+    let tree = git2::build::TreeUpdateBuilder::new()
+        .upsert(path, blob, git2::FileMode::Blob)
+        .create_updated(&repository, &head.tree()?)?;
+    let tree = repository.find_tree(tree)?;
+    let who = git2::Signature::now("rr8", "rr8")?;
+    repository.commit(
+        Some("refs/heads/main"),
+        &who,
+        &who,
+        "rr8 a file written past the store",
+        &tree,
+        &[&head],
+    )?;
+    Ok(())
+}
+
+/// Purge the workspace `target` as `rr5_purge` does (purge 61 under mutations 60 and 62), and
+/// give back what the purger answered.
+async fn rr8_purge(
+    storage: &Storage,
+    target: &StorageScope,
+) -> Fallible<Result<okf_jawn_contract::purge::PurgeReport, ApiError>> {
+    let tenant = target.tenant_id.clone();
+    let purge = storage
+        .records()
+        .create_purge(
+            &tenant,
+            uuid!(60)?,
+            NewPurge {
+                id: uuid!(61)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: target.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    Ok(storage
+        .purger()
+        .purge_workspace(&tenant, uuid!(62)?, purge.id, target.workspace_id)
+        .await)
+}
+
+/// B-1: a source appearance that does not read as one is damage (only the application writes
+/// them). A backup of its workspace fails naming it, and so does a purge of another workspace,
+/// which reads it as a survivor's: neither guesses what it names, from tokens or otherwise.
+#[tokio::test]
+async fn backup_a_source_appearance_that_does_not_read_fails_a_backup_and_a_purge() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (damaged, _) = create(&storage, "local", 1, "Damaged").await?;
+    let (other, _) = create(&storage, "local", 2, "Other").await?;
+    let path = format!(".okf/sources/{}.json", uuid_text(15));
+    let named = put(&storage, &damaged, b"rr8 bytes the damaged file names")
+        .await?
+        .digest;
+    rr8_commit_raw_file(
+        &storage,
+        &damaged,
+        &path,
+        format!("{{\"object\": \"{}\"}}", named.as_str()).as_bytes(),
+    )?;
+    let error = err_of(
+        storage
+            .backups()
+            .write_workspace_archive(&damaged, uuid!(40)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Internal, "{error}");
+    assert!(error.message.contains(&path), "{error}");
+    let error = err_of(rr8_purge(&storage, &other).await?)?;
+    assert_eq!(error.code, ErrorCode::Internal, "{error}");
+    assert!(error.message.contains(&path), "{error}");
+    Ok(())
+}
+
+/// B-1: a conversion record a card names that does not read as one is damage (only ingest
+/// writes them). A backup fails naming it, and so does a purge of another workspace, which
+/// would otherwise not know what the record's lists name past the damage.
+#[tokio::test]
+async fn backup_a_card_named_record_that_does_not_read_fails_a_backup_and_a_purge() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (damaged, head) = create(&storage, "local", 1, "Damaged").await?;
+    let (other, _) = create(&storage, "local", 2, "Other").await?;
+    let original = put(&storage, &damaged, b"rr8 a converted original")
+        .await?
+        .digest;
+    let record = put(&storage, &damaged, b"{\"structured\": [{\"digest\": \"cut")
+        .await?
+        .digest;
+    commit(
+        &storage,
+        &damaged,
+        3,
+        &head,
+        vec![rr4_converted_card(
+            uuid!(14)?,
+            "sources/report.md",
+            &original,
+            &record,
+        )?],
+    )
+    .await?;
+    let error = err_of(
+        storage
+            .backups()
+            .write_workspace_archive(&damaged, uuid!(40)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Internal, "{error}");
+    assert!(
+        error.message.contains(record.as_str()) && error.message.contains("does not read"),
+        "{error}"
+    );
+    let error = err_of(rr8_purge(&storage, &other).await?)?;
+    assert_eq!(error.code, ErrorCode::Internal, "{error}");
+    assert!(error.message.contains(record.as_str()), "{error}");
+    Ok(())
+}
+
+/// The names of the objects of tenant `tenant` the store at `data` holds.
+fn rr8_stored(data: &Path, tenant: &str) -> Fallible<std::collections::BTreeSet<String>> {
+    let mut found = std::collections::BTreeSet::new();
+    let root = data.join("objects").join(tenant);
+    for prefix in std::fs::read_dir(&root)? {
+        let prefix = prefix?.path();
+        if prefix.is_dir() {
+            for object in std::fs::read_dir(&prefix)? {
+                found.insert(object?.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The `objects/` entries of the workspace archive object `digest` in the store at `data`.
+fn rr8_archived(data: &Path, digest: &Digest) -> Fallible<std::collections::BTreeSet<String>> {
+    Ok(entries(&object_file(data, digest)?)?
+        .into_iter()
+        .filter_map(|name| name.strip_prefix("objects/").map(str::to_owned))
+        .collect())
+}
+
+/// A conversion record as ingest writes it (core `ConversionRecord`, read back through its
+/// type): one structured export, a page render and a picture whose caption holds no hex, and a
+/// table whose one cell is plain text.
+fn rr8_record(export: &Digest, render: &Digest, picture: &Digest) -> Fallible<Vec<u8>> {
+    let page = json!({ "provenance": "direct", "locator": { "kind": "page", "page_no": 1 } });
+    let record: okf_jawn_core::conversion::ConversionRecord = serde_json::from_value(json!({
+        "converter": rr4_converter(),
+        "outcome": { "status": "completed" },
+        "page_count": 1,
+        "structured": [{ "digest": export.as_str() }],
+        "markdown": "8".repeat(64),
+        "locations": [{ "lines": { "start": 1, "end": 2 }, "location": page }],
+        "outline": [],
+        "tables": [{
+            "lines": { "start": 2, "end": 2 },
+            "location": page,
+            "num_rows": 1,
+            "num_cols": 1,
+            "cells": [{
+                "row": 0, "column": 0, "row_span": 1, "column_span": 1,
+                "text": "harbour depth", "column_header": false, "row_header": false
+            }]
+        }],
+        "assets": [
+            {
+                "digest": render.as_str(),
+                "media_type": "image/png",
+                "role": "page_image",
+                "location": page
+            },
+            {
+                "digest": picture.as_str(),
+                "media_type": "image/png",
+                "role": "picture",
+                "location": page,
+                "caption": "A map of the harbour"
+            }
+        ],
+        "warnings": []
+    }))?;
+    Ok(serde_json::to_vec(&record)?)
+}
+
+/// A converted source in `rich` (created at `created`) as an import job writes it: the job is
+/// claimed, the original, structured export, page render, captioned picture and conversion
+/// record are put, the card naming the record is committed, and the job completes with its
+/// outputs. Then a correction and supplied text, which name the record only as a key. Returns
+/// the card's item, the card's revision and (original, record, export, render, picture).
+async fn rr8_converted(
+    storage: &Storage,
+    rich: &StorageScope,
+    created: &Revision,
+) -> Fallible<(ItemId, Revision, [Digest; 5])> {
+    let records = storage.records();
+    let import = records
+        .create_job(
+            &JobScope::Workspace(rich.clone()),
+            NewJob {
+                mutation_id: uuid!(30)?,
+                initiator: person("ana"),
+                spec: JobSpec::Import {
+                    base_revision: created.clone(),
+                    upload_ids: Vec::new(),
+                    destination: None,
+                    apply_naming_rules: false,
+                    settings: ConversionSettings::default(),
+                },
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(import.id).await?, "the claimed import")?;
+    let original = put(storage, rich, b"rr8 rich original").await?.digest;
+    let export = put(storage, rich, b"{\"rr8\": \"docling export\"}")
+        .await?
+        .digest;
+    let render = put(storage, rich, b"rr8 page render").await?.digest;
+    let picture = put(storage, rich, b"rr8 harbour picture").await?.digest;
+    let record = put(storage, rich, &rr8_record(&export, &render, &picture)?)
+        .await?
+        .digest;
+    let item: ItemId = uuid!(14)?;
+    let revision = commit(
+        storage,
+        rich,
+        31,
+        created,
+        vec![rr4_converted_card(
+            item,
+            "sources/report.md",
+            &original,
+            &record,
+        )?],
+    )
+    .await?;
+    records
+        .complete_job(JobCompletion {
+            lease: claimed.lease,
+            revision: Some(revision.clone()),
+            item_ids: vec![item],
+            artifact: None,
+            restore: None,
+            outputs: vec![
+                export.clone(),
+                render.clone(),
+                picture.clone(),
+                record.clone(),
+            ],
+            warnings: Vec::new(),
+        })
+        .await?;
+    let corrected = commit(
+        storage,
+        rich,
+        32,
+        &revision,
+        vec![TreeEdit::CorrectDigest {
+            item_id: item,
+            digest: record.clone(),
+            corrected_markdown: "Corrected harbour text.".to_owned(),
+            adopts: None,
+        }],
+    )
+    .await?;
+    commit(
+        storage,
+        rich,
+        33,
+        &corrected,
+        vec![TreeEdit::SupplyExtraction {
+            item_id: item,
+            based_on: Some(record.clone()),
+            pages: Vec::new(),
+            markdown: "Supplied harbour text.".to_owned(),
+            proposal_id: uuid!(34)?,
+            supplier: person("agent"),
+        }],
+    )
+    .await?;
+    Ok((item, revision, [original, record, export, render, picture]))
+}
+
+/// The records of `rich` that name objects, as the application writes them: an export artifact,
+/// a derived dataset of `item` at `revision`, and a completed upload. Returns (export artifact,
+/// dataset, upload).
+async fn rr8_rows(
+    storage: &Storage,
+    rich: &StorageScope,
+    item: ItemId,
+    revision: &Revision,
+) -> Fallible<[Digest; 3]> {
+    let records = storage.records();
+    let scope = JobScope::Workspace(rich.clone());
+    let exported = put(storage, rich, b"rr8 an export archive").await?;
+    let job = records
+        .create_job(
+            &scope,
+            NewJob {
+                mutation_id: uuid!(35)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    records
+        .record_artifact(
+            &scope,
+            uuid!(36)?,
+            NewArtifact {
+                kind: ArtifactKind::Export,
+                object: exported.clone(),
+                media_type: "application/zip".to_owned(),
+                created_by_job: job.id,
+            },
+        )
+        .await?;
+    let dataset = put(storage, rich, b"rr8 harbour dataset").await?.digest;
+    records
+        .record_derived_object(
+            rich,
+            DerivedObject {
+                item_id: item,
+                revision: revision.clone(),
+                digest: dataset.clone(),
+                kind: DerivedKind::Dataset,
+                media_type: "text/csv".to_owned(),
+            },
+        )
+        .await?;
+    let upload = rr6_uploaded(storage, rich, b"rr8 an uploaded note").await?;
+    Ok([exported.digest, dataset, upload])
+}
+
+/// B-1 false-delete guard. A workspace built through the store calls the application makes (an
+/// import job's original, conversion record, structured export, page render and captioned
+/// picture, then its completion; a correction and supplied text; an export artifact; a derived
+/// dataset; a completed upload) references structurally every object the store holds for it:
+/// its archive, which copies exactly that set, holds every one, so no object is reached only by
+/// a token. A purge of another workspace that names each of those objects too deletes none.
+#[tokio::test]
+async fn backup_every_object_a_rich_workspace_uses_is_structural_and_survives_another_purge()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (rich, created) = create(&storage, "local", 1, "Rich").await?;
+    let (item, revision, converted) = rr8_converted(&storage, &rich, &created).await?;
+    let rows = rr8_rows(&storage, &rich, item, &revision).await?;
+    // The archive copies exactly the structural set; every object the store holds is in it.
+    let archive = storage
+        .backups()
+        .write_workspace_archive(&rich, uuid!(40)?)
+        .await?;
+    let archived = rr8_archived(directory.path(), &archive.digest)?;
+    let mut stored = rr8_stored(directory.path(), "local")?;
+    stored.remove(archive.digest.as_str());
+    assert_eq!(
+        archived, stored,
+        "every object the store holds is named structurally"
+    );
+    for digest in converted.iter().chain(&rows) {
+        assert!(archived.contains(digest.as_str()), "{digest:?} is archived");
+    }
+    assert_eq!(
+        archived.len(),
+        8,
+        "the five converted objects and the three rows'"
+    );
+    // Another workspace names every one of them, as its own originals, and is purged.
+    let (other, other_head) = create(&storage, "local", 2, "Other").await?;
+    let mut cards = Vec::new();
+    for (n, name) in (100_u32..).zip(&archived) {
+        let digest = Digest::try_from(name.clone())?;
+        put(
+            &storage,
+            &other,
+            &std::fs::read(object_file(directory.path(), &digest)?)?,
+        )
+        .await?;
+        cards.push(rr7_card_named(
+            uuid!(n)?,
+            &format!("sources/copy-{n}.md"),
+            &digest,
+            "copy.bin",
+        )?);
+    }
+    commit(&storage, &other, 50, &other_head, cards).await?;
+    rr5_purge(&storage, &other).await?;
+    for name in &archived {
+        assert!(
+            object_file(directory.path(), &Digest::try_from(name.clone())?)?.is_file(),
+            "another workspace's purge deleted {name}, which the rich workspace uses"
+        );
+    }
+    Ok(())
+}
+
+// B-2: a restore refuses, before any write, an archive whose history or rows name an object it
+// does not hold.
+
+/// The entry names of the archive `bytes`.
+fn entries_of_bytes(bytes: &[u8]) -> Fallible<Vec<String>> {
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec()))?;
+    Ok(archive.file_names().map(str::to_owned).collect())
+}
+
+/// The archive `bytes` without its entry `name`.
+fn rr7_without(bytes: &[u8], name: &str) -> Fallible<Vec<u8>> {
+    use std::io::Write as _;
+    let mut source = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec()))?;
+    let mut target = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let mut dropped = 0_u32;
+    for index in 0..source.len() {
+        let mut entry = source.by_index(index)?;
+        let entry_name = entry.name().to_owned();
+        if entry_name == name {
+            dropped = dropped.saturating_add(1);
+            continue;
+        }
+        let mut content = Vec::new();
+        entry.read_to_end(&mut content)?;
+        target.start_file(
+            entry_name.as_str(),
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )?;
+        target.write_all(&content)?;
+    }
+    assert_eq!(dropped, 1, "{name} dropped");
+    Ok(target.finish()?.into_inner())
+}
+
+/// B-2: an uploaded archive whose card names, as its original, an object the archive does not
+/// hold but another workspace of the importing tenant does (its digest is all the uploader
+/// knows) is refused before anything is written. Otherwise the imported card would name the
+/// other workspace's bytes, the target's own archive would copy them, and that workspace's
+/// purge would keep them.
+#[tokio::test]
+async fn rr7_an_import_whose_card_names_an_object_it_does_not_hold_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (victim, victim_head) = create(&storage, "local", 2, "Victim").await?;
+    let secret = b"rr7 bytes only the victim workspace holds";
+    let hidden = put(&storage, &victim, secret).await?.digest;
+    commit(
+        &storage,
+        &victim,
+        3,
+        &victim_head,
+        vec![card(uuid!(15)?, &hidden)?],
+    )
+    .await?;
+    // An archive whose card names the same digest; its copy of the bytes is then left out.
+    let (source, source_head) = create(&storage, "staging", 4, "Source").await?;
+    put(&storage, &source, secret).await?;
+    commit(
+        &storage,
+        &source,
+        5,
+        &source_head,
+        vec![card(uuid!(16)?, &hidden)?],
+    )
+    .await?;
+    let written = storage
+        .backups()
+        .write_workspace_archive(&source, uuid!(40)?)
+        .await?;
+    let bytes = std::fs::read(
+        directory
+            .path()
+            .join("objects")
+            .join("staging")
+            .join(some(written.digest.as_str().get(..2), "a digest")?)
+            .join(written.digest.as_str()),
+    )?;
+    assert!(
+        entries_of_bytes(&bytes)?.contains(&format!("objects/{}", hidden.as_str())),
+        "the written archive holds the bytes its card names"
+    );
+    let crafted = rr7_without(&bytes, &format!("objects/{}", hidden.as_str()))?;
+    let (target, blank) = create(&storage, "local", 81, "Blank").await?;
+    let uploaded = storage
+        .blobs()
+        .put(
+            &target,
+            Box::pin(std::io::Cursor::new(crafted)),
+            1 << 30,
+            None,
+        )
+        .await?
+        .digest;
+    let result = storage
+        .backups()
+        .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
+        .await;
+    match result {
+        Err(error) => {
+            assert_eq!(error.code, ErrorCode::InvalidInput, "{error}");
+            assert!(
+                error.message.contains(hidden.as_str()) && error.message.contains("original"),
+                "names the digest and what names it: {error}"
+            );
+            assert_eq!(storage.versions().head(&target).await?, blank);
+            Ok(())
+        }
+        Ok(report) => {
+            let archive = storage
+                .backups()
+                .write_workspace_archive(&target, uuid!(85)?)
+                .await?;
+            let copied = entries(&object_file(directory.path(), &archive.digest)?)?
+                .contains(&format!("objects/{}", hidden.as_str()));
+            rr5_purge(&storage, &victim).await?;
+            let kept = object_file(directory.path(), &hidden)?.is_file();
+            Err(format!(
+                "imported ({report:?}) although the archive does not hold {}; the target's own \
+                 archive then holds the victim's bytes: {copied}; the victim's purge kept them: \
+                 {kept}",
+                hidden.as_str()
+            )
+            .into())
+        }
+    }
+}
+
+/// B-2: an uploaded archive whose card-named conversion record names an asset the archive does
+/// not hold is refused before anything is written, naming the asset.
+#[tokio::test]
+async fn backup_an_import_whose_record_names_an_asset_it_does_not_hold_is_refused() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (source, head) = create(&storage, "local", 1, "Converted").await?;
+    let original = put(&storage, &source, b"rr8 converted original")
+        .await?
+        .digest;
+    let export = put(&storage, &source, b"{\"rr8\": \"export\"}")
+        .await?
+        .digest;
+    let asset = put(&storage, &source, b"rr8 page render").await?.digest;
+    let record = put(&storage, &source, &rr4_record(&export, &asset, 3))
+        .await?
+        .digest;
+    commit(
+        &storage,
+        &source,
+        3,
+        &head,
+        vec![rr4_converted_card(
+            uuid!(14)?,
+            "sources/report.md",
+            &original,
+            &record,
+        )?],
+    )
+    .await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let crafted = rr7_without(&bytes, &format!("objects/{}", asset.as_str()))?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, asset.as_str()).await
+}
+
+/// B-2, rows: an import refuses an archive whose derived dataset (a row it copies) names an
+/// object the archive does not hold; a replacement refuses one whose job output does (it copies
+/// job rows too). Both before anything is written.
+#[tokio::test]
+async fn backup_a_restore_refuses_a_row_naming_an_object_the_archive_does_not_hold() -> TestResult {
+    let absent = "f".repeat(64);
+    let dataset = format!(
+        "INSERT INTO derived_objects SELECT tenant_id, workspace_id, '{}', '{}', '{absent}',
+             'dataset', 'text/csv' FROM workspaces;",
+        uuid_text(10),
+        "a".repeat(40)
+    );
+    rr7_import_refused(
+        &|bytes| rr7_forged_steps(bytes, &[dataset.as_str()]),
+        &absent,
+    )
+    .await?;
+    let output = format!("INSERT INTO job_outputs SELECT job_id, '{absent}' FROM jobs;");
+    rr7_replace_refused(
+        true,
+        &|bytes| rr7_forged_steps(bytes, &[output.as_str()]),
+        "job output",
+    )
+    .await
+}
+
+/// B-2: an import copies no job row, so it does not require the objects job outputs name, and
+/// imports an archive whose job output names one it does not hold; the target gets no job row.
+#[tokio::test]
+async fn backup_an_import_does_not_require_what_job_outputs_it_does_not_copy_name() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let job_scope = JobScope::Workspace(source.clone());
+    let job = storage
+        .records()
+        .create_job(
+            &job_scope,
+            NewJob {
+                mutation_id: uuid!(61)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    storage
+        .records()
+        .cancel_job(&job_scope, uuid!(62)?, job.id)
+        .await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let forged = rr7_forged_steps(
+        &bytes,
+        &[&format!(
+            "INSERT INTO job_outputs SELECT job_id, '{}' FROM jobs;",
+            "f".repeat(64)
+        )],
+    )?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    let (target, _, result) = import_crafted(&storage, crafted).await?;
+    result?;
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            &format!(
+                "SELECT count(*) FROM jobs WHERE workspace_id = '{}'",
+                target.workspace_id.0
+            )
+        )?,
+        0,
+        "no job row imported"
+    );
+    Ok(())
+}
+
+/// B-2, the writer: a backup is never archived, so a card whose original is a workspace
+/// archive's bytes (an archive imported back as a document) would make the archive
+/// unrestorable. The backup fails, naming the item and the digest, and writes nothing: no
+/// archive object and no record, by itself or in a set.
+#[tokio::test]
+async fn backup_a_card_whose_original_is_a_backup_fails_the_backup_and_writes_nothing() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (workspace, created) = create(&storage, "local", 1, "Notes").await?;
+    let backup = storage
+        .backups()
+        .write_workspace_archive(&workspace, uuid!(40)?)
+        .await?;
+    commit(
+        &storage,
+        &workspace,
+        3,
+        &created,
+        vec![card(uuid!(15)?, &backup.digest)?],
+    )
+    .await?;
+    let stored = rr8_stored(directory.path(), "local")?;
+    let error = err_of(
+        storage
+            .backups()
+            .write_workspace_archive(&workspace, uuid!(41)?)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Internal, "{error}");
+    assert!(
+        error.message.contains(&uuid_text(15)) && error.message.contains(backup.digest.as_str()),
+        "names the item and the digest: {error}"
+    );
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            "SELECT count(*) FROM backup_archives"
+        )?,
+        1,
+        "no second archive recorded"
+    );
+    assert_eq!(
+        rr8_stored(directory.path(), "local")?,
+        stored,
+        "no archive object stored"
+    );
+    let error = err_of(
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Internal, "{error}");
+    assert!(error.message.contains(backup.digest.as_str()), "{error}");
+    Ok(())
+}
+
+/// Q4 (passing probe, adopted): a record no card ever named (a write that died before its card)
+/// is not followed. For a survivor its asset and record stay as that write's pending puts, so
+/// another workspace's purge keeps them even when it names the asset too; for the target, its
+/// own purge deletes both.
+#[tokio::test]
+async fn rr7_a_record_no_card_names_is_kept_or_collected_as_its_pending_puts() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (survivor, _) = create(&storage, "local", 1, "Survivor").await?;
+    let (target, head) = create(&storage, "local", 2, "Target").await?;
+    let asset = put(&storage, &survivor, b"rr7 a survivor's unlanded asset")
+        .await?
+        .digest;
+    let record = put(&storage, &survivor, &rr4_record(&asset, &asset, 1))
+        .await?
+        .digest;
+    let own_asset = put(&storage, &target, b"rr7 the target's unlanded asset")
+        .await?
+        .digest;
+    let own_record = put(&storage, &target, &rr4_record(&own_asset, &own_asset, 1))
+        .await?
+        .digest;
+    put(&storage, &target, b"rr7 a survivor's unlanded asset").await?;
+    commit(&storage, &target, 3, &head, vec![card(uuid!(15)?, &asset)?]).await?;
+    rr5_purge(&storage, &target).await?;
+    for (digest, what, expected) in [
+        (&asset, "the survivor's asset", true),
+        (&record, "the survivor's record", true),
+        (&own_asset, "the target's asset", false),
+        (&own_record, "the target's record", false),
+    ] {
+        assert_eq!(
+            object_file(directory.path(), digest)?.is_file(),
+            expected,
+            "{what}"
+        );
+    }
+    Ok(())
+}
+
+/// Q4 (passing probe, adopted): a few bytes of JSON another workspace is still putting (no
+/// card, no completed upload) naming the target's original keep nothing past its purge.
+#[tokio::test]
+async fn rr7_a_small_pending_json_naming_another_workspaces_object_keeps_nothing() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (uploader, _) = create(&storage, "local", 1, "Uploader").await?;
+    let (target, head) = create(&storage, "local", 2, "Target").await?;
+    let hidden = put(&storage, &target, b"rr7 an original only the target holds")
+        .await?
+        .digest;
+    commit(
+        &storage,
+        &target,
+        3,
+        &head,
+        vec![card(uuid!(15)?, &hidden)?],
+    )
+    .await?;
+    let text = format!(
+        "{{\"structured\": [{{\"digest\": \"{0}\"}}], \"assets\": [{{\"digest\": \"{0}\"}}]}}",
+        hidden.as_str()
+    );
+    put(&storage, &uploader, text.as_bytes()).await?;
+    rr5_purge(&storage, &target).await?;
+    assert!(!object_file(directory.path(), &hidden)?.is_file());
     Ok(())
 }
 

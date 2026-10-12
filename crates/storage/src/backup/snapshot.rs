@@ -4,7 +4,9 @@
 //! workspace before it is published (temporary file, integrity check, publish on success)". The
 //! live database is copied with `VACUUM INTO` into a private file; every table not listed in
 //! `WORKSPACE_TABLES` is emptied and the listed ones keep only the workspace's rows (a kept job
-//! loses the download descriptor of an artifact the archive leaves out); the result
+//! loses the download descriptor of an artifact the archive leaves out, and a row naming an
+//! object the archive leaves out goes with it, so every kept row names an object the archive
+//! holds); the result
 //! is vacuumed again into a second file, so nothing removed is left in free pages; that file is
 //! checked (`integrity_check`, `foreign_key_check`, schema version) before the caller publishes
 //! it.
@@ -121,13 +123,20 @@ pub(crate) fn archive_objects(full: &FullCopy, tenant: &str) -> Result<BTreeSet<
 }
 
 /// Filter the full copy to the workspace and vacuum it into `directory/records.sqlite`,
-/// checked; the full copy is removed.
+/// checked; the full copy is removed. No row of `archive::ROW_OBJECTS` that names an object of
+/// `left_out` (the backups and written histories an archive never holds, `archive_objects`) is
+/// kept, as a kept job keeps no download descriptor of a left-out artifact: every row the
+/// archive keeps names an object it holds, so a restore can require each one
+/// (`restore::refuse_unheld`).
 pub(crate) fn filter(
     full: &FullCopy,
     directory: &Path,
-    tenant: &str,
-    workspace: &str,
+    (tenant, workspace): (&str, &str),
+    left_out: &BTreeSet<Digest>,
 ) -> Result<PathBuf, ApiError> {
+    let left_out =
+        serde_json::to_string(&left_out.iter().map(Digest::as_str).collect::<Vec<&str>>())
+            .map_err(|error| crate::db::json(&error))?;
     {
         let mut connection = Connection::open(&full.path).map_err(|error| sql(&error))?;
         let transaction = connection.transaction().map_err(|error| sql(&error))?;
@@ -164,6 +173,19 @@ pub(crate) fn filter(
             };
             transaction
                 .execute(&query, params![tenant, workspace])
+                .map_err(|error| sql(&error))?;
+        }
+        // A row naming an object the archive leaves out goes with it: a backup job's output is
+        // the backup it wrote, and an upload slot may hold an archive uploaded to be imported.
+        for (table, column, _) in super::archive::ROW_OBJECTS {
+            transaction
+                .execute(
+                    &format!(
+                        "DELETE FROM \"{table}\" WHERE \"{column}\" IN
+                             (SELECT value FROM json_each(?1))"
+                    ),
+                    [&left_out],
+                )
                 .map_err(|error| sql(&error))?;
         }
         // A kept job keeps no download descriptor of an artifact the archive leaves out (a

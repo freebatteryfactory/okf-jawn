@@ -1,50 +1,69 @@
 //! What a workspace references in the tenant's shared object store.
 //!
 //! Objects are shared inside a tenant (`BlobStore`), so a purge may delete an object only when
-//! no surviving workspace and no tenant record references it. A workspace references an object
-//! through its Git history (the source appearance of every card, on every commit of every
-//! reference, proposal candidates included), through the conversion record such an appearance
-//! names (its structured exports and assets), and through its records (derived datasets,
-//! retained artifacts, uploads, sandbox capabilities, written histories, written workspace
-//! archives and job outputs).
+//! no surviving workspace and no tenant record references it; a workspace archive copies exactly
+//! the objects its workspace references (`archive::refuse_missing`); and a restore refuses an
+//! archive whose history or rows reference an object it does not hold (`restore::refuse_unheld`).
+//! Each of them reads references here, in one way.
 //!
-//! References are read as every 64-character lower-case hexadecimal token of those files (the
-//! cards in Git and the rows), not through one decoded shape: a file written by an older build
-//! still counts, and a token that only looks like a digest can only keep an object, or name one
-//! the target already held.
+//! A reference is read structurally, from a typed field that names a stored object, and never
+//! as a token of free text: a digest someone types into a file name, a caption or a table cell
+//! keeps and copies nothing. A workspace references an object through exactly these fields:
 //!
-//! A conversion record is followed one level (`record_tokens`), and only an object a source card
-//! names as its conversion record (`extraction.digest`, `History::records`), whatever its size:
-//! at most `RECORD_LIMIT` bytes, its tokens are scanned in memory; larger, its two lists are read
-//! structurally, streamed (`conversion_objects`). Any other object (an upload, an artifact, a
-//! derived dataset, a pending put) is never opened for references, whatever it holds, so a file
-//! a person uploads cannot keep or copy another workspace's object. No row needs following: a
-//! conversion job's completion lists the record, its structured exports and its assets as job
-//! outputs, each its own row (`RecordStore::complete_job`), and before it, they are pending puts
-//! of the writing workspace.
+//! - **Its Git history**, on every commit of every reference (proposal candidates included).
+//!   The walk reads one kind of file, the source appearance of each card
+//!   (`.okf/sources/<item>.json`), which is the contract's `SourceAppearance` (contract
+//!   `source.rs:150`). Two of its fields name stored objects: the original, `object`
+//!   (`source.rs:152`), and the conversion record, `extraction.digest` (contract
+//!   `extraction.rs:235`). No other field does. `names`, `media_type`, `size` and `metadata` are
+//!   the supplied file's own text. The converter's model `sha256` (`extraction.rs:156`) and the
+//!   supplied text's `content_digest` (`extraction.rs:312`) are content hashes.
+//! - **Files the walk does not read.** The item file's header repeats the appearance's two
+//!   digests (core `SourceCard::header`, `storage.rs:861`). A correction
+//!   (`.okf/corrections/<item>/<digest>.json`) and accepted supplied text
+//!   (`.okf/supplied/<item>.json`, its `based_on`) each hold their own Markdown. The digest each
+//!   carries is a key: it names a conversion record that a card's `extraction.digest` names on
+//!   some commit, never an object only it keeps.
+//! - **The conversion record a card names**, read one level, at any size, streamed
+//!   (`conversion_objects`). Each structured export (`structured[].digest`, core
+//!   `conversion.rs:236`) and each retained asset (`assets[].digest`, `conversion.rs:90`) is
+//!   named. Its `markdown` (`conversion.rs:259`) is the hash of the card's text, and every other
+//!   field is skipped unread. No other object is ever opened for references: not an upload, an
+//!   artifact, a derived dataset or a pending put.
+//! - **Its records** (`records`), each by its digest column: derived datasets, retained
+//!   artifacts, completed uploads, sandbox capabilities, written histories, written workspace
+//!   archives and job outputs. A conversion job's completion lists the record, its structured
+//!   exports and its assets as job outputs (`RecordStore::complete_job`); before it, they are
+//!   pending puts of the writing workspace, and the card-named record leads to them.
+//!
+//! Only the application writes a source appearance or a conversion record. So one that does not
+//! read as its type is damage: a backup or a purge fails with `Internal` naming it (`damaged`),
+//! and a restore refuses the archive as invalid input. Nothing ever falls back to tokens.
 
-use std::collections::BTreeSet;
-use std::io::{BufRead, Read as _};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::BufRead;
 use std::path::Path;
 
 use git2::{ObjectType, Oid, Repository, Sort};
-use okf_jawn_contract::error::ApiError;
+use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{Digest, TenantId};
+use okf_jawn_contract::source::SourceAppearance;
 use rusqlite::{Connection, params};
 
 use crate::blobs::LocalBlobs;
 use crate::db::sql;
 use crate::git::repo::git;
 
-/// Every commit of a repository, on every reference, and the objects its cards reference.
+/// Every commit of a repository on the walked references, and the objects its cards name.
 #[derive(Debug, Default)]
 pub(crate) struct History {
-    /// Every commit reachable from any reference.
+    /// Every commit reachable from a walked reference.
     pub(crate) revisions: Vec<Oid>,
-    /// Digest tokens of every source appearance on those commits.
-    pub(crate) objects: BTreeSet<Digest>,
-    /// The conversion records those appearances name (`extraction.digest`), read structurally:
-    /// the only objects ever opened as records, at any size.
+    /// Every object a source appearance on those commits names, its original (`object`) or its
+    /// conversion record (`extraction.digest`), with what first names it.
+    pub(crate) objects: BTreeMap<Digest, String>,
+    /// The objects of `objects` a card names as its conversion record: the only objects ever
+    /// opened as records.
     pub(crate) records: BTreeSet<Digest>,
 }
 
@@ -57,19 +76,9 @@ pub(crate) enum Rows {
     Survivors,
 }
 
-/// What a source appearance names as its conversion record; every other field is skipped.
-#[derive(serde::Deserialize)]
-struct Appearance {
-    #[serde(default)]
-    extraction: Option<Extraction>,
-}
-
-/// The extraction of an `Appearance`: only its conversion record's digest is read.
-#[derive(serde::Deserialize)]
-struct Extraction {
-    #[serde(default)]
-    digest: Option<String>,
-}
+/// What a file that does not read structurally answers: `damaged` for the store's own files, a
+/// refusal for an uploaded archive's.
+pub(crate) type Unreadable = fn(&str) -> ApiError;
 
 /// A JSON reader over a conversion record of any size (`Scanner::record`). It holds at most
 /// `KEY_LIMIT` bytes of a key, `DIGEST_LENGTH` bytes of a string value, and one bit per level
@@ -92,15 +101,12 @@ enum Stop {
 
 /// What a visitor of a conversion record's named objects is given each object with
 /// (`conversion_objects`).
-type Visit<'a> = dyn FnMut(Digest, &'static str) -> Result<(), ApiError> + 'a;
+pub(crate) type Visit<'a> = dyn FnMut(Digest, &'static str) -> Result<(), ApiError> + 'a;
 
 /// What reads one member of an object for `Scanner::members`: given the scanner, the member's
 /// key (`None` past `KEY_LIMIT` bytes) and the first byte of its value, it reads the value.
 type Member<'a, S> = dyn FnMut(&mut S, Option<&[u8]>, u8) -> Result<(), Stop> + 'a;
 
-/// The largest named conversion record scanned in memory for digest tokens; a larger one is
-/// streamed.
-const RECORD_LIMIT: u64 = 64 << 20;
 /// The tree that holds the source appearance of each card.
 const SOURCES_TREE: &str = ".okf/sources";
 /// The length of a SHA-256 digest in hexadecimal.
@@ -325,110 +331,86 @@ impl<R: BufRead> Scanner<'_, R> {
     }
 }
 
-/// Walk every commit on every reference of `repository`, collecting the commits and the
-/// digest tokens of every source appearance. Each distinct appearance tree and file is read
-/// once, so a long history with few changed cards costs little more than the walk.
-pub(crate) fn history(repository: &Repository) -> Result<History, ApiError> {
-    let mut walk = repository.revwalk().map_err(|error| git(&error))?;
-    walk.set_sorting(Sort::TOPOLOGICAL)
-        .map_err(|error| git(&error))?;
-    let mut pushed = false;
-    for reference in repository.references().map_err(|error| git(&error))? {
-        let reference = reference.map_err(|error| git(&error))?;
-        if let Some(target) = reference.target()
-            && repository.find_commit(target).is_ok()
-        {
-            walk.push(target).map_err(|error| git(&error))?;
-            pushed = true;
-        }
-    }
-    let mut found = History::default();
-    if !pushed {
-        return Ok(found);
-    }
-    let mut trees = BTreeSet::new();
-    let mut files = BTreeSet::new();
-    for oid in walk {
-        let oid = oid.map_err(|error| git(&error))?;
-        found.revisions.push(oid);
-        let Some(sources) = sources_tree(repository, oid)? else {
-            continue;
-        };
-        if trees.insert(sources) {
-            scan(
-                repository,
-                sources,
-                &mut files,
-                (&mut found.objects, &mut found.records),
-            )?;
-        }
-    }
-    Ok(found)
+/// A store's own file that does not read as its type. Only the application writes a source
+/// appearance or a conversion record, so this is damage, and the backup or purge reading it
+/// fails rather than guess what it names.
+pub(crate) fn damaged(message: &str) -> ApiError {
+    ApiError::new(
+        ErrorCode::Internal,
+        format!("the store holds damaged data: {message}"),
+    )
 }
 
-/// The objects the source cards of every commit on every reference of `repository` name, read
-/// structurally rather than as tokens: each appearance's original (`object`) and its conversion
-/// record (`extraction.digest`), as (originals, conversion records). An appearance that does not
-/// parse as JSON names nothing here.
-pub(crate) fn card_objects(
-    repository: &Repository,
-) -> Result<(BTreeSet<Digest>, BTreeSet<Digest>), ApiError> {
-    let (mut originals, mut records) = (BTreeSet::new(), BTreeSet::new());
-    let mut walk = repository.revwalk().map_err(|error| git(&error))?;
-    let mut pushed = false;
+/// Walk every commit on every reference of `repository`, collecting the commits and what the
+/// source appearances on them name (`scan`). Each distinct appearance tree and file is read
+/// once, so a long history with few changed cards costs little more than the walk.
+///
+/// # Errors
+/// Returns `Internal` (`damaged`) for an appearance file that does not read as one.
+pub(crate) fn history(repository: &Repository) -> Result<History, ApiError> {
+    let mut tips = Vec::new();
     for reference in repository.references().map_err(|error| git(&error))? {
         let reference = reference.map_err(|error| git(&error))?;
         if let Some(target) = reference.target()
             && repository.find_commit(target).is_ok()
         {
-            walk.push(target).map_err(|error| git(&error))?;
-            pushed = true;
+            tips.push(target);
         }
     }
-    if !pushed {
-        return Ok((originals, records));
-    }
-    let (mut trees, mut files) = (BTreeSet::new(), BTreeSet::new());
-    for oid in walk {
-        let oid = oid.map_err(|error| git(&error))?;
-        let Some(sources) = sources_tree(repository, oid)? else {
-            continue;
-        };
-        if !trees.insert(sources) {
-            continue;
-        }
-        let sources = repository.find_tree(sources).map_err(|error| git(&error))?;
-        for entry in &sources {
-            if entry.kind() != Some(ObjectType::Blob) || !files.insert(entry.id()) {
-                continue;
-            }
-            let blob = repository
-                .find_blob(entry.id())
-                .map_err(|error| git(&error))?;
-            let Ok(appearance) = serde_json::from_slice::<serde_json::Value>(blob.content()) else {
-                continue;
-            };
-            if let Some(digest) = digest_at(&appearance, &["object"]) {
-                originals.insert(digest);
-            }
-            if let Some(digest) = digest_at(&appearance, &["extraction", "digest"]) {
-                records.insert(digest);
-            }
+    walk(repository, &tips, damaged)
+}
+
+/// The history of an uploaded archive, its pack indexed into `repository`, walked from the
+/// commits its manifest names (`tips`), as `history` walks a workspace's.
+///
+/// # Errors
+/// Returns `unreadable` for a tip the pack does not hold as a commit, or for an appearance file
+/// that does not read as one.
+pub(crate) fn history_from(
+    repository: &Repository,
+    tips: &[Oid],
+    unreadable: Unreadable,
+) -> Result<History, ApiError> {
+    for tip in tips {
+        if repository.find_commit(*tip).is_err() {
+            return Err(unreadable(&format!(
+                "its manifest names the commit {tip}, which its history does not hold"
+            )));
         }
     }
-    Ok((originals, records))
+    walk(repository, tips, unreadable)
+}
+
+/// The objects the source appearances on the one commit `commit` name: those a record of the
+/// workspace names once that commit is stored.
+///
+/// # Errors
+/// Returns `Internal` (`damaged`) for an appearance file that does not read as one.
+pub(crate) fn appearances(
+    repository: &Repository,
+    commit: Oid,
+) -> Result<BTreeSet<Digest>, ApiError> {
+    let mut found = History::default();
+    if let Some(sources) = sources_tree(repository, commit, damaged)? {
+        scan(
+            repository,
+            sources,
+            &mut BTreeSet::new(),
+            &mut found,
+            damaged,
+        )?;
+    }
+    Ok(found.objects.into_keys().collect())
 }
 
 /// Give `visit` each object the held conversion record `digest` names, read structurally, with
 /// what names it: each structured export (`structured[].digest`) and each retained asset
 /// (`assets[].digest`), as it is read. Call it only for an object a source card names as its
-/// conversion record. The record is streamed whatever its size (`Scanner`), every other field
-/// skipped without being held, so this holds no memory that grows with the record; what the
-/// visitor keeps is its own. Nothing for an object that is not held or not a JSON object; a
-/// record malformed part way names what came before. Blocking.
+/// conversion record. Nothing for an object the store does not hold. Blocking.
 ///
 /// # Errors
-/// Returns what `visit` returns, or `Unavailable` for a record that cannot be read.
+/// Returns what `visit` returns, `Unavailable` for a record that cannot be read, and `Internal`
+/// (`damaged`) for one that does not read as a conversion record.
 pub(crate) fn conversion_objects(
     blobs: &LocalBlobs,
     tenant: &TenantId,
@@ -436,152 +418,163 @@ pub(crate) fn conversion_objects(
     visit: &mut Visit<'_>,
 ) -> Result<(), ApiError> {
     let path = blobs.local_path(tenant, digest)?;
-    let Ok(file) = std::fs::File::open(&path) else {
-        return Ok(());
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(crate::data::io_error("read", &path, &error)),
     };
-    let mut scanner = Scanner {
-        reader: std::io::BufReader::with_capacity(64 << 10, file),
-        path: &path,
-    };
+    read_record(
+        std::io::BufReader::with_capacity(64 << 10, file),
+        (&path, digest),
+        visit,
+        damaged,
+    )
+}
+
+/// Read the conversion record `digest` from `reader` (its file `path`, named in a read error):
+/// give `visit` each object its two lists name, as it is read (`conversion_objects`). The record
+/// is streamed whatever its size (`Scanner`), every other field skipped without being held, so
+/// this holds no memory that grows with the record; what the visitor keeps is its own.
+///
+/// # Errors
+/// Returns what `visit` returns, `Unavailable` for bytes that cannot be read, and `unreadable`
+/// for a record that does not read to its end as a JSON object (`visit` was given what came
+/// before).
+pub(crate) fn read_record<R: BufRead>(
+    reader: R,
+    (path, digest): (&Path, &Digest),
+    visit: &mut Visit<'_>,
+    unreadable: Unreadable,
+) -> Result<(), ApiError> {
+    let mut scanner = Scanner { reader, path };
     match scanner.record(visit) {
-        Ok(()) | Err(Stop::Malformed) => Ok(()),
+        Ok(()) => Ok(()),
+        Err(Stop::Malformed) => Err(unreadable(&format!(
+            "the conversion record {} does not read as one",
+            digest.as_str()
+        ))),
         Err(Stop::Failed(error)) => Err(error),
     }
 }
 
-/// The digest at `path` inside `value`, when it is a digest string.
-fn digest_at(value: &serde_json::Value, path: &[&str]) -> Option<Digest> {
-    let mut current = value;
-    for key in path {
-        current = current.get(key)?;
-    }
-    Digest::try_from(current.as_str()?.to_owned()).ok()
-}
-
-/// The digest tokens of every source appearance on the one commit `commit`: the objects a
-/// record of the workspace names once that commit is stored.
-pub(crate) fn appearances(
-    repository: &Repository,
-    commit: Oid,
-) -> Result<BTreeSet<Digest>, ApiError> {
-    let mut found = BTreeSet::new();
-    if let Some(sources) = sources_tree(repository, commit)? {
-        scan(
-            repository,
-            sources,
-            &mut BTreeSet::new(),
-            (&mut found, &mut BTreeSet::new()),
-        )?;
-    }
-    Ok(found)
-}
-
-/// The tree of source appearances on `commit`, when it has one.
-fn sources_tree(repository: &Repository, commit: Oid) -> Result<Option<Oid>, ApiError> {
-    let tree = repository
-        .find_commit(commit)
-        .and_then(|commit| commit.tree())
-        .map_err(|error| git(&error))?;
-    match tree.get_path(Path::new(SOURCES_TREE)) {
-        Ok(entry) => Ok(Some(entry.id())),
-        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
-        Err(error) => Err(git(&error)),
-    }
-}
-
-/// Add to `objects` the digest tokens of every file of the appearance tree `sources` not
-/// already in `files`, and to `records` the conversion record each names (`extraction.digest`).
-fn scan(
-    repository: &Repository,
-    sources: Oid,
-    files: &mut BTreeSet<Oid>,
-    (objects, records): (&mut BTreeSet<Digest>, &mut BTreeSet<Digest>),
-) -> Result<(), ApiError> {
-    let sources = repository.find_tree(sources).map_err(|error| git(&error))?;
-    for entry in &sources {
-        if entry.kind() == Some(ObjectType::Blob) && files.insert(entry.id()) {
-            let blob = repository
-                .find_blob(entry.id())
-                .map_err(|error| git(&error))?;
-            tokens(blob.content(), objects);
-            if let Ok(Appearance {
-                extraction:
-                    Some(Extraction {
-                        digest: Some(record),
-                    }),
-            }) = serde_json::from_slice(blob.content())
-                && let Ok(record) = Digest::try_from(record)
-            {
-                records.insert(record);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Add to `objects` what each object of `objects` that is also in `records` (those a source card
-/// names as its conversion record) names (`record_tokens`); no other object is opened.
-/// Blocking.
+/// Add to `found` each held object that a conversion record of `records` names
+/// (`conversion_objects`); no other object is opened. Only held objects are kept, so memory is
+/// bounded by the tenant's objects, not by a record. Blocking.
+///
+/// # Errors
+/// As `conversion_objects`.
 pub(crate) fn follow_records(
     blobs: &LocalBlobs,
     tenant: &TenantId,
-    objects: &mut BTreeSet<Digest>,
     records: &BTreeSet<Digest>,
+    found: &mut BTreeSet<Digest>,
 ) -> Result<(), ApiError> {
-    let mut found = BTreeSet::new();
-    for digest in objects.iter() {
-        found.extend(record_tokens(
-            blobs,
-            tenant,
-            digest,
-            records.contains(digest),
-        )?);
-    }
-    objects.extend(found);
-    Ok(())
-}
-
-/// What the held object `digest` names as a conversion record, when `named_as_record` (a source
-/// card names it as its conversion record). Otherwise nothing, and the object is not opened,
-/// whatever its size or bytes. Blocking.
-/// - At most `RECORD_LIMIT` bytes, starting with `{`: its digest tokens, scanned in memory.
-/// - Larger: the objects its two lists name (`conversion_objects`), each kept only when the
-///   store holds it, so memory is bounded by the tenant's objects, not by the record.
-pub(crate) fn record_tokens(
-    blobs: &LocalBlobs,
-    tenant: &TenantId,
-    digest: &Digest,
-    named_as_record: bool,
-) -> Result<BTreeSet<Digest>, ApiError> {
-    let mut found = BTreeSet::new();
-    if !named_as_record {
-        return Ok(found);
-    }
-    let path = blobs.local_path(tenant, digest)?;
-    let Ok(metadata) = std::fs::metadata(&path) else {
-        return Ok(found);
-    };
-    if metadata.len() > RECORD_LIMIT {
-        conversion_objects(blobs, tenant, digest, &mut |named, _| {
+    for record in records {
+        conversion_objects(blobs, tenant, record, &mut |named, _| {
             if blobs.local_path(tenant, &named)?.is_file() {
                 found.insert(named);
             }
             Ok(())
         })?;
+    }
+    Ok(())
+}
+
+/// Walk every commit reachable from `tips`, collecting the commits and what the appearances on
+/// them name (`scan`).
+fn walk(
+    repository: &Repository,
+    tips: &[Oid],
+    unreadable: Unreadable,
+) -> Result<History, ApiError> {
+    let mut found = History::default();
+    if tips.is_empty() {
         return Ok(found);
     }
-    let mut bytes = Vec::new();
-    std::fs::File::open(&path)
-        .and_then(|mut file| file.read_to_end(&mut bytes))
-        .map_err(|error| crate::data::io_error("read", &path, &error))?;
-    if bytes
-        .iter()
-        .find(|byte| !byte.is_ascii_whitespace())
-        .is_some_and(|byte| *byte == b'{')
-    {
-        tokens(&bytes, &mut found);
+    let mut walk = repository.revwalk().map_err(|error| git(&error))?;
+    walk.set_sorting(Sort::TOPOLOGICAL)
+        .map_err(|error| git(&error))?;
+    for tip in tips {
+        walk.push(*tip).map_err(|error| git(&error))?;
+    }
+    let (mut trees, mut files) = (BTreeSet::new(), BTreeSet::new());
+    for oid in walk {
+        let oid = oid.map_err(|error| git(&error))?;
+        found.revisions.push(oid);
+        if let Some(sources) = sources_tree(repository, oid, unreadable)?
+            && trees.insert(sources)
+        {
+            scan(repository, sources, &mut files, &mut found, unreadable)?;
+        }
     }
     Ok(found)
+}
+
+/// The tree of source appearances on `commit`, when it has one.
+fn sources_tree(
+    repository: &Repository,
+    commit: Oid,
+    unreadable: Unreadable,
+) -> Result<Option<Oid>, ApiError> {
+    let tree = repository
+        .find_commit(commit)
+        .and_then(|commit| commit.tree())
+        .map_err(|error| git(&error))?;
+    match tree.get_path(Path::new(SOURCES_TREE)) {
+        Ok(entry) if entry.kind() == Some(ObjectType::Tree) => Ok(Some(entry.id())),
+        Ok(_) => Err(unreadable(&format!(
+            "{SOURCES_TREE} on the commit {commit} is not a folder"
+        ))),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(git(&error)),
+    }
+}
+
+/// Add to `found` what each file of the appearance tree `sources` not already in `files` names:
+/// each is a `SourceAppearance`, read as one, which names its original (`object`) and its
+/// conversion record (`extraction.digest`, also added to `found.records`); nothing else of it
+/// is read. An entry that is not such a file is `unreadable`, naming its path.
+fn scan(
+    repository: &Repository,
+    sources: Oid,
+    files: &mut BTreeSet<Oid>,
+    found: &mut History,
+    unreadable: Unreadable,
+) -> Result<(), ApiError> {
+    let sources = repository.find_tree(sources).map_err(|error| git(&error))?;
+    for entry in &sources {
+        let name = String::from_utf8_lossy(entry.name_bytes()).into_owned();
+        if entry.kind() != Some(ObjectType::Blob) {
+            return Err(unreadable(&format!(
+                "{SOURCES_TREE}/{name} is not a source appearance file"
+            )));
+        }
+        if !files.insert(entry.id()) {
+            continue;
+        }
+        let blob = repository
+            .find_blob(entry.id())
+            .map_err(|error| git(&error))?;
+        let appearance: SourceAppearance =
+            serde_json::from_slice(blob.content()).map_err(|error| {
+                unreadable(&format!(
+                    "the source appearance {SOURCES_TREE}/{name} does not read as one: {error}"
+                ))
+            })?;
+        let item = name.strip_suffix(".json").unwrap_or(&name);
+        found
+            .objects
+            .entry(appearance.object)
+            .or_insert_with(|| format!("a source card's original (item {item})"));
+        if let Some(record) = appearance.extraction.digest {
+            found.records.insert(record.clone());
+            found
+                .objects
+                .entry(record)
+                .or_insert_with(|| format!("a source card's conversion record (item {item})"));
+        }
+    }
+    Ok(())
 }
 
 /// The objects the records of `rows` reference. A survivor's upload slot whose object is in
@@ -676,25 +669,11 @@ fn collect(
     Ok(())
 }
 
-/// Add every 64-character run of lower-case hexadecimal in `bytes`, bounded by non-hex bytes.
-pub(crate) fn tokens(bytes: &[u8], found: &mut BTreeSet<Digest>) {
-    let is_hex = |byte: &u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte);
-    for run in bytes.split(|byte| !is_hex(byte)) {
-        if run.len() == DIGEST_LENGTH
-            && let Ok(text) = std::str::from_utf8(run)
-            && let Ok(digest) = Digest::try_from(text.to_owned())
-        {
-            found.insert(digest);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::path::Path;
 
-    use super::{ASSET, STRUCTURED, Scanner, Stop, tokens};
+    use super::{ASSET, STRUCTURED, Scanner, Stop};
 
     /// What `Scanner::record` names in `bytes`, in order, and whether it read them to the end.
     fn named(bytes: &[u8]) -> (Vec<(String, &'static str)>, bool) {
@@ -736,7 +715,7 @@ mod tests {
     }
 
     /// A record that is not a JSON object names nothing; one malformed part way, or nested past
-    /// the depth limit, names what came before and stops.
+    /// the depth limit, names what came before and stops, which `read_record` then refuses.
     #[test]
     fn a_malformed_record_names_what_came_before() {
         let a = "a".repeat(64);
@@ -752,19 +731,5 @@ mod tests {
             "]".repeat(200)
         );
         assert_eq!(named(deep.as_bytes()), (vec![(a, STRUCTURED)], false));
-    }
-
-    #[test]
-    fn only_whole_digest_tokens_are_references() {
-        let mut found = BTreeSet::new();
-        let digest = "a".repeat(64);
-        let text = format!(
-            "{{\"object\":\"{digest}\",\"longer\":\"{}\",\"upper\":\"{}\"}}",
-            "b".repeat(65),
-            "C".repeat(64)
-        );
-        tokens(text.as_bytes(), &mut found);
-        let found: Vec<String> = found.iter().map(|d| d.as_str().to_owned()).collect();
-        assert_eq!(found, vec![digest]);
     }
 }
