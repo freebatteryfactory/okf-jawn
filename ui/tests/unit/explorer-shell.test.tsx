@@ -403,10 +403,12 @@ describe('the page before there is an Explorer', () => {
     });
     renderAt(`/w/${WS}`);
     expect((await screen.findByText('Opening the workspace…')).getAttribute('role')).toBe('status');
-    expect(pageHeading()).toBeTruthy();
+    // Script can focus the heading: focus that was in a failure notice goes there when nothing
+    // else is named, and a browser ignores the call without the attribute.
+    expect(pageHeading().getAttribute('tabindex')).toBe('-1');
     answer(fail(500, 'internal', 'storage stumbled'));
     await screen.findByRole('alert');
-    expect(pageHeading()).toBeTruthy();
+    expect(pageHeading().getAttribute('tabindex')).toBe('-1');
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
   });
 
@@ -414,13 +416,14 @@ describe('the page before there is an Explorer', () => {
     mockApi(workspaceHandlers());
     renderAt('/w/not-a-workspace');
     await screen.findByRole('alert');
-    expect(pageHeading()).toBeTruthy();
+    expect(pageHeading().getAttribute('tabindex')).toBe('-1');
   });
 
   it('leaves the level-one heading to the workspace’s name once the Explorer is there', async () => {
     mockApi(workspaceHandlers());
     renderAt(`/w/${WS}`);
-    expect(await screen.findByRole('heading', { level: 1, name: 'Workshop notes' })).toBeTruthy();
+    const name = await screen.findByRole('heading', { level: 1, name: 'Workshop notes' });
+    expect(name.getAttribute('tabindex')).toBe('-1');
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
   });
 });
