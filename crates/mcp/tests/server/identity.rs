@@ -19,6 +19,12 @@ use crate::support::fixtures::{
     principal, read_object_input, refusal_of, result_of, rpc, rpc_refusal,
 };
 
+/// No extra request headers.
+const NO_HEADERS: &[(&str, &str)] = &[];
+
+/// The header a `server/discover` request carries with its per-request protocol version.
+const DISCOVER_HEADERS: &[(&str, &str)] = &[("mcp-protocol-version", "2025-11-25")];
+
 const EVERY_PERMISSION: &[Permission] = &[
     Permission::Read,
     Permission::Write,
@@ -173,21 +179,33 @@ async fn every_mcp_request_needs_an_agent_identity() -> TestResult {
     let world = World::new(FakeAccess::default().granting("owner", EVERY_PERMISSION));
     let service = http_service(&world, bundle("identity-every-request.html", "<p>app</p>")?)?;
     let browser = principal("owner", AccessRoute::BrowserSession)?;
+    let discover = rpc(
+        5,
+        "server/discover",
+        &json!({"_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2025-11-25",
+            "io.modelcontextprotocol/clientCapabilities": {}
+        }}),
+    );
     let requests = [
-        initialize(1),
-        rpc(2, "tools/list", &json!({})),
-        rpc(3, "resources/list", &json!({})),
-        rpc(4, "resources/read", &json!({"uri": APP_URI})),
+        (initialize(1), NO_HEADERS),
+        (rpc(2, "tools/list", &json!({})), NO_HEADERS),
+        (rpc(3, "resources/list", &json!({})), NO_HEADERS),
+        (
+            rpc(4, "resources/read", &json!({"uri": APP_URI})),
+            NO_HEADERS,
+        ),
+        (discover, DISCOVER_HEADERS),
     ];
-    for request in &requests {
+    for (request, headers) in &requests {
         let method = some(request.get("method"), "the request's method")?;
-        let anonymous = post(&service, None, HOST, &[], request).await?;
+        let anonymous = post(&service, None, HOST, headers, request).await?;
         assert_eq!(
             rpc_refusal(&anonymous)?.code,
             ErrorCode::Unauthenticated,
             "{method}"
         );
-        let session = post(&service, Some(browser.clone()), HOST, &[], request).await?;
+        let session = post(&service, Some(browser.clone()), HOST, headers, request).await?;
         assert_eq!(
             rpc_refusal(&session)?.code,
             ErrorCode::Forbidden,
@@ -205,11 +223,44 @@ async fn every_mcp_request_needs_an_agent_identity() -> TestResult {
         assert_eq!(actor.route, AccessRoute::BrowserSession);
     }
     // The same requests from an agent are served.
-    for request in &requests {
-        let served = post(&service, Some(agent("owner")?), HOST, &[], request).await?;
+    for (request, headers) in &requests {
+        let served = post(&service, Some(agent("owner")?), HOST, headers, request).await?;
         result_of(&served)?;
     }
     assert_eq!(world.application.calls()?, Vec::new());
+    Ok(())
+}
+
+/// A tool call is identified before its tool name is looked up: an unidentified caller learns
+/// nothing about which names exist, and a refused route is recorded whatever it asked for.
+#[tokio::test]
+async fn identity_is_checked_before_the_tool_name() -> TestResult {
+    let world = World::new(FakeAccess::default());
+    let service = http_service(&world, bundle("identity-tool-name.html", "<p>app</p>")?)?;
+    let browser = principal("owner", AccessRoute::BrowserSession)?;
+    let unknown = call(1, "no_such_tool", &json!({}));
+    let anonymous = post(&service, None, HOST, &[], &unknown).await?;
+    assert_eq!(
+        refusal_of(&call_result(&anonymous)?)?.code,
+        ErrorCode::Unauthenticated
+    );
+    let session = post(&service, Some(browser.clone()), HOST, &[], &unknown).await?;
+    assert_eq!(
+        refusal_of(&call_result(&session)?)?.code,
+        ErrorCode::Forbidden
+    );
+    let appended = world.events.appended()?;
+    assert_eq!(
+        appended.len(),
+        1,
+        "the browser session's refusal is recorded"
+    );
+    let (scope, event) = some(appended.first(), "the recorded refusal")?;
+    assert_eq!(scope, &EventScope::Tenant(browser.tenant_id.clone()));
+    assert_eq!(event.operation, None, "an unknown name names no operation");
+    // An agent asking for the same name learns that no such tool exists.
+    let named = post(&service, Some(agent("owner")?), HOST, &[], &unknown).await?;
+    assert_eq!(refusal_of(&call_result(&named)?)?.code, ErrorCode::NotFound);
     Ok(())
 }
 

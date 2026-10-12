@@ -2,9 +2,10 @@
 //!
 //! Identity is read from the HTTP request on every request. The server's identity middleware
 //! puts the authenticated `Principal` into the request's extensions, and rmcp hands the request
-//! parts to the handler, so nothing about a caller outlives its request. Every MCP request that
-//! reaches this server's data (`initialize`, `tools/list`, `tools/call`, `resources/list`,
-//! `resources/read`) passes one check, `admit`: no `Principal` is `Unauthenticated`, and a route
+//! parts to the handler, so nothing about a caller outlives its request. Every MCP request the
+//! handler answers with this server's information or data (`initialize`, `server/discover`,
+//! `tools/list`, `tools/call`, `resources/list`, `resources/read`) passes one check, `admit`,
+//! before anything else is looked at: no `Principal` is `Unauthenticated`, and a route
 //! other than `AccessRoute::McpDelegation` is `Forbidden`. The browser session, `LocalOwner` and
 //! `Service` use the HTTP API; their refusal here is recorded as `permission_denied` in the
 //! tenant's log before anything is decoded.
@@ -33,7 +34,7 @@ use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 use okf_jawn_core::mutations::MutationStore;
 use okf_jawn_core::ports::Application;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, Implementation,
+    CallToolRequestParams, CallToolResponse, CallToolResult, DiscoverResult, Implementation,
     InitializeRequestParams, InitializeResult, JsonObject, ListResourcesResult, ListToolsResult,
     PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
     Resource, ResourceContents, ServerCapabilities, ServerConfig, Tool,
@@ -109,8 +110,10 @@ impl McpServer {
 
     /// Call the tool named `tool` as `principal`, the way `tools/call` does.
     ///
-    /// A name that is no operation's alias is refused as `NotFound`, also when it is a
-    /// canonical operation id: only aliased operations are tools.
+    /// Identity is checked before the name is looked up, so an unidentified caller learns
+    /// nothing about tool names and a refused route is recorded whatever it asked for. A name
+    /// that is no operation's alias is then refused as `NotFound`, also when it is a canonical
+    /// operation id: only aliased operations are tools.
     ///
     /// # Errors
     /// Returns an rmcp error only when an `ApiError` cannot be serialized into its result.
@@ -120,7 +123,11 @@ impl McpServer {
         tool: &str,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ErrorData> {
-        let Some(operation) = operation_of_tool(tool) else {
+        let named = operation_of_tool(tool);
+        if let Err(refusal) = self.admit(principal, named).await {
+            return failure(&refusal);
+        }
+        let Some(operation) = named else {
             return failure(&ApiError::new(
                 ErrorCode::NotFound,
                 format!("No tool is named `{tool}`"),
@@ -279,6 +286,19 @@ impl ServerHandler for McpServer {
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
         self.tools().iter().find(|tool| tool.name == name).cloned()
+    }
+
+    async fn discover(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, ErrorData> {
+        self.admit(request_principal(&context), None)
+            .await
+            .map_err(|refusal| request_error(&refusal))?;
+        Ok(DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        ))
     }
 
     async fn initialize(
