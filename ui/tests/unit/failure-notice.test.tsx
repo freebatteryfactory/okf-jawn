@@ -11,7 +11,7 @@ import {
 } from '@tanstack/react-router';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, StrictMode, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ErrorCode } from '../../src/api/generated/types.gen';
 import { zErrorCode } from '../../src/api/generated/zod.gen';
@@ -126,6 +126,55 @@ function failedWithFocus(request?: string) {
     act(() => give(given));
   };
   return { ...view, asked, button, notice, answer };
+}
+
+/**
+ * An operation whose state the test sets, as it changes when something other than its retry asks
+ * it again: a query refetched when the window regains focus.
+ */
+function Watched({
+  status,
+  code = 'internal',
+  notice = 'one',
+}: {
+  status: 'failed' | 'asking' | 'loaded';
+  code?: ErrorCode;
+  /** The notice's key: under another key it is another notice, a new element. */
+  notice?: string;
+}) {
+  const [presses, setPresses] = useState(0);
+  const retry = useRetry({
+    request: 'one',
+    failed: status === 'failed',
+    error: apiError(code),
+    run: () => Promise.resolve(),
+    loaded: () => document.getElementById('content'),
+  });
+  return (
+    <>
+      <button type="button" data-presses={presses} onClick={() => setPresses(presses + 1)}>
+        Elsewhere
+      </button>
+      {retry.shown && (
+        <FailureNotice key={notice} context="Opening" error={retry.error} retry={retry} />
+      )}
+      {status === 'loaded' && (
+        <h2 id="content" tabIndex={-1}>
+          The content
+        </h2>
+      )}
+    </>
+  );
+}
+
+/** Render the watched operation, failed, with keyboard focus on its retry button. */
+function watchedWithFocus() {
+  const view = render(<Watched status="failed" />);
+  const button = screen.getByRole('button', { name: 'Try again' });
+  const notice = button.parentElement;
+  if (notice === null) throw new Error('the retry button is not in a notice');
+  act(() => button.focus());
+  return { ...view, button, notice };
 }
 
 describe('failure messages', () => {
@@ -362,6 +411,17 @@ describe('a retry never unmounts the focused control', () => {
     expect(document.activeElement).toBe(elsewhere);
   });
 
+  it('moves focus from the notice’s words to its retry button when the retry fails again', async () => {
+    const { button, notice, answer } = failedWithFocus();
+    await userEvent.keyboard('{Enter}');
+    // The person clicks the words of the notice: focus is in the notice, not on its button.
+    act(() => notice.focus());
+    answer(1, 'unavailable');
+    await waitFor(() => expect(button.textContent).toBe('Try again'));
+    expect(button.isConnected).toBe(true);
+    expect(document.activeElement).toBe(button);
+  });
+
   it.each([
     ['succeeded', 'content', 'The content'],
     ['failed again', 'unavailable', 'Try again'],
@@ -393,5 +453,89 @@ describe('a retry never unmounts the focused control', () => {
     // The answer is this request's state now; a retry of it starts afresh.
     const button = await screen.findByRole('button', { name: 'Try again' });
     expect(button.getAttribute('aria-disabled')).toBe('false');
+  });
+});
+
+describe('a failure that changes without a retry', () => {
+  it('moves focus to the content when the failure goes away by itself, as after a retry that succeeded, once', async () => {
+    const { rerender, notice } = watchedWithFocus();
+    rerender(<Watched status="loaded" />);
+    expect(notice.isConnected).toBe(false);
+    const content = screen.getByRole('heading', { name: 'The content' });
+    expect(document.activeElement).toBe(content);
+    // The person moves on, and each press renders the caller again: focus is not taken back.
+    const elsewhere = screen.getByRole('button', { name: 'Elsewhere' });
+    await userEvent.click(elsewhere);
+    await userEvent.click(elsewhere);
+    expect(elsewhere.getAttribute('data-presses')).toBe('2');
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it('leaves focus that was not in the notice where it is when the failure goes away by itself', () => {
+    const { rerender, notice } = watchedWithFocus();
+    const elsewhere = screen.getByRole('button', { name: 'Elsewhere' });
+    act(() => elsewhere.focus());
+    rerender(<Watched status="loaded" />);
+    expect(notice.isConnected).toBe(false);
+    expect(screen.getByRole('heading', { name: 'The content' })).toBeTruthy();
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it('keeps focus on the retry button when the failure shown is replaced by another that allows a retry, and moves it to the notice itself when by one that allows none', () => {
+    const { rerender, button, notice } = watchedWithFocus();
+    rerender(<Watched status="failed" code="unavailable" />);
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Opening: The service is temporarily unavailable.',
+    );
+    expect(button.isConnected).toBe(true);
+    expect(document.activeElement).toBe(button);
+
+    rerender(<Watched status="failed" code="forbidden" />);
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Opening: You do not have permission to do this.',
+    );
+    expect(button.isConnected).toBe(false);
+    expect(screen.queryByRole('button', { name: /Try|Trying/ })).toBeNull();
+    // The same notice, which script can focus: the browser would ignore the call otherwise.
+    expect(notice.isConnected).toBe(true);
+    expect(notice.getAttribute('tabindex')).toBe('-1');
+    expect(document.activeElement).toBe(notice);
+
+    // Focus on the notice itself follows the failure off the page like focus on its button.
+    rerender(<Watched status="loaded" />);
+    expect(notice.isConnected).toBe(false);
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'The content' }));
+  });
+
+  it('moves focus to the retry button of the notice that replaces the one shown', () => {
+    const { rerender, button, notice } = watchedWithFocus();
+    rerender(<Watched status="failed" code="unavailable" notice="two" />);
+    expect(notice.isConnected).toBe(false);
+    expect(button.isConnected).toBe(false);
+    const replacement = screen.getByRole('button', { name: 'Try again' });
+    expect(document.activeElement).toBe(replacement);
+  });
+
+  it('does not take a notice that StrictMode mounts a second time for one that left the page', async () => {
+    // In development StrictMode clears and sets again the refs of what has just mounted. The notice
+    // that replaces the one shown takes focus in the commit it mounts in, so its refs are cleared
+    // with focus in it, and nothing is removed.
+    const view = render(
+      <StrictMode>
+        <Watched status="failed" />
+      </StrictMode>,
+    );
+    act(() => screen.getByRole('button', { name: 'Try again' }).focus());
+    view.rerender(
+      <StrictMode>
+        <Watched status="failed" code="unavailable" notice="two" />
+      </StrictMode>,
+    );
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Try again' }));
+    // The person moves on, and the caller renders again: focus is not taken back to the button.
+    const elsewhere = screen.getByRole('button', { name: 'Elsewhere' });
+    await userEvent.click(elsewhere);
+    expect(elsewhere.getAttribute('data-presses')).toBe('1');
+    expect(document.activeElement).toBe(elsewhere);
   });
 });

@@ -13,15 +13,26 @@
  * it stays on the notice's retry button when the operation failed again (on the notice itself when
  * the new failure allows no retry). Focus the person moved elsewhere meanwhile is left alone.
  *
+ * A failure also changes without a retry: something else asks the operation again (a query
+ * refetched when the window regains focus), or the component asks for something else. Keyboard
+ * focus that was in the notice when the notice, or its retry button, left the page follows that
+ * change the same way: to the content `loaded` names once no failure is shown, else to the retry
+ * button of the notice now shown, or to that notice itself when its failure allows no retry.
+ *
+ * How the hook knows: React clears an element's ref before it removes the element, so the refs
+ * given to the notice and to its button are cleared while focus is still where it was.
+ *
  * Call the hook where the operation is read, not inside the notice: settling re-renders that
  * component, which reads the operation's state as it is then and renders what it loaded in the
  * same commit the focus moves in. The retry button exists only through this hook.
  *
- * Limit: the retry is over when `run` settles. A refetch that replaces a request still in flight
+ * Limits. The retry is over when `run` settles. A refetch that replaces a request still in flight
  * for content already on screen (an invalidation; nothing does that yet) settles `run` early,
  * while the replacement is still in flight; the outcome followed is then the state at that moment.
+ * A notice that leaves because the component calling the hook is itself unmounted is not followed:
+ * the hook goes with it.
  */
-import { type RefObject, useEffect, useRef, useState } from 'react';
+import { type RefCallback, useCallback, useEffect, useRef, useState } from 'react';
 
 export interface RetriedOperation {
   /**
@@ -39,7 +50,7 @@ export interface RetriedOperation {
   error: unknown;
   /** Repeat it. Settles once the operation has answered or failed again; a rejection is a failure. */
   run: () => Promise<unknown>;
-  /** The content a successful retry loaded: its first focusable element, or its heading. */
+  /** The content now shown in the failure's place: its first focusable element, or its heading. */
   loaded: () => HTMLElement | null | undefined;
 }
 
@@ -54,8 +65,10 @@ export interface FailureRetry {
   settled: number;
   /** Repeat the operation; nothing happens while a retry is in flight. */
   start: () => void;
-  /** The notice's element: where keyboard focus is looked for and, with no retry left, put. */
-  noticeRef: RefObject<HTMLDivElement | null>;
+  /** For the notice's element: where keyboard focus is looked for and, with no retry left, put. */
+  noticeRef: RefCallback<HTMLDivElement>;
+  /** For the notice's retry button: where keyboard focus is put while a failure is shown. */
+  buttonRef: RefCallback<HTMLButtonElement>;
 }
 
 /** The last retry asked for: in flight until `outcome` says where keyboard focus was at its end. */
@@ -69,21 +82,40 @@ interface Attempt {
 
 export function useRetry({ request, failed, error, run, loaded }: RetriedOperation): FailureRetry {
   const [attempt, setAttempt] = useState<Attempt | null>(null);
-  const noticeRef = useRef<HTMLDivElement | null>(null);
+  const notice = useRef<HTMLDivElement | null>(null);
+  const button = useRef<HTMLButtonElement | null>(null);
   const followed = useRef(0);
   const mine = attempt !== null && attempt.request === request;
   const retrying = mine && attempt.outcome === null;
 
-  // Once per settled retry, in the commit that shows its outcome: `failed` is the operation's
-  // state after the retry, and what it loaded is on screen.
+  // The notice, or its button, that keyboard focus was in when React cleared its ref. React clears
+  // a ref before it removes the element, while focus is still in it. An element whose ref was
+  // cleared is not always removed: in development, StrictMode clears and sets again the refs of a
+  // notice that has just mounted.
+  const heldFocus = useRef<HTMLElement | null>(null);
+  const noticeRef = useCallback((element: HTMLDivElement | null) => {
+    if (notice.current?.contains(document.activeElement)) heldFocus.current = notice.current;
+    notice.current = element;
+  }, []);
+  const buttonRef = useCallback((element: HTMLButtonElement | null) => {
+    if (button.current?.contains(document.activeElement)) heldFocus.current = button.current;
+    button.current = element;
+  }, []);
+
+  // After each commit: `failed` is the operation's state as that commit shows it, and what it
+  // loaded is on the page. Focus follows a settled retry once, and a notice or button that left
+  // the page with focus in it.
   useEffect(() => {
-    if (attempt === null || attempt.outcome === null || followed.current === attempt.number) return;
-    followed.current = attempt.number;
-    if (!attempt.outcome.focusWasInNotice || attempt.request !== request) return;
-    if (failed) {
-      const notice = noticeRef.current;
-      (notice?.querySelector<HTMLElement>('button') ?? notice)?.focus();
-    } else loaded()?.focus();
+    const left = heldFocus.current !== null && !heldFocus.current.isConnected;
+    heldFocus.current = null;
+    let settledWithFocus = false;
+    if (attempt !== null && attempt.outcome !== null && followed.current !== attempt.number) {
+      followed.current = attempt.number;
+      settledWithFocus = attempt.outcome.focusWasInNotice && attempt.request === request;
+    }
+    if (!left && !settledWithFocus) return;
+    if (failed) (button.current ?? notice.current)?.focus();
+    else loaded()?.focus();
   });
 
   const start = () => {
@@ -91,8 +123,7 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
     const number = (attempt?.number ?? 0) + 1;
     setAttempt({ number, request, error, outcome: null });
     const settle = () => {
-      const notice = noticeRef.current;
-      const focusWasInNotice = notice?.contains(document.activeElement) ?? false;
+      const focusWasInNotice = notice.current?.contains(document.activeElement) ?? false;
       // A later retry (for another request) has replaced this one: its outcome is not followed.
       setAttempt((current) =>
         current !== null && current.number === number
@@ -110,5 +141,6 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
     settled: attempt === null ? 0 : attempt.outcome === null ? attempt.number - 1 : attempt.number,
     start,
     noticeRef,
+    buttonRef,
   };
 }

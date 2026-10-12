@@ -5,6 +5,7 @@
  * and the tree's failed row, which is a row of the tree, not a notice.
  */
 
+import { focusManager } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -625,6 +626,54 @@ describe('a retry in flight belongs to the request it repeats', () => {
       expect(said.filter((words) => words.includes(line))).toHaveLength(1);
     }
   });
+});
+
+/** The window loses and regains focus, as TanStack Query's focus manager sees it. */
+function windowRefocus() {
+  act(() => {
+    focusManager.setFocused(false);
+    focusManager.setFocused(true);
+  });
+  act(() => focusManager.setFocused(undefined));
+}
+
+describe('a failure that goes away without a retry', () => {
+  // The reader's check of a cited revision is made again whenever the window regains focus. Its
+  // query has nothing loaded, so it leaves its failed state at once and the notice goes with it.
+  it.each(['answers', 'fails again'] as const)(
+    'keeps focus in the reader’s revision notice when the failed check is made again as the window regains focus, and %s',
+    async (outcome) => {
+      // The first request opens the workspace; the reader's own check comes after it.
+      const check = studied(() => ok(workspace), afterTheFirst());
+      mockApi(explorerHandlers({ [OPEN]: check.handler }));
+      renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+      const words = await screen.findByText(
+        'Checking for the latest version: Something went wrong in the service.',
+      );
+      const notice = words.closest<HTMLElement>('[role="alert"]')?.parentElement;
+      const revisionNotice = focusableAround(notice?.parentElement ?? null);
+      if (notice === null || notice === undefined || revisionNotice === null) {
+        throw new Error('the failure is not shown in a notice inside the revision notice');
+      }
+      act(() => within(notice).getByRole('button', { name: 'Try again' }).focus());
+      check.hold();
+
+      // Two checks are made again: the shell's, for a newer head, and the reader's.
+      windowRefocus();
+      await waitFor(() => expect(check.inFlight()).toBe(2));
+      await waitFor(() => expect(notice.isConnected).toBe(false));
+      expect(revisionNotice.textContent).toContain('Checking whether it is the latest version…');
+      expect(revisionNotice.getAttribute('tabindex')).toBe('-1');
+      expect(document.activeElement).toBe(revisionNotice);
+
+      check.end(outcome);
+      check.end(outcome);
+      await within(revisionNotice).findByText(
+        outcome === 'answers' ? /it is not the latest version/ : /storage stumbled again/,
+      );
+      expect(document.activeElement).toBe(revisionNotice);
+    },
+  );
 });
 
 describe('a keyboard retry at a failed row of the tree (FolderTree.tsx)', () => {

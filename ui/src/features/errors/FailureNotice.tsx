@@ -10,8 +10,13 @@
  * again…" with `aria-disabled` (a `disabled` button would lose keyboard focus), and a polite status
  * says so. The button and that status sit beside the alert, not inside it, so a change of the
  * button's label is not announced as an alert; the words after a retry that failed are a new alert.
+ *
+ * A notice that has offered a retry can take keyboard focus from script for as long as it is on
+ * screen: when the failure it then shows allows none, the button goes and `useRetry` moves the
+ * focus that was on it to the notice itself.
  */
 import { Link } from '@tanstack/react-router';
+import { useState } from 'react';
 import { classifyFailure, messageFor } from './failure';
 import type { FailureRetry } from './retry';
 
@@ -29,6 +34,12 @@ export interface FailureNoticeProps {
 export function FailureNotice({ context, error, retry, workspaceId }: FailureNoticeProps) {
   const failure = classifyFailure(error);
   const message = messageFor(failure);
+  const retryLabel =
+    retry !== undefined && message.action.kind === 'retry' ? message.action.label : null;
+  // Remembered from the render that offered a retry, so the render that takes the button away
+  // already has the element focus moves to.
+  const [offered, setOffered] = useState(false);
+  if (retryLabel !== null && !offered) setOffered(true);
   const api = failure.kind === 'api' ? failure.error : null;
   const words = (
     <>
@@ -65,8 +76,9 @@ export function FailureNotice({ context, error, retry, workspaceId }: FailureNot
       ) : null}
     </>
   );
-  // A failure that allows no retry, and is not the end of one, is the alert alone, as it always was.
-  if (retry === undefined || (message.action.kind !== 'retry' && retry.settled === 0)) {
+  // A failure that allows no retry, in a notice that has offered none, is the alert alone, as it
+  // always was.
+  if (retry === undefined || (retryLabel === null && !offered)) {
     return (
       <div role="alert" className="failure-notice">
         {words}
@@ -74,15 +86,20 @@ export function FailureNotice({ context, error, retry, workspaceId }: FailureNot
     );
   }
   return (
-    // Focusable from script only: where keyboard focus rests when a retry ends in a failure that
-    // allows no further retry, so the button it was on is gone.
+    // Focusable from script only: where keyboard focus rests when the failure now shown allows no
+    // retry (a retry ended in it, or it replaced the one shown), so the button it was on is gone.
     <div ref={retry.noticeRef} tabIndex={-1} className="failure-notice">
       <div key={retry.settled} role="alert">
         {words}
       </div>
-      {message.action.kind === 'retry' && (
-        <button type="button" aria-disabled={retry.retrying} onClick={retry.start}>
-          {retry.retrying ? 'Trying again…' : message.action.label}
+      {retryLabel !== null && (
+        <button
+          type="button"
+          ref={retry.buttonRef}
+          aria-disabled={retry.retrying}
+          onClick={retry.start}
+        >
+          {retry.retrying ? 'Trying again…' : retryLabel}
         </button>
       )}
       {/* Present from the start, so the retry is announced when it begins. */}
