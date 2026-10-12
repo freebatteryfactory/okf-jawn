@@ -162,6 +162,8 @@ pub mod assets;
 pub mod authkit;
 pub mod config;
 #[cfg(feature = "runtime")]
+pub mod connect;
+#[cfg(feature = "runtime")]
 pub mod cookies;
 pub mod errors;
 pub mod grants;
