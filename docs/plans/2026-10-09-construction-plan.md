@@ -865,6 +865,7 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
   - only then call `purge_workspace`.
 
   Nothing creates a purge until M1.4's purge operation.
+- **WebKit keyboard reach (the desktop launcher, Wave 3).** By default, WebKit leaves links out of the Tab order, and a page cannot change that. So the macOS launcher's web view sets `tabFocusesLinks`, and the Wave 3 keyboard journey runs in that launcher (workspace-ui M1 review, N12).
 - **R-I11 (core M1.4, with the cancel operation).** A point-of-no-return seal on `RecordStore`: `cancel_job` refuses with `Conflict` once a restore has called `restore_import`. Until M1.4, no production path cancels a running job.
 
 ## 7. Risks by wave
