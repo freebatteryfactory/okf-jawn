@@ -6,18 +6,19 @@ use std::pin::Pin;
 
 use okf_jawn_contract::access::{AccessRoute, DelegationCeiling, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
-use okf_jawn_contract::events::EventKind;
-use okf_jawn_contract::identity::IdentityError;
+use okf_jawn_contract::events::{Event, EventKind, ListEventsResponse};
+use okf_jawn_contract::identity::{IdentityError, MutationId};
 use okf_jawn_contract::import::JobKind;
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::operations::DRAFT_BEARING;
 use okf_jawn_core::access::authorize_job_kind;
 use okf_jawn_core::context::Attempt;
-use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
-use okf_jawn_core::events::EventScope;
+use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch, record_refusal};
+use okf_jawn_core::events::{EventLog, EventQuery, EventScope, NewEvent};
 use okf_jawn_core::mutations::request_digest;
 use okf_jawn_core::portable::item_content_digest;
+use okf_jawn_core::ports::PortFuture;
 use okf_jawn_core::storage::StorageScope;
 use serde_json::{Value, json};
 
@@ -27,6 +28,9 @@ use support::{FixturePorts, GrantTable, LedgerCall, all_permissions, tenant, wor
 
 /// A dispatch that was started and is still running, held so a test can finish or drop it.
 type Running<'a> = Pin<Box<dyn Future<Output = Result<Value, ApiError>> + 'a>>;
+
+/// An event log that cannot be written.
+struct UnwritableLog;
 
 const WORKSPACE_A: &str = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_B: &str = "22222222-2222-4222-8222-222222222222";
@@ -38,6 +42,25 @@ const CONNECTOR: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const JOB: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 /// Longest `InvalidInput` message: 512 bytes, the closing `…` included.
 const BOUNDED_MESSAGE: usize = 512;
+
+impl EventLog for UnwritableLog {
+    fn append<'a>(
+        &'a self,
+        _scope: &'a EventScope,
+        _mutation_id: Option<MutationId>,
+        _event: NewEvent,
+    ) -> PortFuture<'a, Event> {
+        Box::pin(async { Err(ApiError::new(ErrorCode::Unavailable, "the log is offline")) })
+    }
+
+    fn list<'a>(
+        &'a self,
+        _scope: &'a EventScope,
+        _query: EventQuery,
+    ) -> PortFuture<'a, ListEventsResponse> {
+        Box::pin(async { Err(ApiError::new(ErrorCode::Unavailable, "the log is offline")) })
+    }
+}
 
 fn principal(subject: &str, route: AccessRoute) -> Result<Principal, IdentityError> {
     Ok(Principal {
@@ -1620,6 +1643,127 @@ async fn a_route_refusal_is_the_workspaces_event_or_the_tenants_by_what_the_requ
     );
     let (second, _) = some(appended.get(1), "the purge_workspace refusal")?;
     assert_eq!(second, &EventScope::Tenant(tenant("tenant-local")?));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_bindings_own_refusal_is_recorded_by_the_rule_of_a_route_refusal() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let events = ports.events.as_ref();
+    // A browser session at a binding that answers only agents: refused before any dispatch.
+    let session = principal("alice", AccessRoute::BrowserSession)?;
+    let refusal = || ApiError::new(ErrorCode::Forbidden, "this route uses the HTTP API");
+    let tenant_log = EventScope::Tenant(tenant("tenant-local")?);
+    let log_of_a = EventScope::Workspace(StorageScope {
+        tenant_id: tenant("tenant-local")?,
+        workspace_id: workspace(WORKSPACE_A)?,
+    });
+    let purge = json!({
+        "workspace_id": WORKSPACE_A,
+        "base_revision": REVISION,
+        "idempotency_key": KEY_ONE
+    });
+    let cases = [
+        // Exactly one workspace: its log.
+        (
+            OperationName::ListItems,
+            list_items_body(WORKSPACE_A),
+            &log_of_a,
+        ),
+        // One workspace named by two targets is still one.
+        (
+            OperationName::AddComment,
+            add_comment_body(WORKSPACE_A, WORKSPACE_A, KEY_ONE),
+            &log_of_a,
+        ),
+        // Two distinct workspaces: the tenant's.
+        (
+            OperationName::AddComment,
+            add_comment_body(WORKSPACE_A, WORKSPACE_B, KEY_ONE),
+            &tenant_log,
+        ),
+        // A Deployment target beside a workspace: the tenant's.
+        (OperationName::PurgeWorkspace, purge, &tenant_log),
+        // No workspace at all: the tenant's.
+        (
+            OperationName::ListWorkspaces,
+            json!({ "page": { "limit": 10 } }),
+            &tenant_log,
+        ),
+        // A body that is not a request of the operation names no workspace: the tenant's.
+        (
+            OperationName::ListItems,
+            json!({ "workspace_id": WORKSPACE_A }),
+            &tenant_log,
+        ),
+    ];
+    for (operation, input, expected) in &cases {
+        let before = ports.events.appended()?.len();
+        let returned = record_refusal(events, &session, *operation, input, refusal()).await;
+        assert_eq!(returned.code, ErrorCode::Forbidden, "{operation:?}");
+        assert_eq!(returned.message, "this route uses the HTTP API");
+        let appended = ports.events.appended()?;
+        assert_eq!(appended.len(), before.saturating_add(1), "{operation:?}");
+        let (scope, event) = some(appended.last(), "the refusal event")?;
+        assert_eq!(&scope, expected, "{operation:?} {input}");
+        assert_eq!(event.kind, EventKind::PermissionDenied);
+        assert_eq!(event.operation, Some(*operation));
+        let actor = some(event.actor.as_ref(), "the refused caller")?;
+        assert_eq!(actor.subject, "alice");
+        assert_eq!(actor.route, AccessRoute::BrowserSession);
+    }
+    // Only a refusal is recorded: any other error is returned without an event.
+    let recorded = ports.events.appended()?.len();
+    let unavailable = record_refusal(
+        events,
+        &session,
+        OperationName::ListItems,
+        &list_items_body(WORKSPACE_A),
+        ApiError::new(ErrorCode::Unavailable, "store offline"),
+    )
+    .await;
+    assert_eq!(unavailable.code, ErrorCode::Unavailable);
+    assert_eq!(ports.events.appended()?.len(), recorded);
+    // A log that cannot be written does not change the answer.
+    let returned = record_refusal(
+        &UnwritableLog,
+        &session,
+        OperationName::ListItems,
+        &list_items_body(WORKSPACE_A),
+        refusal(),
+    )
+    .await;
+    assert_eq!(returned.code, ErrorCode::Forbidden);
+    assert_eq!(returned.message, "this route uses the HTTP API");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_bindings_own_refusal_lands_where_dispatchs_route_refusal_of_the_request_lands()
+-> TestResult {
+    // The same single-workspace request, refused by dispatch for its route and refused by a
+    // binding before dispatch, is recorded in the same log.
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    let agent = connector("alice", all_permissions())?;
+    let (input, _) = draft_exchange(OperationName::ListDrafts, KEY_ONE)?;
+    let by_dispatch = err_of(call(&app, &ports, &agent, "list_drafts", input.clone()).await)?;
+    assert_eq!(by_dispatch.code, ErrorCode::Forbidden);
+    let _returned = record_refusal(
+        ports.events.as_ref(),
+        &agent,
+        OperationName::ListDrafts,
+        &input,
+        ApiError::new(ErrorCode::Forbidden, "refused by the binding"),
+    )
+    .await;
+    let appended = ports.events.appended()?;
+    let [(first, dispatched), (second, bound)] = appended.as_slice() else {
+        return Err(format!("not two refusal events: {appended:?}").into());
+    };
+    assert_eq!(first, second);
+    assert_eq!(dispatched, bound);
+    assert!(matches!(first, EventScope::Workspace(_)), "{first:?}");
     Ok(())
 }
 
