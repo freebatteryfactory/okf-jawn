@@ -18,12 +18,13 @@
 //! (see `denial_scope`). A grant is used only when it is for the workspace and tenant that were
 //! asked for. The ledger never inspects other stores: a
 //! resumed attempt re-runs the handler under the same `MutationId`, and what the ledger
-//! retains is decided by the request's `ReplayPolicy`. The ledger records each mutation's
-//! workspace by the same rule as a refusal's log (`sole_workspace`): `begin` receives the one
-//! workspace the request's targets name, and `None` for a request with a `Deployment` target
-//! or naming no workspace or several; `complete` receives the workspace the response names
-//! at the request's `RequestScope::RESPONSE_WORKSPACE`, read from the serialized typed
-//! response by that pointer, never by searching its text.
+//! retains is decided by the request's `ReplayPolicy`. The ledger records the workspace each
+//! mutation writes: `begin` receives the workspace of the request's first target, the one the
+//! table permission names (`written_workspace`), and `None` when that target is not a
+//! workspace, so a comment written in one workspace that cites another is recorded under the
+//! first; `complete` receives the workspace the response names at the request's
+//! `RequestScope::RESPONSE_WORKSPACE`, read from the serialized typed response by that
+//! pointer, never by searching its text.
 //!
 //! Handlers see the `MutationId`; dispatch keeps the `MutationLease` it was granted and closes
 //! the row with it, so an attempt whose lease was taken over cannot complete or release the
@@ -193,9 +194,8 @@ async fn prepare_mutation<Req: RequestScope + Serialize>(
         operation: context.operation,
         key,
     };
-    // The workspace this mutation is about, by the rule that picks a refusal's log: a purge of
-    // it reaches this row by that column.
-    let workspace = sole_workspace(&request.targets());
+    // The workspace this mutation writes: a purge of it reaches this row by that column.
+    let workspace = written_workspace(&request.targets());
     match ports
         .mutations
         .begin(&mutation_key, &digest, workspace)
@@ -493,6 +493,17 @@ fn sole_workspace(targets: &[Target]) -> Option<WorkspaceId> {
         }
     }
     named
+}
+
+/// The workspace a mutation writes: that of the first of `targets`, which carries the
+/// operation's table permission (`RequestScope::targets`), or `None` when that target is the
+/// tenant or sign-in. A later target is what the request reads (the source a comment cites,
+/// the workspaces a connector is granted), never where its response's content belongs.
+fn written_workspace(targets: &[Target]) -> Option<WorkspaceId> {
+    targets.first().and_then(|first| match *first {
+        Target::Workspace(workspace_id, _) => Some(workspace_id),
+        Target::Authenticated | Target::Deployment(_) => None,
+    })
 }
 
 /// Refuse a workspace grant the adapter returned for a workspace or tenant that was not asked.

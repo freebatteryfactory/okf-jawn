@@ -38,14 +38,16 @@
 //! resumed attempt.
 //!
 //! # Workspace
-//! Each row records the one workspace its mutation is about, beside the key and never part of
-//! it: `begin` records the workspace the request's targets name (dispatch passes it when they
-//! name exactly one distinct workspace and no `Deployment` target), and `complete` records the
-//! workspace a response names for a mutation authorized at the tenant that creates or removes
-//! one (`RequestScope::RESPONSE_WORKSPACE`). A workspace purge reads that column, never the
-//! response text: it empties the completed rows of the purged workspace (the response is
-//! dropped and the row released, its id kept), so a retry under the same key re-runs under the
-//! same `MutationId` and is refused by the purge, and no other workspace's row is touched.
+//! Each row records the workspace its mutation writes, beside the key and never part of it:
+//! `begin` records the workspace of the request's first target, the one the operation's table
+//! permission names (dispatch passes `None` when that target is the tenant), so a comment
+//! written in one workspace that cites another is recorded under the first; and `complete`
+//! records the workspace a response names for a mutation authorized at the tenant that creates
+//! or removes one (`RequestScope::RESPONSE_WORKSPACE`). A workspace purge reads that column,
+//! never the response text: it empties the completed rows of the purged workspace (the
+//! response is dropped and the row released, its id kept), so a retry under the same key
+//! re-runs under the same `MutationId` and is refused by the purge, and no other workspace's
+//! row is touched.
 
 use std::collections::BTreeMap;
 
@@ -132,11 +134,11 @@ pub struct StoredResponse {
 pub trait MutationStore: Send + Sync {
     /// Atomic insert-or-read with a lease.
     ///
-    /// `digest` is [`request_digest`] of the typed request. `workspace` is the one workspace
-    /// the request is about, or `None` for a request authorized at the tenant or naming several
-    /// workspaces (see the module header); it is recorded with a new row and is not part of
-    /// the key. A row that already exists keeps what its first `begin` recorded: the same key
-    /// and digest are the same request, so they name the same workspace.
+    /// `digest` is [`request_digest`] of the typed request. `workspace` is the workspace the
+    /// request writes, that of its first target, or `None` for a request authorized at the
+    /// tenant (see the module header); it is recorded with a new row and is not part of the
+    /// key. A row that already exists keeps what its first `begin` recorded: the same key and
+    /// digest are the same request, so they name the same workspace.
     fn begin<'a>(
         &'a self,
         key: &'a MutationKey,

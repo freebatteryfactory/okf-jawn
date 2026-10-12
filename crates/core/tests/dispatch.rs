@@ -650,7 +650,8 @@ async fn the_ledger_records_the_one_workspace_a_mutation_names() -> TestResult {
 }
 
 #[tokio::test]
-async fn the_ledger_records_no_workspace_for_a_request_about_several_or_the_tenant() -> TestResult {
+async fn the_ledger_records_the_first_target_s_workspace_and_none_for_a_tenant_target() -> TestResult
+{
     let mut table = GrantTable::default();
     let alice = table.workspaces.entry("alice".to_owned()).or_default();
     alice.insert(workspace(WORKSPACE_A)?, all_permissions());
@@ -661,12 +662,17 @@ async fn the_ledger_records_no_workspace_for_a_request_about_several_or_the_tena
     app.set_response("add_comment", comment())?;
     app.set_response("create_connector", issued_connector())?;
     let alice = principal("alice", AccessRoute::LocalOwner)?;
-    // Writing in A, citing B: two workspaces.
+    // Writing in A, citing B: the first target, the one the table permission names, is A.
     let body = add_comment_body(WORKSPACE_A, WORKSPACE_B, KEY_ONE);
     call(&app, &ports, &alice, "add_comment", body).await?;
     let mutation = handled_mutation(&app, "add_comment")?;
-    assert_eq!(ports.mutations.recorded_workspace(mutation)?, None);
-    // A Deployment target and workspace A; its response names workspaces only in a list.
+    assert_eq!(
+        ports.mutations.recorded_workspace(mutation)?,
+        Some(workspace(WORKSPACE_A)?),
+        "the workspace the comment is written in, not the one it cites"
+    );
+    // The first target is the Deployment, workspace A follows; the response names workspaces
+    // only in a list, so nothing is recorded at completion either.
     call(
         &app,
         &ports,

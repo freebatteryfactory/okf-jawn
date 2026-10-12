@@ -3,10 +3,10 @@
 //! of the purged workspace by the workspace each row records, keeps its own, and touches no
 //! other workspace's row, whatever its response text quotes.
 //!
-//! `Harness` stands in for the application handlers of `create_workspace`, `save_draft` and
-//! `purge_workspace` (core's handlers of the first and last are not built yet): each makes the
-//! one storage call its operation's contract names, and records each run with the mutation it
-//! ran under, so a test tells a ledger replay (no run) from a re-run. The purge's tenant job
+//! `Harness` stands in for the application handlers of `create_workspace`, `save_draft`,
+//! `add_comment` and `purge_workspace` (of these core has built only `save_draft`): each makes
+//! the one storage call its operation's contract names, and records each run with the mutation
+//! it ran under, so a test tells a ledger replay (no run) from a re-run. The purge's tenant job
 //! is carried out as ingest's handler does: claimed, then the purger called with the job's
 //! mutation. Authorization is held open (`OpenAccess`): the local access adapter refuses the
 //! purged workspace before the ledger is reached, and what these tests check is that neither
@@ -20,16 +20,18 @@ use std::sync::Mutex;
 use check::{TestResult, err_of, some};
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{Digest, MutationId, PurgeId, TenantId, WorkspaceId};
+use okf_jawn_contract::identity::{Digest, MutationId, PurgeId, TenantId, Timestamp, WorkspaceId};
 use okf_jawn_contract::item::{Draft, SaveDraftRequest};
+use okf_jawn_contract::proposal::{AddCommentRequest, Comment, Proposal};
 use okf_jawn_contract::purge::{Purge, PurgeTarget, PurgeWorkspaceRequest};
 use okf_jawn_contract::workspace::{CreateWorkspaceRequest, Workspace};
 use okf_jawn_core::access::AccessControl;
 use okf_jawn_core::context::{Attempt, OperationContext, TenantGrant, WorkspaceGrant};
-use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
+use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch, new_mutation_id};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::jobs::{JobSpec, NewPurge, RecordStore};
 use okf_jawn_core::ports::{Application, PortFuture};
+use okf_jawn_core::proposals::ProposalStore;
 use okf_jawn_core::storage::{
     NewWorkspace, Provenance, Purger, StorageScope, WorkspaceCatalog, derive_purge_id,
 };
@@ -56,6 +58,9 @@ macro_rules! handler {
     };
     (save_draft) => {
         Harness::save_draft
+    };
+    (add_comment) => {
+        Harness::add_comment
     };
     (purge_workspace) => {
         Harness::purge_workspace
@@ -86,7 +91,8 @@ struct Run {
 struct OpenAccess;
 
 /// A purged target, a survivor whose description quotes the target's identity, a draft of the
-/// target, and the request and first response of each mutation.
+/// target, a comment written in each workspace that cites the other, and the request and first
+/// response of each mutation.
 struct Purged {
     harness: Harness,
     target: WorkspaceId,
@@ -95,6 +101,10 @@ struct Purged {
     create_target: (Value, Value),
     create_survivor: (Value, Value),
     draft: (Value, Value),
+    /// Written in the target, citing the survivor; its text carries the marker.
+    comment_in_target: (Value, Value),
+    /// Written in the survivor, citing the target.
+    comment_in_survivor: (Value, Value),
     purge_request: (Value, Value),
 }
 
@@ -106,9 +116,12 @@ const EVERY: [Permission; 6] = [
     Permission::Review,
     Permission::Admin,
 ];
-/// The marker of the target's content: its name and its draft.
+/// The marker of the target's content: its name, its draft and the comment written in it.
 const MARKER: &[u8] = b"zanzibar";
 const ITEM: &str = "00000000-0000-4000-8000-000000000010";
+/// The proposal each workspace's comment is written on; a proposal's key includes its workspace.
+const PROPOSAL: &str = "00000000-0000-4000-8000-000000000020";
+const INSTANT: &str = "2026-10-09T12:00:00.000Z";
 
 impl Harness {
     fn new(storage: Storage) -> Self {
@@ -192,6 +205,36 @@ impl Harness {
                     body: request.body,
                     properties: request.properties,
                     content_digest,
+                },
+            )
+            .await
+    }
+
+    async fn add_comment(
+        &self,
+        context: &OperationContext,
+        request: AddCommentRequest,
+    ) -> Result<Comment, ApiError> {
+        let mutation = self.ran("add_comment", context)?;
+        let scope = StorageScope {
+            tenant_id: context.principal.tenant_id.clone(),
+            workspace_id: request.workspace_id,
+        };
+        // The application names and stamps the comment; any identity and instant serve the store.
+        let created_at = Timestamp::try_from(INSTANT.to_owned())
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+        self.storage
+            .proposals()
+            .add_comment(
+                &scope,
+                mutation,
+                request.proposal_id,
+                Comment {
+                    id: mutation.0.to_string(),
+                    author: context.principal.subject.clone(),
+                    text: request.text,
+                    created_at,
+                    invalidated_by: None,
                 },
             )
             .await
@@ -386,8 +429,60 @@ fn ledger_rows(data: &Path, workspace: WorkspaceId, state: &str) -> Fallible<Vec
     Ok(rows)
 }
 
-/// Create the target and the survivor, draft in the target, purge the target through dispatch
-/// and carry the purge out as its tenant job does.
+/// Store an open proposal in `workspace` at `head`, for a comment to be written on. Seeded
+/// through the store: `open_proposal` is not what these tests exercise.
+async fn propose(harness: &Harness, workspace: WorkspaceId, head: &Value) -> Fallible<()> {
+    let proposal: Proposal = serde_json::from_value(json!({
+        "id": PROPOSAL,
+        "workspace_id": workspace,
+        "base_revision": head,
+        "proposal_revision": head,
+        "content_digest": "a".repeat(64),
+        "title": "Plan",
+        "description": "",
+        "changes": [],
+        "kind": "content",
+        "status": "open",
+        "created_by": "ana",
+        "created_via": "local_owner",
+        "created_at": INSTANT
+    }))?;
+    let scope = StorageScope {
+        tenant_id: tenant()?,
+        workspace_id: workspace,
+    };
+    harness
+        .storage
+        .proposals()
+        .insert(&scope, new_mutation_id(), proposal)
+        .await?;
+    Ok(())
+}
+
+/// An `add_comment` request written in `writes` that cites an item of `cites` at `cited_head`.
+fn comment_request(
+    writes: WorkspaceId,
+    (cites, cited_head): (WorkspaceId, &Value),
+    text: &str,
+    n: u32,
+) -> Value {
+    json!({
+        "workspace_id": writes,
+        "proposal_id": PROPOSAL,
+        "text": text,
+        "source": {
+            "workspace_id": cites,
+            "item_id": ITEM,
+            "path": "notes/plan.md",
+            "revision": cited_head,
+            "selection": { "kind": "all" }
+        },
+        "idempotency_key": key(n)
+    })
+}
+
+/// Create the target and the survivor, draft in the target, comment in each citing the other,
+/// purge the target through dispatch and carry the purge out as its tenant job does.
 async fn purged(directory: &Path) -> Fallible<Purged> {
     let harness = Harness::new(Storage::open(directory)?);
     let create_target = first(
@@ -423,6 +518,26 @@ async fn purged(directory: &Path) -> Fallible<Purged> {
         }),
     )
     .await?;
+    let survivor_head = some(create_survivor.1.get("head"), "the survivor's head")?.clone();
+    propose(&harness, target, &head).await?;
+    propose(&harness, survivor, &survivor_head).await?;
+    let comment_in_target = first(
+        &harness,
+        "add_comment",
+        comment_request(
+            target,
+            (survivor, &survivor_head),
+            "zanzibar ferry times",
+            5,
+        ),
+    )
+    .await?;
+    let comment_in_survivor = first(
+        &harness,
+        "add_comment",
+        comment_request(survivor, (target, &head), "Compare the two plans", 6),
+    )
+    .await?;
     let purge_request = first(
         &harness,
         "purge_workspace",
@@ -452,6 +567,8 @@ async fn purged(directory: &Path) -> Fallible<Purged> {
         create_target,
         create_survivor,
         draft,
+        comment_in_target,
+        comment_in_survivor,
         purge_request,
     })
 }
@@ -569,11 +686,59 @@ async fn purge_ledger_no_file_keeps_a_response_of_the_purged_workspace() -> Test
     );
     assert_eq!(
         ledger_rows(directory.path(), purged.target, "released")?,
-        ["create_workspace", "save_draft"]
+        ["add_comment", "create_workspace", "save_draft"]
     );
     assert_eq!(
         ledger_rows(directory.path(), purged.survivor, "completed")?,
-        ["create_workspace"]
+        ["add_comment", "create_workspace"]
+    );
+    Ok(())
+}
+
+/// Round 1, item 1: a comment written in the target that cites the survivor is recorded under
+/// the target, the workspace it was written in, so the purge of the target reaches it.
+#[tokio::test]
+async fn purge_ledger_a_comment_citing_another_workspace_goes_with_the_one_it_was_written_in()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let purged = purged(directory.path()).await?;
+    let (request, _) = purged.comment_in_target.clone();
+    let refused = err_of(call(&purged.harness, "add_comment", request).await)?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    assert!(
+        refused.message.contains(&purged.purge.0.to_string()),
+        "the refusal names the purge: {}",
+        refused.message
+    );
+    // The target's comment ran first, the survivor's second; the retry is the third run.
+    let runs = purged.harness.runs_of("add_comment")?;
+    let (original, retry) = (
+        some(runs.first(), "the comment")?,
+        some(runs.get(2), "the retry")?,
+    );
+    assert_eq!(retry.mutation, original.mutation);
+    assert_eq!(retry.attempt, Attempt::Resumed);
+    assert_eq!(
+        marked_files(directory.path())?,
+        Vec::<String>::new(),
+        "the comment's text is in no file"
+    );
+    Ok(())
+}
+
+/// Round 1, item 1: a comment written in the survivor that cites the target is the survivor's.
+/// The purge of the workspace it cites leaves its row whole, so its retry replays.
+#[tokio::test]
+async fn purge_ledger_a_comment_citing_the_purged_workspace_still_replays() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let purged = purged(directory.path()).await?;
+    let (request, response) = purged.comment_in_survivor.clone();
+    let replayed = call(&purged.harness, "add_comment", request).await?;
+    assert_eq!(replayed, response);
+    assert_eq!(
+        purged.harness.runs_of("add_comment")?.len(),
+        2,
+        "the two comments ran once each; the retry is a replay"
     );
     Ok(())
 }

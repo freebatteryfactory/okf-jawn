@@ -128,20 +128,11 @@ fn scoped<T: RequestScope>(id: &'static str, permission: Permission, request: &T
     }
 }
 
-/// Whether `targets` name exactly one distinct workspace and no `Deployment`: the request is
-/// about that one workspace (core dispatch's `sole_workspace`, which the ledger records).
-fn about_one_workspace(targets: &[Target]) -> bool {
-    let mut named = BTreeSet::new();
-    for target in targets {
-        match target {
-            Target::Deployment(_) => return false,
-            Target::Workspace(workspace, _) => {
-                named.insert(*workspace);
-            }
-            Target::Authenticated => {}
-        }
-    }
-    named.len() == 1
+/// Whether the first of `targets`, the one the table permission names, is a workspace: the
+/// request writes that workspace, and the ledger records it when the mutation begins (core
+/// dispatch's `written_workspace`).
+fn writes_a_workspace(targets: &[Target]) -> bool {
+    matches!(targets.first(), Some(Target::Workspace(..)))
 }
 
 /// Every place `schema` names a `WorkspaceId`, resolving `$ref`s into `defs`.
@@ -520,7 +511,7 @@ fn a_tenant_mutation_declares_where_its_response_names_its_workspace() -> Result
             .map(|field| field.pointer.as_str())
             .collect();
         let listed = found.iter().any(|field| field.listed);
-        let at_the_tenant = operation.keyed && !about_one_workspace(&operation.targets);
+        let at_the_tenant = operation.keyed && !writes_a_workspace(&operation.targets);
         match operation.response_workspace {
             Some(pointer) => {
                 assert!(

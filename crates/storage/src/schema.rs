@@ -304,7 +304,7 @@ CREATE TABLE sessions (
 /// workspace's rows: the same restore run again accepts only a workspace this same archive
 /// restored.
 ///
-/// `mutations.workspace_id` is the one workspace a ledger row's mutation is about
+/// `mutations.workspace_id` is the workspace a ledger row's mutation writes
 /// (`core::mutations`, "Workspace"), or `NULL`; a workspace purge empties that workspace's
 /// completed rows by it (`purge::rows`). A row from before this step has none.
 const RECORDS_V2: &str = r"
