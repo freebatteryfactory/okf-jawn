@@ -206,7 +206,10 @@ main.app-main:has(.explorer) {
 [role="treeitem"][aria-selected="true"] {
   background: color-mix(in srgb, Highlight 25%, transparent);
 }
+/* A selected row is tinted with Highlight, so its ring is CanvasText: WebKit's Highlight against
+   that tint measured 2.80:1, below the 3:1 of WCAG 1.4.11. */
 [role="treeitem"]:focus-visible {
+  outline-color: CanvasText;
   outline-offset: -3px;
 }
 /* A long name wraps inside its row (the row measures itself); the tree never scrolls sideways. */

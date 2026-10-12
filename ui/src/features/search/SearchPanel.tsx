@@ -186,7 +186,8 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
         </ol>
       )}
       {results.hasNextPage && (
-        // aria-disabled, not disabled, while loading: a disabled button would drop focus.
+        // aria-disabled rather than disabled while loading: the button stays focusable and
+        // announced (HTML's focus fixup lets an engine blur a focused button that is disabled).
         <button type="button" ref={moreRef} aria-disabled={loadingMore} onClick={loadMore}>
           {loadingMore ? 'Loading more results…' : 'Show more results'}
         </button>

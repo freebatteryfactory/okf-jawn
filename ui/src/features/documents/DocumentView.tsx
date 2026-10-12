@@ -346,7 +346,8 @@ export function DocumentView({
             {last.next_cursor ? '' : ' The rest cannot be continued from here.'}
           </p>
           {read.hasNextPage && (
-            // aria-disabled, not disabled, while reading: a disabled button would drop focus.
+            // aria-disabled rather than disabled while reading: the button stays focusable and
+            // announced (HTML's focus fixup lets an engine blur a focused button that is disabled).
             <button
               type="button"
               ref={continueRef}
