@@ -71,6 +71,27 @@ describe('workspace list', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('moves focus to the first workspace "Show more workspaces" brought, and says how many are shown', async () => {
+    const second = {
+      ...workspace,
+      id: '77777777-7777-4777-8777-777777777777',
+      name: 'Second workspace',
+    };
+    mockApi({
+      '/api/workspaces/list-workspaces': (body) =>
+        (body.page as { cursor?: string | null }).cursor === 'more'
+          ? ok({ items: [second], next_cursor: null })
+          : ok({ items: [workspace], next_cursor: 'more' }),
+    });
+    renderAt('/');
+    const more = await screen.findByRole('button', { name: 'Show more workspaces' });
+    act(() => more.focus());
+    await userEvent.keyboard('{Enter}');
+    const link = await screen.findByRole('link', { name: 'Second workspace' });
+    await waitFor(() => expect(document.activeElement).toBe(link));
+    expect(screen.getByText('2 workspaces shown.').getAttribute('role')).toBe('status');
+  });
+
   it('reads a NotImplemented listing as not available, never as an empty list', async () => {
     mockApi({ '/api/workspaces/list-workspaces': () => notImplemented('list_workspaces') });
     renderAt('/');

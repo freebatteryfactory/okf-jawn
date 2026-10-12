@@ -384,6 +384,68 @@ test.describe('Explorer from the keyboard', () => {
     await expect(tree.getByRole('treeitem', { name: /Plan/ })).toBeFocused();
   });
 
+  test('a press that makes "Split right" unavailable keeps focus on it', async ({ page }) => {
+    await routeApi(page);
+    await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}`);
+    await expect(page.getByRole('tab', { name: 'Meeting notes', selected: true })).toBeVisible();
+    const split = page.getByRole('button', { name: 'Split right' }).first();
+    await split.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('region', { name: /pane 2 of 2/ })).toBeVisible();
+    // Focus is still on the first pane's button; the third pane makes it unavailable.
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('region', { name: /pane 3 of 3/ })).toBeVisible();
+    await page.waitForTimeout(300);
+    expect(await focused(page)).toBe('button:Split right');
+    await expect(page.locator(':focus')).toHaveAttribute('aria-disabled', 'true');
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('region', { name: /pane 4 of/ })).toHaveCount(0);
+    await expectNoAxeViolations(page, 'three panes, "Split right" unavailable');
+  });
+
+  test('going back to no item makes "Close tab" unavailable and keeps focus on it', async ({
+    page,
+  }) => {
+    await routeApi(page);
+    await page.goto(`${server.origin()}/w/${WS}`);
+    await row(page, /^notes$/).click();
+    await row(page, /Meeting notes/).click();
+    await expect(page.getByRole('tab', { name: 'Meeting notes', selected: true })).toBeVisible();
+    const close = page.getByRole('button', { name: 'Close tab' });
+    await close.focus();
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`/w/${WS}$`));
+    await expect(close).toHaveAttribute('aria-disabled', 'true');
+    await page.waitForTimeout(300);
+    expect(await focused(page)).toBe('button:Close tab');
+  });
+
+  test('"Show more workspaces" keeps focus while it loads, then moves to the first new one', async ({
+    page,
+  }) => {
+    const more = held();
+    const second = { ...workspace, id: '77777777-7777-4777-8777-777777777777', name: 'Second' };
+    await routeApi(page, {
+      '/api/workspaces/list-workspaces': async (body) => {
+        if ((body.page as { cursor?: string | null }).cursor !== 'more') {
+          return ok({ items: [workspace], next_cursor: 'more' });
+        }
+        await more.wait;
+        return ok({ items: [second], next_cursor: null });
+      },
+    });
+    await page.goto(`${server.origin()}/`);
+    await page.getByRole('button', { name: 'Show more workspaces' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('button', { name: 'Loading more workspaces…' })).toBeVisible();
+    await page.waitForTimeout(300);
+    const during = await focused(page);
+    more.release();
+    expect(during).toBe('button:Loading more workspaces…');
+    await expect(page.getByRole('link', { name: 'Second' })).toBeFocused();
+    await expectNoAxeViolations(page, 'more workspaces');
+  });
+
   test('Q2a the tree wheeled far from its tab-stop row: axe, and the keyboard lands on a row', async ({
     page,
   }) => {

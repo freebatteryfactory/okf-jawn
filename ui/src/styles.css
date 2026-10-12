@@ -397,7 +397,8 @@ main.app-main:has(.explorer) {
   background: ButtonFace;
   color: ButtonText;
 }
-.app-main button:disabled {
+.app-main button:disabled,
+.app-main button[aria-disabled="true"] {
   opacity: 0.6;
   cursor: default;
 }
