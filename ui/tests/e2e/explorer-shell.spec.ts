@@ -251,6 +251,8 @@ async function expectVisibleFocus(page: Page) {
 }
 
 test.describe('Explorer shell', () => {
+  // A cold browser start on a shared, loaded machine has taken longer than the 30 s default.
+  test.describe.configure({ timeout: 90_000 });
   let origin = '';
   let close: () => void = () => {};
   test.beforeAll(async () => {
