@@ -43,8 +43,9 @@
  * Limits. The retry is over when `run` settles. A refetch that replaces a request still in flight
  * for content already on screen (an invalidation; nothing does that yet) settles `run` early,
  * while the replacement is still in flight; the outcome followed is then the state at that moment.
- * A notice that leaves because the component calling the hook is itself unmounted is not followed:
- * the hook goes with it.
+ * A notice that leaves because the component calling the hook is itself unmounted is not followed
+ * by the hook, which goes with it. When a navigation does that, the router's rule moves the focus
+ * that fell to the page body to the new page's level-one heading (`app/router.tsx`).
  */
 import { type RefCallback, useLayoutEffect, useRef, useState } from 'react';
 import { pageHeading, takeHeld, useWatchedPart } from '../../lib/focus';
