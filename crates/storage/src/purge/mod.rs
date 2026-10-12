@@ -19,7 +19,12 @@
 //!    the purge refusal (`guard`), so a commit either is in the plan or is refused. In the
 //!    same transaction every commit of the workspace is written to
 //!    the revision map as invalidated by this purge with no replacement. The plan holds
-//!    identities and counts, never content.
+//!    identities and counts, never content. The workspace's own damage (an appearance or a
+//!    card-named conversion record that does not read, an entry under `.okf/sources` that is
+//!    not a file, an object its history needs but does not hold) never stops its purge: the
+//!    plan reads past it (`references::history_recording`) and records each unread file, by
+//!    path or record digest, in `WorkspacePlan::unread`, so the purge record says that the
+//!    objects only those files named may remain stored.
 //! 2. **Backups**: every pre-migration copy that holds the workspace is rewritten without it or
 //!    deleted, its archive in every pre-migration backup set is deleted, and every archive of
 //!    another workspace (in a backup set or in the object store) whose records still cite it is
@@ -41,7 +46,13 @@
 //!    target's running writes, adds the objects the target's
 //!    pending puts name, deletes each planned object that no surviving reference names and no
 //!    other workspace pinned since the sweep began, and clears the target's pending puts; the
-//!    others are counted as kept.
+//!    others are counted as kept. A surviving workspace's damage stops this step, loudly
+//!    (`Internal`, `references::refusing_in`): guessing past it could delete what the damaged
+//!    file names. The message names the damaged workspace and the path or record digest, so an
+//!    operator knows where to look. The remedy is a fix of the damaged file or of the reader,
+//!    or a purge of the damaged workspace, which its own damage does not stop (step 1); the
+//!    stopped purge then resumes by repeating the call. A restore refuses to import an archive
+//!    holding such a file (`backup::restore::refuse_unheld`), so no import plants damage.
 //! 7. **Vacuum**: both databases are rebuilt without free pages and their write-ahead logs folded
 //!    back, so removed rows leave no bytes behind; then the report is recorded.
 //!
@@ -116,6 +127,12 @@ struct WorkspacePlan {
     /// Archive objects a rewrite replaced; each is deleted, never counted as a kept object.
     #[serde(default)]
     superseded: BTreeSet<Digest>,
+    /// What of the workspace's own history and card-named conversion records the plan could not
+    /// read, each by its path or record digest and why (`references::History::unread`). The
+    /// objects only those files named are not in `objects`, so they may remain stored once the
+    /// purge completes: recorded here, never hidden, and never a stop of the purge.
+    #[serde(default)]
+    unread: Vec<String>,
     /// The report; the object counts are filled in by the objects step.
     report: PurgeReport,
 }
@@ -126,6 +143,16 @@ enum Progress {
     Running(i64, Box<WorkspacePlan>),
     /// Done, with its report.
     Done(PurgeReport),
+}
+
+/// What a plan read of the target's history and objects (`planned_objects`).
+struct Planned {
+    /// Every commit of the history, for the revision map.
+    revisions: Vec<git2::Oid>,
+    /// Every held object the target references.
+    held: BTreeSet<Digest>,
+    /// What could not be read (`WorkspacePlan::unread`).
+    unread: Vec<String>,
 }
 
 /// The completed-step numbers recorded in `purge_progress.step`.
@@ -244,7 +271,7 @@ impl StoragePurger {
         purge: PurgeId,
     ) -> Result<WorkspacePlan, ApiError> {
         let (tenant, workspace) = scope_key(scope);
-        let (history, objects, copy_plan, archives, uploads) = {
+        let (history, objects, copy_plan, archives, uploads, unread) = {
             let repositories = self.storage.repositories.clone();
             let records = self.storage.records.clone();
             let blobs = self.storage.blobs.clone();
@@ -270,31 +297,22 @@ impl StoragePurger {
                             Ok((target, archives, uploads))
                         }),
                     )?;
+                    // The workspace's own damage is recorded, never a stop: it is being
+                    // removed, and nothing else could remove it.
                     let history = if repositories.path(&scope).exists() {
-                        references::history(&repositories.open(&scope)?)?
+                        references::history_recording(&repositories.open(&scope)?)?
                     } else {
                         references::History::default()
                     };
                     Ok((target, archives, uploads, history))
                 })?;
-                // The same structural sets a survivor is read by (`objects`): what the cards
-                // name, and what the conversion records among them name.
-                let mut objects = target;
-                objects.extend(history.objects.keys().cloned());
-                references::follow_records(
-                    &blobs,
-                    &scope.tenant_id,
-                    &history.records,
-                    &mut objects,
-                )?;
-                let mut held = BTreeSet::new();
-                for digest in objects {
-                    if blobs.local_path(&scope.tenant_id, &digest)?.is_file() {
-                        held.insert(digest);
-                    }
-                }
+                let Planned {
+                    revisions,
+                    held,
+                    unread,
+                } = planned_objects(&blobs, &scope.tenant_id, target, history)?;
                 let copy_plan = copies::plan(&pre_migration, &tenant, &workspace)?;
-                Ok((history.revisions, held, copy_plan, archives, uploads))
+                Ok((revisions, held, copy_plan, archives, uploads, unread))
             })
             .await?
         };
@@ -324,6 +342,7 @@ impl StoragePurger {
                     remove: copy_plan.remove,
                     rewritten: BTreeSet::new(),
                     superseded: BTreeSet::new(),
+                    unread,
                 };
                 invalidate_revisions(transaction, &tenant, &workspace, purge, &history)?;
                 transaction
@@ -580,16 +599,35 @@ impl StoragePurger {
         let surviving = {
             let (blobs, scope) = (blobs.clone(), scope.clone());
             blocking(move || {
-                let (mut found, mut records) = (BTreeSet::new(), BTreeSet::new());
+                let (mut found, mut followed) = (BTreeSet::new(), BTreeSet::new());
                 for path in repositories.others(&scope.tenant_id, &scope)? {
+                    // The survivor's identity, from its repository directory
+                    // (`Repositories::path`): a failure in its history names it.
+                    let workspace = path
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_default();
                     let repository = git2::Repository::open_bare(&path)
                         .map_err(|error| crate::git::repo::git(&error))?;
                     // Read structurally, as the plan reads the target: a survivor's card or
-                    // conversion record that does not read fails the purge (`damaged`) rather
-                    // than risk deleting what it names.
-                    let history = references::history(&repository)?;
+                    // conversion record that does not read fails the purge (`damaged`, naming
+                    // the survivor) rather than risk deleting what it names. Each record is
+                    // followed once, under the first survivor whose card names it.
+                    let history = references::history_naming(&repository, &workspace)?;
                     found.extend(history.objects.into_keys());
-                    records.extend(history.records);
+                    let records: BTreeSet<Digest> = history
+                        .records
+                        .into_iter()
+                        .filter(|record| !followed.contains(record))
+                        .collect();
+                    references::follow_records(
+                        &blobs,
+                        &scope.tenant_id,
+                        &records,
+                        &mut found,
+                        &mut references::refusing_in(&workspace),
+                    )?;
+                    followed.extend(records);
                 }
                 // The objects other workspaces were putting when the sweep began, and those of
                 // their pending puts, are about to be referenced, and kept. A conversion record
@@ -598,7 +636,6 @@ impl StoragePurger {
                 // names each as a job output.
                 found.extend(pinned);
                 found.extend(pending);
-                references::follow_records(&blobs, &scope.tenant_id, &records, &mut found)?;
                 surviving.extend(found);
                 Ok(surviving)
             })
@@ -697,6 +734,41 @@ impl Purger for StoragePurger {
             ))
         })
     }
+}
+
+/// The plan's objects: every held object the target's `rows`, its `history`'s cards and the
+/// conversion records among them name, the same structural sets a survivor is read by
+/// (`StoragePurger::objects`). A card-named record that does not read is recorded with the
+/// history's own unread files, never a stop. Blocking.
+fn planned_objects(
+    blobs: &crate::blobs::LocalBlobs,
+    tenant: &TenantId,
+    rows: BTreeSet<Digest>,
+    history: references::History,
+) -> Result<Planned, ApiError> {
+    let references::History {
+        revisions,
+        objects: named,
+        records: followed,
+        mut unread,
+    } = history;
+    let mut objects = rows;
+    objects.extend(named.into_keys());
+    references::follow_records(blobs, tenant, &followed, &mut objects, &mut |message| {
+        unread.push(message);
+        Ok(())
+    })?;
+    let mut held = BTreeSet::new();
+    for digest in objects {
+        if blobs.local_path(tenant, &digest)?.is_file() {
+            held.insert(digest);
+        }
+    }
+    Ok(Planned {
+        revisions,
+        held,
+        unread,
+    })
 }
 
 /// Map every revision of the workspace, and every revision an earlier item purge of it

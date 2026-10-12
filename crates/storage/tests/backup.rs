@@ -6801,9 +6801,10 @@ async fn rr8_purge(
         .await)
 }
 
-/// B-1: a source appearance that does not read as one is damage (only the application writes
-/// them). A backup of its workspace fails naming it, and so does a purge of another workspace,
-/// which reads it as a survivor's: neither guesses what it names, from tokens or otherwise.
+/// B-1: a source appearance that does not read as one (here its `object` is not a digest) is
+/// damage (only the application writes them). A backup of its workspace fails naming it, and so
+/// does a purge of another workspace, which reads it as a survivor's and names the damaged
+/// workspace too (round 4, N-10): neither guesses what it names, from tokens or otherwise.
 #[tokio::test]
 async fn backup_a_source_appearance_that_does_not_read_fails_a_backup_and_a_purge() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -6811,14 +6812,11 @@ async fn backup_a_source_appearance_that_does_not_read_fails_a_backup_and_a_purg
     let (damaged, _) = create(&storage, "local", 1, "Damaged").await?;
     let (other, _) = create(&storage, "local", 2, "Other").await?;
     let path = format!(".okf/sources/{}.json", uuid_text(15));
-    let named = put(&storage, &damaged, b"rr8 bytes the damaged file names")
-        .await?
-        .digest;
     rr8_commit_raw_file(
         &storage,
         &damaged,
         &path,
-        format!("{{\"object\": \"{}\"}}", named.as_str()).as_bytes(),
+        b"{\"object\": \"not a digest\", \"names\": []}",
     )?;
     let error = err_of(
         storage
@@ -6830,7 +6828,11 @@ async fn backup_a_source_appearance_that_does_not_read_fails_a_backup_and_a_purg
     assert!(error.message.contains(&path), "{error}");
     let error = err_of(rr8_purge(&storage, &other).await?)?;
     assert_eq!(error.code, ErrorCode::Internal, "{error}");
-    assert!(error.message.contains(&path), "{error}");
+    assert!(
+        error.message.contains(&path)
+            && error.message.contains(&damaged.workspace_id.0.to_string()),
+        "names the path and the damaged workspace: {error}"
+    );
     Ok(())
 }
 
@@ -6875,7 +6877,11 @@ async fn backup_a_card_named_record_that_does_not_read_fails_a_backup_and_a_purg
     );
     let error = err_of(rr8_purge(&storage, &other).await?)?;
     assert_eq!(error.code, ErrorCode::Internal, "{error}");
-    assert!(error.message.contains(record.as_str()), "{error}");
+    assert!(
+        error.message.contains(record.as_str())
+            && error.message.contains(&damaged.workspace_id.0.to_string()),
+        "names the record and the damaged workspace: {error}"
+    );
     Ok(())
 }
 
@@ -7099,13 +7105,19 @@ async fn rr8_rows(
 /// picture, then its completion; a correction and supplied text; an export artifact; a derived
 /// dataset; a completed upload) references structurally every object the store holds for it:
 /// its archive, which copies exactly that set, holds every one, so no object is reached only by
-/// a token. A purge of another workspace that names each of those objects too deletes none.
+/// a token.
+///
+/// Round 4 (N-15): the workspace is built in another tenant and its archive imported into
+/// `local`, the way a survivor comes to hold a conversion record whose exports and assets no
+/// `job_outputs` row names (an import copies no job row), so only following the record keeps
+/// them. A purge of another `local` workspace that names each of the eight objects as its own
+/// originals deletes none.
 #[tokio::test]
 async fn backup_every_object_a_rich_workspace_uses_is_structural_and_survives_another_purge()
 -> TestResult {
     let directory = tempfile::tempdir()?;
     let storage = Storage::open(directory.path())?;
-    let (rich, created) = create(&storage, "local", 1, "Rich").await?;
+    let (rich, created) = create(&storage, "elsewhere", 1, "Rich").await?;
     let (item, revision, converted) = rr8_converted(&storage, &rich, &created).await?;
     let rows = rr8_rows(&storage, &rich, item, &revision).await?;
     // The archive copies exactly the structural set; every object the store holds is in it.
@@ -7113,8 +7125,8 @@ async fn backup_every_object_a_rich_workspace_uses_is_structural_and_survives_an
         .backups()
         .write_workspace_archive(&rich, uuid!(40)?)
         .await?;
-    let archived = rr8_archived(directory.path(), &archive.digest)?;
-    let mut stored = rr8_stored(directory.path(), "local")?;
+    let archived = rr9_archived(directory.path(), "elsewhere", &archive.digest)?;
+    let mut stored = rr8_stored(directory.path(), "elsewhere")?;
     stored.remove(archive.digest.as_str());
     assert_eq!(
         archived, stored,
@@ -7128,8 +7140,51 @@ async fn backup_every_object_a_rich_workspace_uses_is_structural_and_survives_an
         8,
         "the five converted objects and the three rows'"
     );
-    // Another workspace names every one of them, as its own originals, and is purged.
-    let (other, other_head) = create(&storage, "local", 2, "Other").await?;
+    // Imported into `local`, the workspace holds the eight objects through its history and its
+    // rows alone: no job row came with it, so the record's export, render and picture are kept
+    // only by following the record its card names.
+    let (restored, _) = create(&storage, "local", 2, "Restored").await?;
+    let archive_bytes = std::fs::read(rr9_object_file(
+        directory.path(),
+        "elsewhere",
+        &archive.digest,
+    )?)?;
+    let uploaded = storage
+        .blobs()
+        .put(
+            &restored,
+            Box::pin(std::io::Cursor::new(archive_bytes)),
+            1 << 30,
+            None,
+        )
+        .await?
+        .digest;
+    storage
+        .backups()
+        .restore_import(&restored, uploaded, uuid!(84)?, vec!["ana".to_owned()])
+        .await?;
+    let live = directory.path().join("records.sqlite");
+    assert_eq!(
+        count(
+            &live,
+            &format!(
+                "SELECT count(*) FROM job_outputs JOIN jobs USING (job_id)
+                 WHERE jobs.workspace_id = '{}'",
+                restored.workspace_id.0
+            ),
+        )?,
+        0,
+        "an import copies no job row, so no output names the record's exports or assets"
+    );
+    for name in &archived {
+        assert!(
+            object_file(directory.path(), &Digest::try_from(name.clone())?)?.is_file(),
+            "{name} was put back by the import"
+        );
+    }
+    // Another workspace of `local` names every one of them, as its own originals, and is
+    // purged.
+    let (other, other_head) = create(&storage, "local", 3, "Other").await?;
     let mut cards = Vec::new();
     for (n, name) in (100_u32..).zip(&archived) {
         let digest = Digest::try_from(name.clone())?;
@@ -7151,7 +7206,7 @@ async fn backup_every_object_a_rich_workspace_uses_is_structural_and_survives_an
     for name in &archived {
         assert!(
             object_file(directory.path(), &Digest::try_from(name.clone())?)?.is_file(),
-            "another workspace's purge deleted {name}, which the rich workspace uses"
+            "another workspace's purge deleted {name}, which the restored workspace uses"
         );
     }
     Ok(())
@@ -7525,6 +7580,378 @@ async fn rr7_a_small_pending_json_naming_another_workspaces_object_keeps_nothing
     put(&storage, &uploader, text.as_bytes()).await?;
     rr5_purge(&storage, &target).await?;
     assert!(!object_file(directory.path(), &hidden)?.is_file());
+    Ok(())
+}
+
+// B1-R round 4 (`rr9_`, the round 3 re-review's probes): a card's two references are read by
+// path, a workspace's own damage never stops its purge, a survivor's damage names the
+// workspace, and the restore refusals the review probed are committed tests.
+
+/// The object `digest` of tenant `tenant` in the store at `data`.
+fn rr9_object_file(data: &Path, tenant: &str, digest: &Digest) -> Fallible<std::path::PathBuf> {
+    Ok(data
+        .join("objects")
+        .join(tenant)
+        .join(some(digest.as_str().get(..2), "a digest")?)
+        .join(digest.as_str()))
+}
+
+/// The `objects/` entries of the workspace archive object `digest` of tenant `tenant`.
+fn rr9_archived(
+    data: &Path,
+    tenant: &str,
+    digest: &Digest,
+) -> Fallible<std::collections::BTreeSet<String>> {
+    Ok(entries(&rr9_object_file(data, tenant, digest)?)?
+        .into_iter()
+        .filter_map(|name| name.strip_prefix("objects/").map(str::to_owned))
+        .collect())
+}
+
+/// The one text `query` answers in `database`.
+fn rr9_text(database: &Path, query: &str) -> Fallible<String> {
+    let connection = rusqlite::Connection::open(database)?;
+    Ok(connection.query_row(query, [], |row| row.get(0))?)
+}
+
+/// The JSON of a valid source appearance over `object` (`card`'s), with `extra` fields merged in
+/// at its top level.
+fn rr9_appearance(object: &Digest, extra: &serde_json::Value) -> Fallible<Vec<u8>> {
+    let mut appearance = json!({
+        "object": object.as_str(),
+        "names": [{
+            "filename": "scan.pdf",
+            "folder": "",
+            "observed_at": "2026-10-09T12:00:00.000Z",
+            "supplied_by": "ana"
+        }],
+        "media_type": "application/pdf",
+        "size": "10",
+        "metadata": {},
+        "extraction": {
+            "outcome": { "status": "unsupported" },
+            "text_origin": "none",
+            "corrected": false,
+            "warnings": []
+        }
+    });
+    if let (Some(fields), Some(more)) = (appearance.as_object_mut(), extra.as_object()) {
+        for (key, value) in more {
+            fields.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(serde_json::to_vec(&appearance)?)
+}
+
+/// Q3(b): a survivor's appearance that is valid except for one field this build does not know
+/// (as a later contract might add, or an earlier one had). Read by path, it still names its
+/// original, and another workspace's purge completes and keeps it. Read through the contract's
+/// `deny_unknown_fields` type, it is "damaged", and the purge stops at its objects step, after
+/// the target's rows and repository are gone.
+#[tokio::test]
+async fn rr9_an_appearance_with_an_unknown_field_does_not_stop_purges() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (survivor, _) = create(&storage, "local", 1, "Survivor").await?;
+    let (target, target_head) = create(&storage, "local", 2, "Target").await?;
+    let bytes = b"rr9 an original both workspaces hold";
+    let shared = put(&storage, &survivor, bytes).await?.digest;
+    rr8_commit_raw_file(
+        &storage,
+        &survivor,
+        &format!(".okf/sources/{}.json", uuid_text(15)),
+        &rr9_appearance(
+            &shared,
+            &json!({ "rr9_later_field": "a field a later contract adds" }),
+        )?,
+    )?;
+    put(&storage, &target, bytes).await?;
+    commit(
+        &storage,
+        &target,
+        3,
+        &target_head,
+        vec![card(uuid!(16)?, &shared)?],
+    )
+    .await?;
+    let outcome = rr8_purge(&storage, &target).await?;
+    let live = directory.path().join("records.sqlite");
+    let rows = count(
+        &live,
+        &format!(
+            "SELECT count(*) FROM workspaces WHERE workspace_id = '{}'",
+            target.workspace_id.0
+        ),
+    )?;
+    let repository = directory
+        .path()
+        .join("repositories")
+        .join("local")
+        .join(format!("{}.git", target.workspace_id.0))
+        .exists();
+    match outcome {
+        Ok(_) => {
+            assert!(
+                object_file(directory.path(), &shared)?.is_file(),
+                "the survivor's original was deleted"
+            );
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "another workspace's purge failed as {:?} ({}), because a survivor's appearance \
+             carries one unknown field; the target's workspace rows left: {rows}, its repository \
+             left: {repository}",
+            error.code, error.message
+        )
+        .into()),
+    }
+}
+
+/// R3-1: a survivor's card as a later contract might write it: a field this build does not know
+/// at the top and under `extraction`, an unknown variant in an unrelated enum
+/// (`outcome.status`) and a changed type (`size`), over objects the target put. Its `object` and
+/// `extraction.digest` are read by path, so the target's purge keeps the original, the record
+/// and the record's export and asset (nothing else of the survivor names them); the survivor's
+/// backup copies exactly those four; and that archive imports into another tenant, which puts
+/// the four back.
+#[tokio::test]
+async fn rr9_a_card_of_a_later_contract_is_read_by_purge_backup_and_restore() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (survivor, _) = create(&storage, "local", 1, "Survivor").await?;
+    let (target, _) = create(&storage, "local", 2, "Target").await?;
+    let original = put(&storage, &target, b"rr9 a later contract's original")
+        .await?
+        .digest;
+    let export = put(&storage, &target, b"{\"rr9\": \"a later export\"}")
+        .await?
+        .digest;
+    let asset = put(&storage, &target, b"rr9 a later render").await?.digest;
+    let record = put(&storage, &target, &rr4_record(&export, &asset, 2))
+        .await?
+        .digest;
+    let later = rr9_appearance(
+        &original,
+        &json!({
+            "rr9_later_field": { "nested": [1, 2, 3] },
+            "size": 10,
+            "extraction": {
+                "outcome": { "status": "rr9_later_status", "rr9_detail": "x" },
+                "digest": record.as_str(),
+                "text_origin": "none",
+                "rr9_later_extraction_field": true
+            }
+        }),
+    )?;
+    rr8_commit_raw_file(
+        &storage,
+        &survivor,
+        &format!(".okf/sources/{}.json", uuid_text(15)),
+        &later,
+    )?;
+    let four = [&original, &record, &export, &asset];
+    // Purge: the target's puts survive only through the survivor's card, read by path.
+    rr8_purge(&storage, &target).await??;
+    for digest in four {
+        assert!(
+            object_file(directory.path(), digest)?.is_file(),
+            "the target's purge deleted {digest:?}, which a later contract's card names"
+        );
+    }
+    // Backup: the archive copies exactly what the card and its record name.
+    let archive = storage
+        .backups()
+        .write_workspace_archive(&survivor, uuid!(40)?)
+        .await?;
+    let archived = rr8_archived(directory.path(), &archive.digest)?;
+    let expected: std::collections::BTreeSet<String> = four
+        .iter()
+        .map(|digest| digest.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        archived, expected,
+        "the archive holds the four named objects"
+    );
+    // Restore: the archive imports, its check having read the card, and puts the four back.
+    let bytes = std::fs::read(object_file(directory.path(), &archive.digest)?)?;
+    let (restored, _, imported) = import_crafted(&storage, bytes).await?;
+    imported?;
+    for digest in four {
+        assert!(
+            rr9_object_file(directory.path(), restored.tenant_id.as_str(), digest)?.is_file(),
+            "the import did not put {digest:?} back"
+        );
+    }
+    Ok(())
+}
+
+/// N-9, N-10: a workspace holds an appearance whose `object` is not a digest and a card-named
+/// conversion record that does not read. Another workspace's purge stops at its objects step,
+/// `Internal`, naming the damaged workspace and the path (its own rows are gone by then, as
+/// before; the message says where to look). The damaged workspace's own purge completes, and its
+/// plan records the path and the record digest it could not read. The other's purge, repeated,
+/// then completes: purging the damaged workspace is the in-product repair.
+#[tokio::test]
+async fn rr9_a_damaged_workspace_purges_itself_and_frees_the_tenants_purges() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (damaged, head) = create(&storage, "local", 1, "Damaged").await?;
+    let (other, _) = create(&storage, "local", 2, "Other").await?;
+    let original = put(&storage, &damaged, b"rr9 a converted original")
+        .await?
+        .digest;
+    let record = put(&storage, &damaged, b"{\"structured\": [{\"digest\": \"cut")
+        .await?
+        .digest;
+    commit(
+        &storage,
+        &damaged,
+        3,
+        &head,
+        vec![rr4_converted_card(
+            uuid!(14)?,
+            "sources/report.md",
+            &original,
+            &record,
+        )?],
+    )
+    .await?;
+    let path = format!(".okf/sources/{}.json", uuid_text(15));
+    rr8_commit_raw_file(&storage, &damaged, &path, b"{\"object\": \"not a digest\"}")?;
+    // Another workspace's purge, recorded under its own ids, stops at its objects step, naming
+    // the damaged workspace and the path.
+    let tenant = other.tenant_id.clone();
+    let purge = storage
+        .records()
+        .create_purge(
+            &tenant,
+            uuid!(70)?,
+            NewPurge {
+                id: uuid!(71)?,
+                target: PurgeTarget::Workspace {
+                    workspace_id: other.workspace_id,
+                },
+                initiator: person("ana"),
+            },
+        )
+        .await?;
+    let error = err_of(
+        storage
+            .purger()
+            .purge_workspace(&tenant, uuid!(72)?, purge.id, other.workspace_id)
+            .await,
+    )?;
+    assert_eq!(error.code, ErrorCode::Internal, "{error}");
+    assert!(
+        error.message.contains(&damaged.workspace_id.0.to_string())
+            && error.message.contains(&path),
+        "names the damaged workspace and the path: {error}"
+    );
+    let live = directory.path().join("records.sqlite");
+    assert_eq!(
+        count(
+            &live,
+            &format!(
+                "SELECT count(*) FROM workspaces WHERE workspace_id = '{}'",
+                other.workspace_id.0
+            )
+        )?,
+        0,
+        "the other workspace's rows are already gone"
+    );
+    // The damaged workspace's own purge completes, recording what it could not read.
+    rr8_purge(&storage, &damaged).await??;
+    let unread: serde_json::Value = serde_json::from_str(&rr9_text(
+        &live,
+        &format!(
+            "SELECT json_extract(plan, '$.unread') FROM purge_progress WHERE purge_id = '{}'",
+            uuid_text(61)
+        ),
+    )?)?;
+    let unread = some(unread.as_array(), "the plan's unread list")?;
+    let mentions = |what: &str| {
+        unread
+            .iter()
+            .any(|entry| entry.as_str().is_some_and(|text| text.contains(what)))
+    };
+    assert!(
+        unread.len() == 2 && mentions(&path) && mentions(record.as_str()),
+        "the plan records the appearance's path and the record's digest: {unread:?}"
+    );
+    assert!(
+        !directory
+            .path()
+            .join("repositories")
+            .join("local")
+            .join(format!("{}.git", damaged.workspace_id.0))
+            .exists(),
+        "the damaged workspace's repository is gone"
+    );
+    // The other's purge, repeated, completes now that nothing of the tenant is damaged.
+    storage
+        .purger()
+        .purge_workspace(&tenant, uuid!(72)?, purge.id, other.workspace_id)
+        .await?;
+    Ok(())
+}
+
+/// Q1: digest-shaped text in an appearance's other fields (embedded metadata, nested, and the
+/// converter's model hash) names nothing: A's archive does not copy B's original, and B's purge
+/// deletes it.
+#[tokio::test]
+async fn rr9_metadata_and_model_hashes_copy_and_keep_nothing() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (a, a_head) = create(&storage, "local", 1, "A").await?;
+    let (b, b_head) = create(&storage, "local", 2, "B").await?;
+    let hidden = put(&storage, &b, b"rr9 an original only workspace B holds")
+        .await?
+        .digest;
+    commit(&storage, &b, 3, &b_head, vec![card(uuid!(15)?, &hidden)?]).await?;
+    let source = put(&storage, &a, b"rr9 A's document").await?.digest;
+    let export = put(&storage, &a, b"{\"rr9\": \"A's export\"}")
+        .await?
+        .digest;
+    let asset = put(&storage, &a, b"rr9 A's render").await?.digest;
+    let record = put(&storage, &a, &rr4_record(&export, &asset, 3))
+        .await?
+        .digest;
+    let TreeEdit::WriteSourceCard(mut card) =
+        rr4_converted_card(uuid!(14)?, "sources/doc.md", &source, &record)?
+    else {
+        return Err("a card".into());
+    };
+    let mut appearance = serde_json::to_value(&card.appearance)?;
+    if let Some(fields) = appearance.as_object_mut() {
+        fields.insert(
+            "metadata".to_owned(),
+            json!({ "Title": hidden.as_str(), "xmp": { "deep": [hidden.as_str()] } }),
+        );
+    }
+    if let Some(models) = appearance
+        .pointer_mut("/extraction/converter/models")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for model in models.iter_mut() {
+            if let Some(fields) = model.as_object_mut() {
+                fields.insert("sha256".to_owned(), json!(hidden.as_str()));
+            }
+        }
+    }
+    card.appearance = serde_json::from_value(appearance)?;
+    commit(
+        &storage,
+        &a,
+        4,
+        &a_head,
+        vec![TreeEdit::WriteSourceCard(card)],
+    )
+    .await?;
+    let (copied, kept) = rr7_copied_and_kept(directory.path(), &storage, &a, &b, &hidden).await?;
+    assert!(
+        !copied && !kept,
+        "digest text in A's metadata and model hash: copied {copied}, kept {kept}"
+    );
     Ok(())
 }
 

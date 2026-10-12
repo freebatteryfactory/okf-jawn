@@ -276,9 +276,17 @@ fn checked(
 ///   only derived datasets, and leaves aside artifacts, uploads and job outputs (an import
 ///   copies no job row, `IMPORTED`), which it never copies.
 ///
+/// The history is read as a purge reads a survivor's: a card's `object` and `extraction.digest`
+/// by path, so a card another contract version wrote restores; an appearance that does not read
+/// (not JSON, or a named field that is not a digest), an entry under `.okf/sources` that is not a
+/// file, a manifest commit the pack lacks, and a pack that lacks a parent, tree or appearance
+/// blob a commit needs are each refused, so a restore never plants what would stop the tenant's
+/// purges (`purge::references`).
+///
 /// # Errors
 /// Returns `InvalidInput` naming the digest and what names it, or naming an appearance or
-/// conversion record that does not read; otherwise what the history names.
+/// conversion record that does not read, or the object the pack lacks; otherwise what the
+/// history names.
 fn refuse_unheld(
     opened: &mut Opened,
     manifest: &WorkspaceManifest,
