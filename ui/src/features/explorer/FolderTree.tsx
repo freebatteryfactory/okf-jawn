@@ -11,7 +11,16 @@
  */
 import { type UseQueryResult, useQueries, useQueryClient } from '@tanstack/react-query';
 import { ChartColumn, FileBox, FileText, Folder, FolderOpen } from 'lucide-react';
-import { useEffect, useId, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import {
   type NodeApi,
   type NodeRendererProps,
@@ -55,6 +64,7 @@ export interface FolderTreeProps {
   onOpenItem: (itemId: string) => void;
 }
 
+/** The height of a one-line row; a row whose name wraps measures taller. */
 const ROW_HEIGHT = 30;
 const ROLE_ICON = { note: FileText, source: FileBox, view: ChartColumn } as const;
 const EXTRACTION_WORD = {
@@ -197,6 +207,21 @@ export function FolderTree({
   const height = useElementHeight(boxRef);
   const heading = useId();
 
+  // Measured row heights by entry id: a wrapped name makes its row taller. The list keeps
+  // virtualizing; a changed height re-lays out the list from that row on.
+  const rowHeights = useRef(new Map<string, number>());
+  const rowHeight = useCallback(
+    (node: NodeApi<TreeEntry>) => rowHeights.current.get(node.id) ?? ROW_HEIGHT,
+    [],
+  );
+  const measureRow = useCallback((id: string, index: number, measured: number) => {
+    if (measured <= 0) return; // no layout (or not yet)
+    const next = Math.max(ROW_HEIGHT, Math.ceil(measured));
+    if (rowHeights.current.get(id) === next) return;
+    rowHeights.current.set(id, next);
+    treeRef.current?.redrawList(index);
+  }, []);
+
   // Opening an item from a link expands the folders above it, so the tree can show it selected.
   useEffect(() => {
     if (selectedItemPath === null) return;
@@ -307,36 +332,38 @@ export function FolderTree({
       </p>
       <div ref={boxRef} className="tree-box">
         {root?.isSuccess && entries.length > 0 && (
-          <Tree<TreeEntry>
-            ref={treeRef}
-            data={entries}
-            aria-labelledby={heading}
-            openByDefault={false}
-            initialOpenState={Object.fromEntries(
-              Object.keys(view.expanded).map((folder) => [folderId(folder), true]),
-            )}
-            disableMultiSelection
-            disableEdit
-            disableDrag
-            disableDrop
-            disableSelect={(entry) => entry.kind === 'status'}
-            // Arborist memoizes on its props as a list, so every prop is always passed: no
-            // selection is the empty string.
-            selection={selected ?? ''}
-            onToggle={(id) => {
-              if (!id.startsWith('folder:')) return;
-              const open = treeRef.current?.isOpen(id) ?? false;
-              setExpanded(workspaceId, id.slice('folder:'.length), open);
-            }}
-            onActivate={activate}
-            rowHeight={ROW_HEIGHT}
-            indent={16}
-            width="100%"
-            height={height}
-            renderRow={TreeRow}
-          >
-            {TreeEntryContent}
-          </Tree>
+          <RowMeasure.Provider value={measureRow}>
+            <Tree<TreeEntry>
+              ref={treeRef}
+              data={entries}
+              aria-labelledby={heading}
+              openByDefault={false}
+              initialOpenState={Object.fromEntries(
+                Object.keys(view.expanded).map((folder) => [folderId(folder), true]),
+              )}
+              disableMultiSelection
+              disableEdit
+              disableDrag
+              disableDrop
+              disableSelect={(entry) => entry.kind === 'status'}
+              // Arborist memoizes on its props as a list, so every prop is always passed: no
+              // selection is the empty string.
+              selection={selected ?? ''}
+              onToggle={(id) => {
+                if (!id.startsWith('folder:')) return;
+                const open = treeRef.current?.isOpen(id) ?? false;
+                setExpanded(workspaceId, id.slice('folder:'.length), open);
+              }}
+              onActivate={activate}
+              rowHeight={rowHeight}
+              indent={16}
+              width="100%"
+              height={height}
+              renderRow={TreeRow}
+            >
+              {TreeEntryContent}
+            </Tree>
+          </RowMeasure.Provider>
         )}
       </div>
     </section>
@@ -361,15 +388,25 @@ function entryLabel(entry: TreeEntry): string {
  * Arborist's row, with `aria-expanded` only on folders and Enter opening the entry. The tree is
  * virtualized, so not every entry is in the DOM: each row states its place among its siblings
  * (`aria-posinset` of `aria-setsize`), as the WAI-ARIA tree pattern asks.
+ *
+ * One row is the tree's tab stop (roving tabindex): the focused row, else the selected one, else
+ * the first. Arborist keeps Tab to one stop for the whole tree, and the stop also gives the
+ * scrolling list a tabbable row, so the region a keyboard scrolls is reachable (axe
+ * scrollable-region-focusable).
  */
 function TreeRow({ node, attrs, innerRef, children }: RowRendererProps<TreeEntry>) {
-  const { 'aria-expanded': _expanded, ...rest } = attrs;
+  const { 'aria-expanded': _expanded, style, ...rest } = attrs;
   const siblings = node.parent?.children?.length ?? 1;
+  const tree = node.tree;
+  const stop = tree.focusedNode ?? tree.selectedNodes.at(0) ?? tree.firstNode;
   return (
     <div
       {...rest}
+      // Arborist lets a row grow to `max-content`, which makes the list scroll sideways and
+      // hides a long name from the keyboard. Rows stay as wide as the column and wrap instead.
+      style={{ ...style, minWidth: 0 }}
       role="treeitem"
-      tabIndex={-1}
+      tabIndex={stop?.id === node.id ? 0 : -1}
       aria-label={entryLabel(node.data)}
       aria-expanded={node.data.kind === 'folder' ? node.isOpen : undefined}
       aria-setsize={siblings}
@@ -388,7 +425,26 @@ function TreeRow({ node, attrs, innerRef, children }: RowRendererProps<TreeEntry
   );
 }
 
+/**
+ * Reports a row's measured height to the tree. Rows wrap long names inside the column instead of
+ * scrolling sideways, so their heights vary; each entry measures itself and the virtualized list
+ * re-lays out from that row on.
+ */
+const RowMeasure = createContext<(id: string, index: number, height: number) => void>(() => {});
+
 function TreeEntryContent({ node, style }: NodeRendererProps<TreeEntry>) {
+  const measure = useContext(RowMeasure);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const { id, rowIndex } = node;
+  useLayoutEffect(() => {
+    const element = contentRef.current;
+    if (element === null) return;
+    const report = () => measure(id, rowIndex ?? 0, element.getBoundingClientRect().height);
+    report();
+    const observer = new ResizeObserver(report);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [id, rowIndex, measure]);
   const entry = node.data;
   const item = entry.item;
   const Icon =
@@ -401,8 +457,8 @@ function TreeEntryContent({ node, style }: NodeRendererProps<TreeEntry>) {
         : ROLE_ICON[item.kind];
   const extraction = extractionWord(item);
   return (
-    <div style={style} className={`tree-entry tree-${entry.kind}`}>
-      {Icon === null ? null : <Icon aria-hidden="true" size={16} />}
+    <div ref={contentRef} style={style} className={`tree-entry tree-${entry.kind}`}>
+      {Icon === null ? null : <Icon aria-hidden="true" size={16} className="tree-icon" />}
       <span className="tree-name">{entry.name}</span>
       {item === null ? null : <span className="tree-type">{item.type_name}</span>}
       {extraction === null ? null : <span className="tree-flag">{extraction}</span>}

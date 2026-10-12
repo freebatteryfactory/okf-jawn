@@ -196,12 +196,23 @@ main.app-main:has(.explorer) {
 [role="treeitem"]:focus-visible {
   outline-offset: -3px;
 }
+/* A long name wraps inside its row (the row measures itself); the tree never scrolls sideways. */
 .tree-entry {
   display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  height: 100%;
-  white-space: nowrap;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  column-gap: 0.35rem;
+  min-height: 30px;
+  padding-block: 0.2rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.tree-name {
+  min-width: 0;
+}
+.tree-icon {
+  flex: none;
+  margin-top: 0.15rem;
 }
 .tree-type,
 .tree-flag {

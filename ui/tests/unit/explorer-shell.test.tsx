@@ -1,6 +1,6 @@
 /** The Explorer shell: workspace list, lazily listed tree, and deep links that reopen an item and selection. */
 
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fail, mockApi, notImplemented, ok } from './support/api';
@@ -11,11 +11,13 @@ import {
   NOTE,
   noteSummary,
   OLD,
+  OTHER,
   otherSummary,
   readResponse,
   renderAt,
   sourceSummary,
   sourcesOfNote,
+  summary,
   WS,
   workspace,
 } from './support/workspace';
@@ -104,6 +106,56 @@ describe('folder tree', () => {
       expect(body.page).toEqual({ limit: 200, cursor: null });
     }
     expect(api.violations).toEqual([]);
+  });
+
+  it('wraps a long name in a taller measured row, never a sideways-scrolling one', async () => {
+    const title = 'Minutes of the October workshop on source provenance and naming rules';
+    const long = summary(OTHER, 'minutes.md', title, 'meeting-note');
+    mockApi({
+      ...workspaceHandlers(),
+      [LIST]: () => ok(listing(['notes'], [long, sourceSummary])),
+    });
+    // happy-dom has no layout and never reports resizes: the entry holding the long name
+    // measures one line high, then two once the column narrows (its observers are told).
+    let lines = 1;
+    const resized: Array<() => void> = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(callback: (entries: unknown[], observer: unknown) => void) {
+          resized.push(() => callback([], this));
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    const spy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (!this.classList.contains('tree-entry')) return original.call(this);
+        const wraps = this.textContent?.includes(title) && lines === 2;
+        return new DOMRect(0, 0, 200, wraps ? 52 : 30);
+      });
+    try {
+      renderAt(`/w/${WS}`);
+      const tree = await screen.findByRole('tree', { name: 'Folders' });
+      const row = await within(tree).findByRole('treeitem', { name: new RegExp(title) });
+      const after = within(tree).getByRole('treeitem', { name: /Annual report/ });
+      await waitFor(() => expect(after.style.top).toBe('60px'));
+      lines = 2;
+      act(() => {
+        for (const callback of resized) callback();
+      });
+      await waitFor(() => expect(row.style.height).toBe('52px'));
+      await waitFor(() => expect(after.style.top).toBe('82px'));
+      for (const each of within(tree).getAllByRole('treeitem')) {
+        expect(each.style.minWidth).not.toBe('max-content');
+      }
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('gives every virtualized row its place among its siblings (WAI-ARIA tree)', async () => {
