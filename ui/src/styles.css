@@ -142,6 +142,19 @@ main.app-main:has(.explorer) {
   font-size: 1.1rem;
   margin: 0;
 }
+.head-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-inline-start: auto;
+}
+.head-line p {
+  margin: 0;
+}
+.head-line button {
+  padding: 0.2rem 0.6rem;
+}
 .explorer-columns {
   flex: 1;
   min-height: 0;

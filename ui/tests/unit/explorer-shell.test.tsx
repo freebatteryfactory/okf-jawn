@@ -336,9 +336,7 @@ describe('deep links', () => {
     const api = mockApi(workspaceHandlers());
     const old = 'b'.repeat(40);
     renderAt(`/w/${WS}/i/${NOTE}?rev=${old}`);
-    expect(
-      await screen.findByText(/which a citation named; it is not the latest version/),
-    ).toBeTruthy();
+    expect(await screen.findByText(/it is not the latest version/)).toBeTruthy();
     await waitFor(() => expect(api.callsTo(READ).length).toBeGreaterThan(0));
     expect(api.callsTo(READ)[0]?.at).toEqual({ kind: 'revision', revision: old });
     expect(api.callsTo('/api/reads/get-sources')[0]?.at).toEqual({
@@ -391,7 +389,8 @@ describe('malformed links', () => {
     const read = api.callsTo(READ)[0];
     expect(read?.selection).toEqual({ kind: 'all' });
     expect(read?.at).toEqual({ kind: 'revision', revision: HEAD });
-    expect(screen.queryByText(/Showing/)).toBeNull();
+    // No selection notice: the malformed selection was dropped, not shown.
+    expect(screen.queryByRole('button', { name: 'Show the whole item' })).toBeNull();
     expect(api.violations).toEqual([]);
   });
 

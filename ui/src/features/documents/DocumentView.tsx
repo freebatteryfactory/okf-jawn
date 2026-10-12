@@ -1,19 +1,23 @@
 /**
  * Read one item: its identity and properties from `get_item`, its text from `read_item` as
- * sanitized Markdown, at one resolved revision and the selection the URL names.
+ * sanitized Markdown, at one resolved revision and the selection the URL names. A revision is
+ * called "the latest" only when a request made for that statement resolved it.
  *
  * A partial read says so and offers its continuation, which resumes the same resolved read;
  * continuing moves keyboard focus to the part it loaded, and a live region says what happened.
  * Warnings, partial extraction and agent-supplied text are shown, never smoothed over. Each
  * operation's failure is shown where its content would have been.
  */
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useRef } from 'react';
 import {
   getItemOptions,
+  openWorkspaceQueryKey,
   readItemInfiniteOptions,
 } from '../../api/generated/@tanstack/react-query.gen';
+import { openWorkspace, readItem } from '../../api/generated/sdk.gen';
 import type { ReadItemRequest, Revision } from '../../api/generated/types.gen';
+import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
 import { FailureNotice } from '../errors/FailureNotice';
 import type { ItemSelection } from '../explorer/search-params';
@@ -27,15 +31,15 @@ export const READ_BUDGET_BYTES = 65_536;
 export interface DocumentViewProps {
   workspaceId: string;
   itemId: string;
-  /** The workspace head. */
-  head: Revision;
-  /** The revision to read at: the head, or the exact revision a citation named. */
+  /** The revision to read at: the shell's resolved head, or the exact revision a link names. */
   revision: Revision;
+  /** A link names this revision, so the reader says whether it is still the latest. */
+  pinned: boolean;
   selection: ItemSelection | undefined;
   /** Show another selection of this item (or the whole item). */
   onSelect: (selection: ItemSelection | undefined) => void;
-  /** Leave a cited revision for the head. */
-  onReadLatest: () => void;
+  /** The latest version was read; `resolved` is the revision the server resolved for it. */
+  onReadLatest: (resolved: Revision) => void;
 }
 
 const ROLE = { note: 'Note', source: 'Source', view: 'View' } as const;
@@ -57,11 +61,110 @@ export function itemOptions(workspaceId: string, itemId: string, revision: Revis
   });
 }
 
+/**
+ * A pinned revision, compared with a head fetched for this comparison (never a cached one), and
+ * the way to the latest version: a read with `at: latest`, which the server resolves once. Its
+ * answer is kept as the first part of a read pinned to the revision it resolved, so the pane,
+ * the URL and the continuation all follow that one read.
+ */
+function PinnedRevision({
+  workspaceId,
+  revision,
+  request,
+  onReadLatest,
+}: {
+  workspaceId: string;
+  revision: Revision;
+  request: ReadItemRequest;
+  onReadLatest: (resolved: Revision) => void;
+}) {
+  const client = useQueryClient();
+  const body = { workspace_id: workspaceId };
+  const latestHead = useQuery({
+    queryKey: [{ ...openWorkspaceQueryKey({ body })[0], _comparedWith: revision }],
+    queryFn: async ({ signal }) => {
+      const { data } = await openWorkspace({ body, signal, throwOnError: true });
+      return data;
+    },
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  });
+  const readLatest = useMutation({
+    mutationFn: async () => {
+      const { data } = await readItem({
+        body: { ...request, at: { kind: 'latest' }, cursor: null },
+        throwOnError: true,
+      });
+      return data;
+    },
+    onSuccess: (response) => {
+      const resolved = response.source.revision;
+      const pinned: ReadItemRequest = { ...request, at: { kind: 'revision', revision: resolved } };
+      client.setQueryData(readItemInfiniteOptions({ body: pinned }).queryKey, {
+        pages: [response],
+        pageParams: [{ body: pinned }],
+      });
+      onReadLatest(resolved);
+    },
+  });
+
+  const reading = <code title={revision}>{short(revision)}</code>;
+  if (latestHead.isPending) {
+    return (
+      <p role="note" className="notice">
+        You are reading revision {reading}. Checking whether it is the latest version…
+      </p>
+    );
+  }
+  if (latestHead.isError) {
+    return (
+      <FailureNotice
+        context="Checking for the latest version"
+        error={latestHead.error}
+        onRetry={() => void latestHead.refetch()}
+        workspaceId={workspaceId}
+      />
+    );
+  }
+  const checked = <Instant value={new Date(latestHead.dataUpdatedAt).toISOString()} />;
+  if (latestHead.data.head === revision) {
+    return (
+      <p role="note" className="notice">
+        You are reading revision {reading}, the latest version when checked at {checked}.
+      </p>
+    );
+  }
+  return (
+    <div role="note" className="notice">
+      <p>
+        You are reading revision {reading}; it is not the latest version (checked at {checked}).{' '}
+        <button
+          type="button"
+          aria-disabled={readLatest.isPending}
+          onClick={() => {
+            if (!readLatest.isPending) readLatest.mutate();
+          }}
+        >
+          {readLatest.isPending ? 'Reading the latest version…' : 'Read the latest version'}
+        </button>
+      </p>
+      {readLatest.isError && (
+        <FailureNotice
+          context="Reading the latest version"
+          error={readLatest.error}
+          onRetry={() => readLatest.mutate()}
+          workspaceId={workspaceId}
+        />
+      )}
+    </div>
+  );
+}
+
 export function DocumentView({
   workspaceId,
   itemId,
-  head,
   revision,
+  pinned,
   selection,
   onSelect,
   onReadLatest,
@@ -143,14 +246,13 @@ export function DocumentView({
         {summary?.description ? <p>{summary.description}</p> : null}
       </header>
 
-      {revision !== head && (
-        <p role="note" className="notice">
-          You are reading revision <code title={revision}>{short(revision)}</code>, which a citation
-          named; it is not the latest version.{' '}
-          <button type="button" onClick={onReadLatest}>
-            Read the latest version
-          </button>
-        </p>
+      {pinned && (
+        <PinnedRevision
+          workspaceId={workspaceId}
+          revision={revision}
+          request={request}
+          onReadLatest={onReadLatest}
+        />
       )}
       {selection && (
         <p role="note" className="notice">

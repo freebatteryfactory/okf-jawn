@@ -3,16 +3,21 @@
  * resizable columns.
  *
  * The URL says which item the focused pane shows, at which selection and cited revision; the
- * Explorer store remembers the other tabs. Every read is pinned to the workspace head the
- * server resolved when the workspace opened, unless a citation named an exact revision.
+ * Explorer store remembers the other tabs. Listings, search and reads are pinned to one resolved
+ * workspace head, so their pages agree, unless a link names an exact revision. That head is
+ * shown "as of" the moment it was resolved, never as "the latest": Refresh (or returning to the
+ * window) re-resolves it. (SPEC section 3: a latest selector is resolved once, by a request.)
  */
 import { useQuery } from '@tanstack/react-query';
 import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import type { Workspace } from '../../api/generated/types.gen';
 import { zItemId } from '../../api/generated/zod.gen';
+import { Instant } from '../../lib/instant';
 import { itemOptions } from '../documents/DocumentView';
+import { short } from '../documents/describe';
+import { FailureNotice } from '../errors/FailureNotice';
 import { SearchForm, SearchResults } from '../search/SearchPanel';
 import { DocumentPanes, matchingLayout } from './DocumentPanes';
 import { FolderTree } from './FolderTree';
@@ -20,8 +25,20 @@ import { SourcePanel } from './SourcePanel';
 import { type ItemSelection, validateItemSearch, validateWorkspaceSearch } from './search-params';
 import { type PaneLocation, useExplorerStore, useWorkspaceView } from './store';
 
+/** The resolved head the shell is pinned to: when it was resolved, and how to resolve it again. */
+export interface HeadState {
+  /** When the server's answer resolving the head arrived (milliseconds since the epoch). */
+  resolvedAt: number;
+  refreshing: boolean;
+  /** The last refresh failed; the shell keeps the head it had. */
+  refreshError: unknown;
+  /** Re-resolve the head; the new head, or null when the refresh failed. */
+  refresh: () => Promise<string | null>;
+}
+
 export interface ExplorerShellProps {
   workspace: Workspace;
+  head: HeadState;
 }
 
 const COLUMNS_GROUP = 'explorer-columns';
@@ -33,7 +50,7 @@ interface Destination {
   replace?: boolean;
 }
 
-export function ExplorerShell({ workspace }: ExplorerShellProps) {
+export function ExplorerShell({ workspace, head: headState }: ExplorerShellProps) {
   const workspaceId = workspace.id;
   const head = workspace.head;
   const params = useParams({ strict: false });
@@ -117,6 +134,7 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
       <div className="explorer-bar">
         <h1 className="workspace-name">{workspace.name}</h1>
         {workspace.description ? <p className="meta">{workspace.description}</p> : null}
+        <HeadLine head={head} state={headState} />
       </div>
       <Group
         orientation="horizontal"
@@ -180,7 +198,7 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
               goToItem(target, { ...location, replace: true });
             }}
             onSelect={(target, location) => goToItem(target, location)}
-            onReadLatest={(target) => goToItem(target, { sel })}
+            onReadLatest={(target, location) => goToItem(target, location)}
           />
         </Panel>
         <Separator className="separator" aria-label="Resize the source panel" />
@@ -191,6 +209,43 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
         </Panel>
       </Group>
       <Outlet />
+    </div>
+  );
+}
+
+/**
+ * The head the shell lists, "as of" when it was resolved, with Refresh to resolve it again.
+ * Refresh keeps keyboard focus (aria-disabled while it runs) and a live region says the outcome.
+ */
+function HeadLine({ head, state }: { head: string; state: HeadState }) {
+  const [outcome, setOutcome] = useState('');
+  const refresh = async () => {
+    if (state.refreshing) return;
+    setOutcome('Refreshing…');
+    const next = await state.refresh();
+    setOutcome(
+      next === null
+        ? 'The workspace could not be refreshed; still showing the version above.'
+        : next === head
+          ? `Refreshed: no newer version; still revision ${short(head)}.`
+          : `Refreshed: now showing revision ${short(next)}.`,
+    );
+  };
+  return (
+    <div className="head-line">
+      <p className="meta">
+        Showing the workspace as of <Instant value={new Date(state.resolvedAt).toISOString()} />,
+        revision <code title={head}>{short(head)}</code>.
+      </p>
+      <button type="button" aria-disabled={state.refreshing} onClick={() => void refresh()}>
+        {state.refreshing ? 'Refreshing…' : 'Refresh'}
+      </button>
+      <p role="status" className="sr-only">
+        {outcome}
+      </p>
+      {state.refreshError !== null && (
+        <FailureNotice context="Refreshing this workspace" error={state.refreshError} />
+      )}
     </div>
   );
 }

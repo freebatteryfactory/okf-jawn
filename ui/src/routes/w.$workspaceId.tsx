@@ -3,6 +3,9 @@
  *
  * The workspace id in the path is checked with the generated schema before anything is sent: a
  * malformed one gets a plain-language message and no request.
+ *
+ * The head is re-resolved whenever the window regains focus, and on Refresh; the shell shows it
+ * "as of" when it was resolved. A failed refresh keeps the Explorer and says so there.
  */
 import { useQuery } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
@@ -23,6 +26,8 @@ function WorkspaceRoute() {
   const workspace = useQuery({
     ...openWorkspaceOptions({ body: { workspace_id: workspaceId } }),
     enabled: valid,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
   });
   if (!valid) {
     return (
@@ -37,23 +42,36 @@ function WorkspaceRoute() {
       </div>
     );
   }
-  if (workspace.isPending) {
+  if (workspace.data === undefined) {
+    if (workspace.isError) {
+      return (
+        <div className="page-status">
+          <FailureNotice
+            context="Opening this workspace"
+            error={workspace.error}
+            onRetry={() => void workspace.refetch()}
+          />
+        </div>
+      );
+    }
     return (
       <p role="status" className="page-status">
         Opening the workspace…
       </p>
     );
   }
-  if (workspace.isError) {
-    return (
-      <div className="page-status">
-        <FailureNotice
-          context="Opening this workspace"
-          error={workspace.error}
-          onRetry={() => void workspace.refetch()}
-        />
-      </div>
-    );
-  }
-  return <ExplorerShell workspace={workspace.data} />;
+  return (
+    <ExplorerShell
+      workspace={workspace.data}
+      head={{
+        resolvedAt: workspace.dataUpdatedAt,
+        refreshing: workspace.isFetching,
+        refreshError: workspace.isError ? workspace.error : null,
+        refresh: async () => {
+          const result = await workspace.refetch();
+          return result.isError ? null : (result.data?.head ?? null);
+        },
+      }}
+    />
+  );
 }

@@ -45,7 +45,8 @@ export interface DocumentPanesProps {
   onSplit: (paneId: string, itemId: string) => void;
   /** Show another selection of an item, keeping the revision that pane reads. */
   onSelect: (itemId: string, location: PaneLocation) => void;
-  onReadLatest: (itemId: string) => void;
+  /** The latest version was read: pin the pane to the revision the server resolved. */
+  onReadLatest: (itemId: string, location: PaneLocation) => void;
 }
 
 const PANES_GROUP = 'document-panes';
@@ -222,8 +223,8 @@ function DocumentPane({
                 key={active}
                 workspaceId={workspaceId}
                 itemId={active}
-                head={head}
                 revision={citedRevision ?? head}
+                pinned={citedRevision !== undefined}
                 selection={shownSelection}
                 onSelect={(next) =>
                   onSelect(active, {
@@ -231,7 +232,12 @@ function DocumentPane({
                     ...(citedRevision === undefined ? {} : { rev: citedRevision }),
                   })
                 }
-                onReadLatest={() => onReadLatest(active)}
+                onReadLatest={(resolved) =>
+                  onReadLatest(active, {
+                    ...(shownSelection === undefined ? {} : { sel: shownSelection }),
+                    rev: resolved,
+                  })
+                }
               />
             </Tabs.Panel>
           )}
