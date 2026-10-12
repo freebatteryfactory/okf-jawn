@@ -2,8 +2,11 @@
  * Show a wire instant (UTC, RFC 3339) in the reader's own locale and time zone.
  *
  * The wire value stays the machine-readable `dateTime`; only the visible text is converted. A
- * value that is not an instant is shown exactly as received and flagged, never guessed.
+ * value is converted only when it is exactly the contract's `Timestamp` (the generated
+ * `zTimestamp`): anything else, such as a date without a time or a day/month spelling, is shown
+ * exactly as received and flagged, never guessed into another day or time.
  */
+import { zTimestamp } from '../api/generated/zod.gen';
 
 const INSTANT_FORMAT: Intl.DateTimeFormatOptions = { dateStyle: 'medium', timeStyle: 'short' };
 
@@ -12,6 +15,7 @@ const INSTANT_FORMAT: Intl.DateTimeFormatOptions = { dateStyle: 'medium', timeSt
  * they are parameters only so the conversion itself can be checked.
  */
 export function formatInstant(value: string, locale?: string, timeZone?: string): string | null {
+  if (!zTimestamp.safeParse(value).success) return null;
   const millis = Date.parse(value);
   if (Number.isNaN(millis)) return null;
   const options: Intl.DateTimeFormatOptions =
