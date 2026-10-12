@@ -85,6 +85,35 @@ describe('a navigation that removes the focused element', () => {
   });
 });
 
+describe('the heading a navigation ended on, when the page replaces it', () => {
+  it('hands focus on to the workspace’s name when a workspace opened from the list by keyboard has opened', async () => {
+    // The workspace answers when the test says so: until then the page before the Explorer shows.
+    let opened: (reply: ReturnType<typeof ok>) => void = () => {};
+    mockApi(
+      explorerHandlers({
+        [WORKSPACES]: listed,
+        [OPEN]: () =>
+          new Promise((resolve) => {
+            opened = resolve;
+          }),
+      }),
+    );
+    renderAt('/');
+    const link = await screen.findByRole('link', { name: 'Workshop notes' });
+    act(() => link.focus());
+    await userEvent.keyboard('{Enter}');
+    await screen.findByText('Opening the workspace…');
+    // The list is gone with the link: the navigation ends on the heading of the page shown now.
+    const opening = pageHeadingNamed('Workspace');
+    await waitFor(() => expect(document.activeElement).toBe(opening));
+
+    opened(ok(workspace));
+    await screen.findByRole('tree', { name: 'Folders' });
+    expect(opening.isConnected).toBe(false);
+    expect(document.activeElement).toBe(pageHeadingNamed('Workshop notes'));
+  });
+});
+
 describe('a navigation that does not take focus anywhere', () => {
   it.each([
     ['the workspace list', '/', () => screen.findByRole('link', { name: 'Workshop notes' })],

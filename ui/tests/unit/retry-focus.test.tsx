@@ -832,6 +832,13 @@ describe('a failure that goes away without a retry', () => {
     const heading = screen.getByRole('heading', { level: 1, name: 'Workspace' });
     expect(heading.getAttribute('tabindex')).toBe('-1');
     expect(document.activeElement).toBe(heading);
+
+    // That workspace opens: the heading goes with the page before the Explorer, and focus goes on
+    // to the heading that takes its place, the workspace's name.
+    opening.end('answers');
+    await screen.findByRole('tree', { name: 'Folders' });
+    expect(heading.isConnected).toBe(false);
+    expectFocusOn(screen.getByRole('heading', { level: 1, name: 'Workshop notes' }));
   });
 });
 
