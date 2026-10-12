@@ -161,6 +161,7 @@ pub mod config;
 pub mod errors;
 pub mod grants;
 pub mod identity;
+pub mod local;
 #[cfg(feature = "runtime")]
 pub mod mcp;
 pub mod public;
