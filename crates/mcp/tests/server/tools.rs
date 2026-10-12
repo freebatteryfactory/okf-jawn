@@ -1,8 +1,10 @@
 //! The tool catalog and the result helpers every tool call answers through.
 
+use std::collections::BTreeSet;
+
 use okf_jawn_contract::access::Permission;
 use okf_jawn_contract::error::ErrorCode;
-use okf_jawn_contract::metadata::OperationName;
+use okf_jawn_contract::metadata::{OperationName, operations};
 use okf_jawn_contract::operations::{DRAFT_BEARING, HUMAN_SESSION_ONLY};
 use okf_jawn_mcp::{McpServer, operation_of_tool};
 use serde_json::{Value, json};
@@ -73,6 +75,42 @@ fn every_listed_tool_is_an_operation_and_none_carries_a_draft() -> TestResult {
         operation_of_tool("read_object"),
         Some(OperationName::GetObject)
     );
+    Ok(())
+}
+
+/// Only the agent alias column names a tool: never a canonical id, an operator/CLI alias or a
+/// label, and every agent alias the table declares is listed.
+#[tokio::test]
+async fn only_agent_aliases_are_tool_names() -> TestResult {
+    let world = reader();
+    let server = McpServer::new(world.ports, bundle("tools-names.html", "<p>app</p>")?)?;
+    let listed: BTreeSet<String> = server
+        .tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    let aliases: BTreeSet<String> = operations()
+        .into_iter()
+        .filter(|info| !info.alias.is_empty())
+        .map(|info| info.alias.to_owned())
+        .collect();
+    assert_eq!(listed, aliases);
+    let alice = agent("alice")?;
+    for info in operations() {
+        if !info.alias.is_empty() {
+            let operation = some(operation_of_tool(info.alias), "the alias's operation")?;
+            assert_eq!(operation.as_str(), info.id);
+        }
+        for name in [info.id, info.operator_alias, info.label] {
+            if name.is_empty() || aliases.contains(name) {
+                continue;
+            }
+            assert_eq!(operation_of_tool(name), None, "{name} ({})", info.id);
+            let result = server.call_tool_as(Some(&alice), name, None).await?;
+            assert_eq!(refusal_of(&result)?.code, ErrorCode::NotFound, "{name}");
+        }
+    }
+    assert_eq!(world.application.calls()?, Vec::new());
     Ok(())
 }
 

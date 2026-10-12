@@ -3,9 +3,10 @@
 //! `api/mcp-tools.json` and `api/mcp-apps.json` are committed generator output, so they are
 //! compiled in. The App bundle the resource names is uncommitted build output and is read at
 //! runtime (see `server`). A tool name is an operation's agent alias in the contract's
-//! operation table (`for_each_operation`); nothing here lists tools by hand. Loading refuses a
-//! catalog that lists a tool the table does not alias, or that declares any resource other than
-//! the one App, so what is listed and what can be called or read never disagree.
+//! operation table (`for_each_operation`); nothing here lists tools by hand. Loading checks both
+//! directions: every listed tool is an agent alias and every agent alias is a listed tool. It
+//! also refuses any resource declaration other than the one App, so what is listed and what can
+//! be called or read never disagree.
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::metadata::OperationName;
@@ -53,7 +54,8 @@ impl Catalog {
     ///
     /// # Errors
     /// Returns `Internal` when a catalog does not decode as rmcp's types, when a listed tool is
-    /// no operation's alias, or when the resources are not exactly the one App with its MIME type.
+    /// no operation's agent alias or an agent alias is not listed, or when the resources are not
+    /// exactly the one App with its MIME type.
     pub fn load() -> Result<Self, ApiError> {
         Self::from_documents(TOOLS_JSON, APPS_JSON)
     }
@@ -73,6 +75,15 @@ impl Catalog {
                     "api/mcp-tools.json lists `{}`, which is no operation's alias",
                     tool.name
                 ),
+            ));
+        }
+        if let Some((alias, _)) = TOOL_ALIASES
+            .iter()
+            .find(|(alias, _)| !alias.is_empty() && !tools.iter().any(|tool| tool.name == *alias))
+        {
+            return Err(ApiError::new(
+                ErrorCode::Internal,
+                format!("api/mcp-tools.json does not list `{alias}`, an operation's agent alias"),
             ));
         }
         let apps_document: Value =
@@ -162,6 +173,21 @@ mod tests {
 
     type Checked = Result<(), Box<dyn std::error::Error>>;
 
+    /// The committed tool catalog without the tool named `name`.
+    fn tools_without(name: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let mut document: Value = serde_json::from_str(TOOLS_JSON)?;
+        let tools = document
+            .get_mut("tools")
+            .and_then(Value::as_array_mut)
+            .ok_or("the committed catalog has no tools array")?;
+        let before = tools.len();
+        tools.retain(|tool| tool.get("name") != Some(&json!(name)));
+        if tools.len() == before {
+            return Err(format!("the committed catalog has no tool `{name}`").into());
+        }
+        Ok(document.to_string())
+    }
+
     /// The committed tool catalog with one more tool, a copy of the first renamed `name`.
     fn tools_with(name: &str) -> Result<String, Box<dyn std::error::Error>> {
         let mut document: Value = serde_json::from_str(TOOLS_JSON)?;
@@ -203,6 +229,16 @@ mod tests {
     fn a_listed_tool_that_is_no_operations_alias_is_refused() -> Checked {
         for name in ["save_draft", "read_item", "invented"] {
             let error = refused(Catalog::from_documents(&tools_with(name)?, APPS_JSON))?;
+            assert_eq!(error.code, ErrorCode::Internal, "{name}");
+            assert!(error.message.contains(name), "{}", error.message);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_agent_alias_the_catalog_does_not_list_is_refused() -> Checked {
+        for name in ["show", "read_object", "propose"] {
+            let error = refused(Catalog::from_documents(&tools_without(name)?, APPS_JSON))?;
             assert_eq!(error.code, ErrorCode::Internal, "{name}");
             assert!(error.message.contains(name), "{}", error.message);
         }
