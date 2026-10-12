@@ -1,6 +1,7 @@
 //! The public and declared non-JSON routes of the application origin: liveness asks no
 //! dependency, the protected-resource metadata exists only hosted, and form schemas need a
 //! signed-in caller.
+#![cfg(feature = "runtime")]
 
 use std::sync::Arc;
 
@@ -12,14 +13,15 @@ use okf_jawn_contract::health::HealthResponse;
 use okf_jawn_server::BoundApplication;
 use okf_jawn_server::app::{ServiceParts, service};
 use okf_jawn_server::config::HostedConfig;
+use okf_jawn_server::cookies::CrateCookies;
 use okf_jawn_server::identity::{BearerAuth, ConnectIdentity, Identity, IdentityPorts};
 use serde_json::Value;
 use tower::ServiceExt;
 
 use check::TestResult;
 use fixtures::counting::CountingApplication;
-use fixtures::{FixturePorts, GrantTable, tenant, workspace};
-use support::{FakeCredentials, NoCookies, OWNER, OneToken};
+use fixtures::{FixturePorts, GrantTable, workspace};
+use support::{FakeCredentials, OWNER, OneToken};
 
 const HOST: &str = "127.0.0.1:7711";
 const SECRET: &str = "connector-secret-of-the-test";
@@ -58,16 +60,14 @@ fn app(hosted: bool) -> Result<Router, Box<dyn std::error::Error>> {
                 .to_owned(),
         }
     } else {
-        BearerAuth::Local {
-            tenant_id: tenant("local")?,
-        }
+        BearerAuth::Local
     };
     let identity = Identity::new(
         bearer,
         IdentityPorts {
             credentials,
             events: ports.events.clone(),
-            cookies: Arc::new(NoCookies),
+            cookies: Arc::new(CrateCookies),
         },
         vec![format!("http://{HOST}")],
     );
@@ -81,6 +81,9 @@ fn app(hosted: bool) -> Result<Router, Box<dyn std::error::Error>> {
         identity,
         hosts: vec![HOST.to_owned()],
         hosted: hosted.then(hosted_config),
+
+        cors_origins: Vec::new(),
+        ui_dir: None,
         extra: okf_jawn_server::schemas::routes(),
     })?)
 }

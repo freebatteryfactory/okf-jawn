@@ -29,7 +29,7 @@ use axum::http::header::{AUTHORIZATION, ORIGIN, WWW_AUTHENTICATE};
 use axum::http::{HeaderMap, HeaderValue, Method};
 use axum::middleware::Next;
 use axum::response::Response;
-use okf_jawn_contract::access::{AccessRoute, DelegationCeiling, Principal};
+use okf_jawn_contract::access::{AccessRoute, CSRF_HEADER, DelegationCeiling, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::TenantId;
 use okf_jawn_contract::metadata::{OperationName, operations};
@@ -72,11 +72,9 @@ pub struct ConnectIdentity {
 /// How a bearer token is resolved: by the deployment's entry path.
 #[derive(Clone)]
 pub enum BearerAuth {
-    /// A connector secret of this installation, whose fixed tenant is `tenant_id`.
-    Local {
-        /// The installation's tenant.
-        tenant_id: TenantId,
-    },
+    /// A connector secret of this installation, whose tenant is the fixed local one
+    /// (`TenantId::local`).
+    Local,
     /// A WorkOS Connect access token.
     Hosted {
         /// The token verifier.
@@ -112,12 +110,6 @@ struct Inner {
 /// The browser session cookie (`api/openapi.json` `browserSession`).
 pub const SESSION_COOKIE: &str = "okf-session";
 
-/// The cookie that hands the page its anti-CSRF token; readable by the page, `SameSite=Strict`.
-pub const CSRF_COOKIE: &str = "okf-csrf";
-
-/// The header a cookie-authenticated mutation sends the anti-CSRF token in.
-pub const CSRF_HEADER: &str = "x-okf-csrf";
-
 /// The MCP endpoint path (`api/transports.json` `mcp_request`).
 pub const MCP_PATH: &str = "/mcp";
 
@@ -138,7 +130,7 @@ impl Identity {
     /// The `Principal` a bearer token authenticates.
     async fn bearer_principal(&self, token: &str) -> Result<Principal, ApiError> {
         match &self.inner.bearer {
-            BearerAuth::Local { tenant_id } => {
+            BearerAuth::Local => {
                 let credentials = &self.inner.ports.credentials;
                 let connector = credentials
                     .lookup_connector(secret_hash(token))
@@ -148,7 +140,7 @@ impl Identity {
                 let owner = credentials.installation_identity().await?;
                 Ok(Principal {
                     subject: owner.subject,
-                    tenant_id: tenant_id.clone(),
+                    tenant_id: TenantId::local(),
                     route: AccessRoute::McpDelegation,
                     client_id: Some(connector.connector_id.0.to_string()),
                     delegation: Some(DelegationCeiling {
@@ -186,7 +178,7 @@ impl Identity {
             return Ok(None);
         };
         let expected = match self.inner.bearer {
-            BearerAuth::Local { .. } => AccessRoute::LocalOwner,
+            BearerAuth::Local => AccessRoute::LocalOwner,
             BearerAuth::Hosted { .. } => AccessRoute::BrowserSession,
         };
         if record.principal.route != expected || record.session_id != session_id {
@@ -212,7 +204,7 @@ impl Identity {
     fn challenge(&self, error: ApiError) -> Response {
         let mut response = error_response(error);
         let value = match &self.inner.bearer {
-            BearerAuth::Local { .. } => "Bearer".to_owned(),
+            BearerAuth::Local => "Bearer".to_owned(),
             BearerAuth::Hosted {
                 resource_metadata, ..
             } => format!("Bearer resource_metadata=\"{resource_metadata}\""),
@@ -357,7 +349,8 @@ fn invalid_token() -> ApiError {
     )
 }
 
-fn hex(bytes: &[u8]) -> String {
+/// Lowercase hexadecimal of `bytes`.
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut text = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {

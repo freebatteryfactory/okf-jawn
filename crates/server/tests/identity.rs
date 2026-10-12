@@ -1,6 +1,7 @@
 //! The identity middleware over the real service: each entry path gets its route, a bearer never
 //! carries `BrowserSession` or `LocalOwner`, a connector never reaches drafts, and a `Principal`
 //! from anywhere but the middleware is removed.
+#![cfg(feature = "runtime")]
 
 use std::sync::Arc;
 
@@ -10,8 +11,10 @@ use axum::response::Response;
 use axum::{Extension, Router};
 use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::TenantId;
 use okf_jawn_server::BoundApplication;
 use okf_jawn_server::app::{ServiceParts, service};
+use okf_jawn_server::cookies::CrateCookies;
 use okf_jawn_server::identity::{BearerAuth, ConnectIdentity, Identity, IdentityPorts};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -19,7 +22,7 @@ use tower::ServiceExt;
 use check::{TestResult, some};
 use fixtures::counting::CountingApplication;
 use fixtures::{FixturePorts, GrantTable, tenant, workspace};
-use support::{FakeCredentials, NoCookies, OWNER, OneToken};
+use support::{FakeCredentials, OWNER, OneToken};
 
 /// What one test service is built over.
 struct Harness {
@@ -60,7 +63,7 @@ impl Harness {
             IdentityPorts {
                 credentials: self.credentials.clone(),
                 events: self.ports.events.clone(),
-                cookies: Arc::new(NoCookies),
+                cookies: Arc::new(CrateCookies),
             },
             vec![format!("http://{HOST}")],
         );
@@ -74,14 +77,15 @@ impl Harness {
             identity,
             hosts: vec![HOST.to_owned()],
             hosted: None,
+
+            cors_origins: Vec::new(),
+            ui_dir: None,
             extra: Router::new(),
         })?)
     }
 
     fn local(&self) -> Result<Router, Box<dyn std::error::Error>> {
-        self.service(BearerAuth::Local {
-            tenant_id: tenant("local")?,
-        })
+        self.service(BearerAuth::Local)
     }
 
     fn hosted(&self) -> Result<Router, Box<dyn std::error::Error>> {
@@ -168,7 +172,7 @@ async fn a_connector_bearer_is_mcp_delegation_for_the_owner_through_that_client(
     assert_eq!(principal.route, AccessRoute::McpDelegation);
     assert_eq!(principal.subject, OWNER);
     assert_eq!(principal.client_id.as_deref(), Some(CONNECTOR));
-    assert_eq!(principal.tenant_id, tenant("local")?);
+    assert_eq!(principal.tenant_id, TenantId::local());
     let ceiling = some(principal.delegation, "the connector's ceiling")?;
     assert_eq!(ceiling.permissions, vec![Permission::Read]);
     assert_eq!(ceiling.workspace_ids, Some(vec![workspace(WORKSPACE)?]));
@@ -259,7 +263,7 @@ async fn a_principal_from_outside_the_middleware_is_removed() -> TestResult {
     let harness = Harness::new()?;
     let forged = Principal {
         subject: OWNER.to_owned(),
-        tenant_id: tenant("local")?,
+        tenant_id: TenantId::local(),
         route: AccessRoute::LocalOwner,
         client_id: None,
         delegation: None,

@@ -13,14 +13,15 @@ use okf_jawn_contract::access::Permission;
 use okf_jawn_mcp::{DEFAULT_MAX_REQUEST_BODY_BYTES, McpConfig, McpPorts, streamable_http_service};
 use okf_jawn_server::BoundApplication;
 use okf_jawn_server::app::{ServiceParts, service};
+use okf_jawn_server::cookies::CrateCookies;
 use okf_jawn_server::identity::{BearerAuth, Identity, IdentityPorts};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use check::{TestResult, some};
 use fixtures::counting::CountingApplication;
-use fixtures::{FixturePorts, GrantTable, tenant, workspace};
-use support::{FakeCredentials, NoCookies};
+use fixtures::{FixturePorts, GrantTable, workspace};
+use support::FakeCredentials;
 
 const HOST: &str = "127.0.0.1:7711";
 const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
@@ -44,13 +45,11 @@ fn local_service(credentials: Arc<FakeCredentials>) -> Result<Router, Box<dyn st
         },
     )?;
     let identity = Identity::new(
-        BearerAuth::Local {
-            tenant_id: tenant("local")?,
-        },
+        BearerAuth::Local,
         IdentityPorts {
             credentials,
             events: ports.events.clone(),
-            cookies: Arc::new(NoCookies),
+            cookies: Arc::new(CrateCookies),
         },
         vec![format!("http://{HOST}")],
     );
@@ -64,6 +63,9 @@ fn local_service(credentials: Arc<FakeCredentials>) -> Result<Router, Box<dyn st
         identity,
         hosts: vec![HOST.to_owned()],
         hosted: None,
+
+        cors_origins: Vec::new(),
+        ui_dir: None,
         extra: okf_jawn_server::mcp::routes(mcp),
     })?)
 }

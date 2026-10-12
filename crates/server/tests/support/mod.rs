@@ -1,10 +1,12 @@
-//! Test doubles of the server's identity ports: a credential store, a Connect verifier and a
-//! cookie reader. Not production adapters; each answers only what a test put in it.
+//! Test doubles of the server's identity ports (a credential store and a Connect verifier) and a
+//! local-mode service over fixture ports. Not production adapters; each answers only what a
+//! test put in it. The including target declares `mod fixtures;` (core's test support) at its root.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use axum::http::HeaderMap;
+use axum::Router;
 use okf_jawn_contract::access::{Connector, IssuedConnector, Permission};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{ConnectorId, MutationId, Timestamp, WorkspaceId};
@@ -12,7 +14,15 @@ use okf_jawn_core::credentials::{
     ConnectorIssue, CredentialStore, InstallationIdentity, NewConnector, SessionRecord, secret_hash,
 };
 use okf_jawn_core::ports::PortFuture;
-use okf_jawn_server::identity::{ConnectIdentity, ConnectVerifier, CookieReader};
+use okf_jawn_server::BoundApplication;
+use okf_jawn_server::app::{ServiceParts, service};
+use okf_jawn_server::cookies::CrateCookies;
+use okf_jawn_server::identity::{
+    BearerAuth, ConnectIdentity, ConnectVerifier, Identity, IdentityPorts,
+};
+
+use crate::fixtures::counting::CountingApplication;
+use crate::fixtures::{FixturePorts, GrantTable, all_permissions, workspace};
 
 /// Connectors by secret hash, sessions by id, and one installation identity.
 #[derive(Default)]
@@ -30,14 +40,37 @@ pub struct OneToken {
     pub identity: ConnectIdentity,
 }
 
-/// A cookie reader that finds no cookie: the bearer and anonymous paths need none.
-pub struct NoCookies;
+/// A local-mode service over fixture ports: the owner holds every permission on [`WORKSPACE`],
+/// and one read-only connector is reachable with [`SECRET`].
+pub struct LocalApp {
+    /// The application double.
+    pub counting: Arc<CountingApplication>,
+    /// The credential store double.
+    pub credentials: Arc<FakeCredentials>,
+    /// Dispatch's fixture ports.
+    pub ports: FixturePorts,
+}
 
 /// The installation owner's subject.
 pub const OWNER: &str = "owner-1";
 
 /// A valid instant for records.
 pub const INSTANT: &str = "2026-10-12T12:00:00.000Z";
+
+/// The `Host` the test service answers.
+pub const HOST: &str = "127.0.0.1:7711";
+
+/// The test service's own origin.
+pub const ORIGIN: &str = "http://127.0.0.1:7711";
+
+/// The workspace the owner and the connector may read.
+pub const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
+
+/// The connector's identity.
+pub const CONNECTOR: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+/// The connector's bearer secret.
+pub const SECRET: &str = "connector-secret-of-the-test";
 
 impl FakeCredentials {
     /// Register a connector reachable with `secret`.
@@ -181,9 +214,72 @@ impl ConnectVerifier for OneToken {
     }
 }
 
-impl CookieReader for NoCookies {
-    fn read(&self, _headers: &HeaderMap, _name: &str) -> Option<String> {
-        None
+impl LocalApp {
+    /// The fixtures, with the connector registered.
+    ///
+    /// # Errors
+    /// Returns when a fixed value does not parse.
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let mut table = GrantTable::default();
+        table
+            .workspaces
+            .entry(OWNER.to_owned())
+            .or_default()
+            .insert(workspace(WORKSPACE)?, all_permissions());
+        let credentials = Arc::new(FakeCredentials::default());
+        credentials.add_connector(
+            SECRET,
+            CONNECTOR,
+            vec![workspace(WORKSPACE)?],
+            vec![Permission::Read],
+            false,
+        )?;
+        Ok(Self {
+            counting: Arc::new(CountingApplication::new()),
+            credentials,
+            ports: FixturePorts::new(table),
+        })
+    }
+
+    /// The application and dispatch ports the routes are bound to.
+    #[must_use]
+    pub fn bound(&self) -> BoundApplication {
+        BoundApplication {
+            application: self.counting.clone(),
+            access: self.ports.access.clone(),
+            mutations: self.ports.mutations.clone(),
+            events: self.ports.events.clone(),
+        }
+    }
+
+    /// The local service with `extra` routes, the given CORS origins and UI directory.
+    ///
+    /// # Errors
+    /// Returns the composition's refusal.
+    pub fn service(
+        &self,
+        extra: Router,
+        cors_origins: Vec<String>,
+        ui_dir: Option<PathBuf>,
+    ) -> Result<Router, ApiError> {
+        let identity = Identity::new(
+            BearerAuth::Local,
+            IdentityPorts {
+                credentials: self.credentials.clone(),
+                events: self.ports.events.clone(),
+                cookies: Arc::new(CrateCookies),
+            },
+            vec![ORIGIN.to_owned()],
+        );
+        service(ServiceParts {
+            bound: self.bound(),
+            identity,
+            hosts: vec![HOST.to_owned()],
+            hosted: None,
+            cors_origins,
+            ui_dir,
+            extra,
+        })
     }
 }
 
@@ -204,8 +300,24 @@ mod tests {
     use okf_jawn_contract::identity::{TenantId, Timestamp};
     use okf_jawn_core::credentials::{CredentialStore, SessionRecord};
 
-    use super::{FakeCredentials, INSTANT, NoCookies, OWNER};
+    use super::{FakeCredentials, HOST, INSTANT, LocalApp, OWNER};
     use crate::check::TestResult;
+
+    #[tokio::test]
+    async fn the_local_app_serves_liveness() -> TestResult {
+        use tower::ServiceExt as _;
+        let local = LocalApp::new()?;
+        let app = local.service(axum::Router::new(), Vec::new(), None)?;
+        let request = axum::http::Request::get("/healthz")
+            .header("host", HOST)
+            .body(axum::body::Body::empty())?;
+        assert_eq!(
+            app.oneshot(request).await?.status(),
+            axum::http::StatusCode::OK
+        );
+        assert_eq!(local.counting.call_count("get_health")?, 0);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn one_token_accepts_only_its_token() -> TestResult {
@@ -249,9 +361,6 @@ mod tests {
         credentials.revoke_session("s").await?;
         assert!(credentials.get_session("s").await?.is_none());
         assert_eq!(credentials.revoked_sessions()?, vec!["s".to_owned()]);
-        assert!(
-            super::CookieReader::read(&NoCookies, &axum::http::HeaderMap::new(), "x").is_none()
-        );
         Ok(())
     }
 }
