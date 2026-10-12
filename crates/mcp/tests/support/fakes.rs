@@ -1,11 +1,12 @@
 //! Fakes of the ports an MCP server holds, built for this crate's tests; core's are core's.
 //!
-//! `FakeApplication` answers each operation from a configured response and records who called
-//! what. `FakeAccess` grants each known subject a fixed permission set on every workspace and
-//! on the tenant, so dispatch's own route and permission rules decide. `FakeLedger` always
-//! begins a new mutation. `FakeEvents` records every append.
+//! `FakeApplication` answers each operation from a configured response, and `get_object` from
+//! a configured outcome per object digest first, and records who called what with which
+//! request. `FakeAccess` grants each known subject a fixed permission set on every workspace
+//! but the ones it refuses, and on the tenant, so dispatch's own route and permission rules
+//! decide. `FakeLedger` always begins a new mutation. `FakeEvents` records every append.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use okf_jawn_contract::access::{Permission, Principal};
@@ -27,9 +28,9 @@ macro_rules! fake_operations {
         $operator:literal, $visibility:literal, $permission:ident, $ui:literal, $status:literal,
         $destructive:literal, $description:literal)),* $(,)?) => {
         impl Application for FakeApplication {
-            $(fn $id<'a>(&'a self, context: &'a OperationContext, _request: $request)
+            $(fn $id<'a>(&'a self, context: &'a OperationContext, request: $request)
                 -> PortFuture<'a, $response> {
-                Box::pin(async move { self.answer(stringify!($id), context) })
+                Box::pin(async move { self.answer(stringify!($id), context, &request) })
             })*
         }
     };
@@ -48,13 +49,16 @@ pub struct Call {
 #[derive(Default)]
 pub struct FakeApplication {
     responses: Mutex<BTreeMap<&'static str, Value>>,
+    objects: Mutex<BTreeMap<String, Result<Value, ApiError>>>,
     calls: Mutex<Vec<Call>>,
+    requests: Mutex<Vec<(&'static str, Value)>>,
 }
 
-/// Grants by subject; an unknown subject holds nothing.
+/// Grants by subject; an unknown subject holds nothing, and nobody holds a refused workspace.
 #[derive(Default)]
 pub struct FakeAccess {
     grants: BTreeMap<String, Vec<Permission>>,
+    refused: BTreeSet<String>,
 }
 
 /// A ledger in which every key is new.
@@ -96,6 +100,23 @@ impl FakeApplication {
         Ok(())
     }
 
+    /// Answer `get_object` for the object `digest` with `outcome` from now on, before any
+    /// response configured for `get_object` as a whole.
+    ///
+    /// # Errors
+    /// Returns an error when the object table is poisoned.
+    pub fn serve_object(
+        &self,
+        digest: &str,
+        outcome: Result<Value, ApiError>,
+    ) -> Result<(), ApiError> {
+        self.objects
+            .lock()
+            .map_err(|_| poisoned())?
+            .insert(digest.to_owned(), outcome);
+        Ok(())
+    }
+
     /// Every call the application received, in order.
     ///
     /// # Errors
@@ -104,22 +125,62 @@ impl FakeApplication {
         Ok(self.calls.lock().map_err(|_| poisoned())?.clone())
     }
 
-    fn answer<T: rmcp::serde::de::DeserializeOwned>(
+    /// The serialized requests of every call to `operation`, in order.
+    ///
+    /// # Errors
+    /// Returns an error when the request record is poisoned.
+    pub fn requests(&self, operation: &str) -> Result<Vec<Value>, ApiError> {
+        Ok(self
+            .requests
+            .lock()
+            .map_err(|_| poisoned())?
+            .iter()
+            .filter(|(called, _)| *called == operation)
+            .map(|(_, request)| request.clone())
+            .collect())
+    }
+
+    fn answer<T: rmcp::serde::de::DeserializeOwned, R: rmcp::serde::Serialize>(
         &self,
         operation: &'static str,
         context: &OperationContext,
+        request: &R,
     ) -> Result<T, ApiError> {
+        let request = serde_json::to_value(request)
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
         self.calls.lock().map_err(|_| poisoned())?.push(Call {
             operation,
             subject: context.principal.subject.clone(),
         });
-        let response = self
-            .responses
+        self.requests
             .lock()
             .map_err(|_| poisoned())?
-            .get(operation)
-            .cloned()
-            .ok_or_else(|| ApiError::new(ErrorCode::Unavailable, "No test response configured"))?;
+            .push((operation, request.clone()));
+        let object = request
+            .get("object")
+            .and_then(Value::as_str)
+            .filter(|_| operation == "get_object");
+        let served = match object {
+            Some(digest) => self
+                .objects
+                .lock()
+                .map_err(|_| poisoned())?
+                .get(digest)
+                .cloned(),
+            None => None,
+        };
+        let response = match served {
+            Some(outcome) => outcome?,
+            None => self
+                .responses
+                .lock()
+                .map_err(|_| poisoned())?
+                .get(operation)
+                .cloned()
+                .ok_or_else(|| {
+                    ApiError::new(ErrorCode::Unavailable, "No test response configured")
+                })?,
+        };
         serde_json::from_value(response)
             .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))
     }
@@ -130,6 +191,13 @@ impl FakeAccess {
     #[must_use]
     pub fn granting(mut self, subject: &str, permissions: &[Permission]) -> Self {
         self.grants.insert(subject.to_owned(), permissions.to_vec());
+        self
+    }
+
+    /// Refuse every subject on `workspace`, whatever it is granted elsewhere.
+    #[must_use]
+    pub fn refusing(mut self, workspace: &str) -> Self {
+        self.refused.insert(workspace.to_owned());
         self
     }
 
@@ -149,6 +217,12 @@ impl AccessControl for FakeAccess {
         _permission: Permission,
     ) -> PortFuture<'a, WorkspaceGrant> {
         Box::pin(async move {
+            if self.refused.contains(&workspace.0.to_string()) {
+                return Err(ApiError::new(
+                    ErrorCode::Forbidden,
+                    "No grant on this workspace",
+                ));
+            }
             Ok(WorkspaceGrant {
                 scope: StorageScope {
                     tenant_id: principal.tenant_id.clone(),

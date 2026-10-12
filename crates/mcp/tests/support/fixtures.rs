@@ -39,6 +39,15 @@ pub const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
 /// The item every fixture names.
 pub const ITEM: &str = "22222222-2222-4222-8222-222222222222";
 
+/// A second workspace, which a test's access may refuse.
+pub const OTHER_WORKSPACE: &str = "66666666-6666-4666-8666-666666666666";
+
+/// The path of the item the image fixtures read.
+pub const REPORT: &str = "reports/q3.pdf";
+
+/// The Markdown of the item the image fixtures read.
+pub const REPORT_MARKDOWN: &str = "# Q3 report\n\nRevenue grew in every region.";
+
 /// The `Host` the test services accept.
 pub const HOST: &str = "localhost";
 
@@ -133,6 +142,141 @@ pub fn read_response(markdown: &str) -> Value {
         "warnings": [],
         "truncated": false,
         "receipt_id": "33333333-3333-4333-8333-333333333333"
+    })
+}
+
+/// `show` arguments for a read of `view` (`multimodal` or `pages`) that selects images.
+#[must_use]
+pub fn image_read_input(view: &str, max_bytes: u32, max_images: u16) -> Value {
+    json!({
+        "workspace_id": WORKSPACE,
+        "item_id": ITEM,
+        "at": {"kind": "latest"},
+        "view": view,
+        "selection": {"kind": "all"},
+        "max_bytes": max_bytes,
+        "max_images": max_images
+    })
+}
+
+/// A complete read of `view` whose citation names `workspace` and which selected `media`.
+#[must_use]
+pub fn image_read_response(workspace: &str, view: &str, media: &[Value]) -> Value {
+    json!({
+        "source": {
+            "workspace_id": workspace,
+            "item_id": ITEM,
+            "path": REPORT,
+            "revision": revision(),
+            "selection": {"kind": "all"}
+        },
+        "view": view,
+        "markdown": REPORT_MARKDOWN,
+        "outline": [],
+        "media": media,
+        "warnings": [],
+        "truncated": false,
+        "receipt_id": "33333333-3333-4333-8333-333333333333"
+    })
+}
+
+/// A selected image: object `digest` of `media_type`, a picture located at `location`, with
+/// its caption when it has one.
+#[must_use]
+pub fn media(digest: &str, media_type: &str, caption: Option<&str>, location: &Value) -> Value {
+    let mut media = json!({
+        "object": digest,
+        "media_type": media_type,
+        "role": "picture",
+        "source": {
+            "workspace_id": WORKSPACE,
+            "item_id": ITEM,
+            "path": REPORT,
+            "revision": revision(),
+            "digest": digest,
+            "selection": {"kind": "all"},
+            "locations": [location]
+        },
+        "width": 640,
+        "height": 480
+    });
+    if let (Some(caption), Some(fields)) = (caption, media.as_object_mut()) {
+        fields.insert("caption".to_owned(), json!(caption));
+    }
+    media
+}
+
+/// A location the converter gave: a whole page.
+#[must_use]
+pub fn on_page(page_no: u32) -> Value {
+    json!({"provenance": "direct", "locator": {"kind": "page", "page_no": page_no}})
+}
+
+/// A location the converter gave: a box on a page.
+#[must_use]
+pub fn in_region(page_no: u32) -> Value {
+    json!({
+        "provenance": "direct",
+        "locator": {"kind": "region", "region": {
+            "page_no": page_no,
+            "bbox": {"l": 72.5, "t": 100.0, "r": 300.0, "b": 400.0, "coord_origin": "top_left"},
+            "page_size": {"width": 612.0, "height": 792.0}
+        }}
+    })
+}
+
+/// A `get_object` block of the object `digest`: `data_base64` served as `media_type`, from a
+/// whole object of `total_size` bytes.
+#[must_use]
+pub fn object_block(
+    digest: &str,
+    media_type: &str,
+    data_base64: &str,
+    total_size: usize,
+    has_more: bool,
+) -> Value {
+    json!({
+        "sha256": digest,
+        "offset": "0",
+        "total_size": total_size.to_string(),
+        "media_type": media_type,
+        "data_base64": data_base64,
+        "has_more": has_more
+    })
+}
+
+/// Padded base64 of `bytes` zero bytes.
+#[must_use]
+pub fn zeros_base64(bytes: usize) -> String {
+    let tail = match bytes % 3 {
+        1 => "AA==",
+        2 => "AAA=",
+        _ => "",
+    };
+    format!("{}{tail}", "AAAA".repeat(bytes / 3))
+}
+
+/// A distinct object digest spelled with the hex digit `digit`.
+#[must_use]
+pub fn digest_of(digit: char) -> String {
+    digit.to_string().repeat(64)
+}
+
+/// The `get_object` request the server sends for the image `digest` of a read citing
+/// `workspace`, asking for at most `length` bytes.
+#[must_use]
+pub fn object_request(workspace: &str, digest: &str, length: usize) -> Value {
+    json!({
+        "source": {
+            "workspace_id": workspace,
+            "item_id": ITEM,
+            "path": REPORT,
+            "revision": revision(),
+            "digest": digest,
+            "selection": {"kind": "all"}
+        },
+        "object": digest,
+        "length": length
     })
 }
 

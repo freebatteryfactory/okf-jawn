@@ -5,11 +5,16 @@
 //! server crate mounts, and `catalog` the committed tool and App catalogs.
 //! A successful result always carries text a host can show without reading
 //! `structuredContent`: the document Markdown for a read, the serialized response otherwise.
+//! A read's selected images follow its text as image blocks; an image the server did not
+//! inline is named in the text with its source location, its digest and the reason.
 //! A failed call is reported as text with `isError` set and no structured content: a tool's
 //! declared output schema describes its success response only.
 
-use okf_jawn_contract::error::ApiError;
-use okf_jawn_contract::read::ReadItemResponse;
+use std::fmt::{Display, Formatter};
+
+use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::read::{AssetRole, MediaReference, ReadItemResponse};
+use okf_jawn_contract::source::{SourceLocation, SourceLocator};
 use rmcp::model::{CallToolResult, ContentBlock, Tool};
 use serde_json::Value;
 
@@ -19,8 +24,67 @@ pub use http::{
 };
 pub use server::{McpPorts, McpServer};
 
+/// What became of one image a read selected (an entry of `ReadItemResponse::media`).
+#[derive(Debug, Clone)]
+pub enum ReadImage<'a> {
+    /// Inlined: an image block after the text.
+    Inline {
+        /// The image's bytes in base64, exactly as `read_object` returned them.
+        data_base64: String,
+        /// The `image/*` MIME type the bytes were served with.
+        mime_type: String,
+    },
+    /// Not inlined: one line of the text block names the image and gives the reason.
+    NotInlined {
+        /// The image, as the read selected it.
+        media: &'a MediaReference,
+        /// Why it is not inlined.
+        reason: NotInlined,
+    },
+}
+
+/// Why a selected image is described in the text instead of inlined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotInlined {
+    /// Its media type, as the read declared it or as its bytes were served, is not `image/*`.
+    NotAnImage {
+        /// The media type.
+        media_type: String,
+    },
+    /// The whole image does not fit what is left of the image budget.
+    TooLarge {
+        /// The whole object's size in bytes as `read_object` reported it; `None` when the
+        /// budget was spent before the image was fetched.
+        size: Option<String>,
+        /// Bytes of the image budget left when the image was reached.
+        left: usize,
+    },
+    /// `read_object` refused the fetch.
+    Refused {
+        /// The refusal's `ApiError` code.
+        code: ErrorCode,
+    },
+}
+
 /// Largest text block a helper writes; equal to the largest `max_bytes` a read may request.
 pub const MAX_TEXT_BYTES: usize = 1_048_576;
+
+impl Display for NotInlined {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAnImage { media_type } => write!(f, "not an image type ({media_type})"),
+            Self::TooLarge {
+                size: Some(size),
+                left,
+            } => write!(
+                f,
+                "too large ({size} bytes; {left} bytes of the image budget left)"
+            ),
+            Self::TooLarge { size: None, .. } => f.write_str("too large (no image budget left)"),
+            Self::Refused { code } => write!(f, "the fetch was refused ({})", code_name(code)),
+        }
+    }
+}
 
 /// Decode the generated model-tool catalog using the actual SDK's wire types.
 ///
@@ -34,18 +98,38 @@ pub fn decode_tools(document: &Value) -> Result<Vec<Tool>, serde_json::Error> {
 ///
 /// The text is cut at a character boundary to `max_text_bytes`. A bracketed note follows when
 /// the text was cut here, and when the read itself is partial and has a continuation cursor.
+/// Then each of `images` in order: an inlined image becomes an image block after the text, and
+/// an image that is not inlined becomes one line of the text naming it (its caption and role,
+/// its source location and its digest) and the reason. The structured content is the response,
+/// unchanged, whatever became of its images; with no images the result is text alone.
 ///
 /// # Errors
 /// Returns an error if the response cannot be serialized.
 pub fn read_result(
     response: &ReadItemResponse,
     max_text_bytes: usize,
+    images: &[ReadImage<'_>],
 ) -> Result<CallToolResult, serde_json::Error> {
     let structured = serde_json::to_value(response)?;
-    let mut result = CallToolResult::success(vec![ContentBlock::text(read_text(
-        response,
-        max_text_bytes,
-    ))]);
+    let mut text = read_text(response, max_text_bytes);
+    let mut blocks = Vec::new();
+    let mut described = 0_usize;
+    for image in images {
+        match image {
+            ReadImage::Inline {
+                data_base64,
+                mime_type,
+            } => blocks.push(ContentBlock::image(data_base64.clone(), mime_type.clone())),
+            ReadImage::NotInlined { media, reason } => {
+                text.push_str(if described == 0 { "\n\n" } else { "\n" });
+                text.push_str(&image_note(media, reason));
+                described = described.saturating_add(1);
+            }
+        }
+    }
+    let mut content = vec![ContentBlock::text(text)];
+    content.extend(blocks);
+    let mut result = CallToolResult::success(content);
     result.structured_content = Some(structured);
     Ok(result)
 }
@@ -116,6 +200,62 @@ fn within_budget(text: &str, max_bytes: usize) -> (String, bool) {
         .map(|(_, character)| character)
         .collect();
     (kept, true)
+}
+
+/// The text line of an image that is not inlined: what it is, where it is in the original,
+/// its digest, and why. A caption is folded onto the one line.
+fn image_note(media: &MediaReference, reason: &NotInlined) -> String {
+    let role = match media.role {
+        AssetRole::PageImage => "page image",
+        AssetRole::Picture => "picture",
+    };
+    let caption = media
+        .caption
+        .as_deref()
+        .map(|caption| {
+            format!(
+                " \"{}\"",
+                caption.split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+        })
+        .unwrap_or_default();
+    let location = if media.source.locations.is_empty() {
+        "no recorded location".to_owned()
+    } else {
+        media
+            .source
+            .locations
+            .iter()
+            .map(location_text)
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    format!(
+        "[Image not inlined: {role}{caption}, {location}, object {}: {reason}]",
+        media.object.as_str()
+    )
+}
+
+/// Where an image lies in the original, in words; the exact box is in `structuredContent`.
+fn location_text(location: &SourceLocation) -> String {
+    let locator = |locator: &SourceLocator| match locator {
+        SourceLocator::Page { page_no } => format!("page {page_no}"),
+        SourceLocator::Region { region } => format!("a region of page {}", region.page_no),
+        SourceLocator::Cells { range } => format!("cells of sheet \"{}\"", range.sheet),
+    };
+    match location {
+        SourceLocation::Direct { locator: at } => locator(at),
+        SourceLocation::Inferred { locator: at } => format!("{} (inferred)", locator(at)),
+        SourceLocation::Unresolved { .. } => "location unresolved".to_owned(),
+    }
+}
+
+/// The wire spelling of an error code, as an `ApiError` serializes it.
+fn code_name(code: &ErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{code:?}"))
 }
 
 mod catalog;
