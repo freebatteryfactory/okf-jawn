@@ -11,7 +11,9 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use okf_jawn_contract::access::{AccessRoute, Principal};
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::identity::TenantId;
-use okf_jawn_mcp::{McpConfig, McpHttpService, streamable_http_service};
+use okf_jawn_mcp::{
+    DEFAULT_MAX_REQUEST_BODY_BYTES, McpConfig, McpHttpService, streamable_http_service,
+};
 use rmcp::model::{CallToolResult, JsonObject};
 use serde_json::{Value, json};
 
@@ -271,6 +273,7 @@ pub fn http_service(world: &World, app_bundle: PathBuf) -> Outcome<McpHttpServic
         McpConfig {
             app_bundle,
             allowed_hosts: vec![HOST.to_owned()],
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
         },
     )?)
 }

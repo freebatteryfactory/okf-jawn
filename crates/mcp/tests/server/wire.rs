@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use axum::{Extension, Router};
 use okf_jawn_contract::access::Permission;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_mcp::{APP_URI, McpConfig, streamable_http_service};
+use okf_jawn_mcp::{APP_URI, DEFAULT_MAX_REQUEST_BODY_BYTES, McpConfig, streamable_http_service};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -20,8 +20,8 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::check::{TestResult, err_of, some};
 use crate::support::fakes::{FakeAccess, World};
 use crate::support::fixtures::{
-    Outcome, agent, bundle, call, committed, initialize, missing_bundle, post, rpc,
-    workspaces_input, workspaces_response,
+    HOST, Outcome, agent, bundle, call, committed, http_service, initialize, missing_bundle, post,
+    rpc, workspaces_input, workspaces_response,
 };
 
 /// One HTTP/1.1 exchange's status and JSON body (`Null` when empty).
@@ -79,6 +79,7 @@ async fn initialize_list_call_and_read_over_real_http() -> TestResult {
         McpConfig {
             app_bundle: bundle("wire-app.html", HTML)?,
             allowed_hosts: vec!["127.0.0.1".to_owned()],
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
         },
     )?;
     let router = Router::new()
@@ -132,6 +133,7 @@ async fn the_configured_hosts_are_the_ones_accepted() -> TestResult {
         McpConfig {
             app_bundle: missing_bundle("wire-hosts.html")?,
             allowed_hosts: vec!["mcp.example.org".to_owned()],
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
         },
     )?;
     let accepted = post(
@@ -155,6 +157,55 @@ async fn the_configured_hosts_are_the_ones_accepted() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_request_over_the_configured_body_limit_is_refused() -> TestResult {
+    let world = World::new(FakeAccess::default().granting("alice", &[Permission::Read]));
+    world
+        .application
+        .answer_with("list_workspaces", workspaces_response())?;
+    let service = streamable_http_service(
+        world.ports.clone(),
+        McpConfig {
+            app_bundle: missing_bundle("wire-limit.html")?,
+            allowed_hosts: vec![HOST.to_owned()],
+            max_request_body_bytes: 2048,
+        },
+    )?;
+    let small = call(1, "workspaces", &workspaces_input());
+    let accepted = post(&service, Some(agent("alice")?), HOST, &[], &small).await?;
+    assert_eq!(accepted.status, 200, "{}", accepted.body);
+    let large = call(
+        2,
+        "workspaces",
+        &json!({"page": {"limit": 10, "cursor": "a".repeat(4096)}}),
+    );
+    assert!(large.to_string().len() > 2048);
+    let refused = post(&service, Some(agent("alice")?), HOST, &[], &large).await?;
+    assert_eq!(refused.status, 413, "{}", refused.body);
+    assert_eq!(
+        world.application.calls()?.len(),
+        1,
+        "only the small call ran"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_provisional_default_body_limit_is_rmcps_4_mib() -> TestResult {
+    assert_eq!(DEFAULT_MAX_REQUEST_BODY_BYTES, 4 * 1024 * 1024);
+    let world = World::new(FakeAccess::default().granting("alice", &[Permission::Read]));
+    let service = http_service(&world, missing_bundle("wire-default-limit.html")?)?;
+    let over = call(
+        1,
+        "workspaces",
+        &json!({"page": {"limit": 10, "cursor": "a".repeat(DEFAULT_MAX_REQUEST_BODY_BYTES)}}),
+    );
+    let refused = post(&service, Some(agent("alice")?), HOST, &[], &over).await?;
+    assert_eq!(refused.status, 413, "{}", refused.body);
+    assert_eq!(world.application.calls()?, Vec::new());
+    Ok(())
+}
+
 #[test]
 fn an_empty_host_list_is_refused() -> TestResult {
     let world = World::new(FakeAccess::default());
@@ -163,6 +214,7 @@ fn an_empty_host_list_is_refused() -> TestResult {
         McpConfig {
             app_bundle: missing_bundle("wire-no-hosts.html")?,
             allowed_hosts: Vec::new(),
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
         },
     );
     let refused: ApiError = err_of(built.map(|_| "a service"))?;

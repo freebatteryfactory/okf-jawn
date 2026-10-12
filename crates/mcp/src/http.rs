@@ -27,7 +27,18 @@ pub struct McpConfig {
     /// `Host` values rmcp accepts (`host` for any port, or `host:port`), its DNS-rebinding
     /// guard. Never empty: rmcp reads an empty list as "accept every host".
     pub allowed_hosts: Vec<String>,
+    /// The largest POST body rmcp reads; a larger request is refused with HTTP 413 before the
+    /// handler runs. [`DEFAULT_MAX_REQUEST_BODY_BYTES`] is provisional (see there).
+    pub max_request_body_bytes: usize,
 }
+
+/// rmcp's own default POST body limit (4 MiB), which rmcp does not export.
+///
+/// Provisional: the contract bounds neither agent-supplied proposal text nor the number of
+/// changes, so a contract-valid `propose` can exceed it and be refused by the transport (HTTP
+/// 413) before dispatch. The contract bound, and one body limit shared by HTTP and MCP, are
+/// integration-owner work carried to server M1; this default changes with them.
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// Build the Streamable HTTP service over the application.
 ///
@@ -52,7 +63,8 @@ pub fn streamable_http_service(
     let transport = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .with_json_response(true)
-        .with_allowed_hosts(config.allowed_hosts);
+        .with_allowed_hosts(config.allowed_hosts)
+        .with_max_request_body_bytes(config.max_request_body_bytes);
     Ok(StreamableHttpService::new(
         move || Ok(server.clone()),
         Arc::new(NeverSessionManager::default()),

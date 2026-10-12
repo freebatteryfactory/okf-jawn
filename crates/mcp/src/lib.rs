@@ -14,7 +14,9 @@ use rmcp::model::{CallToolResult, ContentBlock, Tool};
 use serde_json::Value;
 
 pub use catalog::{APP_MIME_TYPE, APP_URI, operation_of_tool};
-pub use http::{McpConfig, McpHttpService, streamable_http_service};
+pub use http::{
+    DEFAULT_MAX_REQUEST_BODY_BYTES, McpConfig, McpHttpService, streamable_http_service,
+};
 pub use server::{McpPorts, McpServer};
 
 /// Largest text block a helper writes; equal to the largest `max_bytes` a read may request.
