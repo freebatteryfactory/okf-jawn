@@ -94,6 +94,21 @@ interface Attempt {
   outcome: { focusWasInNotice: boolean } | null;
 }
 
+/**
+ * A ref of the notice goes from `previous` to `next`. React clears a ref before it removes the
+ * element, while keyboard focus is still in it: an element cleared with focus in it is held. An
+ * element whose ref is set again has not left the page, and is let go: in development, StrictMode
+ * clears and sets again the refs of a notice that has just mounted.
+ */
+function refChanged(
+  held: { current: HTMLElement | null },
+  previous: HTMLElement | null,
+  next: HTMLElement | null,
+) {
+  if (previous?.contains(document.activeElement)) held.current = previous;
+  if (next === held.current) held.current = null;
+}
+
 export function useRetry({ request, failed, error, run, loaded }: RetriedOperation): FailureRetry {
   const [attempt, setAttempt] = useState<Attempt | null>(null);
   const notice = useRef<HTMLDivElement | null>(null);
@@ -102,17 +117,14 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
   const mine = attempt !== null && attempt.request === request;
   const retrying = mine && attempt.outcome === null;
 
-  // The notice, or its button, that keyboard focus was in when React cleared its ref. React clears
-  // a ref before it removes the element, while focus is still in it. An element whose ref was
-  // cleared is not always removed: in development, StrictMode clears and sets again the refs of a
-  // notice that has just mounted.
+  // The notice, or its button, that left the page with keyboard focus in it (see `refChanged`).
   const heldFocus = useRef<HTMLElement | null>(null);
   const noticeRef = useCallback((element: HTMLDivElement | null) => {
-    if (notice.current?.contains(document.activeElement)) heldFocus.current = notice.current;
+    refChanged(heldFocus, notice.current, element);
     notice.current = element;
   }, []);
   const buttonRef = useCallback((element: HTMLButtonElement | null) => {
-    if (button.current?.contains(document.activeElement)) heldFocus.current = button.current;
+    refChanged(heldFocus, button.current, element);
     button.current = element;
   }, []);
 
@@ -120,7 +132,7 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
   // shows it, and what it loaded is on the page. Focus follows a settled retry once, and a notice
   // or button that left the page with focus in it.
   useLayoutEffect(() => {
-    const left = heldFocus.current !== null && !heldFocus.current.isConnected;
+    const left = heldFocus.current !== null;
     heldFocus.current = null;
     let settledWithFocus = false;
     if (attempt !== null && attempt.outcome !== null && followed.current !== attempt.number) {

@@ -593,26 +593,46 @@ describe('a failure that changes without a retry', () => {
     expect(document.activeElement).toBe(replacement);
   });
 
-  it('does not take a notice that StrictMode mounts a second time for one that left the page', async () => {
-    // In development StrictMode clears and sets again the refs of what has just mounted. The notice
-    // that replaces the one shown takes focus in the commit it mounts in, so its refs are cleared
-    // with focus in it, and nothing is removed.
-    const view = render(
-      <StrictMode>
-        <Watched status="failed" />
-      </StrictMode>,
-    );
-    act(() => screen.getByRole('button', { name: 'Try again' }).focus());
-    view.rerender(
-      <StrictMode>
-        <Watched status="failed" code="unavailable" notice="two" />
-      </StrictMode>,
-    );
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Try again' }));
-    // The person moves on, and the caller renders again: focus is not taken back to the button.
-    const elsewhere = screen.getByRole('button', { name: 'Elsewhere' });
-    await userEvent.click(elsewhere);
-    expect(elsewhere.getAttribute('data-presses')).toBe('1');
-    expect(document.activeElement).toBe(elsewhere);
+  describe('under StrictMode, which in development clears and sets again the refs of what has just mounted', () => {
+    /**
+     * The notice that replaces the one shown takes focus in the commit it mounts in, so its refs
+     * are cleared with focus in it, and nothing is removed.
+     */
+    function replacedUnderStrictMode() {
+      const view = render(
+        <StrictMode>
+          <Watched status="failed" />
+        </StrictMode>,
+      );
+      act(() => screen.getByRole('button', { name: 'Try again' }).focus());
+      view.rerender(
+        <StrictMode>
+          <Watched status="failed" code="unavailable" notice="two" />
+        </StrictMode>,
+      );
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Try again' }));
+      return { ...view, elsewhere: screen.getByRole('button', { name: 'Elsewhere' }) };
+    }
+
+    it('does not take the notice mounted a second time for one that left: when the caller renders again, focus the person has moved stays where it is', async () => {
+      const { elsewhere } = replacedUnderStrictMode();
+      await userEvent.click(elsewhere);
+      expect(elsewhere.getAttribute('data-presses')).toBe('1');
+      expect(document.activeElement).toBe(elsewhere);
+    });
+
+    it('does not take the notice mounted a second time for one that left with focus in it: when it does leave, focus the person has moved stays where it is', () => {
+      const { rerender, elsewhere } = replacedUnderStrictMode();
+      // Focus moves without the caller rendering; the next thing it renders is the content.
+      act(() => elsewhere.focus());
+      rerender(
+        <StrictMode>
+          <Watched status="loaded" />
+        </StrictMode>,
+      );
+      expect(screen.getByRole('heading', { name: 'The content' })).toBeTruthy();
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(document.activeElement).toBe(elsewhere);
+    });
   });
 });
