@@ -5,15 +5,17 @@
  * text, which the reader shows. The save state is always on screen and is a polite live region
  * (unsaved, saving, saved as a draft with the time, not saved); the text box is described by it. A
  * failed save keeps the text in the editor and offers its retry through the failure notice, which
- * stays while the save is tried again. Leaving the editor (another tab, another item, reading the
- * committed text, closing the tab) saves at once and keeps the text in its session.
+ * stays while the save is tried again. The next change's own save can cure it too; keyboard focus
+ * that was on the retry button then moves to the text box (`useRetry`). Leaving the editor
+ * (another tab, another item, reading the committed text, closing the tab) saves at once and keeps
+ * the text in its session.
  *
  * Discarding asks first, in place: "Keep the draft" takes keyboard focus, and choosing it gives
  * focus back to "Discard draft". After a discard the pane reads the committed text again and the
  * caller says where focus goes.
  */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { type FocusEvent, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Instant } from '../../lib/instant';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -70,29 +72,6 @@ export function DraftEditor({ session, title, onDiscarded }: DraftEditorProps) {
     run: () => flushSession(client, workspaceId, itemId),
     loaded: textBox,
   });
-
-  // A failed save can also be cured by the next change's own save. If keyboard focus was in the
-  // notice then, its button goes with it; focus moves to the text box, not to the page.
-  const noticeHadFocus = useRef(false);
-  const leftNotice = (event: FocusEvent<HTMLElement>) => {
-    const from = event.target;
-    if (event.relatedTarget !== null) noticeHadFocus.current = false;
-    else {
-      // Focus left for no element: if the control is still there, it was not removed.
-      window.setTimeout(() => {
-        if (from.isConnected && document.activeElement !== from) noticeHadFocus.current = false;
-      });
-    }
-  };
-  const failureShown = saveFailure.shown;
-  useLayoutEffect(() => {
-    if (failureShown || !noticeHadFocus.current) return;
-    noticeHadFocus.current = false;
-    const active = document.activeElement;
-    if (active === null || active === document.body) {
-      sectionRef.current?.querySelector<HTMLElement>('[role="textbox"]')?.focus();
-    }
-  }, [failureShown]);
 
   const [confirming, setConfirming] = useState(false);
   const discardRef = useRef<HTMLButtonElement | null>(null);
@@ -154,21 +133,14 @@ export function DraftEditor({ session, title, onDiscarded }: DraftEditorProps) {
           </p>
         </div>
       )}
-      <div
-        onFocusCapture={() => {
-          noticeHadFocus.current = true;
-        }}
-        onBlurCapture={leftNotice}
-      >
-        {saveFailure.shown && (
-          <FailureNotice
-            context="Saving this draft"
-            error={saveFailure.error}
-            retry={saveFailure}
-            workspaceId={workspaceId}
-          />
-        )}
-      </div>
+      {saveFailure.shown && (
+        <FailureNotice
+          context="Saving this draft"
+          error={saveFailure.error}
+          retry={saveFailure}
+          workspaceId={workspaceId}
+        />
+      )}
       {confirming ? (
         <fieldset className="confirm">
           <legend>Discard this draft?</legend>
