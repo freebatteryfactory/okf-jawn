@@ -120,6 +120,8 @@ interface Caller {
   loadingLine?: string;
   /** That line is a note, not a status. */
   loadingLineIsNote?: boolean;
+  /** What a status says once the retry has loaded the content. */
+  saidAfter?: string;
   /** The element keyboard focus is on after the retry loaded the content. */
   loaded: () => HTMLElement | null | undefined;
 }
@@ -160,6 +162,7 @@ const callers: Caller[] = [
     isStudied: () => (body) => cursorOf(body) === 'more',
     reach: () => press('Show more workspaces'),
     context: 'Listing more workspaces',
+    saidAfter: '3 workspaces shown.',
     loaded: () => screen.queryByRole('link', { name: 'Second' }),
   },
   {
@@ -203,6 +206,7 @@ const callers: Caller[] = [
     good: () => ok({ hits: [hit(NOTE, 'Meeting notes')], revision: HEAD }),
     context: 'Searching',
     loadingLine: 'Searching…',
+    saidAfter: '1 result shown.',
     loaded: () => screen.queryByRole('link', { name: /Meeting notes/ }),
   },
   {
@@ -218,6 +222,7 @@ const callers: Caller[] = [
     reach: () => press('Show more results'),
     context: 'Loading more results',
     loadingLine: 'Loading more results…',
+    saidAfter: '3 results shown.',
     loaded: () => screen.queryByRole('link', { name: /Plan/ }),
   },
   {
@@ -250,6 +255,7 @@ const callers: Caller[] = [
     reach: () => press('Continue reading'),
     context: 'Continuing this reading',
     loadingLine: 'Reading more…',
+    saidAfter: 'Part 2 read.',
     loaded: () => screen.queryByRole('group', { name: 'Part 2 of this reading' }),
   },
   {
@@ -343,6 +349,9 @@ describe.each(callers)('a keyboard retry at $name', (caller) => {
       expect(document.activeElement).toBe(loaded);
     });
     expect(document.activeElement).not.toBe(document.body);
+    // The operation's own status says what the retry brought, as it does without a retry.
+    const after = caller.saidAfter;
+    if (after !== undefined) await waitFor(() => expect(linesOf('status')).toContain(after));
   });
 
   it('keeps focus on the retry button of the new notice when the operation fails again', async () => {
