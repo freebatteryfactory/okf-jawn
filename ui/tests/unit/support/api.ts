@@ -36,6 +36,8 @@ export type Handler = (body: Json) => Reply | Promise<Reply>;
 export interface Call {
   path: string;
   body: Json;
+  /** The request's headers, names in lower case. */
+  headers: Record<string, string>;
 }
 
 const CONTRACT: Record<string, { request: ZodType; response: ZodType }> = {
@@ -90,7 +92,11 @@ export function mockApi(handlers: Record<string, Handler>): MockedApi {
       parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
         ? Object.fromEntries(Object.entries(parsed))
         : {};
-    calls.push({ path, body });
+    const headers: Record<string, string> = {};
+    request.headers.forEach((value, name) => {
+      headers[name.toLowerCase()] = value;
+    });
+    calls.push({ path, body, headers });
     const contract = CONTRACT[path];
     if (contract !== undefined) {
       const checked = contract.request.safeParse(body);
