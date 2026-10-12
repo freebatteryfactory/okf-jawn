@@ -1,5 +1,5 @@
 {
-  "git_sha": "9bd7e208b68be5d7df6543d3d01f2b6e9965b61f",
+  "git_sha": "06a019426fc72387de3cfcce7a0201df84c4ddd5",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-12T07:27:51.717Z",
+  "produced_at": "2026-10-12T08:29:29.973Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-12T07:28:19.447Z",
+  "finished_at": "2026-10-12T08:33:30.246Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -279,8 +279,8 @@
     },
     "http": {
       "status": "listening",
-      "endpoint": "http://127.0.0.1:18765/mcp",
-      "requested": "http://127.0.0.1:18765/mcp"
+      "endpoint": "http://127.0.0.1:18766/mcp",
+      "requested": "http://127.0.0.1:18766/mcp"
     }
   },
   "harness_binary": {
@@ -289,7 +289,7 @@
     "sha256": "acdf4a8866afe274e04305e8a3f4c478193ef6fc82b922f791e69afb6f79a124",
     "args": [
       "--http",
-      "127.0.0.1:18765"
+      "127.0.0.1:18766"
     ]
   },
   "harness_process": {
@@ -311,7 +311,7 @@
     ]
   },
   "bundle_sizes": {
-    "app": 1601339
+    "app": 1601376
   },
   "app_bundle": {
     "node_env": "development",
@@ -336,7 +336,7 @@
     "resource_count": 1,
     "resources": [
       {
-        "byteLength": 1601339,
+        "byteLength": 1601376,
         "metaUi": {
           "csp": {
             "connectDomains": [],
@@ -348,7 +348,7 @@
         "name": "app",
         "path": "ui/dist-apps/app.html",
         "readable": true,
-        "sha256": "dd666c64df582f839f3662cf9777e9de0a975e88d82fdfc923bdd4df701f02d0",
+        "sha256": "ba09deffba179194b84436cb5881a4e6d9e1d5fe835f1bd75a8db1a061539cc0",
         "uri": "ui://okf-jawn/app.html"
       }
     ],
@@ -451,7 +451,7 @@
       {
         "uri": "ui://okf-jawn/app.html",
         "mime_type": "text/html;profile=mcp-app",
-        "text_sha256": "dd666c64df582f839f3662cf9777e9de0a975e88d82fdfc923bdd4df701f02d0",
+        "text_sha256": "ba09deffba179194b84436cb5881a4e6d9e1d5fe835f1bd75a8db1a061539cc0",
         "csp": {
           "connectDomains": [],
           "resourceDomains": []
@@ -853,7 +853,7 @@
     "opened_at": null,
     "closed_at": null,
     "public_url": null,
-    "local_port": 18765,
+    "local_port": 18766,
     "note": "OKF_MCP_APPS_NGROK is not 1"
   },
   "host_render": {
