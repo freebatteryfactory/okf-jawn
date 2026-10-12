@@ -52,6 +52,7 @@ function ItemSources({
             context="Listing this item’s sources"
             error={sources.error}
             onRetry={() => void sources.refetch()}
+            workspaceId={workspaceId}
           />
         </>
       )}

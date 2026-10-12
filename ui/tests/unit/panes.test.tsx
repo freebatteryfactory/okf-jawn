@@ -4,7 +4,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useExplorerStore } from '../../src/features/explorer/store';
-import { mockApi } from './support/api';
+import { fail, mockApi, notImplemented } from './support/api';
 import { explorerHandlers, NOTE, OTHER, renderAt, WS } from './support/workspace';
 
 afterEach(() => {
@@ -88,6 +88,27 @@ describe('tabs and panes', () => {
     }
     expect(stored).toContain(NOTE);
     expect(stored).toContain(OTHER);
+  });
+});
+
+describe('failures keep the workspace open', () => {
+  it('keeps the open tabs when a not_found sends the reader back to the workspace', async () => {
+    const base = explorerHandlers();
+    mockApi({
+      ...base,
+      '/api/reads/read-item': (body) =>
+        body.item_id === OTHER
+          ? fail(404, 'not_found', 'no such item')
+          : (base['/api/reads/read-item']?.(body) ?? notImplemented('read_item')),
+    });
+    const { router } = await openTwoTabs();
+    const article = await screen.findByRole('article', { name: 'Plan' });
+    const alert = await within(article).findByRole('alert');
+    expect(alert.textContent).toContain('Reading this item: This could not be found.');
+    await userEvent.click(within(alert).getByRole('link', { name: 'Go to this workspace' }));
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}`));
+    expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Plan' })).toBeTruthy();
   });
 });
 
