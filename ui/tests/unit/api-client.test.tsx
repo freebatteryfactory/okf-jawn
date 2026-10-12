@@ -20,7 +20,7 @@ import {
 import { createQueryClient } from '../../src/app/query-client';
 import { classifyFailure, messageFor, shouldRetry } from '../../src/features/errors/failure';
 import { fail, mockApi, ok } from './support/api';
-import { explorerHandlers, NOTE, renderAt, WS, workspace } from './support/workspace';
+import { explorerHandlers, NOTE, OLD, renderAt, WS, workspace } from './support/workspace';
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
 const OPEN = '/api/workspaces/open-workspace';
@@ -313,5 +313,19 @@ describe('through the app', () => {
     renderAt(`/w/${WS}/i/${NOTE}`);
     await screen.findByText('Text of Meeting notes');
     expect(api.callsTo(OPEN)).toHaveLength(1);
+  });
+
+  it('sends what a person asks for while the browser reports no network (a mutation)', async () => {
+    const api = mockApi(explorerHandlers());
+    renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    const latest = await screen.findByRole('button', { name: 'Read the latest version' });
+    const asked = () =>
+      api
+        .callsTo('/api/reads/read-item')
+        .filter((body) => JSON.stringify(body.at).includes('latest'));
+    expect(asked()).toHaveLength(0);
+    onlineManager.setOnline(false);
+    fireEvent.click(latest);
+    await waitFor(() => expect(asked()).toHaveLength(1));
   });
 });
