@@ -1,6 +1,6 @@
 /**
- * The workspace head: shown "as of" when it was resolved, re-resolved on Refresh and on window
- * focus, and a revision is called "the latest" only when a request made for that statement
+ * The workspace head: shown "as of" when it was resolved, re-resolved only on Refresh, checked on
+ * window focus, and a revision is called "the latest" only when a request made for that statement
  * resolved it (SPEC section 3: "At::Latest is a request selector resolved once before the
  * operation reads").
  */
@@ -9,6 +9,8 @@ import { focusManager } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { openWorkspaceQueryKey } from '../../src/api/generated/@tanstack/react-query.gen';
+import type { ItemSummary } from '../../src/api/generated/types.gen';
 import { fail, type Json, mockApi, ok } from './support/api';
 import {
   explorerHandlers,
@@ -21,6 +23,7 @@ import {
   readResponse,
   renderAt,
   sourceSummary,
+  summary,
   WS,
   workspace,
 } from './support/workspace';
@@ -240,6 +243,122 @@ describe('the shell head is shown as of when it was resolved', () => {
     // so the first entry.
     act(() => tree.focus());
     await waitFor(() => expect(focusedName()).toBe('notes'));
+  });
+
+  /** Root entries at HEAD, and the ones a newer head lists; focus Annual report (index 1). */
+  async function focusedWhileRefreshing(atNew: ItemSummary[], folders: string[] = ['notes']) {
+    mockApi(
+      explorerHandlers({
+        [OPEN]: headMovesOn(),
+        [LIST]: (body) => {
+          const revision = String((body.at as Json).revision);
+          const answer =
+            revision === NEW
+              ? listing(folders, atNew)
+              : listing(['notes'], [sourceSummary, otherSummary]);
+          return ok({ ...answer, revision });
+        },
+      }),
+    );
+    const { queryClient } = renderAt(`/w/${WS}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    await within(tree).findByRole('treeitem', { name: /Plan/ });
+    act(() => tree.focus());
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(focusedName()).toMatch(/^Annual report,/));
+    // A Refresh resolves the newer head while keyboard focus is still on that row.
+    await act(() =>
+      queryClient.refetchQueries({
+        queryKey: openWorkspaceQueryKey({ body: { workspace_id: WS } }),
+        exact: true,
+      }),
+    );
+    return tree;
+  }
+
+  it('moves keyboard focus from an entry a refresh removed to the entry now in its place (N18, R4b)', async () => {
+    const tree = await focusedWhileRefreshing([otherSummary]);
+    await waitFor(() =>
+      expect(within(tree).queryByRole('treeitem', { name: /Annual report/ })).toBeNull(),
+    );
+    await waitFor(() => expect(focusedName()).toMatch(/^Plan,/));
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it('moves keyboard focus to the nearest remaining entry when the removed one was last', async () => {
+    const tree = await focusedWhileRefreshing([], ['notes']);
+    await waitFor(() =>
+      expect(within(tree).queryByRole('treeitem', { name: /Annual report/ })).toBeNull(),
+    );
+    await waitFor(() => expect(focusedName()).toBe('notes'));
+  });
+
+  it('moves keyboard focus to the empty-workspace line when a refresh leaves no entry', async () => {
+    await focusedWhileRefreshing([], []);
+    const empty = await screen.findByText('This workspace has no folders or items yet.');
+    await waitFor(() => expect(document.activeElement).toBe(empty));
+  });
+
+  it('follows the focused entry through a refresh that moves it, to find its place when a later one removes it', async () => {
+    const NEWER = 'f'.repeat(40);
+    const extra = summary('66666666-6666-4666-8666-666666666666', 'extra.md', 'Extra', 'note');
+    const heads = [HEAD, NEW, NEWER];
+    let opens = 0;
+    mockApi(
+      explorerHandlers({
+        [OPEN]: () => {
+          opens += 1;
+          return ok({ ...workspace, head: heads[Math.min(opens, heads.length) - 1] ?? HEAD });
+        },
+        [LIST]: (body) => {
+          const revision = String((body.at as Json).revision);
+          const items =
+            revision === NEWER
+              ? [extra, otherSummary]
+              : revision === NEW
+                ? [extra, sourceSummary, otherSummary]
+                : [sourceSummary, otherSummary];
+          return ok({ ...listing(['notes'], items), revision });
+        },
+      }),
+    );
+    const { queryClient } = renderAt(`/w/${WS}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    await within(tree).findByRole('treeitem', { name: /Plan/ });
+    act(() => tree.focus());
+    await userEvent.keyboard('{ArrowDown}');
+    await waitFor(() => expect(focusedName()).toMatch(/^Annual report,/));
+    const refresh = () =>
+      act(() =>
+        queryClient.refetchQueries({
+          queryKey: openWorkspaceQueryKey({ body: { workspace_id: WS } }),
+          exact: true,
+        }),
+      );
+    // The newer head adds an entry above: the focused one moves down a place and keeps focus.
+    await refresh();
+    await within(tree).findByRole('treeitem', { name: /Extra/ });
+    expect(focusedName()).toMatch(/^Annual report,/);
+    // The next one removes it: focus goes to the entry now at its new place, Plan.
+    await refresh();
+    await waitFor(() =>
+      expect(within(tree).queryByRole('treeitem', { name: /Annual report/ })).toBeNull(),
+    );
+    await waitFor(() => expect(focusedName()).toMatch(/^Plan,/));
+  });
+
+  it('keeps keyboard focus on an entry the refresh keeps', async () => {
+    const tree = await focusedWhileRefreshing([sourceSummary, otherSummary]);
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the workspace as of/).querySelector('code')?.title).toBe(
+        NEW,
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(focusedName()).toMatch(/^Annual report,/);
+    expect(within(tree).getByRole('treeitem', { name: /Annual report/ })).toBe(
+      document.activeElement,
+    );
   });
 
   it('says quietly that the newer-head check failed, in plain words, never as an alert (N20)', async () => {

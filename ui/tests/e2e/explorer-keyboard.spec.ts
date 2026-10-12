@@ -640,6 +640,47 @@ test.describe('a newer head moves nothing until Refresh', () => {
     await expect(page.getByRole('button', { name: 'Refresh' })).toBeFocused();
   });
 
+  for (const removed of [true, false]) {
+    test(`R4b focus on an entry while the newer listing loads, the entry ${removed ? 'removed' : 'kept'} by the newer head: focus never drops to the body`, async ({
+      page,
+    }) => {
+      const newer = held();
+      await routeApi(page, {
+        '/api/workspaces/open-workspace': headMovesOn(),
+        '/api/items/list-items': async (body) => {
+          const revision = String((body.at as { revision: string }).revision);
+          if (revision === NEW) await newer.wait;
+          const shown =
+            revision === NEW && removed ? items.filter((_, index) => index !== 40) : items;
+          return ok({ folders: [], items: shown, revision });
+        },
+      });
+      await page.goto(`${server.origin()}/w/${WS}`);
+      await expect(row(page, /Item number 0,/)).toBeVisible();
+      await page.keyboard.press('Shift');
+      await page.getByRole('tree', { name: 'Folders' }).focus();
+      for (let index = 0; index < 40; index += 1) await page.keyboard.press('ArrowDown');
+      await expect(row(page, /Item number 40,/)).toBeFocused();
+      await page.getByRole('button', { name: 'Refresh' }).focus();
+      await page.keyboard.press('Enter');
+      await expect(page.getByText(/Showing the workspace as of/).locator('code')).toHaveAttribute(
+        'title',
+        NEW,
+      );
+      // The newer listing is held: the tree still shows the older one. Back onto row 40.
+      await page.keyboard.press('Shift');
+      await row(page, /Item number 40,/).focus();
+      await expect(row(page, /Item number 40,/)).toBeFocused();
+      newer.release();
+      // Removed: focus moves to the entry now in its place. Kept: it stays.
+      await expect(row(page, removed ? /Item number 41,/ : /Item number 40,/)).toBeFocused();
+      await page.waitForTimeout(300);
+      expect(await focused(page)).toContain(removed ? 'Item number 41' : 'Item number 40');
+      await page.keyboard.press('ArrowDown');
+      await expect(row(page, removed ? /Item number 42,/ : /Item number 41,/)).toBeFocused();
+    });
+  }
+
   test('N20 a failed newer-head check says so quietly, never as an alert', async ({ page }) => {
     let opens = 0;
     await routeApi(page, {

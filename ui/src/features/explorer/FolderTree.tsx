@@ -246,6 +246,30 @@ export function FolderTree({
 
   const rowContext = useMemo(() => ({ measure: measureRow }), [measureRow]);
 
+  // Keyboard focus on a row that a newer listing no longer holds would drop to the page when the
+  // row goes (a Refresh lands while focus is in the tree). It moves to the entry now at that
+  // place, or the nearest remaining one; with no entry left, to the empty-workspace line. The
+  // row that last had focus and the place of arborist's focused entry are remembered for this.
+  const lastFocusIndex = useRef<number | null>(null);
+  const lastFocusedRow = useRef<HTMLElement | null>(null);
+  const emptyRef = useRef<HTMLParagraphElement | null>(null);
+  const rememberRow = (event: ReactFocusEvent<HTMLElement>) => {
+    if (event.target.getAttribute('role') === 'treeitem') lastFocusedRow.current = event.target;
+  };
+  const forgetRow = (event: ReactFocusEvent<HTMLElement>) => {
+    const row = event.target;
+    const to = event.relatedTarget;
+    if (to instanceof Node && !boxRef.current?.contains(to)) lastFocusedRow.current = null;
+    else if (to === null) {
+      // Focus left for no element: if the row is still there, it was not removed.
+      window.setTimeout(() => {
+        if (lastFocusedRow.current === row && row.isConnected && document.activeElement !== row) {
+          lastFocusedRow.current = null;
+        }
+      });
+    }
+  };
+
   // Keyboard focus that lands on the tree itself (Tab onto its container) or on its scrolling
   // list (Shift+Tab while the tab-stop row is scrolled out of the rendered window) moves on to the
   // tab-stop entry, scrolled into view, and arborist is told it is focused. A press of the pointer
@@ -329,6 +353,33 @@ export function FolderTree({
     );
   });
 
+  // After each render: remember where arborist's focused entry stands; if the row that had
+  // keyboard focus was removed with its entry, move focus to the nearest entry (see above).
+  useLayoutEffect(() => {
+    const tree = treeRef.current;
+    const row = lastFocusedRow.current;
+    const active = document.activeElement;
+    const dropped =
+      row !== null && !row.isConnected && (active === null || active === document.body);
+    if (tree) {
+      const focusId = tree.state.nodes.focus.id;
+      const index = focusId === null ? undefined : tree.indexOf(focusId);
+      if (index !== null && index !== undefined) {
+        lastFocusIndex.current = index;
+        return;
+      }
+      if (!dropped) return;
+      lastFocusedRow.current = null;
+      const near = tree.at(Math.min(lastFocusIndex.current ?? 0, tree.visibleNodes.length - 1));
+      if (near !== null) tree.focus(near.id);
+      return;
+    }
+    if (dropped) {
+      lastFocusedRow.current = null;
+      emptyRef.current?.focus();
+    }
+  });
+
   const activate = (node: NodeApi<TreeEntry>) => {
     const entry = node.data;
     const shownCount = () =>
@@ -363,7 +414,11 @@ export function FolderTree({
           pointing.current = false;
         });
       }}
-      onFocusCapture={enterTree}
+      onFocusCapture={(event) => {
+        rememberRow(event);
+        enterTree(event);
+      }}
+      onBlurCapture={forgetRow}
     >
       <h2 id={heading} className="panel-heading">
         Folders
@@ -377,7 +432,9 @@ export function FolderTree({
         />
       )}
       {root?.isSuccess && entries.length === 0 && (
-        <p>This workspace has no folders or items yet.</p>
+        <p ref={emptyRef} tabIndex={-1}>
+          This workspace has no folders or items yet.
+        </p>
       )}
       <p role="status" className="sr-only">
         {loadNote}
@@ -407,6 +464,9 @@ export function FolderTree({
                 setExpanded(workspaceId, id.slice('folder:'.length), open);
               }}
               onActivate={activate}
+              onFocus={(node) => {
+                lastFocusIndex.current = node.rowIndex;
+              }}
               rowHeight={rowHeight}
               indent={16}
               width="100%"
