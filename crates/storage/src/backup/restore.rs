@@ -206,6 +206,9 @@ pub(crate) fn check(
 /// - its entries (`Opened::open`: compression methods, sizes, and each object's bytes against
 ///   its digest), its manifest, and its objects, listed from its entries (an older manifest's
 ///   own list is not read);
+/// - that Git can name each reference its manifest lists (`refuse_unnameable_references`),
+///   which the restore would otherwise find out setting it, after the objects and the history
+///   were written;
 /// - its records, extracted under `staging` (`migrated`): a UTF-8 database SQLite reads,
 ///   intact, and brought to this build's schema;
 /// - their schema (`refuse_other_schema`) and then their rows (`refuse_foreign_rows`), against
@@ -227,6 +230,7 @@ fn checked(
     let mut opened = Opened::open(archive)?;
     let mut manifest = opened.workspace()?;
     manifest.objects = opened.objects()?;
+    refuse_unnameable_references(&manifest)?;
     let records = staging.join(RECORDS);
     opened.extract(RECORDS, &records)?;
     migrated(&records)?;
@@ -276,9 +280,17 @@ fn checked(
 ///   only derived datasets, and leaves aside artifacts, uploads and job outputs (an import
 ///   copies no job row, `IMPORTED`), which it never copies.
 ///
+/// The history is read as a purge reads a survivor's: a card's `object` and `extraction.digest`
+/// by path, so a card another contract version wrote restores; an appearance that does not read
+/// (not JSON, or a named field that is not a digest), an entry under `.okf/sources` that is not a
+/// file, a manifest commit the pack lacks, and a pack that lacks a parent, tree or appearance
+/// blob a commit needs are each refused, so a restore never plants what would stop the tenant's
+/// purges (`purge::references`).
+///
 /// # Errors
 /// Returns `InvalidInput` naming the digest and what names it, or naming an appearance or
-/// conversion record that does not read; otherwise what the history names.
+/// conversion record that does not read, or the object the pack lacks; otherwise what the
+/// history names.
 fn refuse_unheld(
     opened: &mut Opened,
     manifest: &WorkspaceManifest,
@@ -350,6 +362,23 @@ fn refuse_unheld(
         history: history.objects.into_keys().collect(),
         followed,
     })
+}
+
+/// Refuse a manifest that lists a reference Git cannot name (`Reference::is_valid_name`), before
+/// anything is written: the restore sets each reference after it put the objects back and
+/// indexed the history, and would otherwise fail there, with those written.
+///
+/// # Errors
+/// Returns `InvalidInput` naming the reference.
+fn refuse_unnameable_references(manifest: &WorkspaceManifest) -> Result<(), ApiError> {
+    for (name, _) in &manifest.references {
+        if !git2::Reference::is_valid_name(name) {
+            return Err(invalid(&format!(
+                "its manifest names the reference {name:?}, which is not a name Git accepts"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Check the extracted records database at `records` and bring it to this build's schema:
@@ -1430,6 +1459,7 @@ mod tests {
             archived_at: None,
             references: Vec::new(),
             objects: Vec::new(),
+            rows_left_out: 0,
         };
         let own = format!(
             "INSERT INTO workspaces VALUES ('local', '{workspace}', 'm0', 'Notes', '', 't', NULL);"

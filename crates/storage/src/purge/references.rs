@@ -12,12 +12,17 @@
 //!
 //! - **Its Git history**, on every commit of every reference (proposal candidates included).
 //!   The walk reads one kind of file, the source appearance of each card
-//!   (`.okf/sources/<item>.json`), which is the contract's `SourceAppearance` (contract
-//!   `source.rs:150`). Two of its fields name stored objects: the original, `object`
-//!   (`source.rs:152`), and the conversion record, `extraction.digest` (contract
-//!   `extraction.rs:235`). No other field does. `names`, `media_type`, `size` and `metadata` are
-//!   the supplied file's own text. The converter's model `sha256` (`extraction.rs:156`) and the
-//!   supplied text's `content_digest` (`extraction.rs:312`) are content hashes.
+//!   (`.okf/sources/<item>.json`), which the application writes as the contract's
+//!   `SourceAppearance` (contract `source.rs:150`). Two of its fields name stored objects: the
+//!   original, `object` (`source.rs:152`), and the conversion record, `extraction.digest`
+//!   (contract `extraction.rs:235`). No other field does. `names`, `media_type`, `size` and
+//!   `metadata` are the supplied file's own text. The converter's model `sha256`
+//!   (`extraction.rs:156`) and the supplied text's `content_digest` (`extraction.rs:312`) are
+//!   content hashes. **The two fields are read by path** (`appearance_objects`), never through
+//!   the contract type, whose `deny_unknown_fields` would make a card of another contract
+//!   version unreadable: a field this build does not know, a renamed variant or a changed type
+//!   anywhere else in the file leaves the two references readable. `object` is required; a
+//!   missing `extraction` or `extraction.digest` is simply no record.
 //! - **Files the walk does not read.** The item file's header repeats the appearance's two
 //!   digests (core `SourceCard::header`, `storage.rs:861`). A correction
 //!   (`.okf/corrections/<item>/<digest>.json`) and accepted supplied text
@@ -27,18 +32,35 @@
 //! - **The conversion record a card names**, read one level, at any size, streamed
 //!   (`conversion_objects`). Each structured export (`structured[].digest`, core
 //!   `conversion.rs:236`) and each retained asset (`assets[].digest`, `conversion.rs:90`) is
-//!   named. Its `markdown` (`conversion.rs:259`) is the hash of the card's text, and every other
-//!   field is skipped unread. No other object is ever opened for references: not an upload, an
-//!   artifact, a derived dataset or a pending put.
+//!   named: only the `digest` of each entry is read, and every other key, known to this build or
+//!   not, is skipped unread. An entry whose `digest` is not a digest names nothing, since no
+//!   stored object has such a key. Its `markdown` (`conversion.rs:259`) is the hash of the
+//!   card's text. No other object is ever opened for references: not an upload, an artifact, a
+//!   derived dataset or a pending put.
 //! - **Its records** (`records`), each by its digest column: derived datasets, retained
 //!   artifacts, completed uploads, sandbox capabilities, written histories, written workspace
 //!   archives and job outputs. A conversion job's completion lists the record, its structured
 //!   exports and its assets as job outputs (`RecordStore::complete_job`); before it, they are
 //!   pending puts of the writing workspace, and the card-named record leads to them.
 //!
-//! Only the application writes a source appearance or a conversion record. So one that does not
-//! read as its type is damage: a backup or a purge fails with `Internal` naming it (`damaged`),
-//! and a restore refuses the archive as invalid input. Nothing ever falls back to tokens.
+//! **Damage.** Only the application writes a source appearance or a conversion record, so one
+//! that does not read is damage, and exactly this is damage: a file that is not JSON (an
+//! appearance that is not a JSON object with an `object`; a record that does not read to its
+//! end as a JSON object), or an appearance's named field (`object`, `extraction.digest`) that
+//! holds something other than a digest. So is a history whose commit needs an object the
+//! repository does not hold (a parent, a tree, an appearance blob), or whose `.okf/sources`
+//! holds something other than files. Nothing ever falls back to tokens. What a reader does with
+//! damage depends on whose it is (`Report`):
+//! - a backup of the damaged workspace fails with `Internal` naming the path or the record
+//!   digest (`damaged`), and a restore refuses an archive that holds it as invalid input
+//!   (`restore::refuse_unheld`), so no import plants damage;
+//! - a purge of another workspace stops at its objects step with `Internal` naming the damaged
+//!   workspace and the path or record digest (`refusing_in`): guessing could delete what the
+//!   file names, and the message says where to look;
+//! - a purge of the damaged workspace itself goes on (`history_recording`): each unread file is
+//!   recorded in `History::unread` by its path or record digest, what was read stays read, and
+//!   the objects only an unread file named may remain stored once the purge completes. Purging
+//!   the damaged workspace is the in-product repair for a tenant whose purges its damage stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::BufRead;
@@ -47,8 +69,8 @@ use std::path::Path;
 use git2::{ObjectType, Oid, Repository, Sort};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{Digest, TenantId};
-use okf_jawn_contract::source::SourceAppearance;
 use rusqlite::{Connection, params};
+use serde_json::Value;
 
 use crate::blobs::LocalBlobs;
 use crate::db::sql;
@@ -65,6 +87,10 @@ pub(crate) struct History {
     /// The objects of `objects` a card names as its conversion record: the only objects ever
     /// opened as records.
     pub(crate) records: BTreeSet<Digest>,
+    /// What a recording walk (`history_recording`) could not read, each by its path or object
+    /// and why: the objects only it names are not in `objects`. Empty after a walk that refuses
+    /// damage, which stops at the first.
+    pub(crate) unread: Vec<String>,
 }
 
 /// Which rows of the tenant a record query reads.
@@ -79,6 +105,11 @@ pub(crate) enum Rows {
 /// What a file that does not read structurally answers: `damaged` for the store's own files, a
 /// refusal for an uploaded archive's.
 pub(crate) type Unreadable = fn(&str) -> ApiError;
+
+/// What a reader does with damage, given its message (the path or object, and why): `refusing`
+/// answers an error, which stops the read at the first; a recording reader keeps the message and
+/// reads on (`history_recording`, for the workspace a purge removes).
+pub(crate) type Report<'a> = dyn FnMut(String) -> Result<(), ApiError> + 'a;
 
 /// A JSON reader over a conversion record of any size (`Scanner::record`). It holds at most
 /// `KEY_LIMIT` bytes of a key, `DIGEST_LENGTH` bytes of a string value, and one bit per level
@@ -107,8 +138,16 @@ pub(crate) type Visit<'a> = dyn FnMut(Digest, &'static str) -> Result<(), ApiErr
 /// key (`None` past `KEY_LIMIT` bytes) and the first byte of its value, it reads the value.
 type Member<'a, S> = dyn FnMut(&mut S, Option<&[u8]>, u8) -> Result<(), Stop> + 'a;
 
-/// The tree that holds the source appearance of each card.
+/// The tree that holds the source appearance of each card, as a path.
 const SOURCES_TREE: &str = ".okf/sources";
+/// The application's folder at the root of a tree.
+const OKF_TREE: &str = ".okf";
+/// The appearance folder inside `OKF_TREE`.
+const SOURCES_DIR: &str = "sources";
+/// Where an appearance names its original.
+const OBJECT_AT: &str = "/object";
+/// Where an appearance names its conversion record.
+const RECORD_AT: &str = "/extraction/digest";
 /// The length of a SHA-256 digest in hexadecimal.
 const DIGEST_LENGTH: usize = 64;
 /// The most bytes of a key `Scanner` holds: more than any key it looks for.
@@ -341,31 +380,68 @@ pub(crate) fn damaged(message: &str) -> ApiError {
     )
 }
 
+/// The `Report` that refuses damage: it answers `unreadable` of the message, which stops the
+/// read at the first damaged file.
+pub(crate) fn refusing(unreadable: Unreadable) -> impl FnMut(String) -> Result<(), ApiError> {
+    move |message| Err(unreadable(&message))
+}
+
+/// The `Report` that refuses damage in the surviving workspace `workspace`, read during another
+/// workspace's purge: `damaged`, naming the workspace before the path or record digest, so an
+/// operator knows where to look. The remedy is a fix of the damaged file or of this reader, or
+/// a purge of the damaged workspace, which its own damage does not stop (`history_recording`).
+pub(crate) fn refusing_in(workspace: &str) -> impl FnMut(String) -> Result<(), ApiError> {
+    let workspace = workspace.to_owned();
+    move |message| Err(damaged(&format!("in the workspace {workspace}, {message}")))
+}
+
 /// Walk every commit on every reference of `repository`, collecting the commits and what the
 /// source appearances on them name (`scan`). Each distinct appearance tree and file is read
 /// once, so a long history with few changed cards costs little more than the walk.
 ///
 /// # Errors
-/// Returns `Internal` (`damaged`) for an appearance file that does not read as one.
+/// Returns `Internal` (`damaged`) for damage: an appearance that does not read as one, an
+/// entry under `.okf/sources` that is not a file, or an object a commit needs that the
+/// repository does not hold.
 pub(crate) fn history(repository: &Repository) -> Result<History, ApiError> {
-    let mut tips = Vec::new();
-    for reference in repository.references().map_err(|error| git(&error))? {
-        let reference = reference.map_err(|error| git(&error))?;
-        if let Some(target) = reference.target()
-            && repository.find_commit(target).is_ok()
-        {
-            tips.push(target);
-        }
-    }
-    walk(repository, &tips, damaged)
+    walk(repository, &tips(repository)?, &mut refusing(damaged))
+}
+
+/// As `history`, for the surviving workspace `workspace` read during another workspace's
+/// purge: a failure names the workspace (`refusing_in`).
+///
+/// # Errors
+/// As `history`, naming the workspace.
+pub(crate) fn history_naming(
+    repository: &Repository,
+    workspace: &str,
+) -> Result<History, ApiError> {
+    walk(repository, &tips(repository)?, &mut refusing_in(workspace))
+}
+
+/// As `history`, for the workspace a purge removes: damage does not stop the walk. Each unread
+/// file is recorded in `History::unread` by its path or object and why, what was read stays
+/// read, and the walk goes on, so a workspace's own damage never keeps it from being purged. The
+/// objects only an unread file named are not in `History::objects`, and may remain stored.
+///
+/// # Errors
+/// Returns `Unavailable` for a failure of the version store itself; never for damage.
+pub(crate) fn history_recording(repository: &Repository) -> Result<History, ApiError> {
+    let mut unread = Vec::new();
+    let mut found = walk(repository, &tips(repository)?, &mut |message| {
+        unread.push(message);
+        Ok(())
+    })?;
+    found.unread = unread;
+    Ok(found)
 }
 
 /// The history of an uploaded archive, its pack indexed into `repository`, walked from the
 /// commits its manifest names (`tips`), as `history` walks a workspace's.
 ///
 /// # Errors
-/// Returns `unreadable` for a tip the pack does not hold as a commit, or for an appearance file
-/// that does not read as one.
+/// Returns `unreadable` for a tip the pack does not hold as a commit, or for damage of the
+/// history (as `history`), which an archive's is: a restore refuses it as invalid input.
 pub(crate) fn history_from(
     repository: &Repository,
     tips: &[Oid],
@@ -378,26 +454,27 @@ pub(crate) fn history_from(
             )));
         }
     }
-    walk(repository, tips, unreadable)
+    walk(repository, tips, &mut refusing(unreadable))
 }
 
 /// The objects the source appearances on the one commit `commit` name: those a record of the
 /// workspace names once that commit is stored.
 ///
 /// # Errors
-/// Returns `Internal` (`damaged`) for an appearance file that does not read as one.
+/// Returns `Internal` (`damaged`) for damage, as `history`.
 pub(crate) fn appearances(
     repository: &Repository,
     commit: Oid,
 ) -> Result<BTreeSet<Digest>, ApiError> {
     let mut found = History::default();
-    if let Some(sources) = sources_tree(repository, commit, damaged)? {
+    let mut report = refusing(damaged);
+    if let Some(sources) = sources_tree(repository, commit, &mut report)? {
         scan(
             repository,
             sources,
             &mut BTreeSet::new(),
             &mut found,
-            damaged,
+            &mut report,
         )?;
     }
     Ok(found.objects.into_keys().collect())
@@ -417,18 +494,10 @@ pub(crate) fn conversion_objects(
     digest: &Digest,
     visit: &mut Visit<'_>,
 ) -> Result<(), ApiError> {
-    let path = blobs.local_path(tenant, digest)?;
-    let file = match std::fs::File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(crate::data::io_error("read", &path, &error)),
-    };
-    read_record(
-        std::io::BufReader::with_capacity(64 << 10, file),
-        (&path, digest),
-        visit,
-        damaged,
-    )
+    match stream_held(blobs, tenant, digest, visit)? {
+        None => Ok(()),
+        Some(message) => Err(damaged(&message)),
+    }
 }
 
 /// Read the conversion record `digest` from `reader` (its file `path`, named in a read error):
@@ -446,10 +515,72 @@ pub(crate) fn read_record<R: BufRead>(
     visit: &mut Visit<'_>,
     unreadable: Unreadable,
 ) -> Result<(), ApiError> {
+    match stream(reader, (path, digest), visit)? {
+        None => Ok(()),
+        Some(message) => Err(unreadable(&message)),
+    }
+}
+
+/// Add to `found` each held object that a conversion record of `records` names
+/// (`conversion_objects`); no other object is opened. Only held objects are kept, so memory is
+/// bounded by the tenant's objects, not by a record. A record that does not read to its end is
+/// told to `report`, with what came before kept. Blocking.
+///
+/// # Errors
+/// What `report` returns for damage; `Unavailable` for a record that cannot be read.
+pub(crate) fn follow_records(
+    blobs: &LocalBlobs,
+    tenant: &TenantId,
+    records: &BTreeSet<Digest>,
+    found: &mut BTreeSet<Digest>,
+    report: &mut Report<'_>,
+) -> Result<(), ApiError> {
+    for record in records {
+        let read = stream_held(blobs, tenant, record, &mut |named, _| {
+            if blobs.local_path(tenant, &named)?.is_file() {
+                found.insert(named);
+            }
+            Ok(())
+        })?;
+        if let Some(message) = read {
+            report(message)?;
+        }
+    }
+    Ok(())
+}
+
+/// `conversion_objects`, answering the message of a record that does not read to its end
+/// instead of failing on it: `None` when it read whole, or the store does not hold it.
+fn stream_held(
+    blobs: &LocalBlobs,
+    tenant: &TenantId,
+    digest: &Digest,
+    visit: &mut Visit<'_>,
+) -> Result<Option<String>, ApiError> {
+    let path = blobs.local_path(tenant, digest)?;
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(crate::data::io_error("read", &path, &error)),
+    };
+    stream(
+        std::io::BufReader::with_capacity(64 << 10, file),
+        (&path, digest),
+        visit,
+    )
+}
+
+/// `read_record`, answering the message of a record that does not read to its end instead of
+/// failing on it: `None` when it read whole.
+fn stream<R: BufRead>(
+    reader: R,
+    (path, digest): (&Path, &Digest),
+    visit: &mut Visit<'_>,
+) -> Result<Option<String>, ApiError> {
     let mut scanner = Scanner { reader, path };
     match scanner.record(visit) {
-        Ok(()) => Ok(()),
-        Err(Stop::Malformed) => Err(unreadable(&format!(
+        Ok(()) => Ok(None),
+        Err(Stop::Malformed) => Ok(Some(format!(
             "the conversion record {} does not read as one",
             digest.as_str()
         ))),
@@ -457,35 +588,26 @@ pub(crate) fn read_record<R: BufRead>(
     }
 }
 
-/// Add to `found` each held object that a conversion record of `records` names
-/// (`conversion_objects`); no other object is opened. Only held objects are kept, so memory is
-/// bounded by the tenant's objects, not by a record. Blocking.
-///
-/// # Errors
-/// As `conversion_objects`.
-pub(crate) fn follow_records(
-    blobs: &LocalBlobs,
-    tenant: &TenantId,
-    records: &BTreeSet<Digest>,
-    found: &mut BTreeSet<Digest>,
-) -> Result<(), ApiError> {
-    for record in records {
-        conversion_objects(blobs, tenant, record, &mut |named, _| {
-            if blobs.local_path(tenant, &named)?.is_file() {
-                found.insert(named);
-            }
-            Ok(())
-        })?;
+/// The commit each reference of `repository` names, for those that name one.
+fn tips(repository: &Repository) -> Result<Vec<Oid>, ApiError> {
+    let mut tips = Vec::new();
+    for reference in repository.references().map_err(|error| git(&error))? {
+        let reference = reference.map_err(|error| git(&error))?;
+        if let Some(target) = reference.target()
+            && repository.find_commit(target).is_ok()
+        {
+            tips.push(target);
+        }
     }
-    Ok(())
+    Ok(tips)
 }
 
 /// Walk every commit reachable from `tips`, collecting the commits and what the appearances on
-/// them name (`scan`).
+/// them name (`scan`); damage goes to `report`.
 fn walk(
     repository: &Repository,
     tips: &[Oid],
-    unreadable: Unreadable,
+    report: &mut Report<'_>,
 ) -> Result<History, ApiError> {
     let mut found = History::default();
     if tips.is_empty() {
@@ -499,82 +621,185 @@ fn walk(
     }
     let (mut trees, mut files) = (BTreeSet::new(), BTreeSet::new());
     for oid in walk {
-        let oid = oid.map_err(|error| git(&error))?;
+        let oid = match oid {
+            Ok(oid) => oid,
+            Err(error) => {
+                // A commit the walk reached names a parent the repository does not hold: the
+                // commits read so far stay read, and the walk cannot go on past it.
+                report(missing(&error, "a parent a commit names")?)?;
+                break;
+            }
+        };
         found.revisions.push(oid);
-        if let Some(sources) = sources_tree(repository, oid, unreadable)?
+        if let Some(sources) = sources_tree(repository, oid, report)?
             && trees.insert(sources)
         {
-            scan(repository, sources, &mut files, &mut found, unreadable)?;
+            scan(repository, sources, &mut files, &mut found, report)?;
         }
     }
     Ok(found)
 }
 
-/// The tree of source appearances on `commit`, when it has one.
+/// A Git failure while reading a history. An object the history needs but the repository does
+/// not hold (`NotFound`) is damage of the history, told as `what` it is, for `Report`: a restore
+/// refuses the archive, a purge of the workspace records it. Any other failure is the version
+/// store's own (`Unavailable`).
+fn missing(error: &git2::Error, what: &str) -> Result<String, ApiError> {
+    if error.code() == git2::ErrorCode::NotFound {
+        Ok(format!(
+            "the history does not hold {what}: {}",
+            error.message()
+        ))
+    } else {
+        Err(git(error))
+    }
+}
+
+/// The tree of source appearances on `commit`, when it has one: the `sources` folder of the
+/// `.okf` folder at its root. A missing tree object, or a `.okf/sources` that is not a folder,
+/// is damage (`report`), and then there is nothing to read.
 fn sources_tree(
     repository: &Repository,
     commit: Oid,
-    unreadable: Unreadable,
+    report: &mut Report<'_>,
 ) -> Result<Option<Oid>, ApiError> {
-    let tree = repository
+    let root = match repository
         .find_commit(commit)
         .and_then(|commit| commit.tree())
-        .map_err(|error| git(&error))?;
-    match tree.get_path(Path::new(SOURCES_TREE)) {
-        Ok(entry) if entry.kind() == Some(ObjectType::Tree) => Ok(Some(entry.id())),
-        Ok(_) => Err(unreadable(&format!(
-            "{SOURCES_TREE} on the commit {commit} is not a folder"
-        ))),
-        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
-        Err(error) => Err(git(&error)),
+    {
+        Ok(tree) => tree,
+        Err(error) => {
+            report(missing(
+                &error,
+                &format!("the tree of the commit {commit}"),
+            )?)?;
+            return Ok(None);
+        }
+    };
+    let Some(okf) = root
+        .get_name(OKF_TREE)
+        .filter(|entry| entry.kind() == Some(ObjectType::Tree))
+    else {
+        return Ok(None);
+    };
+    let okf_id = okf.id();
+    let okf = match repository.find_tree(okf_id) {
+        Ok(tree) => tree,
+        Err(error) => {
+            report(missing(
+                &error,
+                &format!("the folder {OKF_TREE} ({okf_id}) of the commit {commit}"),
+            )?)?;
+            return Ok(None);
+        }
+    };
+    match okf.get_name(SOURCES_DIR) {
+        None => Ok(None),
+        Some(entry) if entry.kind() == Some(ObjectType::Tree) => Ok(Some(entry.id())),
+        Some(_) => {
+            report(format!(
+                "{SOURCES_TREE} on the commit {commit} is not a folder"
+            ))?;
+            Ok(None)
+        }
     }
 }
 
 /// Add to `found` what each file of the appearance tree `sources` not already in `files` names:
-/// each is a `SourceAppearance`, read as one, which names its original (`object`) and its
-/// conversion record (`extraction.digest`, also added to `found.records`); nothing else of it
-/// is read. An entry that is not such a file is `unreadable`, naming its path.
+/// its original (`object`) and its conversion record (`extraction.digest`, also added to
+/// `found.records`), read by path (`appearance_objects`); nothing else of it is read. An entry
+/// that is not a file, a file the repository does not hold, or one that does not read is damage
+/// (`report`), naming its path; the others are still read.
 fn scan(
     repository: &Repository,
     sources: Oid,
     files: &mut BTreeSet<Oid>,
     found: &mut History,
-    unreadable: Unreadable,
+    report: &mut Report<'_>,
 ) -> Result<(), ApiError> {
-    let sources = repository.find_tree(sources).map_err(|error| git(&error))?;
+    let sources = match repository.find_tree(sources) {
+        Ok(tree) => tree,
+        Err(error) => {
+            report(missing(
+                &error,
+                &format!("the folder {SOURCES_TREE} ({sources})"),
+            )?)?;
+            return Ok(());
+        }
+    };
     for entry in &sources {
         let name = String::from_utf8_lossy(entry.name_bytes()).into_owned();
         if entry.kind() != Some(ObjectType::Blob) {
-            return Err(unreadable(&format!(
+            report(format!(
                 "{SOURCES_TREE}/{name} is not a source appearance file"
-            )));
+            ))?;
+            continue;
         }
         if !files.insert(entry.id()) {
             continue;
         }
-        let blob = repository
-            .find_blob(entry.id())
-            .map_err(|error| git(&error))?;
-        let appearance: SourceAppearance =
-            serde_json::from_slice(blob.content()).map_err(|error| {
-                unreadable(&format!(
-                    "the source appearance {SOURCES_TREE}/{name} does not read as one: {error}"
-                ))
-            })?;
+        let blob = match repository.find_blob(entry.id()) {
+            Ok(blob) => blob,
+            Err(error) => {
+                report(missing(
+                    &error,
+                    &format!(
+                        "the source appearance {SOURCES_TREE}/{name} ({})",
+                        entry.id()
+                    ),
+                )?)?;
+                continue;
+            }
+        };
         let item = name.strip_suffix(".json").unwrap_or(&name);
-        found
-            .objects
-            .entry(appearance.object)
-            .or_insert_with(|| format!("a source card's original (item {item})"));
-        if let Some(record) = appearance.extraction.digest {
-            found.records.insert(record.clone());
-            found
-                .objects
-                .entry(record)
-                .or_insert_with(|| format!("a source card's conversion record (item {item})"));
+        match appearance_objects(blob.content()) {
+            Ok((object, record)) => {
+                found
+                    .objects
+                    .entry(object)
+                    .or_insert_with(|| format!("a source card's original (item {item})"));
+                if let Some(record) = record {
+                    found.records.insert(record.clone());
+                    found.objects.entry(record).or_insert_with(|| {
+                        format!("a source card's conversion record (item {item})")
+                    });
+                }
+            }
+            Err(why) => report(format!("the source appearance {SOURCES_TREE}/{name} {why}"))?,
         }
     }
     Ok(())
+}
+
+/// The two objects a source appearance's bytes name, read by path and nothing else of the file:
+/// its original (`object`, required) and its conversion record (`extraction.digest`, none when
+/// absent or null). Every other field, known to this build or not, is left unread, so a card
+/// another contract version wrote still names its objects.
+///
+/// # Errors
+/// Why the bytes do not read as an appearance: they are not JSON, there is no `object`, or a
+/// named field holds something other than a digest.
+fn appearance_objects(bytes: &[u8]) -> Result<(Digest, Option<Digest>), String> {
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|error| format!("is not JSON: {error}"))?;
+    let object = digest_at(&value, OBJECT_AT)?.ok_or_else(|| "has no object".to_owned())?;
+    let record = digest_at(&value, RECORD_AT)?;
+    Ok((object, record))
+}
+
+/// The digest `value` holds at `pointer` (a JSON pointer): `None` when nothing, or null, is
+/// there.
+///
+/// # Errors
+/// When what is there is not a digest.
+fn digest_at(value: &Value, pointer: &str) -> Result<Option<Digest>, String> {
+    match value.pointer(pointer) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Digest::try_from(text.clone())
+            .map(Some)
+            .map_err(|_| format!("holds at {pointer} a string that is not a digest")),
+        Some(_) => Err(format!("holds at {pointer} a value that is not a digest")),
+    }
 }
 
 /// The objects the records of `rows` reference. A survivor's upload slot whose object is in
@@ -673,7 +898,7 @@ fn collect(
 mod tests {
     use std::path::Path;
 
-    use super::{ASSET, STRUCTURED, Scanner, Stop};
+    use super::{ASSET, STRUCTURED, Scanner, Stop, appearance_objects};
 
     /// What `Scanner::record` names in `bytes`, in order, and whether it read them to the end.
     fn named(bytes: &[u8]) -> (Vec<(String, &'static str)>, bool) {
@@ -731,5 +956,70 @@ mod tests {
             "]".repeat(200)
         );
         assert_eq!(named(deep.as_bytes()), (vec![(a, STRUCTURED)], false));
+    }
+
+    /// B1-R round 4 (R3-1): an appearance is read by its two paths and nothing else. A field
+    /// this build does not know, at the top or under `extraction`, an unknown variant in an
+    /// unrelated field, a changed type elsewhere, a missing `extraction` or a null record all
+    /// read; not JSON, no `object`, or a named field that is not a digest are damage, named by
+    /// path.
+    #[test]
+    fn an_appearance_is_read_by_its_two_paths_whatever_else_it_holds() {
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let later = format!(
+            r#"{{"object": "{a}", "size": 10, "later_field": {{"x": [1, 2]}},
+                "extraction": {{"digest": "{b}", "outcome": {{"status": "later_status"}},
+                                "later_extraction_field": true}}}}"#
+        );
+        let read = |bytes: &str| {
+            appearance_objects(bytes.as_bytes()).map(|(object, record)| {
+                (
+                    object.as_str().to_owned(),
+                    record.map(|record| record.as_str().to_owned()),
+                )
+            })
+        };
+        assert_eq!(read(&later), Ok((a.clone(), Some(b.clone()))));
+        assert_eq!(
+            read(&format!(r#"{{"object": "{a}"}}"#)),
+            Ok((a.clone(), None)),
+            "no extraction is no record"
+        );
+        assert_eq!(
+            read(&format!(
+                r#"{{"object": "{a}", "extraction": {{"digest": null}}}}"#
+            )),
+            Ok((a.clone(), None)),
+            "a null record is no record"
+        );
+        assert_eq!(
+            read(&format!(r#"{{"object": "{a}", "extraction": "later"}}"#)),
+            Ok((a.clone(), None)),
+            "an extraction of another shape holds no record at its path"
+        );
+        for (bytes, why) in [
+            ("not json", "is not JSON"),
+            (r#"["a list"]"#, "has no object"),
+            (r#"{"names": []}"#, "has no object"),
+            (
+                r#"{"object": "not a digest"}"#,
+                "holds at /object a string that is not a digest",
+            ),
+            (
+                r#"{"object": 5}"#,
+                "holds at /object a value that is not a digest",
+            ),
+            (
+                &format!(r#"{{"object": "{a}", "extraction": {{"digest": "cut"}}}}"#),
+                "holds at /extraction/digest a string that is not a digest",
+            ),
+            (
+                &format!(r#"{{"object": "{a}", "extraction": {{"digest": ["{b}"]}}}}"#),
+                "holds at /extraction/digest a value that is not a digest",
+            ),
+        ] {
+            let failed = read(bytes).err().unwrap_or_default();
+            assert!(failed.starts_with(why), "{bytes}: {failed}");
+        }
     }
 }
