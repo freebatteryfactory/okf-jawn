@@ -130,8 +130,10 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
       settledWithFocus = attempt.outcome.focusWasInNotice && attempt.request === request;
     }
     if (!left && !settledWithFocus) return;
-    if (failed) (button.current ?? notice.current)?.focus();
-    else (loaded() ?? pageHeading())?.focus();
+    // The notice of a failure still shown, when this hook's notice is on the page. The caller may
+    // show the failure otherwise, or not at all (another failure of its own takes the place).
+    const shownNow = failed ? (button.current ?? notice.current) : null;
+    (shownNow ?? loaded() ?? pageHeading())?.focus();
   });
 
   const start = (repeat: () => Promise<unknown>) => {

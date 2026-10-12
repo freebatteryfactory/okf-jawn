@@ -136,9 +136,12 @@ function Watched({
   status,
   code = 'internal',
   notice = 'one',
+  covered = false,
 }: {
   status: 'failed' | 'asking' | 'loaded';
   code?: ErrorCode;
+  /** The caller shows something else in the notice's place while the operation is still failed. */
+  covered?: boolean;
   /** The notice's key: under another key it is another notice, a new element. */
   notice?: string;
 }) {
@@ -156,9 +159,10 @@ function Watched({
       <button type="button" data-presses={presses} onClick={() => setPresses(presses + 1)}>
         Elsewhere
       </button>
-      {retry.shown && (
+      {retry.shown && !covered && (
         <FailureNotice key={notice} context="Opening" error={retry.error} retry={retry} />
       )}
+      {covered && <p>Something else is shown here.</p>}
       {status === 'loaded' && (
         <h2 id="content" tabIndex={-1}>
           The content
@@ -586,6 +590,15 @@ describe('a failure that changes without a retry', () => {
     rerender(<Watched status="asking" />);
     expect(notice.isConnected).toBe(false);
     expect(screen.queryByRole('heading', { name: 'The content' })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
+  });
+
+  it('moves focus to the page’s level-one heading when the notice leaves while its failure stays and nothing is named', () => {
+    const { rerender, notice } = watchedWithFocus();
+    // The operation is still failed; the caller shows something else where the notice was.
+    rerender(<Watched status="failed" covered />);
+    expect(notice.isConnected).toBe(false);
+    expect(screen.queryByRole('alert')).toBeNull();
     expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
   });
 
