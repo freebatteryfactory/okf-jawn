@@ -31,7 +31,7 @@ pub enum ReadImage<'a> {
     Inline {
         /// The image's bytes in base64, exactly as `read_object` returned them.
         data_base64: String,
-        /// The `image/*` MIME type the bytes were served with.
+        /// The raster MIME type the bytes were served with, one of the inline image types.
         mime_type: String,
     },
     /// Not inlined: one line of the text block names the image and gives the reason.
@@ -46,8 +46,9 @@ pub enum ReadImage<'a> {
 /// Why a selected image is described in the text instead of inlined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotInlined {
-    /// Its media type, as the read declared it or as its bytes were served, is not `image/*`.
-    NotAnImage {
+    /// Its media type, as the read declared it or as its bytes were served, is not one of the
+    /// raster types inlined (PNG, JPEG, GIF, WebP): SVG and any other type are never inlined.
+    NotInlineType {
         /// The media type.
         media_type: String,
     },
@@ -72,7 +73,9 @@ pub const MAX_TEXT_BYTES: usize = 1_048_576;
 impl Display for NotInlined {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotAnImage { media_type } => write!(f, "not an image type ({media_type})"),
+            Self::NotInlineType { media_type } => {
+                write!(f, "not an inline image type ({media_type})")
+            }
             Self::TooLarge {
                 size: Some(size),
                 left,

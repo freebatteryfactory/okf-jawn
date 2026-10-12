@@ -26,6 +26,9 @@ const PNG: &str = "iVBORw0KGgo=";
 /// Base64 of the first ten bytes of a JFIF file.
 const JPEG: &str = "/9j/4AAQSkZJRg==";
 
+/// Base64 of the six-byte document `<svg/>`.
+const SVG: &str = "PHN2Zy8+";
+
 fn reader() -> World {
     World::new(FakeAccess::default().granting("alice", &[Permission::Read]))
 }
@@ -64,7 +67,7 @@ async fn a_multimodal_read_returns_its_selected_images_as_image_blocks_in_order(
         "multimodal",
         &[
             media(&png, "image/png", Some("Revenue by quarter"), &on_page(2)),
-            media(&jpeg, "image/jpg", None, &on_page(3)),
+            media(&jpeg, "Image/JPEG; q=1", None, &on_page(3)),
         ],
     );
     world
@@ -243,7 +246,7 @@ async fn once_the_image_budget_is_spent_no_image_is_fetched() -> TestResult {
 }
 
 #[tokio::test]
-async fn an_image_that_is_not_an_image_type_is_described() -> TestResult {
+async fn a_media_type_that_is_no_image_is_described() -> TestResult {
     let world = reader();
     let (declared, served) = (digest_of('c'), digest_of('d'));
     world.application.answer_with(
@@ -278,15 +281,65 @@ async fn an_image_that_is_not_an_image_type_is_described() -> TestResult {
         described(&[
             format!(
                 "[Image not inlined: picture \"Appendix scan\", a region of page 5, \
-                 object {declared}: not an image type (application/pdf)]"
+                 object {declared}: not an inline image type (application/pdf)]"
             ),
             format!(
                 "[Image not inlined: picture, page 6, object {served}: \
-                 not an image type (text/plain)]"
+                 not an inline image type (text/plain)]"
             ),
         ])
     );
     // A media type the read declares as no image is not fetched.
+    assert_eq!(
+        world.application.requests("get_object")?,
+        vec![object_request(WORKSPACE, &served, 1024)]
+    );
+    Ok(())
+}
+
+/// SVG can carry script and the document is untrusted, so an SVG is never an image block:
+/// neither one the read declares nor bytes served as SVG under a raster declaration.
+#[tokio::test]
+async fn an_svg_image_is_described_never_inlined() -> TestResult {
+    let world = reader();
+    let (declared, served) = (digest_of('c'), digest_of('d'));
+    world.application.answer_with(
+        "read_item",
+        image_read_response(
+            WORKSPACE,
+            "multimodal",
+            &[
+                media(&declared, "image/svg+xml", Some("Logo"), &on_page(1)),
+                media(&served, "image/png", None, &on_page(2)),
+            ],
+        ),
+    )?;
+    for digest in [&declared, &served] {
+        world.application.serve_object(
+            digest,
+            Ok(object_block(digest, "image/svg+xml", SVG, 6, false)),
+        )?;
+    }
+    let result = show(
+        &world,
+        "images-svg.html",
+        image_read_input("multimodal", 1024, 2),
+    )
+    .await?;
+    assert_eq!(images_of(&result)?.len(), 0);
+    assert_eq!(
+        text_of(&result)?,
+        described(&[
+            format!(
+                "[Image not inlined: picture \"Logo\", page 1, object {declared}: \
+                 not an inline image type (image/svg+xml)]"
+            ),
+            format!(
+                "[Image not inlined: picture, page 2, object {served}: \
+                 not an inline image type (image/svg+xml)]"
+            ),
+        ])
+    );
     assert_eq!(
         world.application.requests("get_object")?,
         vec![object_request(WORKSPACE, &served, 1024)]

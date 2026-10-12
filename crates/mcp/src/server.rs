@@ -84,6 +84,11 @@ const INSTRUCTIONS: &str = "okf-jawn document workspaces. Call `workspaces` firs
      reads to a workspace's head revision. Every result carries readable text and \
      structuredContent; a failed call is text with isError set.";
 
+/// The only media types a read's selected image is inlined as: raster formats, which carry no
+/// active content. SVG can carry script and the document is untrusted input, so it and every
+/// other type, `image/*` or not, are described in the text instead.
+const INLINE_IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
 impl McpServer {
     /// A server over `ports` that serves the App bundle at `app_bundle`.
     ///
@@ -232,8 +237,9 @@ impl McpServer {
     /// What becomes of each image the read selected, in media order. Core has already applied
     /// `max_images`, so every entry of `media` is one the caller asked for.
     ///
-    /// An image is inlined when its media type is `image/*`, its fetch is complete
-    /// (`has_more` false) and it fits what is left of the image budget. The image budget is the
+    /// An image is inlined when its media type, as declared and as served, is an inline raster
+    /// type (`INLINE_IMAGE_TYPES`), its fetch is complete (`has_more` false) and it fits what
+    /// is left of the image budget. The image budget is the
     /// read's own `budget` (its `max_bytes`, capped at `MAX_TEXT_BYTES`), counted again and
     /// separately from the text's: the text and the images may each use all of it. It counts
     /// image bytes, the decoded size of each inlined image, so the base64 on the wire is about
@@ -266,12 +272,12 @@ impl McpServer {
 
     /// One selected image, inlined with its decoded size, or the reason it is not.
     ///
-    /// A media type the read declares as not `image/*` is not fetched, nor is any image once
-    /// the budget is spent.
+    /// A media type the read declares as no inline image type is not fetched, nor is any image
+    /// once the budget is spent.
     ///
     /// # Errors
-    /// Returns why the image is not inlined: not an image type (declared or served), too
-    /// large, or the fetch refused with its `ApiError` code.
+    /// Returns why the image is not inlined: not an inline image type (declared or served),
+    /// too large, or the fetch refused with its `ApiError` code.
     async fn fetch_image(
         &self,
         principal: &Principal,
@@ -279,8 +285,8 @@ impl McpServer {
         media: &MediaReference,
         left: usize,
     ) -> Result<(ReadImage<'static>, usize), NotInlined> {
-        if !is_image_type(&media.media_type) {
-            return Err(NotInlined::NotAnImage {
+        if !is_inline_image_type(&media.media_type) {
+            return Err(NotInlined::NotInlineType {
                 media_type: media.media_type.clone(),
             });
         }
@@ -291,8 +297,8 @@ impl McpServer {
             .fetch_object(principal, read, media, left)
             .await
             .map_err(|refusal| NotInlined::Refused { code: refusal.code })?;
-        if !is_image_type(&block.media_type) {
-            return Err(NotInlined::NotAnImage {
+        if !is_inline_image_type(&block.media_type) {
+            return Err(NotInlined::NotInlineType {
                 media_type: block.media_type,
             });
         }
@@ -548,11 +554,15 @@ fn read_budget(input: &Value) -> Option<usize> {
         .map(|bytes| bytes.min(MAX_TEXT_BYTES))
 }
 
-/// Whether `media_type` is an `image/*` type (case-insensitive, parameters allowed).
-fn is_image_type(media_type: &str) -> bool {
-    media_type.split_once('/').is_some_and(|(top, subtype)| {
-        top.trim().eq_ignore_ascii_case("image") && !subtype.trim().is_empty()
-    })
+/// Whether `media_type` is one of `INLINE_IMAGE_TYPES`, ignoring case and any parameters.
+fn is_inline_image_type(media_type: &str) -> bool {
+    let essence = media_type
+        .split_once(';')
+        .map_or(media_type, |(essence, _)| essence)
+        .trim();
+    INLINE_IMAGE_TYPES
+        .iter()
+        .any(|inline| essence.eq_ignore_ascii_case(inline))
 }
 
 /// The number of bytes padded base64 text decodes to: three per four characters, less the
