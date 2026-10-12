@@ -50,6 +50,7 @@ import { type FailureRetry, useRetry } from '../errors/retry';
 import type { ItemSelection } from '../explorer/search-params';
 import { describeSelection, extractionLabels, short } from './describe';
 import { Properties } from './Properties';
+import { PropertiesForm } from './PropertiesForm';
 import { SafeMarkdown } from './SafeMarkdown';
 
 /** Text budget per read; a longer item is read in parts through the continuation. */
@@ -502,8 +503,10 @@ export function DocumentView({
           retry={itemFailure}
           workspaceId={workspaceId}
         />
+      ) : editing && document ? (
+        <PropertiesForm session={session} typeName={document.summary.type_name} />
       ) : document ? (
-        <Properties properties={editing ? session.properties : document.properties} />
+        <Properties properties={document.properties} />
       ) : (
         <p role="status">Loading properties…</p>
       )}

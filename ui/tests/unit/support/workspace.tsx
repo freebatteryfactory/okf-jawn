@@ -184,8 +184,9 @@ export function explorerHandlers(overrides: Record<string, Handler> = {}): Recor
       return ok(readResponse(item, `# ${item.title}\n\nText of ${item.title}`));
     },
     '/api/reads/get-sources': () => ok(sourcesOfNote),
-    // The person has no drafts unless a test says so.
+    // The person has no drafts, and the workspace defines no types, unless a test says so.
     '/api/items/list-drafts': () => ok({ items: [], next_cursor: null }),
+    '/api/types/list-types': () => ok({ items: [] }),
     ...overrides,
   };
 }
