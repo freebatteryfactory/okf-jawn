@@ -384,6 +384,16 @@ main.app-main:has(.explorer) {
 .failure-notice p {
   margin: 0.25rem 0;
 }
+/* A notice with a retry holds its alert and, beside it, the button: the notice carries the rule
+   and the alert inside it none, so it looks as a notice without a retry does. */
+.failure-notice:not([role="alert"]) {
+  border-left: 3px solid currentColor;
+  padding: 0.75rem;
+}
+.failure-notice > [role="alert"] {
+  border-left: 0;
+  padding: 0;
+}
 /* Tailwind's preflight strips borders, list markers and heading sizes; the shell restores them. */
 .app-main input[type="search"] {
   border: 1px solid GrayText;

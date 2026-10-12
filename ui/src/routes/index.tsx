@@ -4,20 +4,27 @@
  * "Show more workspaces" keeps keyboard focus while it loads (aria-disabled, not disabled: Chromium
  * and WebKit move focus to the body when a focused button becomes disabled), then moves focus to
  * the first workspace it brought; if none came, focus stays on a control still there, and a live
- * region says how many are shown.
+ * region says how many are shown. A failed listing keeps its notice through a retry, which ends
+ * with focus on the first workspace it brought (the heading, when there is none).
  */
 
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { listWorkspacesQueryKey } from '../api/generated/@tanstack/react-query.gen';
 import { listWorkspaces } from '../api/generated/sdk.gen';
 import { FailureNotice } from '../features/errors/FailureNotice';
+import { useRetry } from '../features/errors/retry';
 import { Instant } from '../lib/instant';
 
 export const Route = createFileRoute('/')({ component: Home });
 
 const PAGE = 50;
+
+/** The link of the workspace at `index` in the list, when it is on screen. */
+function workspaceLink(list: HTMLUListElement | null, index: number): HTMLElement | null {
+  return list?.querySelectorAll<HTMLElement>(':scope > li > a').item(index) ?? null;
+}
 
 function Home() {
   const options = { body: { page: { limit: PAGE } } };
@@ -36,10 +43,10 @@ function Home() {
   });
   const workspaces = result.data?.pages.flatMap((page) => page.items) ?? [];
 
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
   const moreRef = useRef<HTMLButtonElement | null>(null);
   const focusFrom = useRef<{ shown: number; pages: number } | null>(null);
-  const [shownNote, setShownNote] = useState('');
   const loadingMore = result.isFetchingNextPage;
   const moreFailed = result.isFetchNextPageError;
   const pageCount = result.data?.pages.length ?? 0;
@@ -50,31 +57,57 @@ function Home() {
     // Settled once another page is here (even an empty one), or the next page failed.
     if (asked === null || !(pageCount > asked.pages || (moreFailed && !loadingMore))) return;
     focusFrom.current = null;
-    const links = listRef.current?.querySelectorAll<HTMLElement>(':scope > li > a');
-    const first = links?.item(asked.shown);
-    if (first) first.focus();
-    else if (moreRef.current) moreRef.current.focus();
-    else links?.item(links.length - 1)?.focus();
-    if (!moreFailed) {
-      setShownNote(
-        `${shownCount} ${shownCount === 1 ? 'workspace' : 'workspaces'} shown${more ? '; more are available' : ''}.`,
-      );
-    }
-  }, [pageCount, loadingMore, moreFailed, shownCount, more]);
+    const list = listRef.current;
+    (
+      workspaceLink(list, asked.shown) ??
+      moreRef.current ??
+      workspaceLink(list, shownCount - 1)
+    )?.focus();
+  }, [pageCount, loadingMore, moreFailed, shownCount]);
   const loadMore = () => {
     if (loadingMore) return;
     focusFrom.current = { shown: shownCount, pages: pageCount };
     void result.fetchNextPage();
   };
+
+  const listFailure = useRetry({
+    request: 'workspaces',
+    failed: result.isError && !result.isFetchNextPageError,
+    error: result.error,
+    run: () => result.refetch(),
+    // The first workspace it listed; with none, the page's heading.
+    loaded: () => workspaceLink(listRef.current, 0) ?? headingRef.current,
+  });
+  const lastPageSize = result.data?.pages.at(-1)?.items.length ?? 0;
+  const moreFailure = useRetry({
+    request: 'more workspaces',
+    failed: result.isFetchNextPageError,
+    error: result.error,
+    run: () => result.fetchNextPage(),
+    // The first workspace of the page it brought; if that page was empty, a control still there.
+    loaded: () =>
+      workspaceLink(listRef.current, shownCount - lastPageSize) ??
+      moreRef.current ??
+      workspaceLink(listRef.current, shownCount - 1),
+  });
+  // Once a later page has come, however it was asked for: how many are shown now.
+  const shownNote =
+    pageCount > 1
+      ? `${shownCount} ${shownCount === 1 ? 'workspace' : 'workspaces'} shown${more ? '; more are available' : ''}.`
+      : '';
   return (
     <section className="home" aria-labelledby="workspaces-heading">
-      <h1 id="workspaces-heading">Your workspaces</h1>
-      {result.isPending && <p role="status">Contacting the workspace service…</p>}
-      {result.isError && !result.isFetchNextPageError && (
+      <h1 id="workspaces-heading" ref={headingRef} tabIndex={-1}>
+        Your workspaces
+      </h1>
+      {result.isPending && !listFailure.retrying && (
+        <p role="status">Contacting the workspace service…</p>
+      )}
+      {listFailure.shown && (
         <FailureNotice
           context="Listing your workspaces"
-          error={result.error}
-          onRetry={() => void result.refetch()}
+          error={listFailure.error}
+          retry={listFailure}
         />
       )}
       {result.isSuccess && workspaces.length === 0 && (
@@ -108,11 +141,11 @@ function Home() {
       <p role="status" className="sr-only">
         {shownNote}
       </p>
-      {result.isFetchNextPageError && (
+      {moreFailure.shown && (
         <FailureNotice
           context="Listing more workspaces"
-          error={result.error}
-          onRetry={() => void result.fetchNextPage()}
+          error={moreFailure.error}
+          retry={moreFailure}
         />
       )}
     </section>

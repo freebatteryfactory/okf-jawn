@@ -1,4 +1,7 @@
-/** Every ApiError code reads as plain language with the action it allows; NotImplemented is never success. */
+/**
+ * Every ApiError code reads as plain language with the action it allows; NotImplemented is never
+ * success. A retry keeps the notice and its focused button on screen until it settles.
+ */
 
 import {
   createMemoryHistory,
@@ -6,14 +9,15 @@ import {
   createRouter,
   RouterProvider,
 } from '@tanstack/react-router';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ReactNode } from 'react';
+import { type ReactNode, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ErrorCode } from '../../src/api/generated/types.gen';
 import { zErrorCode } from '../../src/api/generated/zod.gen';
 import { FailureNotice } from '../../src/features/errors/FailureNotice';
 import { classifyFailure, messageFor, shouldRetry } from '../../src/features/errors/failure';
+import { useRetry } from '../../src/features/errors/retry';
 
 /** The notice's way home is a router link, so it renders inside a minimal router. */
 async function renderNotice(element: ReactNode) {
@@ -33,6 +37,93 @@ const apiError = (code: ErrorCode, extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 
+/** A failed operation with its retry, as a caller holds it: `run` repeats the operation. */
+function Retried({
+  context,
+  error,
+  run,
+}: {
+  context: string;
+  error: unknown;
+  run: () => Promise<unknown>;
+}) {
+  const retry = useRetry({ request: 'one', failed: true, error, run, loaded: () => null });
+  return <FailureNotice context={context} error={retry.error} retry={retry} />;
+}
+
+/** What a repeated operation answers: its content, or a failure with this code. */
+type Answer = 'content' | ErrorCode;
+
+/**
+ * An operation as a query with nothing loaded behaves: it leaves its failed state the moment it
+ * is asked again, and holds each answer until the test gives it.
+ */
+function Operation({
+  asked,
+  request = 'one',
+}: {
+  asked: Array<(answer: Answer) => void>;
+  request?: string;
+}) {
+  const [state, setState] = useState<{ status: 'failed' | 'asking' | 'loaded'; error: unknown }>({
+    status: 'failed',
+    error: apiError('internal'),
+  });
+  const retry = useRetry({
+    request,
+    failed: state.status === 'failed',
+    error: state.error,
+    run: () =>
+      new Promise<void>((resolve) => {
+        setState({ status: 'asking', error: null });
+        asked.push((answer) => {
+          setState(
+            answer === 'content'
+              ? { status: 'loaded', error: null }
+              : { status: 'failed', error: apiError(answer) },
+          );
+          resolve();
+        });
+      }),
+    loaded: () => document.getElementById('content'),
+  });
+  return (
+    <>
+      <button type="button">Elsewhere</button>
+      {state.status === 'asking' && !retry.retrying && <p>Asking…</p>}
+      {retry.shown && <FailureNotice context="Opening" error={retry.error} retry={retry} />}
+      {state.status === 'loaded' && (
+        <h2 id="content" tabIndex={-1}>
+          The content
+        </h2>
+      )}
+    </>
+  );
+}
+
+/** Render the operation, failed, with keyboard focus on its retry button. */
+function failedWithFocus(request?: string) {
+  const asked: Array<(answer: Answer) => void> = [];
+  const view = render(
+    request === undefined ? (
+      <Operation asked={asked} />
+    ) : (
+      <Operation asked={asked} request={request} />
+    ),
+  );
+  const button = screen.getByRole('button', { name: 'Try again' });
+  const notice = button.parentElement;
+  if (notice === null) throw new Error('the retry button is not in a notice');
+  act(() => button.focus());
+  /** Give the retry numbered `nth` (from 1) its answer. */
+  const answer = (nth: number, given: Answer) => {
+    const give = asked[nth - 1];
+    if (give === undefined) throw new Error(`the operation was not asked ${nth} times`);
+    act(() => give(given));
+  };
+  return { ...view, asked, button, notice, answer };
+}
+
 describe('failure messages', () => {
   it('covers every generated error code with its own words and an action decision', () => {
     expect(codes.length).toBe(13);
@@ -47,12 +138,12 @@ describe('failure messages', () => {
   });
 
   it('reads not_implemented as not available in this build and offers no success or retry', async () => {
-    const onRetry = vi.fn();
+    const run = vi.fn(async () => undefined);
     await renderNotice(
-      <FailureNotice
+      <Retried
         context="Reading this item"
         error={apiError('not_implemented', { message: 'read_item is not implemented yet' })}
-        onRetry={onRetry}
+        run={run}
       />,
     );
     const alert = screen.getByRole('alert');
@@ -77,18 +168,39 @@ describe('failure messages', () => {
     ['internal', 'Something went wrong in the service.', 'Try again'],
     ['not_implemented', 'Not available in this build.', null],
   ] as const)('shows %s as "%s" with action %s', async (code, title, button) => {
-    const onRetry = vi.fn();
-    await renderNotice(
-      <FailureNotice context="Opening" error={apiError(code)} onRetry={onRetry} />,
-    );
+    const run = vi.fn(async () => undefined);
+    await renderNotice(<Retried context="Opening" error={apiError(code)} run={run} />);
     expect(screen.getByRole('alert').textContent).toContain(`Opening: ${title}`);
     expect(screen.getByRole('alert').textContent).toContain(`server words for ${code}`);
     if (button === null) {
       expect(screen.queryByRole('button')).toBeNull();
     } else {
       await userEvent.click(screen.getByRole('button', { name: button }));
-      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(run).toHaveBeenCalledTimes(1);
+      // The retry settled: the button offers the action again.
+      expect(await screen.findByRole('button', { name: button })).toBeTruthy();
     }
+  });
+
+  it('shows a failure that allows no retry as the alert alone, as before, where a retry could be offered', () => {
+    const run = vi.fn(async () => undefined);
+    render(<Retried context="Reading" error={apiError('forbidden')} run={run} />);
+    const alert = screen.getByRole('alert');
+    expect(alert.className).toBe('failure-notice');
+    expect(alert.hasAttribute('tabindex')).toBe(false);
+    expect(alert.parentElement?.className).not.toBe('failure-notice');
+    expect(alert.textContent).toContain('Reading: You do not have permission to do this.');
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('offers no retry without the retry that keeps the notice on screen', () => {
+    render(<FailureNotice context="Refreshing" error={apiError('unavailable')} />);
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toContain('Refreshing: The service is temporarily unavailable.');
+    expect(alert.className).toBe('failure-notice');
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
   });
 
   it('offers the way home for not_found as a router navigation, and shows the field and reference', async () => {
@@ -140,15 +252,14 @@ describe('failure messages', () => {
   });
 
   it('reads a thrown network error as an unreachable service with a retry', async () => {
-    const onRetry = vi.fn();
-    render(
-      <FailureNotice context="Listing" error={new TypeError('fetch failed')} onRetry={onRetry} />,
-    );
+    const run = vi.fn(async () => undefined);
+    render(<Retried context="Listing" error={new TypeError('fetch failed')} run={run} />);
     expect(screen.getByRole('alert').textContent).toContain(
       'Listing: The workspace service could not be reached.',
     );
     await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    expect(onRetry).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
+    expect(await screen.findByRole('button', { name: 'Try again' })).toBeTruthy();
   });
 
   it('retries once only what may pass by itself', () => {
@@ -158,5 +269,106 @@ describe('failure messages', () => {
     for (const code of ['not_implemented', 'forbidden', 'not_found', 'invalid_input'] as const) {
       expect(shouldRetry(0, apiError(code))).toBe(false);
     }
+  });
+});
+
+describe('a retry never unmounts the focused control', () => {
+  it('keeps the notice and its focused button while the operation is asked again, and says so politely', async () => {
+    const { asked, button, notice, answer } = failedWithFocus();
+    const alert = screen.getByRole('alert');
+    const words = alert.textContent;
+    expect(screen.getByRole('status').textContent).toBe('');
+    await userEvent.keyboard('{Enter}');
+    expect(asked).toHaveLength(1);
+    // The operation has left its failed state; the notice is still the same one.
+    expect(notice.isConnected).toBe(true);
+    expect(button.isConnected).toBe(true);
+    expect(document.activeElement).toBe(button);
+    expect(button.textContent).toBe('Trying again…');
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect(button.hasAttribute('disabled')).toBe(false);
+    // Said by a polite status beside the alert; the alert itself is untouched, so not re-announced.
+    const status = screen.getByRole('status');
+    expect(status.textContent).toBe('Opening: trying again…');
+    expect(alert.contains(status)).toBe(false);
+    expect(alert.contains(button)).toBe(false);
+    expect(screen.getByRole('alert')).toBe(alert);
+    expect(alert.textContent).toBe(words);
+    expect(screen.queryByText('Asking…')).toBeNull();
+    // A second press while it is in flight asks nothing more.
+    await userEvent.keyboard('{Enter}');
+    expect(asked).toHaveLength(1);
+    answer(1, 'content');
+    await waitFor(() => expect(notice.isConnected).toBe(false));
+  });
+
+  it('moves focus to the content a successful retry loaded', async () => {
+    const { notice, answer } = failedWithFocus();
+    await userEvent.keyboard('{Enter}');
+    answer(1, 'content');
+    const content = await screen.findByRole('heading', { name: 'The content' });
+    await waitFor(() => expect(document.activeElement).toBe(content));
+    expect(notice.isConnected).toBe(false);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps focus on the retry button when the retry fails again, under a new alert', async () => {
+    const { button, notice, answer } = failedWithFocus();
+    const first = screen.getByRole('alert');
+    await userEvent.keyboard('{Enter}');
+    answer(1, 'unavailable');
+    await waitFor(() => expect(button.textContent).toBe('Try again'));
+    expect(notice.isConnected).toBe(true);
+    expect(document.activeElement).toBe(button);
+    expect(button.getAttribute('aria-disabled')).toBe('false');
+    expect(screen.getByRole('status').textContent).toBe('');
+    // The words are a new alert, so the second failure is announced like the first.
+    const second = screen.getByRole('alert');
+    expect(second).not.toBe(first);
+    expect(first.isConnected).toBe(false);
+    expect(second.textContent).toContain('Opening: The service is temporarily unavailable.');
+    // And it can be tried again from where focus is.
+    await userEvent.keyboard('{Enter}');
+    answer(2, 'content');
+    const content = await screen.findByRole('heading', { name: 'The content' });
+    await waitFor(() => expect(document.activeElement).toBe(content));
+  });
+
+  it('moves focus to the notice itself when the retry ends in a failure that allows none', async () => {
+    const { button, notice, answer } = failedWithFocus();
+    await userEvent.keyboard('{Enter}');
+    answer(1, 'forbidden');
+    await waitFor(() => expect(button.isConnected).toBe(false));
+    expect(notice.isConnected).toBe(true);
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Opening: You do not have permission to do this.',
+    );
+    expect(screen.queryByRole('button', { name: /Try|Trying/ })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(notice));
+  });
+
+  it('leaves focus the person moved elsewhere during the retry where it is', async () => {
+    const { answer } = failedWithFocus();
+    await userEvent.keyboard('{Enter}');
+    const elsewhere = screen.getByRole('button', { name: 'Elsewhere' });
+    act(() => elsewhere.focus());
+    answer(1, 'content');
+    await screen.findByRole('heading', { name: 'The content' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it('does not show a retry in flight for another request as this one’s', async () => {
+    const { asked, rerender, answer } = failedWithFocus('one');
+    await userEvent.keyboard('{Enter}');
+    expect(screen.getByRole('button', { name: 'Trying again…' })).toBeTruthy();
+    // The component now asks something else, which is being asked for the first time.
+    rerender(<Operation asked={asked} request="two" />);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByText('Asking…')).toBeTruthy();
+    answer(1, 'internal');
+    // The answer is this request's state now; a retry of it starts afresh.
+    const button = await screen.findByRole('button', { name: 'Try again' });
+    expect(button.getAttribute('aria-disabled')).toBe('false');
   });
 });

@@ -389,6 +389,42 @@ describe('P3 failures: an unbuilt listing is never an empty workspace', () => {
   });
 });
 
+describe('the page before there is an Explorer', () => {
+  const pageHeading = () => screen.getByRole('heading', { level: 1, name: 'Workspace' });
+
+  it('has a level-one heading while the workspace opens, and when it did not open', async () => {
+    let answer: (reply: ReturnType<typeof fail>) => void = () => {};
+    mockApi({
+      ...workspaceHandlers(),
+      '/api/workspaces/open-workspace': () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    });
+    renderAt(`/w/${WS}`);
+    expect((await screen.findByText('Opening the workspace…')).getAttribute('role')).toBe('status');
+    expect(pageHeading()).toBeTruthy();
+    answer(fail(500, 'internal', 'storage stumbled'));
+    await screen.findByRole('alert');
+    expect(pageHeading()).toBeTruthy();
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+  });
+
+  it('has a level-one heading when the link names no workspace', async () => {
+    mockApi(workspaceHandlers());
+    renderAt('/w/not-a-workspace');
+    await screen.findByRole('alert');
+    expect(pageHeading()).toBeTruthy();
+  });
+
+  it('leaves the level-one heading to the workspace’s name once the Explorer is there', async () => {
+    mockApi(workspaceHandlers());
+    renderAt(`/w/${WS}`);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Workshop notes' })).toBeTruthy();
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+  });
+});
+
 describe('P4 state: revision and selection travel together in the URL', () => {
   it('reopens a deep link with both a cited revision and a selection, and keeps the revision when the whole item is shown', async () => {
     const api = mockApi(workspaceHandlers());

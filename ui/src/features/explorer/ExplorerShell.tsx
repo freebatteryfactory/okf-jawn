@@ -12,7 +12,7 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { useEffect, useState } from 'react';
+import { type Ref, useEffect, useState } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { openWorkspaceQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { openWorkspace } from '../../api/generated/sdk.gen';
@@ -44,6 +44,8 @@ export interface HeadState {
 export interface ExplorerShellProps {
   workspace: Workspace;
   head: HeadState;
+  /** The workspace's name: where keyboard focus goes when a retry has opened the workspace. */
+  nameRef?: Ref<HTMLHeadingElement>;
 }
 
 /** A newer-head check older than this is repeated when the head line mounts again. */
@@ -57,7 +59,7 @@ interface Destination {
   replace?: boolean;
 }
 
-export function ExplorerShell({ workspace, head: headState }: ExplorerShellProps) {
+export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerShellProps) {
   const workspaceId = workspace.id;
   const head = workspace.head;
   const params = useParams({ strict: false });
@@ -155,7 +157,9 @@ export function ExplorerShell({ workspace, head: headState }: ExplorerShellProps
   return (
     <div className="explorer">
       <div className="explorer-bar">
-        <h1 className="workspace-name">{workspace.name}</h1>
+        <h1 className="workspace-name" ref={nameRef} tabIndex={-1}>
+          {workspace.name}
+        </h1>
         {workspace.description ? <p className="meta">{workspace.description}</p> : null}
         <HeadLine workspace={workspace} state={headState} />
       </div>

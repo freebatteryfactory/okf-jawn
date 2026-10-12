@@ -7,7 +7,8 @@
  * Enter also opens the focused entry. The open item of the URL is the tree's selection, and its
  * folders are expanded when it is opened from a link. "Show more entries" and a retry move
  * keyboard focus to the first entry they brought (or keep it on a row still there), and a live
- * region says what happened.
+ * region says what happened. A failed folder is a row of the tree, which stays while it is listed
+ * again; a failed root listing is a failure notice, kept through its retry (`useRetry`).
  *
  * However keyboard focus enters the tree (Tab onto its container, Shift+Tab onto its tab-stop row
  * or its scrolling list, a click, a screen reader), arborist is told which entry has it, because
@@ -41,6 +42,7 @@ import {
 import type { ItemSummary, Revision } from '../../api/generated/types.gen';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
+import { useRetry } from '../errors/retry';
 import {
   ancestorFolders,
   type FolderListing,
@@ -312,6 +314,17 @@ export function FolderTree({
   });
   const root = listings.get('');
   const entries = entriesOf('', listings, view.expanded, revision);
+  // A root listing that failed keeps its notice through a retry, which ends with keyboard focus
+  // on the tree's tab-stop entry (the empty-workspace line, when it listed nothing).
+  const rootFailure = useRetry({
+    request: `${workspaceId} ${revision}`,
+    failed: root?.isError ?? false,
+    error: root?.error,
+    run: () => root?.refetch() ?? Promise.resolve(),
+    loaded: () =>
+      boxRef.current?.querySelector<HTMLElement>('[role="treeitem"][tabindex="0"]') ??
+      emptyRef.current,
+  });
   const selected =
     selectedItemId !== null && contains(entries, itemNodeId(selectedItemId))
       ? itemNodeId(selectedItemId)
@@ -423,12 +436,12 @@ export function FolderTree({
       <h2 id={heading} className="panel-heading">
         Folders
       </h2>
-      {root?.isPending && <p role="status">Loading folders…</p>}
-      {root?.isError && (
+      {root?.isPending && !rootFailure.retrying && <p role="status">Loading folders…</p>}
+      {rootFailure.shown && (
         <FailureNotice
           context="Listing this workspace"
-          error={root.error}
-          onRetry={() => void root.refetch()}
+          error={rootFailure.error}
+          retry={rootFailure}
         />
       )}
       {root?.isSuccess && entries.length === 0 && (
