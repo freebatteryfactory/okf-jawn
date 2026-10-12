@@ -47,6 +47,7 @@
  * the hook goes with it.
  */
 import { type RefCallback, useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { pageHeading } from '../../lib/focus';
 
 export interface RetriedOperation {
   /**
@@ -144,7 +145,7 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
     }
     if (!left && !settledWithFocus) return;
     if (failed) (button.current ?? notice.current)?.focus();
-    else (loaded() ?? document.querySelector<HTMLElement>('h1'))?.focus();
+    else (loaded() ?? pageHeading())?.focus();
   });
 
   const start = () => {
