@@ -13,7 +13,8 @@ pub enum Change {
         path: crate::identity::WorkspacePath,
         #[doc = "Type name."]
         type_name: String,
-        #[doc = "Body."]
+        #[doc = "Body, at most 8 MiB in UTF-8."]
+        #[schemars(length(max = crate::item::MAX_ITEM_TEXT_BYTES))]
         body: String,
         #[doc = "Properties."]
         properties: std::collections::BTreeMap<String, serde_json::Value>,
@@ -22,7 +23,8 @@ pub enum Change {
     Edit {
         #[doc = "Item id."]
         item_id: crate::identity::ItemId,
-        #[doc = "Body."]
+        #[doc = "Body, at most 8 MiB in UTF-8."]
+        #[schemars(length(max = crate::item::MAX_ITEM_TEXT_BYTES))]
         body: String,
         #[doc = "Properties."]
         properties: std::collections::BTreeMap<String, serde_json::Value>,
@@ -49,7 +51,8 @@ pub enum Change {
         #[doc = "Pages the text covers, as the agent claims; empty for the whole."]
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pages: Vec<crate::common::PageRange>,
-        #[doc = "The complete proposed text, Markdown."]
+        #[doc = "The complete proposed text, Markdown, at most 8 MiB in UTF-8."]
+        #[schemars(length(max = crate::item::MAX_ITEM_TEXT_BYTES))]
         markdown: String,
     },
 }
@@ -229,6 +232,27 @@ pub struct Comment {
     /// The purge that invalidated the comment's `source`, whose stored path was scrubbed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invalidated_by: Option<crate::identity::PurgeId>,
+}
+
+impl Change {
+    /// Refuse an item text longer than `item::MAX_ITEM_TEXT_BYTES` in this change.
+    ///
+    /// `pointer` is this change's JSON Pointer inside its request, such as `/changes/0`.
+    ///
+    /// # Errors
+    /// Returns `TooLarge` on `<pointer>/body` of a `create` or `edit` change, or on
+    /// `<pointer>/markdown` of a `supply_extraction` change, when that text is too long.
+    pub fn check_text(&self, pointer: &str) -> Result<(), crate::error::ApiError> {
+        match self {
+            Self::Create { body, .. } | Self::Edit { body, .. } => {
+                crate::item::check_item_text(body, &format!("{pointer}/body"))
+            }
+            Self::SupplyExtraction { markdown, .. } => {
+                crate::item::check_item_text(markdown, &format!("{pointer}/markdown"))
+            }
+            Self::Move { .. } | Self::Archive { .. } => Ok(()),
+        }
+    }
 }
 
 impl ProposalKind {
