@@ -49,7 +49,8 @@
       "description": "Exact revision on which this change is based; stale writes conflict."
     },
     "corrected_markdown": {
-      "description": "Corrected text kept separate from generated text.",
+      "description": "Corrected text kept separate from generated text, at most 8 MiB in UTF-8.",
+      "maxLength": 8388608,
       "type": "string"
     },
     "digest": {

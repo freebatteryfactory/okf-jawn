@@ -144,7 +144,7 @@
   "description": "Current identity and capability summary without credentials.",
   "properties": {
     "csrf_required": {
-      "description": "Browser writes require a same-origin anti-CSRF token.",
+      "description": "Browser writes require a same-origin anti-CSRF token: the double-submit pair published\nas the `csrfCookie` and `csrfHeader` security schemes.",
       "type": "boolean"
     },
     "principal": {

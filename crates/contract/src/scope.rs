@@ -37,7 +37,7 @@ use crate::import::{
 use crate::item::{
     CreateFolderRequest, CreateItemRequest, DeleteItemRequest, DiscardDraftRequest, GetItemRequest,
     ItemStatus, ListDraftsRequest, ListItemsRequest, ListTypesRequest, MoveItemRequest,
-    SaveDraftRequest, SetLifecycleRequest, SetTypeRequest,
+    SaveDraftRequest, SetLifecycleRequest, SetTypeRequest, check_item_text,
 };
 use crate::proposal::{
     AcceptProposalRequest, AddCommentRequest, DeclineProposalRequest, GetProposalRequest,
@@ -162,10 +162,12 @@ pub trait RequestScope {
     /// Refuse a decoded request that breaks a rule its wire schema cannot state.
     ///
     /// Dispatch calls this before any grant lookup or handler, so the refusal does not depend
-    /// on who asks. Most requests have no such rule.
+    /// on who asks. Most requests have no such rule. A request carrying an item's text refuses
+    /// one longer than `item::MAX_ITEM_TEXT_BYTES` here.
     ///
     /// # Errors
-    /// Returns `InvalidInput` naming the offending field.
+    /// Returns `InvalidInput`, or `TooLarge` for an item text over the bound, naming the
+    /// offending field.
     fn check_rules(&self) -> Result<(), ApiError> {
         Ok(())
     }
@@ -213,8 +215,6 @@ workspace_read!(
 workspace_keyed!(Write:
     UpdateWorkspaceRequest,
     ExportWorkspaceRequest,
-    CreateItemRequest,
-    SaveDraftRequest,
     DiscardDraftRequest,
     MoveItemRequest,
     DeleteItemRequest,
@@ -228,7 +228,6 @@ workspace_keyed!(Write:
     RetryJobRequest,
     CancelJobRequest,
     RedigestRequest,
-    CorrectDigestRequest,
     SetRulesRequest,
     ApplyNamesRequest,
     ExportViewRequest,
@@ -319,9 +318,50 @@ impl RequestScope for OpenProposalRequest {
     fn idempotency_key(&self) -> Option<&IdempotencyKey> {
         Some(&self.idempotency_key)
     }
-    /// A supply proposal holds only supply changes, each for a different item.
+    /// A supply proposal holds only supply changes, each for a different item, and no change
+    /// carries an item text over the bound.
     fn check_rules(&self) -> Result<(), ApiError> {
-        ProposalKind::of(&self.changes).map(|_| ())
+        ProposalKind::of(&self.changes)?;
+        for (index, change) in self.changes.iter().enumerate() {
+            change.check_text(&format!("/changes/{index}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl RequestScope for CreateItemRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    fn check_rules(&self) -> Result<(), ApiError> {
+        check_item_text(&self.body, "/body")
+    }
+}
+
+impl RequestScope for SaveDraftRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    fn check_rules(&self) -> Result<(), ApiError> {
+        check_item_text(&self.body, "/body")
+    }
+}
+
+impl RequestScope for CorrectDigestRequest {
+    fn targets(&self) -> Vec<Target> {
+        vec![Target::Workspace(self.workspace_id, Permission::Write)]
+    }
+    fn idempotency_key(&self) -> Option<&IdempotencyKey> {
+        Some(&self.idempotency_key)
+    }
+    fn check_rules(&self) -> Result<(), ApiError> {
+        check_item_text(&self.corrected_markdown, "/corrected_markdown")
     }
 }
 

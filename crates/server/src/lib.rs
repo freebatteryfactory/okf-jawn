@@ -79,10 +79,8 @@ struct Authenticated {
     session_id: Option<String>,
 }
 
-/// Largest JSON request body accepted, in bytes (2 MiB).
-///
-/// One named constant until the integration owner's shared HTTP and MCP limit lands (Batch C).
-pub const JSON_BODY_LIMIT: usize = 2_097_152;
+/// Largest JSON request body accepted, in bytes: the contract's one request-body limit.
+const JSON_BODY_LIMIT: usize = okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 
 impl<S: Send + Sync> FromRequestParts<S> for Authenticated {
     type Rejection = Response;
