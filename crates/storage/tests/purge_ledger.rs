@@ -369,6 +369,23 @@ fn marked_files(directory: &Path) -> Fallible<Vec<String>> {
     Ok(found)
 }
 
+/// The operations of the ledger rows that record `workspace` and stand in `state`, in name
+/// order; a row in a state other than `completed` must hold no response.
+fn ledger_rows(data: &Path, workspace: WorkspaceId, state: &str) -> Fallible<Vec<String>> {
+    let records = rusqlite::Connection::open(data.join("records.sqlite"))?;
+    let mut statement = records.prepare(
+        "SELECT operation FROM mutations
+         WHERE workspace_id = ?1 AND state = ?2 AND (state = 'completed') = (response IS NOT NULL)
+         ORDER BY operation",
+    )?;
+    let rows = statement
+        .query_map([workspace.0.to_string(), state.to_owned()], |row| {
+            row.get(0)
+        })?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(rows)
+}
+
 /// Create the target and the survivor, draft in the target, purge the target through dispatch
 /// and carry the purge out as its tenant job does.
 async fn purged(directory: &Path) -> Fallible<Purged> {
@@ -544,11 +561,19 @@ async fn purge_ledger_no_file_keeps_a_response_of_the_purged_workspace() -> Test
         Vec::<String>::new(),
         "the target's name and draft are in no file, its ledger responses included"
     );
-    // The survivor's quoting response is kept, unchanged.
-    let (request, response) = purged.create_survivor;
+    // The ledger as the purge left it: of the target only the purge's own row keeps a response,
+    // its other rows are emptied with their identity kept, and the survivor's row is whole.
     assert_eq!(
-        call(&purged.harness, "create_workspace", request).await?,
-        response
+        ledger_rows(directory.path(), purged.target, "completed")?,
+        ["purge_workspace"]
+    );
+    assert_eq!(
+        ledger_rows(directory.path(), purged.target, "released")?,
+        ["create_workspace", "save_draft"]
+    );
+    assert_eq!(
+        ledger_rows(directory.path(), purged.survivor, "completed")?,
+        ["create_workspace"]
     );
     Ok(())
 }
