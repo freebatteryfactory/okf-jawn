@@ -6,6 +6,10 @@
  * One case per place a first load or a further page can fail. Focus is read 300 ms into each
  * state, after the frame in which a browser moves focus off a control that was removed or disabled.
  *
+ * And a failure that goes away without a retry: the reader's check of a cited revision, made again
+ * when the window regains focus, takes its notice off the page; focus that was on the retry button
+ * is then on the revision notice, not on the body.
+ *
  * Needs `bun --bun run build` first: the spec serves the built `dist/` itself.
  */
 
@@ -33,6 +37,9 @@ import {
 type Body = Record<string, unknown>;
 type Answer = Answers[string];
 type Outcome = 'answers' | 'fails again';
+
+/** A revision a link cites that is not the workspace's head. */
+const OLD = 'b'.repeat(40);
 
 const failed = (message: string): Reply => ({
   status: 500,
@@ -305,6 +312,57 @@ test.describe('a failure notice’s retry from the keyboard', () => {
       await expect.poll(() => operation.inFlight()).toBe(1);
       operation.end('answers');
       await expect(caller.loaded(page)).toBeFocused();
+    });
+  }
+
+  // A failure that goes away without a retry. The reader's check of a cited revision is made again
+  // whenever the window regains focus; its query has nothing loaded, so its notice leaves the page
+  // at once, with the focused button.
+  for (const outcome of ['answers', 'fails again'] as const) {
+    test(`the reader’s revision check, made again as the window regains focus, and ${outcome}: focus stays in the revision notice`, async ({
+      page,
+    }) => {
+      // The first request opens the workspace; the reader's own check comes after it.
+      let opens = 0;
+      const check = studied(
+        () => ok(workspace),
+        () => {
+          opens += 1;
+          return opens > 1;
+        },
+      );
+      await routeApi(page, { '/api/workspaces/open-workspace': check.answer });
+      await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}?rev=${OLD}`);
+      const alert = page.getByRole('alert').filter({
+        hasText: 'Checking for the latest version: Something went wrong in the service.',
+      });
+      await expect(alert).toBeVisible();
+      const retry = alert.locator('xpath=..').getByRole('button');
+      await expect(retry).toHaveText('Try again');
+      check.hold();
+      await retry.focus();
+      await expect(retry).toBeFocused();
+
+      // Two checks are made again: the shell's, for a newer head, and the reader's.
+      await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')));
+      await expect.poll(() => check.inFlight()).toBe(2);
+      await expect(alert).toHaveCount(0);
+      const revisionNotice = page.locator('.pinned-revision');
+      await expect(revisionNotice).toContainText('Checking whether it is the latest version…');
+      await page.waitForTimeout(300);
+      expect(await focused(page)).not.toBe('body');
+      await expect(revisionNotice).toBeFocused();
+      await expectVisibleFocus(page);
+      await expectNoAxeViolations(page, 'the revision check, made again by a window refocus');
+
+      check.end(outcome);
+      check.end(outcome);
+      await expect(revisionNotice).toContainText(
+        outcome === 'answers' ? 'it is not the latest version' : 'storage stumbled again',
+      );
+      await page.waitForTimeout(300);
+      await expect(revisionNotice).toBeFocused();
+      await expectNoAxeViolations(page, `the revision check, after it ${outcome}`);
     });
   }
 });
