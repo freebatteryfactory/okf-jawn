@@ -1,12 +1,30 @@
 /** Every ApiError code reads as plain language with the action it allows; NotImplemented is never success. */
 
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from '@tanstack/react-router';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ErrorCode } from '../../src/api/generated/types.gen';
 import { zErrorCode } from '../../src/api/generated/zod.gen';
 import { FailureNotice } from '../../src/features/errors/FailureNotice';
 import { classifyFailure, messageFor, shouldRetry } from '../../src/features/errors/failure';
+
+/** The notice's way home is a router link, so it renders inside a minimal router. */
+async function renderNotice(element: ReactNode) {
+  const router = createRouter({
+    routeTree: createRootRoute({ component: () => element }),
+    history: createMemoryHistory({ initialEntries: ['/somewhere'] }),
+  });
+  render(<RouterProvider router={router} />);
+  await screen.findByRole('alert');
+  return router;
+}
 
 const codes: ErrorCode[] = zErrorCode.options.flatMap((option) => [...option.values]);
 const apiError = (code: ErrorCode, extra: Record<string, unknown> = {}) => ({
@@ -30,7 +48,7 @@ describe('failure messages', () => {
 
   it('reads not_implemented as not available in this build and offers no success or retry', async () => {
     const onRetry = vi.fn();
-    render(
+    await renderNotice(
       <FailureNotice
         context="Reading this item"
         error={apiError('not_implemented', { message: 'read_item is not implemented yet' })}
@@ -46,7 +64,7 @@ describe('failure messages', () => {
 
   it.each([
     ['invalid_input', 'The request was not valid.', null],
-    ['unauthenticated', 'You are not signed in.', 'Reload'],
+    ['unauthenticated', 'You are not signed in.', 'Try again after signing in'],
     ['forbidden', 'You do not have permission to do this.', null],
     ['not_found', 'This could not be found.', null],
     ['conflict', 'This changed since it was loaded.', 'Reload'],
@@ -60,7 +78,9 @@ describe('failure messages', () => {
     ['not_implemented', 'Not available in this build.', null],
   ] as const)('shows %s as "%s" with action %s', async (code, title, button) => {
     const onRetry = vi.fn();
-    render(<FailureNotice context="Opening" error={apiError(code)} onRetry={onRetry} />);
+    await renderNotice(
+      <FailureNotice context="Opening" error={apiError(code)} onRetry={onRetry} />,
+    );
     expect(screen.getByRole('alert').textContent).toContain(`Opening: ${title}`);
     expect(screen.getByRole('alert').textContent).toContain(`server words for ${code}`);
     if (button === null) {
@@ -71,18 +91,33 @@ describe('failure messages', () => {
     }
   });
 
-  it('offers the way home for not_found, and shows the field and reference', () => {
-    render(
+  it('offers the way home for not_found as a router navigation, and shows the field and reference', async () => {
+    const router = await renderNotice(
       <FailureNotice
         context="Opening"
         error={apiError('not_found', { field: '/item_id', request_id: 'req-7' })}
       />,
     );
-    expect(screen.getByRole('link', { name: 'Go to your workspaces' }).getAttribute('href')).toBe(
-      '/',
-    );
+    const home = screen.getByRole('link', { name: 'Go to your workspaces' });
+    expect(home.getAttribute('href')).toBe('/');
     expect(screen.getByText('/item_id')).toBeTruthy();
     expect(screen.getByText('req-7')).toBeTruthy();
+    await userEvent.click(home);
+    expect(router.state.location.pathname).toBe('/');
+  });
+
+  it('inside a workspace, not_found goes back to that workspace', async () => {
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    await renderNotice(
+      <FailureNotice
+        context="Reading this item"
+        error={apiError('not_found')}
+        workspaceId={workspaceId}
+      />,
+    );
+    expect(screen.getByRole('link', { name: 'Go to this workspace' }).getAttribute('href')).toBe(
+      `/w/${workspaceId}`,
+    );
   });
 
   it('uses the typed retry_after of in_progress', () => {
