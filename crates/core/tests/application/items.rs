@@ -2,6 +2,8 @@
 //! only the caller's own draft, and every write commits on its base with the conformance
 //! check, then indexes, announces and (for a `MutationResult`) records a receipt.
 
+use std::path::PathBuf;
+
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::PageRequest;
 use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
@@ -864,6 +866,72 @@ async fn a_replayed_write_whose_warnings_cannot_be_rebuilt_still_answers_its_com
         only.message.contains("could not be rebuilt") && only.message.contains("type"),
         "says why: {}",
         only.message
+    );
+    Ok(())
+}
+
+/// The directories a replayed commit's check wrote under the system's temporary directory
+/// (`okf-jawn-recheck-*`) that still hold `file`.
+fn recheck_directories_holding(file: &str) -> Built<Vec<PathBuf>> {
+    let mut holding = Vec::new();
+    for entry in std::fs::read_dir(std::env::temp_dir())? {
+        let directory = entry?.path();
+        let rechecks = directory
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("okf-jawn-recheck-"));
+        if rechecks && directory.join(file).exists() {
+            holding.push(directory);
+        }
+    }
+    Ok(holding)
+}
+
+#[tokio::test]
+async fn the_directory_a_replayed_commits_check_wrote_is_removed_after_the_check() -> TestResult {
+    // The commit's tree holds one file no other test writes, so the directory this check wrote
+    // is told apart from one a concurrent test's check is still using.
+    let unique = format!("archive/{}.md", Uuid::new_v4().simple());
+    let world = World::new()?;
+    note_at(&world, &['a'])?;
+    let moved = note(
+        NOTE,
+        &revision('b')?,
+        &unique,
+        "No heading.\n",
+        json!({ "type": "Note" }),
+    )?;
+    world
+        .versions
+        .put_document(&revision('b')?, moved.clone())?;
+    world.versions.queue_revision(revision('b')?)?;
+    let stage = world.versions.stage();
+    std::fs::remove_file(stage.0.join("notes/plan.md"))?;
+    std::fs::create_dir_all(stage.0.join("archive"))?;
+    stage.write(&unique, &file_text(&moved))?;
+    let request = || -> Built<MoveItemRequest> {
+        Ok(MoveItemRequest {
+            destination: path(&unique)?,
+            ..move_request()?
+        })
+    };
+    let caller = alice(OperationName::MoveItem, Some(mutation(1)))?;
+    // The write fails after its commit; the retry replays the commit and checks its tree again.
+    world.search.fail_next();
+    err_of(world.service.move_item(&caller, request()?).await)?;
+    let retried = world.service.move_item(&caller, request()?).await?;
+    // The check did run over a directory holding that tree: its warning names the file.
+    assert!(
+        retried.warnings.iter().any(|warning| {
+            warning.code.starts_with("okf_lint")
+                && warning.location.as_deref() == Some(unique.as_str())
+        }),
+        "{:?}",
+        retried.warnings
+    );
+    assert_eq!(
+        recheck_directories_holding(&unique)?,
+        Vec::<PathBuf>::new(),
+        "the check's directory is gone"
     );
     Ok(())
 }
