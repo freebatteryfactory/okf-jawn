@@ -157,35 +157,33 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
         />
       )}
       {hits.length > 0 && (
-        <>
-          <ol className="hit-list" ref={listRef}>
-            {keyed(hits, (hit) => JSON.stringify(hit.source)).map(({ key, value: hit }) => (
-              <li key={key}>
-                <Link
-                  to="/w/$workspaceId/i/$itemId"
-                  params={{ workspaceId, itemId: hit.source.item_id }}
-                  search={{
-                    q: query,
-                    ...(hit.source.selection.kind === 'all' ? {} : { sel: hit.source.selection }),
-                    ...(hit.source.revision === head ? {} : { rev: hit.source.revision }),
-                  }}
-                  className="hit"
-                >
-                  <span className="hit-title">{hit.title}</span>
-                  <span className="hit-where">
-                    {hit.source.path}, {describeSelection(hit.source.selection)}
+        <ol className="hit-list" ref={listRef}>
+          {keyed(hits, (hit) => JSON.stringify(hit.source)).map(({ key, value: hit }) => (
+            <li key={key}>
+              <Link
+                to="/w/$workspaceId/i/$itemId"
+                params={{ workspaceId, itemId: hit.source.item_id }}
+                search={{
+                  q: query,
+                  ...(hit.source.selection.kind === 'all' ? {} : { sel: hit.source.selection }),
+                  ...(hit.source.revision === head ? {} : { rev: hit.source.revision }),
+                }}
+                className="hit"
+              >
+                <span className="hit-title">{hit.title}</span>
+                <span className="hit-where">
+                  {hit.source.path}, {describeSelection(hit.source.selection)}
+                </span>
+                {extractionLabels(hit.extraction).map((label) => (
+                  <span key={label} className="hit-label">
+                    {label}
                   </span>
-                  {extractionLabels(hit.extraction).map((label) => (
-                    <span key={label} className="hit-label">
-                      {label}
-                    </span>
-                  ))}
-                  <span className="hit-snippet">{hit.snippet}</span>
-                </Link>
-              </li>
-            ))}
-          </ol>
-        </>
+                ))}
+                <span className="hit-snippet">{hit.snippet}</span>
+              </Link>
+            </li>
+          ))}
+        </ol>
       )}
       {results.hasNextPage && (
         // aria-disabled, not disabled, while loading: a disabled button would drop focus.
