@@ -16,6 +16,10 @@
  * Call the hook where the operation is read, not inside the notice: settling re-renders that
  * component, which reads the operation's state as it is then and renders what it loaded in the
  * same commit the focus moves in. The retry button exists only through this hook.
+ *
+ * Limit: the retry is over when `run` settles. A refetch that replaces a request still in flight
+ * for content already on screen (an invalidation; nothing does that yet) settles `run` early,
+ * while the replacement is still in flight; the outcome followed is then the state at that moment.
  */
 import { type RefObject, useEffect, useRef, useState } from 'react';
 
@@ -23,7 +27,10 @@ export interface RetriedOperation {
   /**
    * What is asked, as text that changes when the request does (another item, another revision).
    * A retry in flight for another request is not this one's; a component that only ever asks one
-   * thing passes a constant.
+   * thing passes a constant. A query whose request is abandoned when its component asks something
+   * else (its last observer leaves and its fetch is aborted) settles its retry at once anyway; the
+   * text is what covers an operation that keeps running: a listing made of several requests, a
+   * mutation.
    */
   request: string;
   /** The operation has failed and has not answered since. */
