@@ -3,7 +3,8 @@
  * operation, pinned to one resolved revision and paged through the operation's cursor. Each
  * result opens its item at the exact cited selection and the revision its hit was resolved at
  * (SPEC section 3), and a result from partly converted, agent-supplied or corrected text carries
- * the same labels the reader shows.
+ * the same labels the reader shows. A failed search or further page keeps its notice through a
+ * retry (`useRetry`).
  */
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -14,6 +15,7 @@ import type { Revision, SearchRequest } from '../../api/generated/types.gen';
 import { keyed } from '../../lib/keys';
 import { describeSelection, extractionLabels } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
+import { useRetry } from '../errors/retry';
 
 /** Results per page. */
 export const SEARCH_PAGE = 20;
@@ -60,7 +62,10 @@ export function SearchForm({ query, onSearch }: SearchFormProps) {
   );
 }
 
-/** The words of the results' live region: searching, failed, none, or how many are shown. */
+/**
+ * The words of the results' live region: searching, failed, none, or how many are shown. While a
+ * failure notice is trying again, the notice says so and this line says nothing of that request.
+ */
 function searchStatus(
   results: {
     isPending: boolean;
@@ -71,14 +76,20 @@ function searchStatus(
   },
   shown: number,
   query: string,
+  retrying: boolean,
 ): string {
-  if (results.isPending) return 'Searching…';
+  if (results.isPending) return retrying ? '' : 'Searching…';
   if (results.isError && !results.isFetchNextPageError) return 'The search did not complete.';
   if (shown === 0) return `No matches for “${query}”.`;
-  if (results.isFetchingNextPage) return 'Loading more results…';
+  if (results.isFetchingNextPage && !retrying) return 'Loading more results…';
   const count = `${shown} ${shown === 1 ? 'result' : 'results'} shown`;
   if (results.isFetchNextPageError) return `${count}; more could not be loaded.`;
   return `${count}${results.hasNextPage ? '; more are available' : ''}.`;
+}
+
+/** The link of the result at `index` in the list, when it is on screen. */
+function hitLink(list: HTMLOListElement | null, index: number): HTMLElement | null {
+  return list?.querySelectorAll<HTMLElement>('a.hit').item(index) ?? null;
 }
 
 export interface SearchResultsProps {
@@ -138,10 +149,35 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
     void results.fetchNextPage();
   };
 
+  // A failed search, or a failed further page, keeps its notice through a retry, which ends with
+  // keyboard focus on the first result it brought (the heading, when the search found none).
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+  const searched = `${query} ${head}`;
+  const searchFailure = useRetry({
+    request: searched,
+    failed: results.isError && !results.isFetchNextPageError,
+    error: results.error,
+    run: () => results.refetch(),
+    loaded: () => hitLink(listRef.current, 0) ?? headingRef.current,
+  });
+  const lastPageSize = results.data?.pages.at(-1)?.hits.length ?? 0;
+  const moreFailure = useRetry({
+    request: searched,
+    failed: results.isFetchNextPageError,
+    error: results.error,
+    run: () => results.fetchNextPage(),
+    // The first result of the page it brought; if that page was empty, a control still there.
+    loaded: () =>
+      hitLink(listRef.current, hits.length - lastPageSize) ??
+      moreRef.current ??
+      hitLink(listRef.current, hits.length - 1) ??
+      headingRef.current,
+  });
+
   return (
     <section className="search-results" aria-labelledby={headingId}>
       <div className="panel-title-row">
-        <h2 id={headingId} className="panel-heading">
+        <h2 id={headingId} ref={headingRef} tabIndex={-1} className="panel-heading">
           Results for “{query}”
         </h2>
         <button type="button" onClick={onClear}>
@@ -149,13 +185,11 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
         </button>
       </div>
       {/* One polite live region, present from the start, announces what the search found. */}
-      <p role="status">{searchStatus(results, hits.length, query)}</p>
-      {results.isError && !results.isFetchNextPageError && (
-        <FailureNotice
-          context="Searching"
-          error={results.error}
-          onRetry={() => void results.refetch()}
-        />
+      <p role="status">
+        {searchStatus(results, hits.length, query, searchFailure.retrying || moreFailure.retrying)}
+      </p>
+      {searchFailure.shown && (
+        <FailureNotice context="Searching" error={searchFailure.error} retry={searchFailure} />
       )}
       {hits.length > 0 && (
         <ol className="hit-list" ref={listRef}>
@@ -196,11 +230,11 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
           {loadingMore ? 'Loading more results…' : 'Show more results'}
         </button>
       )}
-      {results.isFetchNextPageError && (
+      {moreFailure.shown && (
         <FailureNotice
           context="Loading more results"
-          error={results.error}
-          onRetry={() => void results.fetchNextPage()}
+          error={moreFailure.error}
+          retry={moreFailure}
         />
       )}
     </section>

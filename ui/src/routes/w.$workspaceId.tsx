@@ -8,13 +8,16 @@
  * another head only on Refresh: tree, unpinned reads and search pages stay on the revision they
  * were opened at (SPEC section 7: "pagination stays tied to the same revision and
  * representation"). Whether a newer head exists is checked apart, on window focus (the shell's
- * head line). A failed refresh keeps the Explorer and says so there.
+ * head line). A failed refresh keeps the Explorer and says so there. A workspace that failed to
+ * open keeps its notice through a retry, which ends with focus on the workspace's name.
  */
 import { useQuery } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
+import { useRef } from 'react';
 import { openWorkspaceOptions } from '../api/generated/@tanstack/react-query.gen';
 import { zWorkspaceId } from '../api/generated/zod.gen';
 import { FailureNotice } from '../features/errors/FailureNotice';
+import { useRetry } from '../features/errors/retry';
 import { ExplorerShell } from '../features/explorer/ExplorerShell';
 import { validateWorkspaceSearch } from '../features/explorer/search-params';
 
@@ -33,6 +36,14 @@ function WorkspaceRoute() {
     staleTime: Number.POSITIVE_INFINITY,
     refetchOnWindowFocus: false,
   });
+  const nameRef = useRef<HTMLHeadingElement | null>(null);
+  const opening = useRetry({
+    request: workspaceId,
+    failed: workspace.data === undefined && workspace.isError,
+    error: workspace.error,
+    run: () => workspace.refetch(),
+    loaded: () => nameRef.current,
+  });
   if (!valid) {
     return (
       <div className="page-status">
@@ -47,14 +58,10 @@ function WorkspaceRoute() {
     );
   }
   if (workspace.data === undefined) {
-    if (workspace.isError) {
+    if (opening.shown) {
       return (
         <div className="page-status">
-          <FailureNotice
-            context="Opening this workspace"
-            error={workspace.error}
-            onRetry={() => void workspace.refetch()}
-          />
+          <FailureNotice context="Opening this workspace" error={opening.error} retry={opening} />
         </div>
       );
     }
@@ -67,6 +74,7 @@ function WorkspaceRoute() {
   return (
     <ExplorerShell
       workspace={workspace.data}
+      nameRef={nameRef}
       head={{
         resolvedAt: workspace.dataUpdatedAt,
         refreshing: workspace.isFetching,

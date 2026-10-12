@@ -5,7 +5,8 @@
  * schema (so no field the contract lacks, and no flat guessed signature), and every successful
  * answer must parse with its generated response schema, so no test is driven by an answer the
  * server could not give. An operation without a handler answers `not_implemented`, as the real
- * service does for unbuilt operations.
+ * service does for unbuilt operations. A handler may answer later (a promise), so a test can look
+ * at the page while a request is in flight.
  */
 import { vi } from 'vitest';
 import type { ZodType } from 'zod';
@@ -31,7 +32,7 @@ export interface Reply {
   status: number;
   body: unknown;
 }
-export type Handler = (body: Json) => Reply;
+export type Handler = (body: Json) => Reply | Promise<Reply>;
 export interface Call {
   path: string;
   body: Json;
@@ -99,7 +100,7 @@ export function mockApi(handlers: Record<string, Handler>): MockedApi {
       }
     }
     const handler = handlers[path];
-    const reply = handler === undefined ? notImplemented(path) : handler(body);
+    const reply = handler === undefined ? notImplemented(path) : await handler(body);
     if (reply.status === 200 && contract !== undefined) {
       const checked = contract.response.safeParse(reply.body);
       if (!checked.success) violations.push(`${path} response: ${checked.error.message}`);

@@ -6,7 +6,8 @@
  * A partial read says so and offers its continuation, which resumes the same resolved read;
  * continuing moves keyboard focus to the part it loaded, and a live region says what happened.
  * Warnings, partial extraction and agent-supplied text are shown, never smoothed over. Each
- * operation's failure is shown where its content would have been.
+ * operation's failure is shown where its content would have been, and stays there while it is
+ * tried again (`useRetry`), so a retry never drops keyboard focus.
  */
 import {
   type UseMutationResult,
@@ -32,6 +33,7 @@ import type {
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
 import { FailureNotice } from '../errors/FailureNotice';
+import { type FailureRetry, useRetry } from '../errors/retry';
 import type { ItemSelection } from '../explorer/search-params';
 import { describeSelection, extractionLabels, short } from './describe';
 import { Properties } from './Properties';
@@ -56,15 +58,25 @@ export interface DocumentViewProps {
 
 const ROLE = { note: 'Note', source: 'Source', view: 'View' } as const;
 
-/** The words of the reading's live region: what the last continuation did. */
+/**
+ * The words of the reading's live region: what the last continuation did. While the failure
+ * notice is trying the continuation again, the notice says so and this line stays as it was.
+ */
 function readingStatus(
   read: { isFetchingNextPage: boolean; isFetchNextPageError: boolean; hasNextPage: boolean },
   parts: number,
+  retrying: boolean,
 ): string {
-  if (read.isFetchingNextPage) return 'Reading more…';
+  if (read.isFetchingNextPage && !retrying) return 'Reading more…';
   if (read.isFetchNextPageError) return 'The rest of this reading could not be read.';
   if (parts > 1) return `Part ${parts} read${read.hasNextPage ? '; more can be read' : ''}.`;
   return '';
+}
+
+/** A part of the reading on screen, as an element keyboard focus can go to. */
+function partOf(body: HTMLDivElement | null, which: 'first' | 'last'): HTMLElement | null {
+  const part = which === 'first' ? body?.firstElementChild : body?.lastElementChild;
+  return part instanceof HTMLElement ? part : null;
 }
 
 export function itemOptions(workspaceId: string, itemId: string, revision: Revision) {
@@ -124,6 +136,22 @@ function PinnedRevision({
       onReadLatest(resolved);
     },
   });
+  // Either failure keeps its notice through a retry, which ends with keyboard focus at this
+  // notice: it then says what the check found, or which revision was read.
+  const checkFailure = useRetry({
+    request: revision,
+    failed: latestHead.isError,
+    error: latestHead.error,
+    run: () => latestHead.refetch(),
+    loaded: () => noticeRef.current,
+  });
+  const latestFailure = useRetry({
+    request: revision,
+    failed: readLatest.isError,
+    error: readLatest.error,
+    run: () => readLatest.mutateAsync(),
+    loaded: () => noticeRef.current,
+  });
 
   return (
     <div ref={noticeRef} tabIndex={-1} className="pinned-revision">
@@ -132,6 +160,8 @@ function PinnedRevision({
         revision={revision}
         latestHead={latestHead}
         readLatest={readLatest}
+        checkFailure={checkFailure}
+        latestFailure={latestFailure}
       />
     </div>
   );
@@ -142,32 +172,37 @@ function PinnedRevisionState({
   revision,
   latestHead,
   readLatest,
+  checkFailure,
+  latestFailure,
 }: {
   workspaceId: string;
   revision: Revision;
   latestHead: UseQueryResult<Workspace>;
   readLatest: UseMutationResult<ReadItemResponse, Error, void>;
+  checkFailure: FailureRetry;
+  latestFailure: FailureRetry;
 }) {
   const reading = <code title={revision}>{short(revision)}</code>;
-  if (latestHead.isPending) {
+  if (checkFailure.shown) {
+    return (
+      <FailureNotice
+        context="Checking for the latest version"
+        error={checkFailure.error}
+        retry={checkFailure}
+        workspaceId={workspaceId}
+      />
+    );
+  }
+  const latest = latestHead.data;
+  if (latest === undefined) {
     return (
       <p role="note" className="notice">
         You are reading revision {reading}. Checking whether it is the latest version…
       </p>
     );
   }
-  if (latestHead.isError) {
-    return (
-      <FailureNotice
-        context="Checking for the latest version"
-        error={latestHead.error}
-        onRetry={() => void latestHead.refetch()}
-        workspaceId={workspaceId}
-      />
-    );
-  }
   const checked = <Instant value={new Date(latestHead.dataUpdatedAt).toISOString()} />;
-  if (latestHead.data.head === revision) {
+  if (latest.head === revision) {
     return (
       <p role="note" className="notice">
         You are reading revision {reading}, the latest version when checked at {checked}.
@@ -188,11 +223,11 @@ function PinnedRevisionState({
           {readLatest.isPending ? 'Reading the latest version…' : 'Read the latest version'}
         </button>
       </p>
-      {readLatest.isError && (
+      {latestFailure.shown && (
         <FailureNotice
           context="Reading the latest version"
-          error={readLatest.error}
-          onRetry={() => readLatest.mutate()}
+          error={latestFailure.error}
+          retry={latestFailure}
           workspaceId={workspaceId}
         />
       )}
@@ -263,8 +298,34 @@ export function DocumentView({
     void read.fetchNextPage();
   };
 
+  // Each operation's failure keeps its notice through a retry, which ends with keyboard focus on
+  // what it loaded: the properties' disclosure, the first part of the text, or the part continued.
+  const articleRef = useRef<HTMLElement | null>(null);
+  const reading = JSON.stringify(request);
+  const itemFailure = useRetry({
+    request: revision,
+    failed: item.isError,
+    error: item.error,
+    run: () => item.refetch(),
+    loaded: () => articleRef.current?.querySelector<HTMLElement>('.properties > summary'),
+  });
+  const readFailure = useRetry({
+    request: reading,
+    failed: read.isError && !read.isFetchNextPageError,
+    error: read.error,
+    run: () => read.refetch(),
+    loaded: () => partOf(bodyRef.current, 'first'),
+  });
+  const moreFailure = useRetry({
+    request: reading,
+    failed: read.isFetchNextPageError,
+    error: read.error,
+    run: () => read.fetchNextPage(),
+    loaded: () => partOf(bodyRef.current, 'last'),
+  });
+
   return (
-    <article className="document" aria-labelledby={titleId}>
+    <article ref={articleRef} className="document" aria-labelledby={titleId}>
       <header className="document-header">
         <h2 id={titleId}>{title}</h2>
         <p className="meta">
@@ -303,11 +364,11 @@ export function DocumentView({
         </p>
       )}
 
-      {item.isError ? (
+      {itemFailure.shown ? (
         <FailureNotice
           context="Reading this item’s properties"
-          error={item.error}
-          onRetry={() => void item.refetch()}
+          error={itemFailure.error}
+          retry={itemFailure}
           workspaceId={workspaceId}
         />
       ) : item.data ? (
@@ -345,12 +406,12 @@ export function DocumentView({
         </p>
       ))}
 
-      {read.isPending && <p role="status">Reading…</p>}
-      {read.isError && !read.isFetchNextPageError && (
+      {read.isPending && !readFailure.retrying && <p role="status">Reading…</p>}
+      {readFailure.shown && (
         <FailureNotice
           context="Reading this item"
-          error={read.error}
-          onRetry={() => void read.refetch()}
+          error={readFailure.error}
+          retry={readFailure}
           workspaceId={workspaceId}
         />
       )}
@@ -371,7 +432,7 @@ export function DocumentView({
         </div>
       )}
       <p role="status" className="sr-only">
-        {readingStatus(read, pages.length)}
+        {readingStatus(read, pages.length, moreFailure.retrying)}
       </p>
       {keyed(warnings, (warning) => JSON.stringify(warning)).map(({ key, value: warning }) => (
         <p key={key} role="note" className="notice">
@@ -400,11 +461,11 @@ export function DocumentView({
           )}
         </div>
       )}
-      {read.isFetchNextPageError && (
+      {moreFailure.shown && (
         <FailureNotice
           context="Continuing this reading"
-          error={read.error}
-          onRetry={() => void read.fetchNextPage()}
+          error={moreFailure.error}
+          retry={moreFailure}
           workspaceId={workspaceId}
         />
       )}

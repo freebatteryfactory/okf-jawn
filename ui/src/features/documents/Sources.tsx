@@ -4,8 +4,10 @@
  * with how it was obtained, and every declared `sources` entry with what it resolved to.
  *
  * Shared with the MCP App, so it takes only the operation's result and needs no router or cache.
+ * A host that moves keyboard focus here (after a retry loaded the sources) passes `headingRef`,
+ * which also makes the heading focusable from script; without it the output is unchanged.
  */
-import { useId } from 'react';
+import { type Ref, useId } from 'react';
 import type { z } from 'zod';
 import type { zGetSourcesResponse, zSourceLocation } from '../../api/generated/zod.gen';
 import { Instant } from '../../lib/instant';
@@ -22,14 +24,18 @@ import {
 
 export interface SourcesProps {
   result: z.infer<typeof zGetSourcesResponse>;
+  /** The "Sources" heading, for a host that moves keyboard focus to it. */
+  headingRef?: Ref<HTMLHeadingElement>;
 }
 
-export function Sources({ result }: SourcesProps) {
+export function Sources({ result, headingRef }: SourcesProps) {
   const declared = result.declared ?? [];
   const heading = useId();
   return (
     <section aria-labelledby={heading} className="sources">
-      <h2 id={heading}>Sources</h2>
+      <h2 id={heading} {...(headingRef === undefined ? {} : { ref: headingRef, tabIndex: -1 })}>
+        Sources
+      </h2>
       <p>
         At revision <code title={result.revision}>{short(result.revision)}</code>
       </p>
