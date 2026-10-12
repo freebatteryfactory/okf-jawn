@@ -849,6 +849,9 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
   - a landing clears only its own pending put, not every pending put of the workspace (storage P1 review, mutant MCLEAR);
   - a kept export's artifact descriptor survives the job-artifact scrub (storage pass-3 review, mutant MKEPTART).
 - **`FormatHasNoLocator`** for an unmatched picture in a pageless format, which today records `NotLocatedByConverter`.
+- **A managed backup is never imported as a source document.** The archive writer refuses a card whose original is a backup or written-history object, because such a card can never be restored or read. So ingest's import refuses, with `InvalidInput`, to convert an upload whose digest is one of the tenant's managed archives or written histories. A restore's own upload stays allowed.
+- **A backup taken during an import keeps the upload usable.** Running jobs are not archived. So an upload consumed only by a job the archive drops is archived as completed and unconsumed, and the import can be run again after a restore.
+- **What a failed replacement restore leaves.** Some failures are found only by the copy, such as a key collision between two archives of one set. These leave the installation rows and the earlier workspaces written. Each such check either moves into the read-only pre-check, or the `restore` doc states what is left, and a test shows that a rerun completes.
 
 **With their features.**
 
