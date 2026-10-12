@@ -88,3 +88,381 @@ button {
   outline: 3px solid Highlight;
   outline-offset: 3px;
 }
+/* Workspace shell. System colors only; the owner decides any further visual system. */
+:root {
+  /* System GrayText falls below WCAG AA contrast on a selected row; this stays above it. */
+  --secondary-text: color-mix(in srgb, CanvasText 72%, Canvas);
+}
+.skip-link {
+  position: absolute;
+  left: -100vw;
+}
+.skip-link:focus {
+  left: 1rem;
+  top: 0.5rem;
+  z-index: 10;
+  background: Canvas;
+  padding: 0.5rem;
+}
+main.app-main:has(.explorer) {
+  max-width: none;
+  padding: 0;
+}
+.page-status {
+  max-width: 52rem;
+  margin: 2rem auto;
+}
+.workspace-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 1rem;
+}
+.workspace-list a {
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+.meta {
+  color: var(--secondary-text);
+  font-size: 0.85rem;
+}
+.explorer {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 4.5rem);
+}
+.explorer-bar {
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid GrayText;
+}
+.workspace-name {
+  font-size: 1.1rem;
+  margin: 0;
+}
+.head-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-inline-start: auto;
+}
+.head-line p {
+  margin: 0;
+}
+.head-line button {
+  padding: 0.2rem 0.6rem;
+}
+.explorer-columns {
+  flex: 1;
+  min-height: 0;
+}
+.sidebar,
+.source-column,
+.pane {
+  height: 100%;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 0.5rem 0.75rem;
+}
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.folder-tree {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.tree-box {
+  flex: 1;
+  min-height: 0;
+}
+.panel-heading {
+  font-size: 0.95rem;
+  margin: 0.25rem 0;
+}
+.panel-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+.separator {
+  width: 6px;
+  background: color-mix(in srgb, GrayText 35%, transparent);
+}
+.separator:focus-visible,
+.separator[data-separator="active"] {
+  background: Highlight;
+}
+[role="treeitem"] {
+  cursor: default;
+}
+[role="treeitem"][aria-selected="true"] {
+  background: color-mix(in srgb, Highlight 25%, transparent);
+}
+/* A selected row is tinted with Highlight, so its ring is CanvasText: WebKit's Highlight against
+   that tint measured 2.80:1, below the 3:1 of WCAG 1.4.11. */
+[role="treeitem"]:focus-visible {
+  outline-color: CanvasText;
+  outline-offset: -3px;
+}
+/* A long name wraps inside its row (the row measures itself); the tree never scrolls sideways. */
+.tree-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  min-height: 30px;
+  padding-block: 0.2rem;
+  line-height: 1.4;
+}
+.tree-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tree-type,
+.tree-flag {
+  margin-inline-start: 0.35rem;
+}
+.tree-icon {
+  flex: none;
+  margin-top: 0.15rem;
+}
+.tree-type,
+.tree-flag {
+  color: var(--secondary-text);
+  font-size: 0.8rem;
+}
+.tree-status {
+  font-style: italic;
+}
+.search-form label {
+  display: block;
+  font-size: 0.85rem;
+  margin-bottom: 0.25rem;
+}
+.search-row {
+  display: flex;
+  gap: 0.25rem;
+}
+.search-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 0.4rem;
+}
+.hit-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.hit {
+  display: grid;
+  gap: 0.15rem;
+  color: inherit;
+}
+.hit-title {
+  font-weight: 700;
+}
+.hit-where {
+  color: var(--secondary-text);
+  font-size: 0.8rem;
+}
+.hit-snippet {
+  font-size: 0.9rem;
+}
+.hit-label {
+  border-left: 3px solid GrayText;
+  padding-left: 0.4rem;
+  font-size: 0.8rem;
+}
+.pane-group {
+  height: 100%;
+}
+.pane-focused {
+  box-shadow: inset 0 2px 0 Highlight;
+}
+.tab-bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-bottom: 1px solid GrayText;
+}
+.tab-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+.tab {
+  white-space: nowrap;
+  background: none;
+  border: 1px solid transparent;
+  border-bottom: none;
+  color: inherit;
+}
+.tab[data-active] {
+  border-color: GrayText;
+  font-weight: 700;
+}
+.pane-actions {
+  display: flex;
+  gap: 0.25rem;
+  padding-bottom: 0.25rem;
+}
+.pane-actions button {
+  padding: 0.25rem 0.5rem;
+  white-space: nowrap;
+}
+.property dt,
+.property dd {
+  overflow-wrap: anywhere;
+}
+.empty-pane {
+  color: var(--secondary-text);
+}
+.document-header h2 {
+  margin-bottom: 0.25rem;
+}
+.notice {
+  border-left: 3px solid GrayText;
+  padding: 0.5rem 0.75rem;
+}
+.properties dl {
+  display: grid;
+  grid-template-columns: fit-content(40%) minmax(0, 1fr);
+  gap: 0.25rem 1rem;
+}
+.property {
+  display: contents;
+}
+.property dt {
+  font-weight: 700;
+}
+.property dd {
+  margin: 0;
+}
+.link-button {
+  background: none;
+  border: none;
+  padding: 0.1rem 0;
+  color: LinkText;
+  text-decoration: underline;
+}
+.document-body {
+  overflow-wrap: anywhere;
+}
+.citation {
+  color: var(--secondary-text);
+  font-size: 0.85rem;
+}
+.locations {
+  padding-left: 1rem;
+}
+.location-label {
+  font-weight: 700;
+}
+.location-inferred {
+  font-style: italic;
+  border-left: 3px dashed GrayText;
+  padding-left: 0.5rem;
+  list-style: none;
+}
+.location-unresolved {
+  color: var(--secondary-text);
+}
+.appearance dd {
+  margin: 0 0 0.5rem;
+}
+.failure-notice p {
+  margin: 0.25rem 0;
+}
+/* Tailwind's preflight strips borders, list markers and heading sizes; the shell restores them. */
+.app-main input[type="search"] {
+  border: 1px solid GrayText;
+  border-radius: 0.25rem;
+  background: Field;
+  color: FieldText;
+}
+.app-main button:not(.tab):not(.link-button) {
+  border: 1px solid GrayText;
+  border-radius: 0.25rem;
+  background: ButtonFace;
+  color: ButtonText;
+}
+.app-main button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.workspace-name,
+.panel-heading,
+.document-header h2 {
+  font-weight: 700;
+}
+.document-header h2 {
+  font-size: 1.4rem;
+}
+.document-body h1 {
+  font-size: 1.6rem;
+}
+.document-body h2 {
+  font-size: 1.35rem;
+}
+.document-body h3 {
+  font-size: 1.15rem;
+}
+.document-body :is(h1, h2, h3, h4, h5, h6) {
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 1rem 0 0.5rem;
+}
+.document-body :is(p, ul, ol, table, pre, blockquote) {
+  margin: 0.5rem 0;
+}
+.document-body ul,
+.citations,
+.declared {
+  padding-left: 1.5rem;
+}
+.document-body ul {
+  list-style: disc;
+}
+.document-body ol,
+.citations,
+.declared {
+  list-style: decimal;
+}
+.document-body ol {
+  padding-left: 1.5rem;
+}
+.document-body ul.contains-task-list {
+  list-style: none;
+  padding-left: 0.25rem;
+}
+.document-body blockquote {
+  border-left: 3px solid GrayText;
+  padding-left: 0.75rem;
+}
+.sources h2 {
+  font-size: 1rem;
+  font-weight: 700;
+}
+.sources h3 {
+  font-size: 0.9rem;
+  font-weight: 700;
+  margin: 0.75rem 0 0.25rem;
+}
+.sources p {
+  margin: 0.15rem 0;
+}
+.workspace-list a,
+.hit-title {
+  text-decoration: underline;
+}
