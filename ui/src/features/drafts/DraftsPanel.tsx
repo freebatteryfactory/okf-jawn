@@ -350,15 +350,14 @@ function DraftRow({
   return (
     <li>
       {selectable && (
-        // aria-disabled rather than disabled: a conflict can arrive while the box has focus.
+        // aria-disabled rather than disabled: a conflict can arrive while the box has focus. A
+        // conflicting draft's box shows unticked whatever is pressed, until it is resolved.
         <input
           type="checkbox"
           checked={selected}
           aria-disabled={conflicting}
           aria-label={`Include ${name} in the Snapshot`}
-          onChange={(event) => {
-            if (!conflicting) onSelect(event.target.checked);
-          }}
+          onChange={(event) => onSelect(event.target.checked)}
         />
       )}{' '}
       <button type="button" className="link-button" onClick={() => onOpenItem(row.itemId)}>

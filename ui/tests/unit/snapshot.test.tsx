@@ -436,14 +436,20 @@ describe('taking a Snapshot', () => {
     await screen.findByRole('region', { name: 'Drafts (2)' });
     await pressSnapshot('Tidy');
     await within(panel()).findByRole('button', { name: 'Try again' });
-    fireEvent.change(nameField(), { target: { value: 'Tidy more' } });
+    // The button pressed again with nothing changed is the same request, like the retry.
     fireEvent.click(snapshotButton());
     await eventuallyReal(() => expect(api.callsTo(COMMIT)).toHaveLength(2));
+    await within(panel()).findByRole('button', { name: 'Try again' });
+    expect(api.callsTo(COMMIT).at(1)).toEqual(api.callsTo(COMMIT).at(0));
+    fireEvent.change(nameField(), { target: { value: 'Tidy more' } });
+    fireEvent.click(snapshotButton());
+    await eventuallyReal(() => expect(api.callsTo(COMMIT)).toHaveLength(3));
+    await within(panel()).findByRole('button', { name: 'Try again' });
     fireEvent.click(
       within(panel()).getByRole('checkbox', { name: 'Include Plan in the Snapshot' }),
     );
     fireEvent.click(snapshotButton());
-    await eventuallyReal(() => expect(api.callsTo(COMMIT)).toHaveLength(3));
+    await eventuallyReal(() => expect(api.callsTo(COMMIT)).toHaveLength(4));
     const keys = api.callsTo(COMMIT).map((sent) => sent.idempotency_key);
     expect(new Set(keys).size).toBe(3);
   });
@@ -745,6 +751,32 @@ describe('a Snapshot that conflicts', () => {
     expect(within(notice).queryByRole('button', { name: 'Keep mine' })).toBeNull();
     expect(within(notice).getByRole('button', { name: 'Take theirs' })).toBeDefined();
     expect(textIn(textBox('Text of Meeting notes'))).toBe(DRAFT_BODY);
+  });
+
+  it('keeps the draft when taking theirs fails, and repeats the discard under the same key', async () => {
+    let failing = true;
+    const { api, notice } = await openConflict(
+      {},
+      {
+        [DISCARD]: (body) =>
+          failing
+            ? fail(503, 'unavailable', 'busy')
+            : ok(draftOf(String(body.item_id), HEAD, LATER)),
+      },
+    );
+    fireEvent.click(within(notice).getByRole('button', { name: 'Take theirs' }));
+    fireEvent.click(within(notice).getByRole('button', { name: 'Discard my draft' }));
+    const retry = await within(notice).findByRole('button', { name: 'Try again' });
+    expect(
+      within(notice).getByText('Discarding your draft: The service is temporarily unavailable.'),
+    ).toBeDefined();
+    expect(textIn(textBox('Text of Meeting notes'))).toBe(DRAFT_BODY);
+    failing = false;
+    fireEvent.click(retry);
+    await screen.findByText('Text of Meeting notes');
+    const [first, second] = api.callsTo(DISCARD);
+    expect(api.callsTo(DISCARD)).toHaveLength(2);
+    expect(second).toEqual(first);
   });
 
   it('keeps the conflict on screen when keeping fails, and repeats the same requests', async () => {
