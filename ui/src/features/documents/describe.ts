@@ -9,6 +9,7 @@ import type {
   zCellRange,
   zConversionOutcome,
   zExtractionStatus,
+  zExtractionSummary,
   zExtractionWarning,
   zFailureReason,
   zPageRange,
@@ -23,6 +24,7 @@ import type {
 type CellRange = z.infer<typeof zCellRange>;
 type ConversionOutcome = z.infer<typeof zConversionOutcome>;
 type ExtractionStatus = z.infer<typeof zExtractionStatus>;
+type ExtractionSummary = z.infer<typeof zExtractionSummary>;
 type ExtractionWarning = z.infer<typeof zExtractionWarning>;
 type FailureReason = z.infer<typeof zFailureReason>;
 type PageRange = z.infer<typeof zPageRange>;
@@ -131,6 +133,22 @@ export const TEXT_ORIGIN: Record<TextOrigin, string> = {
     'The text shown was supplied by an agent and accepted by a person; it is not the converter’s.',
   none: 'There is no text to show.',
 };
+
+export const CORRECTED = 'A person’s correction is shown over the converted text.';
+
+/**
+ * The labels a source's text carries wherever it is shown (SPEC section 5: agent-supplied text
+ * is labelled as such, and generated extraction and human corrections stay distinguishable):
+ * partial or failed conversion, text not from the converter, and a person's correction.
+ */
+export function extractionLabels(extraction: ExtractionSummary | null | undefined): string[] {
+  if (extraction === null || extraction === undefined) return [];
+  const labels: string[] = [];
+  if (extraction.status !== 'completed') labels.push(EXTRACTION_STATUS[extraction.status]);
+  if (extraction.text_origin !== 'converter') labels.push(TEXT_ORIGIN[extraction.text_origin]);
+  if (extraction.corrected) labels.push(CORRECTED);
+  return labels;
+}
 
 export function describeFailure(reason: FailureReason): string {
   switch (reason.kind) {

@@ -117,6 +117,60 @@ describe('search', () => {
     expect(await screen.findByRole('tree', { name: 'Folders' })).toBeTruthy();
   });
 
+  it('labels a search snippet taken from text an agent supplied (P7)', async () => {
+    mockApi(
+      explorerHandlers({
+        [SEARCH]: () =>
+          ok({
+            hits: [
+              {
+                ...hit(NOTE, 'Meeting notes', 'notes/meeting.md', 4),
+                extraction: { status: 'partial', text_origin: 'supplied_by_agent', corrected: false },
+              },
+            ],
+            revision: HEAD,
+          }),
+      }),
+    );
+    renderAt(`/w/${WS}?q=budget`);
+    const results = await screen.findByRole('region', { name: 'Results for “budget”' });
+    const link = await within(results).findByRole('link', { name: /Meeting notes/ });
+    expect(link.textContent).toMatch(/supplied by an agent/i);
+  });
+
+  it('labels a result exactly as the reader does: partial, agent-supplied, corrected', async () => {
+    mockApi(
+      explorerHandlers({
+        [SEARCH]: () =>
+          ok({
+            hits: [
+              {
+                ...hit(NOTE, 'Meeting notes', 'notes/meeting.md', 4),
+                extraction: { status: 'partial', text_origin: 'supplied_by_agent', corrected: true },
+              },
+              {
+                ...hit(OTHER, 'Plan', 'notes/plan.md', 1),
+                extraction: { status: 'completed', text_origin: 'converter', corrected: false },
+              },
+            ],
+            revision: HEAD,
+          }),
+      }),
+    );
+    renderAt(`/w/${WS}?q=budget`);
+    const results = await screen.findByRole('region', { name: 'Results for “budget”' });
+    const labelled = await within(results).findByRole('link', { name: /Meeting notes/ });
+    expect(labelled.textContent).toContain('Partly converted.');
+    expect(labelled.textContent).toContain(
+      'The text shown was supplied by an agent and accepted by a person; it is not the converter’s.',
+    );
+    expect(labelled.textContent).toContain(
+      'A person’s correction is shown over the converted text.',
+    );
+    const plain = within(results).getByRole('link', { name: /Plan/ });
+    expect(plain.textContent).not.toMatch(/converted|supplied|correction/);
+  });
+
   it('shows an unbuilt search as not available, never as no matches', async () => {
     mockApi(explorerHandlers({ [SEARCH]: () => notImplemented('search_items') }));
     renderAt(`/w/${WS}?q=budget`);

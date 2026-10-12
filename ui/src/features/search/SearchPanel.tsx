@@ -1,7 +1,8 @@
 /**
  * Workspace search: a search form whose query lives in the URL, and the results of the search
  * operation, pinned to one resolved revision and paged through the operation's cursor. Each
- * result opens its item at the exact cited selection.
+ * result opens its item at the exact cited selection, and a result from partly converted,
+ * agent-supplied or corrected text carries the same labels the reader shows.
  */
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -10,7 +11,7 @@ import { searchItemsQueryKey } from '../../api/generated/@tanstack/react-query.g
 import { searchItems } from '../../api/generated/sdk.gen';
 import type { Revision, SearchRequest } from '../../api/generated/types.gen';
 import { keyed } from '../../lib/keys';
-import { describeSelection } from '../documents/describe';
+import { describeSelection, extractionLabels } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 
 /** Results per page. */
@@ -116,6 +117,11 @@ export function SearchResults({ workspaceId, head, query, onClear }: SearchResul
                   <span className="hit-where">
                     {hit.source.path}, {describeSelection(hit.source.selection)}
                   </span>
+                  {extractionLabels(hit.extraction).map((label) => (
+                    <span key={label} className="hit-label">
+                      {label}
+                    </span>
+                  ))}
                   <span className="hit-snippet">{hit.snippet}</span>
                 </Link>
               </li>

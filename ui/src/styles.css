@@ -247,6 +247,11 @@ main.app-main:has(.explorer) {
 .hit-snippet {
   font-size: 0.9rem;
 }
+.hit-label {
+  border-left: 3px solid GrayText;
+  padding-left: 0.4rem;
+  font-size: 0.8rem;
+}
 .pane-group {
   height: 100%;
 }

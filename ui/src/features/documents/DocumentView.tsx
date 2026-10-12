@@ -16,7 +16,7 @@ import type { ReadItemRequest, Revision } from '../../api/generated/types.gen';
 import { keyed } from '../../lib/keys';
 import { FailureNotice } from '../errors/FailureNotice';
 import type { ItemSelection } from '../explorer/search-params';
-import { describeSelection, EXTRACTION_STATUS, short, TEXT_ORIGIN } from './describe';
+import { describeSelection, extractionLabels, short } from './describe';
 import { Properties } from './Properties';
 import { SafeMarkdown } from './SafeMarkdown';
 
@@ -157,21 +157,11 @@ export function DocumentView({
         </details>
       )}
 
-      {extraction && extraction.status !== 'completed' && (
-        <p role="note" className="notice">
-          {EXTRACTION_STATUS[extraction.status]}
+      {extractionLabels(extraction).map((label) => (
+        <p key={label} role="note" className="notice">
+          {label}
         </p>
-      )}
-      {extraction && extraction.text_origin !== 'converter' && (
-        <p role="note" className="notice">
-          {TEXT_ORIGIN[extraction.text_origin]}
-        </p>
-      )}
-      {extraction?.corrected && (
-        <p role="note" className="notice">
-          A person’s correction is shown over the converted text.
-        </p>
-      )}
+      ))}
 
       {read.isPending && <p role="status">Reading…</p>}
       {read.isError && !read.isFetchNextPageError && (
