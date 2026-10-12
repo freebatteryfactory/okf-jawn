@@ -157,9 +157,12 @@ async fn respond(
 okf_jawn_contract::for_each_operation!(bind_routes);
 
 pub mod app;
+#[cfg(feature = "runtime")]
+pub mod authkit;
 pub mod config;
 pub mod errors;
 pub mod grants;
+pub mod hosted;
 pub mod identity;
 pub mod local;
 #[cfg(feature = "runtime")]
