@@ -83,7 +83,9 @@ export function FailureNotice({ context, error, retry, workspaceId }: FailureNot
       </div>
     );
   }
-  const retryLabel = message.action.kind === 'retry' ? message.action.label : null;
+  // No retry of its own where the caller gave the hook no way to repeat the operation.
+  const retryLabel =
+    retry.start !== undefined && message.action.kind === 'retry' ? message.action.label : null;
   return (
     // The hook's ref on the root whatever the failure allows, and focusable from script only:
     // where keyboard focus rests when the failure now shown allows no retry (a retry ended in it,

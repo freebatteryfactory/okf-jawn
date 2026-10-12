@@ -5,7 +5,7 @@
  * operation reads").
  */
 
-import { focusManager } from '@tanstack/react-query';
+import { focusManager, onlineManager } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -429,5 +429,42 @@ describe('the shell head is shown as of when it was resolved', () => {
         'The workspace could not be refreshed; still showing the version above.',
       ),
     ).toBeTruthy();
+    // The failure allows a retry, and the notice offers none of its own: Refresh is the retry.
+    const notice = alert.parentElement;
+    if (notice === null) throw new Error('the alert is not in a notice');
+    expect(notice.className).toBe('failure-notice');
+    expect(within(notice).queryByRole('button')).toBeNull();
+    expect(within(notice).queryByRole('status')).toBeNull();
+  });
+
+  it('moves focus from the way out of a failed refresh to Refresh when the failure goes away by itself', async () => {
+    // The workspace opens, a refresh finds it gone, and it is there again when asked once more.
+    let opens = 0;
+    mockApi(
+      explorerHandlers({
+        [OPEN]: () => {
+          opens += 1;
+          return opens === 2 ? fail(404, 'not_found', 'gone') : ok(workspace);
+        },
+      }),
+    );
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('tree', { name: 'Folders' });
+    const refresh = screen.getByRole('button', { name: 'Refresh' });
+    await userEvent.click(refresh);
+    const words = await screen.findByText('Refreshing this workspace: This could not be found.');
+    const notice = words.closest<HTMLElement>('[role="alert"]')?.parentElement;
+    if (notice === null || notice === undefined) throw new Error('the alert is not in a notice');
+    const wayOut = within(notice).getByRole('link', { name: 'Go to your workspaces' });
+    act(() => wayOut.focus());
+    // The network returns: a query whose last answer was a failure is asked again.
+    act(() => {
+      onlineManager.setOnline(false);
+      onlineManager.setOnline(true);
+    });
+    await waitFor(() => expect(wayOut.isConnected).toBe(false));
+    expect(opens).toBe(3);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(document.activeElement).toBe(refresh);
   });
 });

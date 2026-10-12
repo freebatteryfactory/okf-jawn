@@ -63,8 +63,12 @@ export interface RetriedOperation {
   failed: boolean;
   /** Whatever it threw. */
   error: unknown;
-  /** Repeat it. Settles once the operation has answered or failed again; a rejection is a failure. */
-  run: () => Promise<unknown>;
+  /**
+   * Repeat it. Settles once the operation has answered or failed again; a rejection is a failure.
+   * Left out where another control of the page repeats the operation (the shell's Refresh): the
+   * notice then offers no retry of its own, and keyboard focus in it is followed all the same.
+   */
+  run?: () => Promise<unknown>;
   /**
    * The content now shown in the failure's place: its first focusable element, or its heading.
    * When it names nothing, focus goes to the page's level-one heading.
@@ -81,8 +85,11 @@ export interface FailureRetry {
   retrying: boolean;
   /** How many retries have settled: the words shown after each are a new alert. */
   settled: number;
-  /** Repeat the operation; nothing happens while a retry is in flight. */
-  start: () => void;
+  /**
+   * Repeat the operation; nothing happens while a retry is in flight. Undefined when the caller
+   * gave no way to repeat it: the notice then offers no retry button.
+   */
+  start: (() => void) | undefined;
   /** For the notice's element: where keyboard focus is looked for and, with no retry left, put. */
   noticeRef: RefCallback<HTMLDivElement>;
   /** For the notice's retry button: where keyboard focus is put while a failure is shown. */
@@ -127,7 +134,7 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
     else (loaded() ?? pageHeading())?.focus();
   });
 
-  const start = () => {
+  const start = (repeat: () => Promise<unknown>) => {
     if (retrying) return;
     const number = (attempt?.number ?? 0) + 1;
     setAttempt({ number, request, error, outcome: null });
@@ -140,7 +147,7 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
           : current,
       );
     };
-    void run().then(settle, settle);
+    void repeat().then(settle, settle);
   };
 
   return {
@@ -148,7 +155,7 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
     error: retrying ? attempt.error : error,
     retrying,
     settled: attempt === null ? 0 : attempt.outcome === null ? attempt.number - 1 : attempt.number,
-    start,
+    start: run === undefined ? undefined : () => start(run),
     noticeRef,
     buttonRef,
     wayOutRef,
