@@ -28,7 +28,7 @@ import { DocumentPanes, matchingLayout } from './DocumentPanes';
 import { FolderTree } from './FolderTree';
 import { SourcePanel } from './SourcePanel';
 import { type ItemSelection, validateItemSearch, validateWorkspaceSearch } from './search-params';
-import { type PaneLocation, useExplorerStore, useWorkspaceView } from './store';
+import { type PaneLocation, tabLocation, useExplorerStore, useWorkspaceView } from './store';
 
 /** The resolved head the shell is pinned to: when it was resolved, and how to resolve it again. */
 export interface HeadState {
@@ -89,6 +89,17 @@ export function ExplorerShell({ workspace, head: headState }: ExplorerShellProps
     if (itemId !== null) openInStore(workspaceId, itemId, { sel, rev });
   }, [itemId, openInStore, workspaceId, sel, rev]);
 
+  /**
+   * Every link to an item this shell builds says which revision it reads (SPEC section 3: a
+   * source reference keeps its resolved revision):
+   * - pinned, carrying `rev`: a search result (the revision its hit resolved), "Read the latest
+   *   version" (the revision the server resolved), a tab returned to, the tab shown after a close,
+   *   a refocused pane and a split (the revision their URL last named), and a selection change
+   *   within an item (the revision that pane reads);
+   * - unpinned, meaning "the item now", read at the listed head: an entry opened from the folder
+   *   tree, which lists that head. Refresh moves such a tab to the newer head; that is its intent.
+   * Links to a workspace (the list, failure notices) name no item revision.
+   */
   const goToItem = (target: string, destination: Destination = {}) =>
     void navigate({
       to: '/w/$workspaceId/i/$itemId',
@@ -128,13 +139,18 @@ export function ExplorerShell({ workspace, head: headState }: ExplorerShellProps
   // Focusing a pane makes the URL describe it again: its item, selection and cited revision.
   const navigateToPane = (paneId: string) => {
     const pane = view.panes.find((candidate) => candidate.id === paneId);
-    if (pane?.active) goToItem(pane.active, { ...pane.location, replace: true });
+    if (pane?.active) goToItem(pane.active, { ...tabLocation(pane, pane.active), replace: true });
     else goToWorkspace();
+  };
+  /** Where a pane's tab reads, as its URL last named it: the active tab's unless `itemId`. */
+  const paneLocation = (paneId: string, itemId?: string): PaneLocation => {
+    const pane = view.panes.find((candidate) => candidate.id === paneId);
+    return pane === undefined ? {} : tabLocation(pane, itemId ?? pane.active);
   };
   const locationOf = (paneId: string): PaneLocation =>
     paneId === view.focusedPaneId
       ? { ...(sel === undefined ? {} : { sel }), ...(rev === undefined ? {} : { rev }) }
-      : (view.panes.find((pane) => pane.id === paneId)?.location ?? {});
+      : paneLocation(paneId);
 
   return (
     <div className="explorer">
@@ -184,7 +200,8 @@ export function ExplorerShell({ workspace, head: headState }: ExplorerShellProps
             revision={search.rev}
             onActivate={(paneId, target) => {
               focusPane(workspaceId, paneId);
-              goToItem(target);
+              // A tab returned to reads where it read: its selection and cited revision.
+              goToItem(target, paneLocation(paneId, target));
             }}
             onFocusPane={(paneId) => {
               focusPane(workspaceId, paneId);

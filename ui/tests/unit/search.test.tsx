@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SearchHit } from '../../src/api/generated/types.gen';
 import { fail, mockApi, notImplemented, ok } from './support/api';
-import { explorerHandlers, HEAD, NOTE, OTHER, renderAt, WS } from './support/workspace';
+import { explorerHandlers, HEAD, NOTE, OTHER, renderAt, WS, workspace } from './support/workspace';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -13,6 +13,7 @@ afterEach(() => {
 
 const SEARCH = '/api/search/search-items';
 const READ = '/api/reads/read-item';
+const NEW = 'e'.repeat(40);
 
 function hit(itemId: string, title: string, path: string, start: number): SearchHit {
   return {
@@ -69,9 +70,11 @@ describe('search', () => {
     const results = await screen.findByRole('region', { name: 'Results for “budget”' });
     await userEvent.click(await within(results).findByRole('link', { name: /Meeting notes/ }));
     await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    // Adapted: the link now also carries the revision the hit was resolved at (Codex P1).
     expect(router.state.location.search).toEqual({
       q: 'budget',
       sel: { kind: 'lines', range: { start: 4, end: 5 } },
+      rev: HEAD,
     });
     expect(await screen.findByText('Showing lines 4–5.', { exact: false })).toBeTruthy();
     await waitFor(() =>
@@ -80,6 +83,39 @@ describe('search', () => {
         range: { start: 4, end: 5 },
       }),
     );
+  });
+
+  it('links a result to the revision its hit resolved, even the listed head, so it reads that revision once the head moves (Codex P1)', async () => {
+    let opens = 0;
+    const api = mockApi(
+      explorerHandlers({
+        '/api/workspaces/open-workspace': () => {
+          opens += 1;
+          return ok({ ...workspace, head: opens === 1 ? HEAD : NEW });
+        },
+        [SEARCH]: () =>
+          ok({ hits: [hit(NOTE, 'Meeting notes', 'notes/meeting.md', 4)], revision: HEAD }),
+      }),
+    );
+    const first = renderAt(`/w/${WS}?q=budget`);
+    const results = await screen.findByRole('region', { name: 'Results for “budget”' });
+    const link = await within(results).findByRole('link', { name: /Meeting notes/ });
+    expect(link.getAttribute('href')).toContain(`rev=${HEAD}`);
+    await userEvent.click(link);
+    await waitFor(() => expect(first.router.state.location.search).toMatchObject({ rev: HEAD }));
+    const reopened = first.router.state.location.href;
+    first.unmount();
+    // The link reopened after the head moved on still reads the hit's revision.
+    const before = api.callsTo(READ).length;
+    renderAt(reopened);
+    const article = await screen.findByRole('article', { name: 'Meeting notes' });
+    await within(article).findByText(/it is not the latest version/);
+    await waitFor(() => expect(api.callsTo(READ).length).toBeGreaterThan(before));
+    for (const body of api.callsTo(READ).slice(before)) {
+      expect(body.at).toEqual({ kind: 'revision', revision: HEAD });
+    }
+    expect(within(article).getAllByTitle(HEAD).length).toBeGreaterThan(0);
+    expect(api.violations).toEqual([]);
   });
 
   it('pages through results with the operation cursor', async () => {
