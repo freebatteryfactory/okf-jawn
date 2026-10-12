@@ -59,6 +59,23 @@ describe('reading', () => {
     expect(Reflect.get(window, 'okfHacked')).toBeUndefined();
   });
 
+  it('shows GFM task boxes as named checkboxes nobody can change', async () => {
+    mockApi(
+      explorerHandlers({
+        [READ]: () =>
+          ok(readResponse(noteSummary, '- [x] Collect the sources\n- [ ] Draft the summary')),
+      }),
+    );
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    const article = await openDocument();
+    const done = await within(article).findByRole('checkbox', { name: 'Task done' });
+    const open = within(article).getByRole('checkbox', { name: 'Task not done' });
+    expect(done).toHaveProperty('checked', true);
+    expect(open).toHaveProperty('checked', false);
+    expect(done).toHaveProperty('disabled', true);
+    expect(open).toHaveProperty('disabled', true);
+  });
+
   it('shows properties read-only, keeping unknown values and the managed header', async () => {
     mockApi(explorerHandlers());
     renderAt(`/w/${WS}/i/${NOTE}`);

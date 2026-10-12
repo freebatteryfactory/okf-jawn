@@ -89,6 +89,10 @@ button {
   outline-offset: 3px;
 }
 /* Workspace shell. System colors only; the owner decides any further visual system. */
+:root {
+  /* System GrayText falls below WCAG AA contrast on a selected row; this stays above it. */
+  --secondary-text: color-mix(in srgb, CanvasText 72%, Canvas);
+}
 .skip-link {
   position: absolute;
   left: -100vw;
@@ -119,7 +123,7 @@ main.app-main:has(.explorer) {
   font-weight: 700;
 }
 .meta {
-  color: GrayText;
+  color: var(--secondary-text);
   font-size: 0.85rem;
 }
 .explorer {
@@ -201,7 +205,7 @@ main.app-main:has(.explorer) {
 }
 .tree-type,
 .tree-flag {
-  color: GrayText;
+  color: var(--secondary-text);
   font-size: 0.8rem;
 }
 .tree-status {
@@ -237,7 +241,7 @@ main.app-main:has(.explorer) {
   font-weight: 700;
 }
 .hit-where {
-  color: GrayText;
+  color: var(--secondary-text);
   font-size: 0.8rem;
 }
 .hit-snippet {
@@ -262,6 +266,7 @@ main.app-main:has(.explorer) {
   gap: 0.25rem;
 }
 .tab {
+  white-space: nowrap;
   background: none;
   border: 1px solid transparent;
   border-bottom: none;
@@ -278,9 +283,14 @@ main.app-main:has(.explorer) {
 }
 .pane-actions button {
   padding: 0.25rem 0.5rem;
+  white-space: nowrap;
+}
+.property dt,
+.property dd {
+  overflow-wrap: anywhere;
 }
 .empty-pane {
-  color: GrayText;
+  color: var(--secondary-text);
 }
 .document-header h2 {
   margin-bottom: 0.25rem;
@@ -291,7 +301,7 @@ main.app-main:has(.explorer) {
 }
 .properties dl {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  grid-template-columns: fit-content(40%) minmax(0, 1fr);
   gap: 0.25rem 1rem;
 }
 .property {
@@ -314,7 +324,7 @@ main.app-main:has(.explorer) {
   overflow-wrap: anywhere;
 }
 .citation {
-  color: GrayText;
+  color: var(--secondary-text);
   font-size: 0.85rem;
 }
 .locations {
@@ -330,11 +340,93 @@ main.app-main:has(.explorer) {
   list-style: none;
 }
 .location-unresolved {
-  color: GrayText;
+  color: var(--secondary-text);
 }
 .appearance dd {
   margin: 0 0 0.5rem;
 }
 .failure-notice p {
   margin: 0.25rem 0;
+}
+/* Tailwind's preflight strips borders, list markers and heading sizes; the shell restores them. */
+.app-main input[type="search"] {
+  border: 1px solid GrayText;
+  border-radius: 0.25rem;
+  background: Field;
+  color: FieldText;
+}
+.app-main button:not(.tab):not(.link-button) {
+  border: 1px solid GrayText;
+  border-radius: 0.25rem;
+  background: ButtonFace;
+  color: ButtonText;
+}
+.app-main button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.workspace-name,
+.panel-heading,
+.document-header h2 {
+  font-weight: 700;
+}
+.document-header h2 {
+  font-size: 1.4rem;
+}
+.document-body h1 {
+  font-size: 1.6rem;
+}
+.document-body h2 {
+  font-size: 1.35rem;
+}
+.document-body h3 {
+  font-size: 1.15rem;
+}
+.document-body :is(h1, h2, h3, h4, h5, h6) {
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 1rem 0 0.5rem;
+}
+.document-body :is(p, ul, ol, table, pre, blockquote) {
+  margin: 0.5rem 0;
+}
+.document-body ul,
+.citations,
+.declared {
+  padding-left: 1.5rem;
+}
+.document-body ul {
+  list-style: disc;
+}
+.document-body ol,
+.citations,
+.declared {
+  list-style: decimal;
+}
+.document-body ol {
+  padding-left: 1.5rem;
+}
+.document-body ul.contains-task-list {
+  list-style: none;
+  padding-left: 0.25rem;
+}
+.document-body blockquote {
+  border-left: 3px solid GrayText;
+  padding-left: 0.75rem;
+}
+.sources h2 {
+  font-size: 1rem;
+  font-weight: 700;
+}
+.sources h3 {
+  font-size: 0.9rem;
+  font-weight: 700;
+  margin: 0.75rem 0 0.25rem;
+}
+.sources p {
+  margin: 0.15rem 0;
+}
+.workspace-list a,
+.hit-title {
+  text-decoration: underline;
 }
