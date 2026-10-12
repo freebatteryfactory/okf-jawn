@@ -510,6 +510,31 @@ describe('a keyboard retry that loads nothing new', () => {
     await waitFor(() => expect(notice.isConnected).toBe(false));
     await waitFor(() => expectFocusOn(caller.loaded()));
   });
+
+  it('ends on the application’s level-one heading, not on the one a document brings, when nothing is named beside an open document', async () => {
+    const { operation, notice } = await retryFromTheKeyboard({
+      name: 'more search results that end an empty search, beside an open document',
+      url: `/w/${WS}/i/${NOTE}?q=budget`,
+      path: SEARCH,
+      good: firstOfMore(
+        ok({ hits: [], revision: HEAD, next_cursor: 'more' }),
+        ok({ hits: [], revision: HEAD }),
+      ),
+      isStudied: () => (body) => cursorOf(body) === 'more',
+      reach: () => press('Show more results'),
+      context: 'Loading more results',
+    });
+    // The document's own `# Meeting notes` is rendered as a level-one heading too.
+    await screen.findByRole('heading', { level: 1, name: 'Meeting notes' });
+    operation.end('answers');
+    await waitFor(() => expect(notice.isConnected).toBe(false));
+    const headings = screen.getAllByRole('heading', { level: 1 });
+    expect(headings.map((heading) => heading.textContent)).toEqual([
+      'Workshop notes',
+      'Meeting notes',
+    ]);
+    await waitFor(() => expectFocusOn(headings[0]));
+  });
 });
 
 type AppRouter = ReturnType<typeof renderAt>['router'];
