@@ -455,6 +455,30 @@ const nothingNew: Caller[] = [
     context: 'Listing this workspace',
     loaded: () => screen.queryByText('This workspace has no folders or items yet.'),
   },
+  // Nothing is named: no entry was ever listed, and the page that came leaves no control behind.
+  {
+    name: 'more workspaces, when the listing ends with no workspace at all: the page’s level-one heading',
+    url: '/',
+    path: WORKSPACES,
+    good: firstOfMore(ok({ items: [], next_cursor: 'more' }), ok({ items: [], next_cursor: null })),
+    isStudied: () => (body) => cursorOf(body) === 'more',
+    reach: () => press('Show more workspaces'),
+    context: 'Listing more workspaces',
+    loaded: () => screen.queryByRole('heading', { level: 1, name: 'Your workspaces' }),
+  },
+  {
+    name: 'more search results, when the search ends with no result at all: the page’s level-one heading',
+    url: `/w/${WS}?q=budget`,
+    path: SEARCH,
+    good: firstOfMore(
+      ok({ hits: [], revision: HEAD, next_cursor: 'more' }),
+      ok({ hits: [], revision: HEAD }),
+    ),
+    isStudied: () => (body) => cursorOf(body) === 'more',
+    reach: () => press('Show more results'),
+    context: 'Loading more results',
+    loaded: () => screen.queryByRole('heading', { level: 1, name: 'Workshop notes' }),
+  },
 ];
 
 describe('a keyboard retry that loads nothing new', () => {
@@ -674,6 +698,24 @@ describe('a failure that goes away without a retry', () => {
       expect(document.activeElement).toBe(revisionNotice);
     },
   );
+
+  it('moves focus to the page’s level-one heading when another workspace is opened while focus is on the retry button of the one that did not open', async () => {
+    const opening = studied(() => ok(workspace));
+    mockApi(explorerHandlers({ [OPEN]: opening.handler }));
+    const { router } = renderAt(`/w/${WS}`);
+    const button = await screen.findByRole('button', { name: 'Try again' });
+    opening.hold();
+    act(() => button.focus());
+    // The address changes under the page (Back or Forward): focus is still on the button.
+    await act(() => router.navigate({ to: '/w/$workspaceId', params: { workspaceId: OTHER_WS } }));
+    await waitFor(() => expect(opening.inFlight()).toBe(1));
+    await waitFor(() => expect(button.isConnected).toBe(false));
+    // Nothing is loaded in the notice's place yet: there is no workspace name to go to.
+    expect(screen.getByText('Opening the workspace…')).toBeTruthy();
+    const heading = screen.getByRole('heading', { level: 1, name: 'Workspace' });
+    expect(heading.getAttribute('tabindex')).toBe('-1');
+    expect(document.activeElement).toBe(heading);
+  });
 });
 
 describe('a keyboard retry at a failed row of the tree (FolderTree.tsx)', () => {

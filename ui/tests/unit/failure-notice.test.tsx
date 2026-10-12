@@ -152,6 +152,7 @@ function Watched({
   });
   return (
     <>
+      <h1 tabIndex={-1}>The page</h1>
       <button type="button" data-presses={presses} onClick={() => setPresses(presses + 1)}>
         Elsewhere
       </button>
@@ -469,6 +470,15 @@ describe('a failure that changes without a retry', () => {
     await userEvent.click(elsewhere);
     expect(elsewhere.getAttribute('data-presses')).toBe('2');
     expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it('moves focus to the page’s level-one heading when the failure goes away and nothing is named in its place', () => {
+    const { rerender, notice } = watchedWithFocus();
+    // Asked again by something else: the failure is gone and nothing is loaded yet.
+    rerender(<Watched status="asking" />);
+    expect(notice.isConnected).toBe(false);
+    expect(screen.queryByRole('heading', { name: 'The content' })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
   });
 
   it('leaves focus that was not in the notice where it is when the failure goes away by itself', () => {

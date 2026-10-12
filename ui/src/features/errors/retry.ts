@@ -19,6 +19,11 @@
  * change the same way: to the content `loaded` names once no failure is shown, else to the retry
  * button of the notice now shown, or to that notice itself when its failure allows no retry.
  *
+ * When `loaded` names nothing (a further page that brought nothing and left no control behind, a
+ * request that has only just been made), focus goes to the page's level-one heading instead of
+ * staying on the page body. The workspace list, the Explorer and the page shown before the Explorer
+ * each have one that takes focus from script (`tabindex="-1"`); a page added later needs one too.
+ *
  * How the hook knows: React clears an element's ref before it removes the element, so the refs
  * given to the notice and to its button are cleared while focus is still where it was.
  *
@@ -50,7 +55,10 @@ export interface RetriedOperation {
   error: unknown;
   /** Repeat it. Settles once the operation has answered or failed again; a rejection is a failure. */
   run: () => Promise<unknown>;
-  /** The content now shown in the failure's place: its first focusable element, or its heading. */
+  /**
+   * The content now shown in the failure's place: its first focusable element, or its heading.
+   * When it names nothing, focus goes to the page's level-one heading.
+   */
   loaded: () => HTMLElement | null | undefined;
 }
 
@@ -115,7 +123,7 @@ export function useRetry({ request, failed, error, run, loaded }: RetriedOperati
     }
     if (!left && !settledWithFocus) return;
     if (failed) (button.current ?? notice.current)?.focus();
-    else loaded()?.focus();
+    else (loaded() ?? document.querySelector<HTMLElement>('h1'))?.focus();
   });
 
   const start = () => {

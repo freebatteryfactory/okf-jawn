@@ -29,12 +29,15 @@ export const Route = createFileRoute('/w/$workspaceId')({
 /**
  * The page while there is no Explorer: the workspace is opening, did not open, or the link is not
  * valid. Like every page it has a level-one heading, read out but not drawn; the Explorer's is the
- * workspace's name.
+ * workspace's name. It takes focus from script: where keyboard focus goes when it was in a failure
+ * notice that left with nothing loaded in its place (`useRetry`).
  */
 function BeforeTheExplorer({ children }: { children: ReactNode }) {
   return (
     <div className="page-status">
-      <h1 className="sr-only">Workspace</h1>
+      <h1 className="sr-only" tabIndex={-1}>
+        Workspace
+      </h1>
       {children}
     </div>
   );
