@@ -263,7 +263,8 @@ pub struct CorrectDigestRequest {
     pub base_revision: crate::identity::Revision,
     /// Digest being corrected.
     pub digest: crate::identity::Digest,
-    /// Corrected text kept separate from generated text.
+    /// Corrected text kept separate from generated text, at most 8 MiB in UTF-8.
+    #[schemars(length(max = crate::item::MAX_ITEM_TEXT_BYTES))]
     pub corrected_markdown: String,
     /// Keep the accepted agent-supplied text of this proposal over a later complete
     /// conversion: `corrected_markdown` must equal that text (compared by digest), and the

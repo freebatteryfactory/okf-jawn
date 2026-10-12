@@ -661,7 +661,8 @@
             "description": "Create a note or View with retained properties.",
             "properties": {
               "body": {
-                "description": "Body.",
+                "description": "Body, at most 8 MiB in UTF-8.",
+                "maxLength": 8388608,
                 "type": "string"
               },
               "kind": {
@@ -696,7 +697,8 @@
             "description": "Replace authored content with preconditions.",
             "properties": {
               "body": {
-                "description": "Body.",
+                "description": "Body, at most 8 MiB in UTF-8.",
+                "maxLength": 8388608,
                 "type": "string"
               },
               "item_id": {
@@ -788,7 +790,8 @@
                 "type": "string"
               },
               "markdown": {
-                "description": "The complete proposed text, Markdown.",
+                "description": "The complete proposed text, Markdown, at most 8 MiB in UTF-8.",
+                "maxLength": 8388608,
                 "type": "string"
               },
               "pages": {
@@ -1563,7 +1566,8 @@
             "description": "Exact revision on which this change is based; stale writes conflict."
           },
           "corrected_markdown": {
-            "description": "Corrected text kept separate from generated text.",
+            "description": "Corrected text kept separate from generated text, at most 8 MiB in UTF-8.",
+            "maxLength": 8388608,
             "type": "string"
           },
           "digest": {
@@ -1702,7 +1706,8 @@
             "description": "Exact revision on which this change is based; stale writes conflict."
           },
           "body": {
-            "description": "Markdown content.",
+            "description": "Markdown content, at most 8 MiB in UTF-8.",
+            "maxLength": 8388608,
             "type": "string"
           },
           "idempotency_key": {
@@ -7099,7 +7104,8 @@
             "description": "Revision the editor saw; equal to the current head to rebase after resolving a conflict."
           },
           "body": {
-            "description": "Drafted Markdown body.",
+            "description": "Drafted Markdown body, at most 8 MiB in UTF-8.",
+            "maxLength": 8388608,
             "type": "string"
           },
           "idempotency_key": {

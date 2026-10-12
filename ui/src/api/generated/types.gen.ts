@@ -387,7 +387,7 @@ export type CellRange = {
  */
 export type Change = {
     /**
-     * Body.
+     * Body, at most 8 MiB in UTF-8.
      */
     body: string;
     kind: 'create';
@@ -407,7 +407,7 @@ export type Change = {
     type_name: string;
 } | {
     /**
-     * Body.
+     * Body, at most 8 MiB in UTF-8.
      */
     body: string;
     /**
@@ -448,7 +448,7 @@ export type Change = {
     item_id: ItemId;
     kind: 'supply_extraction';
     /**
-     * The complete proposed text, Markdown.
+     * The complete proposed text, Markdown, at most 8 MiB in UTF-8.
      */
     markdown: string;
     /**
@@ -856,7 +856,7 @@ export type CorrectDigestRequest = {
      */
     base_revision: Revision;
     /**
-     * Corrected text kept separate from generated text.
+     * Corrected text kept separate from generated text, at most 8 MiB in UTF-8.
      */
     corrected_markdown: string;
     /**
@@ -960,7 +960,7 @@ export type CreateItemRequest = {
      */
     base_revision: Revision;
     /**
-     * Markdown content.
+     * Markdown content, at most 8 MiB in UTF-8.
      */
     body: string;
     /**
@@ -3927,7 +3927,7 @@ export type SaveDraftRequest = {
      */
     base_revision: Revision;
     /**
-     * Drafted Markdown body.
+     * Drafted Markdown body, at most 8 MiB in UTF-8.
      */
     body: string;
     /**

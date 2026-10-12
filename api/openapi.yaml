@@ -481,7 +481,8 @@ components:
         description: Create a note or View with retained properties.
         properties:
           body:
-            description: Body.
+            description: Body, at most 8 MiB in UTF-8.
+            maxLength: 8388608
             type: string
           kind:
             const: create
@@ -507,7 +508,8 @@ components:
         description: Replace authored content with preconditions.
         properties:
           body:
-            description: Body.
+            description: Body, at most 8 MiB in UTF-8.
+            maxLength: 8388608
             type: string
           item_id:
             $ref: '#/components/schemas/ItemId'
@@ -570,7 +572,8 @@ components:
             const: supply_extraction
             type: string
           markdown:
-            description: The complete proposed text, Markdown.
+            description: The complete proposed text, Markdown, at most 8 MiB in UTF-8.
+            maxLength: 8388608
             type: string
           pages:
             description: Pages the text covers, as the agent claims; empty for the whole.
@@ -1127,7 +1130,8 @@ components:
           $ref: '#/components/schemas/Revision'
           description: Exact revision on which this change is based; stale writes conflict.
         corrected_markdown:
-          description: Corrected text kept separate from generated text.
+          description: Corrected text kept separate from generated text, at most 8 MiB in UTF-8.
+          maxLength: 8388608
           type: string
         digest:
           $ref: '#/components/schemas/Digest'
@@ -1233,7 +1237,8 @@ components:
           $ref: '#/components/schemas/Revision'
           description: Exact revision on which this change is based; stale writes conflict.
         body:
-          description: Markdown content.
+          description: Markdown content, at most 8 MiB in UTF-8.
+          maxLength: 8388608
           type: string
         idempotency_key:
           $ref: '#/components/schemas/IdempotencyKey'
@@ -5117,7 +5122,8 @@ components:
           $ref: '#/components/schemas/Revision'
           description: Revision the editor saw; equal to the current head to rebase after resolving a conflict.
         body:
-          description: Drafted Markdown body.
+          description: Drafted Markdown body, at most 8 MiB in UTF-8.
+          maxLength: 8388608
           type: string
         idempotency_key:
           $ref: '#/components/schemas/IdempotencyKey'
