@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useExplorerStore } from '../../src/features/explorer/store';
 import { fail, mockApi, notImplemented } from './support/api';
-import { explorerHandlers, NOTE, OLD, OTHER, renderAt, WS } from './support/workspace';
+import { explorerHandlers, NOTE, OLD, OTHER, renderAt, SOURCE, WS } from './support/workspace';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -134,6 +134,44 @@ describe('closing keeps keyboard focus (WAI-ARIA tabs)', () => {
     await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}`));
     const empty = await screen.findByText('Open an item from the folders or the search results.');
     await waitFor(() => expect(document.activeElement).toBe(empty));
+  });
+
+  it('moves focus to the tab after a closed middle tab, not the one before it (X5)', async () => {
+    mockApi(explorerHandlers());
+    const { router } = await openTwoTabs();
+    const tree = screen.getByRole('tree', { name: 'Folders' });
+    await userEvent.click(within(tree).getByRole('treeitem', { name: /Annual report/ }));
+    await screen.findByRole('tab', { name: 'Annual report', selected: true });
+    // Three tabs: Meeting notes, Plan, Annual report. Close the middle one from the keyboard.
+    screen.getByRole('tab', { name: 'Annual report' }).focus();
+    await userEvent.keyboard('{ArrowLeft}');
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Plan' }));
+    await userEvent.keyboard('{Delete}');
+    await waitFor(() => expect(screen.queryByRole('tab', { name: 'Plan' })).toBeNull());
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Annual report' })),
+    );
+    expect(router.state.location.pathname).toBe(`/w/${WS}/i/${SOURCE}`);
+  });
+
+  it('moves focus within the pane whose tab closed when another pane shows the same item (X6)', async () => {
+    mockApi(explorerHandlers());
+    await openTwoTabs();
+    await userEvent.click(screen.getByRole('button', { name: 'Split right' }));
+    const second = await screen.findByRole('region', { name: 'Documents, pane 2 of 2, focused' });
+    // Pane 1 holds Meeting notes and Plan; pane 2 holds Plan, then Meeting notes too.
+    const tree = screen.getByRole('tree', { name: 'Folders' });
+    await userEvent.click(within(tree).getByRole('treeitem', { name: /Meeting notes/ }));
+    await within(second).findByRole('tab', { name: 'Meeting notes', selected: true });
+    within(second).getByRole('tab', { name: 'Meeting notes' }).focus();
+    await userEvent.keyboard('{Delete}');
+    await waitFor(() =>
+      expect(within(second).queryByRole('tab', { name: 'Meeting notes' })).toBeNull(),
+    );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(within(second).getByRole('tab', { name: 'Plan' })),
+    );
+    expect(second.getAttribute('aria-label')).toBe('Documents, pane 2 of 2, focused');
   });
 
   it("moves focus to the neighbouring pane's active tab when a pane closes", async () => {

@@ -1,6 +1,6 @@
 /** Search: the query lives in the URL, results open items at their cited selection, and paging follows the cursor. */
 
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SearchHit } from '../../src/api/generated/types.gen';
@@ -210,6 +210,19 @@ describe('search', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Back to folders' }));
     await waitFor(() => expect(router.state.location.search).toEqual({}));
     expect(await screen.findByRole('tree', { name: 'Folders' })).toBeTruthy();
+  });
+
+  it('empties the search box on "Back to folders", and its text follows the URL back (X8)', async () => {
+    mockApi(explorerHandlers({ [SEARCH]: () => ok({ hits: [], revision: HEAD }) }));
+    const { router } = renderAt(`/w/${WS}?q=budget`);
+    const input = await screen.findByRole('searchbox', { name: 'Search this workspace' });
+    expect(input).toHaveProperty('value', 'budget');
+    await userEvent.click(await screen.findByRole('button', { name: 'Back to folders' }));
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
+    expect(input).toHaveProperty('value', '');
+    act(() => router.history.back());
+    await waitFor(() => expect(router.state.location.search).toEqual({ q: 'budget' }));
+    await waitFor(() => expect(input).toHaveProperty('value', 'budget'));
   });
 
   it('labels a search snippet taken from text an agent supplied (P7)', async () => {

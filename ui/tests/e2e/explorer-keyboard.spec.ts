@@ -328,13 +328,40 @@ test.describe('Explorer from the keyboard', () => {
     await page.goto(`${server.origin()}/w/${WS}?q=budget`);
     await page.getByRole('button', { name: 'Show more results' }).focus();
     await page.keyboard.press('Enter');
-    // While the page loads, the button says so and keeps focus (a disabled button would not).
+    // While the page loads, the button says so and keeps focus. A disabled button would not:
+    // Chromium and WebKit move focus to the body within a frame of a focused button becoming
+    // disabled, so focus is read only after several frames, not at the first poll.
     const loading = page.getByRole('button', { name: 'Loading more results…' });
-    await expect(loading).toBeFocused();
+    await expect(loading).toBeVisible();
+    await page.waitForTimeout(300);
+    expect(await focused(page)).toContain('Loading more results');
     answerMore();
     await expect(page.getByRole('alert')).toContainText('Loading more results');
     await expect(page.getByRole('button', { name: 'Show more results' })).toBeFocused();
     expect(await focused(page)).not.toBe('body');
+  });
+
+  test('Q5b "Show more results" keeps focus through a slow load, checked after the focus fixup', async ({
+    page,
+  }) => {
+    const more = held();
+    await routeApi(page, {
+      '/api/search/search-items': async (body) => {
+        if ((body.page as { cursor: string | null }).cursor !== 'more') {
+          return ok({ revision: HEAD, hits: [hitOf(NOTE, 'Meeting notes')], next_cursor: 'more' });
+        }
+        await more.wait;
+        return ok({ revision: HEAD, hits: [] });
+      },
+    });
+    await page.goto(`${server.origin()}/w/${WS}?q=budget`);
+    await page.getByRole('button', { name: 'Show more results' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('button', { name: 'Loading more results…' })).toBeVisible();
+    await page.waitForTimeout(300);
+    const during = await focused(page);
+    more.release();
+    expect(during).toContain('Loading more results');
   });
 
   test('E12 "Show more entries" in the tree moves focus to the first new entry', async ({
@@ -484,6 +511,8 @@ test.describe('a newer head moves nothing until Refresh', () => {
     await expect.poll(() => listed.includes(NEW)).toBe(true);
     await expect(row(page, /Item number 40,/)).toBeVisible();
     await expect(tree.getByRole('treeitem', { name: /Loading/ })).toHaveCount(0);
+    // No status row is added below the 80 entries either (it would be out of the rendered window).
+    await expect(row(page, /Item number 40,/)).toHaveAttribute('aria-setsize', '80');
     newer.release();
     await expect(page.getByText(/Showing the workspace as of/).locator('code')).toHaveAttribute(
       'title',
