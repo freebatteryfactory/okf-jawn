@@ -1,7 +1,8 @@
 //! The two archive formats (Stage 1b design section 8), written and read with `zip`.
 //!
 //! A **workspace archive** holds `manifest.json` (format, version, tenant, workspace, catalog
-//! entry, references, objects), `records.sqlite` (the filtered snapshot, `snapshot`),
+//! entry, references, objects, and the count of records rows left out for naming a backup),
+//! `records.sqlite` (the filtered snapshot, `snapshot`),
 //! `history.pack` (a Git pack, written by libgit2's `PackBuilder`, of every commit on every
 //! reference: the accepted line and each proposal candidate) and `objects/<digest>` (a copy of
 //! exactly the retained objects the workspace references, read structurally as
@@ -54,6 +55,13 @@ pub(crate) struct WorkspaceManifest {
     /// not grow with a workspace's objects.
     #[serde(default)]
     pub(crate) objects: Vec<Digest>,
+    /// How many rows of the workspace's records were left out of `records.sqlite` because they
+    /// named a managed backup or written history, which an archive never holds
+    /// (`snapshot::filter`): the workspace's own backup artifacts, a backup job's output, an
+    /// upload slot holding an archive. A restore does not carry them; this says how many. Zero
+    /// in an archive written before the count existed.
+    #[serde(default)]
+    pub(crate) rows_left_out: u32,
 }
 
 /// What an installation archive holds.
@@ -306,14 +314,15 @@ fn expansion_bound(size: u64) -> u64 {
 }
 
 /// Write the workspace archive `target` from the repository at `repository`, the filtered
-/// records at `records` and the tenant's objects. It copies exactly the objects the workspace
+/// records at `records` (which left `rows_left_out` rows out for naming a backup,
+/// `snapshot::filter`) and the tenant's objects. It copies exactly the objects the workspace
 /// references structurally (`refuse_missing`, read as `purge::references` reads them), each one
 /// held, and nothing a token only seems to name; an `excluded` object (a backup or a written
 /// history) that it references fails it instead.
 pub(crate) fn write_workspace(
     target: &Path,
     repository: &Repository,
-    records: &Path,
+    (records, rows_left_out): (&Path, u32),
     blobs: &LocalBlobs,
     tenant: &TenantId,
     excluded: &BTreeSet<Digest>,
@@ -325,6 +334,7 @@ pub(crate) fn write_workspace(
     let staged_pack = target.with_extension("pack");
     let references = write_pack(repository, &staged_pack)?;
     let mut manifest = manifest_of(records, tenant, references)?;
+    manifest.rows_left_out = rows_left_out;
     // The archive's `objects/<digest>` entries list its objects; the manifest does not repeat
     // them, so its size does not grow with the workspace's objects (`MANIFEST_LIMIT`).
     let manifest_text = {
@@ -591,6 +601,7 @@ fn manifest_of(
         archived_at,
         references,
         objects: Vec::new(),
+        rows_left_out: 0,
     })
 }
 

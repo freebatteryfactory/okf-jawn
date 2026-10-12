@@ -127,16 +127,19 @@ pub(crate) fn archive_objects(full: &FullCopy, tenant: &str) -> Result<BTreeSet<
 /// `left_out` (the backups and written histories an archive never holds, `archive_objects`) is
 /// kept, as a kept job keeps no download descriptor of a left-out artifact: every row the
 /// archive keeps names an object it holds, so a restore can require each one
-/// (`restore::refuse_unheld`).
+/// (`restore::refuse_unheld`). Returns the records file and how many of the workspace's rows
+/// were left out for naming a backup: its own backup artifacts, and every `ROW_OBJECTS` row
+/// naming an object of `left_out` (`WorkspaceManifest::rows_left_out`).
 pub(crate) fn filter(
     full: &FullCopy,
     directory: &Path,
     (tenant, workspace): (&str, &str),
     left_out: &BTreeSet<Digest>,
-) -> Result<PathBuf, ApiError> {
+) -> Result<(PathBuf, u32), ApiError> {
     let left_out =
         serde_json::to_string(&left_out.iter().map(Digest::as_str).collect::<Vec<&str>>())
             .map_err(|error| crate::db::json(&error))?;
+    let mut rows_left_out: usize = 0;
     {
         let mut connection = Connection::open(&full.path).map_err(|error| sql(&error))?;
         let transaction = connection.transaction().map_err(|error| sql(&error))?;
@@ -147,10 +150,20 @@ pub(crate) fn filter(
         let workspace_backup = variant_text!(&ArtifactKind::WorkspaceBackup)?;
         for table in tables(&transaction)? {
             let query = match table.as_str() {
-                "artifacts" => format!(
-                    "DELETE FROM artifacts WHERE NOT (tenant_id = ?1 AND workspace_id IS ?2)
-                       OR kind = '{workspace_backup}'"
-                ),
+                "artifacts" => {
+                    // The workspace's own rows first; then its backup artifacts, which name a
+                    // backup, are left out and counted.
+                    transaction
+                        .execute(
+                            "DELETE FROM artifacts WHERE NOT (tenant_id = ?1 AND workspace_id IS ?2)",
+                            params![tenant, workspace],
+                        )
+                        .map_err(|error| sql(&error))?;
+                    format!(
+                        "DELETE FROM artifacts WHERE kind = '{workspace_backup}'
+                           AND ?1 IS NOT NULL AND ?2 IS NOT NULL"
+                    )
+                }
                 "job_controls" | "job_outputs" => {
                     format!("DELETE FROM \"{table}\" WHERE job_id NOT IN ({kept_jobs})")
                 }
@@ -171,14 +184,18 @@ pub(crate) fn filter(
                     ));
                 }
             };
-            transaction
+            let removed = transaction
                 .execute(&query, params![tenant, workspace])
                 .map_err(|error| sql(&error))?;
+            if table == "artifacts" {
+                rows_left_out = rows_left_out.saturating_add(removed);
+            }
         }
-        // A row naming an object the archive leaves out goes with it: a backup job's output is
-        // the backup it wrote, and an upload slot may hold an archive uploaded to be imported.
+        // A row naming an object the archive leaves out goes with it, counted: a backup job's
+        // output is the backup it wrote, and an upload slot may hold an archive uploaded to be
+        // imported.
         for (table, column, _) in super::archive::ROW_OBJECTS {
-            transaction
+            let removed = transaction
                 .execute(
                     &format!(
                         "DELETE FROM \"{table}\" WHERE \"{column}\" IN
@@ -187,6 +204,7 @@ pub(crate) fn filter(
                     [&left_out],
                 )
                 .map_err(|error| sql(&error))?;
+            rows_left_out = rows_left_out.saturating_add(removed);
         }
         // A kept job keeps no download descriptor of an artifact the archive leaves out (a
         // workspace backup): it stays finished, with no artifact, so a restored job never
@@ -209,7 +227,9 @@ pub(crate) fn filter(
     std::fs::remove_file(&full.path).map_err(|error| io_error("remove", &full.path, &error))?;
     let target = directory.join("records.sqlite");
     verify(&target)?;
-    Ok(target)
+    let rows_left_out = u32::try_from(rows_left_out)
+        .map_err(|_| ApiError::new(ErrorCode::Internal, "too many rows left out to count"))?;
+    Ok((target, rows_left_out))
 }
 
 /// Check an archived records database: intact, no dangling reference, at a schema version this

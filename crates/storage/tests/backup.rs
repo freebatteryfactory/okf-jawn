@@ -48,6 +48,16 @@ type Restored = Result<Vec<okf_jawn_contract::workspace::RestoreReport>, ApiErro
 /// A zip archive being built in memory.
 type ZipBuild = zip::ZipWriter<std::io::Cursor<Vec<u8>>>;
 
+/// A Git pack and the references it was built from (`rr9_pack_of`).
+type Rr9Pack = (Vec<u8>, Vec<(String, String)>);
+
+/// What damages a workspace's repository through Git for a crafted archive, giving the objects
+/// to add to the archive (`rr9_set_with_history`).
+type Rr9Damage<'a> = dyn Fn(&Storage, &StorageScope) -> Fallible<Vec<Vec<u8>>> + 'a;
+
+/// What picks the object a crafted pack leaves out (`rr9_set_with_history`).
+type Rr9Omit<'a> = dyn Fn(&git2::Repository) -> Fallible<Option<git2::Oid>> + 'a;
+
 /// Accepts every candidate.
 struct Accept;
 
@@ -7614,6 +7624,276 @@ fn rr9_text(database: &Path, query: &str) -> Fallible<String> {
     Ok(connection.query_row(query, [], |row| row.get(0))?)
 }
 
+/// The pack of every commit on every reference of `repository`, and those references, as the
+/// archive writer builds them (`archive::write_pack`). With `omit`, every object the walk
+/// reaches is inserted one by one but that one, so the pack lacks it.
+fn rr9_pack_of(repository: &git2::Repository, omit: Option<git2::Oid>) -> Fallible<Rr9Pack> {
+    let mut walk = repository.revwalk()?;
+    let mut references = Vec::new();
+    for reference in repository.references()? {
+        let reference = reference?;
+        if let (Ok(name), Some(target)) = (reference.name(), reference.target())
+            && repository.find_commit(target).is_ok()
+        {
+            walk.push(target)?;
+            references.push((name.to_owned(), target.to_string()));
+        }
+    }
+    references.sort();
+    let mut pack = repository.packbuilder()?;
+    match omit {
+        None => pack.insert_walk(&mut walk)?,
+        Some(omitted) => {
+            for commit in walk {
+                let commit = repository.find_commit(commit?)?;
+                let mut objects = vec![commit.id(), commit.tree_id()];
+                commit
+                    .tree()?
+                    .walk(git2::TreeWalkMode::PreOrder, |_, entry| {
+                        objects.push(entry.id());
+                        git2::TreeWalkResult::Ok
+                    })?;
+                for object in objects {
+                    if object != omitted {
+                        pack.insert_object(object, None)?;
+                    }
+                }
+            }
+        }
+    }
+    let mut buffer = git2::Buf::new();
+    pack.write_buf(&mut buffer)?;
+    Ok((buffer.to_vec(), references))
+}
+
+/// The archive `bytes` with its manifest changed by `change`.
+fn rr9_with_manifest(bytes: &[u8], change: &dyn Fn(&mut serde_json::Value)) -> Fallible<Vec<u8>> {
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&entry_bytes_of(bytes, "manifest.json")?)?;
+    change(&mut manifest);
+    let text = serde_json::to_vec(&manifest)?;
+    rebuilt(
+        bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "manifest.json").then(|| text.clone()),
+        &[],
+    )
+}
+
+/// A backup set of tenant `local` with one notes workspace. After the set is written, `damage`
+/// changes the workspace's repository through Git and gives the objects to add as
+/// `objects/<digest>` entries; the workspace archive's `history.pack` is then rebuilt from that
+/// repository, without the object `omit` names, and its manifest references with it. The data
+/// directory is left as it is. Returns (data directory, output directory, workspace,
+/// installation archive, workspace archive).
+async fn rr9_set_with_history(
+    damage: &Rr9Damage<'_>,
+    omit: &Rr9Omit<'_>,
+) -> Fallible<(
+    tempfile::TempDir,
+    tempfile::TempDir,
+    StorageScope,
+    std::path::PathBuf,
+    std::path::PathBuf,
+)> {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let workspace = notes_workspace(&storage).await?;
+    storage
+        .backups()
+        .write_backup_set(output.path(), None)
+        .await?;
+    let extra = damage(&storage, &workspace)?;
+    let repository = repository_of(&storage, &workspace)?;
+    let (pack, references) = rr9_pack_of(&repository, omit(&repository)?)?;
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let bytes = std::fs::read(&archive)?;
+    let named: Vec<(String, Vec<u8>)> = extra
+        .into_iter()
+        .map(|object| {
+            let digest = digest_of_bytes(&object)?;
+            Ok((format!("objects/{}", digest.as_str()), object))
+        })
+        .collect::<Fallible<_>>()?;
+    let added: Vec<(&str, &[u8])> = named
+        .iter()
+        .map(|(name, object)| (name.as_str(), object.as_slice()))
+        .collect();
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "history.pack").then(|| pack.clone()),
+        &added,
+    )?;
+    let crafted = rr9_with_manifest(&crafted, &|manifest| {
+        if let Some(fields) = manifest.as_object_mut() {
+            fields.insert("references".to_owned(), json!(references));
+        }
+    })?;
+    std::fs::write(&archive, crafted)?;
+    drop(storage);
+    Ok((directory, output, workspace, installation, archive))
+}
+
+/// Q3(a): the crafted set restored by replacement over the deleted directory, and its archive
+/// imported into a blank workspace of another tenant; each must be refused as invalid input
+/// naming `what`, with nothing written.
+async fn rr9_both_refuse(damage: &Rr9Damage<'_>, omit: &Rr9Omit<'_>, what: &str) -> TestResult {
+    let (directory, _output, workspace, installation, archive) =
+        rr9_set_with_history(damage, omit).await?;
+    // Import first, into another tenant of the same data directory.
+    {
+        let storage = Storage::open(directory.path())?;
+        let outcome = import_crafted(&storage, std::fs::read(&archive)?).await?;
+        assert_import_refused(&storage, outcome, what).await?;
+    }
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let result = restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await;
+    drop(restored);
+    if let Err(error) = &result {
+        assert!(error.message.contains(what), "{error}");
+    }
+    rr5_refused_before_writing(directory.path(), &workspace, result, what)
+}
+
+/// Q3(a): an archive whose history holds a source appearance that does not read as one: not
+/// JSON, an `object` that is not a digest, or an `extraction.digest` that is not one. If a
+/// restore took it, every later purge of the tenant would stop on it.
+#[tokio::test]
+async fn rr9_a_restore_refuses_an_appearance_that_does_not_read() -> TestResult {
+    let path = format!(".okf/sources/{}.json", uuid_text(15));
+    let digest = "a".repeat(64);
+    for bytes in [
+        b"not json at all".to_vec(),
+        b"{\"object\": \"not a digest\"}".to_vec(),
+        format!("{{\"object\": \"{digest}\", \"extraction\": {{\"digest\": \"cut\"}}}}")
+            .into_bytes(),
+    ] {
+        rr9_both_refuse(
+            &|storage, workspace| {
+                rr8_commit_raw_file(storage, workspace, &path, &bytes)?;
+                Ok(Vec::new())
+            },
+            &|_| Ok(None),
+            &path,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Q3(a): an archive whose `.okf/sources` holds a folder, not appearance files.
+#[tokio::test]
+async fn rr9_a_restore_refuses_a_folder_among_the_appearances() -> TestResult {
+    rr9_both_refuse(
+        &|storage, workspace| {
+            rr8_commit_raw_file(storage, workspace, ".okf/sources/nested/x.json", b"{}")?;
+            Ok(Vec::new())
+        },
+        &|_| Ok(None),
+        ".okf/sources/nested",
+    )
+    .await
+}
+
+/// Q3(a): an archive whose card names, as its conversion record, an object the archive holds
+/// but that does not read as a record.
+#[tokio::test]
+async fn rr9_a_restore_refuses_a_card_named_record_that_does_not_read() -> TestResult {
+    let original = b"rr9 a converted original".to_vec();
+    let record = b"{\"structured\": [{\"digest\": \"cut".to_vec();
+    let record_digest = digest_of_bytes(&record)?;
+    rr9_both_refuse(
+        &|storage, workspace| {
+            let original_digest = digest_of_bytes(&original)?;
+            let path = format!(".okf/sources/{}.json", uuid_text(14));
+            let TreeEdit::WriteSourceCard(card) = rr4_converted_card(
+                uuid!(14)?,
+                "sources/report.md",
+                &original_digest,
+                &record_digest,
+            )?
+            else {
+                return Err("a card".into());
+            };
+            rr8_commit_raw_file(
+                storage,
+                workspace,
+                &path,
+                &serde_json::to_vec(&card.appearance)?,
+            )?;
+            Ok(vec![original.clone(), record.clone()])
+        },
+        &|_| Ok(None),
+        record_digest.as_str(),
+    )
+    .await
+}
+
+/// N-14: a pack that lacks an object a commit of its history needs (the parent of its head, the
+/// head's tree, an appearance blob) is refused as invalid input naming the object, before any
+/// write, in both modes: it is the archive's fault, not the version store's.
+#[tokio::test]
+async fn rr9_a_restore_refuses_a_pack_lacking_an_object_its_history_needs() -> TestResult {
+    let original = b"rr9 an original a valid card names".to_vec();
+    let path = format!(".okf/sources/{}.json", uuid_text(15));
+    let omissions: [&Rr9Omit<'_>; 3] = [
+        &|repository| Ok(Some(rr9_head(repository)?.parent(0)?.id())),
+        &|repository| Ok(Some(rr9_head(repository)?.tree_id())),
+        &|repository| {
+            Ok(Some(
+                rr9_head(repository)?
+                    .tree()?
+                    .get_path(Path::new(&path))?
+                    .id(),
+            ))
+        },
+    ];
+    for omission in omissions {
+        rr9_both_refuse(
+            &|storage, workspace| {
+                rr8_commit_raw_file(
+                    storage,
+                    workspace,
+                    &path,
+                    &rr9_appearance(&digest_of_bytes(&original)?, &json!({}))?,
+                )?;
+                Ok(vec![original.clone()])
+            },
+            omission,
+            "the history does not hold",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The commit `refs/heads/main` of `repository` names.
+fn rr9_head(repository: &git2::Repository) -> Fallible<git2::Commit<'_>> {
+    Ok(repository
+        .find_reference("refs/heads/main")?
+        .peel_to_commit()?)
+}
+
+/// The SHA-256 digest of `bytes`.
+fn digest_of_bytes(bytes: &[u8]) -> Fallible<Digest> {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+    let hash = sha2::Sha256::digest(bytes);
+    Ok(Digest::try_from(hash.iter().fold(
+        String::new(),
+        |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        },
+    ))?)
+}
+
 /// The JSON of a valid source appearance over `object` (`card`'s), with `extra` fields merged in
 /// at its top level.
 fn rr9_appearance(object: &Digest, extra: &serde_json::Value) -> Fallible<Vec<u8>> {
@@ -7951,6 +8231,262 @@ async fn rr9_metadata_and_model_hashes_copy_and_keep_nothing() -> TestResult {
     assert!(
         !copied && !kept,
         "digest text in A's metadata and model hash: copied {copied}, kept {kept}"
+    );
+    Ok(())
+}
+
+/// Q5: a manifest that names a commit the archive's history does not hold is refused as invalid
+/// input naming the commit, before anything is written, in both modes.
+#[tokio::test]
+async fn rr9_a_manifest_commit_the_pack_lacks_is_refused() -> TestResult {
+    let ghost = "0123456789abcdef0123456789abcdef01234567";
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let workspace = {
+        let storage = Storage::open(directory.path())?;
+        let workspace = notes_workspace(&storage).await?;
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        workspace
+    };
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let crafted = rr9_with_manifest(&std::fs::read(&archive)?, &|manifest| {
+        if let Some(references) = manifest
+            .get_mut("references")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            references.push(json!(["refs/heads/rr9-ghost", ghost]));
+        }
+    })?;
+    std::fs::write(&archive, &crafted)?;
+    {
+        let storage = Storage::open(directory.path())?;
+        let outcome = import_crafted(&storage, crafted).await?;
+        assert_import_refused(&storage, outcome, ghost).await?;
+    }
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let result = restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await;
+    drop(restored);
+    if let Err(error) = &result {
+        assert!(error.message.contains(ghost), "{error}");
+    }
+    rr5_refused_before_writing(directory.path(), &workspace, result, "a ghost commit")
+}
+
+/// N-11: a manifest reference whose name Git refuses, on a commit the pack holds, is refused as
+/// invalid input before anything is written: the target's head has not moved and its only
+/// pending put is the uploaded archive.
+#[tokio::test]
+async fn rr9_a_manifest_reference_git_cannot_name_is_refused_before_any_write() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let crafted = rr9_with_manifest(&bytes, &|manifest| {
+        let main = manifest
+            .get("references")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|references| {
+                references.iter().find(|reference| {
+                    reference.get(0).and_then(serde_json::Value::as_str) == Some("refs/heads/main")
+                })
+            })
+            .and_then(|reference| reference.get(1))
+            .cloned();
+        if let (Some(main), Some(references)) = (
+            main,
+            manifest
+                .get_mut("references")
+                .and_then(serde_json::Value::as_array_mut),
+        ) {
+            references.push(json!(["refs/heads/rr9..bad", main]));
+        }
+    })?;
+    let (target, blank, result) = import_crafted(&storage, crafted).await?;
+    let moved = storage.versions().head(&target).await? != blank;
+    let pending = count(
+        &directory.path().join("records.sqlite"),
+        &format!(
+            "SELECT count(*) FROM pending_puts WHERE workspace_id = '{}'",
+            target.workspace_id.0
+        ),
+    )?;
+    match result {
+        Ok(report) => Err(format!("imported: {report:?}").into()),
+        Err(error) => {
+            assert!(
+                error.code == ErrorCode::InvalidInput
+                    && error.message.contains("rr9..bad")
+                    && !moved
+                    && pending == 1,
+                "refused as {:?} ({}); the target's head moved: {moved}; its pending puts: \
+                 {pending} (1 is the uploaded archive)",
+                error.code,
+                error.message
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Q4, N-13: a workspace whose backup job's output is the archive it wrote, recorded as its
+/// artifact, and which holds that archive in a completed upload slot too (beside an ordinary
+/// upload). Its next backup set leaves out the three rows that name the archive, counts them in
+/// the manifest's `rows_left_out`, and keeps the rest; the set restores by replacement and its
+/// archive by import, and the restored workspace keeps the job (finished, no output, no
+/// download) and the ordinary upload.
+/// A notes workspace in the data directory `directory` whose backup job's output is the archive
+/// it wrote, recorded as its `WorkspaceBackup` artifact, and which holds that archive in a
+/// completed upload slot too, beside an ordinary upload; then a backup set of the directory
+/// written into `output`. Returns the workspace and the first archive's digest.
+async fn rr9_workspace_holding_its_own_backup(
+    directory: &Path,
+    output: &Path,
+) -> Fallible<(StorageScope, Digest)> {
+    let storage = Storage::open(directory)?;
+    let workspace = notes_workspace(&storage).await?;
+    let scope = JobScope::Workspace(workspace.clone());
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &scope,
+            NewJob {
+                mutation_id: uuid!(30)?,
+                initiator: person("ana"),
+                spec: JobSpec::BackupWorkspace,
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+    let archive = storage
+        .backups()
+        .write_workspace_archive(&workspace, claimed.mutation_id)
+        .await?;
+    let artifact = records
+        .record_artifact(
+            &scope,
+            claimed.mutation_id,
+            NewArtifact {
+                kind: ArtifactKind::WorkspaceBackup,
+                object: archive.clone(),
+                media_type: "application/zip".to_owned(),
+                created_by_job: job.id,
+            },
+        )
+        .await?;
+    records
+        .complete_job(JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: Some(artifact.id),
+            restore: None,
+            outputs: vec![archive.digest.clone()],
+            warnings: Vec::new(),
+        })
+        .await?;
+    // The archive's bytes uploaded back into the workspace, then an ordinary upload.
+    let archive_bytes = std::fs::read(object_file(directory, &archive.digest)?)?;
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            &workspace,
+            uuid!(41)?,
+            NewUpload {
+                filename: "backup.zip".to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(archive_bytes.len())?,
+                expected_sha256: None,
+                supplied_by: person("ana"),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            &workspace,
+            slot.id,
+            Box::pin(std::io::Cursor::new(archive_bytes)),
+            1 << 30,
+        )
+        .await?;
+    uploads
+        .complete(&workspace, slot.id, archive.digest.clone())
+        .await?;
+    rr6_uploaded(&storage, &workspace, b"rr9 an ordinary upload").await?;
+    storage.backups().write_backup_set(output, None).await?;
+    Ok((workspace, archive.digest))
+}
+
+#[tokio::test]
+async fn rr9_a_workspace_holding_its_own_backup_restores_without_the_rows_naming_it() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let (workspace, first) =
+        rr9_workspace_holding_its_own_backup(directory.path(), output.path()).await?;
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let bytes = std::fs::read(&archive)?;
+    assert!(
+        !entries(&archive)?.contains(&format!("objects/{}", first.as_str())),
+        "the set's archive holds no earlier archive"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&entry_bytes_of(&bytes, "manifest.json")?)?;
+    assert_eq!(
+        manifest
+            .get("rows_left_out")
+            .and_then(serde_json::Value::as_u64),
+        Some(3),
+        "the backup artifact, the job's output and the upload slot naming the archive are \
+         counted: {manifest}"
+    );
+    let staged = output.path().join("records.sqlite");
+    std::fs::write(&staged, entry_bytes_of(&bytes, "records.sqlite")?)?;
+    assert_eq!(
+        count(&staged, "SELECT count(*) FROM uploads")?,
+        1,
+        "one upload kept"
+    );
+    assert_eq!(
+        count(&staged, "SELECT count(*) FROM job_outputs")?,
+        0,
+        "no output kept"
+    );
+    assert_eq!(
+        count(&staged, "SELECT count(*) FROM jobs")?,
+        1,
+        "the job kept"
+    );
+    // By import, into another tenant of the same directory.
+    {
+        let storage = Storage::open(directory.path())?;
+        let (_, _, imported) = import_crafted(&storage, bytes).await?;
+        imported?;
+    }
+    // By replacement, over the deleted directory.
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await?;
+    let live = directory.path().join("records.sqlite");
+    assert_eq!(count(&live, "SELECT count(*) FROM uploads")?, 1);
+    assert_eq!(count(&live, "SELECT count(*) FROM jobs")?, 1);
+    assert_eq!(count(&live, "SELECT count(*) FROM job_outputs")?, 0);
+    assert_eq!(
+        count(
+            &live,
+            "SELECT count(*) FROM jobs WHERE json_extract(record, '$.artifact') IS NOT NULL"
+        )?,
+        0,
+        "the restored job advertises no download"
     );
     Ok(())
 }

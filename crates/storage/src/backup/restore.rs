@@ -206,6 +206,9 @@ pub(crate) fn check(
 /// - its entries (`Opened::open`: compression methods, sizes, and each object's bytes against
 ///   its digest), its manifest, and its objects, listed from its entries (an older manifest's
 ///   own list is not read);
+/// - that Git can name each reference its manifest lists (`refuse_unnameable_references`),
+///   which the restore would otherwise find out setting it, after the objects and the history
+///   were written;
 /// - its records, extracted under `staging` (`migrated`): a UTF-8 database SQLite reads,
 ///   intact, and brought to this build's schema;
 /// - their schema (`refuse_other_schema`) and then their rows (`refuse_foreign_rows`), against
@@ -227,6 +230,7 @@ fn checked(
     let mut opened = Opened::open(archive)?;
     let mut manifest = opened.workspace()?;
     manifest.objects = opened.objects()?;
+    refuse_unnameable_references(&manifest)?;
     let records = staging.join(RECORDS);
     opened.extract(RECORDS, &records)?;
     migrated(&records)?;
@@ -358,6 +362,23 @@ fn refuse_unheld(
         history: history.objects.into_keys().collect(),
         followed,
     })
+}
+
+/// Refuse a manifest that lists a reference Git cannot name (`Reference::is_valid_name`), before
+/// anything is written: the restore sets each reference after it put the objects back and
+/// indexed the history, and would otherwise fail there, with those written.
+///
+/// # Errors
+/// Returns `InvalidInput` naming the reference.
+fn refuse_unnameable_references(manifest: &WorkspaceManifest) -> Result<(), ApiError> {
+    for (name, _) in &manifest.references {
+        if !git2::Reference::is_valid_name(name) {
+            return Err(invalid(&format!(
+                "its manifest names the reference {name:?}, which is not a name Git accepts"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Check the extracted records database at `records` and bring it to this build's schema:
@@ -1438,6 +1459,7 @@ mod tests {
             archived_at: None,
             references: Vec::new(),
             objects: Vec::new(),
+            rows_left_out: 0,
         };
         let own = format!(
             "INSERT INTO workspaces VALUES ('local', '{workspace}', 'm0', 'Notes', '', 't', NULL);"
