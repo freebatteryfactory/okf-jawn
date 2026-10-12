@@ -10,6 +10,7 @@ import {
   listing,
   NOTE,
   noteSummary,
+  OLD,
   otherSummary,
   readResponse,
   renderAt,
@@ -246,6 +247,41 @@ describe('deep links', () => {
       kind: 'revision',
       revision: old,
     });
+  });
+});
+
+describe('revealing a linked item', () => {
+  it('reveals a cited item where the listed head holds it, found by id, and lists only the head', async () => {
+    // At the cited revision the note lived in archive/; at the head it is in notes/.
+    const moved = { ...noteSummary, path: 'archive/meeting.md', revision: OLD };
+    const api = mockApi({
+      ...workspaceHandlers(),
+      [LIST]: (body) =>
+        body.folder === 'notes'
+          ? ok(listing([], [noteSummary, otherSummary]))
+          : body.folder === 'archive'
+            ? ok(listing([], []))
+            : ok(listing(['archive', 'notes'], [sourceSummary])),
+      '/api/items/get-item': (body) => {
+        const at = body.at as { revision?: string };
+        if (body.item_id !== NOTE) return ok(itemDocument(otherSummary));
+        return ok(itemDocument(at.revision === OLD ? moved : noteSummary));
+      },
+    });
+    renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    const tree = await screen.findByRole('tree', { name: 'Folders' });
+    const row = await within(tree).findByRole('treeitem', { name: /Meeting notes/ });
+    await waitFor(() => expect(row.getAttribute('aria-selected')).toBe('true'));
+    expect(
+      within(tree).getByRole('treeitem', { name: 'notes' }).getAttribute('aria-expanded'),
+    ).toBe('true');
+    expect(
+      within(tree).getByRole('treeitem', { name: 'archive' }).getAttribute('aria-expanded'),
+    ).toBe('false');
+    expect(api.callsTo(LIST).map((body) => body.folder)).toEqual(['', 'notes']);
+    for (const body of api.callsTo(LIST)) {
+      expect(body.at).toEqual({ kind: 'revision', revision: HEAD });
+    }
   });
 });
 

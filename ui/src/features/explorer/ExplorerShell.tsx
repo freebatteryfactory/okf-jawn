@@ -88,8 +88,10 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
     });
 
   const revision = search.rev ?? head;
-  const selected = useQuery({
-    ...itemOptions(workspaceId, itemId ?? '', revision),
+  // The tree lists the head, so the item is revealed where it is at the head, found by its
+  // id: a cited revision may have held it at another path, or the head may no longer hold it.
+  const atListedHead = useQuery({
+    ...itemOptions(workspaceId, itemId ?? '', head),
     enabled: itemId !== null,
   });
   const layouts = useExplorerStore((state) => state.layouts);
@@ -122,7 +124,7 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
                 workspaceId={workspaceId}
                 revision={head}
                 selectedItemId={itemId}
-                selectedItemPath={selected.data?.summary.path ?? null}
+                selectedItemPath={atListedHead.data?.summary.path ?? null}
                 onOpenItem={(target) => goToItem(target)}
               />
             ) : (
