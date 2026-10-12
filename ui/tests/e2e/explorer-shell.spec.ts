@@ -96,12 +96,11 @@ test.describe('Explorer shell', () => {
     await page.getByRole('button', { name: 'Split right' }).click();
     await expect(page.getByRole('region', { name: 'Documents, pane 2 of 2' })).toBeVisible();
     const separator = page.getByRole('separator', { name: 'Resize panes 1 and 2' });
-    // After the pointer click above, a key press returns the page to keyboard modality, as a
-    // keyboard user moving to the separator would.
-    await page.keyboard.press('Shift');
+    // After the pointer click above, the separator's own key returns the page to keyboard
+    // modality, as a keyboard user resizing would (WebKit ignores a modifier key alone).
     await separator.focus();
-    await expectVisibleFocus(page);
     await page.keyboard.press('ArrowLeft');
+    await expectVisibleFocus(page);
     await page.getByRole('tab', { name: 'Plan' }).first().focus();
     await page.keyboard.press('ArrowLeft');
     await expect(page.getByRole('tab', { name: 'Meeting notes' })).toBeFocused();

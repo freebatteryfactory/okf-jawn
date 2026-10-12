@@ -72,7 +72,7 @@ export const markdown = [
 ].join('\n');
 
 export type Reply = { status: number; body: unknown };
-export type Answers = Record<string, (body: Record<string, unknown>) => Reply>;
+export type Answers = Record<string, (body: Record<string, unknown>) => Reply | Promise<Reply>>;
 export const ok = (body: unknown): Reply => ({ status: 200, body });
 
 export function readAnswer(
@@ -188,7 +188,7 @@ export async function routeApi(page: Page, overrides: Answers = {}) {
       parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
     const answer = table[path];
     const reply = answer
-      ? answer(body)
+      ? await answer(body)
       : { status: 501, body: { code: 'not_implemented', message: `${path} is not implemented` } };
     await route.fulfill({
       status: reply.status,
