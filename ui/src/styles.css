@@ -215,16 +215,20 @@ main.app-main:has(.explorer) {
 /* A long name wraps inside its row (the row measures itself); the tree never scrolls sideways. */
 .tree-entry {
   display: flex;
-  flex-wrap: wrap;
   align-items: flex-start;
-  column-gap: 0.35rem;
+  gap: 0.35rem;
   min-height: 30px;
   padding-block: 0.2rem;
   line-height: 1.4;
+}
+.tree-text {
+  flex: 1;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
-.tree-name {
-  min-width: 0;
+.tree-type,
+.tree-flag {
+  margin-inline-start: 0.35rem;
 }
 .tree-icon {
   flex: none;

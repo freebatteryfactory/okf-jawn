@@ -459,9 +459,12 @@ function TreeEntryContent({ node, style }: NodeRendererProps<TreeEntry>) {
   return (
     <div ref={contentRef} style={style} className={`tree-entry tree-${entry.kind}`}>
       {Icon === null ? null : <Icon aria-hidden="true" size={16} className="tree-icon" />}
-      <span className="tree-name">{entry.name}</span>
-      {item === null ? null : <span className="tree-type">{item.type_name}</span>}
-      {extraction === null ? null : <span className="tree-flag">{extraction}</span>}
+      {/* One text block beside the icon, so a long name wraps next to it, not under it. */}
+      <span className="tree-text">
+        <span className="tree-name">{entry.name}</span>
+        {item === null ? null : <span className="tree-type">{item.type_name}</span>}
+        {extraction === null ? null : <span className="tree-flag">{extraction}</span>}
+      </span>
     </div>
   );
 }
