@@ -127,7 +127,6 @@ export function DocumentView({
           context="Reading this item’s properties"
           error={item.error}
           onRetry={() => void item.refetch()}
-          workspaceId={workspaceId}
         />
       ) : item.data ? (
         <Properties properties={item.data.properties} />
@@ -170,7 +169,6 @@ export function DocumentView({
           context="Reading this item"
           error={read.error}
           onRetry={() => void read.refetch()}
-          workspaceId={workspaceId}
         />
       )}
       {pages.length > 0 && (
@@ -208,7 +206,6 @@ export function DocumentView({
           context="Continuing this reading"
           error={read.error}
           onRetry={() => void read.fetchNextPage()}
-          workspaceId={workspaceId}
         />
       )}
       {first && (

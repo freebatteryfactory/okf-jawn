@@ -40,8 +40,8 @@ const MESSAGES: Record<ErrorCode, FailureMessage> = {
   unauthenticated: {
     title: 'You are not signed in.',
     advice:
-      'Sign in again. On this computer, open the launch link the server printed when it started; then try again.',
-    action: { kind: 'retry', label: 'Try again after signing in' },
+      'Sign in again. On this computer, open the launch link the server printed when it started; then reload.',
+    action: { kind: 'retry', label: 'Reload' },
   },
   forbidden: {
     title: 'You do not have permission to do this.',
