@@ -35,7 +35,10 @@
  * component, which reads the operation's state as it is then and renders what it loaded in the
  * same commit the focus moves in. A ref `loaded` reads must be on an element that component
  * renders, itself or through its children: those refs are set before its layout effects run. The
- * retry button exists only through this hook.
+ * notice must come and go with that component's own renders (it renders the notice from this
+ * hook's result): the effect that moves focus runs when the component renders, so a notice taken
+ * away by a component in between, on its own state, would be followed only at the next render.
+ * The retry button exists only through this hook.
  *
  * Limits. The retry is over when `run` settles. A refetch that replaces a request still in flight
  * for content already on screen (an invalidation; nothing does that yet) settles `run` early,
