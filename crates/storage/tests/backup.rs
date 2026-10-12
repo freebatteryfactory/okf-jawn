@@ -4695,56 +4695,75 @@ async fn backup_a_replacement_restore_refuses_an_archive_table_with_a_generated_
 // The PR #20 pass-4b re-review's probes (lane-storage-m2-pass4b-rereview.md), adopted, and the
 // tests of its rulings.
 
-/// The archive `drafts` table rebuilt as `definition`, its rows copied by `copy`.
+/// SQL that takes the quotes `ALTER TABLE ... RENAME` puts around the table `name` off its
+/// stored statement (`CREATE TABLE "name"` becomes `CREATE TABLE name`), as this build writes it.
+fn rr5_unquoted(name: &str) -> String {
+    format!(
+        "PRAGMA writable_schema = ON;
+         UPDATE sqlite_schema
+             SET sql = replace(sql, 'CREATE TABLE \"{name}\"', 'CREATE TABLE {name}')
+             WHERE name = '{name}';
+         PRAGMA writable_schema = OFF;"
+    )
+}
+
+/// The archive `drafts` table rebuilt as `definition`, its rows copied by `copy`. The rename
+/// stores the statement as `CREATE TABLE "drafts" ...`; the quotes are taken off (`rr5_unquoted`),
+/// so the stored statement is this build's, up to whitespace, but for what `definition` changes:
+/// the same rebuild with nothing changed restores
+/// (`rr5_control_a_rebuild_with_no_change_restores`).
 fn rr5_drafts_as(definition: &str, copy: &str) -> String {
     format!(
         "CREATE TABLE drafts_new {definition};
          INSERT INTO drafts_new {copy};
          DROP TABLE drafts;
-         ALTER TABLE drafts_new RENAME TO drafts;"
+         ALTER TABLE drafts_new RENAME TO drafts;
+         {}",
+        rr5_unquoted("drafts")
     )
 }
 
-/// Each schema variant of `drafts` that is not this build's, with its rows all of the archive's
-/// own tenant and workspace.
+/// This build's `drafts` statement after `CREATE TABLE drafts`, its `columns` replaced and with
+/// `tail` after the closing parenthesis, token for token as the live schema states it.
+fn rr5_definition(columns: &str, tail: &str) -> String {
+    format!("( {columns}, {RR5_KEY} ){tail}")
+}
+
+/// Each schema variant of `drafts` that is not this build's, each changing exactly one
+/// property, with its rows all of the archive's own tenant and workspace.
 fn rr5_variants() -> Vec<(&'static str, String)> {
+    let all = "SELECT * FROM drafts";
     vec![
         (
             "collation",
             rr5_drafts_as(
-                &format!(
-                    "({}, {RR5_KEY}) STRICT",
-                    RR5_COLUMNS.replace(
+                &rr5_definition(
+                    &RR5_COLUMNS.replace(
                         "workspace_id TEXT NOT NULL",
-                        "workspace_id TEXT NOT NULL COLLATE NOCASE"
-                    )
+                        "workspace_id TEXT NOT NULL COLLATE NOCASE",
+                    ),
+                    " STRICT",
                 ),
-                "SELECT * FROM drafts",
+                all,
             ),
         ),
         (
             "not strict",
-            rr5_drafts_as(
-                &format!("({RR5_COLUMNS}, {RR5_KEY})"),
-                "SELECT * FROM drafts",
-            ),
+            rr5_drafts_as(&rr5_definition(RR5_COLUMNS, ""), all),
         ),
         (
             "without rowid",
-            rr5_drafts_as(
-                &format!("({RR5_COLUMNS}, {RR5_KEY}) STRICT, WITHOUT ROWID"),
-                "SELECT * FROM drafts",
-            ),
+            rr5_drafts_as(&rr5_definition(RR5_COLUMNS, " STRICT, WITHOUT ROWID"), all),
         ),
         (
             "stored generated",
             rr5_drafts_as(
-                &format!(
-                    "({}, {RR5_KEY}) STRICT",
-                    RR5_COLUMNS.replace(
+                &rr5_definition(
+                    &RR5_COLUMNS.replace(
                         "body TEXT NOT NULL",
-                        "body TEXT GENERATED ALWAYS AS ('forged') STORED"
-                    )
+                        "body TEXT GENERATED ALWAYS AS ('forged') STORED",
+                    ),
+                    " STRICT",
                 ),
                 "(tenant_id, workspace_id, item_id, editor, saved_at, record, properties)
                  SELECT tenant_id, workspace_id, item_id, editor, saved_at, record, properties
@@ -4754,16 +4773,16 @@ fn rr5_variants() -> Vec<(&'static str, String)> {
         (
             "extra column",
             rr5_drafts_as(
-                &format!("({RR5_COLUMNS}, extra TEXT, {RR5_KEY}) STRICT"),
+                &rr5_definition(&format!("{RR5_COLUMNS}, extra TEXT"), " STRICT"),
                 "SELECT *, NULL FROM drafts",
             ),
         ),
         (
             "missing column",
             rr5_drafts_as(
-                &format!(
-                    "({}, {RR5_KEY}) STRICT",
-                    RR5_COLUMNS.replace(", properties TEXT NOT NULL", "")
+                &rr5_definition(
+                    &RR5_COLUMNS.replace(", properties TEXT NOT NULL", ""),
+                    " STRICT",
                 ),
                 "SELECT tenant_id, workspace_id, item_id, editor, saved_at, record, body
                  FROM drafts",
@@ -4772,33 +4791,39 @@ fn rr5_variants() -> Vec<(&'static str, String)> {
         (
             "other type",
             rr5_drafts_as(
-                &format!(
-                    "({}, {RR5_KEY}) STRICT",
-                    RR5_COLUMNS.replace("saved_at TEXT NOT NULL", "saved_at ANY NOT NULL")
+                &rr5_definition(
+                    &RR5_COLUMNS.replace("saved_at TEXT NOT NULL", "saved_at ANY NOT NULL"),
+                    " STRICT",
                 ),
-                "SELECT * FROM drafts",
+                all,
             ),
         ),
         (
             "other default",
             rr5_drafts_as(
-                &format!(
-                    "({}, {RR5_KEY}) STRICT",
-                    RR5_COLUMNS.replace("body TEXT NOT NULL", "body TEXT NOT NULL DEFAULT ''")
+                &rr5_definition(
+                    &RR5_COLUMNS.replace("body TEXT NOT NULL", "body TEXT NOT NULL DEFAULT ''"),
+                    " STRICT",
                 ),
-                "SELECT * FROM drafts",
+                all,
             ),
         ),
         (
             "other case table",
-            "ALTER TABLE drafts RENAME TO drafts_tmp; ALTER TABLE drafts_tmp RENAME TO Drafts;"
-                .to_owned(),
+            format!(
+                "ALTER TABLE drafts RENAME TO drafts_tmp; ALTER TABLE drafts_tmp RENAME TO Drafts;
+                 {}",
+                rr5_unquoted("Drafts")
+            ),
         ),
         (
             "check",
             rr5_drafts_as(
-                &format!("({RR5_COLUMNS}, CHECK (length(body) >= 0), {RR5_KEY}) STRICT"),
-                "SELECT * FROM drafts",
+                &rr5_definition(
+                    &format!("{RR5_COLUMNS}, CHECK (length(body) >= 0)"),
+                    " STRICT",
+                ),
+                all,
             ),
         ),
         (
@@ -5779,6 +5804,720 @@ async fn backup_a_conversion_before_its_completion_restores_with_its_exports_and
     assert_eq!(count(&live, "SELECT count(*) FROM job_outputs")?, 3);
     assert_eq!(rr6_pending(directory.path(), &workspace, &named)?, 0);
     Ok(())
+}
+
+// The PR #20 B1-R re-review's probes (lane-storage-m2-b1r-rereview.md, `rr7_`), adopted, and the
+// tests of its round-3 rulings.
+
+/// The records entry of the archive `bytes`, with each of `steps` run on a fresh connection,
+/// foreign keys off (`WS99` stands for another workspace id). A fresh connection per step reads
+/// the schema a `writable_schema` step left on disk.
+fn rr7_forged_steps(bytes: &[u8], steps: &[&str]) -> Fallible<Vec<u8>> {
+    let staged = tempfile::tempdir()?;
+    let records = staged.path().join("records.sqlite");
+    std::fs::write(&records, entry_bytes_of(bytes, "records.sqlite")?)?;
+    for step in steps {
+        let connection = rusqlite::Connection::open(&records)?;
+        connection.execute_batch(&format!(
+            "PRAGMA foreign_keys = OFF; {}",
+            step.replace("WS99", &uuid_text(99))
+        ))?;
+    }
+    Ok(std::fs::read(&records)?)
+}
+
+/// The stored statement of the schema object `name` in the records at `records`.
+fn rr7_statement(records: &Path, name: &str) -> Fallible<String> {
+    let connection = rusqlite::Connection::open(records)?;
+    Ok(connection.query_row(
+        "SELECT sql FROM sqlite_schema WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )?)
+}
+
+/// The records entry of the archive `bytes` with the stored statement of `name` rewritten in
+/// place (`writable_schema`): every `from` replaced by `to`, nothing else. Refuses a rewrite that
+/// would change nothing, so a probe never passes vacuously.
+fn rr7_rewritten(bytes: &[u8], name: &str, from: &str, to: &str) -> Fallible<Vec<u8>> {
+    let staged = tempfile::tempdir()?;
+    let records = staged.path().join("records.sqlite");
+    std::fs::write(&records, entry_bytes_of(bytes, "records.sqlite")?)?;
+    let before = rr7_statement(&records, name)?;
+    if !before.contains(from) {
+        return Err(format!("{name}'s statement holds no {from:?}: {before}").into());
+    }
+    {
+        let connection = rusqlite::Connection::open(&records)?;
+        connection.execute_batch("PRAGMA writable_schema = ON")?;
+        connection.execute(
+            "UPDATE sqlite_schema SET sql = replace(sql, ?1, ?2) WHERE name = ?3",
+            rusqlite::params![from, to, name],
+        )?;
+        connection.execute_batch("PRAGMA writable_schema = OFF")?;
+    }
+    let after = rr7_statement(&records, name)?;
+    if after == before {
+        return Err(format!("{name}'s statement did not change").into());
+    }
+    Ok(std::fs::read(&records)?)
+}
+
+/// The records entry of the archive `bytes` copied, row for row, into a new database whose text
+/// encoding is UTF-16le, built by this build's own migrations: the same statements, the same
+/// rows.
+fn rr7_utf16(bytes: &[u8]) -> Fallible<Vec<u8>> {
+    let staged = tempfile::tempdir()?;
+    let source = staged.path().join("source.sqlite");
+    std::fs::write(&source, entry_bytes_of(bytes, "records.sqlite")?)?;
+    let target = staged.path().join("utf16.sqlite");
+    {
+        let from = rusqlite::Connection::open(&source)?;
+        let mut to = rusqlite::Connection::open(&target)?;
+        to.execute_batch("PRAGMA encoding = 'UTF-16le'")?;
+        okf_jawn_storage::schema::RECORDS.to_latest(&mut to)?;
+        to.execute_batch("PRAGMA foreign_keys = OFF")?;
+        let tables: Vec<String> = {
+            let mut statement = from.prepare(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )?;
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        for table in tables {
+            let mut select = from.prepare(&format!("SELECT * FROM \"{table}\""))?;
+            let width = select.column_count();
+            let rows: Vec<Vec<rusqlite::types::Value>> = select
+                .query_map([], |row| {
+                    (0..width)
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect()
+                })?
+                .collect::<Result<_, _>>()?;
+            let marks = (1..=width)
+                .map(|n| format!("?{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            for row in rows {
+                to.execute(
+                    &format!("INSERT INTO \"{table}\" VALUES ({marks})"),
+                    rusqlite::params_from_iter(row),
+                )?;
+            }
+        }
+        let encoding: String = to.query_row("PRAGMA encoding", [], |row| row.get(0))?;
+        assert_eq!(encoding, "UTF-16le");
+        let integrity: String = to.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        assert_eq!(integrity, "ok");
+        for name in ["drafts", "events", "job_controls"] {
+            assert_eq!(
+                rr7_statement(&target, name)?,
+                rr7_statement(&source, name)?,
+                "{name}: the same statement"
+            );
+        }
+    }
+    Ok(std::fs::read(&target)?)
+}
+
+/// A backup set of a notes workspace (with a cancelled job and its control when `job`) whose
+/// workspace archive's records are replaced by `forge(archive bytes)`, restored by replacement
+/// over the deleted directory.
+async fn rr7_replace(
+    job: bool,
+    forge: &dyn Fn(&[u8]) -> Fallible<Vec<u8>>,
+) -> Fallible<(tempfile::TempDir, tempfile::TempDir, StorageScope, Restored)> {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let workspace = {
+        let storage = Storage::open(directory.path())?;
+        let workspace = notes_workspace(&storage).await?;
+        if job {
+            let records = storage.records();
+            let job_scope = JobScope::Workspace(workspace.clone());
+            let created = records
+                .create_job(
+                    &job_scope,
+                    NewJob {
+                        mutation_id: uuid!(61)?,
+                        initiator: person("ana"),
+                        spec: JobSpec::BackupWorkspace,
+                    },
+                )
+                .await?;
+            records
+                .cancel_job(&job_scope, uuid!(62)?, created.id)
+                .await?;
+        }
+        storage
+            .backups()
+            .write_backup_set(output.path(), None)
+            .await?;
+        workspace
+    };
+    let (installation, archive) = set_of(output.path(), &workspace);
+    let bytes = std::fs::read(&archive)?;
+    let forged = forge(&bytes)?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    std::fs::write(&archive, crafted)?;
+    std::fs::remove_dir_all(directory.path())?;
+    let restored = Storage::open(directory.path())?;
+    let result = restored
+        .backups()
+        .restore_replacement(&installation, &[archive])
+        .await;
+    drop(restored);
+    Ok((directory, output, workspace, result))
+}
+
+/// A forged replacement is refused as `InvalidInput` naming `table`, before any workspace row
+/// or repository was written.
+async fn rr7_replace_refused(
+    job: bool,
+    forge: &dyn Fn(&[u8]) -> Fallible<Vec<u8>>,
+    table: &str,
+) -> TestResult {
+    let (directory, _output, workspace, result) = rr7_replace(job, forge).await?;
+    if let Err(error) = &result {
+        assert!(error.message.contains(table), "{table}: {error}");
+    }
+    rr5_refused_before_writing(directory.path(), &workspace, result, table)
+}
+
+/// A forged replacement restores as any other: the workspace and its draft are live.
+async fn rr7_replace_restores(forge: &dyn Fn(&[u8]) -> Fallible<Vec<u8>>) -> TestResult {
+    let (directory, _output, workspace, result) = rr7_replace(false, forge).await?;
+    result?;
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            &format!(
+                "SELECT count(*) FROM drafts WHERE workspace_id = '{}'",
+                workspace.workspace_id.0
+            )
+        )?,
+        1
+    );
+    Ok(())
+}
+
+/// A notes workspace's archive whose records are replaced by `forge(archive bytes)`, imported
+/// into a blank workspace of another tenant: refused as `InvalidInput` naming `table`, nothing
+/// written.
+async fn rr7_import_refused(forge: &dyn Fn(&[u8]) -> Fallible<Vec<u8>>, table: &str) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let forged = forge(&bytes)?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    let outcome = import_crafted(&storage, crafted).await?;
+    assert_import_refused(&storage, outcome, table).await
+}
+
+/// An import of a notes workspace's archive whose records are `forge(archive bytes)`: refused as
+/// `InvalidInput` with the target's head still blank, naming what was written otherwise.
+async fn rr7_import_reported(forge: &dyn Fn(&[u8]) -> Fallible<Vec<u8>>) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let source = notes_workspace(&storage).await?;
+    let bytes = archive_bytes(&storage, &source).await?;
+    let forged = forge(&bytes)?;
+    let crafted = rebuilt(
+        &bytes,
+        &|_| zip::CompressionMethod::Stored,
+        &|name| (name == "records.sqlite").then(|| forged.clone()),
+        &[],
+    )?;
+    let (target, blank, result) = import_crafted(&storage, crafted).await?;
+    let moved = storage.versions().head(&target).await? != blank;
+    let pending = count(
+        &directory.path().join("records.sqlite"),
+        &format!(
+            "SELECT count(*) FROM pending_puts WHERE workspace_id = '{}'",
+            target.workspace_id.0
+        ),
+    )?;
+    match result {
+        Ok(report) => Err(format!("imported: {report:?}").into()),
+        Err(error) => {
+            // The one pending put is the crafted archive this test uploaded, not the restore's.
+            assert!(
+                error.code == ErrorCode::InvalidInput && !moved && pending == 1,
+                "refused as {:?} ({}); the target's head moved: {moved}; its pending puts: \
+                 {pending}",
+                error.code,
+                error.message
+            );
+            Ok(())
+        }
+    }
+}
+
+// N-4: each property changed alone, in place, every other byte of the statement this build's.
+
+/// R7SPACED: a statement that differs from this build's only in whitespace is this build's.
+#[tokio::test]
+async fn rr7_control_a_whitespace_only_rewrite_restores() -> TestResult {
+    rr7_replace_restores(&|bytes| rr7_rewritten(bytes, "drafts", "\n", "\n \t  ")).await
+}
+
+#[tokio::test]
+async fn rr7_replace_column_collation_alone() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "drafts",
+                "workspace_id TEXT NOT NULL,",
+                "workspace_id TEXT NOT NULL COLLATE NOCASE,",
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_column_collation_alone() -> TestResult {
+    rr7_import_refused(
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "drafts",
+                "workspace_id TEXT NOT NULL,",
+                "workspace_id TEXT NOT NULL COLLATE NOCASE,",
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_strict_dropped_alone() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| rr7_rewritten(bytes, "drafts", ") STRICT", ")"),
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_strict_dropped_alone() -> TestResult {
+    rr7_import_refused(
+        &|bytes| rr7_rewritten(bytes, "drafts", ") STRICT", ")"),
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_check_added_alone() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "drafts",
+                "body TEXT NOT NULL,",
+                "body TEXT NOT NULL CHECK (length(body) >= 0),",
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_check_removed_alone() -> TestResult {
+    rr7_replace_refused(
+        true,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "job_controls",
+                " CHECK (action IN ('cancel', 'retry'))",
+                "",
+            )
+        },
+        "job_controls",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_check_removed_alone() -> TestResult {
+    rr7_import_refused(
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "job_controls",
+                " CHECK (action IN ('cancel', 'retry'))",
+                "",
+            )
+        },
+        "job_controls",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_references_removed_alone() -> TestResult {
+    rr7_replace_refused(
+        true,
+        &|bytes| rr7_rewritten(bytes, "job_outputs", " REFERENCES jobs (job_id)", ""),
+        "job_outputs",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_references_removed_alone() -> TestResult {
+    rr7_import_refused(
+        &|bytes| rr7_rewritten(bytes, "job_outputs", " REFERENCES jobs (job_id)", ""),
+        "job_outputs",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_index_collation_alone() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "events_by_log",
+                "(tenant_id,",
+                "(tenant_id COLLATE NOCASE,",
+            )
+        },
+        "events",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_index_collation_alone() -> TestResult {
+    rr7_import_refused(
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "events_by_log",
+                "(tenant_id,",
+                "(tenant_id COLLATE NOCASE,",
+            )
+        },
+        "events",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_partial_index_alone() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "jobs_by_state",
+                "ON jobs (state)",
+                "ON jobs (state) WHERE state <> 'rr7'",
+            )
+        },
+        "jobs",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_missing_index() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| rr7_forged_steps(bytes, &["DROP INDEX reviews_by_item;"]),
+        "reviews",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_missing_index() -> TestResult {
+    rr7_import_refused(
+        &|bytes| rr7_forged_steps(bytes, &["DROP INDEX reviews_by_item;"]),
+        "reviews",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_keyword_case_game() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| rr7_rewritten(bytes, "drafts", "NOT NULL", "not null"),
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_replace_quoted_table_name() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "drafts",
+                "CREATE TABLE drafts",
+                "CREATE TABLE \"drafts\"",
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn rr7_import_bracketed_table_name() -> TestResult {
+    rr7_import_refused(
+        &|bytes| {
+            rr7_rewritten(
+                bytes,
+                "drafts",
+                "CREATE TABLE drafts",
+                "CREATE TABLE [drafts]",
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+/// An extra table and a view under other names: never read, so the restore goes ahead, and the
+/// extra table does not appear in the live database.
+#[tokio::test]
+async fn rr7_an_extra_table_and_view_are_never_read() -> TestResult {
+    let (directory, _output, _workspace, result) =
+        rr7_replace(false, &|bytes| {
+            rr7_forged_steps(
+            bytes,
+            &["CREATE TABLE rr7_extra (workspace_id TEXT); INSERT INTO rr7_extra VALUES ('WS99');
+               CREATE VIEW rr7_view AS SELECT tenant_id, 'WS99' AS workspace_id FROM drafts;"],
+        )
+        })
+        .await?;
+    result?;
+    assert_eq!(
+        count(
+            &directory.path().join("records.sqlite"),
+            "SELECT count(*) FROM sqlite_schema WHERE name IN ('rr7_extra', 'rr7_view')"
+        )?,
+        0
+    );
+    Ok(())
+}
+
+/// N-4 control: a rename rebuild with nothing changed is refused. SQLite stores the renamed
+/// table's statement as `CREATE TABLE "drafts" (...`, and a quoted name is not whitespace, so
+/// the statement is not this build's text: the in-place quoted name's case
+/// (`rr7_replace_quoted_table_name`). No archive this build writes is renamed after it is built;
+/// the one rename of the schema (`keyed_events` to `events`, schema 2) runs in the migrations
+/// every records database goes through, live and archived alike, so both store the same text.
+#[tokio::test]
+async fn rr7_control_a_rename_rebuild_with_no_change_is_refused() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            rr7_forged_steps(
+                bytes,
+                &[&format!(
+                    "CREATE TABLE drafts_new {};
+                     INSERT INTO drafts_new SELECT * FROM drafts;
+                     DROP TABLE drafts;
+                     ALTER TABLE drafts_new RENAME TO drafts;",
+                    rr5_definition(RR5_COLUMNS, " STRICT")
+                )],
+            )
+        },
+        "drafts",
+    )
+    .await
+}
+
+/// N-4 control: the same rebuild with the rename's quotes taken off (`rr5_drafts_as`) is this
+/// build's statement up to whitespace, and restores; so each `rr5_` variant differs from this
+/// build's schema in its one property only.
+#[tokio::test]
+async fn rr5_control_a_rebuild_with_no_change_restores() -> TestResult {
+    rr7_replace_restores(&|bytes| {
+        rr7_forged_steps(
+            bytes,
+            &[&rr5_drafts_as(
+                &rr5_definition(RR5_COLUMNS, " STRICT"),
+                "SELECT * FROM drafts",
+            )],
+        )
+    })
+    .await
+}
+
+/// N-1: records in UTF-16, with this build's statements and rows, intact and migrated, are
+/// refused before anything is written: the copy attaches them to the UTF-8 live database, which
+/// SQLite refuses for another encoding.
+#[tokio::test]
+async fn rr7_replace_utf16_records() -> TestResult {
+    rr7_replace_refused(false, &rr7_utf16, "UTF-8").await
+}
+
+#[tokio::test]
+async fn rr7_import_utf16_records() -> TestResult {
+    rr7_import_reported(&rr7_utf16).await
+}
+
+/// `drafts` made loose, a draft's body stored as a BLOB, then its statement put back byte for
+/// byte: a STRICT table holding a value of another type, every statement this build's.
+#[tokio::test]
+async fn rr7_a_blob_in_a_strict_table_under_its_own_statement_is_refused_before_any_write()
+-> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| {
+            let forged = rr7_forged_steps(
+                bytes,
+                &[
+                    "PRAGMA writable_schema = ON;
+                     UPDATE sqlite_schema SET sql = replace(sql, ') STRICT', ')') WHERE name = 'drafts';
+                     PRAGMA writable_schema = OFF;",
+                    "UPDATE drafts SET body = CAST(body AS BLOB);",
+                    "PRAGMA writable_schema = ON;
+                     UPDATE sqlite_schema SET sql = sql || ' STRICT' WHERE name = 'drafts';
+                     PRAGMA writable_schema = OFF;",
+                ],
+            )?;
+            let staged = tempfile::tempdir()?;
+            let path = staged.path().join("f.sqlite");
+            std::fs::write(&path, &forged)?;
+            let original = staged.path().join("o.sqlite");
+            std::fs::write(&original, entry_bytes_of(bytes, "records.sqlite")?)?;
+            assert_eq!(
+                rr7_statement(&path, "drafts")?,
+                rr7_statement(&original, "drafts")?
+            );
+            assert_eq!(
+                count(&path, "SELECT count(*) FROM drafts WHERE typeof(body) = 'blob'")?,
+                1
+            );
+            Ok(forged)
+        },
+        "drafts",
+    )
+    .await
+}
+
+/// `jobs` made loose, a job of the archive's own workspace with no id added, a control of a job
+/// the archive does not hold added, then `jobs`' statement put back byte for byte. The job-keyed
+/// row check reads `job_id NOT IN (SELECT job_id FROM jobs)`, which a NULL id makes unknown.
+#[tokio::test]
+async fn rr7_a_job_without_an_id_is_refused_before_any_write() -> TestResult {
+    rr7_replace_refused(
+        true,
+        &|bytes| {
+            rr7_forged_steps(
+                bytes,
+                &[
+                    "PRAGMA writable_schema = ON;
+                     UPDATE sqlite_schema SET sql = replace(sql, ') STRICT', ')') WHERE name = 'jobs';
+                     PRAGMA writable_schema = OFF;",
+                    "INSERT INTO jobs (job_id, tenant_id, workspace_id, mutation_id, initiator, spec,
+                         record, state)
+                         SELECT NULL, tenant_id, workspace_id, 'rr7-null-job', '{}', '{}', '{}',
+                         'cancelled' FROM workspaces;
+                     INSERT INTO job_controls VALUES ('rr7-control', 'rr7-elsewhere-job', 'cancel');",
+                    "PRAGMA writable_schema = ON;
+                     UPDATE sqlite_schema SET sql = sql || ' STRICT' WHERE name = 'jobs';
+                     PRAGMA writable_schema = OFF;",
+                ],
+            )
+        },
+        "jobs",
+    )
+    .await
+}
+
+/// N-2: a draft whose stored `record` is not JSON (an import rewrites the workspace identity
+/// inside it) is refused before anything is written.
+#[tokio::test]
+async fn rr7_an_import_of_a_draft_whose_record_is_not_json_is_refused_before_any_write()
+-> TestResult {
+    rr7_import_reported(&|bytes| {
+        rr7_forged_steps(bytes, &["UPDATE drafts SET record = 'rr7 not json';"])
+    })
+    .await
+}
+
+/// N-2, by replacement: the application reads every `record` as JSON, so one that is not is
+/// refused before anything is written.
+#[tokio::test]
+async fn backup_a_replacement_refuses_a_record_that_is_not_json() -> TestResult {
+    rr7_replace_refused(
+        false,
+        &|bytes| rr7_forged_steps(bytes, &["UPDATE drafts SET record = 'rr7 not json';"]),
+        "drafts",
+    )
+    .await
+}
+
+/// R7QUICK: an index whose entry count matches its table but whose content does not. The event
+/// row is the archive's own while `events_by_log` is built, then the index is made partial (so
+/// an update leaves its entry alone), the row is moved to another workspace, and the statement
+/// is put back. `quick_check` counts entries; only `integrity_check` compares their content. A
+/// row check that counts through the covering index would see the old workspace.
+#[tokio::test]
+async fn rr7_an_index_that_lies_about_its_rows_is_refused_before_any_write() -> TestResult {
+    let (directory, _output, workspace, result) = rr7_replace(false, &|bytes| {
+        rr7_forged_steps(
+            bytes,
+            &[
+                "INSERT INTO events (tenant_id, workspace_id, event_key, record)
+                     SELECT tenant_id, workspace_id, 'rr7-lying-index', '{}' FROM workspaces;",
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_schema SET sql = sql || ' WHERE seq < 0'
+                     WHERE name = 'events_by_log';
+                 PRAGMA writable_schema = OFF;",
+                "UPDATE events SET workspace_id = 'WS99' WHERE event_key = 'rr7-lying-index';",
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_schema SET sql = replace(sql, ' WHERE seq < 0', '')
+                     WHERE name = 'events_by_log';
+                 PRAGMA writable_schema = OFF;",
+            ],
+        )
+    })
+    .await?;
+    let foreign = count(
+        &directory.path().join("records.sqlite"),
+        &format!(
+            "SELECT count(*) FROM events WHERE workspace_id = '{}'",
+            uuid_text(99)
+        ),
+    )?;
+    if let Err(error) = &result {
+        assert!(error.message.contains("damaged"), "{error}");
+    }
+    assert_eq!(foreign, 0, "an event of another workspace was restored");
+    rr5_refused_before_writing(directory.path(), &workspace, result, "lying index")
 }
 
 #[path = "../../../tests/support/check.rs"]

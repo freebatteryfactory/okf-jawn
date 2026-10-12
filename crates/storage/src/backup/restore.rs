@@ -3,10 +3,10 @@
 //!
 //! In both, the archive is checked first, before anything is written (`checked`): an archive
 //! may be a caller's file. Its entries, its manifest and every object's bytes against its
-//! digest; then its records: a database SQLite reads, intact, migrated to this build's schema,
-//! whose tables and indexes are exactly this build's, and whose rows are all of its own tenant,
-//! workspace and jobs. Then the objects are put back, then the Git history (the pack is indexed
-//! and every reference set), then the records in one transaction.
+//! digest; then its records: a UTF-8 database SQLite reads, intact, migrated to this build's
+//! schema, whose tables and indexes are exactly this build's, and whose rows are all of its own
+//! tenant, workspace and jobs, each `record` JSON. Then the objects are put back, then the Git
+//! history (the pack is indexed and every reference set), then the records in one transaction.
 //! An import then writes one commit on the archive head carrying its mutation (same tree), so
 //! its revision is found by that mutation like any job's write. A resumed import finds the
 //! accepted head already at the archive's, or at that commit, and skips what is done; the
@@ -103,10 +103,11 @@ struct Checked {
 /// of whitespace made one space (`spaced`).
 #[derive(Debug, PartialEq, Eq)]
 struct Table {
-    /// Its columns, in order.
+    /// Its columns, in order: the live schema's give the columns a restore copies
+    /// (`copied_columns`). An archive's are not compared: its statement states each of them.
     columns: Vec<Column>,
-    /// Its `CREATE TABLE` statement, which states what the columns do not: each column's
-    /// collation, STRICT, WITHOUT ROWID, CHECK and REFERENCES.
+    /// Its `CREATE TABLE` statement, which states each column (type, constraints, default and
+    /// collation) and STRICT, WITHOUT ROWID, CHECK, REFERENCES and the keys.
     statement: String,
     /// Each of its indexes by name, with its `CREATE INDEX` statement (none for the index
     /// SQLite makes for a primary key or a unique column).
@@ -195,8 +196,8 @@ pub(crate) fn check(
 /// - its entries (`Opened::open`: compression methods, sizes, and each object's bytes against
 ///   its digest), its manifest, and its objects, listed from its entries (an older manifest's
 ///   own list is not read);
-/// - its records, extracted under `staging` (`migrated`): a database SQLite reads, intact, and
-///   brought to this build's schema;
+/// - its records, extracted under `staging` (`migrated`): a UTF-8 database SQLite reads,
+///   intact, and brought to this build's schema;
 /// - their schema (`refuse_other_schema`) and then their rows (`refuse_foreign_rows`), against
 ///   this build's schema read from the live database: the one schema the rows are then copied
 ///   with.
@@ -236,11 +237,14 @@ fn checked(
 /// Check the extracted records database at `records` and bring it to this build's schema:
 /// SQLite must read it as a database, `PRAGMA integrity_check` must answer `ok` (the checks'
 /// count queries and the copy may take different paths through its tables and indexes, so
-/// those must agree), and this build's migrations must accept it.
+/// those must agree), its text encoding must be UTF-8 like the live database's (the copy
+/// attaches it, which SQLite refuses for another encoding), and this build's migrations must
+/// accept it.
 ///
 /// # Errors
-/// Returns `InvalidInput` for a file that is not a database, is damaged or does not migrate (a
-/// newer schema, say); a store fault only for a failure of this machine (`is_fault`).
+/// Returns `InvalidInput` for a file that is not a database, is damaged, is not UTF-8 or does
+/// not migrate (a newer schema, say); a store fault only for a failure of this machine
+/// (`is_fault`).
 fn migrated(records: &Path) -> Result<(), ApiError> {
     let unreadable = |error: &rusqlite::Error| {
         if is_fault(error) {
@@ -256,6 +260,14 @@ fn migrated(records: &Path) -> Result<(), ApiError> {
     if integrity != "ok" {
         return Err(invalid(&format!(
             "its records database is damaged: {integrity}"
+        )));
+    }
+    let encoding: String = connection
+        .query_row("PRAGMA encoding", [], |row| row.get(0))
+        .map_err(|error| unreadable(&error))?;
+    if encoding != "UTF-8" {
+        return Err(invalid(&format!(
+            "its records database is in {encoding}, not UTF-8"
         )));
     }
     crate::schema::RECORDS
@@ -486,12 +498,14 @@ fn copied_columns(schema: &Schema, table: &str) -> Result<Vec<String>, ApiError>
 ///
 /// Each table of this build's schema must be an ordinary table of the archive under exactly its
 /// name (a view, a table under another case or a missing table is refused), and equal it
-/// exactly (`table_of`): the same columns (name, declared type, not null, default, primary-key
-/// position, and never a generated column), the same `CREATE TABLE` statement (so the same
-/// collation for each column, STRICT, WITHOUT ROWID, CHECK and REFERENCES) and the same indexes,
-/// each by name with the same statement. Statements are compared with every run of whitespace
-/// made one space, nothing else. What else the archive holds (a table this build does not have,
-/// a trigger) is never read, and nothing is written to the archive for a trigger to act on.
+/// exactly (`table_of`): the same `CREATE TABLE` statement (so the same columns, each with its
+/// declared type, constraints, default and collation, and the same STRICT, WITHOUT ROWID, CHECK,
+/// REFERENCES and keys) and the same indexes, each by name with the same statement. Statements
+/// are compared with every run of whitespace made one space, nothing else. No statement of this
+/// build's schema holds whitespace inside a quoted name or literal, so that rule widens nothing,
+/// and the columns `pragma_table_xinfo` reports (all stated by the statement) are not compared
+/// again. What else the archive holds (a table this build does not have, a trigger) is never
+/// read, and nothing is written to the archive for a trigger to act on.
 ///
 /// # Errors
 /// Returns `InvalidInput` naming the table.
@@ -513,10 +527,8 @@ fn refuse_other_schema(connection: &Connection, live: &Schema) -> Result<(), Api
             )));
         }
         let archived = table_of(connection, table)?;
-        let differs = if archived.columns != expected.columns {
-            "columns"
-        } else if archived.statement != expected.statement {
-            "definition (a collation, STRICT, WITHOUT ROWID, CHECK or REFERENCES)"
+        let differs = if archived.statement != expected.statement {
+            "definition (its columns, a collation, STRICT, WITHOUT ROWID, CHECK or REFERENCES)"
         } else if archived.indexes != expected.indexes {
             "indexes"
         } else {
@@ -535,9 +547,15 @@ fn refuse_other_schema(connection: &Connection, live: &Schema) -> Result<(), Api
 /// In the columns the copy selects (`copied_columns`, the same list), compared byte for byte
 /// (`COLLATE BINARY`, whatever collation the archive declares):
 /// - a table with `tenant_id` and `workspace_id` holds only the manifest's tenant and workspace;
-/// - one with `tenant_id` alone only its tenant;
-/// - one keyed by `job_id` alone only rows of the archive's own jobs;
+/// - one keyed by `job_id` and no tenant only rows of the archive's own jobs (`job_controls`,
+///   `job_outputs`);
+/// - every `record` is JSON (an import rewrites the workspace identity inside it, and the
+///   application reads it);
 /// - and `workspaces` holds exactly one row, which is then the manifest's workspace.
+///
+/// Every workspace table is one of the first two kinds; one that is neither is a schema change
+/// these checks must cover first, so it fails every restore (`Internal`) rather than go
+/// unchecked.
 ///
 /// # Errors
 /// Returns `InvalidInput` naming the table.
@@ -551,16 +569,15 @@ fn refuse_foreign_rows(
     for table in WORKSPACE_TABLES {
         let copied = copied_columns(live, table)?;
         let has = |name: &str| copied.iter().any(|column| column == name);
-        let foreign = match (has("tenant_id"), has("workspace_id")) {
-            (true, true) => {
-                "\"tenant_id\" COLLATE BINARY IS NOT ?1 OR \"workspace_id\" COLLATE BINARY IS NOT ?2"
-            }
-            (true, false) => "\"tenant_id\" COLLATE BINARY IS NOT ?1 AND ?2 IS NOT NULL",
-            (false, _) if has("job_id") && *table != "jobs" => {
-                "\"job_id\" COLLATE BINARY NOT IN (SELECT \"job_id\" COLLATE BINARY FROM jobs) \
-                 AND ?1 IS NOT NULL AND ?2 IS NOT NULL"
-            }
-            _ => continue,
+        let foreign = if has("tenant_id") && has("workspace_id") {
+            "\"tenant_id\" COLLATE BINARY IS NOT ?1 OR \"workspace_id\" COLLATE BINARY IS NOT ?2"
+        } else if has("job_id") && !has("tenant_id") {
+            "\"job_id\" COLLATE BINARY NOT IN (SELECT \"job_id\" COLLATE BINARY FROM jobs) \
+             AND ?1 IS NOT NULL AND ?2 IS NOT NULL"
+        } else {
+            return Err(internal(format!(
+                "no row check of a restore covers the records table {table}"
+            )));
         };
         let count: i64 = connection
             .query_row(
@@ -574,6 +591,20 @@ fn refuse_foreign_rows(
                 "its {table} hold {count} rows of another tenant or workspace than its manifest \
                  names"
             )));
+        }
+        if has("record") {
+            let unreadable: i64 = connection
+                .query_row(
+                    &format!("SELECT count(*) FROM \"{table}\" WHERE NOT json_valid(\"record\")"),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| sql(&error))?;
+            if unreadable > 0 {
+                return Err(invalid(&format!(
+                    "its {table} hold {unreadable} rows whose record is not JSON"
+                )));
+            }
         }
     }
     let workspaces: i64 = connection
