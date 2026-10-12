@@ -8737,8 +8737,10 @@ async fn rr10_rows_left_out_counts_only_the_workspaces_own_rows() -> TestResult 
 }
 
 /// N-22: another workspace's purge, once `break_repository` has broken the survivor's
-/// repository directory, fails naming the survivor, as its damage does (N-10), so an operator
-/// knows where to look; the failure stays the version store's.
+/// repository directory, fails naming the survivor as its damage does (N-10), "in the workspace
+/// <id>", so an operator knows where to look; the failure stays the version store's. The id
+/// alone would not do: libgit2's own message for a repository that does not open carries the
+/// directory path, which holds the id.
 async fn rr10_a_broken_survivor_fails_the_purge_naming_it(
     break_repository: &dyn Fn(&Path) -> TestResult,
 ) -> TestResult {
@@ -8756,8 +8758,10 @@ async fn rr10_a_broken_survivor_fails_the_purge_naming_it(
     let error = err_of(rr8_purge(&storage, &target).await?)?;
     assert_eq!(error.code, ErrorCode::Unavailable, "{error}");
     assert!(
-        error.message.contains(&survivor.workspace_id.0.to_string()),
-        "names the survivor: {error}"
+        error
+            .message
+            .contains(&format!("in the workspace {}", survivor.workspace_id.0)),
+        "names the survivor as damage does: {error}"
     );
     Ok(())
 }
