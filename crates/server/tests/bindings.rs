@@ -13,6 +13,7 @@ use okf_jawn_contract::access::{AccessRoute, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::identity::IdentityError;
 use okf_jawn_contract::item::ItemDocument;
+use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 use okf_jawn_core::portable::item_content_digest;
 use okf_jawn_core::ports::Application;
 use okf_jawn_server::{BoundApplication, SessionId, router};
@@ -29,8 +30,8 @@ const OTHER_WORKSPACE: &str = "22222222-2222-4222-8222-222222222222";
 const REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const LIST_ITEMS: &str = "/api/items/list-items";
 const CREATE_ITEM: &str = "/api/items/create-item";
-/// One byte more than the router's 2 MiB JSON body limit.
-const OVER_LIMIT: usize = 2_097_153;
+/// One byte more than the router's JSON body limit, the contract's request-body limit.
+const OVER_LIMIT: usize = MAX_REQUEST_BODY_BYTES.saturating_add(1);
 
 fn alice() -> Result<Principal, IdentityError> {
     Ok(Principal {
@@ -272,11 +273,21 @@ async fn a_wrong_content_type_is_400_invalid_input() -> TestResult {
     Ok(())
 }
 
+/// The limit is exactly the contract's: a body of that size is read whole (and then fails as
+/// JSON, being only spaces), one byte more is refused before it is parsed.
 #[tokio::test]
 async fn a_body_over_the_limit_is_413_too_large() -> TestResult {
     let ports = ports()?;
     let counting = Arc::new(CountingApplication::new());
     let app = signed_in(counting.clone(), &ports)?;
+    let at_limit = post(
+        LIST_ITEMS,
+        "application/json",
+        vec![b' '; MAX_REQUEST_BODY_BYTES],
+    )?;
+    let response = app.clone().oneshot(at_limit).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(api_error(response).await?.code, ErrorCode::InvalidInput);
     let request = post(LIST_ITEMS, "application/json", vec![b' '; OVER_LIMIT])?;
     let response = app.oneshot(request).await?;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);

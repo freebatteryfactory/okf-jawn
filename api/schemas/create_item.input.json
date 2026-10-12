@@ -50,7 +50,8 @@
       "description": "Exact revision on which this change is based; stale writes conflict."
     },
     "body": {
-      "description": "Markdown content.",
+      "description": "Markdown content, at most 8 MiB in UTF-8.",
+      "maxLength": 8388608,
       "type": "string"
     },
     "idempotency_key": {

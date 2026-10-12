@@ -82,6 +82,13 @@ rlimit = { version = "=0.11.0" }
 # resident set (memory-cap-research; vendors.json process-memory-cap). macOS-only; it needs
 # libclang at build time there.
 libproc = { version = "=0.14.11" }
+# Batch C: the server lane's M1 requests (lane-server-report R1, R2, R5). The browser session and
+# CSRF cookies are read and written with cookie, never hand-parsed. WorkOS Connect tokens are
+# verified with jsonwebtoken on the pure-Rust provider: signatures are checked with public JWKS
+# keys only (deny.toml RUSTSEC-2023-0071). futures-util turns the event-log poll into the SSE stream.
+cookie = { version = "=0.18.2", default-features = false }
+jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rust_crypto"] }
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 
 clap_complete = "=4.6.11"
 clap_mangen = "=0.3.3"
