@@ -49,7 +49,8 @@
 //!    others are counted as kept. A surviving workspace's damage stops this step, loudly
 //!    (`Internal`, `references::refusing_in`): guessing past it could delete what the damaged
 //!    file names. The message names the damaged workspace and the path or record digest, so an
-//!    operator knows where to look. The remedy is a fix of the damaged file or of the reader,
+//!    operator knows where to look; a survivor whose repository does not open stops the step
+//!    naming it the same way. The remedy is a fix of the damaged file or of the reader,
 //!    or a purge of the damaged workspace, which its own damage does not stop (step 1); the
 //!    stopped purge then resumes by repeating the call. A restore refuses to import an archive
 //!    holding such a file (`backup::restore::refuse_unheld`), so no import plants damage.
@@ -602,13 +603,14 @@ impl StoragePurger {
                 let (mut found, mut followed) = (BTreeSet::new(), BTreeSet::new());
                 for path in repositories.others(&scope.tenant_id, &scope)? {
                     // The survivor's identity, from its repository directory
-                    // (`Repositories::path`): a failure in its history names it.
+                    // (`Repositories::path`): a failure opening or reading it names it.
                     let workspace = path
                         .file_stem()
                         .map(|stem| stem.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    let repository = git2::Repository::open_bare(&path)
-                        .map_err(|error| crate::git::repo::git(&error))?;
+                    let repository = git2::Repository::open_bare(&path).map_err(|error| {
+                        references::naming(&workspace, crate::git::repo::git(&error))
+                    })?;
                     // Read structurally, as the plan reads the target: a survivor's card or
                     // conversion record that does not read fails the purge (`damaged`, naming
                     // the survivor) rather than risk deleting what it names. Each record is

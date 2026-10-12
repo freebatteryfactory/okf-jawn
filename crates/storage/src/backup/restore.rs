@@ -37,7 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use git2::Repository;
+use git2::{Oid, Repository};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{Digest, MutationId};
 use okf_jawn_contract::workspace::RestoreReport;
@@ -272,7 +272,9 @@ fn checked(
 ///
 /// - Its pack is indexed into a scratch bare repository under `staging`, walked from the
 ///   commits its manifest names (`references::history_from`): every card's original and
-///   conversion record must be an `objects/` entry;
+///   conversion record must be an `objects/` entry; then walked once more as the archive
+///   writer packs a workspace (`refuse_unpackable`): every commit, tree and blob the history
+///   needs must be in the pack;
 /// - each such conversion record is read from its entry, streamed (`references::read_record`):
 ///   every structured export and asset it names must be one too;
 /// - and every object a row of `archive::ROW_OBJECTS` names, in the tables the restore copies:
@@ -285,7 +287,9 @@ fn checked(
 /// (not JSON, or a named field that is not a digest), an entry under `.okf/sources` that is not a
 /// file, a manifest commit the pack lacks, and a pack that lacks a parent, tree or appearance
 /// blob a commit needs are each refused, so a restore never plants what would stop the tenant's
-/// purges (`purge::references`).
+/// purges (`purge::references`); a pack that lacks any other object a commit needs is refused
+/// too, so a restore never plants what would stop the installation's backups
+/// (`refuse_unpackable`).
 ///
 /// # Errors
 /// Returns `InvalidInput` naming the digest and what names it, or naming an appearance or
@@ -318,7 +322,9 @@ fn refuse_unheld(
             .iter()
             .map(|(_, commit)| oid(commit))
             .collect::<Result<Vec<_>, _>>()?;
-        references::history_from(&scratch, &tips, invalid)?
+        let history = references::history_from(&scratch, &tips, invalid)?;
+        refuse_unpackable(&scratch, &tips)?;
+        history
     };
     let _ = std::fs::remove_dir_all(&scratch_path);
     for (digest, what) in &history.objects {
@@ -361,6 +367,38 @@ fn refuse_unheld(
     Ok(Named {
         history: history.objects.into_keys().collect(),
         followed,
+    })
+}
+
+/// Refuse a pack that the archive writer could not pack again: every object of every commit
+/// reachable from `tips` is inserted into a pack builder, as `archive::write_pack` packs a
+/// workspace (`PackBuilder::insert_walk`), so a commit, tree or blob the pack lacks anywhere in
+/// a tree is found now, before anything is written. `history_from` has read the commits, the
+/// appearance trees and the appearance blobs, and names what it finds missing; this walk reads
+/// every other tree and blob, which an item's read and every later archive need. Without it, a
+/// pack lacking an item's blob (an earlier version of a note, say) restores, and then every
+/// archive of the workspace fails on it, with it every installation-wide backup set and the
+/// pre-migration set, so the installation does not open after an upgrade (SPEC sections 2 and
+/// 12). The builder only collects the objects; nothing is written.
+///
+/// # Errors
+/// Returns `InvalidInput` naming the object the pack lacks; another Git failure is the version
+/// store's (`Unavailable`).
+fn refuse_unpackable(scratch: &Repository, tips: &[Oid]) -> Result<(), ApiError> {
+    let mut walk = scratch.revwalk().map_err(|error| git(&error))?;
+    for tip in tips {
+        walk.push(*tip).map_err(|error| git(&error))?;
+    }
+    let mut pack = scratch.packbuilder().map_err(|error| git(&error))?;
+    pack.insert_walk(&mut walk).map_err(|error| {
+        if error.code() == git2::ErrorCode::NotFound {
+            invalid(&format!(
+                "the history does not hold an object a commit needs: {}",
+                error.message()
+            ))
+        } else {
+            git(&error)
+        }
     })
 }
 

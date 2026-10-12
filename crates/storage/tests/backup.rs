@@ -8335,12 +8335,6 @@ async fn rr9_a_manifest_reference_git_cannot_name_is_refused_before_any_write() 
     }
 }
 
-/// Q4, N-13: a workspace whose backup job's output is the archive it wrote, recorded as its
-/// artifact, and which holds that archive in a completed upload slot too (beside an ordinary
-/// upload). Its next backup set leaves out the three rows that name the archive, counts them in
-/// the manifest's `rows_left_out`, and keeps the rest; the set restores by replacement and its
-/// archive by import, and the restored workspace keeps the job (finished, no output, no
-/// download) and the ordinary upload.
 /// A notes workspace in the data directory `directory` whose backup job's output is the archive
 /// it wrote, recorded as its `WorkspaceBackup` artifact, and which holds that archive in a
 /// completed upload slot too, beside an ordinary upload; then a backup set of the directory
@@ -8423,6 +8417,12 @@ async fn rr9_workspace_holding_its_own_backup(
     Ok((workspace, archive.digest))
 }
 
+/// Q4, N-13: a workspace whose backup job's output is the archive it wrote, recorded as its
+/// artifact, and which holds that archive in a completed upload slot too (beside an ordinary
+/// upload). Its next backup set leaves out the three rows that name the archive, counts them in
+/// the manifest's `rows_left_out`, and keeps the rest; the set restores by replacement and its
+/// archive by import, and the restored workspace keeps the job (finished, no output, no
+/// download) and the ordinary upload.
 #[tokio::test]
 async fn rr9_a_workspace_holding_its_own_backup_restores_without_the_rows_naming_it() -> TestResult
 {
@@ -8489,6 +8489,303 @@ async fn rr9_a_workspace_holding_its_own_backup_restores_without_the_rows_naming
         "the restored job advertises no download"
     );
     Ok(())
+}
+
+// Round 4 re-review (`rr10_`, b1r4): B4-1, a pack lacking a blob only its history or its head
+// needs, and what a refused import leaves working; N-20, the `.okf` and `sources` trees; N-21,
+// the count against other workspaces' rows; N-22, a survivor whose repository does not open.
+
+/// `Rr9Damage`: edit `notes/plan.md` once more through Git, so the note's first blob is needed
+/// by the history but not by the head.
+fn rr10_edit_the_note(storage: &Storage, workspace: &StorageScope) -> Fallible<Vec<Vec<u8>>> {
+    let repository = repository_of(storage, workspace)?;
+    let head = rr9_head(&repository)?;
+    let entry = head.tree()?.get_path(Path::new("notes/plan.md"))?;
+    let text = String::from_utf8(repository.find_blob(entry.id())?.content().to_vec())?;
+    let edited = text.replace("The plan.", "The plan, edited.");
+    assert!(edited != text, "the note was edited");
+    drop(head);
+    drop(repository);
+    rr8_commit_raw_file(storage, workspace, "notes/plan.md", edited.as_bytes())?;
+    Ok(Vec::new())
+}
+
+/// `Rr9Omit`: the blob of `notes/plan.md` on the parent of the head of `repository`, which
+/// only the history needs once `rr10_edit_the_note` ran.
+fn rr10_old_note(repository: &git2::Repository) -> Fallible<Option<git2::Oid>> {
+    Ok(Some(
+        rr9_head(repository)?
+            .parent(0)?
+            .tree()?
+            .get_path(Path::new("notes/plan.md"))?
+            .id(),
+    ))
+}
+
+/// `Rr9Omit`: the blob of `notes/plan.md` on the head of `repository`.
+fn rr10_head_note(repository: &git2::Repository) -> Fallible<Option<git2::Oid>> {
+    Ok(Some(
+        rr9_head(repository)?
+            .tree()?
+            .get_path(Path::new("notes/plan.md"))?
+            .id(),
+    ))
+}
+
+/// B4-1: an archive whose pack lacks a blob only its history needs (an earlier version of a
+/// note, on no appearance tree) is refused as invalid input before any write, in both modes, as
+/// N-14 refuses a pack lacking a parent, a tree or an appearance blob: the archive writer could
+/// not pack the restored workspace again.
+#[tokio::test]
+async fn rr10_a_pack_lacking_a_blob_only_its_history_needs_is_refused() -> TestResult {
+    rr9_both_refuse(
+        &rr10_edit_the_note,
+        &rr10_old_note,
+        "the history does not hold",
+    )
+    .await
+}
+
+/// B4-1: a pack lacking a blob its head needs (the note itself) is refused as invalid input
+/// before any write, in both modes, rather than failing as the version store's after the pack
+/// is indexed and the head moved.
+#[tokio::test]
+async fn rr10_a_pack_lacking_a_blob_its_head_needs_is_refused_before_any_write() -> TestResult {
+    rr9_both_refuse(
+        &|_, _| Ok(Vec::new()),
+        &rr10_head_note,
+        "the history does not hold",
+    )
+    .await
+}
+
+/// B4-1, the reviewer's characterisation turned around: a workspace Admin of tenant `elsewhere`
+/// imports an archive whose pack lacks a blob (`omit`, after `damage`), and the import is
+/// refused. Then every later backup still runs: the target workspace's own archive, the
+/// installation's backup set, and, once the records need an upgrade, the pre-migration set, so
+/// the installation opens and migrates for every tenant (SPEC sections 2 and 12).
+async fn rr10_refused_import_leaves_the_backups_working(
+    damage: &Rr9Damage<'_>,
+    omit: &Rr9Omit<'_>,
+) -> TestResult {
+    let (directory, _output, _workspace, _installation, archive) =
+        rr9_set_with_history(damage, omit).await?;
+    {
+        let storage = Storage::open(directory.path())?;
+        let (target, blank, result) = import_crafted(&storage, std::fs::read(&archive)?).await?;
+        assert_import_refused(
+            &storage,
+            (target.clone(), blank, result),
+            "the history does not hold",
+        )
+        .await?;
+        storage
+            .backups()
+            .write_workspace_archive(&target, uuid!(95)?)
+            .await?;
+        let everything = tempfile::tempdir()?;
+        storage
+            .backups()
+            .write_backup_set(everything.path(), None)
+            .await?;
+        assert!(
+            set_of(everything.path(), &target).1.is_file(),
+            "the installation's set holds the target's archive"
+        );
+    }
+    let records = directory.path().join("records.sqlite");
+    as_records_schema_1(&records)?;
+    let storage = Storage::open(directory.path())?;
+    let sets = std::fs::read_dir(storage.data().pre_migration_path())?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .count();
+    assert_eq!(sets, 1, "the pre-migration backup set was written");
+    assert_eq!(
+        count(&records, "PRAGMA user_version")?,
+        2,
+        "then the records are upgraded"
+    );
+    Ok(())
+}
+
+/// B4-1: after the refused import of a pack lacking a blob only its history needs, every later
+/// backup set and the pre-migration backup succeed.
+#[tokio::test]
+async fn rr10_a_refused_import_lacking_an_old_blob_leaves_the_installations_backups_working()
+-> TestResult {
+    rr10_refused_import_leaves_the_backups_working(&rr10_edit_the_note, &rr10_old_note).await
+}
+
+/// B4-1: after the refused import of a pack lacking a blob its head needs, every later backup
+/// set and the pre-migration backup succeed.
+#[tokio::test]
+async fn rr10_a_refused_import_lacking_a_head_blob_leaves_the_installations_backups_working()
+-> TestResult {
+    rr10_refused_import_leaves_the_backups_working(&|_, _| Ok(Vec::new()), &rr10_head_note).await
+}
+
+/// N-20: a pack that lacks the tree at `tree` of its head (under which a valid appearance sits)
+/// is refused as invalid input naming `what`, before any write, in both modes.
+async fn rr10_a_pack_lacking_a_tree_is_refused(tree: &str, what: &str) -> TestResult {
+    let original = b"rr10 an original a valid card names".to_vec();
+    let path = format!(".okf/sources/{}.json", uuid_text(15));
+    rr9_both_refuse(
+        &|storage, workspace| {
+            rr8_commit_raw_file(
+                storage,
+                workspace,
+                &path,
+                &rr9_appearance(&digest_of_bytes(&original)?, &json!({}))?,
+            )?;
+            Ok(vec![original.clone()])
+        },
+        &|repository| {
+            Ok(Some(
+                rr9_head(repository)?
+                    .tree()?
+                    .get_path(Path::new(tree))?
+                    .id(),
+            ))
+        },
+        what,
+    )
+    .await
+}
+
+/// N-20: a pack lacking the `.okf` tree of a commit is refused naming that folder, told apart
+/// from a commit with no sources folder.
+#[tokio::test]
+async fn rr10_a_pack_lacking_the_okf_tree_is_refused_naming_it() -> TestResult {
+    rr10_a_pack_lacking_a_tree_is_refused(".okf", "the folder .okf (").await
+}
+
+/// N-20: a pack lacking the `.okf/sources` tree of a commit is refused naming that folder.
+#[tokio::test]
+async fn rr10_a_pack_lacking_the_sources_tree_is_refused_naming_it() -> TestResult {
+    rr10_a_pack_lacking_a_tree_is_refused(".okf/sources", "the folder .okf/sources (").await
+}
+
+/// N-21: `rows_left_out` is the workspace's own count. A second workspace of the tenant holding
+/// its own backup artifact and job output adds nothing to the first's count (3), and its own
+/// archive counts its two rows.
+#[tokio::test]
+async fn rr10_rows_left_out_counts_only_the_workspaces_own_rows() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let output = tempfile::tempdir()?;
+    let second = {
+        let storage = Storage::open(directory.path())?;
+        let (second, _) = create(&storage, "local", 2, "Second").await?;
+        let scope = JobScope::Workspace(second.clone());
+        let records = storage.records();
+        let job = records
+            .create_job(
+                &scope,
+                NewJob {
+                    mutation_id: uuid!(90)?,
+                    initiator: person("ana"),
+                    spec: JobSpec::BackupWorkspace,
+                },
+            )
+            .await?;
+        let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+        let archive = storage
+            .backups()
+            .write_workspace_archive(&second, claimed.mutation_id)
+            .await?;
+        let artifact = records
+            .record_artifact(
+                &scope,
+                claimed.mutation_id,
+                NewArtifact {
+                    kind: ArtifactKind::WorkspaceBackup,
+                    object: archive.clone(),
+                    media_type: "application/zip".to_owned(),
+                    created_by_job: job.id,
+                },
+            )
+            .await?;
+        records
+            .complete_job(JobCompletion {
+                lease: claimed.lease,
+                revision: None,
+                item_ids: Vec::new(),
+                artifact: Some(artifact.id),
+                restore: None,
+                outputs: vec![archive.digest.clone()],
+                warnings: Vec::new(),
+            })
+            .await?;
+        second
+    };
+    let (workspace, _) =
+        rr9_workspace_holding_its_own_backup(directory.path(), output.path()).await?;
+    let counted = |scope: &StorageScope| -> Fallible<Option<u64>> {
+        let (_, archive) = set_of(output.path(), scope);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&entry_bytes_of(&std::fs::read(&archive)?, "manifest.json")?)?;
+        Ok(manifest
+            .get("rows_left_out")
+            .and_then(serde_json::Value::as_u64))
+    };
+    let (first, other) = (counted(&workspace)?, counted(&second)?);
+    assert!(
+        first == Some(3) && other == Some(2),
+        "the first workspace's count {first:?} (3 expected), the second's {other:?} (2 expected)"
+    );
+    Ok(())
+}
+
+/// N-22: another workspace's purge, once `break_repository` has broken the survivor's
+/// repository directory, fails naming the survivor as its damage does (N-10), "in the workspace
+/// <id>", so an operator knows where to look; the failure stays the version store's. The id
+/// alone would not do: libgit2's own message for a repository that does not open carries the
+/// directory path, which holds the id.
+async fn rr10_a_broken_survivor_fails_the_purge_naming_it(
+    break_repository: &dyn Fn(&Path) -> TestResult,
+) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let storage = Storage::open(directory.path())?;
+    let (survivor, _) = create(&storage, "local", 1, "Survivor").await?;
+    let (target, _) = create(&storage, "local", 2, "Target").await?;
+    break_repository(
+        &storage
+            .data()
+            .repositories_path()
+            .join("local")
+            .join(format!("{}.git", survivor.workspace_id.0)),
+    )?;
+    let error = err_of(rr8_purge(&storage, &target).await?)?;
+    assert_eq!(error.code, ErrorCode::Unavailable, "{error}");
+    assert!(
+        error
+            .message
+            .contains(&format!("in the workspace {}", survivor.workspace_id.0)),
+        "names the survivor as damage does: {error}"
+    );
+    Ok(())
+}
+
+/// N-22: a survivor whose repository does not open (its `HEAD` is gone) is named.
+#[tokio::test]
+async fn rr10_a_survivor_whose_repository_does_not_open_fails_the_purge_naming_it() -> TestResult {
+    rr10_a_broken_survivor_fails_the_purge_naming_it(&|repository| {
+        Ok(std::fs::remove_file(repository.join("HEAD"))?)
+    })
+    .await
+}
+
+/// N-22: a survivor whose repository opens but whose references do not list (its `packed-refs`
+/// does not parse) is named too.
+#[tokio::test]
+async fn rr10_a_survivor_whose_references_do_not_list_fails_the_purge_naming_it() -> TestResult {
+    rr10_a_broken_survivor_fails_the_purge_naming_it(&|repository| {
+        Ok(std::fs::write(
+            repository.join("packed-refs"),
+            b"not a packed references file",
+        )?)
+    })
+    .await
 }
 
 #[path = "../../../tests/support/check.rs"]
