@@ -280,8 +280,11 @@ test.describe('editing a document', () => {
     await shot(page, '11-draft-editor');
 
     // Every request to the service carried the cookie's value in the header, reads included.
+    // (Counted as words: `toEqual` reads an array of missing values as an empty one.)
     expect(csrf.length).toBeGreaterThan(5);
-    expect(csrf.filter((value) => value !== TOKEN)).toEqual([]);
+    expect(csrf.filter((value) => value !== TOKEN).map((value) => value ?? 'no header')).toEqual(
+      [],
+    );
 
     // Reload: the item opens on the draft the service holds, marked as one.
     await page.reload();
