@@ -168,6 +168,47 @@ function Watched({
   );
 }
 
+/**
+ * An operation that keeps running when its component asks something else, as a mutation does, or
+ * a query another component still reads: whatever is asked has failed, and each run ends when the
+ * test says so.
+ */
+function Outliving({ request, runs }: { request: string; runs: Array<() => void> }) {
+  const retry = useRetry({
+    request,
+    failed: true,
+    error: apiError('internal'),
+    run: () =>
+      new Promise<void>((resolve) => {
+        runs.push(resolve);
+      }),
+    loaded: () => null,
+  });
+  return <FailureNotice context="Opening" error={retry.error} retry={retry} />;
+}
+
+/** Ask for a retry of "one" from the keyboard, then have the component ask "two" instead. */
+async function retryOutlived() {
+  const runs: Array<() => void> = [];
+  const view = render(<Outliving request="one" runs={runs} />);
+  const button = screen.getByRole('button', { name: 'Try again' });
+  const notice = button.parentElement;
+  if (notice === null) throw new Error('the retry button is not in a notice');
+  act(() => button.focus());
+  await userEvent.keyboard('{Enter}');
+  expect(button.textContent).toBe('Trying again…');
+  view.rerender(<Outliving request="two" runs={runs} />);
+  // "two" has failed too, and no retry of it has been asked for.
+  expect(button.textContent).toBe('Try again');
+  /** End the run numbered `nth` (from 1). */
+  const end = async (nth: number) => {
+    const run = runs[nth - 1];
+    if (run === undefined) throw new Error(`the operation was not run ${nth} times`);
+    await act(async () => run());
+  };
+  return { runs, button, notice, end };
+}
+
 /** Render the watched operation, failed, with keyboard focus on its retry button. */
 function watchedWithFocus() {
   const view = render(<Watched status="failed" />);
@@ -454,6 +495,30 @@ describe('a retry never unmounts the focused control', () => {
     // The answer is this request's state now; a retry of it starts afresh.
     const button = await screen.findByRole('button', { name: 'Try again' });
     expect(button.getAttribute('aria-disabled')).toBe('false');
+  });
+
+  it('does not end the retry of what is asked now when an earlier request’s retry ends late', async () => {
+    const { runs, button, end } = await retryOutlived();
+    await userEvent.keyboard('{Enter}');
+    expect(runs).toHaveLength(2);
+    expect(button.textContent).toBe('Trying again…');
+    // The retry of "one" ends: the retry of "two" is still in flight.
+    await end(1);
+    expect(button.textContent).toBe('Trying again…');
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect(screen.getByRole('status').textContent).toBe('Opening: trying again…');
+    // It ends when its own run does.
+    await end(2);
+    expect(button.textContent).toBe('Try again');
+  });
+
+  it('does not follow an earlier request’s retry that ends late: focus in the notice of what is asked now stays where it is', async () => {
+    const { button, notice, end } = await retryOutlived();
+    // The person clicks the words of the notice: focus is in the notice, not on its button.
+    act(() => notice.focus());
+    await end(1);
+    expect(button.isConnected).toBe(true);
+    expect(document.activeElement).toBe(notice);
   });
 });
 
