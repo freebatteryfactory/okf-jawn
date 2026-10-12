@@ -166,6 +166,8 @@ pub mod connect;
 #[cfg(feature = "runtime")]
 pub mod cookies;
 pub mod errors;
+#[cfg(feature = "runtime")]
+pub mod events;
 pub mod grants;
 pub mod hosted;
 pub mod identity;
@@ -177,3 +179,5 @@ pub mod sandbox;
 pub mod schemas;
 #[cfg(feature = "runtime")]
 pub mod sessions;
+#[cfg(feature = "runtime")]
+pub mod transfers;
