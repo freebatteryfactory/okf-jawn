@@ -29,7 +29,8 @@
       "description": "Revision the editor saw; equal to the current head to rebase after resolving a conflict."
     },
     "body": {
-      "description": "Drafted Markdown body.",
+      "description": "Drafted Markdown body, at most 8 MiB in UTF-8.",
+      "maxLength": 8388608,
       "type": "string"
     },
     "idempotency_key": {

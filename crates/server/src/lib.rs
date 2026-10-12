@@ -71,8 +71,8 @@ struct Authenticated {
     session_id: Option<String>,
 }
 
-/// Largest JSON request body accepted, in bytes (2 MiB).
-const JSON_BODY_LIMIT: usize = 2_097_152;
+/// Largest JSON request body accepted, in bytes: the contract's one request-body limit.
+const JSON_BODY_LIMIT: usize = okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 
 impl<S: Send + Sync> FromRequestParts<S> for Authenticated {
     type Rejection = Response;
@@ -146,7 +146,13 @@ async fn respond(
 /// JSON, and 415 is not among the statuses the published contract declares.
 fn body_rejection(rejection: &JsonRejection) -> ApiError {
     if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        ApiError::new(ErrorCode::TooLarge, "Request body exceeds the 2 MiB limit")
+        ApiError::new(
+            ErrorCode::TooLarge,
+            format!(
+                "Request body exceeds the {} MiB limit",
+                JSON_BODY_LIMIT / 1_048_576
+            ),
+        )
     } else {
         ApiError::new(ErrorCode::InvalidInput, rejection.body_text())
     }

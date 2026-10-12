@@ -46,6 +46,12 @@
         "path": "docling → docling-pdf (declared dependency)"
       },
       {
+        "id": "RUSTSEC-2023-0071",
+        "crate": "rsa",
+        "label": "verify-only use",
+        "path": "server → jsonwebtoken (rust_crypto) → rsa"
+      },
+      {
         "id": "GHSA-vfj7-8cjw-p6xm",
         "package": "braces@3.0.3",
         "label": "build-time tooling",
