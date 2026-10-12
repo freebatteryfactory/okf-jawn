@@ -852,6 +852,9 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
 - **A managed backup is never imported as a source document.** The archive writer refuses a card whose original is a backup or written-history object, because such a card can never be restored or read. So ingest's import refuses, with `InvalidInput`, to convert an upload whose digest is one of the tenant's managed archives or written histories. A restore's own upload stays allowed.
 - **A backup taken during an import keeps the upload usable.** Running jobs are not archived. So an upload consumed only by a job the archive drops is archived as completed and unconsumed, and the import can be run again after a restore.
 - **What a failed replacement restore leaves.** Some failures are found only by the copy, such as a key collision between two archives of one set. These leave the installation rows and the earlier workspaces written. Each such check either moves into the read-only pre-check, or the `restore` doc states what is left, and a test shows that a rerun completes.
+- **One local tenant id.** Storage and server use the contract's `LOCAL_TENANT_ID` (`"local"`, Batch C) wherever production code names the local tenant; no other literal remains.
+- **Purge and backup outcomes reach the caller.** Today the rows an archive leaves out for naming a backup (`rows_left_out`) and the files a purge could not read (`unread`) are recorded only in the manifest and in the purge plan. Carry both through the core port and the contract's reports. Also carry `purge_progress` in the installation archive, so a replacement restore keeps the `unread` list.
+- **Git errors name no machine path.** libgit2 messages passed up through `git()` include the data-directory path, and they reach an administrator in an `Unavailable`. Remove the data-directory prefix from surfaced Git errors, keeping the workspace id.
 
 **With their features.**
 
@@ -866,6 +869,16 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
 
   Nothing creates a purge until M1.4's purge operation.
 - **WebKit keyboard reach (the desktop launcher, Wave 3).** By default, WebKit leaves links out of the Tab order, and a page cannot change that. So the macOS launcher's web view sets `tabFocusesLinks`, and the Wave 3 keyboard journey runs in that launcher (workspace-ui M1 review, N12).
+- **Byte transfers, sign-ins and connector events (core M1.4).** These come from server M1 (S3 to S5). The server holds no operation behaviour, so core provides:
+  - a `transfers` module over `Ports`: `upload_content`, `download_object`, `download_artifact` and `download_tenant_artifact`, which return a `Download` (media type, total size, offset, length, body) and record a `Forbidden` as `permission_denied`, as dispatch does;
+  - `ApplicationService::record_sign_in(principal)` (stage-1b design section 7);
+  - `connector_issued` and `connector_revoked` recorded in the `create_connector` and `revoke_connector` handlers.
+
+  Server M1 binds the byte routes against a trait of the same shape until then.
+- **Stored shapes are versioned (a standing rule for every lane).** The search indexer and the read path parse a stored card through the strict contract type, and so does every other stored-file reader. Any contract change to the shape of a file stored in Git (an appearance, a conversion record, a correction) therefore bumps the data-format version and ships a migration that rewrites older files. A restore refuses an archive of another version (storage B1-R round-4 re-review, N-16).
+- **Deployment settings (server M2).** `deploy/.env.example` gains `OKF_SANDBOX_ORIGIN`, `OKF_ALLOWED_HOSTS` (defaulting to the authority of `OKF_PUBLIC_ORIGIN`) and `OKF_UI_DIR`.
+- **The CSRF cookie name in the UI (workspace-ui M2).** The generated client sends `x-okf-csrf`. workspace-ui reads the `okf-csrf` cookie name from generated output, or from one constant whose test checks it against the OpenAPI document.
+- **Screen readers on the tree (the Wave 3 accessibility check).** The tree's scrolling list is an unnamed `group` tab stop that forwards focus to the active row. Check how NVDA and VoiceOver announce it.
 - **R-I11 (core M1.4, with the cancel operation).** A point-of-no-return seal on `RecordStore`: `cancel_job` refuses with `Conflict` once a restore has called `restore_import`. Until M1.4, no production path cancels a running job.
 
 ## 7. Risks by wave
