@@ -136,7 +136,12 @@ export const sourcesOfNote: GetSourcesResponse = {
 
 /** Render the whole app (router, query cache, Explorer) at `url`, with a fresh Explorer store. */
 export function renderAt(url: string) {
-  useExplorerStore.setState({ views: { [WS]: emptyView() }, layouts: {}, nextPane: 2 });
+  useExplorerStore.setState({
+    views: { [WS]: emptyView() },
+    layouts: {},
+    nextPane: 2,
+    focusRequest: null,
+  });
   const router = createAppRouter(createMemoryHistory({ initialEntries: [url] }));
   const queryClient = createQueryClient();
   const view = render(<App router={router} queryClient={queryClient} />);

@@ -18,7 +18,7 @@ import { DocumentPanes, matchingLayout } from './DocumentPanes';
 import { FolderTree } from './FolderTree';
 import { SourcePanel } from './SourcePanel';
 import { type ItemSelection, validateItemSearch, validateWorkspaceSearch } from './search-params';
-import { useExplorerStore, useWorkspaceView } from './store';
+import { type PaneLocation, useExplorerStore, useWorkspaceView } from './store';
 
 export interface ExplorerShellProps {
   workspace: Workspace;
@@ -56,10 +56,13 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
   const splitRight = useExplorerStore((state) => state.splitRight);
   const setLayout = useExplorerStore((state) => state.setLayout);
 
-  // The URL is the truth for the focused pane: whatever item it names is open there.
+  // The URL is the truth for the focused pane: whatever item it names is open there, at the
+  // selection and cited revision it names. The pane remembers them for when it loses focus.
+  const sel = search.sel;
+  const rev = search.rev;
   useEffect(() => {
-    if (itemId !== null) openInStore(workspaceId, itemId);
-  }, [itemId, openInStore, workspaceId]);
+    if (itemId !== null) openInStore(workspaceId, itemId, { sel, rev });
+  }, [itemId, openInStore, workspaceId, sel, rev]);
 
   const goToItem = (target: string, destination: Destination = {}) =>
     void navigate({
@@ -97,11 +100,16 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
   const layouts = useExplorerStore((state) => state.layouts);
   const columns = matchingLayout(layouts[COLUMNS_GROUP], COLUMN_IDS);
 
+  // Focusing a pane makes the URL describe it again: its item, selection and cited revision.
   const navigateToPane = (paneId: string) => {
     const pane = view.panes.find((candidate) => candidate.id === paneId);
-    if (pane?.active) goToItem(pane.active, { replace: true });
+    if (pane?.active) goToItem(pane.active, { ...pane.location, replace: true });
     else goToWorkspace();
   };
+  const locationOf = (paneId: string): PaneLocation =>
+    paneId === view.focusedPaneId
+      ? { ...(sel === undefined ? {} : { sel }), ...(rev === undefined ? {} : { rev }) }
+      : (view.panes.find((pane) => pane.id === paneId)?.location ?? {});
 
   return (
     <div className="explorer">
@@ -157,18 +165,18 @@ export function ExplorerShell({ workspace }: ExplorerShellProps) {
               navigateToPane(paneId);
             }}
             onClose={(paneId, target) => {
-              const wasFocused = paneId === view.focusedPaneId;
-              const next = closeTab(workspaceId, paneId, target);
-              if (!wasFocused) return;
-              if (next === null) goToWorkspace();
-              else goToItem(next, { replace: true });
+              const result = closeTab(workspaceId, paneId, target);
+              if (result === null || !result.focusedChanged) return;
+              if (result.show === null) goToWorkspace();
+              else goToItem(result.show.itemId, { ...result.show.location, replace: true });
             }}
             onSplit={(paneId, target) => {
-              splitRight(workspaceId, paneId, target);
-              goToItem(target, { replace: true });
+              const location = locationOf(paneId);
+              splitRight(workspaceId, paneId, target, location);
+              goToItem(target, { ...location, replace: true });
             }}
-            onSelect={(target, sel) => goToItem(target, { sel, rev: search.rev })}
-            onReadLatest={(target) => goToItem(target, { sel: search.sel })}
+            onSelect={(target, location) => goToItem(target, location)}
+            onReadLatest={(target) => goToItem(target, { sel })}
           />
         </Panel>
         <Separator className="separator" aria-label="Resize the source panel" />

@@ -5,11 +5,13 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useExplorerStore } from '../../src/features/explorer/store';
 import { fail, mockApi, notImplemented } from './support/api';
-import { explorerHandlers, NOTE, OTHER, renderAt, WS } from './support/workspace';
+import { explorerHandlers, NOTE, OLD, OTHER, renderAt, WS } from './support/workspace';
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+const READ = '/api/reads/read-item';
 
 async function openTwoTabs() {
   const view = renderAt(`/w/${WS}/i/${NOTE}`);
@@ -91,6 +93,67 @@ describe('tabs and panes', () => {
     }
     expect(stored).toContain(NOTE);
     expect(stored).toContain(OTHER);
+  });
+});
+
+describe('each pane keeps what it shows', () => {
+  const lines = { kind: 'lines', range: { start: 2, end: 3 } } as const;
+  const deepLink = `/w/${WS}/i/${NOTE}?sel=${encodeURIComponent(JSON.stringify(lines))}&rev=${OLD}`;
+
+  it('does not apply the focused pane selection to another pane showing the same item (P9)', async () => {
+    mockApi(explorerHandlers());
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}`);
+    await screen.findByRole('tab', { name: 'Meeting notes', selected: true });
+    await userEvent.click(screen.getByRole('button', { name: 'Split right' }));
+    const first = await screen.findByRole('region', { name: 'Documents, pane 1 of 2' });
+    await screen.findByRole('region', { name: /^Documents, pane 2 of 2/ });
+    await router.navigate({
+      to: '/w/$workspaceId/i/$itemId',
+      params: { workspaceId: WS, itemId: NOTE },
+      search: { sel: { kind: 'lines', range: { start: 2, end: 3 } } },
+    });
+    await screen.findByText('Showing lines 2–3.', { exact: false });
+    expect(within(first).queryByText(/Showing lines/)).toBeNull();
+  });
+
+  it('splits a pane with its selection and cited revision, in both panes and the URL', async () => {
+    const api = mockApi(explorerHandlers());
+    const { router } = renderAt(deepLink);
+    await screen.findByText('Showing lines 2–3.', { exact: false });
+    await userEvent.click(screen.getByRole('button', { name: 'Split right' }));
+    const first = await screen.findByRole('region', { name: 'Documents, pane 1 of 2' });
+    const second = screen.getByRole('region', { name: 'Documents, pane 2 of 2, focused' });
+    await within(second).findByText('Showing lines 2–3.', { exact: false });
+    expect(within(first).getByText('Showing lines 2–3.', { exact: false })).toBeTruthy();
+    expect(router.state.location.search).toEqual({ sel: lines, rev: OLD });
+    for (const body of api.callsTo(READ)) {
+      expect(body.at).toEqual({ kind: 'revision', revision: OLD });
+      expect(body.selection).toEqual(lines);
+    }
+  });
+
+  it('an unfocused pane keeps its selection and revision, and refocusing it restores the URL', async () => {
+    const api = mockApi(explorerHandlers());
+    const { router } = renderAt(deepLink);
+    await screen.findByText('Showing lines 2–3.', { exact: false });
+    await userEvent.click(screen.getByRole('button', { name: 'Split right' }));
+    const second = await screen.findByRole('region', { name: 'Documents, pane 2 of 2, focused' });
+    // Open another item in the new pane: the URL now describes it.
+    const tree = screen.getByRole('tree', { name: 'Folders' });
+    await userEvent.click(await within(tree).findByRole('treeitem', { name: /Plan/ }));
+    await within(second).findByRole('tab', { name: 'Plan', selected: true });
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${OTHER}`));
+    expect(router.state.location.search).toEqual({});
+    const first = screen.getByRole('region', { name: 'Documents, pane 1 of 2' });
+    expect(within(first).getByText('Showing lines 2–3.', { exact: false })).toBeTruthy();
+    const noteReads = api.callsTo(READ).filter((body) => body.item_id === NOTE);
+    for (const body of noteReads) {
+      expect(body.at).toEqual({ kind: 'revision', revision: OLD });
+      expect(body.selection).toEqual(lines);
+    }
+    within(first).getByRole('tab', { name: 'Meeting notes' }).focus();
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    expect(router.state.location.search).toEqual({ sel: lines, rev: OLD });
   });
 });
 

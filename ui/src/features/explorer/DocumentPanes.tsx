@@ -14,7 +14,13 @@ import { Group, Panel, Separator } from 'react-resizable-panels';
 import type { Revision } from '../../api/generated/types.gen';
 import { DocumentView, itemOptions } from '../documents/DocumentView';
 import type { ItemSelection } from './search-params';
-import { MAX_PANES, type Pane, type PanelLayout, useExplorerStore } from './store';
+import {
+  MAX_PANES,
+  type Pane,
+  type PaneLocation,
+  type PanelLayout,
+  useExplorerStore,
+} from './store';
 
 export interface DocumentPanesProps {
   workspaceId: string;
@@ -25,14 +31,18 @@ export interface DocumentPanesProps {
   urlItemId: string | null;
   /** The URL names an item id the contract rejects; nothing was requested for it. */
   invalidItemLink: boolean;
-  /** The URL's selection and cited revision, which apply to the focused pane's open item. */
+  /**
+   * The URL's selection and cited revision, which apply to the focused pane's open item. Every
+   * other pane shows its own, as its URL last named them.
+   */
   selection: ItemSelection | undefined;
   revision: Revision | undefined;
   onActivate: (paneId: string, itemId: string) => void;
   onFocusPane: (paneId: string) => void;
   onClose: (paneId: string, itemId: string) => void;
   onSplit: (paneId: string, itemId: string) => void;
-  onSelect: (itemId: string, selection: ItemSelection | undefined) => void;
+  /** Show another selection of an item, keeping the revision that pane reads. */
+  onSelect: (itemId: string, location: PaneLocation) => void;
   onReadLatest: (itemId: string) => void;
 }
 
@@ -107,6 +117,9 @@ function DocumentPane({
       ? `Documents, pane ${index + 1} of ${panes.length}${focused ? ', focused' : ''}`
       : 'Documents';
   const active = focused ? urlItemId : pane.active;
+  // The focused pane shows what the URL names; another pane keeps showing what it showed.
+  const shownSelection = focused ? selection : pane.location.sel;
+  const citedRevision = focused ? revision : pane.location.rev;
   return (
     <section
       aria-label={label}
@@ -183,9 +196,14 @@ function DocumentPane({
                 workspaceId={workspaceId}
                 itemId={active}
                 head={head}
-                revision={focused && revision !== undefined ? revision : head}
-                selection={focused ? selection : undefined}
-                onSelect={(next) => onSelect(active, next)}
+                revision={citedRevision ?? head}
+                selection={shownSelection}
+                onSelect={(next) =>
+                  onSelect(active, {
+                    ...(next === undefined ? {} : { sel: next }),
+                    ...(citedRevision === undefined ? {} : { rev: citedRevision }),
+                  })
+                }
                 onReadLatest={() => onReadLatest(active)}
               />
             </Tabs.Panel>

@@ -1,18 +1,29 @@
 /**
- * Ephemeral Explorer state: open tabs and panes, expanded folders, pane sizes.
+ * Ephemeral Explorer state: open tabs and panes, expanded folders, pane sizes and where keyboard
+ * focus goes next.
  *
- * It holds item and folder references only. Titles, paths, revisions and content live in the
- * Query cache and are read from there; nothing the server owns is copied here. The router owns
- * which item the focused pane shows; this store only remembers the other tabs. Nothing here is
- * persisted: it lasts as long as the page.
+ * It holds references only: item ids, folder paths, and for each pane the selection and cited
+ * revision its URL last named (what the pane shows when it is not the focused one). Titles,
+ * paths, the workspace head and content live in the Query cache and are read from there; nothing
+ * the server owns is copied here. The router owns what the focused pane shows; this store
+ * remembers the rest. Nothing here is persisted: it lasts as long as the page.
  */
 import { create } from 'zustand';
+import type { ItemSelection } from './search-params';
+
+/** What a pane's URL names besides the item: a selection inside it and a cited revision. */
+export interface PaneLocation {
+  sel?: ItemSelection | undefined;
+  rev?: string | undefined;
+}
 
 export interface Pane {
   id: string;
   /** Item identities, in tab order. */
   tabs: string[];
   active: string | null;
+  /** The selection and cited revision of the active item, as the pane's URL last named them. */
+  location: PaneLocation;
 }
 
 export interface WorkspaceView {
@@ -22,6 +33,21 @@ export interface WorkspaceView {
   expanded: Record<string, true>;
   /** How many listing pages each folder shows. */
   folderPages: Record<string, number>;
+}
+
+/** Where keyboard focus goes once the documents area has re-rendered. */
+export type FocusTarget =
+  | { kind: 'tab'; paneId: string; itemId: string }
+  | { kind: 'empty'; paneId: string };
+
+/** What closing a tab leaves: the focused pane, what it shows, and where focus goes. */
+export interface CloseResult {
+  focusedPaneId: string;
+  /** Whether the focused pane changed or its active item changed, so the URL must follow. */
+  focusedChanged: boolean;
+  /** The focused pane's active item and location afterwards, if any. */
+  show: { itemId: string; location: PaneLocation } | null;
+  focus: FocusTarget;
 }
 
 /** Sizes of a resizable group, by panel id, as percentages. */
@@ -34,23 +60,30 @@ interface ExplorerState {
   views: Record<string, WorkspaceView>;
   layouts: Record<string, PanelLayout>;
   nextPane: number;
-  /** Show `itemId` in the focused pane, adding a tab when it has none. */
-  openItem: (workspaceId: string, itemId: string) => void;
+  focusRequest: FocusTarget | null;
+  /** Show `itemId` at `location` in the focused pane, adding a tab when it has none. */
+  openItem: (workspaceId: string, itemId: string, location?: PaneLocation) => void;
   focusPane: (workspaceId: string, paneId: string) => void;
-  /** Close a tab; returns the item that pane shows next, if any. */
-  closeTab: (workspaceId: string, paneId: string, itemId: string) => string | null;
-  /** Open `itemId` in a new pane to the right of `paneId` and focus it. */
-  splitRight: (workspaceId: string, paneId: string, itemId: string) => void;
+  /**
+   * Close a tab. Focus goes to the tab after it, else the one before (WAI-ARIA tabs); a pane left
+   * empty closes and focus goes to its neighbour's active tab; with nothing open, to the empty
+   * documents area.
+   */
+  closeTab: (workspaceId: string, paneId: string, itemId: string) => CloseResult | null;
+  /** Open `itemId` at `location` in a new pane to the right of `paneId` and focus it. */
+  splitRight: (workspaceId: string, paneId: string, itemId: string, location: PaneLocation) => void;
   setExpanded: (workspaceId: string, folder: string, open: boolean) => void;
   showMore: (workspaceId: string, folder: string) => void;
   setLayout: (group: string, layout: PanelLayout) => void;
+  requestFocus: (target: FocusTarget) => void;
+  clearFocusRequest: () => void;
 }
 
 const FIRST_PANE = 'pane-1';
 
 export function emptyView(): WorkspaceView {
   return {
-    panes: [{ id: FIRST_PANE, tabs: [], active: null }],
+    panes: [{ id: FIRST_PANE, tabs: [], active: null, location: {} }],
     focusedPaneId: FIRST_PANE,
     expanded: {},
     folderPages: {},
@@ -61,6 +94,20 @@ function updatePane(view: WorkspaceView, paneId: string, change: (pane: Pane) =>
   return view.panes.map((pane) => (pane.id === paneId ? change(pane) : pane));
 }
 
+function sameLocation(a: PaneLocation, b: PaneLocation): boolean {
+  return (
+    JSON.stringify([a.sel ?? null, a.rev ?? null]) ===
+    JSON.stringify([b.sel ?? null, b.rev ?? null])
+  );
+}
+
+function cleanLocation(location: PaneLocation): PaneLocation {
+  return {
+    ...(location.sel === undefined ? {} : { sel: location.sel }),
+    ...(location.rev === undefined ? {} : { rev: location.rev }),
+  };
+}
+
 export const useExplorerStore = create<ExplorerState>()((set, get) => {
   const view = (workspaceId: string) => get().views[workspaceId] ?? emptyView();
   const write = (workspaceId: string, next: WorkspaceView) =>
@@ -69,12 +116,23 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
     views: {},
     layouts: {},
     nextPane: 2,
-    openItem: (workspaceId, itemId) => {
+    focusRequest: null,
+    openItem: (workspaceId, itemId, location = {}) => {
       const current = view(workspaceId);
-      const panes = updatePane(current, current.focusedPaneId, (pane) => ({
-        ...pane,
-        tabs: pane.tabs.includes(itemId) ? pane.tabs : [...pane.tabs, itemId],
+      const pane = current.panes.find((candidate) => candidate.id === current.focusedPaneId);
+      if (
+        pane !== undefined &&
+        pane.active === itemId &&
+        pane.tabs.includes(itemId) &&
+        sameLocation(pane.location, location)
+      ) {
+        return;
+      }
+      const panes = updatePane(current, current.focusedPaneId, (focused) => ({
+        ...focused,
+        tabs: focused.tabs.includes(itemId) ? focused.tabs : [...focused.tabs, itemId],
         active: itemId,
+        location: cleanLocation(location),
       }));
       write(workspaceId, { ...current, panes });
     },
@@ -86,36 +144,67 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
     },
     closeTab: (workspaceId, paneId, itemId) => {
       const current = view(workspaceId);
-      const pane = current.panes.find((candidate) => candidate.id === paneId);
+      const at = current.panes.findIndex((candidate) => candidate.id === paneId);
+      const pane = current.panes[at];
       if (pane === undefined) return null;
       const index = pane.tabs.indexOf(itemId);
+      if (index < 0) return null;
       const tabs = pane.tabs.filter((tab) => tab !== itemId);
-      const active =
-        pane.active === itemId ? (tabs[Math.min(index, tabs.length - 1)] ?? null) : pane.active;
+      // The tab after the closed one, else the one before it.
+      const following = tabs[index] ?? tabs[index - 1] ?? null;
+      const closedActive = pane.active === itemId;
+      const active = closedActive ? following : pane.active;
+      const location = closedActive ? {} : pane.location;
+      const wasFocused = current.focusedPaneId === paneId;
+
       if (tabs.length === 0 && current.panes.length > 1) {
         const panes = current.panes.filter((candidate) => candidate.id !== paneId);
-        const focused = current.focusedPaneId === paneId ? panes[0] : undefined;
-        write(workspaceId, {
-          ...current,
-          panes,
-          focusedPaneId: focused?.id ?? current.focusedPaneId,
-        });
-        return focused?.active ?? null;
+        const neighbour = current.panes[at + 1] ?? current.panes[at - 1];
+        const focusedPaneId = wasFocused && neighbour ? neighbour.id : current.focusedPaneId;
+        write(workspaceId, { ...current, panes, focusedPaneId });
+        const focusedPane = panes.find((candidate) => candidate.id === focusedPaneId);
+        const shown = focusedPane?.active ?? null;
+        return {
+          focusedPaneId,
+          focusedChanged: wasFocused,
+          show:
+            focusedPane && shown !== null
+              ? { itemId: shown, location: focusedPane.location }
+              : null,
+          focus:
+            neighbour !== undefined && neighbour.active !== null
+              ? { kind: 'tab', paneId: neighbour.id, itemId: neighbour.active }
+              : { kind: 'empty', paneId: neighbour?.id ?? current.focusedPaneId },
+        };
       }
+
       write(workspaceId, {
         ...current,
-        panes: updatePane(current, paneId, () => ({ id: paneId, tabs, active })),
+        panes: updatePane(current, paneId, () => ({ id: paneId, tabs, active, location })),
       });
-      return active;
+      return {
+        focusedPaneId: current.focusedPaneId,
+        focusedChanged: wasFocused && closedActive,
+        show: active === null ? null : { itemId: active, location },
+        focus:
+          following === null
+            ? { kind: 'empty', paneId }
+            : { kind: 'tab', paneId, itemId: following },
+      };
     },
-    splitRight: (workspaceId, paneId, itemId) => {
+    splitRight: (workspaceId, paneId, itemId, location) => {
       const current = view(workspaceId);
       if (current.panes.length >= MAX_PANES) return;
       const at = current.panes.findIndex((pane) => pane.id === paneId);
       if (at < 0) return;
       const id = `pane-${get().nextPane}`;
       const panes = [...current.panes];
-      panes.splice(at + 1, 0, { id, tabs: [itemId], active: itemId });
+      panes.splice(at + 1, 0, {
+        id,
+        tabs: [itemId],
+        active: itemId,
+        location: cleanLocation(location),
+      });
       set((state) => ({ nextPane: state.nextPane + 1 }));
       write(workspaceId, { ...current, panes, focusedPaneId: id });
     },
@@ -134,6 +223,8 @@ export const useExplorerStore = create<ExplorerState>()((set, get) => {
     },
     setLayout: (group, layout) =>
       set((state) => ({ layouts: { ...state.layouts, [group]: layout } })),
+    requestFocus: (target) => set({ focusRequest: target }),
+    clearFocusRequest: () => set({ focusRequest: null }),
   };
 });
 
