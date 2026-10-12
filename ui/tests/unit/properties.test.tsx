@@ -53,6 +53,17 @@ const meetingNote = {
   ui_schema: {},
 };
 
+/** Another type of the workspace, with a property of its own. */
+const plan = {
+  name: 'plan',
+  schema_version: 1,
+  properties_schema: {
+    type: 'object',
+    properties: { deadline: { type: 'string', title: 'Deadline' } },
+  },
+  ui_schema: {},
+};
+
 /** What the note holds: properties its type names, and others it does not. */
 const stored = {
   type: 'meeting-note',
@@ -74,7 +85,8 @@ function typed(overrides: Record<string, Handler> = {}) {
             ? { ...itemDocument(noteSummary), properties: stored }
             : itemDocument(otherSummary),
         ),
-      [TYPES]: () => ok({ items: [meetingNote] }),
+      // Another type comes first: the form is the one of the item's own type.
+      [TYPES]: () => ok({ items: [plan, meetingNote] }),
       [SAVE]: (body) => ok(draftOf(String(body.item_id), String(body.base_revision), LATER)),
       ...overrides,
     }),
@@ -214,6 +226,20 @@ describe('the properties form', () => {
       owner: 'Grace',
       attendees: 6,
     });
+  });
+
+  it('gives the form only the properties its schema names, so a strict type still saves', async () => {
+    // A type that allows no other property. The application's header is never one of a type's.
+    const strict = {
+      ...meetingNote,
+      properties_schema: { ...meetingNote.properties_schema, additionalProperties: false },
+    };
+    const api = typed({ [TYPES]: () => ok({ items: [strict] }) });
+    await editNote();
+    set('Owner', 'Grace');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+    expect(api.callsTo(SAVE).at(0)?.properties).toEqual({ ...stored, owner: 'Grace' });
   });
 
   it('does not send a required property emptied', async () => {
