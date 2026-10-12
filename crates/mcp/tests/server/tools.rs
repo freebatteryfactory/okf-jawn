@@ -145,9 +145,10 @@ async fn the_read_tool_answers_through_read_result_within_its_budget() -> TestRe
         .await?;
     assert_eq!(result.is_error, Some(false));
     let text = text_of(&result)?;
+    // The whole text block, the cut note included, stays within the budget and nearly fills it.
+    assert!(text.len() <= 256, "{} bytes", text.len());
+    assert!(text.len() > 250, "only {} bytes", text.len());
     let (kept, note) = some(text.split_once("\n\n[Text cut"), "the cut note")?;
-    assert!(kept.len() <= 256, "{} bytes kept", kept.len());
-    assert!(kept.len() > 250, "only {} bytes kept", kept.len());
     assert!(markdown.starts_with(kept));
     assert!(note.contains("structuredContent"), "{note}");
     assert_eq!(result.structured_content, Some(read_response(&markdown)));
