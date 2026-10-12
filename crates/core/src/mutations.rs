@@ -36,11 +36,21 @@
 //! for a reason other than a lost lease). The row keeps its id and digest and is not
 //! completed, so the same key and body may be sent again at once; that retry runs as a
 //! resumed attempt.
+//!
+//! # Workspace
+//! Each row records the one workspace its mutation is about, beside the key and never part of
+//! it: `begin` records the workspace the request's targets name (dispatch passes it when they
+//! name exactly one distinct workspace and no `Deployment` target), and `complete` records the
+//! workspace a response names for a mutation authorized at the tenant that creates or removes
+//! one (`RequestScope::RESPONSE_WORKSPACE`). A workspace purge reads that column, never the
+//! response text: it empties the completed rows of the purged workspace (the response is
+//! dropped and the row released, its id kept), so a retry under the same key re-runs under the
+//! same `MutationId` and is refused by the purge, and no other workspace's row is touched.
 
 use std::collections::BTreeMap;
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{Digest, IdempotencyKey, MutationId, TenantId};
+use okf_jawn_contract::identity::{Digest, IdempotencyKey, MutationId, TenantId, WorkspaceId};
 use okf_jawn_contract::metadata::OperationName;
 use serde::Serialize;
 use serde_json::Value;
@@ -122,14 +132,23 @@ pub struct StoredResponse {
 pub trait MutationStore: Send + Sync {
     /// Atomic insert-or-read with a lease.
     ///
-    /// `digest` is [`request_digest`] of the typed request.
+    /// `digest` is [`request_digest`] of the typed request. `workspace` is the one workspace
+    /// the request is about, or `None` for a request authorized at the tenant or naming several
+    /// workspaces (see the module header); it is recorded with a new row and is not part of
+    /// the key. A row that already exists keeps what its first `begin` recorded: the same key
+    /// and digest are the same request, so they name the same workspace.
     fn begin<'a>(
         &'a self,
         key: &'a MutationKey,
         digest: &'a Digest,
+        workspace: Option<WorkspaceId>,
     ) -> PortFuture<'a, BeginOutcome>;
 
     /// Mark the mutation completed and retain the response for replay.
+    ///
+    /// `workspace` is the workspace the completed response names
+    /// (`RequestScope::RESPONSE_WORKSPACE`), or `None`; it is recorded only when `begin`
+    /// recorded none, so a request's own workspace is never replaced.
     ///
     /// Compare-and-set on the lease: fails with `ErrorCode::Conflict` when `lease` is no longer
     /// the current grant (it expired and another attempt holds the mutation). Nothing is
@@ -138,7 +157,12 @@ pub trait MutationStore: Send + Sync {
     /// `Conflict` is returned for a lost lease and for nothing else; any other failure uses
     /// another code (`Unavailable` or `Internal`). Dispatch treats `Conflict` here as "another
     /// attempt holds this mutation" and does not release.
-    fn complete(&self, lease: MutationLease, response: Value) -> PortFuture<'_, ()>;
+    fn complete(
+        &self,
+        lease: MutationLease,
+        response: Value,
+        workspace: Option<WorkspaceId>,
+    ) -> PortFuture<'_, ()>;
 
     /// End the lease after a failed attempt. The row keeps its id; the same key may begin again.
     ///

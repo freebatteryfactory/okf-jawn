@@ -6,13 +6,22 @@
 //!
 //! - every table with `tenant_id` and `workspace_id` loses the workspace's rows, except the
 //!   purge records (`purges`, `purge_progress`) and the revision map, which hold identities only
-//!   and outlive the workspace;
+//!   and outlive the workspace, and the mutation ledger (next);
 //! - a table keyed by `job_id` without a workspace column loses the rows of the workspace's
 //!   jobs, before the jobs go;
 //! - every connector's `workspace_ids` loses the workspace;
-//! - a mutation-ledger row whose stored response names the workspace is removed (the response
-//!   may hold its name or an item's title; a retry then finds no response and is refused by the
-//!   purged workspace);
+//! - every completed mutation-ledger row of the workspace (`mutations.workspace_id`, the
+//!   workspace its request named or its response named at `RequestScope::RESPONSE_WORKSPACE`)
+//!   is emptied: its stored response (which may hold the workspace's name or an item's title)
+//!   is dropped and the row released, its identity kept. A retry under its key then re-runs
+//!   under the same `MutationId` and is refused by the purge (`guard`, and the catalog for a
+//!   `create_workspace`); a deleted row would let the retry start a new mutation, and a
+//!   `create_workspace` retry would create a second workspace. The rows of purges
+//!   (`purge_workspace`, `purge_item`) are kept: their response is the purge record, identities
+//!   and counts only, which outlives the workspace as `purges` does, so a retry of the purge
+//!   replays it. The response text is never searched, so another workspace's row that quotes
+//!   the workspace's identity is not touched. A row with no workspace (one from before records
+//!   schema 2, or any row of a copy older than it) cannot be attributed and is left;
 //! - a receipt or review of another workspace of the tenant that cites the workspace is marked
 //!   invalidated (a receipt's `invalidated_by`, a review's coverage), and each citing source
 //!   becomes the invalidated citation (`scrub_source`): its path `purged/<item id>`, its
@@ -23,7 +32,8 @@
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::identity::PurgeId;
-use rusqlite::{Connection, OptionalExtension, params};
+use okf_jawn_contract::metadata::OperationName;
+use rusqlite::{Connection, OptionalExtension, ToSql, params};
 use serde_json::Value;
 
 use crate::db::{json, sql};
@@ -43,6 +53,17 @@ const KEPT: &[&str] = &["pending_puts", "purges", "purge_progress", "revision_ma
 /// `sources` and a review's `source`.
 const CITING: &[(&str, &str)] = &[("receipts", "receipt_id"), ("reviews", "review_id")];
 
+/// The mutation ledger, whose rows of the workspace are emptied, not removed (module header).
+const LEDGER: &str = "mutations";
+
+/// The operations whose ledger rows a purge keeps: their response is a purge record.
+const PURGES: [OperationName; 2] = [OperationName::PurgeWorkspace, OperationName::PurgeItem];
+
+/// The completed ledger rows of the workspace (`?1` tenant, `?2` workspace) whose stored
+/// response a purge drops: every one but a purge's (`?3`, `?4`, `PURGES`).
+const LEDGER_ROWS: &str = "tenant_id = ?1 AND workspace_id = ?2 AND state = 'completed'
+     AND operation NOT IN (?3, ?4)";
+
 impl Table {
     fn has(&self, column: &str) -> bool {
         self.columns.iter().any(|name| name == column)
@@ -50,7 +71,15 @@ impl Table {
 
     /// A workspace-scoped table whose rows a purge removes.
     fn scoped(&self) -> bool {
-        self.has("tenant_id") && self.has("workspace_id") && !KEPT.contains(&self.name.as_str())
+        self.has("tenant_id")
+            && self.has("workspace_id")
+            && !KEPT.contains(&self.name.as_str())
+            && self.name != LEDGER
+    }
+
+    /// The mutation ledger, at a schema that records each row's workspace.
+    fn ledger(&self) -> bool {
+        self.name == LEDGER && self.has("workspace_id")
     }
 }
 
@@ -60,22 +89,34 @@ pub(crate) fn holds(
     tenant: &str,
     workspace: &str,
 ) -> Result<bool, ApiError> {
+    let [purge_workspace, purge_item] = PURGES.map(OperationName::as_str);
+    let scope: [&dyn ToSql; 2] = [&tenant, &workspace];
+    let ledger: [&dyn ToSql; 4] = [&tenant, &workspace, &purge_workspace, &purge_item];
     for table in tables(connection)? {
-        let query = if table.scoped() {
-            format!(
-                "SELECT 1 FROM \"{}\" WHERE tenant_id = ?1 AND workspace_id = ?2 LIMIT 1",
-                table.name
+        let (query, values): (String, &[&dyn ToSql]) = if table.scoped() {
+            (
+                format!(
+                    "SELECT 1 FROM \"{}\" WHERE tenant_id = ?1 AND workspace_id = ?2 LIMIT 1",
+                    table.name
+                ),
+                &scope,
             )
-        } else if table.name == "mutations" && table.has("response") {
-            "SELECT 1 FROM mutations WHERE tenant_id = ?1 AND instr(response, ?2) > 0 LIMIT 1"
-                .to_owned()
+        } else if table.ledger() {
+            (
+                format!("SELECT 1 FROM {LEDGER} WHERE {LEDGER_ROWS} LIMIT 1"),
+                &ledger,
+            )
         } else if table.name == "connectors" && table.has("record") {
-            "SELECT 1 FROM connectors WHERE ?1 = ?1 AND instr(record, ?2) > 0 LIMIT 1".to_owned()
+            (
+                "SELECT 1 FROM connectors WHERE ?1 = ?1 AND instr(record, ?2) > 0 LIMIT 1"
+                    .to_owned(),
+                &scope,
+            )
         } else {
             continue;
         };
         let found: Option<i64> = connection
-            .query_row(&query, params![tenant, workspace], |row| row.get(0))
+            .query_row(&query, values, |row| row.get(0))
             .optional()
             .map_err(|error| sql(&error))?;
         if found.is_some() {
@@ -122,16 +163,18 @@ pub(crate) fn remove(
             )?;
         }
     }
-    if tables
-        .iter()
-        .any(|table| table.name == "mutations" && table.has("response"))
-    {
-        execute(
-            connection,
-            "DELETE FROM mutations WHERE tenant_id = ?1 AND instr(response, ?2) > 0",
-            tenant,
-            workspace,
-        )?;
+    if tables.iter().any(Table::ledger) {
+        let [purge_workspace, purge_item] = PURGES.map(OperationName::as_str);
+        // Keep `finished_ms`: the emptied row expires when the completed one would have.
+        connection
+            .execute(
+                &format!(
+                    "UPDATE {LEDGER} SET state = 'released', response = NULL
+                     WHERE {LEDGER_ROWS}"
+                ),
+                params![tenant, workspace, purge_workspace, purge_item],
+            )
+            .map_err(|error| sql(&error))?;
     }
     if tables
         .iter()

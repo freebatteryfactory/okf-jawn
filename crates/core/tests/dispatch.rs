@@ -7,7 +7,7 @@ use std::pin::Pin;
 use okf_jawn_contract::access::{AccessRoute, DelegationCeiling, Permission, Principal};
 use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::events::EventKind;
-use okf_jawn_contract::identity::IdentityError;
+use okf_jawn_contract::identity::{IdentityError, MutationId};
 use okf_jawn_contract::import::JobKind;
 use okf_jawn_contract::item::ItemDocument;
 use okf_jawn_contract::metadata::OperationName;
@@ -611,6 +611,93 @@ async fn a_tenant_admin_creates_a_workspace() -> TestResult {
     assert_eq!(tenant_grant.tenant_id, alice.tenant_id);
     assert!(tenant_grant.allows(Permission::Admin));
     assert_eq!(context.grants, Vec::new());
+    Ok(())
+}
+
+/// The mutation the first run of `operation`'s handler ran under.
+fn handled_mutation(
+    app: &CountingApplication,
+    operation: &str,
+) -> Result<MutationId, Box<dyn std::error::Error>> {
+    let contexts = app.contexts(operation)?;
+    let context = some(contexts.first(), "the handler context")?;
+    Ok(some(context.mutation, "the mutation id")?)
+}
+
+fn comment() -> Value {
+    json!({
+        "id": "c1",
+        "author": "alice",
+        "text": "note",
+        "created_at": "2026-01-01T00:00:00.000Z"
+    })
+}
+
+#[tokio::test]
+async fn the_ledger_records_the_one_workspace_a_mutation_names() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    app.set_response("create_item", item_document("hello")?)?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let body = create_item_body(WORKSPACE_A, KEY_ONE, "hello");
+    call(&app, &ports, &alice, "create_item", body).await?;
+    let mutation = handled_mutation(&app, "create_item")?;
+    assert_eq!(
+        ports.mutations.recorded_workspace(mutation)?,
+        Some(workspace(WORKSPACE_A)?)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_ledger_records_no_workspace_for_a_request_about_several_or_the_tenant() -> TestResult {
+    let mut table = GrantTable::default();
+    let alice = table.workspaces.entry("alice".to_owned()).or_default();
+    alice.insert(workspace(WORKSPACE_A)?, all_permissions());
+    alice.insert(workspace(WORKSPACE_B)?, all_permissions());
+    table.tenants.insert("alice".to_owned(), all_permissions());
+    let ports = FixturePorts::new(table);
+    let app = CountingApplication::new();
+    app.set_response("add_comment", comment())?;
+    app.set_response("create_connector", issued_connector())?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    // Writing in A, citing B: two workspaces.
+    let body = add_comment_body(WORKSPACE_A, WORKSPACE_B, KEY_ONE);
+    call(&app, &ports, &alice, "add_comment", body).await?;
+    let mutation = handled_mutation(&app, "add_comment")?;
+    assert_eq!(ports.mutations.recorded_workspace(mutation)?, None);
+    // A Deployment target and workspace A; its response names workspaces only in a list.
+    call(
+        &app,
+        &ports,
+        &alice,
+        "create_connector",
+        create_connector_body(KEY_ONE),
+    )
+    .await?;
+    let mutation = handled_mutation(&app, "create_connector")?;
+    assert_eq!(ports.mutations.recorded_workspace(mutation)?, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_ledger_records_the_workspace_a_tenant_mutation_s_response_names() -> TestResult {
+    let ports = ports_admin_a_read_b()?;
+    let app = CountingApplication::new();
+    // The description quotes workspace B; only the response's `id` is read.
+    let mut created = created_workspace();
+    if let Some(fields) = created.as_object_mut() {
+        fields.insert("description".to_owned(), json!(WORKSPACE_B));
+    }
+    app.set_response("create_workspace", created)?;
+    let alice = principal("alice", AccessRoute::LocalOwner)?;
+    let input = create_workspace_body(KEY_ONE);
+    call(&app, &ports, &alice, "create_workspace", input).await?;
+    let mutation = handled_mutation(&app, "create_workspace")?;
+    assert_eq!(
+        ports.mutations.recorded_workspace(mutation)?,
+        Some(workspace(WORKSPACE_A)?)
+    );
     Ok(())
 }
 

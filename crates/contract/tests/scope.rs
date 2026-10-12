@@ -22,6 +22,7 @@ use okf_jawn_contract::workspace::{
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::path::PathBuf;
 
@@ -48,6 +49,10 @@ macro_rules! scope_checks {
             })*
             Ok(found)
         }
+
+        fn response_schemas() -> Result<BTreeMap<&'static str, Value>, Box<dyn Error>> {
+            Ok(BTreeMap::from([$((stringify!($id), schema_for::<$response>()?)),*]))
+        }
     };
 }
 
@@ -57,6 +62,15 @@ struct Scoped {
     targets: Vec<Target>,
     keyed: bool,
     replay: ReplayPolicy,
+    response_workspace: Option<&'static str>,
+}
+
+/// One place a response schema names a workspace identity: its JSON pointer, and whether it
+/// is inside a list (an array or a map), where it is one of several.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct WorkspaceField {
+    pointer: String,
+    listed: bool,
 }
 
 /// `check_rules` of one View-carrying request, as synthesized and with every binding moved to
@@ -97,6 +111,11 @@ const SIGN_IN_ONLY: &[&str] = &[
     "get_readiness",
 ];
 const OTHER_WORKSPACE: &str = "33333333-3333-4333-8333-333333333333";
+/// Mutations authorized at the tenant whose response names workspaces only in a list (a
+/// connector's grants): no one workspace to record, so they declare no `RESPONSE_WORKSPACE`.
+/// The issued connector's ledger row keeps only its id (`ReplayPolicy::AlreadyIssued`), and a
+/// purge unlists the workspace from the connector record itself.
+const NAMES_WORKSPACES_IN_A_LIST: &[&str] = &["create_connector", "revoke_connector"];
 
 fn scoped<T: RequestScope>(id: &'static str, permission: Permission, request: &T) -> Scoped {
     Scoped {
@@ -105,7 +124,83 @@ fn scoped<T: RequestScope>(id: &'static str, permission: Permission, request: &T
         targets: request.targets(),
         keyed: request.idempotency_key().is_some(),
         replay: T::REPLAY,
+        response_workspace: T::RESPONSE_WORKSPACE,
     }
+}
+
+/// Whether `targets` name exactly one distinct workspace and no `Deployment`: the request is
+/// about that one workspace (core dispatch's `sole_workspace`, which the ledger records).
+fn about_one_workspace(targets: &[Target]) -> bool {
+    let mut named = BTreeSet::new();
+    for target in targets {
+        match target {
+            Target::Deployment(_) => return false,
+            Target::Workspace(workspace, _) => {
+                named.insert(*workspace);
+            }
+            Target::Authenticated => {}
+        }
+    }
+    named.len() == 1
+}
+
+/// Every place `schema` names a `WorkspaceId`, resolving `$ref`s into `defs`.
+fn workspace_fields(
+    schema: &Value,
+    defs: &Value,
+    at: &WorkspaceField,
+    depth: u8,
+    found: &mut BTreeSet<WorkspaceField>,
+) -> Result<(), Box<dyn Error>> {
+    if depth > 40 {
+        return Err("schema recursion too deep to walk".into());
+    }
+    let next = depth.saturating_add(1);
+    let Some(object) = schema.as_object() else {
+        return Ok(());
+    };
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        let name = reference
+            .strip_prefix("#/$defs/")
+            .ok_or_else(|| format!("unsupported reference {reference}"))?;
+        if name == "WorkspaceId" {
+            found.insert(at.clone());
+            return Ok(());
+        }
+        let target = defs
+            .get(name)
+            .ok_or_else(|| format!("missing definition {name}"))?;
+        return workspace_fields(target, defs, at, next, found);
+    }
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        for (name, property) in properties {
+            let field = WorkspaceField {
+                pointer: format!("{}/{name}", at.pointer),
+                listed: at.listed,
+            };
+            workspace_fields(property, defs, &field, next, found)?;
+        }
+    }
+    for listing in ["items", "additionalProperties"] {
+        if let Some(element) = object.get(listing) {
+            let field = WorkspaceField {
+                pointer: at.pointer.clone(),
+                listed: true,
+            };
+            workspace_fields(element, defs, &field, next, found)?;
+        }
+    }
+    for combinator in ["oneOf", "anyOf", "allOf"] {
+        for branch in object
+            .get(combinator)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            workspace_fields(branch, defs, at, next, found)?;
+        }
+    }
+    Ok(())
 }
 
 fn sample<T: DeserializeOwned + JsonSchema + RequestScope>(
@@ -395,6 +490,72 @@ fn the_already_issued_pointer_finds_the_connector_id_in_the_response() -> Result
         .ok_or_else(|| format!("{id_pointer} is absent from IssuedConnector"))?;
     let connector_id: ConnectorId = serde_json::from_value(found)?;
     assert_eq!(connector_id, issued.connector.connector_id);
+    Ok(())
+}
+
+/// The mutation ledger records each mutation's workspace: the request's own, or for a mutation
+/// authorized at the tenant the one its response names at `RESPONSE_WORKSPACE`. Every such
+/// mutation whose response schema names a workspace outside a list declares where, and only
+/// those do; a newly declared operation is covered from its own types.
+#[test]
+fn a_tenant_mutation_declares_where_its_response_names_its_workspace() -> Result<(), Box<dyn Error>>
+{
+    let schemas = response_schemas()?;
+    let mut declared = Vec::new();
+    for operation in sampled_operations()? {
+        let id = operation.id;
+        let schema = schemas
+            .get(id)
+            .ok_or_else(|| format!("{id} has no response schema"))?;
+        let defs = schema.get("$defs").cloned().unwrap_or_else(|| json!({}));
+        let mut found = BTreeSet::new();
+        let root = WorkspaceField {
+            pointer: String::new(),
+            listed: false,
+        };
+        workspace_fields(schema, &defs, &root, 0, &mut found)?;
+        let single: BTreeSet<&str> = found
+            .iter()
+            .filter(|field| !field.listed)
+            .map(|field| field.pointer.as_str())
+            .collect();
+        let listed = found.iter().any(|field| field.listed);
+        let at_the_tenant = operation.keyed && !about_one_workspace(&operation.targets);
+        match operation.response_workspace {
+            Some(pointer) => {
+                assert!(
+                    at_the_tenant,
+                    "{id}: only a mutation authorized at the tenant names its workspace by its response"
+                );
+                assert!(
+                    single.contains(pointer),
+                    "{id}: {pointer} is not a workspace identity of its response ({single:?})"
+                );
+                declared.push(id);
+            }
+            None if at_the_tenant => {
+                assert!(
+                    single.is_empty(),
+                    "{id}: its response names a workspace at {single:?}; declare RESPONSE_WORKSPACE"
+                );
+                assert_eq!(
+                    listed,
+                    NAMES_WORKSPACES_IN_A_LIST.contains(&id),
+                    "{id}: whether its response names workspaces in a list"
+                );
+            }
+            None => {}
+        }
+    }
+    assert_eq!(
+        declared,
+        [
+            "create_workspace",
+            "purge_workspace",
+            "backup_installation",
+            "purge_item"
+        ]
+    );
     Ok(())
 }
 

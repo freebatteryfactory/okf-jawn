@@ -2549,12 +2549,13 @@ async fn migrations_take_a_pre_migration_backup_set_before_an_upgrade() -> TestR
 }
 
 /// Put a records database back as records schema 1 left it: without the tables schema 2 adds,
-/// and with the events table as it was before event keys.
+/// without the ledger's workspace column, and with the events table as it was before event keys.
 fn as_records_schema_1(records: &Path) -> TestResult {
     let connection = rusqlite::Connection::open(records)?;
     connection.execute_batch(
         "DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
          DROP TABLE pending_puts; DROP TABLE replacement_restores;
+         DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
          CREATE TABLE unkeyed_events (
              seq INTEGER PRIMARY KEY AUTOINCREMENT,
              tenant_id TEXT NOT NULL,

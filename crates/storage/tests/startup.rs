@@ -361,6 +361,7 @@ async fn single_writer_lock_lives_as_long_as_any_store_it_handed_out() -> TestRe
         .begin(
             &key,
             &okf_jawn_contract::identity::Digest::try_from("a".repeat(64))?,
+            None,
         )
         .await?;
     drop(ledger);

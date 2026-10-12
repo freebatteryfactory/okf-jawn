@@ -409,7 +409,7 @@ async fn connect(
     }
 }
 
-/// A completed mutation whose stored response names the workspace and shows its name.
+/// A completed mutation of the workspace whose stored response shows its name.
 async fn remember(storage: &Storage, workspace: &StorageScope) -> Fallible<()> {
     let ledger = storage.mutations();
     let key = MutationKey {
@@ -420,13 +420,17 @@ async fn remember(storage: &Storage, workspace: &StorageScope) -> Fallible<()> {
         key: uuid!(42)?,
     };
     let BeginOutcome::New(lease) = ledger
-        .begin(&key, &Digest::try_from("a".repeat(64))?)
+        .begin(
+            &key,
+            &Digest::try_from("a".repeat(64))?,
+            Some(workspace.workspace_id),
+        )
         .await?
     else {
         return Err("expected a new mutation".into());
     };
-    let response = json!({ "id": workspace.workspace_id, "name": "zanzibar trip" });
-    ledger.complete(lease, response).await?;
+    let response = json!({ "name": "zanzibar trip" });
+    ledger.complete(lease, response, None).await?;
     Ok(())
 }
 
