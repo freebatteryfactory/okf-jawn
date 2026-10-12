@@ -88,3 +88,253 @@ button {
   outline: 3px solid Highlight;
   outline-offset: 3px;
 }
+/* Workspace shell. System colors only; the owner decides any further visual system. */
+.skip-link {
+  position: absolute;
+  left: -100vw;
+}
+.skip-link:focus {
+  left: 1rem;
+  top: 0.5rem;
+  z-index: 10;
+  background: Canvas;
+  padding: 0.5rem;
+}
+main.app-main:has(.explorer) {
+  max-width: none;
+  padding: 0;
+}
+.page-status {
+  max-width: 52rem;
+  margin: 2rem auto;
+}
+.workspace-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 1rem;
+}
+.workspace-list a {
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+.meta {
+  color: GrayText;
+  font-size: 0.85rem;
+}
+.explorer {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 4.5rem);
+}
+.explorer-bar {
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid GrayText;
+}
+.workspace-name {
+  font-size: 1.1rem;
+  margin: 0;
+}
+.explorer-columns {
+  flex: 1;
+  min-height: 0;
+}
+.sidebar,
+.source-column,
+.pane {
+  height: 100%;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 0.5rem 0.75rem;
+}
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.folder-tree {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.tree-box {
+  flex: 1;
+  min-height: 0;
+}
+.panel-heading {
+  font-size: 0.95rem;
+  margin: 0.25rem 0;
+}
+.panel-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+.separator {
+  width: 6px;
+  background: color-mix(in srgb, GrayText 35%, transparent);
+}
+.separator:focus-visible,
+.separator[data-separator="active"] {
+  background: Highlight;
+}
+[role="treeitem"] {
+  cursor: default;
+}
+[role="treeitem"][aria-selected="true"] {
+  background: color-mix(in srgb, Highlight 25%, transparent);
+}
+[role="treeitem"]:focus-visible {
+  outline-offset: -3px;
+}
+.tree-entry {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  height: 100%;
+  white-space: nowrap;
+}
+.tree-type,
+.tree-flag {
+  color: GrayText;
+  font-size: 0.8rem;
+}
+.tree-status {
+  font-style: italic;
+}
+.search-form label {
+  display: block;
+  font-size: 0.85rem;
+  margin-bottom: 0.25rem;
+}
+.search-row {
+  display: flex;
+  gap: 0.25rem;
+}
+.search-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 0.4rem;
+}
+.hit-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.hit {
+  display: grid;
+  gap: 0.15rem;
+  color: inherit;
+}
+.hit-title {
+  font-weight: 700;
+}
+.hit-where {
+  color: GrayText;
+  font-size: 0.8rem;
+}
+.hit-snippet {
+  font-size: 0.9rem;
+}
+.pane-group {
+  height: 100%;
+}
+.pane-focused {
+  box-shadow: inset 0 2px 0 Highlight;
+}
+.tab-bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-bottom: 1px solid GrayText;
+}
+.tab-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+.tab {
+  background: none;
+  border: 1px solid transparent;
+  border-bottom: none;
+  color: inherit;
+}
+.tab[data-active] {
+  border-color: GrayText;
+  font-weight: 700;
+}
+.pane-actions {
+  display: flex;
+  gap: 0.25rem;
+  padding-bottom: 0.25rem;
+}
+.pane-actions button {
+  padding: 0.25rem 0.5rem;
+}
+.empty-pane {
+  color: GrayText;
+}
+.document-header h2 {
+  margin-bottom: 0.25rem;
+}
+.notice {
+  border-left: 3px solid GrayText;
+  padding: 0.5rem 0.75rem;
+}
+.properties dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+}
+.property {
+  display: contents;
+}
+.property dt {
+  font-weight: 700;
+}
+.property dd {
+  margin: 0;
+}
+.link-button {
+  background: none;
+  border: none;
+  padding: 0.1rem 0;
+  color: LinkText;
+  text-decoration: underline;
+}
+.document-body {
+  overflow-wrap: anywhere;
+}
+.citation {
+  color: GrayText;
+  font-size: 0.85rem;
+}
+.locations {
+  padding-left: 1rem;
+}
+.location-label {
+  font-weight: 700;
+}
+.location-inferred {
+  font-style: italic;
+  border-left: 3px dashed GrayText;
+  padding-left: 0.5rem;
+  list-style: none;
+}
+.location-unresolved {
+  color: GrayText;
+}
+.appearance dd {
+  margin: 0 0 0.5rem;
+}
+.failure-notice p {
+  margin: 0.25rem 0;
+}
