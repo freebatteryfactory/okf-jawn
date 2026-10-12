@@ -9,7 +9,7 @@ import {
   createRouter,
   RouterProvider,
 } from '@tanstack/react-router';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { type ReactNode, StrictMode, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -251,6 +251,61 @@ async function wayOutWithFocus(becomes: 'loaded' | ErrorCode) {
   act(() => link.focus());
   const change = () => fireEvent.click(screen.getByRole('button', { name: 'Change' }));
   return { link, notice, change };
+}
+
+/** Two operations of one caller, each with its own notice and its own content, as the reader has. */
+function Two({
+  first,
+  second,
+  secondCode = 'internal',
+}: {
+  first: 'failed' | 'loaded';
+  second: 'failed' | 'loaded';
+  secondCode?: ErrorCode;
+}) {
+  const one = useRetry({
+    request: 'first',
+    failed: first === 'failed',
+    error: apiError('internal'),
+    run: () => Promise.resolve(),
+    loaded: () => document.getElementById('first-content'),
+  });
+  const two = useRetry({
+    request: 'second',
+    failed: second === 'failed',
+    error: apiError(secondCode),
+    run: () => Promise.resolve(),
+    loaded: () => document.getElementById('second-content'),
+  });
+  return (
+    <>
+      <section aria-label="First">
+        {one.shown && <FailureNotice context="First" error={one.error} retry={one} />}
+        {first === 'loaded' && (
+          <h2 id="first-content" tabIndex={-1}>
+            First content
+          </h2>
+        )}
+      </section>
+      <section aria-label="Second">
+        {two.shown && <FailureNotice context="Second" error={two.error} retry={two} />}
+        {second === 'loaded' && (
+          <h2 id="second-content" tabIndex={-1}>
+            Second content
+          </h2>
+        )}
+      </section>
+    </>
+  );
+}
+
+/** The retry button of the first of the two notices, with keyboard focus on it. */
+function firstRetryFocused() {
+  const button = within(screen.getByRole('region', { name: 'First' })).getByRole('button', {
+    name: 'Try again',
+  });
+  act(() => button.focus());
+  return button;
 }
 
 /** Render the watched operation, failed, with keyboard focus on its retry button. */
@@ -665,6 +720,45 @@ describe('a failure that changes without a retry', () => {
     expect(button.isConnected).toBe(false);
     const replacement = screen.getByRole('button', { name: 'Try again' });
     expect(document.activeElement).toBe(replacement);
+  });
+
+  describe('with two notices in one caller, one leaving never moves focus that is in the other', () => {
+    it('when the other’s failure goes away by itself', () => {
+      const { rerender } = render(<Two first="failed" second="failed" />);
+      const button = firstRetryFocused();
+      rerender(<Two first="failed" second="loaded" />);
+      expect(screen.getByRole('heading', { name: 'Second content' })).toBeTruthy();
+      expect(document.activeElement).toBe(button);
+    });
+
+    it('when the other’s failure is replaced by one that allows no retry', () => {
+      const { rerender } = render(<Two first="failed" second="failed" />);
+      const button = firstRetryFocused();
+      rerender(<Two first="failed" second="failed" secondCode="forbidden" />);
+      expect(screen.getByText('Second: You do not have permission to do this.')).toBeTruthy();
+      expect(document.activeElement).toBe(button);
+    });
+
+    it('under StrictMode, when the other leaves first and then its own', () => {
+      const { rerender } = render(
+        <StrictMode>
+          <Two first="failed" second="failed" />
+        </StrictMode>,
+      );
+      const button = firstRetryFocused();
+      rerender(
+        <StrictMode>
+          <Two first="failed" second="loaded" />
+        </StrictMode>,
+      );
+      expect(document.activeElement).toBe(button);
+      rerender(
+        <StrictMode>
+          <Two first="loaded" second="loaded" />
+        </StrictMode>,
+      );
+      expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'First content' }));
+    });
   });
 
   describe('under StrictMode, which in development clears and sets again the refs of what has just mounted', () => {
