@@ -165,4 +165,5 @@ pub mod local;
 #[cfg(feature = "runtime")]
 pub mod mcp;
 pub mod public;
+pub mod sandbox;
 pub mod schemas;
