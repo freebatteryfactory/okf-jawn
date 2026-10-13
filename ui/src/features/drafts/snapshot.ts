@@ -4,7 +4,11 @@
  *
  * The service commits the drafts it holds, so the text of each selected item still being edited
  * is saved first. If some of it cannot be saved, nothing is asked: a Snapshot never commits an
- * older text than the one on screen.
+ * older text than the one on screen. A selected item whose session is refused (`saving.ts`: the
+ * item is not a Note) counts as not saved, whatever the service holds of it: its save sends
+ * nothing and settles at once, and nothing is asked. The Drafts panel does not tick such an item
+ * (it reads the item's kind for itself), so this is reached only when the refusal comes while a
+ * Snapshot waits for another save.
  *
  * On success the shell shows the returned revision as its head at once, because the person made
  * that change (`adoptHead` in `explorer/head.ts`, shared with every other change of the tree). A
@@ -81,7 +85,10 @@ export interface Snapshotted {
   warnings: Warning[];
 }
 
-/** Some selected items hold text the service has not confirmed: nothing was asked. */
+/**
+ * Some selected items hold text the service has not confirmed, or their session is refused:
+ * nothing was asked.
+ */
 export class UnsavedSelection extends Error {
   readonly itemIds: string[];
 
@@ -178,7 +185,7 @@ export async function takeSnapshot(
   const held = useDraftSessions.getState().sessions;
   const unsaved = itemIds.filter((itemId) => {
     const session = held[sessionKey(workspaceId, itemId)];
-    return session !== undefined && needsSave(session);
+    return session !== undefined && (needsSave(session) || session.refused !== null);
   });
   if (unsaved.length > 0) throw new UnsavedSelection(unsaved);
   // The request is named once the saves have answered: what it commits is known only then.

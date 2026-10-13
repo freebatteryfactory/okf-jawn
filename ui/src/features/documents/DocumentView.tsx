@@ -385,7 +385,10 @@ export function DocumentView({
   const editable = atShown && isNote;
   const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
   const [chosen, setChosen] = useState<'read' | 'edit' | null>(null);
-  const wantsEdit = editable && (chosen ?? (hasDraft ? 'edit' : 'read')) === 'edit';
+  // Editing is wanted only of a draft: a pane that chose to edit and whose session then ended by
+  // another hand (a Snapshot elsewhere, or a read that says the item is not a Note while nothing
+  // was typed) reads the committed text again, and "Edit" starts a new session.
+  const wantsEdit = editable && hasDraft && (chosen ?? 'edit') === 'edit';
   // A draft the service holds is opened as it arrives. Without one, a session starts only when
   // the person presses "Edit": a discarded draft is not started again behind their back.
   const heldDraft = document?.draft ?? null;
@@ -542,6 +545,8 @@ export function DocumentView({
   // The editor and the form leave when the session ends by another hand than this pane's own
   // buttons (a Snapshot taken in the Drafts panel). Keyboard focus that was in them goes to the
   // pane's switch, as after the other ways out of the editor; with no switch, to the page's heading.
+  // The kept text of a refused session leaves the same way when its draft is discarded: the item
+  // is not a Note, so there is no switch, and focus goes to the page's heading.
   const heldFocus = useRef<HTMLElement | null>(null);
   const [, editingRef] = useWatchedPart<HTMLDivElement>(heldFocus);
   // The editor gives way to the kept text when the item is read as not a Note: focus that was in
@@ -701,9 +706,11 @@ export function DocumentView({
               ? 'Read the committed text'
               : elsewhere
                 ? 'Edit here'
-                : hasDraft
-                  ? 'Edit your draft'
-                  : 'Edit'}
+                : notANote !== null
+                  ? 'Show your draft'
+                  : hasDraft
+                    ? 'Edit your draft'
+                    : 'Edit'}
           </button>
         </p>
       )}

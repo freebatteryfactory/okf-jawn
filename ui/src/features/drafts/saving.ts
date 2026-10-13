@@ -68,21 +68,24 @@
  * item read says the item is not a Note (it is a Source or a View): the service takes no draft of
  * such an item. The pane tells the session at each read (`refuseSaving`, from `DocumentView`) and
  * the session carries it (`refused`: what the item is, or null). This is the one place that says
- * what follows; every function here and in `snapshot.ts` that sends or waits asks that field.
+ * what follows; the functions here and in `snapshot.ts` that send or wait ask that field.
  * - Nothing of it is sent. Every `save_draft` goes through `save` (the autosave's timer, leaving
  *   the editor, a hidden page, a Snapshot's save, "Keep mine"), and `save` returns at once, with
  *   no request, for a refused session. A request already under way when the refusal comes is let
  *   to answer. The text and what was entered in the properties stay in the session.
  * - No control that would send for it is drawn: in place of the editor and of the conflict notice
- *   the pane shows what was typed, read-only (`KeptText`).
+ *   the pane shows what was typed, read-only, with "Discard draft" (`KeptText`).
  * - Nothing waits on it. `rebaseSession` ("Keep mine") rejects with `DraftNotKept('refused')`
  *   instead of saving until the text is saved: a result its caller can tell from "saved".
- *   `flushSession` settles at once, and its outcome is the session's state, as ever.
+ *   `flushSession` settles at once, and its outcome is the session's state, as ever:
+ *   `takeSnapshot`, which waits on it, takes a refused session as not saved and asks nothing.
  * - A discard is still sent: it is the way out, and the refusal ends with the session.
+ * - A session that holds nothing of the person's (nothing typed, nothing saved, nothing held
+ *   back) is ended, not refused: there is nothing to keep, and nothing to discard.
  * - When a later read says the item is a Note, the refusal is lifted: the editor is drawn again
  *   with the text the session kept, and the save it owes is sent a moment later, as after a
- *   change. A session whose last save failed or was stopped is not sent by itself, here as
- *   anywhere: its notice has the retry.
+ *   change. The lift does not send again a save that had failed or was stopped: its notice,
+ *   back with the editor, has the retry.
  * Limits. The refusal is per item, whichever pane read it: a pane that reads the item at another
  * revision, where it is a Note, lifts what another pane set. And with no pane of the item open
  * nothing reads its kind for the session: a save sent then (the page is hidden) is the service's
@@ -107,6 +110,7 @@ import {
   needsSave,
   type SaveAttempt,
   sameText,
+  saveStateOf,
   sessionKey,
   useDraftSessions,
 } from './sessions';
@@ -281,6 +285,11 @@ export function refuseSaving(
   const session = sessions().sessions[key];
   const refused = kind === 'note' ? null : kind;
   if (session === undefined || session.refused === refused) return;
+  if (refused !== null && saveStateOf(session) === 'unchanged') {
+    // Nothing of the person's is in it: there is nothing to keep on screen.
+    endSession(workspaceId, itemId);
+    return;
+  }
   sessions().change(key, { refused });
   // A save that failed is not sent again by itself: its notice, back with the editor, has the retry.
   if (refused === null && session.failure === null) saveSoon(client, key);

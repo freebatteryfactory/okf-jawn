@@ -13,12 +13,14 @@ import { draftsOptions, rememberDraft } from '../../src/features/drafts/drafts-l
 import {
   AUTOSAVE_DELAY_MS,
   DraftNotKept,
+  editSession,
   MAX_BODY_BYTES,
   rebaseSession,
   resetDraftSessions,
   STILL_SENDING_AFTER_MS,
 } from '../../src/features/drafts/saving';
 import { sessionKey, useDraftSessions } from '../../src/features/drafts/sessions';
+import { takeSnapshot, UnsavedSelection } from '../../src/features/drafts/snapshot';
 import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
 import {
@@ -341,7 +343,7 @@ describe('who may edit, and where', () => {
         expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
         expect(
           screen.getByText(
-            `This item is now a ${word}, which is not edited as a draft, so your text is no longer saved. It is kept here: copy what you need.`,
+            `This item is now a ${word}, which is not edited as a draft, so your text is no longer saved. It is kept here: copy what you need, then discard the draft.`,
           ),
         ).toBeDefined();
         // Focus that was in the editor goes to the kept text, not to the page body.
@@ -361,9 +363,105 @@ describe('who may edit, and where', () => {
         );
         await pass(AUTOSAVE_DELAY_MS * 15);
         expect(api.callsTo(SAVE)).toHaveLength(0);
+        // The switch leads back to the kept text, and says so: there is nothing to edit.
+        expect(screen.queryByRole('button', { name: /^Edit/ })).toBeNull();
+        fireEvent.click(screen.getByRole('button', { name: 'Show your draft' }));
+        await eventually(() => expect(keptText()).toHaveProperty('value', `${COMMITTED} and more`));
       },
       20_000,
     );
+
+    it('ends a session in which nothing was typed instead of refusing it: nothing is kept, and "Edit" starts afresh once it is a Note again', async () => {
+      const { api, held } = becomesSource();
+      const { box } = await startEditing();
+      act(() => box.focus());
+      await refreshTo(held, NEWER);
+      await eventually(() => expect(screen.getByText(/Source · type/)).toBeDefined());
+      expect(screen.queryByLabelText('Your text, read only')).toBeNull();
+      expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+      expect(session()).toBeUndefined();
+      // Focus that was in the editor is on the page's heading, not on the page body.
+      expect(document.activeElement).toBe(
+        screen.getByRole('heading', { level: 1, name: 'Workshop notes' }),
+      );
+      expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+      // A Note again: the pane reads the committed text, and offers to edit it.
+      await refreshTo(held, 'f'.repeat(40));
+      await eventually(() => expect(screen.getByText('Text of Meeting notes')).toBeDefined());
+      expect(screen.getByRole('button', { name: 'Edit' })).toBeDefined();
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+    }, 20_000);
+
+    describe('the kept text offers "Discard draft"', () => {
+      const answered = (body: Json): Reply => ok(draftOf(String(body.item_id), HEAD, LATER));
+
+      it('asks as the editor asks, then asks the service, and the pane shows the item as it is now with focus on the page’s heading', async () => {
+        // The text was saved before the item was read as a Source: the service holds a draft.
+        const { api, held } = becomesSource(asSource, { [DISCARD]: answered });
+        const { box } = await startEditing();
+        typeInto(box, ' and more');
+        await pass(AUTOSAVE_DELAY_MS);
+        await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+        await refreshTo(held, NEWER);
+        const kept = await eventuallyGet(keptText);
+        const region = screen.getByRole('region', { name: 'Draft of Meeting notes, not saved' });
+        const discard = within(region).getByRole('button', { name: 'Discard draft' });
+        fireEvent.click(discard);
+        const question = within(region).getByRole('group', { name: 'Discard this draft?' });
+        expect(question.textContent).toContain(
+          'Your text here will be removed. The committed text stays as it is.',
+        );
+        const keep = within(question).getByRole('button', { name: 'Keep the draft' });
+        await eventually(() => expect(document.activeElement).toBe(keep));
+        fireEvent.click(keep);
+        await eventually(() =>
+          expect(document.activeElement).toBe(
+            within(region).getByRole('button', { name: 'Discard draft' }),
+          ),
+        );
+        expect(api.callsTo(DISCARD)).toHaveLength(0);
+        expect(kept.isConnected).toBe(true);
+        fireEvent.click(within(region).getByRole('button', { name: 'Discard draft' }));
+        const confirm = within(region).getByRole('button', { name: 'Discard the draft' });
+        act(() => confirm.focus());
+        fireEvent.click(confirm);
+        await eventually(() => expect(screen.queryByLabelText('Your text, read only')).toBeNull());
+        // A discard is the one request a refused session still sends.
+        expect(api.callsTo(DISCARD)).toHaveLength(1);
+        expect(api.callsTo(DISCARD).at(0)).toMatchObject({ workspace_id: WS, item_id: NOTE });
+        expect(api.callsTo(SAVE)).toHaveLength(1);
+        expect(session()).toBeUndefined();
+        expect(screen.queryByRole('button', { name: /Edit|Show your draft/ })).toBeNull();
+        expect(document.activeElement).toBe(
+          screen.getByRole('heading', { level: 1, name: 'Workshop notes' }),
+        );
+        expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+        expect(api.violations).toEqual([]);
+      }, 20_000);
+
+      it('keeps the text when the discard fails, and says so with its retry', async () => {
+        const { api, held } = becomesSource(asSource, {
+          [DISCARD]: () => fail(503, 'unavailable', 'busy'),
+        });
+        const { box } = await startEditing();
+        typeInto(box, ' and more');
+        await pass(AUTOSAVE_DELAY_MS);
+        await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+        await refreshTo(held, NEWER);
+        const kept = await eventuallyGet(keptText);
+        fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+        await eventually(() =>
+          expect(
+            screen.getByText('Discarding this draft: The service is temporarily unavailable.'),
+          ).toBeDefined(),
+        );
+        expect(kept.isConnected).toBe(true);
+        expect(kept).toHaveProperty('value', `${COMMITTED} and more`);
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeDefined();
+        expect(api.callsTo(DISCARD).length).toBeGreaterThan(0);
+      }, 20_000);
+    });
 
     // The third re-check's probe: a Snapshot's conflict open on an item that is then refused.
     // "Keep mine" saves until the text is saved, and nothing of a refused session is saved.
@@ -405,6 +503,24 @@ describe('who may edit, and where', () => {
       }
       expect(api.callsTo(SAVE)).toHaveLength(0);
       expect(session()?.baseRevision).toBe(HEAD);
+    }, 20_000);
+
+    it('takes no Snapshot of it, though all of its text was saved before: nothing is asked', async () => {
+      const { api, held } = becomesSource();
+      const { box, queryClient } = await startEditing();
+      typeInto(box, ' and more');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+      await refreshTo(held, NEWER);
+      await eventuallyGet(keptText);
+      const outcome = await takeSnapshot(queryClient, WS, [NOTE], 'Tidy').then(
+        () => 'taken',
+        (thrown: unknown) => thrown,
+      );
+      expect(outcome).toBeInstanceOf(UnsavedSelection);
+      expect(outcome).toHaveProperty('itemIds', [NOTE]);
+      expect(api.callsTo('/api/history/commit-items')).toHaveLength(0);
+      expect(api.callsTo(SAVE)).toHaveLength(1);
     }, 20_000);
 
     it('ends a "Keep mine" that was waiting for a save when the refusal came, as not kept', async () => {
@@ -878,12 +994,19 @@ describe('a save with no answer is not forgotten', () => {
 describe('a text too long to save', () => {
   it('sends a body of exactly the bound, and never one byte more', async () => {
     const api = writable();
-    const { box } = await startEditing();
-    replaceText(box, 'x'.repeat(MAX_BODY_BYTES));
+    const { queryClient } = await startEditing();
+    // The two texts are put into the open editor's session by the call the editor itself makes
+    // at each change (`editSession`), not typed into the text box. Under happy-dom the text box
+    // takes most of a second to take in 8 MiB, twice here, and that cost alone put this test
+    // past the runner's default limit on a loaded machine. The bound is the save's rule, not the
+    // text box's: what is sent, and what is not, is decided from the session.
+    const atTheBound = 'x'.repeat(MAX_BODY_BYTES);
+    act(() => editSession(queryClient, WS, NOTE, { body: atTheBound }));
     await pass(AUTOSAVE_DELAY_MS);
     await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
     expect(api.callsTo(SAVE)).toHaveLength(1);
-    typeInto(box, 'x');
+    expect(String(api.callsTo(SAVE).at(0)?.body).length).toBe(MAX_BODY_BYTES);
+    act(() => editSession(queryClient, WS, NOTE, { body: `${atTheBound}x` }));
     await pass(AUTOSAVE_DELAY_MS);
     await eventually(() => expect(saveState()).toBe('Not saved: the text is too long.'));
     expect(api.callsTo(SAVE)).toHaveLength(1);
@@ -891,7 +1014,9 @@ describe('a text too long to save', () => {
     expect(screen.getByRole('alert').textContent).toContain('Nothing was sent.');
     expect(screen.getByRole('tab', { name: 'Meeting notes (not saved)' })).toBeDefined();
     expect(api.violations).toEqual([]);
-  });
+    // Its own limit, not the runner's default: 8 MiB still goes through one request and the
+    // checks of the mocked service, and a loaded machine multiplies that.
+  }, 20_000);
 
   it('is no longer called too long once the text is back to what is saved', async () => {
     const api = writable();
@@ -1639,6 +1764,25 @@ describe('discarding a draft', () => {
     expect(await screen.findByRole('tab', { name: 'Meeting notes' })).toBeDefined();
     expect(await screen.findByRole('region', { name: 'Drafts (0)' })).toBeDefined();
     expect(api.violations).toEqual([]);
+  });
+
+  it('puts focus on the switch after a discard pressed with a pointer that does not focus what it presses', async () => {
+    writable({ [DISCARD]: (body) => ok(draftOf(String(body.item_id), HEAD, LATER)) });
+    const { box } = await startEditing();
+    typeInto(box, ' and more');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+    // Focus is nowhere in the editor when the button is pressed (a pointer in WebKit).
+    await eventually(() =>
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Keep the draft' })),
+    );
+    act(() => screen.getByRole('button', { name: 'Keep the draft' }).blur());
+    expect(document.activeElement).toBe(document.body);
+    fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+    await eventually(() =>
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Edit' })),
+    );
   });
 
   it('keeps the draft when the discard fails, and repeats it under the same key', async () => {

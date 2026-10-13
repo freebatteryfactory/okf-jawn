@@ -13,7 +13,10 @@
  * box is unticked and cannot be ticked, and it offers "Discard draft", which asks first. Until a
  * row's item has been read its kind is not known: the row says "checking…", is not ticked and is
  * not in the Snapshot or its count, so a Snapshot pressed then never includes a Source's or a
- * View's draft. If the read never answers the row stays so.
+ * View's draft. When that read fails the row says so, with the failure and its retry
+ * (`useRetry`), stays unticked, and offers "Discard draft" too: a draft whose item cannot be read
+ * (it was deleted, say) can still be got rid of. A read that fails once the item was read takes
+ * nothing off the row.
  *
  * This panel asks for the list's further pages by itself, one after another, so the marks in the
  * tree and on the tabs cover every draft. A page that fails stops that, says so here and offers
@@ -78,6 +81,8 @@ interface Row {
   conflict: SnapshotConflict | null;
   /** The item as `get_item` answers it at the head shown; undefined until it has. */
   summary: ItemSummary | undefined;
+  /** That read, when it failed: what it threw, and the way to ask again. Null otherwise. */
+  unread: { error: unknown; again: () => Promise<unknown> } | null;
 }
 
 /** The kinds of item that are not edited as a draft here, as the person is told. */
@@ -145,6 +150,7 @@ export function DraftsPanel({
     session: null,
     conflict: conflictOf(draft.item_id),
     summary: undefined,
+    unread: null,
   }));
   for (const session of Object.values(sessions)) {
     if (session.workspaceId !== workspaceId) continue;
@@ -157,6 +163,7 @@ export function DraftsPanel({
         session,
         conflict: conflictOf(session.itemId),
         summary: undefined,
+        unread: null,
       });
     }
   }
@@ -169,10 +176,14 @@ export function DraftsPanel({
       enabled: deletedHere[`${workspaceId}/${row.itemId}`] === undefined,
     })),
   });
-  const rows: Row[] = unread.map((row, index) => ({
-    ...row,
-    summary: items.at(index)?.data?.summary,
-  }));
+  const rows: Row[] = unread.map((row, index) => {
+    const read = items.at(index);
+    return {
+      ...row,
+      summary: read?.data?.summary,
+      unread: read?.isError === true ? { error: read.error, again: () => read.refetch() } : null,
+    };
+  });
 
   // The list failed with nothing listed, or with some listed: then those stay and the rest waits.
   const nothingListed = drafts.data === undefined;
@@ -273,6 +284,7 @@ export function DraftsPanel({
               index={index}
               held={heldRow}
               workspaceId={workspaceId}
+              head={head}
               row={row}
               selectable={canWrite}
               selected={offered(row) && !left.has(row.itemId)}
@@ -416,6 +428,7 @@ function DraftRow({
   index,
   held,
   workspaceId,
+  head,
   row,
   selectable,
   selected,
@@ -426,6 +439,8 @@ function DraftRow({
   index: number;
   held: HeldFocus;
   workspaceId: string;
+  /** The head the row’s item is read at. */
+  head: Revision;
   row: Row;
   selectable: boolean;
   selected: boolean;
@@ -444,6 +459,25 @@ function DraftRow({
         : `Item ${row.itemId.slice(0, 8)}`;
   const kind = otherKind(row);
   const [, rowRef] = useWatchedPart<HTMLLIElement>(held);
+  const openRef = useRef<HTMLButtonElement | null>(null);
+  // The row's own read, when it failed with nothing read: shown with its retry, which ends with
+  // keyboard focus on the row's item. A read that fails once the item was read changes nothing.
+  const unread = kindUnknown(row);
+  const readFailure = useRetry({
+    request: `${workspaceId}/${row.itemId}/${head}`,
+    failed: row.unread !== null,
+    error: row.unread?.error,
+    run: () => row.unread?.again() ?? Promise.resolve(),
+    loaded: () => openRef.current,
+  });
+  const notRead = unread && readFailure.shown;
+  // The discard is offered where the draft cannot be snapshotted from here. It leaves when the
+  // item is read after all and is a Note; keyboard focus that was in it goes to the row's item.
+  const heldDiscard = useRef<HTMLElement | null>(null);
+  const [, discardRef] = useWatchedPart<HTMLDivElement>(heldDiscard);
+  useLayoutEffect(() => {
+    if (takeHeld(heldDiscard)) openRef.current?.focus();
+  });
   return (
     <li ref={rowRef} data-row={index}>
       {selectable && (
@@ -458,52 +492,78 @@ function DraftRow({
           onChange={(event) => onSelect(event.target.checked)}
         />
       )}{' '}
-      <button type="button" className="link-button" onClick={() => onOpenItem(row.itemId)}>
+      <button
+        type="button"
+        ref={openRef}
+        className="link-button"
+        onClick={() => onOpenItem(row.itemId)}
+      >
         {name}
       </button>{' '}
       <span className="meta">
         {kind === null ? null : `${kind} · `}
         {deleted !== undefined ? (
           <>its item was deleted: open it to copy from the draft or discard it</>
-        ) : kindUnknown(row) ? (
-          <>checking…</>
-        ) : (
+        ) : !unread ? (
           <Standing row={row} />
+        ) : notRead ? (
+          <>not read</>
+        ) : (
+          <>checking…</>
         )}
       </span>
       {kind !== null && (
-        <OtherKindDraft
-          workspaceId={workspaceId}
-          itemId={row.itemId}
-          name={name}
-          kind={kind}
-          discardable={selectable}
-        />
+        <p className="meta">
+          A draft of a {kind} cannot be snapshotted: only a Note is edited as a draft.
+          {selectable ? ' It can be discarded here.' : ''}
+        </p>
+      )}
+      {notRead && (
+        <>
+          <p className="meta">
+            This draft’s item could not be read, so it is not known whether it can be snapshotted.
+            {selectable ? ' It can be discarded here.' : ''}
+          </p>
+          <FailureNotice
+            context={`Reading ${name}`}
+            error={readFailure.error}
+            retry={readFailure}
+            workspaceId={workspaceId}
+          />
+        </>
+      )}
+      {selectable && (kind !== null || notRead) && (
+        <div ref={discardRef}>
+          <RowDiscard
+            workspaceId={workspaceId}
+            itemId={row.itemId}
+            name={name}
+            committed={kind ?? 'item'}
+          />
+        </div>
       )}
     </li>
   );
 }
 
 /**
- * What a draft of a Source or a View carries in its row: why it cannot be snapshotted, and the
- * way to discard it, which asks first, in place ("Keep the draft" takes keyboard focus, and
- * choosing it gives focus back to "Discard draft"). The discard is the item's own (`saving.ts`):
- * this page has no session of such an item, so the service is asked. When it is done the row
- * leaves, and the panel says where keyboard focus goes.
+ * The way to discard a draft from its row, for a draft that cannot be snapshotted from here (of a
+ * Source or a View, or of an item that could not be read). It asks first, in place ("Keep the
+ * draft" takes keyboard focus, and choosing it gives focus back to "Discard draft"). The discard
+ * is the item's own (`saving.ts`): the service is asked unless this page knows it holds no draft
+ * of the item. When it is done the row leaves, and the panel says where keyboard focus goes.
  */
-function OtherKindDraft({
+function RowDiscard({
   workspaceId,
   itemId,
   name,
-  kind,
-  discardable,
+  committed,
 }: {
   workspaceId: string;
   itemId: string;
   name: string;
-  kind: (typeof OTHER_KIND)[keyof typeof OTHER_KIND];
-  /** The person may write in this workspace. */
-  discardable: boolean;
+  /** What stays as it is, as the question says it: the kind of the item, or "item". */
+  committed: (typeof OTHER_KIND)[keyof typeof OTHER_KIND] | 'item';
 }) {
   const client = useQueryClient();
   const [confirming, setConfirming] = useState(false);
@@ -530,14 +590,10 @@ function OtherKindDraft({
   });
   return (
     <>
-      <p className="meta">
-        A draft of a {kind} cannot be snapshotted: only a Note is edited as a draft.
-        {discardable ? ' It can be discarded here.' : ''}
-      </p>
-      {!discardable ? null : confirming ? (
+      {confirming ? (
         <fieldset className="confirm">
           <legend>Discard the draft of {name}?</legend>
-          <p>The draft will be removed. The committed {kind} stays as it is.</p>
+          <p>The draft will be removed. The committed {committed} stays as it is.</p>
           <button
             type="button"
             ref={keepRef}
