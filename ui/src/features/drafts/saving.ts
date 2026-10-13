@@ -280,9 +280,10 @@ export function assertSaved(workspaceId: string, itemId: string) {
 /**
  * The first half of "keep mine": the draft is saved again with `revision` as its base, which the
  * service takes as the explicit rebase when that is the revision the item is at. The session's own
- * save carries it, after any save in flight and with the text the editor holds by then. A draft
- * already on that base, with that text, is not sent again. Rejects with what the save threw, or
- * with `DraftNotKept`.
+ * save carries it, after any save in flight and with the text the editor holds by then; text
+ * typed while that save is in flight is saved after it, so this settles with the text on screen
+ * saved. A draft already on that base, with that text, is not sent again. Rejects with what a
+ * save threw, or with `DraftNotKept`.
  */
 export async function rebaseSession(
   client: QueryClient,
@@ -296,7 +297,14 @@ export async function rebaseSession(
   // A save in flight answers with the base it was sent on: the new base is named after it.
   await inFlight.get(key);
   sessions().change(key, { baseRevision: revision });
-  await save(client, key);
+  // What is typed while a save is in flight is saved too, without waiting for the autosave's
+  // moment: the draft is kept once the text on screen is saved, a save failed, or it is too long.
+  for (;;) {
+    cancelTimer(key);
+    await save(client, key);
+    const now = sessions().sessions[key];
+    if (now === undefined || !needsSave(now) || now.failure !== null || now.tooLong !== null) break;
+  }
   assertSaved(workspaceId, itemId);
 }
 

@@ -1515,6 +1515,66 @@ describe('a Snapshot that conflicts', () => {
       expect(reusedKeys(api.callsTo(SAVE))).toEqual([]);
     });
 
+    // Typed while the draft is being kept, and that save answers before the autosave's moment.
+    describe('text typed while the draft is kept, inside the autosave delay', () => {
+      async function typedWhileKept(second: (body: Json) => Reply) {
+        const answers: Array<() => void> = [];
+        let saves = 0;
+        const made = await openConflict(
+          {},
+          {
+            [SAVE]: (body) => {
+              saves += 1;
+              // The save that keeps the draft waits for the test; any after it answers at once.
+              return saves === 1
+                ? new Promise<Reply>((resolve) => {
+                    answers.push(() => resolve(savedAs(body)));
+                  })
+                : second(body);
+            },
+            [COMMIT]: commits(() => committed()),
+          },
+        );
+        vi.useFakeTimers();
+        fireEvent.click(within(made.notice).getByRole('button', { name: 'Keep mine' }));
+        await eventually(() => expect(made.api.callsTo(SAVE)).toHaveLength(1));
+        typeInto(textBox('Text of Meeting notes'), ' and more');
+        // The clock is not moved: the autosave of what was typed has not come due.
+        act(() => {
+          answers.shift()?.();
+        });
+        return made;
+      }
+
+      it('is saved before the Snapshot is taken, and nothing is called too long', async () => {
+        const { api } = await typedWhileKept(savedAs);
+        await eventually(() => expect(said()).toMatch(/^Snapshot “Tidy” taken: 1 item\./));
+        expect(api.callsTo(SAVE).map((sent) => [sent.base_revision, sent.body])).toEqual([
+          [THEIRS, DRAFT_BODY],
+          [THEIRS, `${DRAFT_BODY} and more`],
+        ]);
+        // The Snapshot was asked once the text on screen was saved, and not before.
+        expect(api.callsTo(COMMIT)).toHaveLength(2);
+        expect(document.body.textContent).not.toContain('too long');
+        expect(document.body.textContent).not.toContain('Your draft was not kept.');
+        expect(reusedKeys(api.callsTo(SAVE))).toEqual([]);
+      });
+
+      it('says a save of it that fails as that save’s failure, and takes no Snapshot', async () => {
+        const { api, notice } = await typedWhileKept(() => fail(503, 'unavailable', 'busy'));
+        await eventually(() =>
+          expect(
+            within(notice).getByText('Keeping your draft: The service is temporarily unavailable.'),
+          ).toBeDefined(),
+        );
+        expect(api.callsTo(SAVE)).toHaveLength(2);
+        expect(api.callsTo(COMMIT)).toHaveLength(1);
+        expect(notice.textContent).not.toContain('too long');
+        expect(notice.textContent).not.toContain('could not be reached');
+        expect(within(notice).getByRole('button', { name: 'Try again' })).toBeDefined();
+      });
+    });
+
     it('sends a save that failed on the old base under a new key on the new one', async () => {
       let failing = false;
       const { api, notice } = await openConflict(

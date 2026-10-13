@@ -29,15 +29,9 @@ import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { MAX_DIFF_LINES, type PatchHunk, readPatch } from './patch';
-import { assertSaved, DraftNotKept, discardSession, rebaseSession } from './saving';
+import { DraftNotKept, discardSession, rebaseSession } from './saving';
 import { type ConflictItem, type SnapshotConflict, useDraftSessions } from './sessions';
-import {
-  draftConflictsOf,
-  type Snapshotted,
-  saySnapshotted,
-  takeSnapshot,
-  UnsavedSelection,
-} from './snapshot';
+import { draftConflictsOf, type Snapshotted, saySnapshotted, takeSnapshot } from './snapshot';
 
 export interface ConflictNoticeProps {
   workspaceId: string;
@@ -141,14 +135,11 @@ export function ConflictNotice({
 
   const keep = useMutation({
     mutationFn: async () => {
+      // The draft is kept once the text on screen is saved on that revision: text typed
+      // meanwhile is saved by it too, and a save that failed is its failure, said as such. The
+      // Snapshot that follows in the same turn therefore finds nothing unsaved.
       await rebaseSession(client, workspaceId, itemId, item.current_revision);
-      try {
-        return await takeSnapshot(client, workspaceId, [itemId], conflict.message);
-      } catch (error) {
-        // Text typed meanwhile could not be saved: the reason is the save's, and is said as such.
-        if (error instanceof UnsavedSelection) assertSaved(workspaceId, itemId);
-        throw error;
-      }
+      return takeSnapshot(client, workspaceId, [itemId], conflict.message);
     },
     onSuccess: (snapshotted) => {
       saySnapshotted(workspaceId, conflict.message, snapshotted);
