@@ -7,7 +7,7 @@
 //! the bounds of the shipped relay and CLI are the stated ones, each from both sides.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, UdpSocket};
+use std::net::{IpAddr, TcpListener, UdpSocket};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -29,6 +29,9 @@ use crate::support::{
 
 /// How long a test waits for what a correct relay does within a few seconds.
 const PATIENCE: Duration = Duration::from_secs(30);
+/// The test of a remote address, as the test run names it.
+const REMOTE_TEST: &str =
+    "mcp_stdio::review::a_remote_address_is_never_started_by_the_shipped_entry_point";
 
 /// A loopback port on which nothing listens: one that was free a moment ago.
 fn closed_port() -> Outcome<u16> {
@@ -37,10 +40,58 @@ fn closed_port() -> Outcome<u16> {
 
 /// An address of this machine that is not loopback: the one it would send from. No packet is
 /// sent to find it, and a connection to a closed port there is refused by this machine.
-fn own_address() -> Outcome<std::net::IpAddr> {
+///
+/// `None` when the operating system will not connect a socket toward a remote address, which
+/// is what it does on a machine that has no address but loopback (a build sandbox, a runner
+/// without a network): it has no route to send by. Whatever its reason, a machine that
+/// refuses here has no address this test could use.
+fn own_address() -> Outcome<Option<IpAddr>> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
-    socket.connect("192.0.2.1:9")?;
-    Ok(socket.local_addr()?.ip())
+    if socket.connect("192.0.2.1:9").is_err() {
+        return Ok(None);
+    }
+    Ok(Some(socket.local_addr()?.ip()))
+}
+
+/// B1 for the address `address` of this machine. With no address there is nothing to run:
+/// that is said on `said`, in one line that names the test, and it is no failure.
+async fn remote_case(address: Option<IpAddr>, said: &mut impl Write) -> TestResult {
+    let Some(address) = address else {
+        writeln!(
+            said,
+            "{REMOTE_TEST} did not run its remote-address case: this machine has no address \
+             but loopback, so the relay's refusal to start a server for a remote address was \
+             not tested here"
+        )?;
+        return Ok(());
+    };
+    assert!(
+        !address.is_loopback() && !address.is_unspecified(),
+        "{address}"
+    );
+    let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-such-okf-jawn-server");
+    let read = Arc::new(AtomicBool::new(false));
+    let ran = cli_reading(
+        &[
+            "mcp",
+            "--stdio",
+            "--server",
+            &format!("https://{address}:{}", closed_port()?),
+            "--server-bin",
+            &missing.display().to_string(),
+        ],
+        Some(TOKEN),
+        Untouched(read.clone()),
+    )
+    .await?;
+    assert_eq!((ran.code, ran.stdout.as_str()), (1, ""));
+    assert!(
+        ran.stderr.contains("never starts a remote service"),
+        "{}",
+        ran.stderr
+    );
+    assert!(!read.load(Ordering::SeqCst), "stdin was read");
+    Ok(())
 }
 
 /// Start the built relay as a process of its own, its three standard streams piped.
@@ -72,35 +123,31 @@ fn stopped(mut child: Child) -> Outcome<(String, String)> {
 /// B1: the shipped entry point never starts a server for a remote address. The address is
 /// this machine's own, on a closed port, so the connection is refused without a network; the
 /// server executable named does not exist, so a start would be reported as such.
+///
+/// A machine with no address but loopback cannot run this: the test then says so and passes.
+/// It writes to the error stream itself, which the test runner does not capture as it does
+/// what a test prints, so the line shows in a run that passes.
 #[tokio::test]
 async fn a_remote_address_is_never_started_by_the_shipped_entry_point() -> TestResult {
-    let address = own_address()?;
+    remote_case(own_address()?, &mut std::io::stderr()).await
+}
+
+/// On a machine with no address but loopback, the test above says in one line, by its name,
+/// that it did not run its remote-address case, and does not fail. It never passes in
+/// silence: this is the same code, given no address.
+#[tokio::test]
+async fn a_machine_with_no_remote_address_is_told_that_the_remote_case_did_not_run() -> TestResult {
+    let mut said = Vec::new();
+    remote_case(None, &mut said).await?;
+    let said = String::from_utf8(said)?;
+    assert_eq!(said.lines().count(), 1, "{said}");
     assert!(
-        !address.is_loopback() && !address.is_unspecified(),
-        "{address}"
+        said.starts_with(
+            "mcp_stdio::review::a_remote_address_is_never_started_by_the_shipped_entry_point \
+             did not run its remote-address case: "
+        ) && said.ends_with('\n'),
+        "{said}"
     );
-    let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-such-okf-jawn-server");
-    let read = Arc::new(AtomicBool::new(false));
-    let ran = cli_reading(
-        &[
-            "mcp",
-            "--stdio",
-            "--server",
-            &format!("https://{address}:{}", closed_port()?),
-            "--server-bin",
-            &missing.display().to_string(),
-        ],
-        Some(TOKEN),
-        Untouched(read.clone()),
-    )
-    .await?;
-    assert_eq!((ran.code, ran.stdout.as_str()), (1, ""));
-    assert!(
-        ran.stderr.contains("never starts a remote service"),
-        "{}",
-        ran.stderr
-    );
-    assert!(!read.load(Ordering::SeqCst), "stdin was read");
     Ok(())
 }
 
