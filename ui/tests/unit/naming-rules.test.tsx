@@ -12,7 +12,7 @@ import namingSchema from '../../../api/forms/naming-rules.schema.json';
 import type { ItemSummary, NamingRules } from '../../src/api/generated/types.gen';
 import { staleReason } from '../../src/features/conventions/NamingRules';
 import { formHolds, RulesForm, rulesProblems } from '../../src/features/conventions/RulesForm';
-import { type Preview, sameRules } from '../../src/features/conventions/rules';
+import { keepOrder, type Preview, sameRules } from '../../src/features/conventions/rules';
 import { resetDraftSessions } from '../../src/features/drafts/saving';
 import { type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textIn } from './support/editor';
@@ -1447,5 +1447,85 @@ describe('saving over rules someone else saved meanwhile', () => {
     await waitFor(() => expect(said()).toContain('The rules are saved.'));
     expect(savedNow()).toBeNull();
     expect(replaceQuestion()).toBeNull();
+  });
+});
+
+describe('what the two views of the rules say and keep', () => {
+  it('keeps keys in the order they had: shared keys stay, new ones go last, lists place by place', () => {
+    expect(
+      Object.keys(keepOrder({ b: 1, a: 2, gone: 3 }, { a: 20, b: 10, added: 5 }) as object),
+    ).toEqual(['b', 'a', 'added']);
+    expect(keepOrder({ b: 1, a: 2 }, { a: 20, b: 10 })).toEqual({ b: 10, a: 20 });
+    const kept = keepOrder(
+      { rules: [{ prefix: '', glob: 'x' }], schema_version: 1 },
+      {
+        schema_version: 1,
+        rules: [
+          { glob: 'x', prefix: 'p' },
+          { glob: 'y', prefix: '' },
+        ],
+      },
+    ) as { rules: object[] };
+    expect(Object.keys(kept)).toEqual(['rules', 'schema_version']);
+    expect(kept.rules.map((each) => Object.keys(each))).toEqual([
+      ['prefix', 'glob'],
+      ['glob', 'prefix'],
+    ]);
+    // Nothing but the order differs, and what is no mapping is given back as it is.
+    expect(keepOrder('x', { a: [1, { b: null }] })).toEqual({ a: [1, { b: null }] });
+    expect(keepOrder({ a: 1 }, 'text')).toBe('text');
+    expect(keepOrder({ a: 1 }, null)).toBeNull();
+  });
+
+  it('leaves every key where the YAML had it when the form changes one value', async () => {
+    service();
+    await openRules();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    // The person's own order: the rules first, and the prefix first in the rule.
+    const mine = [
+      'rules:',
+      '  - prefix: ""',
+      '    glob: "**/*.md"',
+      '    collision: reject',
+      '    case: kebab',
+      '    separator: "-"',
+      '    date_order: ymd',
+      '    date_format: "%Y-%m-%d"',
+      '    strip_version_suffix: true',
+      '    extension_policy: preserve',
+      '    alias_preservation: true',
+      'schema_version: 1',
+      '',
+    ].join('\n');
+    typeYaml(box, mine);
+    await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
+    await userEvent.type(prefix(), 'x-');
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const after = textIn(await findTextBox('The naming rules as YAML'));
+    const keys = (text: string) => [...text.matchAll(/^\s*-?\s*([a-z_]+):/gm)].map((m) => m[1]);
+    expect(keys(after)).toEqual(keys(mine));
+    expect(after).toContain('prefix: x-');
+  });
+
+  it('says in the YAML view, before anything is typed, that comments are not kept, and why', async () => {
+    service();
+    await openRules();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    await findTextBox('The naming rules as YAML');
+    const note = within(panel()).getByText(/Comments are not kept\./);
+    expect(note.textContent).toContain('The service stores the rules as data, not as text');
+    expect(note.getAttribute('role')).toBe('note');
+  });
+
+  it('says in a preview that archived items are left out, and that their number cannot be told', async () => {
+    service();
+    await openRules();
+    await setPrefix('2025-');
+    await previewNow();
+    const preview = screen.getByRole('region', { name: 'Preview: what would be renamed' });
+    expect(preview.textContent).toContain(
+      'Archived items are not listed in the workspace as it is now, so they are not in this preview and would not be renamed. How many there are cannot be told here.',
+    );
   });
 });

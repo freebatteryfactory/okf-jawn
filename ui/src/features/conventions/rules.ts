@@ -75,6 +75,30 @@ function ordered(value: unknown): unknown {
   return value;
 }
 
+/**
+ * `after` with its keys in the order `before` has them: a key both have stays where it was, a key
+ * only `after` has goes last, and lists are matched place by place. The form library hands a
+ * value back with its keys in the order of its schema; this keeps the order the person's YAML had,
+ * so a form edit changes only the keys it changes.
+ */
+export function keepOrder(before: unknown, after: unknown): unknown {
+  if (Array.isArray(after)) {
+    const was = Array.isArray(before) ? before : [];
+    return after.map((entry, place) => keepOrder(was.at(place), entry));
+  }
+  if (after === null || typeof after !== 'object') return after;
+  const now = new Map(Object.entries(after));
+  const was =
+    before !== null && typeof before === 'object' && !Array.isArray(before)
+      ? new Map(Object.entries(before))
+      : new Map<string, unknown>();
+  const keys = [
+    ...[...was.keys()].filter((key) => now.has(key)),
+    ...[...now.keys()].filter((key) => !was.has(key)),
+  ];
+  return Object.fromEntries(keys.map((key) => [key, keepOrder(was.get(key), now.get(key))]));
+}
+
 /** Save the rules as the workspace's naming rules: one commit on the head shown. */
 export async function saveRules(
   client: QueryClient,

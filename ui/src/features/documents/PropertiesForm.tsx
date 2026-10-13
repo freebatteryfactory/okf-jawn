@@ -544,7 +544,8 @@ const TypedForm = memo(function TypedForm({
       {heldBack && (
         <p className="notice">
           What you changed in the properties is held back, and is not saved until the properties fit
-          the type.
+          the type. It can be repaired in the YAML view, which shows the properties as you left
+          them.
         </p>
       )}
     </div>

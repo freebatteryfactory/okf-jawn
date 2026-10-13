@@ -6,7 +6,9 @@
  * One value is edited, starting from the saved rules of the version the workspace shows. The form
  * and the YAML view are two views of it, one on screen at a time: a change in the form is written
  * into the YAML, and YAML that can be read becomes what the form shows. The value is kept as it
- * is: a key neither view knows is never dropped. YAML that cannot be read changes nothing: the
+ * is: a key neither view knows is never dropped, and a form edit leaves every key where the YAML
+ * had it (`keepOrder`). Comments are not kept: the service stores the rules as data, so a comment
+ * never reaches it, and the YAML view says so before anything is typed. YAML that cannot be read changes nothing: the
  * value stays the last one that could, the text stays as typed (through a change of view too),
  * and its problems are listed with their lines. Nothing is sent while the YAML cannot be read or
  * the value has a problem by the service's schema: the problems are shown at their fields and in
@@ -71,6 +73,7 @@ import { folderProblem } from '../tree/names';
 import { formHolds, RulesForm, rulesProblems } from './RulesForm';
 import {
   applyPreview,
+  keepOrder,
   NothingToPreview,
   type Preview,
   previewRenames,
@@ -513,8 +516,9 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
                   schema={form}
                   value={value}
                   onChange={(next) => {
-                    // The form is one view of the value: the YAML is written from it again.
-                    setEdited(next);
+                    // The form is one view of the value: the YAML is written from it again, its
+                    // keys where they were.
+                    setEdited(keepOrder(value, next));
                     setTyped(null);
                   }}
                 />
@@ -525,6 +529,11 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
               )}
             </Tabs.Panel>
             <Tabs.Panel value="yaml">
+              <p role="note" className="notice">
+                Comments are not kept. The service stores the rules as data, not as text: a comment
+                typed here is not saved, and is gone from this text as soon as the form changes the
+                rules.
+              </p>
               <YamlEditor
                 key={dropped}
                 label="The naming rules as YAML"
@@ -703,6 +712,10 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
             revision{' '}
             <code title={preview.plan.base_revision}>{short(preview.plan.base_revision)}</code>.
             Nothing has been renamed.
+          </p>
+          <p className="meta">
+            Archived items are not listed in the workspace as it is now, so they are not in this
+            preview and would not be renamed. How many there are cannot be told here.
           </p>
           {stale !== null && (
             <div role="alert" className="failure-notice">

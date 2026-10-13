@@ -5,7 +5,7 @@
  */
 import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { refusals, withHeaderBack } from '../../src/features/documents/PropertiesYaml';
+import { asLeft, refusals, withHeaderBack } from '../../src/features/documents/PropertiesYaml';
 import { AUTOSAVE_DELAY_MS, resetDraftSessions } from '../../src/features/drafts/saving';
 import { YAML_PAUSE_MS } from '../../src/lib/yaml';
 import { type Handler, mockApi, ok } from './support/api';
@@ -298,5 +298,59 @@ describe('when the properties YAML is read', () => {
     expect(screen.getByRole('alert').textContent).toContain(
       'A directive line (starting with %) is not accepted here.',
     );
+  });
+});
+
+describe('what the form holds back, in the YAML view', () => {
+  it('puts held-back input in its place among the properties as the person left them', () => {
+    const held = {
+      form: { owner: 'Ada', attendees: 0 },
+      entered: ['attendees'],
+      opened: [],
+      takenOut: [],
+    };
+    expect(asLeft(stored, null)).toBe(stored);
+    expect(asLeft(stored, held)).toEqual({ ...stored, attendees: 0 });
+    expect(Object.keys(asLeft(stored, held))).toEqual(Object.keys(stored));
+  });
+
+  it('shows it as the person left it, says why it is held back, and takes the repair made there', async () => {
+    const api = service();
+    await openYaml();
+    fireEvent.click(tab('Form'));
+    await pass(0);
+    // Not a number the type allows: the form holds it back.
+    fireEvent.change(screen.getByLabelText(/^Attendees/), { target: { value: '0' } });
+    await pass(AUTOSAVE_DELAY_MS * 2);
+    expect(api.callsTo(SAVE)).toEqual([]);
+    const line = screen.getByText(/What you changed in the properties is held back/);
+    expect(line.textContent).toContain(
+      'It can be repaired in the YAML view, which shows the properties as you left them.',
+    );
+
+    fireEvent.click(tab('YAML'));
+    await pass(0);
+    // As the person left it, not as the draft holds it; and the reason is listed.
+    const box = textBox(YAML);
+    expect(textIn(box)).toBe(storedYaml.replace('attendees: 4', 'attendees: 0'));
+    expect(screen.getByRole('alert').textContent).toContain('“attendees” must be >= 1.');
+    expect(api.callsTo(SAVE)).toEqual([]);
+
+    replaceText(box, storedYaml.replace('attendees: 4', 'attendees: 9'));
+    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS);
+    expect(saved(api)).toEqual({ ...stored, attendees: 9 });
+    expect(screen.queryByRole('alert')).toBeNull();
+    // Nothing is held back any more, in either view.
+    fireEvent.click(tab('Form'));
+    await pass(0);
+    expect(screen.getByLabelText(/^Attendees/)).toHaveProperty('value', '9');
+    expect(screen.queryByText(/What you changed in the properties is held back/)).toBeNull();
+  });
+
+  it('opens on the draft’s properties when nothing is held back', async () => {
+    service();
+    const box = await openYaml();
+    expect(textIn(box)).toBe(storedYaml);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

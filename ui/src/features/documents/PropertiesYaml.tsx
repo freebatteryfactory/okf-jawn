@@ -20,8 +20,10 @@
  * through a change of view too. A change made in the form after that replaces the text: the YAML
  * view then opens on the draft's properties again.
  *
- * Limit: what the form holds back (input that does not fit the type) is the form's own and is not
- * carried into the YAML view; that view shows what the draft holds.
+ * What the form holds back (input that does not fit the type, kept with the session) is in the
+ * text too: the view opens on the properties as the person left them, the held-back input in its
+ * place, and lists why they are held back. So they can be repaired here: once the text fits, it
+ * is put into the draft, and nothing is held back any more.
  */
 import { Tabs } from '@base-ui/react/tabs';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -32,9 +34,10 @@ import { keyed } from '../../lib/keys';
 import { usePausedReading, YamlEditor, YamlFindings } from '../../lib/YamlEditor';
 import { writeYaml, type YamlRead } from '../../lib/yaml';
 import { editSession } from '../drafts/saving';
-import type { DraftSession } from '../drafts/sessions';
+import type { DraftSession, HeldProperties } from '../drafts/sessions';
 import {
   APP_HEADER_KEY,
+  mergeProperties,
   misfits,
   PropertiesForm,
   withoutHeader,
@@ -55,6 +58,13 @@ export interface TypedYaml {
   refused: string[];
   /** The property map the draft held once this was typed: while it still does, the text stands. */
   draft: PropertyMap;
+}
+
+/** The properties as the person left them: what the form holds back is in its place. */
+export function asLeft(properties: PropertyMap, held: HeldProperties | null): PropertyMap {
+  return held === null
+    ? properties
+    : mergeProperties(properties, held.entered, held.form, held.opened);
 }
 
 /** A mapping of names to values: what an item's properties are. */
@@ -122,7 +132,18 @@ function PropertiesYaml({ session, typeName, typed, onTyped, readNow }: Properti
     onTyped({ text, read, refused, draft: wanted });
     editSession(client, session.workspaceId, session.itemId, { properties: wanted });
   });
-  const { flush } = reading;
+  const opening =
+    typed?.text ?? writeYaml(withoutHeader(asLeft(session.properties, session.heldBack)));
+  // The form's held-back input is text that is held back here too: read once as the view opens,
+  // so the reasons are listed under it.
+  const { change, flush } = reading;
+  const first = useRef({ heldBack: session.heldBack !== null && typed === null, text: opening });
+  useEffect(() => {
+    if (!first.current.heldBack) return;
+    first.current.heldBack = false;
+    change(first.current.text);
+    flush();
+  }, [change, flush]);
   useEffect(() => {
     readNow.current = flush;
     return () => {
@@ -134,7 +155,7 @@ function PropertiesYaml({ session, typeName, typed, onTyped, readNow }: Properti
       <summary>Properties ({count})</summary>
       <YamlEditor
         label="Properties as YAML"
-        initialText={typed?.text ?? writeYaml(withoutHeader(session.properties))}
+        initialText={opening}
         describedBy={findingsId}
         onChange={reading.change}
         onBlur={reading.flush}

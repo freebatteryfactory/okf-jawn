@@ -387,7 +387,7 @@ describe('the properties form', () => {
     /** What the form says above its fields. */
     const saidAbove = () => document.querySelector('.form-said')?.textContent ?? '';
     const HELD_BACK =
-      'What you changed in the properties is held back, and is not saved until the properties fit the type.';
+      'What you changed in the properties is held back, and is not saved until the properties fit the type. It can be repaired in the YAML view, which shows the properties as you left them.';
     const sent = (api: ReturnType<typeof typed>, at: number) =>
       Object(api.callsTo(SAVE).at(at)?.properties);
 
