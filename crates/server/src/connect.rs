@@ -82,7 +82,7 @@ use std::time::{Duration, Instant};
 
 use axum::http::{HeaderMap, Method};
 use jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER;
-use jsonwebtoken::jwk::JwkSet;
+use jsonwebtoken::jwk::{Jwk, JwkSet};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_core::ports::PortFuture;
@@ -170,16 +170,16 @@ impl KeyCache {
         may_refresh && (stale || !known)
     }
 
-    /// The verification key `kid` names in the cached set as it stands at `now`. `fetched` says
+    /// A copy of the key `kid` names in the cached set as it stands at `now`. `fetched` says
     /// the set was fetched for this very request: only then is a `kid` it lacks known to be
     /// false. Any other unknown `kid`, and any request with no usable set, cannot be judged yet.
-    fn key(&self, kid: &str, now: Instant, fetched: bool) -> Result<DecodingKey, Unverified> {
+    fn jwk(&self, kid: &str, now: Instant, fetched: bool) -> Result<Jwk, Unverified> {
         let kept = since(self.fetched_at, now).is_some_and(|age| age < KEY_SET_KEPT);
         let Some(set) = self.set.as_ref().filter(|_| kept) else {
             return Err(self.not_yet(now, unavailable()));
         };
         match set.find(kid) {
-            Some(jwk) => DecodingKey::from_jwk(jwk).map_err(|_| refused().into()),
+            Some(jwk) => Ok(jwk.clone()),
             None if fetched => Err(refused().into()),
             None => Err(self.not_yet(now, unknown_key())),
         }
@@ -256,15 +256,23 @@ impl ConnectTokens {
         })
     }
 
-    /// The verification key `kid` names, by the timing rules of the module header.
+    /// The verification key `kid` names. It is built after the cache's lock is released, from
+    /// a copy of the one key: the lock every hosted bearer request takes covers a lookup and a
+    /// small copy, never the decoding of key material.
     async fn key(&self, kid: &str) -> Result<DecodingKey, Unverified> {
+        let jwk = self.jwk(kid).await?;
+        DecodingKey::from_jwk(&jwk).map_err(|_| refused().into())
+    }
+
+    /// A copy of the key `kid` names, by the timing rules of the module header.
+    async fn jwk(&self, kid: &str) -> Result<Jwk, Unverified> {
         let began = {
             let mut cache = self.cache.lock().await;
             // Read under the lock that decides who takes the attempt: no request decides on a
             // reading older than an attempt another request marked in the meantime.
             let now = self.clock.now();
             if !cache.needs_fetch(kid, now) {
-                return cache.key(kid, now, false);
+                return cache.jwk(kid, now, false);
             }
             // Taken under the lock, before the issuer is asked: every other request of this
             // minute, also one that arrives while the fetch runs, answers from the cache.
@@ -283,7 +291,7 @@ impl ConnectTokens {
             cache.fetching = false;
             false
         });
-        cache.key(kid, self.clock.now(), fetched)
+        cache.jwk(kid, self.clock.now(), fetched)
     }
 
     async fn identity(&self, token: &str) -> Result<ConnectIdentity, Unverified> {
