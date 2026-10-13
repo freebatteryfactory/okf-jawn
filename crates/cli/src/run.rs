@@ -20,6 +20,7 @@ use crate::endpoint::Endpoint;
 use crate::relay::{
     HttpTransport, Limits, ProcessLauncher, Relay, StartPolicy, SystemClock, server_beside,
 };
+use crate::request::Failure;
 use crate::{RELAY_COMMAND, TOKEN_VARIABLE};
 
 /// The standard streams of one run; tests pass in-memory ones.
@@ -75,6 +76,7 @@ where
             &mut stderr,
             None,
             &ApiError::new(ErrorCode::InvalidInput, "A command is required"),
+            None,
         )
         .await;
     };
@@ -91,16 +93,24 @@ where
                 )
                 .await
             }
-            Err(error) => fail(&mut stderr, None, &error).await,
+            Err(error) => fail(&mut stderr, None, &error, None).await,
         };
     }
     let credential = match Credential::from_environment(environment, TOKEN_VARIABLE) {
         Ok(credential) => credential,
-        Err(error) => return fail(&mut stderr, None, &error).await,
+        Err(error) => return fail(&mut stderr, None, &error, None).await,
     };
     match operate(name, selected, credential.as_ref(), &mut stdin, &mut stdout).await {
         Ok(()) => 0,
-        Err(error) => fail(&mut stderr, credential.as_ref(), &error).await,
+        Err(failure) => {
+            fail(
+                &mut stderr,
+                credential.as_ref(),
+                &failure.error,
+                failure.detail.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -128,12 +138,20 @@ pub fn report(error: &ApiError) -> String {
 }
 
 /// Write a failure to the error stream, without the credential, and return the failure code.
+///
+/// `detail` is the service's detail as JSON when the error itself cannot hold it; it is
+/// written as the detail line.
 async fn fail<E: AsyncWrite + Unpin>(
     stderr: &mut E,
     credential: Option<&Credential>,
     error: &ApiError,
+    detail: Option<&str>,
 ) -> u8 {
-    let text = report(error);
+    let mut text = report(error);
+    if let Some(detail) = detail {
+        // Writing to a `String` cannot fail.
+        let _ = writeln!(text, "  detail: {detail}");
+    }
     let text = credential.map_or_else(|| text.clone(), |credential| credential.redact(&text));
     let _ = stderr.write_all(text.as_bytes()).await;
     let _ = stderr.flush().await;
@@ -147,7 +165,7 @@ async fn operate<I: AsyncRead + Unpin, O: AsyncWrite + Unpin>(
     credential: Option<&Credential>,
     stdin: &mut I,
     stdout: &mut O,
-) -> Result<(), ApiError> {
+) -> Result<(), Failure> {
     let operation = operations()
         .into_iter()
         .find(|operation| operation.id == name)

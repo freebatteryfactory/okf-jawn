@@ -176,6 +176,79 @@ async fn a_refusal_goes_to_stderr_with_its_code_and_the_exit_code_is_1() -> Test
     Ok(())
 }
 
+/// The service's refusal is read member by member: a member, a detail kind or a code this
+/// CLI does not know costs neither the code nor the message. The detail it cannot type is
+/// printed as the service sent it, and an unknown code is named beside the message while the
+/// status decides the code.
+#[tokio::test]
+async fn a_refusal_with_what_this_cli_does_not_know_keeps_its_code_and_message() -> TestResult {
+    let newer = json!({
+        "code": "conflict",
+        "message": "the item moved",
+        "field": "path",
+        "request_id": "req-21",
+        "detail": {"kind": "a_kind_of_next_year", "n": [1, 2]},
+        "a_member_of_next_year": true
+    });
+    let unknown_code = json!({"code": "teapot", "message": "short and stout", "extra": 1});
+    let no_code = json!({"message": "it says no more", "detail": null});
+    let listener = Answering::with(vec![
+        json_answer("409 Conflict", &newer.to_string()),
+        json_answer("418 I'm a teapot", &unknown_code.to_string()),
+        json_answer("404 Not Found", &no_code.to_string()),
+    ])
+    .await?;
+    let mut said = Vec::new();
+    for _ in 0..3 {
+        let ran = cli(&["get_health", "--server", &listener.origin()], None, b"").await?;
+        assert_eq!((ran.code, ran.stdout.as_str()), (1, ""));
+        said.push(ran.stderr);
+    }
+    assert_eq!(
+        said,
+        [
+            "okf-jawn: conflict: the item moved\n  field: path\n  request: req-21\n  \
+             detail: {\"kind\":\"a_kind_of_next_year\",\"n\":[1,2]}\n",
+            "okf-jawn: internal: short and stout (code: teapot)\n",
+            "okf-jawn: not_found: it says no more\n",
+        ]
+    );
+    Ok(())
+}
+
+/// A credential that holds a quote and a backslash is removed from a refusal's message and
+/// from its detail, which is JSON and spells both with an escape.
+#[tokio::test]
+async fn a_credential_that_needs_escaping_is_removed_from_a_refusal_and_its_detail() -> TestResult {
+    let token = "ab\"cd\\ef-9912";
+    let refusal = json!({
+        "code": "unauthenticated",
+        "message": format!("Bearer {token} is not known"),
+        "detail": {"seen": token}
+    });
+    let listener =
+        Answering::with(vec![json_answer("401 Unauthorized", &refusal.to_string())]).await?;
+    let ran = cli(
+        &["get_session", "--server", &listener.origin()],
+        Some(token),
+        b"",
+    )
+    .await?;
+    assert_eq!(
+        only(&listener)?.header("authorization"),
+        Some(format!("Bearer {token}"))
+    );
+    assert_eq!(
+        (ran.code, ran.stderr.as_str()),
+        (
+            1,
+            "okf-jawn: unauthenticated: Bearer [credential] is not known\n  \
+             detail: {\"seen\":\"[credential]\"}\n"
+        )
+    );
+    Ok(())
+}
+
 /// An answer that carries no `ApiError` is reported with the code its status stands for.
 #[tokio::test]
 async fn a_refusal_without_an_error_body_is_reported_by_its_status() -> TestResult {

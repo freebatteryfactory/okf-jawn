@@ -3,28 +3,55 @@
 //! The input is read inline, from a file (`@path`) or from standard input (`-`), within the
 //! contract's request-body limit, and is sent as it was given once it is known to be JSON.
 //! A success body is copied to the output as it arrives, followed by one line feed when it does
-//! not end with one; nothing else is written there. A refusal is returned as the service's own
-//! `ApiError`; an answer that carries none is given the code its HTTP status stands for.
+//! not end with one; nothing else is written there. A refusal is returned with the service's
+//! own code and message; an answer that carries none is given the code its HTTP status stands
+//! for.
+//!
+//! The service's refusal is read member by member, not through the contract's `ApiError`,
+//! which refuses a member it does not know: a newer service may add a member, a detail kind or
+//! a code, and its code and message must still reach the user. A detail of a kind this CLI
+//! has no type for is kept as the JSON the service sent; a code it does not know is named in
+//! the message, and the HTTP status then decides the code.
 
 use std::io::Read;
 use std::time::Duration;
 
-use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::error::{ApiError, ErrorCode, ErrorDetail};
 use okf_jawn_contract::metadata::OperationInfo;
 use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::credential::Credential;
 use crate::endpoint::Endpoint;
 
+/// A failure of an operation: the error, and what of the service's refusal the contract's
+/// error type cannot hold.
+#[derive(Debug)]
+pub(crate) struct Failure {
+    /// The error, with the service's code and message when it gave them.
+    pub(crate) error: ApiError,
+    /// The service's `detail` as JSON, when it is of a kind this CLI has no type for.
+    pub(crate) detail: Option<String>,
+}
+
 /// How long one operation may take, connection and answer together.
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+impl From<ApiError> for Failure {
+    fn from(error: ApiError) -> Self {
+        Self {
+            error,
+            detail: None,
+        }
+    }
+}
 
 /// Run one operation and copy its response body to `output`.
 ///
 /// # Errors
-/// Returns the service's `ApiError` for a refusal, `Unavailable` when the service cannot be
+/// Returns the service's own error for a refusal, `Unavailable` when the service cannot be
 /// reached or answers with a redirect, and `Internal` when the output cannot be written.
 pub(crate) async fn call<O: AsyncWrite + Unpin>(
     operation: &OperationInfo,
@@ -32,7 +59,7 @@ pub(crate) async fn call<O: AsyncWrite + Unpin>(
     credential: Option<&Credential>,
     input: Vec<u8>,
     output: &mut O,
-) -> Result<(), ApiError> {
+) -> Result<(), Failure> {
     let client = endpoint.client(Some(OPERATION_TIMEOUT))?;
     let mut request = client
         .post(endpoint.url(operation.path))
@@ -50,21 +77,21 @@ pub(crate) async fn call<O: AsyncWrite + Unpin>(
                 "The service answered with a redirect (HTTP {}), which is never followed",
                 status.as_u16()
             ),
-        ));
+        )
+        .into());
     }
     if !status.is_success() {
         let body = error_body(&mut response).await;
-        return Err(
-            serde_json::from_slice::<ApiError>(&body).unwrap_or_else(|_| {
-                ApiError::new(
-                    code_of(status.as_u16()),
-                    format!(
-                        "The service answered HTTP {} without an error it could explain",
-                        status.as_u16()
-                    ),
-                )
-            }),
-        );
+        return Err(explained(status.as_u16(), &body).unwrap_or_else(|| {
+            ApiError::new(
+                code_of(status.as_u16()),
+                format!(
+                    "The service answered HTTP {} without an error it could explain",
+                    status.as_u16()
+                ),
+            )
+            .into()
+        }));
     }
     let mut last = None;
     while let Some(chunk) = response.chunk().await.map_err(|error| unanswered(&error))? {
@@ -80,7 +107,7 @@ pub(crate) async fn call<O: AsyncWrite + Unpin>(
             .await
             .map_err(|error| unwritable(&error))?;
     }
-    output.flush().await.map_err(|error| unwritable(&error))
+    Ok(output.flush().await.map_err(|error| unwritable(&error))?)
 }
 
 /// Read an operation's JSON input: inline text, `@path` for a file, or `-` for `stdin`.
@@ -157,6 +184,41 @@ async fn error_body(response: &mut reqwest::Response) -> Vec<u8> {
         body.extend_from_slice(&chunk);
     }
     body
+}
+
+/// The service's refusal, read member by member. `None` when the body is not a JSON object
+/// with a `message`: the refusal is then reported by its status.
+fn explained(status: u16, body: &[u8]) -> Option<Failure> {
+    let refusal = serde_json::from_slice::<Value>(body).ok()?;
+    let text = |name: &str| refusal.get(name).and_then(Value::as_str).map(str::to_owned);
+    let mut message = text("message")?;
+    let known = refusal
+        .get("code")
+        .and_then(|code| serde_json::from_value::<ErrorCode>(code.clone()).ok());
+    let code = known.unwrap_or_else(|| {
+        // A code this CLI does not know is named in the message; the status decides the code.
+        if let Some(named) = text("code") {
+            message = format!("{message} (code: {named})");
+        }
+        code_of(status)
+    });
+    let (detail, unread) = match refusal.get("detail") {
+        None | Some(Value::Null) => (None, None),
+        Some(sent) => match serde_json::from_value::<ErrorDetail>(sent.clone()) {
+            Ok(typed) => (Some(Box::new(typed)), None),
+            Err(_) => (None, Some(sent.to_string())),
+        },
+    };
+    Some(Failure {
+        error: ApiError {
+            code,
+            message,
+            field: text("field"),
+            request_id: text("request_id"),
+            detail,
+        },
+        detail: unread,
+    })
 }
 
 fn unanswered(error: &reqwest::Error) -> ApiError {
