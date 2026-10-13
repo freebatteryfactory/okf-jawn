@@ -1,14 +1,20 @@
 //! Incremental framing of a `text/event-stream` answer into the data of its message events.
 //!
-//! This reads what the relay needs and no more. Lines end with a line feed, with or without a
-//! carriage return before it; a stream that ends its lines with a bare carriage return is not
-//! split. `data` lines of one event are joined with line feeds, and a blank line ends the
-//! event. An event is yielded when its type is absent or `message` and its data is not blank;
-//! comments, `id`, `retry`, other event types and blank priming events are dropped. An event
-//! that the stream never ends with a blank line is dropped, as the event-stream format says.
+//! This reads what the relay needs and no more. A line ends with a line feed, with a carriage
+//! return, or with a carriage return and the line feed after it, as the event-stream format
+//! says; a stream may use all three. `data` lines of one event are joined with line feeds, and
+//! a blank line ends the event. An event is yielded when its type is absent or `message` and
+//! its data is not blank; comments, `id`, `retry`, other event types and blank priming events
+//! are dropped. An event that the stream never ends with a blank line is dropped, as the
+//! event-stream format says.
 //!
 //! Invariants:
-//! - One event's buffered bytes never exceed the limit.
+//! - A carriage return ends its line at once, whatever follows it. A line feed that is the
+//!   next byte of the stream belongs to that line end and ends no line of its own, also when
+//!   the two arrive in different chunks (the parser remembers the carriage return): counted
+//!   twice, it would be the blank line that hands an event over early.
+//! - One event's buffered bytes never exceed the limit. A line end is not buffered, so an
+//!   event is bounded alike whichever way its lines end.
 //! - What is buffered of an event stands in one buffer that holds room for its capacity
 //!   ([`Gathering`]): the data read so far, then the line being read. A `data` line is moved
 //!   back within that buffer, not copied to another, and an event is handed over as soon as
@@ -29,6 +35,18 @@ pub struct EventParser {
     /// Whether the event names a type other than `message`.
     other: bool,
     started: bool,
+    /// What the byte read last was, which is kept from one chunk to the next.
+    last: Last,
+}
+
+/// What the byte read last means for the byte that comes next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Last {
+    /// A carriage return, which ended its line: a line feed that comes next is the rest of
+    /// that line end.
+    Return,
+    /// Any other byte, or none yet: the next byte is read for what it is.
+    Other,
 }
 
 /// The UTF-8 byte order mark a stream may begin with.
@@ -56,11 +74,8 @@ impl EventParser {
     fn end_line(&mut self) -> Result<Option<Held>, TransportError> {
         // The line is read where it stands, and its places noted, before anything moves.
         let all = self.held.bytes();
-        let mut end = all.len();
+        let end = all.len();
         let mut start = self.data.min(end);
-        if end > start && all.last() == Some(&b'\r') {
-            end = end.saturating_sub(1);
-        }
         let mut line = all.get(start..end).unwrap_or_default();
         if !self.started {
             self.started = true;
@@ -114,6 +129,7 @@ impl EventParser {
             has_data: false,
             other: false,
             started: false,
+            last: Last::Other,
         }
     }
 
@@ -127,8 +143,16 @@ impl EventParser {
     /// the events returned before it stay returned.
     pub async fn next(&mut self, bytes: &mut &[u8]) -> Result<Option<Held>, TransportError> {
         while !bytes.is_empty() {
-            let feed = bytes.iter().position(|byte| *byte == b'\n');
-            let part = bytes.get(..feed.unwrap_or(bytes.len())).unwrap_or_default();
+            // Whatever follows a carriage return, it follows it only once.
+            let last = std::mem::replace(&mut self.last, Last::Other);
+            if last == Last::Return && bytes.first() == Some(&b'\n') {
+                *bytes = bytes.get(1..).unwrap_or_default();
+                continue;
+            }
+            let ended = bytes.iter().position(|byte| matches!(*byte, b'\n' | b'\r'));
+            let part = bytes
+                .get(..ended.unwrap_or(bytes.len()))
+                .unwrap_or_default();
             if self.held.len().saturating_add(part.len()) > self.limit {
                 return Err(TransportError(format!(
                     "one event of the service's event stream exceeds {} bytes",
@@ -136,9 +160,12 @@ impl EventParser {
                 )));
             }
             self.held.extend(part).await;
-            let used = part.len().saturating_add(usize::from(feed.is_some()));
+            let used = part.len().saturating_add(usize::from(ended.is_some()));
+            if bytes.get(part.len()) == Some(&b'\r') {
+                self.last = Last::Return;
+            }
             *bytes = bytes.get(used..).unwrap_or_default();
-            if feed.is_some()
+            if ended.is_some()
                 && let Some(event) = self.end_line()?
             {
                 return Ok(Some(event));

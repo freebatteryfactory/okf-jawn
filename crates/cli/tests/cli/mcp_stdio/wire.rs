@@ -44,6 +44,42 @@ async fn fed(
     Ok(())
 }
 
+/// The data of the events a fresh parser of `limit` bytes reads from a stream that arrives in
+/// `parts`.
+async fn events_of(
+    parts: &[&[u8]],
+    limit: usize,
+    room: &Room,
+) -> Result<Vec<String>, TransportError> {
+    let mut parser = EventParser::new(limit, room);
+    let mut events = Vec::new();
+    for part in parts {
+        fed(&mut parser, part, &mut events).await?;
+    }
+    Ok(events)
+}
+
+/// The data of the events of `stream`, read whole. The same stream is also read a byte at a
+/// time and cut in two at every place, and each way must give the same events as the whole.
+async fn however_cut(stream: &[u8], limit: usize, room: &Room) -> Outcome<Vec<String>> {
+    let whole = events_of(&[stream], limit, room)
+        .await
+        .map_err(|error| error.0)?;
+    let bytes: Vec<&[u8]> = stream.chunks(1).collect();
+    let single = events_of(&bytes, limit, room)
+        .await
+        .map_err(|error| error.0)?;
+    assert_eq!(single, whole, "a byte at a time");
+    for at in 0..=stream.len() {
+        let (first, second) = some(stream.split_at_checked(at), "a place in the stream")?;
+        let cut = events_of(&[first, second], limit, room)
+            .await
+            .map_err(|error| error.0)?;
+        assert_eq!(cut, whole, "cut after {at} bytes");
+    }
+    Ok(whole)
+}
+
 /// Send `post` through `transport` and collect the reply and the events passed on.
 async fn send(
     transport: &HttpTransport,
@@ -471,6 +507,156 @@ async fn mcp_stdio_event_stream_framing() -> TestResult {
         err_of(fed(&mut invalid, b"data: \xff\xfe\n\n", &mut events).await)?
             .0
             .contains("UTF-8")
+    );
+    Ok(())
+}
+
+/// The event-stream format ends a line with a line feed, with a carriage return, or with a
+/// carriage return and the line feed after it (the pull request's finding 1). The same events,
+/// written with each of the three, give the same messages, however the bytes arrive. The
+/// letters backslash and `r` inside a value are two letters and end nothing.
+#[tokio::test]
+async fn an_event_stream_is_split_at_each_of_its_three_line_ends() -> TestResult {
+    let room = Room::new(1_048_576);
+    let lines = [
+        "\u{feff}: a comment",
+        "data: one",
+        "",
+        "event: message",
+        "data:two",
+        "data: lines",
+        "",
+        "id: 7",
+        "retry: 100",
+        "data:",
+        "",
+        "event: endpoint",
+        "data: not a message",
+        "",
+        "data",
+        "",
+        "data: {\"text\":\"a\\rb\\nc\"}",
+        "",
+        "unknown: field",
+        "data:  four",
+        "",
+        "data: never ended",
+    ];
+    let expected = ["one", "two\nlines", "{\"text\":\"a\\rb\\nc\"}", " four"];
+    for end in ["\n", "\r\n", "\r"] {
+        let stream = lines.join(end);
+        assert_eq!(
+            however_cut(stream.as_bytes(), 1024, &room).await?,
+            expected,
+            "lines that end with {end:?}"
+        );
+    }
+    // One stream with all three: each pair of line ends that can stand side by side.
+    let mixed = "data: one\r\n\r\
+                 event: message\rdata:two\ndata: lines\r\n\n\
+                 event: endpoint\r\ndata: not a message\r\r\
+                 data: three\n\r\
+                 data: four\r\r\n\
+                 data: five\n\n\
+                 data: never ended\r";
+    assert_eq!(
+        however_cut(mixed.as_bytes(), 1024, &room).await?,
+        ["one", "two\nlines", "three", "four", "five"]
+    );
+    Ok(())
+}
+
+/// A carriage return that is the last byte of one chunk and the line feed that is the first
+/// byte of the next are one line end, not two: a second one would be the blank line that ends
+/// the event, so the event would be handed over early, in two halves, or under the type of
+/// the event before it. A carriage return at the end of a chunk ends its line at once,
+/// whatever comes after it, and so does one at the very end of the stream.
+#[tokio::test]
+async fn a_carriage_return_and_the_line_feed_after_it_are_one_line_end_across_chunks() -> TestResult
+{
+    let room = Room::new(1_048_576);
+    let cases: [(&[&[u8]], &[&str]); 7] = [
+        // Every carriage return ends a chunk and its line feed starts the next.
+        (&[b"data: a\r", b"\ndata: b\r", b"\n\r", b"\n"], &["a\nb"]),
+        // A chunk that is nothing but the line feed of a line end.
+        (&[b"data: a\r", b"\n", b"data: b\n\n"], &["a\nb"]),
+        // A lone carriage return at the end of a chunk, and other data after it.
+        (&[b"data: a\r", b"data: b\r\r"], &["a\nb"]),
+        // A lone carriage return, a line without an end, then a chunk that starts with the
+        // line feed that ends that line: it belongs to no carriage return.
+        (&[b"data: a\r", b"data: b", b"\n\n"], &["a\nb"]),
+        // The carriage return that ends the event is the last byte of the stream.
+        (&[b"data: last\r\r"], &["last"]),
+        (&[b"data: a\r\n", b"\r\n", b"data: b\r", b"\r"], &["a", "b"]),
+        // The type of an event lasts until the blank line, and no longer.
+        (
+            &[b"event: other\r", b"\ndata: x\r", b"\n\r", b"\ndata: y\r\r"],
+            &["y"],
+        ),
+    ];
+    for (parts, expected) in cases {
+        let shown: Vec<String> = parts
+            .iter()
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect();
+        let events = events_of(parts, 1024, &room)
+            .await
+            .map_err(|error| error.0)?;
+        assert_eq!(events, expected, "{shown:?}");
+    }
+    Ok(())
+}
+
+/// The bound of one event is the same whichever way its lines end: an event of exactly the
+/// limit is taken, and one byte more is refused, the event before it kept. A line end is not
+/// part of what is buffered.
+#[tokio::test]
+async fn an_event_is_bounded_alike_whichever_way_its_lines_end() -> TestResult {
+    let room = Room::new(1_048_576);
+    for end in ["\n", "\r\n", "\r"] {
+        let at_limit = format!("data: 0123456789{end}{end}data: 0123456789{end}{end}");
+        assert_eq!(
+            however_cut(at_limit.as_bytes(), 16, &room).await?,
+            ["0123456789", "0123456789"],
+            "{end:?}"
+        );
+        let over = format!("data: kept{end}{end}data: 0123456789a{end}{end}");
+        let mut bounded = EventParser::new(16, &room);
+        let mut events = Vec::new();
+        let refused = err_of(fed(&mut bounded, over.as_bytes(), &mut events).await)?;
+        assert!(refused.0.contains("16 bytes"), "{end:?}: {}", refused.0);
+        assert_eq!(events, ["kept"], "{end:?}");
+    }
+    Ok(())
+}
+
+/// The relay as shipped, against a service whose event stream ends its lines with carriage
+/// returns alone: the request gets the service's answer, and nothing is said.
+#[tokio::test]
+async fn the_relay_as_shipped_reads_an_event_stream_of_carriage_returns() -> TestResult {
+    let stream = ": keep-alive\r\revent: message\rdata: {\"jsonrpc\":\"2.0\",\"id\":1,\r\
+                  data: \"result\":{\"ok\":true}}\r\r";
+    let listener = Answering::routed(move |heard| {
+        if heard.line().starts_with("GET ") {
+            json_answer("200 OK", "{}")
+        } else {
+            events(stream)
+        }
+    })
+    .await?;
+    let ran = cli(
+        &["mcp", "--stdio", "--server", &listener.origin()],
+        Some(TOKEN),
+        request(&json!(1), "tools/call", &json!({})).as_bytes(),
+    )
+    .await?;
+    assert_eq!(
+        (ran.code, ran.stdout.as_str(), ran.stderr.as_str()),
+        (
+            0,
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n",
+            ""
+        )
     );
     Ok(())
 }
