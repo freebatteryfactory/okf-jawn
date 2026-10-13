@@ -155,6 +155,64 @@ fn listing_of_notes(at: At, cursor: Option<String>) -> Built<ListItemsRequest> {
 }
 
 #[tokio::test]
+async fn a_listing_at_a_named_revision_stays_a_current_listing_on_page_two() -> TestResult {
+    let world = World::new()?;
+    let mut archived = listed(2, None)?;
+    archived.archived = true;
+    world.versions.put_listing(
+        &revision('a')?,
+        Some(path("notes")?),
+        FolderListing {
+            items: vec![listed(1, None)?, archived],
+            folders: Vec::new(),
+            next_cursor: Some("next".to_owned()),
+        },
+    )?;
+    let caller = alice(OperationName::ListItems, None)?;
+    let named_a = || -> Built<At> {
+        Ok(At::Revision {
+            revision: revision('a')?,
+        })
+    };
+    let ids = |items: &[okf_jawn_contract::item::ItemSummary]| -> Vec<ItemId> {
+        items.iter().map(|item| item.id).collect()
+    };
+    let live = vec![ItemId(Uuid::from_u128(1))];
+    // Page one names `a`, which is the head: a current listing, its archived item hidden.
+    let first = world
+        .service
+        .list_items(&caller, listing_of_notes(named_a()?, None)?)
+        .await?;
+    assert_eq!(ids(&first.items), live, "page one");
+    let cursor = some(first.next_cursor, "a continuation")?;
+    // A write lands between the pages: `a` is history now, and the listing is still the
+    // current listing it began as, with `a` named again or with `latest`.
+    world.versions.set_head(revision('b')?)?;
+    for at in [named_a()?, At::Latest] {
+        let second = world
+            .service
+            .list_items(&caller, listing_of_notes(at, Some(cursor.clone()))?)
+            .await?;
+        assert_eq!(ids(&second.items), live, "page two hides what page one hid");
+    }
+    // A listing that begins at `a` now is a listing of history, and stays one when `a` is the
+    // head again: its later page shows the archived item, as its first did.
+    let history = world
+        .service
+        .list_items(&caller, listing_of_notes(named_a()?, None)?)
+        .await?;
+    assert_eq!(history.items.len(), 2);
+    let cursor = some(history.next_cursor, "a continuation")?;
+    world.versions.set_head(revision('a')?)?;
+    let later = world
+        .service
+        .list_items(&caller, listing_of_notes(named_a()?, Some(cursor))?)
+        .await?;
+    assert_eq!(later.items.len(), 2, "page two shows what page one showed");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_listing_of_three_pages_reads_every_page_at_the_revision_the_first_resolved() -> TestResult
 {
     // The cursor a continuation returns carries the first page's revision too: a write lands

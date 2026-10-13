@@ -77,7 +77,7 @@ pub(super) async fn search_items(
 ) -> Result<SearchResponse, ApiError> {
     let scope = workspace_scope(context)?;
     let folder = folder_of(request.folder)?;
-    let (revision, page) = resolve_page(service, &scope, &request.at, request.page).await?;
+    let (revision, page, _) = resolve_page(service, &scope, &request.at, request.page).await?;
     let query = SearchQuery {
         revision: revision.clone(),
         text: request.query,
@@ -95,7 +95,7 @@ pub(super) async fn search_items(
     let returned = response.hits.iter().map(|hit| hit.source.clone()).collect();
     record_receipt(service, context, &scope, None, returned).await?;
     Ok(SearchResponse {
-        next_cursor: next_page(&revision, response.next_cursor)?,
+        next_cursor: next_page(&revision, response.next_cursor, None)?,
         revision,
         hits: response.hits,
     })
@@ -115,7 +115,7 @@ pub(super) async fn get_links(
     request: GetLinksRequest,
 ) -> Result<GetLinksResponse, ApiError> {
     let scope = workspace_scope(context)?;
-    let (revision, page) = resolve_page(service, &scope, &request.at, request.page).await?;
+    let (revision, page, _) = resolve_page(service, &scope, &request.at, request.page).await?;
     let query = LinkQuery {
         revision: revision.clone(),
         item_id: request.item_id,
@@ -130,7 +130,7 @@ pub(super) async fn get_links(
     let sources = link_citations(service, &scope, &revision, &response.links).await?;
     record_receipt(service, context, &scope, None, sources).await?;
     Ok(GetLinksResponse {
-        next_cursor: next_page(&revision, response.next_cursor)?,
+        next_cursor: next_page(&revision, response.next_cursor, None)?,
         revision,
         links: response.links,
     })

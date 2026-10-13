@@ -84,6 +84,10 @@ struct PageCursor {
     tip: Revision,
     /// The store's own continuation within the listing at `tip`.
     next: String,
+    /// For a folder listing only: whether its first page decided it is a current listing
+    /// (`items::list_items`), so every later page hides or shows archived items as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current: Option<bool>,
 }
 
 /// A private directory the tree of a replayed commit is written to for its check; a guard
@@ -179,7 +183,8 @@ pub(super) async fn resolve(
     }
 }
 
-/// The revision one page of a paginated read is read at, and the page to ask the store for.
+/// The revision one page of a paginated read is read at, the page to ask the store for, and,
+/// on a continuation of a folder listing, the "current" answer its cursor carries.
 ///
 /// The first page (no cursor) resolves the selector once (`resolve`). A continuation reads at
 /// the tip its cursor carries, whatever `latest` is now, so a write that lands between two pages
@@ -196,9 +201,9 @@ pub(super) async fn resolve_page(
     scope: &StorageScope,
     at: &At,
     page: PageRequest,
-) -> Result<(Revision, Page), ApiError> {
+) -> Result<(Revision, Page, Option<bool>), ApiError> {
     let Some(text) = page.cursor.as_deref() else {
-        return Ok((resolve(service, scope, at).await?, page.into()));
+        return Ok((resolve(service, scope, at).await?, page.into(), None));
     };
     let cursor: PageCursor = URL_SAFE_NO_PAD
         .decode(text)
@@ -218,19 +223,26 @@ pub(super) async fn resolve_page(
             cursor: Some(cursor.next),
             limit: page.limit,
         },
+        cursor.current,
     ))
 }
 
 /// The cursor of the page after one read at `tip`: the store's continuation, bound to `tip`
-/// (`resolve_page` reads it back). `None` when the store has no more.
+/// (`resolve_page` reads it back), with a folder listing's "current" answer when `current`
+/// gives one. `None` when the store has no more.
 ///
 /// # Errors
 /// Returns `Internal` when the cursor cannot be serialized.
-pub(super) fn next_page(tip: &Revision, next: Option<String>) -> Result<Option<String>, ApiError> {
+pub(super) fn next_page(
+    tip: &Revision,
+    next: Option<String>,
+    current: Option<bool>,
+) -> Result<Option<String>, ApiError> {
     next.map(|next| {
         serde_json::to_vec(&PageCursor {
             tip: tip.clone(),
             next,
+            current,
         })
         .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
         .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))

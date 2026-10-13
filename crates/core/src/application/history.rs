@@ -114,7 +114,7 @@ pub(super) async fn log_items(
     request: LogRequest,
 ) -> Result<LogResponse, ApiError> {
     let scope = workspace_scope(context)?;
-    let (tip, page) = resolve_page(service, &scope, &request.at, request.page).await?;
+    let (tip, page, _) = resolve_page(service, &scope, &request.at, request.page).await?;
     let response = service
         .ports()
         .versions
@@ -130,7 +130,7 @@ pub(super) async fn log_items(
     // Commit metadata only: the receipt names no item content.
     record_receipt(service, context, &scope, None, Vec::new()).await?;
     Ok(LogResponse {
-        next_cursor: next_page(&tip, response.next_cursor)?,
+        next_cursor: next_page(&tip, response.next_cursor, None)?,
         commits: response.commits,
     })
 }

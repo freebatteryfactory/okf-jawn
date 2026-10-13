@@ -46,8 +46,11 @@ use crate::storage::{TreeEdit, derive_item_id};
 ///
 /// A continuation lists the revision its first page resolved (`shared::resolve_page`), so a
 /// write that lands between two pages of a listing at `latest` neither repeats nor skips an
-/// entry. A listing begun at `latest` stays a current listing on every page: its archived items
-/// stay hidden, though the head has moved on.
+/// entry. Whether a listing is a current one is decided once, on its first page (at `latest`:
+/// it is; at a named revision: when that revision is the head then), and its cursor carries the
+/// answer: every later page hides or shows archived items as the first page did, whatever the
+/// head is by then and whether the later page is sent with `latest` or with the listing's
+/// revision (any other revision is refused).
 ///
 /// # Errors
 /// Returns `InvalidInput` on `/folder` for a folder that is not a workspace path, on
@@ -65,12 +68,23 @@ pub(super) async fn list_items(
     } else {
         Some(WorkspacePath::try_from(request.folder).map_err(|error| invalid(error.0, "/folder"))?)
     };
-    let (revision, page) = resolve_page(service, &scope, &request.at, request.page).await?;
+    let continued = request.page.cursor.is_some();
+    let (revision, page, carried) =
+        resolve_page(service, &scope, &request.at, request.page).await?;
     let ports = service.ports();
-    // `latest` is the head by resolution; a named revision is current when it is the head now.
-    let current = match &request.at {
-        At::Latest => true,
-        At::Revision { .. } => ports.versions.head(&scope).await? == revision,
+    let current = match (continued, carried, &request.at) {
+        // A later page: what the first page decided.
+        (true, Some(current), _) => current,
+        (true, None, _) => {
+            return Err(invalid(
+                "the cursor was not issued by a listing",
+                "/page/cursor",
+            ));
+        }
+        // `latest` is the head by resolution; a named revision is current when it is the head
+        // now.
+        (false, _, At::Latest) => true,
+        (false, _, At::Revision { .. }) => ports.versions.head(&scope).await? == revision,
     };
     let listing = ports
         .versions
@@ -87,7 +101,7 @@ pub(super) async fn list_items(
         })
         .collect();
     Ok(ListItemsResponse {
-        next_cursor: next_page(&revision, listing.next_cursor)?,
+        next_cursor: next_page(&revision, listing.next_cursor, Some(current))?,
         revision,
         items,
         folders: listing
