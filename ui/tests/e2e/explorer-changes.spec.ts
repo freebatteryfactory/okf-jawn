@@ -23,6 +23,7 @@ import {
   HEAD,
   markdown,
   NOTE,
+  NOW,
   note,
   ok,
   PLAN,
@@ -158,6 +159,15 @@ async function service(): Promise<Service> {
           });
     },
     '/api/reads/get-sources': (body) => ok({ revision: at(body), sources: [], declared: [] }),
+    // A draft is saved as the service saves it; this spec does not study drafts.
+    '/api/items/save-draft': (body) =>
+      ok({
+        item_id: body.item_id,
+        base_revision: body.base_revision,
+        content_digest: 'c'.repeat(64),
+        editor: 'ada',
+        saved_at: NOW,
+      }),
     '/api/items/create-item': write('create_item', (body) => {
       const made = summary(NEW, text(body, 'path'), text(body, 'title'), text(body, 'type_name'));
       const revision = commit((tree) => ({ ...tree, items: [...tree.items, made] }));
@@ -467,6 +477,49 @@ test.describe('changing the tree and the naming rules', () => {
     await expect(page.getByText('notes/2025-plan.md', { exact: true })).toBeVisible();
     expect(await focusSettled(page)).toBe('button:Naming rules');
     await expectVisibleFocus(page);
+  });
+
+  test('the YAML views of the naming rules and of an item’s properties', async ({ page }) => {
+    const played = await service();
+    await routeApi(page, played.answers);
+    await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}`);
+    await expect(page.getByText('Revenue grew by 12% in 2025.')).toBeVisible();
+
+    // The rules: the YAML tab from the keyboard, then text that cannot be read.
+    await press(page, 'Naming rules');
+    await page.getByRole('tab', { name: 'Form' }).focus();
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    const rules = page.getByRole('textbox', { name: 'The naming rules as YAML' });
+    await expect(rules).toContainText('schema_version: 1');
+    await rules.focus();
+    await page.keyboard.press('ControlOrMeta+End');
+    await page.keyboard.type('x-team: [a, b');
+    await expect(page.getByRole('alert')).toContainText('This YAML cannot be read.');
+    expect(await focusSettled(page)).toBe('textbox:The naming rules as YAML');
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(page, 'the naming rules as YAML, with a problem');
+    await shot(page, '30-naming-rules-yaml');
+    await press(page, 'Save the rules');
+    expect(played.sent).toEqual([]);
+    await press(page, 'Close the naming rules');
+
+    // The properties of the open note: its editor, then the YAML tab.
+    await press(page, 'Edit', documents(page));
+    await documents(page).getByRole('tab', { name: 'Form' }).focus();
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    const properties = page.getByRole('textbox', { name: 'Properties as YAML' });
+    await expect(properties).toContainText('type: meeting-note');
+    await expect(properties).not.toContainText('okf_jawn');
+    await properties.focus();
+    await page.keyboard.press('ControlOrMeta+End');
+    await page.keyboard.type('reviewed: "yes"');
+    await expect(page.locator('.save-state')).toContainText('Saved as a draft at');
+    expect(await focusSettled(page)).toBe('textbox:Properties as YAML');
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(page, 'the properties as YAML');
+    await shot(page, '31-properties-yaml');
   });
 
   test('a refused change is shown, and retried from the keyboard', async ({ page }) => {

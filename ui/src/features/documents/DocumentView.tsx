@@ -70,7 +70,7 @@ import { useDeleted, useExplorerStore } from '../explorer/store';
 import { ItemActions } from '../tree/ItemActions';
 import { describeSelection, extractionLabels, short } from './describe';
 import { Properties } from './Properties';
-import { PropertiesForm } from './PropertiesForm';
+import { PropertiesViews } from './PropertiesYaml';
 import { SafeMarkdown } from './SafeMarkdown';
 
 /** Text budget per read; a longer item is read in parts through the continuation. */
@@ -626,7 +626,7 @@ export function DocumentView({
       )}
       {gone ? null : editing ? (
         <div ref={editingRef} className="editing">
-          {typeName === null ? null : <PropertiesForm session={session} typeName={typeName} />}
+          {typeName === null ? null : <PropertiesViews session={session} typeName={typeName} />}
           <DraftEditor
             session={session}
             title={title}

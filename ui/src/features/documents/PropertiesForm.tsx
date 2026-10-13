@@ -73,7 +73,7 @@ const NO_DEFAULTS = {
 const NO_SUBMIT: UiSchema<PropertyMap> = { 'ui:submitButtonOptions': { norender: true } };
 
 /** The application's own header among an item's properties: the service's, never a type's. */
-const APP_HEADER_KEY = 'okf_jawn';
+export const APP_HEADER_KEY = 'okf_jawn';
 
 /** A property map without the application's header: what the service judges against a type. */
 export function withoutHeader(properties: PropertyMap): PropertyMap {
