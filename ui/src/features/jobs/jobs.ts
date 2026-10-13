@@ -15,6 +15,10 @@
  * - either way, not at all on a clock once every job on screen has ended;
  * - a hidden tab asks nothing either way (TanStack Query holds an interval while the page is
  *   hidden; the stream is closed while it is);
+ * - a session that ended stops the clock: once the service has answered that the person is not
+ *   signed in (`unauthenticated`), the jobs are not asked again by themselves, since every such
+ *   request would be refused the same way. They are asked again when the person acts (a retry,
+ *   "List again", a return to the window), and the clock starts again with the first answer;
  * - returning to the window, or to the page, asks once when what is held is older than
  *   `JOBS_POLL_MS`. A job the service has just answered (`rememberJob`) is shown from that answer
  *   and not asked for again at once.
@@ -30,6 +34,7 @@ import { z } from 'zod';
 import { getJobOptions, listJobsQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { listJobs } from '../../api/generated/sdk.gen';
 import type { Job, JobState, ListJobsResponse } from '../../api/generated/types.gen';
+import { classifyFailure } from '../errors/failure';
 
 /** Jobs requested per page. */
 export const JOBS_PAGE = 50;
@@ -47,9 +52,18 @@ export const JOBS_POLL_MS = 5_000;
  */
 export const JOBS_SAFETY_POLL_MS = 30_000;
 
-/** The clock for jobs on screen: none once all are known to have ended. */
-function pollEvery(live: boolean, anyMayChange: boolean): number | false {
-  if (!anyMayChange) return false;
+/** The service's answer that the person is not signed in: the session ended. */
+export function sessionEnded(error: unknown): boolean {
+  const failure = classifyFailure(error);
+  return failure.kind === 'api' && failure.error.code === 'unauthenticated';
+}
+
+/**
+ * The clock for jobs on screen: none once all are known to have ended, and none after the service
+ * answered the last request for them with "not signed in".
+ */
+function pollEvery(live: boolean, anyMayChange: boolean, lastError: unknown): number | false {
+  if (!anyMayChange || sessionEnded(lastError)) return false;
   return live ? JOBS_SAFETY_POLL_MS : JOBS_POLL_MS;
 }
 
@@ -92,6 +106,7 @@ export function jobsOptions(workspaceId: string, live: boolean) {
       pollEvery(
         live,
         (query.state.data?.pages ?? []).some((page) => page.items.some(mayChange)),
+        query.state.error,
       ),
   });
 }
@@ -103,7 +118,11 @@ export function jobOptions(workspaceId: string, jobId: string, live: boolean) {
     staleTime: JOBS_POLL_MS,
     refetchOnWindowFocus: true,
     refetchInterval: (query) =>
-      pollEvery(live, query.state.data !== undefined && mayChange(query.state.data)),
+      pollEvery(
+        live,
+        query.state.data !== undefined && mayChange(query.state.data),
+        query.state.error,
+      ),
   });
 }
 

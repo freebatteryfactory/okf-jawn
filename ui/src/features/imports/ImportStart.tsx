@@ -24,7 +24,7 @@
  */
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { Revision } from '../../api/generated/types.gen';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -237,6 +237,16 @@ function StartedList({
   canWrite: boolean;
 }) {
   const feed = useJobsFeed(workspaceId);
+  // A job was answered: a stream that had stopped for a session that ended is asked for again.
+  const { wake } = feed;
+  const held = useQueries({ queries: jobIds.map((jobId) => jobHeldOptions(workspaceId, jobId)) });
+  const answeredAt = Math.max(0, ...held.map((job) => job.dataUpdatedAt));
+  const answered = useRef(answeredAt);
+  useEffect(() => {
+    // Not at the first render: the jobs are then shown from the answers that started them.
+    if (answeredAt > answered.current) wake();
+    answered.current = answeredAt;
+  }, [answeredAt, wake]);
   return (
     <ul className="job-list">
       {jobIds.map((jobId) => (

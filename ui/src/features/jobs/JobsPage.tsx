@@ -6,7 +6,9 @@
  * the workspace's event stream while that is open (`feed.ts`), with a slow clock beside it while a
  * listed job is waiting or running; otherwise it is asked again every few seconds while one is,
  * and on no clock once all have ended (`jobs.ts`). "List again" asks at once. A hidden tab asks
- * nothing.
+ * nothing. When the service answers that the person is not signed in, nothing is asked again by
+ * itself: the rows stay as last answered, the failure is shown with its retry, and the page says
+ * that it has stopped asking. The first answer after that starts the clock and the stream again.
  *
  * A change of a job's state is said in one polite status, by the job's name. The time the list
  * was last answered is shown beside it, outside the status, so a repeated listing that changed
@@ -26,7 +28,7 @@ import { useRetry } from '../errors/retry';
 import { type Feed, NotAnEventStream, useJobsFeed } from './feed';
 import { JobRow } from './JobRow';
 import { jobName, jobStateSaid } from './job-words';
-import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS, jobsOptions } from './jobs';
+import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS, jobsOptions, sessionEnded } from './jobs';
 
 export interface JobsPageProps {
   workspaceId: string;
@@ -34,8 +36,11 @@ export interface JobsPageProps {
   canWrite: boolean;
 }
 
-/** How the list stays current, in words. */
-export function describeFeed(feed: Feed): string {
+/** How the list stays current, in words. `signedOut`: the service said the session has ended. */
+export function describeFeed(feed: Feed, signedOut: boolean): string {
+  if (signedOut) {
+    return 'You are not signed in, so this list is not asked again by itself. Sign in, then press “List again”.';
+  }
   if (feed.state === 'live') {
     return `This list follows the workspace’s events: it is asked again when a job changes, and every ${JOBS_SAFETY_POLL_MS / 1000} seconds while a job is waiting or running.`;
   }
@@ -82,6 +87,13 @@ export function JobsPage({ workspaceId, canWrite }: JobsPageProps) {
   const moreRef = useRef<HTMLButtonElement | null>(null);
   const feed = useJobsFeed(workspaceId);
   const jobs = useInfiniteQuery(jobsOptions(workspaceId, feed.live));
+  const signedOut = sessionEnded(jobs.error) || sessionEnded(feed.error);
+  // The jobs were answered: a stream that had stopped for a session that ended is asked for again.
+  const { wake } = feed;
+  const answeredAt = jobs.dataUpdatedAt;
+  useEffect(() => {
+    if (answeredAt > 0) wake();
+  }, [answeredAt, wake]);
   const pages = jobs.data?.pages;
   const listed = useMemo(() => listedOnce(pages), [pages]);
   const said = useStateChanges(listed);
@@ -123,7 +135,7 @@ export function JobsPage({ workspaceId, canWrite }: JobsPageProps) {
       <h2 id={heading} ref={headingRef} tabIndex={-1} className="page-heading">
         Jobs
       </h2>
-      <p className="meta">{describeFeed(feed)}</p>
+      <p className="meta">{describeFeed(feed, signedOut)}</p>
       <p className="page-actions">
         {/* aria-disabled rather than disabled: the button keeps focus while the list is asked. */}
         <button

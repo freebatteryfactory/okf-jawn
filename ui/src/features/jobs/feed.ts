@@ -22,16 +22,21 @@
  * - it could not be opened for a reason that may pass, or it ended: it is opened again after
  *   `RECONNECT_MS`, doubling up to `MAX_RECONNECT_MS`, from the last event it saw.
  *
+ * A session that ended. When the request for the stream is answered "not signed in"
+ * (`unauthenticated`), nothing more is tried by itself: every try would be refused the same way,
+ * for as long as the page is shown. The stream is asked for again when the person has acted and
+ * the jobs were answered again (`wake`), or when the page is shown again after being hidden.
+ *
  * A hidden page holds no stream: it is closed when the page is hidden and opened again, from the
  * last event seen, when the page is shown.
  */
 import { useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { streamEvents } from '../../api/generated/sdk.gen';
 import { zEvent } from '../../api/generated/zod.gen';
 import { sendRequest } from '../../app/api-client';
 import { classifyFailure, messageFor } from '../errors/failure';
-import { jobsChanged } from './jobs';
+import { jobsChanged, sessionEnded } from './jobs';
 
 /** How long after the stream ends or fails it is opened again, at first. */
 export const RECONNECT_MS = 3_000;
@@ -62,9 +67,12 @@ interface FeedHooks {
   onEvent: (data: unknown) => void;
 }
 
-/** A failure a repeat of the same request may cure. */
+/**
+ * A failure a repeat of the same request may cure by itself. "Not signed in" is not one: its
+ * retry is the person's, after signing in.
+ */
 function mayPass(error: unknown): boolean {
-  return messageFor(classifyFailure(error)).action.kind === 'retry';
+  return !sessionEnded(error) && messageFor(classifyFailure(error)).action.kind === 'retry';
 }
 
 /** The media type of an event stream, as `api/transports.json` declares it for `stream_events`. */
@@ -194,19 +202,25 @@ function concernsJobs(data: unknown): boolean {
 /**
  * Keep the workspace's jobs current from its event stream while the calling component is mounted
  * and the page is shown. `live` says the stream is open: the jobs are then asked on the slow clock
- * only.
+ * only. `wake` is for the caller to call when the jobs were answered again: a stream that stopped
+ * because the session had ended is then asked for once more (and nothing happens otherwise).
  */
-export function useJobsFeed(workspaceId: string): Feed & { live: boolean } {
+export function useJobsFeed(workspaceId: string): Feed & { live: boolean; wake: () => void } {
   const client = useQueryClient();
   const [feed, setFeed] = useState<Feed>({ state: 'opening', error: null });
+  const reopen = useRef<() => void>(() => undefined);
   useEffect(() => {
     let stop: (() => string | undefined) | null = null;
     let lastEventId: string | undefined;
+    // The stream stopped because the service said the person is not signed in.
+    let signedOut = false;
     const open = () => {
+      signedOut = false;
       setFeed({ state: 'opening', error: null });
       stop = followEvents(workspaceId, lastEventId, {
         onState: (next) => {
           setFeed(next);
+          signedOut = next.state === 'unavailable' && sessionEnded(next.error);
           // Subscribe, then ask: what changed before the stream was open sent its event to
           // nobody, the first time as after a time without it.
           if (next.state === 'live') jobsChanged(client, workspaceId);
@@ -227,12 +241,19 @@ export function useJobsFeed(workspaceId: string): Feed & { live: boolean } {
         setFeed({ state: 'hidden', error: null });
       } else if (stop === null) open();
     };
+    reopen.current = () => {
+      if (!signedOut || document.visibilityState === 'hidden') return;
+      close();
+      open();
+    };
     visibility();
     document.addEventListener('visibilitychange', visibility);
     return () => {
       document.removeEventListener('visibilitychange', visibility);
+      reopen.current = () => undefined;
       close();
     };
   }, [client, workspaceId]);
-  return { ...feed, live: feed.state === 'live' };
+  const wake = useCallback(() => reopen.current(), []);
+  return { ...feed, live: feed.state === 'live', wake };
 }

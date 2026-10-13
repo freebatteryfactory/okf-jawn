@@ -403,6 +403,54 @@ describe('starting the import', () => {
     expect(api.callsTo(JOB)).toHaveLength(3);
   });
 
+  it('stops asking for a started job once the service says the person is not signed in, and starts again at the retry', async () => {
+    let signedIn = true;
+    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+      [START]: () => accepted(jobOf('running')),
+      [JOB]: () => (signedIn ? ok(jobOf('running')) : fail(401, 'unauthenticated', 'no session')),
+    });
+    fireEvent.click(importButton());
+    await eventually(() => jobRow());
+    signedIn = false;
+    await pass(JOBS_POLL_MS);
+    await later(() => screen.getByText('Reading this job: You are not signed in.'));
+    expect(api.callsTo(JOB)).toHaveLength(1);
+    await pass(600_000);
+    expect(api.callsTo(JOB)).toHaveLength(1);
+    // The row stays as last answered.
+    expect(jobRow().textContent).toContain('Running.');
+    signedIn = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again after signing in' }));
+    await later(() => expect(api.callsTo(JOB)).toHaveLength(2));
+    await pass(JOBS_POLL_MS);
+    await later(() => expect(api.callsTo(JOB)).toHaveLength(3));
+  });
+
+  it('asks for the stream again, on the import page, once a job is answered after the session had ended', async () => {
+    let signedIn = true;
+    const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
+      [START]: () => accepted(jobOf('running')),
+      [JOB]: () => (signedIn ? ok(jobOf('running')) : fail(401, 'unauthenticated', 'no session')),
+    });
+    const events = mockEvents(fail(401, 'unauthenticated', 'no session'));
+    signedIn = false;
+    fireEvent.click(importButton());
+    await eventually(() => jobRow());
+    await eventually(() => expect(events.state.requests).toBe(1));
+    // Refused as not signed in: not asked for again, however long the page is shown.
+    await pass(JOBS_POLL_MS);
+    await later(() => screen.getByText('Reading this job: You are not signed in.'));
+    await pass(600_000);
+    expect(events.state.requests).toBe(1);
+    expect(api.callsTo(JOB)).toHaveLength(1);
+    // The person signs in and retries the reading: with its answer the stream is asked for.
+    signedIn = true;
+    events.state.refusal = null;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again after signing in' }));
+    await later(() => expect(events.streams).toHaveLength(1));
+    expect(events.state.requests).toBe(2);
+  });
+
   it('reads a started job again after a cancel that failed', async () => {
     let job: Job = jobOf('running');
     const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {

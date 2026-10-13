@@ -759,6 +759,93 @@ describe('how the list stays current with the event stream', () => {
   });
 });
 
+describe('a session that ended while the jobs are followed', () => {
+  const SIGNED_OUT =
+    'You are not signed in, so this list is not asked again by itself. Sign in, then press “List again”.';
+  const refused = () => fail(401, 'unauthenticated', 'no session');
+
+  it('stops the clock when the service says the person is not signed in, keeps the rows, and starts again at the person’s retry', async () => {
+    let signedIn = true;
+    const { api } = await openJobs({
+      [JOBS]: () => (signedIn ? listOf([jobOf('running')]) : refused()),
+    });
+    await listed();
+    signedIn = false;
+    await pass(JOBS_POLL_MS);
+    await later(() => screen.getByText('Listing the jobs again: You are not signed in.'));
+    const asked = api.callsTo(JOBS).length;
+    expect(asked).toBe(2);
+    // Ten minutes on, with the page shown: nothing more was asked.
+    await pass(600_000);
+    expect(api.callsTo(JOBS)).toHaveLength(asked);
+    // The job is still there as last answered, and the page says why it does not move.
+    expect(rowOf().textContent).toContain('Running.');
+    expect(screen.getByText(SIGNED_OUT)).toBeDefined();
+    // Signed in again, the person asks: the list is answered and the clock runs again.
+    signedIn = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again after signing in' }));
+    await later(() => expect(api.callsTo(JOBS)).toHaveLength(asked + 1));
+    await later(() => expect(screen.queryByText(SIGNED_OUT)).toBeNull());
+    await pass(JOBS_POLL_MS);
+    await later(() => expect(api.callsTo(JOBS)).toHaveLength(asked + 2));
+  });
+
+  it('asks for the stream no more once it is refused as not signed in, and again after the person’s "List again"', async () => {
+    vi.useFakeTimers();
+    let signedIn = true;
+    const api = mockApi(
+      explorerHandlers({
+        [OPEN]: () => ok(writableWorkspace),
+        [JOBS]: () => (signedIn ? listOf([jobOf('running')]) : refused()),
+      }),
+    );
+    const events = mockEvents();
+    await showJobs();
+    await listed();
+    await eventually(() => screen.getByText(FOLLOWING));
+    await eventually(() => expect(api.callsTo(JOBS)).toHaveLength(2));
+    // The session ends: the service closes the stream and refuses the next.
+    signedIn = false;
+    events.state.refusal = refused();
+    act(() => events.streams.at(0)?.end());
+    await pass(RECONNECT_MS);
+    await later(() => expect(events.state.requests).toBe(2));
+    await later(() => screen.getByText(SIGNED_OUT));
+    // The quick clock asks the list once more, is refused, and stops too.
+    await pass(JOBS_POLL_MS);
+    await later(() => screen.getByText('Listing the jobs again: You are not signed in.'));
+    const asked = api.callsTo(JOBS).length;
+    await pass(600_000);
+    expect(events.state.requests).toBe(2);
+    expect(api.callsTo(JOBS)).toHaveLength(asked);
+    expect(rowOf().textContent).toContain('Running.');
+    // Signed in again: one press asks the list, and with its answer the stream is asked for.
+    signedIn = true;
+    events.state.refusal = null;
+    fireEvent.click(screen.getByRole('button', { name: 'List again' }));
+    await later(() => expect(events.streams).toHaveLength(2));
+    await later(() => screen.getByText(FOLLOWING));
+    expect(screen.queryByText(SIGNED_OUT)).toBeNull();
+  });
+
+  it('goes on trying the stream for a failure that may pass by itself', async () => {
+    vi.useFakeTimers();
+    mockApi(
+      explorerHandlers({
+        [OPEN]: () => ok(writableWorkspace),
+        [JOBS]: () => listOf([jobOf('succeeded')]),
+      }),
+    );
+    const events = mockEvents(fail(500, 'internal', 'restarting'));
+    await showJobs();
+    await listed();
+    await eventually(() => expect(events.state.requests).toBe(1));
+    await pass(RECONNECT_MS);
+    await later(() => expect(events.state.requests).toBe(2));
+    expect(screen.queryByText(SIGNED_OUT)).toBeNull();
+  });
+});
+
 describe('cancelling a job, and trying a failed one again', () => {
   const button = (name: string, id = JOB_ID) => within(rowOf(id)).queryByRole('button', { name });
 
