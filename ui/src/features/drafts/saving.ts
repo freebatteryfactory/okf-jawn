@@ -90,12 +90,7 @@ import {
   openWorkspaceQueryKey,
 } from '../../api/generated/@tanstack/react-query.gen';
 import { discardDraft, saveDraft } from '../../api/generated/sdk.gen';
-import type {
-  ItemDocument,
-  ItemSummary,
-  Revision,
-  Workspace,
-} from '../../api/generated/types.gen';
+import type { ItemDocument, ItemSummary, Revision, Workspace } from '../../api/generated/types.gen';
 import { zSaveDraftRequest } from '../../api/generated/zod.gen';
 import { REQUEST_TIMEOUT_MS, RequestStopped } from '../../app/api-client';
 import { classifyFailure } from '../errors/failure';
