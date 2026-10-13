@@ -39,7 +39,11 @@
  * `9.007199254740993e15`), it is held to the same promise: it is refused when a JavaScript
  * number cannot hold that whole number exactly, and read when it can (`1e20`,
  * `9007199254740992.0`). A real fraction (`0.1`, `1.5e-3`) is read as the nearest double, as
- * every YAML reader reads it.
+ * every YAML reader reads it. Known limit: a double has about 15 to 17 significant digits and a
+ * smallest size, so a fraction with more digits than that is rounded to its nearest double
+ * (`9007199254740993.5` becomes `9007199254740994`) and one smaller than the smallest double
+ * becomes `0` (`1e-400`), in both cases without a word to the person. The whole-number rule
+ * above is not affected: it governs only a text whose digits denote a whole number.
  *
  * The bounds are a first line, not the guarantee. This reader is not run on the page's thread:
  * `lib/yaml-reading.ts` runs it in a worker and ends it after a second, because no bound on length

@@ -5,7 +5,8 @@
  * stops the thread whatever it is doing, which is the one way to stop a parser that does not
  * come back. A worker that answered is kept as the spare for the next reading (one at most), so
  * an ordinary text does not pay for a start each time; a worker whose reading was ended, or that
- * broke, is never used again.
+ * broke, is never used again. The spare stays until the page goes (it is idle, and holds no
+ * text); it is not ended after a time of rest.
  *
  * The text is sent once the worker has said it is ready, and `began` is reported then: the
  * page's time limit counts the reading, not the worker's start.

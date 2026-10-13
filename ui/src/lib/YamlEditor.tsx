@@ -64,7 +64,10 @@ export interface PausedReading {
  * page's thread. `onRead` gets each text that was read with what reading it found (a refusal
  * when it took too long: `readOffThread`), unless the text changed meanwhile. A text still
  * waiting when the caller leaves the page is read then, and reported to the last `onRead`, so
- * it is never dropped unread.
+ * it is never dropped unread. A reading already under way is not ended by leaving: it runs to
+ * its answer, or to the one-second limit, and the answer goes to the `onRead` of the caller
+ * that left, which no longer draws anything. `cancel` is different: it drops the text that
+ * waits and ends the reading under way, so that nothing of either is reported.
  */
 export function usePausedReading(onRead: (text: string, read: YamlRead) => void): PausedReading {
   const report = useRef(onRead);
