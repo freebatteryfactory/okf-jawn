@@ -2,7 +2,8 @@
  * Turn whatever an operation threw into a plain-language failure with the action it allows.
  *
  * The generated client throws the server's `ApiError` body when the call fails. A request that went
- * unanswered for the client's bounded wait (`app/api-client.ts`) timed out. Anything else (a
+ * unanswered for the client's bounded wait (`app/api-client.ts`) timed out; one the person stopped
+ * says so, and that it may have been carried out all the same. Anything else (a
  * network error, a non-JSON answer) means the service was not reached. `not_implemented` is a
  * failure like any other: it reads "not available in this build" and is never shown as a success,
  * an empty result or a silent nothing. The message table is keyed by every `ErrorCode`, so a new
@@ -11,13 +12,14 @@
 import type { z } from 'zod';
 import type { ErrorCode } from '../../api/generated/types.gen';
 import { zApiError } from '../../api/generated/zod.gen';
-import { RequestTimedOut } from '../../app/api-client';
+import { RequestStopped, RequestTimedOut } from '../../app/api-client';
 
 export type ApiFailure = z.infer<typeof zApiError>;
 
 export type Failure =
   | { kind: 'api'; error: ApiFailure }
   | { kind: 'timed_out'; seconds: number }
+  | { kind: 'stopped' }
   | { kind: 'unreachable'; detail: string };
 
 /** What the person can do about a failure. */
@@ -117,6 +119,7 @@ const zApiErrorWithoutDetail = zApiError.omit({ detail: true });
 export function classifyFailure(thrown: unknown): Failure {
   if (thrown instanceof RequestTimedOut)
     return { kind: 'timed_out', seconds: thrown.waitedMs / 1000 };
+  if (thrown instanceof RequestStopped) return { kind: 'stopped' };
   const parsed = zApiError.safeParse(thrown);
   if (parsed.success) return { kind: 'api', error: parsed.data };
   const undetailed = zApiErrorWithoutDetail.safeParse(thrown);
@@ -131,6 +134,13 @@ export function messageFor(failure: Failure): FailureMessage {
     return {
       title: 'The workspace service did not answer in time.',
       advice: `No answer came within ${failure.seconds} seconds. Try again.`,
+      action: RETRY,
+    };
+  }
+  if (failure.kind === 'stopped') {
+    return {
+      title: 'You stopped this before the service answered.',
+      advice: 'Whether the service carried it out is not known. Try again to make sure.',
       action: RETRY,
     };
   }
@@ -161,6 +171,6 @@ const TRANSIENT: ReadonlySet<ErrorCode> = new Set(['unavailable', 'in_progress']
 export function shouldRetry(failureCount: number, thrown: unknown): boolean {
   if (failureCount >= 1) return false;
   const failure = classifyFailure(thrown);
-  if (failure.kind === 'timed_out') return false;
+  if (failure.kind === 'timed_out' || failure.kind === 'stopped') return false;
   return failure.kind === 'unreachable' || TRANSIENT.has(failure.error.code);
 }

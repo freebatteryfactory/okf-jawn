@@ -24,20 +24,30 @@
  * Snapshot of the item that answered while its text had gone on names the revision it made
  * (`snapshot.ts`): the text was typed over what that revision holds.
  *
- * A discard is repeated under one key until it answers, wherever it is pressed from: the key is
+ * A discard asks the service unless the page knows it holds no draft, which it does only of text
+ * no save of which is in doubt: after a save that failed or timed out it asks, and takes the
+ * answer that there is no draft as the discard done. A discard is repeated under one key until it
+ * answers, wherever it is pressed from: the key is
  * kept here, by item, not in the component that asked. A save sent after a discard that did not
  * answer makes the next discard another request (it would remove another draft), with a new key.
  *
  * A body larger than the service accepts is not sent; the session says so until it is shortened.
+ *
+ * A save that has been under way for 30 seconds is said to be still sending, and the person may
+ * stop it (`stopSaving`): the request is aborted, and since it may have been applied, the session
+ * is then as after any save with no answer.
  */
 import type { QueryClient } from '@tanstack/react-query';
 import { discardDraft, saveDraft } from '../../api/generated/sdk.gen';
 import type { ItemDocument, Revision } from '../../api/generated/types.gen';
 import { zSaveDraftRequest } from '../../api/generated/zod.gen';
+import { REQUEST_TIMEOUT_MS, RequestStopped } from '../../app/api-client';
+import { classifyFailure } from '../errors/failure';
 import { rememberDraft } from './drafts-list';
 import {
   atRisk,
   type DraftText,
+  type HeldProperties,
   needsSave,
   type SaveAttempt,
   sameText,
@@ -57,6 +67,14 @@ export const MAX_BODY_BYTES = zSaveDraftRequest.shape.body.maxLength ?? Number.P
  */
 export const AUTOSAVE_MAX_WAIT_MS = 10_000;
 
+/**
+ * How long a save is under way before the person is told it is still being sent and may stop
+ * it: the bounded wait of an ordinary request. Only a save whose wait is longer (a large text:
+ * `app/api-client.ts` allows for what is sent, up to 158 seconds) is still in flight then; an
+ * ordinary one has timed out at that same moment.
+ */
+export const STILL_SENDING_AFTER_MS = REQUEST_TIMEOUT_MS;
+
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 /** When the first change not yet sent was made, by session. */
 const unsavedSince = new Map<string, number>();
@@ -65,6 +83,8 @@ const inFlight = new Map<string, Promise<void>>();
 const changedMeanwhile = new Set<string>();
 /** The key of the discard asked of an item and not answered yet, by session. */
 const discardKeys = new Map<string, string>();
+/** What stops the save in flight, by session. */
+const stoppers = new Map<string, AbortController>();
 
 /** Why a draft could not be kept on a newer revision, when no request failed. */
 export class DraftNotKept extends Error {
@@ -105,9 +125,11 @@ export function beginSession(
     committed,
     confirmed: draft === null ? null : { ...text, draft: draft.draft },
     saving: false,
+    stillSending: false,
     failure: null,
     attempt: null,
     tooLong: null,
+    heldBack: null,
   });
 }
 
@@ -134,7 +156,18 @@ function cancelTimer(key: string) {
   timers.delete(key);
 }
 
-/** The editor's content changed: keep it, and save it a moment after the last change. */
+/**
+ * Keep, with the session, what the person entered in the properties form and the draft has not
+ * taken; `null` once nothing is held back. Nothing is sent: no save carries it.
+ */
+export function holdProperties(workspaceId: string, itemId: string, held: HeldProperties | null) {
+  sessions().change(sessionKey(workspaceId, itemId), { heldBack: held });
+}
+
+/**
+ * The editor's content changed: keep it, and save it a moment after the last change. Properties
+ * put into the draft are all that was entered in the form: nothing of it is held back any more.
+ */
 export function editSession(
   client: QueryClient,
   workspaceId: string,
@@ -143,7 +176,7 @@ export function editSession(
 ) {
   const key = sessionKey(workspaceId, itemId);
   if (sessions().sessions[key] === undefined) return;
-  sessions().change(key, change);
+  sessions().change(key, change.properties === undefined ? change : { ...change, heldBack: null });
   cancelTimer(key);
   // A moment after this change, and at the latest so long after the first one not yet sent.
   const now = Date.now();
@@ -218,9 +251,15 @@ async function send(client: QueryClient, key: string): Promise<void> {
     last !== null && last.baseRevision === session.baseRevision && sameText(last, text)
       ? last
       : { key: crypto.randomUUID(), baseRevision: session.baseRevision, ...text };
-  sessions().change(key, { saving: true, attempt, tooLong: null });
+  sessions().change(key, { saving: true, stillSending: false, attempt, tooLong: null });
   // A discard asked before this save and not answered would now remove another draft.
   discardKeys.delete(key);
+  // The person may stop this save once it has been under way for a while (`stopSaving`).
+  const stopper = new AbortController();
+  stoppers.set(key, stopper);
+  const slow = setTimeout(() => {
+    if (stoppers.get(key) === stopper) sessions().change(key, { stillSending: true });
+  }, STILL_SENDING_AFTER_MS);
   try {
     const { data } = await saveDraft({
       body: {
@@ -231,6 +270,7 @@ async function send(client: QueryClient, key: string): Promise<void> {
         properties: attempt.properties,
         idempotency_key: attempt.key,
       },
+      signal: stopper.signal,
       throwOnError: true,
     });
     const confirmed = { body: attempt.body, properties: attempt.properties, draft: data };
@@ -246,8 +286,31 @@ async function send(client: QueryClient, key: string): Promise<void> {
     });
     rememberDraft(client, session.workspaceId, session.itemId, confirmed);
   } catch (error) {
-    sessions().change(key, { saving: false, failure: error });
+    // A save the person stopped is said as that, whatever the aborted request threw. Like any
+    // save with no answer it may have been applied: the session is not saved, and owes a save.
+    sessions().change(key, {
+      saving: false,
+      failure: stopper.signal.aborted ? new RequestStopped() : error,
+    });
+  } finally {
+    clearTimeout(slow);
+    stoppers.delete(key);
   }
+}
+
+/**
+ * Stop the save of an item that is in flight, at the person's word. The request is aborted; what
+ * the service did with it is not known, so the session is "not saved" and a save is owed, sent by
+ * the next change, by the notice's retry or when the editor is left. Nothing is sent by itself
+ * right after: a change made during that save waits like any other.
+ */
+export function stopSaving(workspaceId: string, itemId: string) {
+  const key = sessionKey(workspaceId, itemId);
+  const stopper = stoppers.get(key);
+  if (stopper === undefined) return;
+  cancelTimer(key);
+  changedMeanwhile.delete(key);
+  stopper.abort();
 }
 
 /**
@@ -263,9 +326,10 @@ export function assertSaved(workspaceId: string, itemId: string) {
 /**
  * The first half of "keep mine": the draft is saved again with `revision` as its base, which the
  * service takes as the explicit rebase when that is the revision the item is at. The session's own
- * save carries it, after any save in flight and with the text the editor holds by then. A draft
- * already on that base, with that text, is not sent again. Rejects with what the save threw, or
- * with `DraftNotKept`.
+ * save carries it, after any save in flight and with the text the editor holds by then; text
+ * typed while that save is in flight is saved after it, so this settles with the text on screen
+ * saved. A draft already on that base, with that text, is not sent again. Rejects with what a
+ * save threw, or with `DraftNotKept`.
  */
 export async function rebaseSession(
   client: QueryClient,
@@ -279,14 +343,32 @@ export async function rebaseSession(
   // A save in flight answers with the base it was sent on: the new base is named after it.
   await inFlight.get(key);
   sessions().change(key, { baseRevision: revision });
-  await save(client, key);
+  // What is typed while a save is in flight is saved too, without waiting for the autosave's
+  // moment: the draft is kept once the text on screen is saved, a save failed, or it is too long.
+  for (;;) {
+    cancelTimer(key);
+    await save(client, key);
+    const now = sessions().sessions[key];
+    if (now === undefined || !needsSave(now) || now.failure !== null || now.tooLong !== null) break;
+  }
   assertSaved(workspaceId, itemId);
 }
 
+/** The service answered that it holds no such thing: of a discard, that there is no draft. */
+function answeredNotFound(thrown: unknown): boolean {
+  const failure = classifyFailure(thrown);
+  return failure.kind === 'api' && failure.error.code === 'not_found';
+}
+
 /**
- * Discard the person's draft of an item: `discard_draft` when the service holds one, and the
- * session with its text either way. Rejects with what `discard_draft` threw, leaving the session
- * as it was. Every attempt of one discard carries the same key, whoever asks.
+ * Discard the person's draft of an item: the session with its text, and the draft the service
+ * holds. The service is asked (`discard_draft`) unless this page knows it holds none, and it knows
+ * that of one case: a session no save of which was confirmed and none failed, so nothing of it
+ * was sent, or what was sent has been snapshotted. After a save that failed or timed out the
+ * service may hold a draft, and so it may when this page has no session of the item: it is asked.
+ * Its answer that it holds no draft of the item (`not_found`) is the discard done. Rejects with
+ * anything else `discard_draft` threw, leaving the session as it was. Every attempt of one
+ * discard carries the same key, whoever asks.
  */
 export async function discardSession(
   client: QueryClient,
@@ -299,13 +381,18 @@ export async function discardSession(
   // A save in flight may be creating the draft: what the service holds is known once it settles.
   await inFlight.get(key);
   const session = sessions().sessions[key];
-  if (session === undefined || session.confirmed !== null) {
+  const holdsNone = session !== undefined && session.confirmed === null && session.failure === null;
+  if (!holdsNone) {
     const idempotencyKey = discardKeys.get(key) ?? crypto.randomUUID();
     discardKeys.set(key, idempotencyKey);
-    await discardDraft({
-      body: { workspace_id: workspaceId, item_id: itemId, idempotency_key: idempotencyKey },
-      throwOnError: true,
-    });
+    try {
+      await discardDraft({
+        body: { workspace_id: workspaceId, item_id: itemId, idempotency_key: idempotencyKey },
+        throwOnError: true,
+      });
+    } catch (error) {
+      if (!answeredNotFound(error)) throw error;
+    }
     discardKeys.delete(key);
   }
   cancelTimer(key);
@@ -330,5 +417,7 @@ export function resetDraftSessions() {
   changedMeanwhile.clear();
   inFlight.clear();
   discardKeys.clear();
+  // A save still in flight is let go, not stopped: its answer finds no session.
+  stoppers.clear();
   useDraftSessions.setState({ sessions: {}, conflicts: {}, said: {}, asked: {} });
 }

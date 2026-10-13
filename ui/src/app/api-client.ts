@@ -67,6 +67,17 @@ export class RequestTimedOut extends Error {
   }
 }
 
+/**
+ * A request the person stopped before it answered (the caller aborted it at their word). Like one
+ * that timed out, it may still have been carried out.
+ */
+export class RequestStopped extends Error {
+  constructor() {
+    super('The request was stopped before it answered');
+    this.name = 'RequestStopped';
+  }
+}
+
 /** The CSRF cookie's value exactly as the browser holds it; null when there is none. */
 export function csrfToken(): string | null {
   for (const pair of document.cookie.split(';')) {

@@ -29,6 +29,7 @@ import {
   renderAt,
   SOURCE,
   sourceSummary,
+  summary,
   WS,
   writableWorkspace,
 } from './support/workspace';
@@ -170,7 +171,8 @@ const nameField = () => within(panel()).getByRole('textbox', { name: 'Snapshot n
 const snapshotButton = () => within(panel()).getByRole('button', { name: /^(Snapshot \d|Taking)/ });
 const headLine = () => document.querySelector('.head-line')?.textContent ?? '';
 /** What the status adds when the text of the one snapshotted item went on meanwhile. */
-const STILL_A_DRAFT = 'What you typed in it while it was taken is not in it, and is still a draft.';
+const STILL_A_DRAFT =
+  'What you typed in it while it was taken may not be in it, and goes on as a draft.';
 
 /** Open the workspace with its two drafts listed, name the Snapshot, and press the button. */
 async function pressSnapshot(name: string) {
@@ -625,24 +627,37 @@ describe('taking a Snapshot', () => {
       },
       [NOTE],
     );
-    // The tab cites the head, so the Snapshot leaves the read of the item at the old head cached.
-    const { queryClient } = renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
-    await findTextBox('Text of Meeting notes');
+    // The tab cites an older revision on purpose, so the Snapshot leaves it where it is and its
+    // read of the item stays on screen. (A tab that follows the head moves to the new revision;
+    // the read it leaves has no reader then, and the library stops it by itself.) A draft is not
+    // bound to a revision: that read carries it too.
+    const { queryClient } = renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    await screen.findByText('Text of Meeting notes');
+    await screen.findByText(/You have a draft of this item\./);
     await screen.findByRole('region', { name: 'Drafts (1)' });
-    const key = itemOptions(WS, NOTE, HEAD).queryKey;
+    const key = itemOptions(WS, NOTE, OLD).queryKey;
+    const atOld = () =>
+      api.callsTo(ITEM).filter((sent) => JSON.stringify(sent.at).includes(OLD)).length;
     read.hold = true;
     act(() => {
       void queryClient.invalidateQueries({ queryKey: key });
     });
     await eventuallyReal(() => expect(read.answer).toBeDefined());
+    const before = atOld();
     await pressSnapshot('Tidy');
     await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Tidy” taken: 1 item\./));
     // The old answer arrives now, with the draft that was just committed in it.
     act(() => read.answer?.());
     await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    // The read was still watched when the answer came: only stopping it kept the draft out.
+    expect(
+      queryClient.getQueryCache().find({ queryKey: key })?.getObserversCount(),
+    ).toBeGreaterThan(0);
     expect(queryClient.getQueryData(key)?.draft ?? null).toBeNull();
-    expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+    expect(screen.queryByText(/You have a draft of this item\./)).toBeNull();
     expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+    // It was asked again after the Snapshot: that answer has the Snapshot in it.
+    expect(atOld()).toBeGreaterThan(before);
     expect(api.callsTo(SAVE)).toHaveLength(0);
   });
 
@@ -658,8 +673,17 @@ describe('taking a Snapshot', () => {
      * `commit_items` commits the draft it read when it started and removes the draft only if it
      * is still that content (crates/core/src/application/history.rs: "A draft saved again in
      * between ... stays in place"). With `holdSaves` a save is applied when the test answers it.
+     * `commitReads` says when the commit reads the draft it commits: when it is asked, or only as
+     * it answers (a save sent meanwhile reached the service first). `headAfter` is the head once
+     * the commit has answered: the revision it made, unless someone else committed right after.
      */
-    function remembering(holdSaves = false) {
+    function remembering(
+      holdSaves = false,
+      {
+        commitReads = 'when asked',
+        headAfter = MADE,
+      }: { commitReads?: string; headAfter?: string } = {},
+    ) {
       const held = {
         head: HEAD,
         committed: '# Meeting notes',
@@ -699,12 +723,13 @@ describe('taking a Snapshot', () => {
             });
           },
           [COMMIT]: () => {
-            const read = held.draft;
+            const asked = held.draft;
             return new Promise<Reply>((resolve) => {
               commit = () => {
+                const read = commitReads === 'when asked' ? asked : held.draft;
                 held.committed = read ?? held.committed;
                 if (held.draft === read) held.draft = null;
-                held.head = MADE;
+                held.head = headAfter;
                 resolve(committed());
               };
             });
@@ -769,6 +794,72 @@ describe('taking a Snapshot', () => {
         base_revision: MADE,
         body: `${DRAFT_BODY} second part!`,
       });
+    });
+
+    // The page cannot tell this order from the one above: the status is true in both.
+    it('saved, and read by the commit, before the Snapshot answers: the text is in it, and nothing says it is not', async () => {
+      const { api, held, answerCommit } = remembering(false, { commitReads: 'as it answers' });
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const box = await findTextBox('Text of Meeting notes');
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      vi.useFakeTimers();
+      await pressSnapshot('First part');
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(1));
+      typeInto(box, ' second part');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      await pass(10);
+      answerCommit();
+      await eventually(() => expect(said()).toMatch(/^Snapshot “First part” taken: 1 item\./));
+      // What was typed meanwhile is in the Snapshot this time.
+      expect(held.committed).toBe(`${DRAFT_BODY} second part`);
+      expect(said()).toContain(STILL_A_DRAFT);
+      expect(said()).not.toMatch(/is not in it|is still a draft/);
+      // The text is kept either way: it goes on as a draft on the revision the Snapshot made.
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      expect(api.callsTo(SAVE).at(1)).toMatchObject({
+        base_revision: MADE,
+        body: `${DRAFT_BODY} second part`,
+      });
+      await eventually(() =>
+        expect(document.querySelector('.save-state')?.textContent).toMatch(/^Saved as a draft at/),
+      );
+      expect(textIn(textBox('Text of Meeting notes'))).toBe(`${DRAFT_BODY} second part`);
+    });
+
+    // A known limit (the header of `snapshot.ts`): the service moves a draft only onto the head.
+    it('someone else commits right after the Snapshot: one more save, and the draft stays on its old base', async () => {
+      const { api, held, answerCommit } = remembering(false, { headAfter: THEIRS });
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const box = await findTextBox('Text of Meeting notes');
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      vi.useFakeTimers();
+      await pressSnapshot('First part');
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(1));
+      typeInto(box, ' second part');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      answerCommit();
+      await eventually(() => expect(said()).toMatch(/^Snapshot “First part” taken: 1 item\./));
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      // The save names the Snapshot's revision, which is not the head: the service leaves the base.
+      expect(api.callsTo(SAVE).map((sent) => sent.base_revision)).toEqual([HEAD, MADE]);
+      expect(held).toEqual({
+        head: THEIRS,
+        committed: DRAFT_BODY,
+        draft: `${DRAFT_BODY} second part`,
+        base: HEAD,
+      });
+      await eventually(() =>
+        expect(document.querySelector('.save-state')?.textContent).toMatch(/^Saved as a draft at/),
+      );
+      // One save, not a loop; and the editor says the base the draft is really on.
+      await pass(60_000);
+      expect(api.callsTo(SAVE)).toHaveLength(2);
+      expect(screen.getByText('Draft.').parentElement?.textContent).toContain(
+        `It started from revision ${HEAD.slice(0, 7)}`,
+      );
+      expect(textIn(textBox('Text of Meeting notes'))).toBe(`${DRAFT_BODY} second part`);
     });
 
     it('being saved when the Snapshot answers: once the save has answered, the draft is moved onto that revision', async () => {
@@ -1093,6 +1184,155 @@ describe('taking a Snapshot', () => {
     await eventuallyReal(() => expect(router.state.location.search).toEqual({ rev: MADE }));
     // It reads what was just committed, and can be edited again.
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeDefined();
+  });
+});
+
+// This workspace edits only Notes as drafts, and the service refuses any other draft at a
+// Snapshot. One made elsewhere is listed all the same: the person has to be able to see it go.
+describe('a draft of a Source or a View made elsewhere', () => {
+  const KINDS = [
+    ['a Source', 'source', 'Source'],
+    ['a View', 'view', 'View'],
+  ] as const;
+
+  /** The person has a draft of the note, and one of an item of another kind. */
+  function withOther(kind: 'source' | 'view', overrides: Record<string, Handler> = {}) {
+    const item = summary(SOURCE, 'things/it.md', 'Annual report', 'report', kind);
+    const made = service(
+      {
+        [ITEM]: (body) => {
+          const itemId = String(body.item_id);
+          const document = itemDocument(
+            itemId === NOTE ? noteSummary : itemId === SOURCE ? item : otherSummary,
+          );
+          return ok(
+            made.state.drafts.has(itemId)
+              ? {
+                  ...document,
+                  draft: {
+                    body: 'a draft made elsewhere',
+                    properties: document.properties,
+                    draft: draftOf(itemId, HEAD, LATER),
+                  },
+                }
+              : document,
+          );
+        },
+        ...overrides,
+      },
+      [NOTE, SOURCE],
+    );
+    return made;
+  }
+  const row = () =>
+    within(panel()).getByRole('button', { name: 'Annual report' }).closest('li')?.textContent ?? '';
+  const box = () =>
+    within(panel()).getByRole('checkbox', { name: 'Include Annual report in the Snapshot' });
+  const discardButton = () =>
+    within(panel()).getByRole('button', { name: 'Discard draft of Annual report' });
+
+  async function listed(kind: 'source' | 'view', overrides: Record<string, Handler> = {}) {
+    const made = withOther(kind, overrides);
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('region', { name: 'Drafts (2)' });
+    // The row's item has been read: its kind is known.
+    await eventuallyReal(() => expect(row()).toContain('cannot be snapshotted'));
+    return made;
+  }
+
+  it.each(KINDS)(
+    'of %s: is listed with its kind, cannot be ticked, says why, and a Snapshot leaves it out',
+    async (_what, kind, word) => {
+      const { api } = await listed(kind);
+      expect(row()).toContain(`${word} · saved`);
+      expect(row()).toContain(
+        `A draft of a ${word} cannot be snapshotted: only a Note is edited as a draft. It can be discarded here.`,
+      );
+      expect(box()).toHaveProperty('checked', false);
+      expect(box().getAttribute('aria-disabled')).toBe('true');
+      fireEvent.click(box());
+      expect(box()).toHaveProperty('checked', false);
+      // The Note beside it is a draft like any other: ticked, and with no discard of its own here.
+      expect(
+        within(panel()).getByRole('checkbox', { name: 'Include Meeting notes in the Snapshot' }),
+      ).toHaveProperty('checked', true);
+      expect(within(panel()).getAllByRole('button', { name: /^Discard draft/ })).toHaveLength(1);
+      expect(snapshotButton().textContent).toBe('Snapshot 1 draft');
+      await pressSnapshot('Tidy');
+      await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Tidy” taken: 1 item\./));
+      expect(api.callsTo(COMMIT).map((sent) => sent.item_ids)).toEqual([[NOTE]]);
+      // It is still there to be discarded.
+      expect(await screen.findByRole('region', { name: 'Drafts (1)' })).toBeDefined();
+      expect(row()).toContain('cannot be snapshotted');
+      expect(api.violations).toEqual([]);
+    },
+  );
+
+  it('offers "Discard draft", which asks first; then the draft is gone and focus is on a row', async () => {
+    const { api, state } = await listed('source');
+    act(() => discardButton().focus());
+    fireEvent.click(discardButton());
+    const question = within(panel()).getByRole('group', {
+      name: 'Discard the draft of Annual report?',
+    });
+    const keep = within(question).getByRole('button', { name: 'Keep the draft' });
+    expect(document.activeElement).toBe(keep);
+    expect(api.callsTo(DISCARD)).toHaveLength(0);
+    fireEvent.click(keep);
+    expect(document.activeElement).toBe(discardButton());
+    expect(api.callsTo(DISCARD)).toHaveLength(0);
+
+    fireEvent.click(discardButton());
+    const confirm = within(panel()).getByRole('button', { name: 'Discard the draft' });
+    act(() => confirm.focus());
+    fireEvent.click(confirm);
+    await screen.findByRole('region', { name: 'Drafts (1)' });
+    // This page had no session of the item: the service was asked.
+    expect(api.callsTo(DISCARD)).toHaveLength(1);
+    expect(api.callsTo(DISCARD).at(0)).toMatchObject({ workspace_id: WS, item_id: SOURCE });
+    expect(state.drafts.has(SOURCE)).toBe(false);
+    expect(within(panel()).queryByRole('button', { name: 'Annual report' })).toBeNull();
+    expect(said()).toBe('Your draft of Annual report was discarded.');
+    // It was the last row: focus goes to the one before it, not to the page.
+    expect(document.activeElement).toBe(
+      within(panel()).getByRole('button', { name: 'Meeting notes' }),
+    );
+    expect(api.violations).toEqual([]);
+  });
+
+  it('keeps the row when the discard fails, says so there, and repeats it under the same key', async () => {
+    let failing = true;
+    const { api, state } = await listed('view', {
+      [DISCARD]: (body) => {
+        if (failing) return fail(503, 'unavailable', 'busy');
+        state.drafts.delete(String(body.item_id));
+        return ok(draftOf(String(body.item_id), HEAD, LATER));
+      },
+    });
+    fireEvent.click(discardButton());
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Discard the draft' }));
+    expect(
+      await within(panel()).findByText(
+        'Discarding the draft of Annual report: The service is temporarily unavailable.',
+      ),
+    ).toBeDefined();
+    expect(row()).toContain('cannot be snapshotted');
+    failing = false;
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Try again' }));
+    await screen.findByRole('region', { name: 'Drafts (1)' });
+    const [first, second] = api.callsTo(DISCARD);
+    expect(api.callsTo(DISCARD)).toHaveLength(2);
+    expect(second).toEqual(first);
+  });
+
+  it('is listed with its reason for a person who may only read, with nothing to press', async () => {
+    await listed('source', { [OPEN]: () => ok({ ...writableWorkspace, permissions: ['read'] }) });
+    expect(row()).toContain(
+      'A draft of a Source cannot be snapshotted: only a Note is edited as a draft.',
+    );
+    expect(row()).not.toContain('It can be discarded here.');
+    expect(within(panel()).queryByRole('button', { name: /^Discard draft/ })).toBeNull();
+    expect(within(panel()).queryByRole('checkbox')).toBeNull();
   });
 });
 
@@ -1515,6 +1755,66 @@ describe('a Snapshot that conflicts', () => {
       expect(reusedKeys(api.callsTo(SAVE))).toEqual([]);
     });
 
+    // Typed while the draft is being kept, and that save answers before the autosave's moment.
+    describe('text typed while the draft is kept, inside the autosave delay', () => {
+      async function typedWhileKept(second: (body: Json) => Reply) {
+        const answers: Array<() => void> = [];
+        let saves = 0;
+        const made = await openConflict(
+          {},
+          {
+            [SAVE]: (body) => {
+              saves += 1;
+              // The save that keeps the draft waits for the test; any after it answers at once.
+              return saves === 1
+                ? new Promise<Reply>((resolve) => {
+                    answers.push(() => resolve(savedAs(body)));
+                  })
+                : second(body);
+            },
+            [COMMIT]: commits(() => committed()),
+          },
+        );
+        vi.useFakeTimers();
+        fireEvent.click(within(made.notice).getByRole('button', { name: 'Keep mine' }));
+        await eventually(() => expect(made.api.callsTo(SAVE)).toHaveLength(1));
+        typeInto(textBox('Text of Meeting notes'), ' and more');
+        // The clock is not moved: the autosave of what was typed has not come due.
+        act(() => {
+          answers.shift()?.();
+        });
+        return made;
+      }
+
+      it('is saved before the Snapshot is taken, and nothing is called too long', async () => {
+        const { api } = await typedWhileKept(savedAs);
+        await eventually(() => expect(said()).toMatch(/^Snapshot “Tidy” taken: 1 item\./));
+        expect(api.callsTo(SAVE).map((sent) => [sent.base_revision, sent.body])).toEqual([
+          [THEIRS, DRAFT_BODY],
+          [THEIRS, `${DRAFT_BODY} and more`],
+        ]);
+        // The Snapshot was asked once the text on screen was saved, and not before.
+        expect(api.callsTo(COMMIT)).toHaveLength(2);
+        expect(document.body.textContent).not.toContain('too long');
+        expect(document.body.textContent).not.toContain('Your draft was not kept.');
+        expect(reusedKeys(api.callsTo(SAVE))).toEqual([]);
+      });
+
+      it('says a save of it that fails as that save’s failure, and takes no Snapshot', async () => {
+        const { api, notice } = await typedWhileKept(() => fail(503, 'unavailable', 'busy'));
+        await eventually(() =>
+          expect(
+            within(notice).getByText('Keeping your draft: The service is temporarily unavailable.'),
+          ).toBeDefined(),
+        );
+        expect(api.callsTo(SAVE)).toHaveLength(2);
+        expect(api.callsTo(COMMIT)).toHaveLength(1);
+        expect(notice.textContent).not.toContain('too long');
+        expect(notice.textContent).not.toContain('could not be reached');
+        expect(within(notice).getByRole('button', { name: 'Try again' })).toBeDefined();
+      });
+    });
+
     it('sends a save that failed on the old base under a new key on the new one', async () => {
       let failing = false;
       const { api, notice } = await openConflict(
@@ -1567,6 +1867,38 @@ describe('a Snapshot that conflicts', () => {
       const asked = api.calls.slice(before).map((call) => call.path);
       expect(asked.filter((path) => path === SAVE || path === COMMIT)).toEqual([]);
       expect(within(notice).getByRole('button', { name: 'Take theirs' })).toBeDefined();
+    });
+
+    it('take theirs still asks the service to discard a draft whose text is not in the page', async () => {
+      // As above: the draft is listed and conflicts, and this page has no session of it. Whether
+      // the service holds it is not this page's to know, so the discard is asked.
+      const { api, state } = withConflict(
+        {},
+        { [ITEM]: (body) => ok(itemDocument(body.item_id === NOTE ? noteSummary : otherSummary)) },
+      );
+      renderAt(`/w/${WS}`);
+      await screen.findByRole('region', { name: 'Drafts (2)' });
+      await pressSnapshot('Tidy');
+      await within(panel()).findByRole('alert');
+      fireEvent.click(within(panel()).getByRole('button', { name: 'Meeting notes' }));
+      const notice = await screen.findByRole('region', {
+        name: 'Meeting notes changed since your draft was started',
+      });
+      fireEvent.click(within(notice).getByRole('button', { name: 'Take theirs' }));
+      fireEvent.click(within(notice).getByRole('button', { name: 'Discard my draft' }));
+      await eventuallyReal(() =>
+        expect(
+          screen.queryByRole('region', {
+            name: 'Meeting notes changed since your draft was started',
+          }),
+        ).toBeNull(),
+      );
+      expect(api.callsTo(DISCARD)).toHaveLength(1);
+      expect(api.callsTo(DISCARD).at(0)).toMatchObject({ workspace_id: WS, item_id: NOTE });
+      // The service no longer holds it, and the list says so.
+      expect(state.drafts.has(NOTE)).toBe(false);
+      expect(await screen.findByRole('region', { name: 'Drafts (1)' })).toBeDefined();
+      expect(within(panel()).queryByRole('button', { name: 'Meeting notes' })).toBeNull();
     });
 
     it('says why a draft too long to save was not kept, and asks nothing', async () => {
