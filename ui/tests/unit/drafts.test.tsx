@@ -753,6 +753,53 @@ describe('who may edit, and where', () => {
         await pass(0);
         expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Refresh' }));
       }, 20_000);
+
+      // Re-check 4, note 8: the lift's own request for the text box is made only in the drawing
+      // that has the editor. The kept text leaving for another reason (its draft discarded, with
+      // focus in it) leaves no request that a later editor would serve.
+      it('leaves focus where the person put it when the item opens on a draft again after the kept text was discarded', async () => {
+        const draftElsewhere = {
+          ...itemDocument(noteSummary, { owner: 'Ada' }),
+          draft: {
+            body: `${COMMITTED} from elsewhere`,
+            properties: { type: 'meeting-note', okf_jawn: { id: NOTE }, owner: 'Grace' },
+            draft: draftOf(NOTE, AGAIN, LATER),
+          },
+        };
+        const { api, held } = becomesSource(asSource, {
+          [DISCARD]: (body) => ok(draftOf(String(body.item_id), HEAD, LATER)),
+          [ITEM]: (body) =>
+            ok(
+              body.item_id !== NOTE
+                ? itemDocument(otherSummary)
+                : JSON.stringify(body.at).includes(NEWER)
+                  ? itemDocument(asSource)
+                  : JSON.stringify(body.at).includes(AGAIN)
+                    ? draftElsewhere
+                    : itemDocument(noteSummary),
+            ),
+        });
+        const { box } = await startEditing();
+        typeInto(box, ' and more');
+        await pass(AUTOSAVE_DELAY_MS);
+        await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+        await refreshTo(held, NEWER);
+        await eventuallyGet(keptText);
+        fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+        const confirm = screen.getByRole('button', { name: 'Discard the draft' });
+        act(() => confirm.focus());
+        fireEvent.click(confirm);
+        await eventually(() => expect(screen.queryByLabelText('Your text, read only')).toBeNull());
+        expect(api.callsTo(DISCARD)).toHaveLength(1);
+        // A Note again, with a draft made elsewhere: the pane opens on it, and takes no focus.
+        const refresh = screen.getByRole('button', { name: 'Refresh' });
+        act(() => refresh.focus());
+        await refreshTo(held, AGAIN);
+        const opened = await eventuallyGet(() => textBox('Text of Meeting notes'));
+        expect(textIn(opened)).toBe(`${COMMITTED} from elsewhere`);
+        await pass(0);
+        expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Refresh' }));
+      }, 20_000);
     });
   });
 });
