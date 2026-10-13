@@ -3,7 +3,15 @@
  * and in the reader. The words always say they are advisory, and an empty list never reads as
  * safe.
  */
-import { cleanup, configure, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  configure,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AttentionItem } from '../../src/api/generated/types.gen';
 import { SHOWN_STEP } from '../../src/features/attention/AttentionPage';
@@ -271,6 +279,52 @@ describe('a long list', () => {
     ).toBeDefined();
   });
 
+  it('does not ask again for a revision it has listed, however long the page is open and whatever opens later', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const api = setup(paged);
+    renderAt(`/w/${WS}`);
+    await waitFor(() => expect(api.callsTo(ATTENTION)).toHaveLength(ATTENTION_AUTO_PAGES));
+    // Ten minutes on, well past the time other lists count as fresh.
+    await act(() => vi.advanceTimersByTimeAsync(600_000));
+    // An item is opened: its tab and its reader read the same list.
+    fireEvent.click(await screen.findByRole('treeitem', { name: /Annual report/ }));
+    await screen.findByRole('tab', { name: 'Annual report' });
+    // The person comes back to the window.
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    expect(api.callsTo(ATTENTION)).toHaveLength(ATTENTION_AUTO_PAGES);
+    vi.useRealTimers();
+  });
+
+  it('asks anew at a new head', async () => {
+    const NEW = 'e'.repeat(40);
+    let head = HEAD;
+    const api = mockApi(
+      explorerHandlers({
+        '/api/workspaces/open-workspace': () =>
+          ok({
+            id: WS,
+            name: 'Workshop notes',
+            description: 'Notes from the workshop',
+            head,
+            created_at: '2026-01-01T23:30:00.000Z',
+            permissions: ['read'],
+          }),
+        [ATTENTION]: (body) => answer(THREE, null, (body.at as Json).revision as string),
+      }),
+    );
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('link', { name: 'Attention (3)' });
+    expect(api.callsTo(ATTENTION)).toHaveLength(1);
+    head = NEW;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(api.callsTo(ATTENTION)).toHaveLength(2));
+    expect(api.callsTo(ATTENTION).map((body) => (body.at as Json).revision)).toEqual([HEAD, NEW]);
+  });
+
   it('asks once for a further page that fails, not again and again by itself', async () => {
     const api = setup((body) =>
       (body.page as Json).cursor === 'next'
@@ -338,6 +392,36 @@ describe('the mark on an item', () => {
       name: 'All warnings of this workspace',
     });
     expect(all.getAttribute('href')).toBe(`/w/${WS}/attention`);
+  });
+
+  it('puts no mark computed at the head on a tab that cites an older revision; the reader’s notice names its revision', async () => {
+    setup(() => answer(THREE));
+    renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    const tab = await screen.findByRole('tab', { name: 'Meeting notes', selected: true });
+    const notice = (await screen.findByText('Attention:')).closest('[role="note"]');
+    // The warnings were found at the revision the workspace shows, and the notice says which.
+    expect(notice?.textContent).toContain(
+      '2 advisory warnings for this item at revision aaaaaaaaaa.',
+    );
+    // The tab shows revision bbbbbbbbbb: a count of another revision's warnings is not its mark.
+    expect(document.getElementById(tab.getAttribute('aria-describedby') ?? '')?.textContent).toBe(
+      '',
+    );
+    expect(tab.textContent).toBe('Meeting notes');
+    // The tree lists the head, and keeps its mark.
+    const row = await screen.findByRole('treeitem', { name: /^Meeting notes/ });
+    expect(row.getAttribute('aria-label')).toContain('2 warnings (advisory)');
+  });
+
+  it('keeps the mark on a tab that cites the very revision the workspace shows', async () => {
+    setup(() => answer(THREE));
+    renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
+    const tab = await screen.findByRole('tab', { name: 'Meeting notes', selected: true });
+    await waitFor(() =>
+      expect(document.getElementById(tab.getAttribute('aria-describedby') ?? '')?.textContent).toBe(
+        ' (2 warnings, advisory)',
+      ),
+    );
   });
 
   it('carries the source’s one warning beside its conversion mark', async () => {

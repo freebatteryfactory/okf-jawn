@@ -300,6 +300,11 @@ const tabStateId = (paneId: string, itemId: string) => `tab-state-${paneId}-${it
  * draft stands. The title is read at the revision the tab shows: `cited` when the tab cites one,
  * else the head. The draft's mark is read at the head the workspace shows, whatever the tab reads.
  * For a tab that cites nothing the two are one read.
+ *
+ * The Attention mark counts the warnings found at the head, so only a tab that shows the head
+ * carries it. A tab that cites another revision carries none: the count would be of a revision
+ * the tab does not show. The reader's notice, which names the revision the warnings were found
+ * at, stands for it there.
  */
 function TabLabel({
   workspaceId,
@@ -323,7 +328,8 @@ function TabLabel({
   const listed = useDraftMarks(workspaceId)(itemId);
   const mark = listed ?? ((item.data?.draft ?? null) !== null ? 'draft' : null);
   const conversion = conversionWord(summary?.extraction);
-  const attention = attentionMark(useAttentionMarks(workspaceId, head)(itemId));
+  const warnings = useAttentionMarks(workspaceId, head)(itemId);
+  const attention = cited === undefined || cited === head ? attentionMark(warnings) : null;
   const said = [conversion, attention === null ? null : `${attention}, advisory`].filter(
     (word) => word !== null,
   );
