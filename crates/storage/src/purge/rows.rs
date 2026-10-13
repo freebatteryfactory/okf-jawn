@@ -503,6 +503,43 @@ mod tests {
         Ok(())
     }
 
+    /// A ledger that records the workspace holds it through one completed response and nothing
+    /// else: `holds` is true until the row is emptied, so a copy whose only trace of the
+    /// workspace is a ledger response is found, and rewritten, by the purge.
+    #[test]
+    fn a_ledger_response_alone_makes_a_database_hold_the_workspace() -> Result<(), ApiError> {
+        let mut connection = Connection::open_in_memory().map_err(|error| fault(&error))?;
+        crate::schema::RECORDS
+            .to_latest(&mut connection)
+            .map_err(|error| fault(&error))?;
+        assert!(
+            !holds(&connection, "local", TARGET)?,
+            "an empty database holds nothing"
+        );
+        connection
+            .execute(
+                "INSERT INTO mutations (tenant_id, subject, client_key, operation,
+                     idempotency_key, mutation_id, digest, state, token, lease_expires_ms,
+                     response, finished_ms, workspace_id)
+                 VALUES ('local', 'ana', '-', 'update_workspace', '1', '1', 'digest',
+                     'completed', 1, 0, '{\"name\":\"zanzibar trip\"}', 0, ?1)",
+                [TARGET],
+            )
+            .map_err(|error| fault(&error))?;
+        assert!(
+            holds(&connection, "local", TARGET)?,
+            "a completed response of the workspace is held"
+        );
+        remove(
+            &connection,
+            "local",
+            TARGET,
+            PurgeId(uuid::Uuid::from_u128(60)),
+        )?;
+        assert!(!holds(&connection, "local", TARGET)?);
+        Ok(())
+    }
+
     #[test]
     fn a_ledger_without_workspaces_that_holds_only_purges_and_other_tenants_is_not_held()
     -> Result<(), ApiError> {
