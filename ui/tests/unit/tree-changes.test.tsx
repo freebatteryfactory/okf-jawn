@@ -1190,6 +1190,7 @@ describe('the draft of an item the person deleted', () => {
       expect(within(tree()).queryByRole('treeitem', { name: /Meeting notes/ })).toBeNull(),
     );
     // The Drafts list still holds the draft, and opens the deleted item's tab.
+    const askedBefore = own.api.callsTo(ITEM).filter((body) => body.item_id === NOTE).length;
     await userEvent.click(
       await within(draftsPanel()).findByRole('button', { name: 'Meeting notes (deleted)' }),
     );
@@ -1197,6 +1198,10 @@ describe('the draft of an item the person deleted', () => {
     // Whether there is a draft could not be read: that is said, with its retry.
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('Looking for your draft of this item');
+    // The tab asked for it itself: the failure is its own, not one left from before.
+    expect(own.api.callsTo(ITEM).filter((body) => body.item_id === NOTE).length).toBeGreaterThan(
+      askedBefore,
+    );
     expect(leftText()).toBeNull();
     failing = false;
     await userEvent.click(button('Try again'));
