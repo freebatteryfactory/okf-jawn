@@ -2430,17 +2430,16 @@ async fn purge_refuses_an_empty_upload_batch() -> TestResult {
     Ok(())
 }
 
-/// The job that consumed `upload`, as the records database holds it; `None` inside when no job
-/// did, and `None` outside when the row is gone.
-fn consumer_of(storage: &Storage, upload: UploadId) -> Fallible<Option<Option<String>>> {
-    use rusqlite::OptionalExtension as _;
-    Ok(rusqlite::Connection::open(storage.data().records_path())?
-        .query_row(
-            "SELECT consumed_by FROM uploads WHERE upload_id = ?1",
-            [upload.0.to_string()],
-            |row| row.get(0),
-        )
-        .optional()?)
+/// The consumer the records database holds for each row of `upload`: one entry when the upload
+/// exists (`None` when no job consumed it), and none when its row is gone.
+fn consumers_of(storage: &Storage, upload: UploadId) -> Fallible<Vec<Option<String>>> {
+    let connection = rusqlite::Connection::open(storage.data().records_path())?;
+    let mut statement =
+        connection.prepare("SELECT consumed_by FROM uploads WHERE upload_id = ?1")?;
+    let rows = statement
+        .query_map([upload.0.to_string()], |row| row.get(0))?
+        .collect::<Result<Vec<Option<String>>, _>>()?;
+    Ok(rows)
 }
 
 /// Review N9: a single `consume` (a restore takes its one archive with it) is refused by a
@@ -2465,15 +2464,19 @@ async fn purge_refuses_a_single_upload_consumption_during_and_after_naming_the_p
         "a single upload consumption during the purge",
     )?;
     assert_eq!(
-        consumer_of(&storage, archive)?,
-        Some(None),
+        consumers_of(&storage, archive)?,
+        [None],
         "the refused consumption marked nothing"
     );
     storage
         .purger()
         .purge_workspace(&tenant()?, uuid!(61)?, purge, target.workspace_id)
         .await?;
-    assert_eq!(consumer_of(&storage, archive)?, None, "the row is gone");
+    assert_eq!(
+        consumers_of(&storage, archive)?,
+        Vec::<Option<String>>::new(),
+        "the row is gone"
+    );
     refused(
         uploads.consume(&target, archive, restore).await,
         "a single upload consumption after the purge",

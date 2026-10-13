@@ -636,25 +636,33 @@ async fn a_repeated_batch_with_a_different_set_takes_the_new_and_releases_none()
     let uploads = storage.uploads();
     let local = scope("local", 1)?;
     let (importer, other): (JobId, JobId) = (uuid!(7)?, uuid!(8)?);
-    let a = complete_slot(&uploads, &local, 20, b"a").await?;
-    let b = complete_slot(&uploads, &local, 21, b"b").await?;
-    let c = complete_slot(&uploads, &local, 22, b"c").await?;
-    let d = complete_slot(&uploads, &local, 23, b"d").await?;
-    let e = complete_slot(&uploads, &local, 24, b"e").await?;
-    uploads.consume(&local, d, other).await?;
-    uploads.consume_batch(&local, &[a, b], importer).await?;
-    // A superset holding another job's upload: refused whole, and `e` stays free.
-    let error = err_of(uploads.consume_batch(&local, &[a, b, e, d], importer).await)?;
+    let first = complete_slot(&uploads, &local, 20, b"a").await?;
+    let second = complete_slot(&uploads, &local, 21, b"b").await?;
+    let third = complete_slot(&uploads, &local, 22, b"c").await?;
+    let theirs = complete_slot(&uploads, &local, 23, b"d").await?;
+    let free = complete_slot(&uploads, &local, 24, b"e").await?;
+    uploads.consume(&local, theirs, other).await?;
+    uploads
+        .consume_batch(&local, &[first, second], importer)
+        .await?;
+    // A superset holding another job's upload: refused whole, and the fifth stays free.
+    let error = err_of(
+        uploads
+            .consume_batch(&local, &[first, second, free, theirs], importer)
+            .await,
+    )?;
     assert_eq!(error.code, ErrorCode::Conflict, "{}", error.message);
     assert_eq!(
-        consumers(&uploads, &local, &[a, b, c, d, e]).await?,
+        consumers(&uploads, &local, &[first, second, third, theirs, free]).await?,
         [Some(importer), Some(importer), None, Some(other), None]
     );
     // A superset of free uploads: the new one is taken too.
-    let more = uploads.consume_batch(&local, &[a, b, c], importer).await?;
+    let more = uploads
+        .consume_batch(&local, &[first, second, third], importer)
+        .await?;
     assert_eq!(more.len(), 3);
     assert_eq!(
-        consumers(&uploads, &local, &[a, b, c, d, e]).await?,
+        consumers(&uploads, &local, &[first, second, third, theirs, free]).await?,
         [
             Some(importer),
             Some(importer),
@@ -664,10 +672,10 @@ async fn a_repeated_batch_with_a_different_set_takes_the_new_and_releases_none()
         ]
     );
     // A subset: nothing changes, and nothing is released.
-    let fewer = uploads.consume_batch(&local, &[a], importer).await?;
+    let fewer = uploads.consume_batch(&local, &[first], importer).await?;
     assert_eq!(fewer.len(), 1);
     assert_eq!(
-        consumers(&uploads, &local, &[a, b, c, d, e]).await?,
+        consumers(&uploads, &local, &[first, second, third, theirs, free]).await?,
         [
             Some(importer),
             Some(importer),

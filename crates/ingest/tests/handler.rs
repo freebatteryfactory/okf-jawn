@@ -1436,7 +1436,7 @@ mod job_handler {
             "refused before restore_import"
         );
         assert!(world.versions.written()?.is_empty());
-        assert!(events_of(&world, &EventKind::Changed)?.is_empty());
+        assert_eq!(events_of(&world, &EventKind::Changed)?, Vec::new());
         Ok(())
     }
 
@@ -1965,7 +1965,11 @@ mod job_handler {
         let mut card_lint = 0_usize;
         for (ordinal, path) in (1_u32..).zip(&paths) {
             let own = kept_for(ordinal)?;
-            assert_eq!(located(&own, WHOLE_CANDIDATE), [path.clone()], "{own:?}");
+            assert_eq!(
+                located(&own, WHOLE_CANDIDATE),
+                std::slice::from_ref(path),
+                "{own:?}"
+            );
             assert!(
                 own.iter()
                     .all(|warning| warning.location.as_deref() == Some(path.as_str())),
