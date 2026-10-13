@@ -430,13 +430,17 @@ pub trait CandidateCheck: Send + Sync {
     /// `rewritten` names the files of the candidate that the store rewrote on its own while it
     /// applied the edits, beyond the paths the edits name: the referrers whose links a move
     /// rewrote (`okf_core::move_concept`), for a `MoveItem` and for a `RestoreItem` that moves
-    /// an item back to its earlier path. The caller that built the edits cannot know them, so
-    /// the store reports them here, as workspace paths, in path order and each once; the moved
-    /// item's own old and new path are not among them. A referrer a later edit of the same
-    /// commit removed is left out, and so is a rewritten file whose path is no `WorkspacePath`
-    /// (no item has such a path). A check that reports findings only for the files a write
-    /// touched (`conformance::EditCheck`) counts these as touched. Empty when the edits moved
-    /// nothing, and for a candidate no edit produced.
+    /// an item back to its earlier path, of every such move of the commit or the candidate. The
+    /// caller that built the edits cannot know them, so the store reports them here, as
+    /// workspace paths spelled as the tree spells them, in path order and each once; a moved
+    /// item's own old and new path are not among them. It names what the store rewrote while
+    /// it applied the edits, not what differs at the end: a file rewritten and then rewritten
+    /// back (the referrer of an item moved away and back by one commit) is named, though its
+    /// bytes end as they began. A referrer a later edit of the same commit removed or moved
+    /// away is left out at the path it no longer has, and so is a rewritten file whose path is
+    /// no `WorkspacePath` (no item has such a path). A check that reports findings only for the
+    /// files a write touched (`conformance::EditCheck`) counts these as touched. Empty when the
+    /// edits moved nothing, and for a candidate no edit produced.
     ///
     /// # Errors
     /// Returns the error that rejects the write; nothing is committed when this fails.

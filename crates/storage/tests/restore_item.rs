@@ -19,8 +19,8 @@ use okf_jawn_contract::identity::{Digest, ItemId, Revision, TenantId, WorkspaceP
 use okf_jawn_contract::item::ItemKind;
 use okf_jawn_core::conformance::EditCheck;
 use okf_jawn_core::storage::{
-    CandidateCheck, CommitChanges, Committed, NewWorkspace, Provenance, SourceCard, StorageScope,
-    TreeEdit, VersionStore, WorkspaceCatalog,
+    CandidateChanges, CandidateCheck, CommitChanges, Committed, NewWorkspace, Provenance,
+    SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
 };
 use okf_jawn_storage::Storage;
 use serde_json::json;
@@ -1453,6 +1453,238 @@ async fn a_rewritten_file_whose_path_is_no_workspace_path_is_left_out_of_what_th
             "refs/b-ref.md".to_owned()
         ]],
         "told without the file that has no workspace path"
+    );
+    Ok(())
+}
+
+/// The plan's workspace (`linked_plan`) with a second linked item: `notes/other.md` (item 14),
+/// linked from `notes/c-ref.md` (item 15), which has no heading either. Returns the revision
+/// that holds both.
+async fn two_linked_items(workspace: &Workspace) -> Fallible<Revision> {
+    let seeded = linked_plan(workspace).await?;
+    Ok(workspace
+        .commit(
+            21,
+            &seeded,
+            vec![
+                note(14, "notes/other.md", "# Other\n\nThe other.")?,
+                linking(15, "notes/c-ref.md", "other.md")?,
+            ],
+        )
+        .await?)
+}
+
+/// R-I12, two moves in one commit, each with its own referrers: the check is told the referrers
+/// of both, in path order, each once, and the lint of both sets is reported. (Reviewer probe
+/// PR1, adopted.)
+#[tokio::test]
+async fn two_moves_in_one_commit_tell_the_check_both_sets_of_referrers() -> TestResult {
+    let workspace = Workspace::new().await?;
+    let seeded = two_linked_items(&workspace).await?;
+    let recording = Recording::over(edit_check(&[
+        "notes/plan.md",
+        "archive/plan.md",
+        "notes/other.md",
+        "archive/other.md",
+    ])?);
+    let moved_both = workspace
+        .commit_with(
+            22,
+            &seeded,
+            vec![
+                moved(10, "archive/plan.md")?,
+                moved(14, "archive/other.md")?,
+            ],
+            recording.clone(),
+        )
+        .await?;
+    assert_eq!(
+        recording.seen()?,
+        [vec![
+            "notes/a-ref.md".to_owned(),
+            "notes/c-ref.md".to_owned(),
+            "refs/b-ref.md".to_owned()
+        ]]
+    );
+    let lint = linted(&moved_both.warnings);
+    assert!(
+        lint.contains(&"notes/a-ref.md")
+            && lint.contains(&"notes/c-ref.md")
+            && lint.contains(&"refs/b-ref.md"),
+        "the lint of both moves' referrers is reported: {:?}",
+        moved_both.warnings
+    );
+    assert!(
+        !lint.contains(&"notes/bystander.md"),
+        "a file nothing was done to is not: {:?}",
+        moved_both.warnings
+    );
+    Ok(())
+}
+
+/// R-I12, a Rewind of two items that each moved since the target, in one commit (one run of
+/// `RestoreItem` edits, as core sends for several selected items). Each has its own referrer,
+/// and the check is told both. (Reviewer probe PR7, adopted.)
+#[tokio::test]
+async fn a_rewind_of_two_moved_items_tells_the_check_both_sets_of_referrers() -> TestResult {
+    let workspace = Workspace::new().await?;
+    let seeded = two_linked_items(&workspace).await?;
+    let moved_away = workspace
+        .commit(
+            22,
+            &seeded,
+            vec![
+                moved(10, "archive/plan.md")?,
+                moved(14, "archive/other.md")?,
+            ],
+        )
+        .await?;
+    let recording = Recording::over(Arc::new(Accept));
+    workspace
+        .commit_with(
+            23,
+            &moved_away,
+            vec![restore(10, &seeded)?, restore(14, &seeded)?],
+            recording.clone(),
+        )
+        .await?;
+    assert_eq!(
+        recording.seen()?,
+        [vec![
+            "notes/a-ref.md".to_owned(),
+            "notes/c-ref.md".to_owned(),
+            "refs/b-ref.md".to_owned()
+        ]]
+    );
+    Ok(())
+}
+
+/// R-I12, a move inside a proposal candidate: the candidate's check is told the referrers, as
+/// a commit's is. (Reviewer probe PR2, adopted.)
+#[tokio::test]
+async fn a_move_inside_a_proposal_candidate_tells_the_check_the_referrers() -> TestResult {
+    let workspace = Workspace::new().await?;
+    let seeded = linked_plan(&workspace).await?;
+    let recording = Recording::over(edit_check(&["notes/plan.md", "archive/plan.md"])?);
+    let candidate = workspace
+        .storage
+        .versions()
+        .create_candidate(
+            &workspace.scope,
+            uuid!(50)?,
+            CandidateChanges {
+                mutation_id: uuid!(51)?,
+                base: seeded.clone(),
+                author: person("agent"),
+                message: "Propose a move".to_owned(),
+                edits: vec![moved(10, "archive/plan.md")?],
+            },
+            recording.clone(),
+        )
+        .await?;
+    assert_ne!(candidate, seeded);
+    assert_eq!(
+        recording.seen()?,
+        [vec![
+            "notes/a-ref.md".to_owned(),
+            "refs/b-ref.md".to_owned()
+        ]]
+    );
+    Ok(())
+}
+
+/// R-I12, review B2: the check is told each referrer as the workspace path the tree spells,
+/// capital letters included and with forward slashes, because the edit check compares it as an
+/// exact string with the location of a lint finding. A referrer in a nested, capitalised
+/// folder is told so, and its lint is reported. (Reviewer probe PR3, adopted.)
+#[tokio::test]
+async fn a_mixed_case_referrer_is_told_as_the_tree_spells_it() -> TestResult {
+    let workspace = Workspace::new().await?;
+    let seeded = workspace
+        .commit(
+            20,
+            &workspace.initial,
+            vec![
+                note(10, "Notes/Plan.md", "# Plan\n\nThe plan.")?,
+                linking(12, "Refs/Deep/B-Ref.md", "../../Notes/Plan.md")?,
+            ],
+        )
+        .await?;
+    let recording = Recording::over(edit_check(&["Notes/Plan.md", "Archive/Plan.md"])?);
+    let moved_plan = workspace
+        .commit_with(
+            21,
+            &seeded,
+            vec![moved(10, "Archive/Plan.md")?],
+            recording.clone(),
+        )
+        .await?;
+    assert_eq!(recording.seen()?, [vec!["Refs/Deep/B-Ref.md".to_owned()]]);
+    assert!(
+        linted(&moved_plan.warnings).contains(&"Refs/Deep/B-Ref.md"),
+        "the referrer's lint is reported at the path the check was told: {:?}",
+        moved_plan.warnings
+    );
+    Ok(())
+}
+
+/// R-I12, a referrer the first move rewrote and a later edit of the same commit moved away:
+/// its old path is no file of the candidate and is not told; its new path is the caller's own
+/// to name. (Reviewer probe PR4, adopted.)
+#[tokio::test]
+async fn a_referrer_rewritten_and_then_moved_is_not_told_at_its_old_path() -> TestResult {
+    let workspace = Workspace::new().await?;
+    let seeded = linked_plan(&workspace).await?;
+    let recording = Recording::over(Arc::new(Accept));
+    workspace
+        .commit_with(
+            21,
+            &seeded,
+            vec![
+                moved(10, "archive/plan.md")?,
+                moved(11, "archive/a-ref.md")?,
+            ],
+            recording.clone(),
+        )
+        .await?;
+    assert_eq!(recording.seen()?, [vec!["refs/b-ref.md".to_owned()]]);
+    Ok(())
+}
+
+/// R-I12, a file rewritten and then rewritten back is named: an item moved away and back in
+/// one commit. Each referrer was rewritten twice and ends with the bytes it began with, and
+/// the check is still told both: `rewritten` names the files the store rewrote while it
+/// applied the commit's edits, not the files whose bytes differ at the end. (Reviewer probe
+/// PR6, adopted; review note N10.)
+#[tokio::test]
+async fn a_move_away_and_back_in_one_commit_tells_the_referrers_it_rewrote_twice() -> TestResult {
+    let workspace = Workspace::new().await?;
+    let seeded = linked_plan(&workspace).await?;
+    let recording = Recording::over(Arc::new(Accept));
+    let there_and_back = workspace
+        .commit_with(
+            21,
+            &seeded,
+            vec![moved(10, "archive/plan.md")?, moved(10, "notes/plan.md")?],
+            recording.clone(),
+        )
+        .await?;
+    for referrer in ["notes/a-ref.md", "refs/b-ref.md"] {
+        let before = workspace.file(&seeded, referrer)?;
+        assert!(before.is_some(), "{referrer} is a file of the workspace");
+        assert_eq!(
+            workspace.file(&there_and_back.revision, referrer)?,
+            before,
+            "{referrer} ends as it began"
+        );
+    }
+    assert_eq!(
+        recording.seen()?,
+        [vec![
+            "notes/a-ref.md".to_owned(),
+            "refs/b-ref.md".to_owned()
+        ]],
+        "told the referrers although their bytes did not change"
     );
     Ok(())
 }
