@@ -1828,6 +1828,33 @@ describe('saving over rules someone else saved meanwhile', () => {
     expect(api.callsTo(SET)).toHaveLength(1);
   });
 
+  it('drops a reading already under way with the rest: answered later, it would bring the edits back', async () => {
+    const { api } = await refusedThenRefreshed();
+    // From here on a reading answers only when the test says so.
+    const held = heldEngine();
+    setYamlEngine(held.engine);
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox('The naming rules as YAML');
+    replaceText(box, textIn(box).replace(/prefix: .*/, 'prefix: late-'));
+    // Leaving the text box starts the reading; it has begun, and has not answered.
+    act(() => {
+      fireEvent.blur(box);
+    });
+    expect(held.readings).toHaveLength(1);
+    act(() => held.readings.at(0)?.began());
+    await userEvent.click(button('Take the saved rules, and drop mine'));
+    expect(held.readings.at(0)?.ended).toBe(true);
+    // The answer arrives anyway, as one from a worker already on its way would.
+    act(() => held.readings.at(0)?.done());
+    await turn();
+    expect(said()).toBe('These are the saved rules now. Your changes were dropped.');
+    expect(textIn(await findTextBox('The naming rules as YAML'))).toContain('prefix: theirs-');
+    await userEvent.click(screen.getByRole('tab', { name: 'Form' }));
+    expect(prefix()).toHaveProperty('value', 'theirs-');
+    expect(savedNow()).toBeNull();
+    expect(api.callsTo(SET)).toHaveLength(1);
+  });
+
   it('asks nothing about replacing with rules that cannot be sent: what is wrong with them comes first', async () => {
     const { api } = await refusedThenRefreshed();
     // The person's rules get a problem: a key the rules do not have.
