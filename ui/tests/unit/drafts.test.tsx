@@ -164,6 +164,31 @@ describe('who may edit, and where', () => {
     expect(api.callsTo(SAVE)).toHaveLength(0);
   });
 
+  // The line that leads to editing is for Notes too: a pane of a Source or a View that reads
+  // another revision is not offered a way to an editor it does not have.
+  it.each([
+    ['a Source', 'source', 'Annual report'],
+    ['a View', 'view', 'Quarterly'],
+  ] as const)(
+    'says nothing of editing for %s that is read at another revision',
+    async (_what, kind, title) => {
+      const item = summary(SOURCE, 'things/it.md', title, 'thing', kind);
+      writable({
+        [ITEM]: () => ok(itemDocument(item)),
+        '/api/reads/read-item': () => ok(readResponse(item, `# ${title}\n\nCommitted text`)),
+      });
+      renderAt(`/w/${WS}/i/${SOURCE}?rev=${OLD}`);
+      await screen.findByText('Committed text');
+      // `get_item` has answered: the header says what kind of item this is.
+      await screen.findByText(new RegExp(`${kind === 'source' ? 'Source' : 'View'} · type`));
+      expect(screen.queryByText(/Editing starts from/)).toBeNull();
+      expect(
+        screen.queryByRole('button', { name: 'Open the version this workspace shows' }),
+      ).toBeNull();
+      expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
+    },
+  );
+
   it('lets a tab that cites the shown version be edited', async () => {
     writable();
     renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
@@ -563,6 +588,21 @@ describe('a text too long to save', () => {
     expect(api.violations).toEqual([]);
   });
 
+  it('is no longer called too long once the text is back to what is saved', async () => {
+    const api = writable();
+    const { box } = await startEditing();
+    replaceText(box, 'x'.repeat(MAX_BODY_BYTES + 1));
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved: the text is too long.'));
+    // Pasted too long and undone: the text is what the service has, and there is nothing to send.
+    replaceText(box, COMMITTED);
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toBe('No changes to save.'));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+    expect(api.callsTo(SAVE)).toHaveLength(0);
+  });
+
   it('counts bytes, not characters', async () => {
     const api = writable();
     const { box } = await startEditing();
@@ -810,6 +850,27 @@ describe('the same item in two panes', () => {
     await eventually(() =>
       expect(api.callsTo(SAVE).at(-1)?.body).toBe(`${COMMITTED} first words then these`),
     );
+  });
+
+  it('gives the editor up when its pane goes back to reading: no pane is said to edit while none does', async () => {
+    const { box } = await editedAndSplit();
+    await eventually(() =>
+      expect(within(pane(2, 2)).getByRole('button', { name: 'Edit here' })).toBeDefined(),
+    );
+    const first = () => screen.getByRole('region', { name: /^Documents, pane 1 of 2/ });
+    const second = () => screen.getByRole('region', { name: /^Documents, pane 2 of 2/ });
+    fireEvent.click(within(first()).getByRole('button', { name: 'Read the committed text' }));
+    // The pane that had said "being edited in another pane" wanted the editor: it has it now.
+    await eventually(() => expect(boxes()).toHaveLength(1));
+    const moved = boxes().at(0);
+    if (moved === undefined) throw new Error('no editor');
+    expect(moved).not.toBe(box);
+    expect(second().contains(moved)).toBe(true);
+    expect(textIn(moved)).toBe(`${COMMITTED} first words`);
+    expect(within(second()).queryByText(/being edited in another pane/)).toBeNull();
+    // The one line that says so is in the pane that reads, and it is true.
+    expect(within(first()).getByText(/being edited in another pane/)).toBeDefined();
+    expect(screen.getAllByText(/being edited in another pane/)).toHaveLength(1);
   });
 
   it('lets the other pane edit once the editing pane is closed', async () => {

@@ -625,24 +625,37 @@ describe('taking a Snapshot', () => {
       },
       [NOTE],
     );
-    // The tab cites the head, so the Snapshot leaves the read of the item at the old head cached.
-    const { queryClient } = renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
-    await findTextBox('Text of Meeting notes');
+    // The tab cites an older revision on purpose, so the Snapshot leaves it where it is and its
+    // read of the item stays on screen. (A tab that follows the head moves to the new revision;
+    // the read it leaves has no reader then, and the library stops it by itself.) A draft is not
+    // bound to a revision: that read carries it too.
+    const { queryClient } = renderAt(`/w/${WS}/i/${NOTE}?rev=${OLD}`);
+    await screen.findByText('Text of Meeting notes');
+    await screen.findByText(/You have a draft of this item\./);
     await screen.findByRole('region', { name: 'Drafts (1)' });
-    const key = itemOptions(WS, NOTE, HEAD).queryKey;
+    const key = itemOptions(WS, NOTE, OLD).queryKey;
+    const atOld = () =>
+      api.callsTo(ITEM).filter((sent) => JSON.stringify(sent.at).includes(OLD)).length;
     read.hold = true;
     act(() => {
       void queryClient.invalidateQueries({ queryKey: key });
     });
     await eventuallyReal(() => expect(read.answer).toBeDefined());
+    const before = atOld();
     await pressSnapshot('Tidy');
     await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Tidy” taken: 1 item\./));
     // The old answer arrives now, with the draft that was just committed in it.
     act(() => read.answer?.());
     await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    // The read was still watched when the answer came: only stopping it kept the draft out.
+    expect(
+      queryClient.getQueryCache().find({ queryKey: key })?.getObserversCount(),
+    ).toBeGreaterThan(0);
     expect(queryClient.getQueryData(key)?.draft ?? null).toBeNull();
-    expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+    expect(screen.queryByText(/You have a draft of this item\./)).toBeNull();
     expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+    // It was asked again after the Snapshot: that answer has the Snapshot in it.
+    expect(atOld()).toBeGreaterThan(before);
     expect(api.callsTo(SAVE)).toHaveLength(0);
   });
 
@@ -1627,6 +1640,38 @@ describe('a Snapshot that conflicts', () => {
       const asked = api.calls.slice(before).map((call) => call.path);
       expect(asked.filter((path) => path === SAVE || path === COMMIT)).toEqual([]);
       expect(within(notice).getByRole('button', { name: 'Take theirs' })).toBeDefined();
+    });
+
+    it('take theirs still asks the service to discard a draft whose text is not in the page', async () => {
+      // As above: the draft is listed and conflicts, and this page has no session of it. Whether
+      // the service holds it is not this page's to know, so the discard is asked.
+      const { api, state } = withConflict(
+        {},
+        { [ITEM]: (body) => ok(itemDocument(body.item_id === NOTE ? noteSummary : otherSummary)) },
+      );
+      renderAt(`/w/${WS}`);
+      await screen.findByRole('region', { name: 'Drafts (2)' });
+      await pressSnapshot('Tidy');
+      await within(panel()).findByRole('alert');
+      fireEvent.click(within(panel()).getByRole('button', { name: 'Meeting notes' }));
+      const notice = await screen.findByRole('region', {
+        name: 'Meeting notes changed since your draft was started',
+      });
+      fireEvent.click(within(notice).getByRole('button', { name: 'Take theirs' }));
+      fireEvent.click(within(notice).getByRole('button', { name: 'Discard my draft' }));
+      await eventuallyReal(() =>
+        expect(
+          screen.queryByRole('region', {
+            name: 'Meeting notes changed since your draft was started',
+          }),
+        ).toBeNull(),
+      );
+      expect(api.callsTo(DISCARD)).toHaveLength(1);
+      expect(api.callsTo(DISCARD).at(0)).toMatchObject({ workspace_id: WS, item_id: NOTE });
+      // The service no longer holds it, and the list says so.
+      expect(state.drafts.has(NOTE)).toBe(false);
+      expect(await screen.findByRole('region', { name: 'Drafts (1)' })).toBeDefined();
+      expect(within(panel()).queryByRole('button', { name: 'Meeting notes' })).toBeNull();
     });
 
     it('says why a draft too long to save was not kept, and asks nothing', async () => {
