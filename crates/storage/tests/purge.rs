@@ -898,6 +898,148 @@ async fn purge_reaches_a_pre_migration_set_written_after_a_failed_attempt() -> T
     Ok(())
 }
 
+/// A completed ledger row of `tenant` for `operation` under key `n`, recording `workspace`.
+async fn completed_row(
+    storage: &Storage,
+    (tenant, operation, n): (&str, OperationName, u32),
+    workspace: Option<okf_jawn_contract::identity::WorkspaceId>,
+    response: serde_json::Value,
+) -> Fallible<()> {
+    let ledger = storage.mutations();
+    let key = MutationKey {
+        tenant_id: TenantId::try_from(tenant.to_owned())?,
+        subject: "ana".to_owned(),
+        client_id: None,
+        operation,
+        key: uuid!(n)?,
+    };
+    let BeginOutcome::New(lease) = ledger
+        .begin(&key, &Digest::try_from("a".repeat(64))?, workspace)
+        .await?
+    else {
+        return Err("expected a new mutation".into());
+    };
+    ledger.complete(lease, response, None).await?;
+    Ok(())
+}
+
+/// Put a records database back as records schema 1 left it: without the tables schema 2 adds,
+/// without the ledger's workspace column, and with the events table as it was before event keys.
+fn as_records_schema_1(records: &Path) -> TestResult {
+    let connection = rusqlite::Connection::open(records)?;
+    connection.execute_batch(
+        "DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
+         DROP TABLE pending_puts; DROP TABLE replacement_restores;
+         DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
+         CREATE TABLE unkeyed_events (
+             seq INTEGER PRIMARY KEY AUTOINCREMENT,
+             tenant_id TEXT NOT NULL,
+             workspace_id TEXT,
+             replay_key TEXT UNIQUE,
+             record TEXT NOT NULL
+         ) STRICT;
+         INSERT INTO unkeyed_events SELECT seq, tenant_id, workspace_id, replay_key, record
+             FROM events;
+         DROP TABLE events;
+         ALTER TABLE unkeyed_events RENAME TO events;
+         CREATE INDEX events_by_log ON events (tenant_id, workspace_id, seq);
+         PRAGMA user_version = 1;",
+    )?;
+    Ok(())
+}
+
+/// The ledger rows of the records database at `records`, in key order: tenant, operation,
+/// state, and whether the row holds a response.
+fn ledger_of(records: &Path) -> Fallible<Vec<(String, String, String, bool)>> {
+    let connection = rusqlite::Connection::open(records)?;
+    let mut statement = connection.prepare(
+        "SELECT tenant_id, operation, state, response IS NOT NULL FROM mutations
+         ORDER BY idempotency_key",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Round 1, item 2: a pre-migration copy from before records schema 2 has a ledger without the
+/// workspace column, so no row of it can be attributed to a workspace. There the purge empties
+/// every completed row of the tenant except a purge's; the fixture's own row (`remember`) holds
+/// the target's name and not its identity, so nothing short of that reaches it.
+#[tokio::test]
+async fn purge_empties_the_ledger_of_a_copy_that_records_no_workspace() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let storage = &fixture.storage;
+    let (target, survivor) = (fixture.target.workspace_id, fixture.survivor.workspace_id);
+    let update = OperationName::UpdateWorkspace;
+    let purge_record = json!({ "id": uuid_text(60), "state": "requested" });
+    completed_row(
+        storage,
+        ("local", update, 43),
+        Some(survivor),
+        json!({ "name": "Garden" }),
+    )
+    .await?;
+    completed_row(
+        storage,
+        ("elsewhere", update, 44),
+        None,
+        json!({ "name": "Orchard" }),
+    )
+    .await?;
+    completed_row(
+        storage,
+        ("local", OperationName::PurgeWorkspace, 45),
+        Some(target),
+        purge_record,
+    )
+    .await?;
+    pre_migration_copy(directory.path(), "records.sqlite", "records-v1-1.sqlite")?;
+    let copy = directory
+        .path()
+        .join("backups/pre-migration/records-v1-1.sqlite");
+    as_records_schema_1(&copy)?;
+    purge_target(&fixture).await?;
+    assert_eq!(
+        marked_files(directory.path())?,
+        Vec::<String>::new(),
+        "no byte of the copy holds the target's name"
+    );
+    let row = |tenant: &str, operation: OperationName, state: &str, response: bool| {
+        (
+            tenant.to_owned(),
+            operation.as_str().to_owned(),
+            state.to_owned(),
+            response,
+        )
+    };
+    let purge = OperationName::PurgeWorkspace;
+    // In the copy no row names a workspace: the tenant's rows are emptied, the survivor's too.
+    assert_eq!(
+        ledger_of(&copy)?,
+        [
+            row("local", update, "released", false),
+            row("local", update, "released", false),
+            row("elsewhere", update, "completed", true),
+            row("local", purge, "completed", true),
+        ]
+    );
+    // The live ledger records each row's workspace, so only the target's row is emptied.
+    assert_eq!(
+        ledger_of(&directory.path().join("records.sqlite"))?,
+        [
+            row("local", update, "released", false),
+            row("local", update, "completed", true),
+            row("elsewhere", update, "completed", true),
+            row("local", purge, "completed", true),
+        ]
+    );
+    Ok(())
+}
+
 /// Assert that `result` is the refusal of a write to a workspace purge 60 names.
 fn refused<T: std::fmt::Debug>(result: Result<T, ApiError>, what: &str) -> TestResult {
     let error = err_of(result)?;

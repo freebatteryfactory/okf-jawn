@@ -20,8 +20,13 @@
 //!   (`purge_workspace`, `purge_item`) are kept: their response is the purge record, identities
 //!   and counts only, which outlives the workspace as `purges` does, so a retry of the purge
 //!   replays it. The response text is never searched, so another workspace's row that quotes
-//!   the workspace's identity is not touched. A row with no workspace (one from before records
-//!   schema 2, or any row of a copy older than it) cannot be attributed and is left;
+//!   the workspace's identity is not touched. A live row from before records schema 2 has no
+//!   workspace, cannot be attributed and is left;
+//! - in a ledger without the workspace column (a copy older than records schema 2) no row can
+//!   be attributed, so every completed row of the tenant but a purge's is emptied the same way,
+//!   whichever workspace it belonged to. Such a copy is a backup: its ledger is never consulted
+//!   for a replay, and a purge does not complete while a managed backup that holds the
+//!   workspace can be restored (SPEC section 8);
 //! - a receipt or review of another workspace of the tenant that cites the workspace is marked
 //!   invalidated (a receipt's `invalidated_by`, a review's coverage), and each citing source
 //!   becomes the invalidated citation (`scrub_source`): its path `purged/<item id>`, its
@@ -64,6 +69,12 @@ const PURGES: [OperationName; 2] = [OperationName::PurgeWorkspace, OperationName
 const LEDGER_ROWS: &str = "tenant_id = ?1 AND workspace_id = ?2 AND state = 'completed'
      AND operation NOT IN (?3, ?4)";
 
+/// The same rows in a ledger that records no workspace (a copy older than records schema 2):
+/// none can be attributed, so every completed row of the tenant but a purge's. `?2` is bound
+/// like `LEDGER_ROWS`' and compared with nothing.
+const UNATTRIBUTED_ROWS: &str = "tenant_id = ?1 AND ?2 IS NOT NULL AND state = 'completed'
+     AND operation NOT IN (?3, ?4)";
+
 impl Table {
     fn has(&self, column: &str) -> bool {
         self.columns.iter().any(|name| name == column)
@@ -77,9 +88,22 @@ impl Table {
             && self.name != LEDGER
     }
 
-    /// The mutation ledger, at a schema that records each row's workspace.
-    fn ledger(&self) -> bool {
-        self.name == LEDGER && self.has("workspace_id")
+    /// For the mutation ledger, the predicate of the rows a purge empties: by the workspace
+    /// each row records, or, where the ledger has no such column, every row of the tenant.
+    /// `None` for any other table.
+    fn ledger_rows(&self) -> Option<&'static str> {
+        let ledger = self.name == LEDGER
+            && ["tenant_id", "operation", "state", "response"]
+                .iter()
+                .all(|column| self.has(column));
+        if !ledger {
+            return None;
+        }
+        Some(if self.has("workspace_id") {
+            LEDGER_ROWS
+        } else {
+            UNATTRIBUTED_ROWS
+        })
     }
 }
 
@@ -101,9 +125,9 @@ pub(crate) fn holds(
                 ),
                 &scope,
             )
-        } else if table.ledger() {
+        } else if let Some(rows) = table.ledger_rows() {
             (
-                format!("SELECT 1 FROM {LEDGER} WHERE {LEDGER_ROWS} LIMIT 1"),
+                format!("SELECT 1 FROM {LEDGER} WHERE {rows} LIMIT 1"),
                 &ledger,
             )
         } else if table.name == "connectors" && table.has("record") {
@@ -163,14 +187,14 @@ pub(crate) fn remove(
             )?;
         }
     }
-    if tables.iter().any(Table::ledger) {
+    if let Some(rows) = tables.iter().find_map(Table::ledger_rows) {
         let [purge_workspace, purge_item] = PURGES.map(OperationName::as_str);
         // Keep `finished_ms`: the emptied row expires when the completed one would have.
         connection
             .execute(
                 &format!(
                     "UPDATE {LEDGER} SET state = 'released', response = NULL
-                     WHERE {LEDGER_ROWS}"
+                     WHERE {rows}"
                 ),
                 params![tenant, workspace, purge_workspace, purge_item],
             )
@@ -359,4 +383,127 @@ fn tables(connection: &Connection) -> Result<Vec<Table>, ApiError> {
             Ok(Table { name, columns })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
+    use okf_jawn_contract::identity::PurgeId;
+    use rusqlite::{Connection, params};
+
+    use super::{holds, remove};
+
+    /// One ledger row as a test reads it: tenant, operation, state, and whether it holds a
+    /// response.
+    type Row = (String, String, String, bool);
+
+    const TARGET: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn fault(error: &dyn std::fmt::Display) -> ApiError {
+        ApiError::new(ErrorCode::Internal, error.to_string())
+    }
+
+    /// A records database whose ledger is as records schema 1 left it, without the workspace
+    /// column, holding one completed row for each (tenant, operation) of `rows`. Each response
+    /// holds a workspace's name and no identity.
+    fn ledger_without_workspaces(rows: &[(&str, &str)]) -> Result<Connection, ApiError> {
+        let mut connection = Connection::open_in_memory().map_err(|error| fault(&error))?;
+        crate::schema::RECORDS
+            .to_latest(&mut connection)
+            .map_err(|error| fault(&error))?;
+        connection
+            .execute_batch(
+                "DROP INDEX mutations_by_workspace;
+                 ALTER TABLE mutations DROP COLUMN workspace_id;",
+            )
+            .map_err(|error| fault(&error))?;
+        for (number, (tenant, operation)) in rows.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO mutations (tenant_id, subject, client_key, operation,
+                         idempotency_key, mutation_id, digest, state, token, lease_expires_ms,
+                         response, finished_ms)
+                     VALUES (?1, 'ana', '-', ?2, ?3, ?3, 'digest', 'completed', 1, 0,
+                         '{\"name\":\"zanzibar trip\"}', 0)",
+                    params![tenant, operation, number.to_string()],
+                )
+                .map_err(|error| fault(&error))?;
+        }
+        Ok(connection)
+    }
+
+    /// The ledger rows of `connection`, in the order they were inserted.
+    fn ledger(connection: &Connection) -> Result<Vec<Row>, ApiError> {
+        let mut statement = connection
+            .prepare(
+                "SELECT tenant_id, operation, state, response IS NOT NULL FROM mutations
+                 ORDER BY idempotency_key",
+            )
+            .map_err(|error| fault(&error))?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|error| fault(&error))?
+            .collect::<Result<_, _>>()
+            .map_err(|error| fault(&error))
+    }
+
+    fn row(tenant: &str, operation: &str, state: &str, response: bool) -> Row {
+        (
+            tenant.to_owned(),
+            operation.to_owned(),
+            state.to_owned(),
+            response,
+        )
+    }
+
+    /// A ledger that records no workspace cannot attribute a row, so a purge empties every
+    /// completed row of the tenant but a purge's, and after that one pass the database no
+    /// longer holds the workspace: the purge's second look at its backups finds nothing to do.
+    #[test]
+    fn a_ledger_without_workspaces_is_held_until_its_tenant_s_rows_are_emptied()
+    -> Result<(), ApiError> {
+        let connection = ledger_without_workspaces(&[
+            ("local", "update_workspace"),
+            ("local", "purge_workspace"),
+            ("local", "purge_item"),
+            ("elsewhere", "update_workspace"),
+        ])?;
+        assert!(
+            holds(&connection, "local", TARGET)?,
+            "a response no purge can attribute is held"
+        );
+        remove(
+            &connection,
+            "local",
+            TARGET,
+            PurgeId(uuid::Uuid::from_u128(60)),
+        )?;
+        assert_eq!(
+            ledger(&connection)?,
+            [
+                row("local", "update_workspace", "released", false),
+                row("local", "purge_workspace", "completed", true),
+                row("local", "purge_item", "completed", true),
+                row("elsewhere", "update_workspace", "completed", true),
+            ]
+        );
+        assert!(
+            !holds(&connection, "local", TARGET)?,
+            "one pass, and the copy no longer holds the workspace"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_ledger_without_workspaces_that_holds_only_purges_and_other_tenants_is_not_held()
+    -> Result<(), ApiError> {
+        let connection = ledger_without_workspaces(&[
+            ("local", "purge_workspace"),
+            ("elsewhere", "update_workspace"),
+        ])?;
+        assert!(!holds(&connection, "local", TARGET)?);
+        Ok(())
+    }
 }
