@@ -2,9 +2,11 @@
  * Bringing files in, the jobs and Attention, from the keyboard, in Chromium and WebKit: choosing
  * a folder and seeing each file's path; an upload that fails once and is retried; an import that
  * becomes a job and then links to its items; an unsupported file shown as unsupported; a job
- * cancelled; the Attention list with warnings, and empty. Every journey ends with keyboard focus
- * on a sensible element and zero axe violations, and saves a screenshot of its screen under
- * `.artifacts/ui/` for the owner.
+ * cancelled; the Attention list with warnings, and empty; an import followed through the
+ * workspace's event stream, held open by a server; files and a folder dragged from the computer
+ * and let go beside the drop box and on it. Every journey ends with keyboard focus on a sensible
+ * element and zero axe violations, and saves a screenshot of its screen under `.artifacts/ui/` for
+ * the owner.
  *
  * The service is played by `page.route` (no server exists in this lane). It keeps the rules of
  * the real upload store: a slot is unique on its key, bytes are appended, and the finish is
@@ -13,13 +15,21 @@
  *
  * The bytes of an upload are received by a small HTTP server of the spec's own (`useUploadSink`):
  * Playwright does not show a route the body of a request whose body is a file, so the route sends
- * the browser's own request on to that server, which reads what the browser really sent.
+ * the browser's own request on to that server, which reads what the browser really sent. The same
+ * server holds the workspace's event stream open for a journey that asks for one (a fulfilled
+ * route would deliver a whole body and end), and sends the events the test tells it to.
+ *
+ * A drag of files from the computer cannot be made by a page's own script: a synthetic event is
+ * delivered whatever the page cancels, and carries no folder. Chromium's protocol can deliver one
+ * as the browser does (`Input.dispatchDragEvent`), so those journeys run in Chromium only; WebKit
+ * has no such way here.
  *
  * Needs `bun --bun run build` first: the spec serves the built `dist/` itself.
  */
 
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import type { ServerResponse } from 'node:http';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -87,6 +97,10 @@ interface Service {
   /** The job as the service now reports it; null before an import started. */
   job: Body | null;
   warnings: Body[];
+  /** What was asked about the job and the stream, in the order it arrived. */
+  asked: string[];
+  /** The event streams the page holds open, oldest first. */
+  streams: Array<{ send: (id: string, data: Body) => void }>;
 }
 
 const jobOf = (state: string, extra: Body = {}): Body => ({
@@ -119,18 +133,41 @@ let playing: Service | null = null;
 function useUploadSink(): { origin: () => string } {
   let origin = '';
   let close: () => void = () => {};
+  /** The event streams now held open. */
+  const open = new Set<ServerResponse>();
+  test.afterEach(() => {
+    for (const stream of open) stream.end();
+    open.clear();
+  });
   test.beforeAll(async () => {
     const sink = createServer((request, response) => {
       // WebKit holds a request sent on to another address to the rules of a cross-origin one.
       const cors = {
         'access-control-allow-origin': request.headers.origin ?? '*',
         'access-control-allow-credentials': 'true',
-        'access-control-allow-methods': 'PUT',
-        'access-control-allow-headers': 'content-type, x-okf-csrf',
+        'access-control-allow-methods': 'GET, PUT',
+        'access-control-allow-headers':
+          request.headers['access-control-request-headers'] ?? 'content-type, x-okf-csrf',
       };
       if (request.method === 'OPTIONS') {
         response.writeHead(204, cors);
         response.end();
+        return;
+      }
+      if (request.method === 'GET' && request.url?.endsWith('/events')) {
+        // The workspace's event stream: opened, and held open until the test ends.
+        response.writeHead(200, {
+          ...cors,
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-store',
+        });
+        response.write(': open\n\n');
+        open.add(response);
+        response.on('close', () => open.delete(response));
+        playing?.asked.push('stream_events');
+        playing?.streams.push({
+          send: (id, data) => response.write(`id: ${id}\ndata: ${JSON.stringify(data)}\n\n`),
+        });
         return;
       }
       const chunks: Buffer[] = [];
@@ -161,7 +198,16 @@ function useUploadSink(): { origin: () => string } {
 async function play(
   page: Page,
   sink: string,
-  options: { job?: Body; warnings?: Body[] } = {},
+  options: {
+    job?: Body;
+    warnings?: Body[];
+    /** The workspace's event stream is served, and held open, by the sink. */
+    events?: boolean;
+    /** The job an import becomes has already moved on when its answer arrives. */
+    runsAtOnce?: boolean;
+    /** The workspace holds no folder and no item. */
+    empty?: boolean;
+  } = {},
 ): Promise<Service> {
   const service: Service = {
     slots: [],
@@ -170,6 +216,8 @@ async function play(
     uploadCsrf: [],
     job: options.job ?? null,
     warnings: options.warnings ?? [],
+    asked: [],
+    streams: [],
     answers: {},
   };
   const view = viewOf;
@@ -206,11 +254,15 @@ async function play(
     },
     '/api/imports/start-import': (body) => {
       service.sent.push({ path: 'start_import', body });
-      service.job = jobOf('queued');
-      return { status: 202, body: service.job };
+      const answered = jobOf('queued');
+      // Jobs run in the service's own process: one can start before its answer is read.
+      service.job = options.runsAtOnce ? jobOf('running') : answered;
+      return { status: 202, body: answered };
     },
-    '/api/imports/get-job': () =>
-      service.job ? ok(service.job) : refuse(404, 'not_found', 'no such job'),
+    '/api/imports/get-job': () => {
+      service.asked.push('get_job');
+      return service.job ? ok(service.job) : refuse(404, 'not_found', 'no such job');
+    },
     '/api/imports/list-jobs': () =>
       ok({ items: service.job ? [service.job] : [], next_cursor: null }),
     '/api/imports/cancel-job': (body) => {
@@ -238,7 +290,16 @@ async function play(
           })
         : ok(readAnswer(body.item_id === SOURCE ? source : note, body)),
   };
+  if (options.empty) {
+    service.answers['/api/items/list-items'] = () => ok({ folders: [], items: [], revision: HEAD });
+  }
   await routeApi(page, service.answers);
+  if (options.events) {
+    // Registered after the operations, so it is the route that answers the stream.
+    await page.route('**/api/workspaces/*/events', async (route) => {
+      await route.continue({ url: `${sink}${new URL(route.request().url()).pathname}` });
+    });
+  }
   // The byte upload: registered after the operations, so it is the route that answers it.
   await page.route('**/api/workspaces/*/uploads/*/content', async (route) => {
     const request = route.request();
@@ -334,6 +395,104 @@ test.describe('bringing files in', () => {
     await expect(rows(page)).toHaveCount(2);
     expect(await focusSettled(page)).toMatch(/^button:Remove incoming\//);
     await expectNoAxeViolations(page, 'the list after a removal');
+
+    // The pickers forget what they held, so the same folder can be chosen again: a browser tells
+    // a page of a choice only when the picker's value changes.
+    for (const picker of await page.locator('input[type="file"]').all()) {
+      await expect(picker).toHaveJSProperty('value', '');
+    }
+  });
+
+  test('an import followed through the event stream, from an answer that was already out of date', async ({
+    page,
+  }) => {
+    const service = await play(page, sink.origin(), { events: true, runsAtOnce: true });
+    await page.goto(`${server.origin()}/w/${WS}/import`);
+    await chooseFolder(page, await folderToImport());
+    await press(page, 'Upload 3 files');
+    await expect(page.getByText('All 3 files are uploaded and checked.')).toBeVisible();
+    await press(page, 'Import 3 uploaded files');
+    // The answer said "waiting to start"; the job was running before the stream was open. The
+    // stream's opening asks, well before any clock: the row shows what the service holds.
+    await expect(jobRow(page)).toContainText('Running.', { timeout: 4_000 });
+    expect(service.asked.slice(0, 2)).toEqual(['stream_events', 'get_job']);
+    expect(service.streams).toHaveLength(1);
+
+    // It finishes, and the stream says so: the row follows, long before the slow clock (30 s).
+    const before = service.asked.length;
+    service.job = jobOf('succeeded', { item_ids: [NOTE], revision: IMPORTED });
+    service.streams.at(0)?.send('7', {
+      id: '7',
+      kind: 'job_updated',
+      at: '2026-01-02T08:15:00.000Z',
+      workspace_id: WS,
+      job_id: JOB,
+    });
+    await expect(jobRow(page)).toContainText('Finished.', { timeout: 10_000 });
+    expect(service.asked.slice(before)).toContain('get_job');
+    expect(service.streams).toHaveLength(1);
+    await expectNoAxeViolations(page, 'an import followed through the event stream');
+
+    // The Jobs page says how it stays current, in the words of an open stream.
+    await page.getByRole('link', { name: 'All jobs of this workspace' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('heading', { name: 'Jobs' })).toBeVisible();
+    await expect(
+      page.getByText(
+        'This list follows the workspace’s events: it is asked again when a job changes, and every 30 seconds while a job is waiting or running.',
+      ),
+    ).toBeVisible();
+    await expect(jobRow(page)).toContainText('Finished.');
+    await expectNoAxeViolations(page, 'the jobs, following the event stream');
+    await shot(page, '32-jobs-following-events');
+  });
+
+  test('files dragged from the computer: let go beside the drop box they do not replace the app, and on it they are listed', async ({
+    page,
+    browserName,
+  }) => {
+    test.skip(
+      browserName !== 'chromium',
+      'only Chromium’s protocol can deliver a drag of files as a browser does',
+    );
+    // An empty workspace: no folder tree, whose own drag-and-drop would cancel the drag too.
+    const service = await play(page, sink.origin(), { empty: true });
+    const url = `${server.origin()}/w/${WS}/import`;
+    await page.goto(url);
+    await expect(page.getByText('This workspace has no folders or items yet.')).toBeVisible();
+    const folder = await folderToImport();
+    const devtools = await page.context().newCDPSession(page);
+    /** Drag `files` from the computer to the middle of `target`, and let go. */
+    const dragTo = async (target: ReturnType<Page['locator']>, files: string[]) => {
+      const box = await target.boundingBox();
+      if (box === null) throw new Error('the target is not on screen');
+      const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      const data = { items: [], files, dragOperationsMask: 1 };
+      for (const type of ['dragEnter', 'dragOver', 'drop'] as const) {
+        await devtools.send('Input.dispatchDragEvent', { type, ...at, data });
+      }
+    };
+
+    // Beside the box, on the page's heading: nothing is listed, and the app is still there.
+    await dragTo(page.getByRole('heading', { name: 'Import files' }), [join(folder, 'readme.txt')]);
+    await page.waitForTimeout(500);
+    expect(page.url()).toBe(url);
+    await expect(page.getByRole('heading', { name: 'Import files' })).toBeVisible();
+    await expect(page.getByText('No files are listed yet.')).toBeVisible();
+
+    // On the box: a file, then a folder, which the browser hands over as a folder to walk.
+    const box = page.getByRole('group', { name: 'Choose what to import' });
+    await dragTo(box, [join(folder, 'readme.txt')]);
+    await expect(page.getByText('1 file added.')).toBeVisible();
+    expect(await listedPaths(page)).toEqual(['readme.txt']);
+    await page.getByRole('button', { name: 'Remove readme.txt' }).click();
+    await dragTo(box, [folder]);
+    await expect(page.getByText('3 files added.')).toBeVisible();
+    expect(await listedPaths(page)).toEqual(PATHS);
+    expect(page.url()).toBe(url);
+    // Nothing has been sent by a drop.
+    expect(service.slots).toEqual([]);
+    await expectNoAxeViolations(page, 'files dropped from the computer');
   });
 
   test('files dropped on the page are listed, beside the tree’s own drag and drop', async ({
