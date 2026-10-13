@@ -7,6 +7,7 @@ import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { refusals, withHeaderBack } from '../../src/features/documents/PropertiesYaml';
 import { AUTOSAVE_DELAY_MS, resetDraftSessions } from '../../src/features/drafts/saving';
+import { YAML_PAUSE_MS } from '../../src/lib/yaml';
 import { type Handler, mockApi, ok } from './support/api';
 import { findTextBox, replaceText, textBox, textIn } from './support/editor';
 import {
@@ -161,7 +162,7 @@ describe('the properties as YAML', () => {
       box,
       storedYaml.replace('owner: Ada', 'owner: Grace').replace('by: grace', 'by: ada'),
     );
-    await pass(AUTOSAVE_DELAY_MS);
+    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS);
     expect(saved(api)).toEqual({
       ...stored,
       owner: 'Grace',
@@ -182,7 +183,7 @@ describe('the properties as YAML', () => {
     fireEvent.click(tab('YAML'));
     await pass(0);
     expect(textIn(textBox(YAML))).toBe(storedYaml.replace('owner: Ada', 'owner: Hedy'));
-    await pass(AUTOSAVE_DELAY_MS);
+    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS);
     expect(saved(api)).toEqual({ ...stored, owner: 'Hedy' });
   });
 
@@ -223,7 +224,7 @@ describe('the properties as YAML', () => {
     expect(api.callsTo(SAVE)).toEqual([]);
     // Fitting again, it is saved.
     replaceText(box, storedYaml.replace('attendees: 4', 'attendees: 5'));
-    await pass(AUTOSAVE_DELAY_MS);
+    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS);
     expect(screen.queryByRole('alert')).toBeNull();
     expect(saved(api)).toEqual({ ...stored, attendees: 5 });
   });
@@ -232,8 +233,70 @@ describe('the properties as YAML', () => {
     const api = service({}, []);
     const box = await openYaml();
     replaceText(box, `${storedYaml}added: true\n`);
-    await pass(AUTOSAVE_DELAY_MS);
+    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS);
     expect(saved(api)).toEqual({ ...stored, added: true });
     expect(Object.keys(saved(api) as object).at(-1)).toBe('added');
+  });
+});
+
+describe('when the properties YAML is read', () => {
+  const broken = 'owner: Grace\nattendees: [\n';
+  const cannotBeRead = () =>
+    screen.queryAllByRole('alert').some((alert) => alert.textContent?.includes('cannot be read'));
+
+  it('reads the text a pause after the last change, not at every change', async () => {
+    service();
+    const box = await openYaml();
+    replaceText(box, broken);
+    await pass(YAML_PAUSE_MS - 1);
+    expect(cannotBeRead()).toBe(false);
+    // Another change starts the pause again.
+    replaceText(box, `${broken}#\n`);
+    await pass(YAML_PAUSE_MS - 1);
+    expect(cannotBeRead()).toBe(false);
+    await pass(1);
+    expect(cannotBeRead()).toBe(true);
+  });
+
+  it('reads the text at once when keyboard focus leaves the text box', async () => {
+    const api = service();
+    const box = await openYaml();
+    replaceText(box, storedYaml.replace('owner: Ada', 'owner: Grace'));
+    fireEvent.blur(box);
+    // No pause passed: only the save's own wait.
+    await pass(AUTOSAVE_DELAY_MS);
+    expect(saved(api)).toEqual({ ...stored, owner: 'Grace' });
+  });
+
+  it('reads the text that still waits when the editor is left, so it is saved with the draft', async () => {
+    const api = service();
+    const box = await openYaml();
+    replaceText(box, storedYaml.replace('owner: Ada', 'owner: Grace'));
+    // Left before the pause has passed: back to the committed text.
+    fireEvent.click(screen.getByRole('button', { name: 'Read the committed text' }));
+    await pass(AUTOSAVE_DELAY_MS);
+    expect(saved(api)).toEqual({ ...stored, owner: 'Grace' });
+  });
+
+  it('saves nothing of a whole number a number cannot hold, and says so', async () => {
+    const api = service();
+    const box = await openYaml();
+    replaceText(box, `${storedYaml}ticket: 12345678901234567890\naccount: 9007199254740993\n`);
+    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS * 2);
+    expect(api.callsTo(SAVE)).toEqual([]);
+    const alert = screen.getByRole('alert').textContent ?? '';
+    expect(alert).toContain('Line 11, column 9: This whole number cannot be sent exactly');
+    expect(alert).toContain('Line 12, column 10: This whole number cannot be sent exactly');
+  });
+
+  it('saves nothing of a text with a directive behind a byte order mark', async () => {
+    const api = service();
+    const box = await openYaml();
+    replaceText(box, `﻿%YAML 1.1\n---\n${storedYaml}started: 2026-10-12\nratio: 1:30\n`);
+    await pass(YAML_PAUSE_MS + AUTOSAVE_DELAY_MS * 2);
+    expect(api.callsTo(SAVE)).toEqual([]);
+    expect(screen.getByRole('alert').textContent).toContain(
+      'A directive line (starting with %) is not accepted here.',
+    );
   });
 });

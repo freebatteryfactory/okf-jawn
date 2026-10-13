@@ -37,8 +37,8 @@ import { useId, useLayoutEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import type { NamingRules, RenamePlan, Revision } from '../../api/generated/types.gen';
 import { keyed } from '../../lib/keys';
-import { YamlEditor, YamlFindings } from '../../lib/YamlEditor';
-import { readYaml, writeYaml, type YamlRead } from '../../lib/yaml';
+import { usePausedReading, YamlEditor, YamlFindings } from '../../lib/YamlEditor';
+import { writeYaml, type YamlRead } from '../../lib/yaml';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
@@ -132,13 +132,23 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
   const [view, setView] = useState<'form' | 'yaml'>('form');
   const [typed, setTyped] = useState<{ text: string; read: YamlRead } | null>(null);
   const unreadable = typed !== null && !typed.read.ok;
+  // The YAML is read a pause after the last change, not at every keystroke; `flush` reads at once
+  // what still waits (before a change of view, and before anything is sent or applied).
+  const reading = usePausedReading((text, read) => {
+    setTyped({ text, read });
+    // Only YAML that can be read becomes the rules; otherwise they stay as they were.
+    if (read.ok) setEdited(read.value);
+  });
   const findingsId = useId();
   const shape = zSchema.safeParse(schema.data);
   const form: RJSFSchema | null = shape.success ? shape.data : null;
   const problems = form === null || value === undefined ? [] : rulesProblems(form, value);
-  // Without a problem by the service's own schema, the value is rules that can be sent.
-  const rules =
-    form !== null && !unreadable && problems.length === 0 && formHolds(value) ? value : null;
+  /** `held` as rules that can be sent: without a problem by the service's own schema. */
+  const sendableOf = (held: unknown, readable: boolean): NamingRules | null =>
+    form !== null && readable && formHolds(held) && rulesProblems(form, held).length === 0
+      ? held
+      : null;
+  const rules = sendableOf(value, !unreadable);
   const changed =
     edited !== undefined && saved.data !== undefined && !sameRules(edited, saved.data);
 
@@ -228,11 +238,19 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
 
   /** The rules, when they can be sent; otherwise focus goes to the list of what is wrong. */
   const sendable = () => {
-    if (rules !== null) return rules;
+    // Text typed a moment ago is read first: what is sent is never older than the text.
+    const read = reading.flush();
+    const now = read === null ? rules : sendableOf(read.ok ? read.value : value, read.ok);
+    if (now !== null) return now;
     setSaid('');
     focusNext.current = 'problems';
     problemsRef.current?.focus();
     return null;
+  };
+  /** Read the text that still waits; whether the preview is then no longer what the rules give. */
+  const staleAfterReading = (shown: Preview) => {
+    const read = reading.flush();
+    return read?.ok === true && staleReason(shown, head, read.value, refused) !== null;
   };
   const startPreview = () => {
     if (previewing.isPending) return;
@@ -249,7 +267,7 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
   };
   const startSave = () => {
     const asked = sendable();
-    if (asked === null || !changed) return;
+    if (asked === null || saved.data === undefined || sameRules(asked, saved.data)) return;
     setSaid('');
     save.start(asked);
   };
@@ -303,7 +321,10 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
           <Tabs.Root
             value={view}
             onValueChange={(next) => {
-              if (next === 'form' || next === 'yaml') setView(next);
+              if (next !== 'form' && next !== 'yaml') return;
+              // The other view opens on what the text says now.
+              reading.flush();
+              setView(next);
             }}
           >
             <Tabs.List aria-label="How the rules are shown" className="tab-list">
@@ -342,12 +363,8 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
                 label="The naming rules as YAML"
                 initialText={typed?.text ?? writeYaml(value)}
                 describedBy={findingsId}
-                onChange={(text) => {
-                  const read = readYaml(text);
-                  setTyped({ text, read });
-                  // Only YAML that can be read becomes the rules; otherwise they stay as they were.
-                  if (read.ok) setEdited(read.value);
-                }}
+                onChange={reading.change}
+                onBlur={reading.flush}
               />
             </Tabs.Panel>
           </Tabs.Root>
@@ -545,7 +562,10 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
                     aria-disabled={apply.pending}
                     onClick={() => {
                       // The question is on screen only while the preview is the preview of what
-                      // the page shows (`stale` above): what is sent is that preview.
+                      // the page shows (`stale` above): what is sent is that preview. Text typed
+                      // a moment ago is read first; when it changes the rules nothing is sent,
+                      // and the page says that the preview is out of date.
+                      if (staleAfterReading(preview)) return;
                       setSent(preview.plan);
                       apply.start(preview);
                     }}
@@ -563,7 +583,7 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
                   ref={applyButton}
                   aria-disabled={stale !== null}
                   onClick={() => {
-                    if (stale !== null) return;
+                    if (stale !== null || staleAfterReading(preview)) return;
                     focusNext.current = 'keep';
                     setAsking(true);
                   }}

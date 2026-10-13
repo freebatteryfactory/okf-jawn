@@ -8,6 +8,11 @@
  * `onChange`. Its text is never set from outside while it is mounted, so a keystroke cannot be
  * undone by an older value arriving late.
  *
+ * Reading the text is not done at every keystroke: `usePausedReading` reads it a short pause
+ * after the last change (`YAML_PAUSE_MS`), and at once when asked (`flush`): when keyboard focus
+ * leaves the text box, when the view changes, and before anything is sent. So what is sent or
+ * shown as the value is never older than the text.
+ *
  * `YamlFindings` shows what reading the text found: each problem with its line and column, as an
  * alert, and each warning as a note. The text box is described by it.
  */
@@ -15,9 +20,9 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { yaml } from '@codemirror/lang-yaml';
 import { Compartment, EditorState } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { keyed } from './keys';
-import { describeProblem, type YamlRead } from './yaml';
+import { describeProblem, readYaml, YAML_PAUSE_MS, type YamlRead } from './yaml';
 
 export interface YamlEditorProps {
   /** The text box's accessible name. */
@@ -27,6 +32,49 @@ export interface YamlEditorProps {
   onChange: (text: string) => void;
   /** The element that describes the text box: what is wrong with its text. */
   describedBy?: string;
+  /** Keyboard focus left the text box. */
+  onBlur?: () => void;
+}
+
+export interface PausedReading {
+  /** The text changed: it is read a pause after the last change. */
+  change: (text: string) => void;
+  /** Read now what waits to be read. Answers that reading, or null when nothing waited. */
+  flush: () => YamlRead | null;
+}
+
+/**
+ * Read a text as YAML a short pause after its last change, not at every keystroke. `onRead` gets
+ * each text that was read with what reading it found. A text still waiting when the caller leaves
+ * the page is read then, so it is never dropped unread.
+ */
+export function usePausedReading(onRead: (text: string, read: YamlRead) => void): PausedReading {
+  const report = useRef(onRead);
+  useEffect(() => {
+    report.current = onRead;
+  }, [onRead]);
+  const waiting = useRef<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flush = useCallback(() => {
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = null;
+    const text = waiting.current;
+    if (text === null) return null;
+    waiting.current = null;
+    const read = readYaml(text);
+    report.current(text, read);
+    return read;
+  }, []);
+  const change = useCallback(
+    (text: string) => {
+      waiting.current = text;
+      if (timer.current !== null) clearTimeout(timer.current);
+      timer.current = setTimeout(flush, YAML_PAUSE_MS);
+    },
+    [flush],
+  );
+  useEffect(() => () => void flush(), [flush]);
+  return { change, flush };
 }
 
 const look = EditorView.theme({
@@ -38,16 +86,18 @@ const look = EditorView.theme({
   '.cm-content:focus-visible': { outline: '3px solid Highlight', outlineOffset: '-3px' },
 });
 
-export function YamlEditor({ label, initialText, onChange, describedBy }: YamlEditorProps) {
+export function YamlEditor({ label, initialText, onChange, describedBy, onBlur }: YamlEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const first = useRef(initialText);
   const report = useRef(onChange);
+  const left = useRef(onBlur);
   const naming = useRef(new Compartment());
 
   useEffect(() => {
     report.current = onChange;
-  }, [onChange]);
+    left.current = onBlur;
+  }, [onChange, onBlur]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -62,6 +112,11 @@ export function YamlEditor({ label, initialText, onChange, describedBy }: YamlEd
           yaml(),
           look,
           naming.current.of([]),
+          EditorView.domEventHandlers({
+            blur: () => {
+              left.current?.();
+            },
+          }),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) report.current(update.state.doc.toString());
           }),

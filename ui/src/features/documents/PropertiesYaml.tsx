@@ -25,12 +25,12 @@
  */
 import { Tabs } from '@base-ui/react/tabs';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useId, useState } from 'react';
+import { type RefObject, useEffect, useId, useRef, useState } from 'react';
 import { z } from 'zod';
 import { listTypesOptions } from '../../api/generated/@tanstack/react-query.gen';
 import { keyed } from '../../lib/keys';
-import { YamlEditor, YamlFindings } from '../../lib/YamlEditor';
-import { readYaml, writeYaml, type YamlRead } from '../../lib/yaml';
+import { usePausedReading, YamlEditor, YamlFindings } from '../../lib/YamlEditor';
+import { writeYaml, type YamlRead } from '../../lib/yaml';
 import { editSession } from '../drafts/saving';
 import type { DraftSession } from '../drafts/sessions';
 import {
@@ -97,9 +97,11 @@ interface PropertiesYamlProps {
   /** The text as typed, while it still stands; null while the view shows the draft's properties. */
   typed: TypedYaml | null;
   onTyped: (typed: TypedYaml) => void;
+  /** Set, while this view is on screen, to what reads at once the text that still waits. */
+  readNow: RefObject<(() => void) | null>;
 }
 
-function PropertiesYaml({ session, typeName, typed, onTyped }: PropertiesYamlProps) {
+function PropertiesYaml({ session, typeName, typed, onTyped, readNow }: PropertiesYamlProps) {
   const client = useQueryClient();
   const findingsId = useId();
   const types = useQuery(listTypesOptions({ body: { workspace_id: session.workspaceId } }));
@@ -108,6 +110,25 @@ function PropertiesYaml({ session, typeName, typed, onTyped }: PropertiesYamlPro
   const schema =
     types.data === undefined ? undefined : shape.success ? withoutHeaderField(shape.data) : null;
   const count = Object.keys(session.properties).length;
+  // The text is read a pause after the last change, when keyboard focus leaves it, and when this
+  // view goes (another view, another tab): what was typed is never dropped unread.
+  const reading = usePausedReading((text, read) => {
+    const refused = read.ok ? refusals(schema, read.value) : [];
+    if (!read.ok || refused.length > 0 || !isMapping(read.value)) {
+      onTyped({ text, read, refused, draft: session.properties });
+      return;
+    }
+    const wanted = withHeaderBack(session.properties, read.value);
+    onTyped({ text, read, refused, draft: wanted });
+    editSession(client, session.workspaceId, session.itemId, { properties: wanted });
+  });
+  const { flush } = reading;
+  useEffect(() => {
+    readNow.current = flush;
+    return () => {
+      readNow.current = null;
+    };
+  }, [readNow, flush]);
   return (
     <details className="properties" open>
       <summary>Properties ({count})</summary>
@@ -115,17 +136,8 @@ function PropertiesYaml({ session, typeName, typed, onTyped }: PropertiesYamlPro
         label="Properties as YAML"
         initialText={typed?.text ?? writeYaml(withoutHeader(session.properties))}
         describedBy={findingsId}
-        onChange={(text) => {
-          const read = readYaml(text);
-          const refused = read.ok ? refusals(schema, read.value) : [];
-          if (!read.ok || refused.length > 0 || !isMapping(read.value)) {
-            onTyped({ text, read, refused, draft: session.properties });
-            return;
-          }
-          const wanted = withHeaderBack(session.properties, read.value);
-          onTyped({ text, read, refused, draft: wanted });
-          editSession(client, session.workspaceId, session.itemId, { properties: wanted });
-        }}
+        onChange={reading.change}
+        onBlur={reading.flush}
       />
       <div id={findingsId}>
         <YamlFindings id={`${findingsId}-read`} read={typed?.read ?? null} />
@@ -162,6 +174,7 @@ export interface PropertiesViewsProps {
 export function PropertiesViews({ session, typeName }: PropertiesViewsProps) {
   const [view, setView] = useState<'form' | 'yaml'>('form');
   const [typed, setTyped] = useState<TypedYaml | null>(null);
+  const readNow = useRef<(() => void) | null>(null);
   // The text stands while the draft's properties are what they were when it was typed; a change
   // made in the form since then replaces it.
   const standing = typed !== null && typed.draft === session.properties ? typed : null;
@@ -170,7 +183,10 @@ export function PropertiesViews({ session, typeName }: PropertiesViewsProps) {
     <Tabs.Root
       value={view}
       onValueChange={(next) => {
-        if (next === 'form' || next === 'yaml') setView(next);
+        if (next !== 'form' && next !== 'yaml') return;
+        // The other view opens on what the text says now: it is read before the view changes.
+        readNow.current?.();
+        setView(next);
       }}
     >
       <Tabs.List aria-label="How the properties are shown" className="tab-list">
@@ -191,7 +207,13 @@ export function PropertiesViews({ session, typeName }: PropertiesViewsProps) {
         <PropertiesForm session={session} typeName={typeName} />
       </Tabs.Panel>
       <Tabs.Panel value="yaml">
-        <PropertiesYaml session={session} typeName={typeName} typed={standing} onTyped={setTyped} />
+        <PropertiesYaml
+          session={session}
+          typeName={typeName}
+          typed={standing}
+          onTyped={setTyped}
+          readNow={readNow}
+        />
       </Tabs.Panel>
     </Tabs.Root>
   );
