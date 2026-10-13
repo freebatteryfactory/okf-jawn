@@ -196,6 +196,7 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
         {workspace.description ? <p className="meta">{workspace.description}</p> : null}
         <WorkspaceNav
           workspaceId={workspaceId}
+          head={head}
           query={query}
           documents={view.panes.find((pane) => pane.id === view.focusedPaneId) ?? null}
         />

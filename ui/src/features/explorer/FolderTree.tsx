@@ -1,6 +1,9 @@
 /**
  * The folder tree: react-arborist over the listing operation, loaded folder by folder.
  *
+ * An item that the listed Attention warnings name says how many, in words, after its other marks
+ * ("2 warnings"; read out as advisory). A row without that mark has not been found safe.
+ *
  * Folders and items appear as the workspace organizes them. Each item shows its title and its
  * user type name (an open vocabulary); its rendering role (Note, Source or View) picks the icon.
  * Arborist supplies the tree semantics and keyboard model (arrows, Home/End, type-ahead, Space);
@@ -40,6 +43,7 @@ import {
   type TreeApi,
 } from 'react-arborist';
 import type { ItemSummary, Revision } from '../../api/generated/types.gen';
+import { attentionMark, useAttentionMarks } from '../attention/attention';
 import { conversionWord } from '../documents/describe';
 import { type DraftMark, useDraftMarks } from '../drafts/marks';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -65,6 +69,8 @@ interface TreeEntry {
   item: ItemSummary | null;
   /** How the item's draft stands, when it has one. */
   mark: DraftMark | null;
+  /** How many listed Attention warnings name the item. */
+  warnings: number;
   status: StatusKind | null;
   error: unknown;
   children: TreeEntry[] | null;
@@ -122,6 +128,7 @@ function statusEntry(folder: string, status: StatusKind, error: unknown = null):
     folder,
     item: null,
     mark: null,
+    warnings: 0,
     status,
     error,
     children: null,
@@ -134,6 +141,7 @@ function entriesOf(
   expanded: Record<string, true>,
   revision: Revision,
   markOf: (itemId: string) => DraftMark | null,
+  warningsOf: (itemId: string) => number,
 ): TreeEntry[] {
   const result = listings.get(folder);
   if (result === undefined) return [];
@@ -149,9 +157,12 @@ function entriesOf(
         folder: child,
         item: null,
         mark: null,
+        warnings: 0,
         status: null,
         error: null,
-        children: expanded[child] ? entriesOf(child, listings, expanded, revision, markOf) : [],
+        children: expanded[child]
+          ? entriesOf(child, listings, expanded, revision, markOf, warningsOf)
+          : [],
       });
     }
     for (const item of page.items) {
@@ -162,6 +173,7 @@ function entriesOf(
         folder,
         item,
         mark: markOf(item.id),
+        warnings: warningsOf(item.id),
         status: null,
         error: null,
         children: null,
@@ -316,7 +328,8 @@ export function FolderTree({
   });
   const root = listings.get('');
   const markOf = useDraftMarks(workspaceId);
-  const entries = entriesOf('', listings, view.expanded, revision, markOf);
+  const warningsOf = useAttentionMarks(workspaceId, revision);
+  const entries = entriesOf('', listings, view.expanded, revision, markOf, warningsOf);
   // A root listing that failed keeps its notice through a retry, which ends with keyboard focus
   // on the tree's tab-stop entry (the empty-workspace line, when it listed nothing).
   const rootFailure = useRetry({
@@ -509,7 +522,9 @@ function entryLabel(entry: TreeEntry): string {
   const extraction = extractionWord(entry.item);
   const type = `${entry.name}, type ${entry.item.type_name}`;
   const converted = extraction === null ? type : `${type}, ${extraction}`;
-  return entry.mark === null ? converted : `${converted}, ${entry.mark}`;
+  const drafted = entry.mark === null ? converted : `${converted}, ${entry.mark}`;
+  const attention = attentionMark(entry.warnings);
+  return attention === null ? drafted : `${drafted}, ${attention} (advisory)`;
 }
 
 /**
@@ -611,6 +626,9 @@ function TreeEntryContent({ node, style }: NodeRendererProps<TreeEntry>) {
         {item === null ? null : <span className="tree-type">{item.type_name}</span>}
         {extraction === null ? null : <span className="tree-flag">{extraction}</span>}
         {entry.mark === null ? null : <span className="tree-flag">{entry.mark}</span>}
+        {entry.warnings === 0 ? null : (
+          <span className="tree-flag">{attentionMark(entry.warnings)}</span>
+        )}
       </span>
     </div>
   );

@@ -41,6 +41,7 @@ import type {
 } from '../../api/generated/types.gen';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
+import { ItemAttention } from '../attention/ItemAttention';
 import { ConflictNotice } from '../drafts/ConflictNotice';
 import { DraftEditor } from '../drafts/DraftEditor';
 import { beginSession } from '../drafts/saving';
@@ -432,6 +433,7 @@ export function DocumentView({
         outcome={document?.source?.extraction.outcome ?? null}
         status={summary?.extraction?.status ?? extraction?.status ?? null}
       />
+      <ItemAttention workspaceId={workspaceId} itemId={itemId} head={head} />
       {pinned && (
         <PinnedRevision
           workspaceId={workspaceId}

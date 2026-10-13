@@ -1,6 +1,6 @@
 /**
- * The workspace's own pages, beside its documents: bringing files in (`/import`) and its jobs
- * (`/jobs`). Each has a URL, which the router owns.
+ * The workspace's own pages, beside its documents: bringing files in (`/import`), its jobs
+ * (`/jobs`) and its Attention warnings (`/attention`). Each has a URL, which the router owns.
  *
  * A page is shown in place of the documents, between the same navigation and source columns. The
  * open tabs are kept in the Explorer store and are there again under "Documents", which goes back
@@ -9,18 +9,22 @@
  * own heading is a level-two heading: the page's level-one heading stays the workspace's name.
  */
 import { Link, useMatchRoute } from '@tanstack/react-router';
+import type { Revision } from '../../api/generated/types.gen';
+import { AttentionLink } from '../attention/AttentionLink';
+import { AttentionPage } from '../attention/AttentionPage';
 import { ImportPage } from '../imports/ImportPage';
 import { JobsPage } from '../jobs/JobsPage';
 import { DocumentPanes, type DocumentPanesProps } from './DocumentPanes';
 import { type Pane, tabLocation } from './store';
 
-export type WorkspacePage = 'import' | 'jobs';
+export type WorkspacePage = 'import' | 'jobs' | 'attention';
 
 /** The page the URL names; null when it names the documents. */
 export function useWorkspacePage(): WorkspacePage | null {
   const matchRoute = useMatchRoute();
   if (matchRoute({ to: '/w/$workspaceId/import' }) !== false) return 'import';
   if (matchRoute({ to: '/w/$workspaceId/jobs' }) !== false) return 'jobs';
+  if (matchRoute({ to: '/w/$workspaceId/attention' }) !== false) return 'attention';
   return null;
 }
 
@@ -37,12 +41,15 @@ export function DocumentsOrPage({
         <ImportPage workspaceId={workspaceId} head={head} canWrite={canWrite} />
       )}
       {page === 'jobs' && <JobsPage workspaceId={workspaceId} canWrite={canWrite} />}
+      {page === 'attention' && <AttentionPage workspaceId={workspaceId} head={head} />}
     </div>
   );
 }
 
 export interface WorkspaceNavProps {
   workspaceId: string;
+  /** The revision the workspace shows: the Attention link counts the warnings found at it. */
+  head: Revision;
   /** The workspace search the URL carries; every link keeps it. */
   query: string | undefined;
   /** The focused pane: "Documents" returns to its open item. */
@@ -53,7 +60,7 @@ export interface WorkspaceNavProps {
  * The links to the workspace's places. The link of the place on screen says so: the router sets
  * `aria-current="page"` on a link to the current URL.
  */
-export function WorkspaceNav({ workspaceId, query, documents }: WorkspaceNavProps) {
+export function WorkspaceNav({ workspaceId, head, query, documents }: WorkspaceNavProps) {
   const kept = query === undefined ? {} : { q: query };
   const params = { workspaceId };
   const shown = documents?.active ?? null;
@@ -84,6 +91,7 @@ export function WorkspaceNav({ workspaceId, query, documents }: WorkspaceNavProp
       <Link to="/w/$workspaceId/jobs" params={params} search={kept}>
         Jobs
       </Link>
+      <AttentionLink workspaceId={workspaceId} head={head} search={kept} />
     </nav>
   );
 }

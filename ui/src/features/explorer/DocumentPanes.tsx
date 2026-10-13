@@ -15,7 +15,8 @@
  *
  * A tab also carries what is said of its item besides its name, in brackets after the title: for
  * a source that is anything but converted, its conversion mark ("(conversion pending)", "(format
- * not supported)"), as its row of the tree has it. These words are the tab's description
+ * not supported)"), as its row of the tree has it, and how many listed Attention warnings name it
+ * ("(2 warnings, advisory)"). These words are the tab's description
  * (`aria-describedby`), not part of its name: the name stays the item's title, and the words are
  * read after it.
  */
@@ -24,6 +25,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Fragment, useEffect, useRef } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import type { Revision } from '../../api/generated/types.gen';
+import { attentionMark, useAttentionMarks } from '../attention/attention';
 import { DocumentView, itemOptions } from '../documents/DocumentView';
 import { conversionWord } from '../documents/describe';
 import { useDraftMarks } from '../drafts/marks';
@@ -312,13 +314,17 @@ function TabLabel({
   const listed = useDraftMarks(workspaceId)(itemId);
   const mark = listed ?? ((item.data?.draft ?? null) !== null ? 'draft' : null);
   const conversion = conversionWord(summary?.extraction);
+  const attention = attentionMark(useAttentionMarks(workspaceId, head)(itemId));
+  const said = [conversion, attention === null ? null : `${attention}, advisory`].filter(
+    (word) => word !== null,
+  );
   return (
     <span className="tab-label">
       {name}
       {mark === null ? null : <span className="tab-mark"> ({mark})</span>}
       {/* Always there, so the tab's description always names an element; hidden from the name. */}
       <span id={stateId} aria-hidden="true" className="tab-mark">
-        {conversion === null ? '' : ` (${conversion})`}
+        {said.map((word) => ` (${word})`).join('')}
       </span>
     </span>
   );
