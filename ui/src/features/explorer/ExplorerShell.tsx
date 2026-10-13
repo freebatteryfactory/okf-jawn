@@ -195,8 +195,10 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   // the panel's own (`beforeunload`).
   const holdBack = useRef<ShouldBlockFn>(() => false);
   // What had keyboard focus when a way off the rules was taken, once the documents are back in
-  // their place: focus goes back to it (a row of the folders, a link), and when it went with the
-  // rules (Back or Forward with focus in them), to the page's heading. Never to the page body.
+  // their place: focus goes back to it (a row of the folders, a link, this page's own "Naming
+  // rules" button), and when it went with the rules (Back or Forward with focus in them), to the
+  // page's heading. Never to the page body. Every way off that asks the rules' question ends
+  // here when the person leaves; when they stay, the panel gives focus back to what asked.
   const askedToLeave = useRef<Element | null | undefined>(undefined);
   const showDocuments = (asker: Element | null) => {
     askedToLeave.current = asker;
@@ -389,7 +391,9 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
             aria-expanded={rulesOpen}
             onClick={() => {
               if (!rulesOpen) setRulesOpen(true);
-              else leaveRules(() => setRulesOpen(false));
+              // Closed by the button that opened them. After the rules' question the pressed
+              // "Discard my changes" has left with them: focus is on this button.
+              else leaveRules(() => showDocuments(rulesButton.current));
             }}
           >
             Naming rules

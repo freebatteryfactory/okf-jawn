@@ -1521,6 +1521,56 @@ describe('leaving the naming rules with edits that are not saved', () => {
     expect(document.activeElement).toBe(button('Naming rules'));
   });
 
+  it('closes the panel from the shell’s own button after "Discard my changes", with focus on that button', async () => {
+    service();
+    await openRules();
+    await setPrefix('unsaved-');
+    await userEvent.click(button('Naming rules'));
+    expect(question()).not.toBeNull();
+    await userEvent.click(button('Discard my changes'));
+    expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+    // The pressed button went with the rules: focus is on the button that opened and closed them.
+    expect(document.activeElement).toBe(button('Naming rules'));
+    expect(button('Naming rules').getAttribute('aria-expanded')).toBe('false');
+    // Discarded: opened again, the rules are the saved ones.
+    await userEvent.click(button('Naming rules'));
+    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    expect(prefix()).toHaveProperty('value', '');
+  });
+
+  it('asks before a draft is opened from the list of drafts, and focus is on its button after either answer', async () => {
+    service({
+      '/api/items/list-drafts': () =>
+        ok({
+          items: [
+            {
+              item_id: NOTE,
+              base_revision: HEAD,
+              content_digest: DIGEST,
+              editor: 'ada',
+              saved_at: '2026-01-01T23:30:00.000Z',
+            },
+          ],
+          next_cursor: null,
+        }),
+    });
+    const { router } = await openRules();
+    await setPrefix('unsaved-');
+    const drafts = await screen.findByRole('region', { name: /^Drafts/ });
+    const draft = await within(drafts).findByRole('button', { name: /Meeting notes/ });
+    await userEvent.click(draft);
+    expect(question()).not.toBeNull();
+    await userEvent.click(button('Keep editing'));
+    expect(router.state.location.pathname).toBe(`/w/${WS}`);
+    expect(prefix()).toHaveProperty('value', 'unsaved-');
+    expect(document.activeElement).toBe(draft);
+    await userEvent.click(draft);
+    await userEvent.click(button('Discard my changes'));
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+    expect(document.activeElement).toBe(draft);
+  });
+
   it('counts YAML that cannot be read, and text typed a moment ago, as edits', async () => {
     service();
     await openRules();
@@ -1667,6 +1717,39 @@ describe('leaving the workspace page with rule edits that are not saved', () => 
     expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull());
     expect(screen.getByRole('region', { name: 'Documents' })).toBeTruthy();
+  });
+
+  it('puts focus on the page’s heading when a navigation that began with focus in the rules takes them off the page, and back in the rules when the person stays', async () => {
+    service();
+    const { router } = await openRules();
+    await setPrefix('unsaved-');
+    // As Back and Forward do: no control outside the rules was pressed, and focus is in them.
+    const toTheNote = () =>
+      act(() => {
+        prefix().focus();
+        void router.navigate({
+          to: '/w/$workspaceId/i/$itemId',
+          params: { workspaceId: WS, itemId: NOTE },
+        });
+      });
+    toTheNote();
+    await waitFor(() => expect(question()).not.toBeNull());
+    await userEvent.click(button('Keep editing'));
+    expect(question()).toBeNull();
+    expect(router.state.location.pathname).toBe(`/w/${WS}`);
+    expect(prefix()).toHaveProperty('value', 'unsaved-');
+    // The person stays: focus is where it was before the question.
+    expect(document.activeElement).toBe(prefix());
+    toTheNote();
+    await waitFor(() => expect(question()).not.toBeNull());
+    await userEvent.click(button('Discard my changes'));
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`));
+    expect(await screen.findByText('Text of Meeting notes')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
+    // What had focus went with the rules: the page's heading has it, never the page body.
+    expect(document.activeElement).toBe(
+      screen.getByRole('heading', { name: writableWorkspace.name, level: 1 }),
+    );
   });
 
   it('asks nothing, and keeps the rules open, when only the search changes', async () => {
@@ -2154,6 +2237,31 @@ describe('the naming rules and the workspace’s own pages', () => {
     expect(rulesPanel()).toBeNull();
     expect(page('Import files')).not.toBeNull();
     expect(document.activeElement).toBe(link('Import'));
+  });
+
+  it('asks before "Documents" leaves a page for an open item, and focus is on the link after either answer', async () => {
+    service();
+    const { router } = renderAt(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(link('Import'));
+    await waitFor(() => expect(page('Import files')).not.toBeNull());
+    await userEvent.click(button('Naming rules'));
+    await within(panel()).findByRole('textbox', { name: /^prefix/ });
+    await setPrefix('unsaved-');
+    const documents = link('Documents');
+    await userEvent.click(documents);
+    expect(question()).not.toBeNull();
+    await userEvent.click(button('Keep editing'));
+    await settle();
+    expect(router.state.location.pathname).toBe(`/w/${WS}/import`);
+    expect(prefix()).toHaveProperty('value', 'unsaved-');
+    expect(document.activeElement).toBe(documents);
+    await userEvent.click(documents);
+    await userEvent.click(button('Discard my changes'));
+    await waitFor(() => expect(rulesPanel()).toBeNull());
+    expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
+    expect(await screen.findByText('Text of Meeting notes')).toBeTruthy();
+    expect(document.activeElement).toBe(link('Documents'));
   });
 
   /** A search that finds the note, cited at lines of the head. */

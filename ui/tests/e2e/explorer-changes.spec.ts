@@ -817,6 +817,42 @@ test.describe('changing the tree and the naming rules', () => {
     expect(played.sent).toEqual([]);
   });
 
+  test('the "Naming rules" button asks before it closes rules with edits, and keeps focus', async ({
+    page,
+  }) => {
+    const played = await service();
+    await routeApi(page, played.answers);
+    await page.goto(`${server.origin()}/w/${WS}`);
+    await expect(row(page, 'notes')).toBeVisible();
+    await press(page, 'Naming rules');
+    const prefix = page.getByRole('textbox', { name: /^prefix/ });
+    await prefix.fill('unsaved-');
+    const question = page.getByRole('group', { name: 'Leave the naming rules without saving?' });
+
+    // The person stays: focus is back on the button that asked.
+    await press(page, 'Naming rules');
+    await expect(question).toBeVisible();
+    expect(await focusSettled(page)).toBe('button:Keep editing');
+    await page.keyboard.press('Enter');
+    await expect(question).toHaveCount(0);
+    await expect(prefix).toHaveValue('unsaved-');
+    expect(await focusSettled(page)).toBe('button:Naming rules');
+
+    // The person leaves: the pressed "Discard my changes" goes with the rules, and focus is on the
+    // button that opened them, not on the page body.
+    await page.keyboard.press('Enter');
+    await expect(question).toBeVisible();
+    await press(page, 'Discard my changes');
+    await expect(page.getByRole('region', { name: 'Naming rules' })).toHaveCount(0);
+    expect(await focusSettled(page)).toBe('button:Naming rules');
+    await expectVisibleFocus(page);
+    await expectNoAxeViolations(
+      page,
+      'the workspace after the naming rules were left by their button',
+    );
+    expect(played.sent).toEqual([]);
+  });
+
   test('a refused change is shown, and retried from the keyboard', async ({ page }) => {
     const played = await service();
     await routeApi(page, played.answers);
