@@ -7,7 +7,11 @@
  * form is held back and in no save); the text box is described by it. A
  * failed save keeps the text in the editor and offers its retry through the failure notice, which
  * stays while the save is tried again. The next change's own save can cure it too; keyboard focus
- * that was on the retry button then moves to the text box (`useRetry`). Leaving the editor
+ * that was on the retry button then moves to the text box (`useRetry`). A save that has been
+ * under way for 30 seconds says "Still sending…" and offers "Stop", which aborts it: what the
+ * service did with it is then unknown, so the text is "not saved" and its notice offers the
+ * retry. "Stop" leaves when it is pressed or the save answers; focus on it goes to the text box.
+ * Leaving the editor
  * (another tab, another item, reading the committed text, closing the tab) saves at once and keeps
  * the text in its session.
  *
@@ -16,13 +20,14 @@
  * caller says where focus goes.
  */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { MarkdownEditor } from './MarkdownEditor';
-import { discardSession, editSession, flushSession, MAX_BODY_BYTES } from './saving';
+import { discardSession, editSession, flushSession, MAX_BODY_BYTES, stopSaving } from './saving';
 import { type DraftSession, saveStateOf } from './sessions';
 
 export interface DraftEditorProps {
@@ -41,7 +46,7 @@ function megabytes(bytes: number): string {
 
 function SaveState({ session }: { session: DraftSession }) {
   const state = saveStateOf(session);
-  if (state === 'saving') return <>Saving…</>;
+  if (state === 'saving') return session.stillSending ? <>Still sending…</> : <>Saving…</>;
   if (state === 'unsaved') return <>Unsaved changes.</>;
   if (state === 'failed') return <>Not saved. Your text is kept here.</>;
   if (state === 'too-long') return <>Not saved: the text is too long.</>;
@@ -85,6 +90,14 @@ export function DraftEditor({ session, title, onDiscarded }: DraftEditorProps) {
     loaded: textBox,
   });
 
+  // "Stop" is there only while a long save is in flight. It leaves when it is pressed and when
+  // that save answers by itself; keyboard focus that was on it goes to the text box.
+  const heldStop = useRef<HTMLElement | null>(null);
+  const [, stopRef] = useWatchedPart<HTMLButtonElement>(heldStop);
+  useLayoutEffect(() => {
+    if (takeHeld(heldStop)) textBox()?.focus();
+  });
+
   const [confirming, setConfirming] = useState(false);
   const discardRef = useRef<HTMLButtonElement | null>(null);
   const keepRef = useRef<HTMLButtonElement | null>(null);
@@ -125,6 +138,17 @@ export function DraftEditor({ session, title, onDiscarded }: DraftEditorProps) {
       <p id={stateId} role="status" className="meta save-state">
         <SaveState session={session} />
       </p>
+      {session.saving && session.stillSending && (
+        <p className="draft-actions">
+          <button type="button" ref={stopRef} onClick={() => stopSaving(workspaceId, itemId)}>
+            Stop
+          </button>{' '}
+          <span className="meta">
+            Stopping does not undo what was already sent: the text stays here, not saved, until it
+            is saved again.
+          </span>
+        </p>
+      )}
       {session.tooLong !== null && (
         <div role="alert" className="failure-notice">
           <p>

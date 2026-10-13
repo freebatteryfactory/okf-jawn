@@ -6,7 +6,7 @@
 import { QueryObserver } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { REQUEST_TIMEOUT_MS } from '../../src/app/api-client';
+import { REQUEST_TIMEOUT_MS, UPLOAD_BYTES_PER_SECOND } from '../../src/app/api-client';
 import { createQueryClient } from '../../src/app/query-client';
 import { itemOptions } from '../../src/features/documents/DocumentView';
 import { draftsOptions, rememberDraft } from '../../src/features/drafts/drafts-list';
@@ -14,6 +14,7 @@ import {
   AUTOSAVE_DELAY_MS,
   MAX_BODY_BYTES,
   resetDraftSessions,
+  STILL_SENDING_AFTER_MS,
 } from '../../src/features/drafts/saving';
 import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
@@ -615,6 +616,123 @@ describe('a text too long to save', () => {
     await pass(AUTOSAVE_DELAY_MS);
     await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+// A large text on a slow link may take long (the wait allows for what is sent): the person is
+// told, and may stop it.
+describe('a save that takes long', () => {
+  /** Large enough that its wait is four seconds longer than an ordinary request's. */
+  const LARGE = 'x'.repeat(4 * UPLOAD_BYTES_PER_SECOND);
+  const stop = () => screen.queryByRole('button', { name: 'Stop' });
+  /** The signals of the `save_draft` requests sent so far. */
+  const saveSignals = () =>
+    vi
+      .mocked(globalThis.fetch)
+      .mock.calls.filter(([input]) => input instanceof Request && input.url.endsWith(SAVE))
+      .map(([, init]) => init?.signal);
+
+  /** A large text is being saved, and `STILL_SENDING_AFTER_MS` less one millisecond have passed. */
+  async function sending(save: Handler) {
+    const api = writable({ [SAVE]: save });
+    const { box } = await startEditing();
+    replaceText(box, LARGE);
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+    await pass(STILL_SENDING_AFTER_MS - 1);
+    return { api, box };
+  }
+
+  it('says it is still sending after 30 seconds, and offers "Stop": not before, and focus stays', async () => {
+    const { box } = await sending(() => new Promise<never>(() => {}));
+    expect(STILL_SENDING_AFTER_MS).toBe(30_000);
+    expect(saveState()).toBe('Saving…');
+    expect(stop()).toBeNull();
+    await pass(1);
+    expect(saveState()).toBe('Still sending…');
+    expect(stop()).not.toBeNull();
+    // Nothing takes focus from where the person put it.
+    expect(document.activeElement).toBe(box);
+    expect(screen.getByRole('tab', { name: 'Meeting notes (unsaved)' })).toBeDefined();
+  });
+
+  it('stops the request at "Stop": the text is not saved, a save is owed, and focus is in the text box', async () => {
+    let answering = false;
+    const { api, box } = await sending((body) =>
+      answering ? saved(body) : new Promise<never>(() => {}),
+    );
+    await pass(1);
+    // A change made meanwhile has come due, and waits for the save in flight.
+    typeInto(box, ' and more');
+    await pass(AUTOSAVE_DELAY_MS);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    const button = stop();
+    if (button === null) throw new Error('no "Stop"');
+    act(() => button.focus());
+    fireEvent.click(button);
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    // The request itself was aborted, not only forgotten.
+    expect(saveSignals().map((signal) => signal?.aborted)).toEqual([true]);
+    expect(
+      screen.getByText('Saving this draft: You stopped this before the service answered.'),
+    ).toBeDefined();
+    expect(screen.getByText(/Whether the service carried it out is not known\./)).toBeDefined();
+    expect(stop()).toBeNull();
+    expect(document.activeElement).toBe(box);
+    expect(textIn(box)).toBe(`${LARGE} and more`);
+    expect(screen.getByRole('tab', { name: 'Meeting notes (not saved)' })).toBeDefined();
+    // Stopped is stopped: nothing is sent by itself, though a change was waiting.
+    await pass(AUTOSAVE_DELAY_MS * 5);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    // The save is owed: the retry sends the text on screen, as a save like any other.
+    answering = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+    expect(api.callsTo(SAVE).at(1)?.body).toBe(`${LARGE} and more`);
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(api.violations).toEqual([]);
+  });
+
+  it('repeats a stopped save under its key when the text is the same, and starts it as "Saving…"', async () => {
+    const { api } = await sending(() => new Promise<never>(() => {}));
+    await pass(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+    // It may have been applied: the same request, so the service does not apply it twice.
+    expect(api.callsTo(SAVE).at(1)).toEqual(api.callsTo(SAVE).at(0));
+    // A new save starts as one: it is not "still" being sent, and there is nothing to stop yet.
+    expect(saveState()).toBe('Saving…');
+    expect(stop()).toBeNull();
+  });
+
+  it('moves focus from "Stop" to the text box when the save answers by itself', async () => {
+    const answers: Array<() => void> = [];
+    const { box } = await sending(
+      (body) => new Promise<Reply>((resolve) => answers.push(() => resolve(saved(body)))),
+    );
+    await pass(1);
+    const button = stop();
+    if (button === null) throw new Error('no "Stop"');
+    act(() => button.focus());
+    act(() => answers.at(0)?.());
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(button.isConnected).toBe(false);
+    expect(document.activeElement).toBe(box);
+  });
+
+  it('times out an ordinary save at that same moment, with nothing to stop', async () => {
+    writable({ [SAVE]: () => new Promise<never>(() => {}) });
+    const { box } = await startEditing();
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    await pass(STILL_SENDING_AFTER_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    expect(stop()).toBeNull();
+    expect(
+      screen.getByText('Saving this draft: The workspace service did not answer in time.'),
+    ).toBeDefined();
   });
 });
 

@@ -72,6 +72,11 @@ export interface DraftSession extends DraftText {
   /** A save is in flight. */
   saving: boolean;
   /**
+   * The save in flight has been under way for so long that the person is told, and may stop it.
+   * It says something only while `saving`: each save starts with it false.
+   */
+  stillSending: boolean;
+  /**
    * What the last save threw; null once a save has answered. While it is set, what the service
    * holds is unknown.
    */
