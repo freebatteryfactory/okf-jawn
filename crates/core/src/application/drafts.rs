@@ -10,12 +10,18 @@
 //! not checked to lie on the head's history: a revision of this workspace that holds the item
 //! is recorded as given. A draft may leave the application header out
 //! or echo it unchanged; any other value is refused before the draft is written.
+//!
+//! A draft never changes the text of a source card: its body is compared byte for byte with the
+//! body the item has at the draft's base (the service normalizes neither line ends nor a
+//! trailing newline anywhere), and a source's text is changed by `correct_digest`. A View has no
+//! draft until its layout and validation land (construction plan M1.6). `commit_items` applies
+//! the same two rules (`refuse_unsupported_draft`) to drafts that predate them.
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{ItemId, Revision};
 use okf_jawn_contract::item::{
-    DiscardDraftRequest, Draft, ItemDocument, ListDraftsRequest, ListDraftsResponse,
-    SaveDraftRequest,
+    DiscardDraftRequest, Draft, DraftContent, ItemDocument, ItemKind, ListDraftsRequest,
+    ListDraftsResponse, SaveDraftRequest,
 };
 
 use super::ApplicationService;
@@ -32,7 +38,8 @@ use crate::storage::StorageScope;
 /// Returns the typed `NotFound` of an invalidated base revision, `NotFound` when the item does
 /// not exist at the head, `NotFound` on `/base_revision` when a first save names a revision at
 /// which the item does not exist, `InvalidInput` on `/properties/okf_jawn` for a changed
-/// application header, or any port error.
+/// application header, `NotImplemented` on `/item_id` for a View, `InvalidInput` on `/body` for a
+/// source card whose body differs from the one at the draft's base, or any port error.
 pub(super) async fn save_draft(
     service: &ApplicationService,
     context: &OperationContext,
@@ -46,11 +53,15 @@ pub(super) async fn save_draft(
     let head = ports.versions.head(&scope).await?;
     let current = ports.versions.show(&scope, &head, request.item_id).await?;
     refuse_header_change(&current.properties, &request.properties, "/properties")?;
+    // A View has no draft: refused before anything is read for it or written.
+    if current.summary.kind == ItemKind::View {
+        return Err(view_has_no_draft(request.item_id));
+    }
     let existing = ports.drafts.get(&scope, request.item_id, editor).await?;
     let base_revision = match existing {
         // A later save keeps the draft's base; naming the head is the explicit rebase.
         Some(saved) if request.base_revision != head => saved.draft.base_revision,
-        Some(_) => head,
+        Some(_) => head.clone(),
         // A first save records the revision the editor saw, which may be behind the head.
         None => {
             if request.base_revision != head {
@@ -59,6 +70,19 @@ pub(super) async fn save_draft(
             request.base_revision
         }
     };
+    if current.summary.kind == ItemKind::Source {
+        // The text the draft is measured against is the item's at the draft's base.
+        let at_base = if base_revision == head {
+            current.body.clone()
+        } else {
+            ports
+                .versions
+                .show(&scope, &base_revision, request.item_id)
+                .await?
+                .body
+        };
+        refuse_source_text_change(request.item_id, &at_base, &request.body)?;
+    }
     // The digest of the drafted body and properties, computed as the item they would commit
     // is, so a draft and that item compare.
     let drafted = ItemDocument {
@@ -82,6 +106,68 @@ pub(super) async fn save_draft(
             },
         )
         .await
+}
+
+/// The refusal of a draft of a View.
+///
+/// `NotImplemented`, as `create_item` answers for a View: the request is well formed and the
+/// operation exists, but this build has no validation for a View document yet (the contract's
+/// rule: "declared but this build does not implement it"), so the caller's input is not what
+/// is wrong and `InvalidInput` would tell it to change something it cannot. Not a success.
+fn view_has_no_draft(item: ItemId) -> ApiError {
+    ApiError::new(
+        ErrorCode::NotImplemented,
+        format!(
+            "item {} is a View; a draft of a View is not implemented in this build, because \
+             a saved View is validated before it is written",
+            item.0
+        ),
+    )
+    .with_field("/item_id")
+}
+
+/// Refuse a draft body that differs from the body a source card has at the draft's base.
+///
+/// The comparison is exact. A card's text is generated extraction or a recorded correction, and
+/// only `correct_digest` records the second (SPEC section 5); a draft would replace the shown
+/// text with no record and the next re-extraction would erase it.
+fn refuse_source_text_change(item: ItemId, at_base: &str, drafted: &str) -> Result<(), ApiError> {
+    if at_base == drafted {
+        return Ok(());
+    }
+    Err(invalid(
+        format!(
+            "item {} is a source card; its text is changed by a correction \
+             (correct_digest), not by a draft",
+            item.0
+        ),
+        "/body",
+    ))
+}
+
+/// The two draft rules for a draft that already exists, as a Snapshot is about to commit it:
+/// a View has no draft, and a source card's draft keeps the body the card has at the draft's
+/// base. Drafts saved before the rules (restored from an archive, for instance) meet them here.
+///
+/// # Errors
+/// The refusals of `save_draft` (same code and field), or any port error reading the item at
+/// the draft's base.
+pub(super) async fn refuse_unsupported_draft(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    held: &DraftContent,
+) -> Result<(), ApiError> {
+    let item = held.draft.item_id;
+    let at_base = service
+        .ports()
+        .versions
+        .show(scope, &held.draft.base_revision, item)
+        .await?;
+    match at_base.summary.kind {
+        ItemKind::Note => Ok(()),
+        ItemKind::View => Err(view_has_no_draft(item)),
+        ItemKind::Source => refuse_source_text_change(item, &at_base.body, &held.body),
+    }
 }
 
 /// Refuse a first save whose base does not hold the item: the resource the draft is based on

@@ -65,6 +65,7 @@ use okf_jawn_contract::read::Selection;
 use okf_jawn_contract::source::SourceReference;
 
 use super::ApplicationService;
+use super::drafts::refuse_unsupported_draft;
 use super::shared::{
     Touched, Write, announce, check_named, commit_with_receipt, invalid, mutation_id, next_page,
     record_receipt, replay_warnings, resolve, resolve_page, store_commit, workspace_scope,
@@ -286,6 +287,10 @@ pub(super) async fn commit_items(
     // Every draft base is a revision this Snapshot reads at.
     for drafted in &drafts {
         check_named(service, &scope, &drafted.draft.base_revision).await?;
+    }
+    // A draft that predates the rules of `save_draft` is refused before anything is committed.
+    for drafted in &drafts {
+        refuse_unsupported_draft(service, &scope, drafted).await?;
     }
     let committed_drafts: Vec<(ItemId, Digest)> = drafts
         .iter()
