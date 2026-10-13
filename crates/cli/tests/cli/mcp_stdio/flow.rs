@@ -1,9 +1,11 @@
-//! What the relay holds and how it ends (the review's notes N5 and N6).
+//! What the relay holds and how it ends (the review's notes N5 and N6, the re-review's F1).
 //!
-//! Everything waiting to be written shares one room counted in bytes; while it is full the
-//! relay takes nothing more from the service and forwards nothing more from its input. When
-//! the input ends, the messages in flight get a bounded time; when the output fails, the
-//! relay stops whatever it was waiting for.
+//! Everything on its way out holds room in one budget counted in bytes, from the moment the
+//! service's double hands it over, as the transport takes room before it reads: a shared part,
+//! and one text more that did not find its room there. While that place is taken the service
+//! can hand over nothing more that needs it, and the relay forwards nothing more from its
+//! input. When the input ends, the messages in flight get a bounded time; when the output
+//! fails, the relay stops whatever it was waiting for.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,12 +14,14 @@ use std::time::Duration;
 use okf_jawn_cli::relay::Limits;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::watch;
 
 use super::{notification, request, response};
 use crate::check::TestResult;
 use crate::support::Outcome;
 use crate::support::doubles::{
-    Broken, FakeTransport, Setup, answered, broken, relay, relay_on, relay_over,
+    Body, Broken, FakeTransport, Script, Setup, answered, broken, relay, relay_on, relay_over,
+    status,
 };
 
 /// The length of every line the service's double answers with in the tests of the room.
@@ -129,38 +133,210 @@ async fn forwarded_while_the_output_stands_still(room: usize) -> Outcome<usize> 
     Ok(forwarded)
 }
 
-/// The room is counted in bytes, and from both sides: with room for exactly two lines, two
-/// wait to be written, a third waits in the exchange's hands and a fourth for the exchange,
-/// so the service hands over four events and no fifth; one byte less room and it is one line
-/// fewer. Once the output is read again, every line comes out.
+/// The room is counted in bytes, and from both sides: with a shared part for exactly two
+/// lines, the service hands over two events and one more, which takes the place beside the
+/// shared part, and no fourth: it would have to be held before it has room. One byte less and
+/// it is one line fewer; one line more and it is one more. Once the output is read again,
+/// every line comes out.
 #[tokio::test]
-async fn what_waits_to_be_written_is_bounded_in_bytes() -> TestResult {
+async fn what_is_held_of_the_service_s_answers_is_bounded_in_bytes() -> TestResult {
     let two_lines = LINE.saturating_mul(2);
     assert_eq!(
         handed_over_while_the_output_stands_still(two_lines).await?,
-        (4, 9)
-    );
-    assert_eq!(
-        handed_over_while_the_output_stands_still(two_lines.saturating_sub(1)).await?,
         (3, 9)
     );
     assert_eq!(
+        handed_over_while_the_output_stands_still(two_lines.saturating_sub(1)).await?,
+        (2, 9)
+    );
+    assert_eq!(
         handed_over_while_the_output_stands_still(LINE.saturating_mul(3)).await?,
-        (5, 9)
+        (4, 9)
     );
     Ok(())
 }
 
-/// While the room is full the relay forwards nothing more from its input, from both sides:
-/// with room for exactly one answer, the first request is forwarded and the second is held;
-/// with one byte more, the second is forwarded too, and its answer then waits for room.
+/// While a text holds the place beside the shared part the relay forwards nothing more from
+/// its input, from both sides: with a shared part for exactly one answer, the second request
+/// is forwarded too, its answer takes that place, and the third is held; with one byte less,
+/// the first answer already takes it, and the second request is held.
 #[tokio::test]
 async fn nothing_more_is_forwarded_while_the_room_is_full() -> TestResult {
-    assert_eq!(forwarded_while_the_output_stands_still(LINE).await?, 1);
+    assert_eq!(forwarded_while_the_output_stands_still(LINE).await?, 2);
     assert_eq!(
-        forwarded_while_the_output_stands_still(LINE.saturating_add(1)).await?,
-        2
+        forwarded_while_the_output_stands_still(LINE.saturating_sub(1)).await?,
+        1
     );
+    assert_eq!(
+        forwarded_while_the_output_stands_still(LINE.saturating_mul(2)).await?,
+        3
+    );
+    Ok(())
+}
+
+/// The budget holds however many messages are in flight (the re-review's F1). Sixteen
+/// requests are in flight, the service answers all of them at the same moment, and the
+/// output takes nothing. The answers the shared part has room for are handed over, and one
+/// more; the others are not held anywhere in the relay. One byte less of room and it is one
+/// answer fewer. Once the output is read, all sixteen come out.
+#[tokio::test]
+async fn the_room_holds_with_sixteen_messages_in_flight() -> TestResult {
+    const FLYING: usize = 16;
+    for (room, held) in [
+        (LINE.saturating_mul(4), 5),
+        (LINE.saturating_mul(4).saturating_sub(1), 4),
+    ] {
+        let arrived = Arc::new(AtomicUsize::new(0));
+        let (open, gate) = watch::channel(false);
+        let transport = FakeTransport::new(move |post, _| {
+            let (arrived, open, mut gate) = (arrived.clone(), open.clone(), gate.clone());
+            Box::pin(async move {
+                let message = serde_json::from_slice::<Value>(&post.body).unwrap_or_default();
+                if arrived.fetch_add(1, Ordering::SeqCst).saturating_add(1) == FLYING {
+                    // The last one is in flight: every answer is ready at once.
+                    let _ = open.send(true);
+                }
+                // The sender lives in every answer, so this ends only when the gate opens.
+                let _ = gate.wait_for(|open| *open).await;
+                answered(&sized(message.get("id"))).reply
+            })
+        });
+        let setup = Setup {
+            limits: Limits {
+                waiting_bytes: room,
+                ..Limits::default()
+            },
+            ..Setup::new(&transport)
+        };
+        let (stdout, mut client) = tokio::io::duplex(1);
+        let input: String = (0..FLYING)
+            .map(|id| request(&json!(id), "tools/call", &json!({})))
+            .collect();
+        let mut running = Box::pin(relay_over(setup, input.as_bytes(), stdout));
+        for _ in 0..TURNS {
+            tokio::select! {
+                biased;
+                early = &mut running => {
+                    return Err(format!("the relay returned while its output stood still: {early:?}").into());
+                }
+                () = tokio::task::yield_now() => {}
+            }
+        }
+        assert_eq!(
+            (transport.posts()?.len(), transport.handed()),
+            (FLYING, held),
+            "a shared part of {room} bytes"
+        );
+        let mut written = Vec::new();
+        let (ran, read) = tokio::join!(running, client.read_to_end(&mut written));
+        assert_eq!(ran?.0, 0);
+        read?;
+        assert_eq!(String::from_utf8(written)?.lines().count(), FLYING);
+        assert_eq!(transport.handed(), FLYING);
+    }
+    Ok(())
+}
+
+/// What the relay has to say in the middle of an answer waits for no room. The room has no
+/// shared part here, so every text needs the one place beside it. The first event of a stream
+/// is no message and is dropped, which the relay says; the second event already waits for the
+/// place. A diagnostic that waited for room at that moment would wait for an event that only
+/// the waiting relay can take: the relay would stand still.
+#[tokio::test]
+async fn what_the_relay_says_in_the_middle_of_an_answer_waits_for_no_room() -> TestResult {
+    let transport = FakeTransport::scripted(|message| Script {
+        events: vec![
+            "no message at all".to_owned(),
+            response(message.get("id").unwrap_or(&Value::Null), &json!({})).to_string(),
+        ],
+        ..status(200, Body::Events)
+    });
+    let setup = Setup {
+        limits: Limits {
+            waiting_bytes: 0,
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let ran = tokio::time::timeout(
+        PATIENCE,
+        relay(
+            setup,
+            request(&json!(1), "tools/call", &json!({})).as_bytes(),
+        ),
+    )
+    .await
+    .map_err(
+        |_| "the relay stood still: a diagnostic waited for room in the middle of an answer",
+    )??;
+    assert_eq!(ran.lines()?, [response(&json!(1), &json!({}))]);
+    assert_eq!(
+        (ran.code, ran.stderr.as_str()),
+        (
+            0,
+            "okf-jawn mcp: dropped an answer of the service that is not a JSON-RPC message\n"
+        )
+    );
+    Ok(())
+}
+
+/// The relay's own lines hold room as the service's answers do. Every request fails before
+/// the service answers, so each gets an error the relay writes itself, and the output takes
+/// nothing. With a shared part of exactly one such line, the second takes the place beside
+/// it and the third request is not forwarded; with one byte less, the first line takes that
+/// place and the second request is not forwarded.
+#[tokio::test]
+async fn the_relay_s_own_lines_hold_room_too() -> TestResult {
+    let failing = || FakeTransport::scripted(|_| broken("connection reset by peer"));
+    let one = relay(
+        Setup::new(&failing()),
+        request(&json!(1), "tools/call", &json!({})).as_bytes(),
+    )
+    .await?;
+    let line = one.stdout.len().saturating_sub(1);
+    assert!(
+        one.stdout.contains("-32603") && line > 100,
+        "{}",
+        one.stdout
+    );
+    for (room, expected) in [(line, 2_usize), (line.saturating_sub(1), 1)] {
+        let transport = failing();
+        let setup = Setup {
+            limits: Limits {
+                waiting_bytes: room,
+                ..Limits::default()
+            },
+            ..Setup::new(&transport)
+        };
+        let (stdout, mut client_out) = tokio::io::duplex(1);
+        let (mut client_in, stdin) = tokio::io::duplex(65_536);
+        let mut running = Box::pin(relay_over(setup, stdin, stdout));
+        for id in 1..=4 {
+            client_in
+                .write_all(request(&json!(id), "tools/call", &json!({})).as_bytes())
+                .await?;
+            for _ in 0..TURNS {
+                tokio::select! {
+                    biased;
+                    early = &mut running => {
+                        return Err(format!("the relay returned while its output stood still: {early:?}").into());
+                    }
+                    () = tokio::task::yield_now() => {}
+                }
+            }
+        }
+        assert_eq!(
+            transport.posts()?.len(),
+            expected,
+            "a shared part of {room} bytes"
+        );
+        drop(client_in);
+        let mut written = Vec::new();
+        let (ran, read) = tokio::join!(running, client_out.read_to_end(&mut written));
+        assert_eq!(ran?.0, 0);
+        read?;
+        assert_eq!(String::from_utf8(written)?.lines().count(), 4);
+    }
     Ok(())
 }
 

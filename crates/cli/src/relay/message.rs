@@ -16,33 +16,18 @@
 
 use serde_json::{Map, Value};
 
-use super::json::{is_json, last, members};
+use super::json::{Noted, Span, noted};
 use super::transport::Post;
-
-/// What the relay reads of a message the service wrote, without changing the text.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct Envelope {
-    /// The id, when the message has one.
-    pub(super) id: Option<Value>,
-    /// Where the id's value stands in the text, when the message has an `id` member.
-    pub(super) id_at: Option<(usize, usize)>,
-    /// Whether the message has a method: a request or a notification of the service.
-    pub(super) method: bool,
-    /// Whether the message has an error object.
-    pub(super) error: bool,
-    /// The protocol version its result names, as an `initialize` result does.
-    pub(super) negotiated: Option<String>,
-}
 
 /// What kind of message a line holds; it decides what the relay owes the client afterwards.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Kind {
     /// A request: exactly one response or error with this id must reach the client.
     Request {
-        /// The request's id, a string or a number.
-        id: Value,
         /// The id as the client wrote it, which is how the relay writes it back.
         written: String,
+        /// The characters the id spells, when it is a string; `None` for a number.
+        spelled: Option<String>,
     },
     /// A notification: nothing is owed; a failure is logged.
     Notification {
@@ -102,30 +87,36 @@ const BASE64_PREFIX: &str = "=?base64?";
 const BASE64_SUFFIX: &str = "?=";
 /// The UTF-8 byte order mark a line may begin with.
 const BYTE_ORDER_MARK: &[u8] = b"\xEF\xBB\xBF";
+/// The longest spelling of the JSON-RPC version `2.0`: three characters of six bytes each as
+/// escapes, and the two quotes.
+const SPELLED_VERSION_BYTES: usize = 20;
 
-impl Envelope {
-    /// Read a text the service wrote. `None` when it is not one JSON value, or not a JSON-RPC
-    /// 2.0 message. When a member occurs twice, the last one counts.
-    pub(super) fn read(text: &str) -> Option<Self> {
-        if !is_json(text) {
-            return None;
+impl Kind {
+    /// Whether `answer`, an id as the service wrote it, is the id of this request.
+    ///
+    /// An id is matched exactly, as JSON-RPC says. A number is the text the client wrote: it
+    /// is not read into a number, so `1.0` is not `1` and two long integers that differ in
+    /// their last digit differ. A string is the characters it spells, because a service that
+    /// reads an id and writes it again may spell a character with another escape.
+    pub(super) fn answered_by(&self, answer: &str) -> bool {
+        match self {
+            Self::Request {
+                written,
+                spelled: None,
+            } => answer == written,
+            Self::Request {
+                spelled: Some(spelled),
+                ..
+            } => {
+                // No spelling of a character is longer than six bytes for each of its own, so
+                // a longer text cannot spell this id and is not read at all.
+                let longest = spelled.len().saturating_mul(6).saturating_add(2);
+                answer.len() <= longest
+                    && serde_json::from_str::<String>(answer).ok().as_deref()
+                        == Some(spelled.as_str())
+            }
+            Self::Notification { .. } | Self::Response => false,
         }
-        let found = members(text)?;
-        let version = serde_json::from_str::<Value>(last(&found, "jsonrpc")?.value).ok()?;
-        if version.as_str() != Some("2.0") {
-            return None;
-        }
-        let id = last(&found, "id");
-        Some(Self {
-            id: id.and_then(|member| serde_json::from_str::<Value>(member.value).ok()),
-            id_at: id.map(|member| (member.start, member.end)),
-            method: last(&found, "method").is_some(),
-            error: last(&found, "error").is_some_and(|member| member.value.starts_with('{')),
-            negotiated: last(&found, "result").and_then(|result| {
-                let inside = members(result.value)?;
-                serde_json::from_str::<String>(last(&inside, "protocolVersion")?.value).ok()
-            }),
-        })
     }
 }
 
@@ -205,9 +196,23 @@ fn headers(
     Ok(headers)
 }
 
+/// Whether `text`, of which `noted` was noted, has an `error` member that is an object.
+pub(super) fn has_error_object(text: &str, noted: &Noted) -> bool {
+    noted
+        .error
+        .is_some_and(|(start, _)| text.as_bytes().get(start) == Some(&b'{'))
+}
+
 /// Whether a JSON value is one JSON-RPC 2.0 message.
 pub(super) fn is_message(value: &Value) -> bool {
     value.get("jsonrpc").and_then(Value::as_str) == Some("2.0") && value.is_object()
+}
+
+/// Whether `text`, of which `noted` was noted, is one JSON-RPC 2.0 message: an object whose
+/// `jsonrpc` is the string `2.0`, whatever escapes spell it.
+pub(super) fn is_version_2(text: &str, noted: &Noted) -> bool {
+    noted.opening.is_some()
+        && spelled(text, noted.jsonrpc, SPELLED_VERSION_BYTES).as_deref() == Some("2.0")
 }
 
 /// The value the `Mcp-Name` header repeats, for the methods that have one.
@@ -253,7 +258,7 @@ pub(super) fn prepare(line: &[u8], lifecycle: &mut Lifecycle) -> Result<Option<O
         .filter(|id| id.is_string() || id.is_number());
     // The id is written back as the client wrote it: a number is not read and spelled again.
     let written = id.map(|id| written_id(line).unwrap_or_else(|| id.to_string()));
-    let id = id.zip(written.as_deref());
+    let id = id.zip(written.clone());
     let written = written.as_deref();
     if !is_message(&value) {
         return Err(invalid(written, "Invalid request: jsonrpc must be \"2.0\""));
@@ -261,8 +266,8 @@ pub(super) fn prepare(line: &[u8], lifecycle: &mut Lifecycle) -> Result<Option<O
     let (kind, method) = match (message.get("method"), message.get("id"), id) {
         (Some(Value::String(method)), _, Some((id, written))) => (
             Kind::Request {
-                id: id.clone(),
-                written: written.to_owned(),
+                written,
+                spelled: id.as_str().map(str::to_owned),
             },
             Some(method.as_str()),
         ),
@@ -312,8 +317,21 @@ pub(super) fn prepare(line: &[u8], lifecycle: &mut Lifecycle) -> Result<Option<O
     }))
 }
 
+/// The string that stands at `place` in `text`, when a string stands there that is no longer
+/// than `most` bytes as it is written. A longer one is not read at all, so reading costs no
+/// more than `most`.
+pub(super) fn spelled(text: &str, place: Option<Span>, most: usize) -> Option<String> {
+    let (start, end) = place?;
+    let written = text.get(start..end)?;
+    if written.len() > most {
+        return None;
+    }
+    serde_json::from_str::<String>(written).ok()
+}
+
 /// The id of the message on `line`, as the client wrote it.
 fn written_id(line: &[u8]) -> Option<String> {
-    let found = members(std::str::from_utf8(line).ok()?)?;
-    Some(last(&found, "id")?.value.to_owned())
+    let text = std::str::from_utf8(line).ok()?;
+    let (start, end) = noted(text)?.id?;
+    Some(text.get(start..end)?.to_owned())
 }

@@ -10,7 +10,7 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use okf_jawn_cli::relay::{Body, HttpTransport};
+use okf_jawn_cli::relay::HttpTransport;
 use okf_jawn_cli::{Credential, Endpoint, RELAY_COMMAND, command};
 use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 use serde_json::{Value, json};
@@ -18,7 +18,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
 use super::request;
 use crate::check::{TestResult, err_of, some};
-use crate::support::doubles::{FakeTransport, Setup, relay, relay_over, status};
+use crate::support::doubles::{Body, FakeTransport, Setup, relay, relay_over, status};
 use crate::support::{TOKEN, cli_reading};
 
 /// An input stream whose every read fails.

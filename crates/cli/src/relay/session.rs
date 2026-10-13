@@ -25,18 +25,45 @@
 //!   written back as the client wrote it. A message to the service is sent as the client
 //!   wrote it.
 //!
-//! What the relay holds. Everything waiting to be written, lines and diagnostics together,
-//! shares one room of `Limits::waiting_bytes` (64 MiB: the length of the longest answer, the
-//! least that still lets every answer through). A text takes its length of that room before
-//! it is queued and gives it back once it is written. While the room is full, an exchange
-//! waits with the answer it has in hand and takes no further event, so the transport stops
-//! reading from the service; and the read loop holds the one message it has read and neither
-//! forwards it nor reads another. Outside that room, each message in flight can hold its
-//! request line (16 MiB), the answer or event being read (64 MiB), one event waiting to be
-//! taken (64 MiB), and the one in hand, with a second copy while the credential is removed
-//! from it (2 x 64 MiB). With sixteen in flight the worst case is about 4.3 GiB. It takes
-//! sixteen event streams that each send events of the full 64 MiB repeating the credential;
-//! an ordinary answer costs once or twice its own length.
+//! What the relay holds of the service's answers. One room (`Room`) is the budget for every
+//! answer from the moment its bytes are taken from the service until they are written, and
+//! for the relay's own lines and diagnostics: 128 MiB, which is `Limits::waiting_bytes` (64
+//! MiB) that all texts share and one text more, at most `Limits::answer_bytes` (64 MiB) long,
+//! that did not find its room there. The shared part is the length of the longest answer, so
+//! that one such answer and everything shorter beside it are read without waiting; the one
+//! text more is what lets the longest answer through when the shared part is full. The
+//! budget is enforced, not estimated: the transport takes room before it holds a byte, and
+//! reads nothing more from the service while there is none, however many messages are in
+//! flight. An answer is then read, made one line, cleaned of the credential and given the
+//! request's id in the buffer it arrived in; nothing copies it and nothing is built from it,
+//! so an answer of many members costs what an answer of one long string costs. While a text
+//! waits for the one place beside the shared part, the read loop holds the one message it
+//! has read and neither forwards it nor reads another.
+//!
+//! What the relay holds besides, which no budget covers:
+//! - Each message in flight holds its request line (at most 16 MiB; sixteen in flight, 256
+//!   MiB), and its id as often as three times more (as written, as read, and in the name
+//!   the relay calls the message by), which matters only for an id of megabytes.
+//! - One request line at a time is read into a tree of values while it is prepared. A line
+//!   of 16 MiB that is one string costs about 50 MiB for that moment; one that is an array of
+//!   8 million numbers was measured at 403 MiB.
+//! - A buffer that grows may be held twice for a moment, so a growing answer can take half
+//!   as much again as its room; an answer whose length the service announced never grows.
+//! - What the HTTP library holds for a connection, and a bit for each level an answer is
+//!   nested (an eighth of its length at most).
+//!
+//! The worst case is therefore about 0.9 GiB: 192 MiB for answers (the budget, and half as
+//! much again while buffers grow), 256 MiB for sixteen request lines of 16 MiB, and about 400
+//! MiB for the one line being prepared. Ids of 16 MiB would bring it to about 1.6 GiB. The
+//! service can cause the first 192 MiB of it; the rest takes a client that writes lines of
+//! megabytes.
+//!
+//! Measured on the built relay of the test profile, Windows 11, peak private bytes of the
+//! process: one answer of 60 MiB costs 65 MiB when it is one long string, 66 MiB when it is
+//! 12.6 million members, and 64 MiB when it is a refusal with an array of 31 million numbers
+//! (before this bound: 98, 1,414 and 1,606 MiB). Sixteen answers of 60 MiB in flight to a
+//! client that reads nothing cost 127 MiB, long strings and many members alike, and 128 MiB
+//! by the time all are written (before: 1,269 MiB for sixteen long strings).
 //!
 //! How it ends. When the input ends, the messages in flight get `Limits::closing` (two
 //! minutes, what the CLI gives one operation) to finish; the relay then returns 0, or names
@@ -55,18 +82,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
-use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::{Id, JoinError, JoinSet};
 
 use super::frame::{Frame, Frames};
-use super::json::one_line;
 use super::launch::{Arrival, Clock, Launcher, Progress, StartPolicy, start_or_connect};
 use super::message::{
-    Envelope, INTERNAL_ERROR, INVALID_REQUEST, Kind, Lifecycle, Outgoing, Refusal, error_line,
-    prepare,
+    INTERNAL_ERROR, INVALID_REQUEST, Kind, Lifecycle, Outgoing, Refusal, error_line,
+    has_error_object, is_version_2, prepare, spelled,
 };
+use super::room::{Held, Room};
 use super::transport::{Body, Transport, TransportError};
 use crate::credential::Credential;
 use crate::run::Streams;
@@ -74,13 +100,13 @@ use crate::run::Streams;
 /// The channels one exchange writes to, the room they share, and the secret kept out of them.
 #[derive(Clone)]
 struct Desk {
-    lines: mpsc::Sender<Queued>,
-    notes: mpsc::Sender<Queued>,
+    lines: mpsc::Sender<Held>,
+    notes: mpsc::Sender<Held>,
     secret: Arc<Credential>,
-    /// One permit for each byte that may still wait to be written.
-    room: Arc<Semaphore>,
-    /// The whole room: no text takes more than this, so the longest one still gets through.
-    budget: u32,
+    /// The budget for everything on its way out.
+    room: Room,
+    /// The longest a text of the service may be; a refusal given the request's id included.
+    most: usize,
 }
 
 /// The messages in flight: their tasks, and what each is called when it has to be named.
@@ -98,8 +124,10 @@ pub struct Limits {
     pub answer_bytes: usize,
     /// Most messages forwarded at the same time.
     pub in_flight: usize,
-    /// Most bytes of lines and diagnostics that may wait to be written. While they fill it,
-    /// nothing more is taken from the service and nothing more is forwarded from the input.
+    /// The shared part of the room: most bytes of answers, lines and diagnostics held at
+    /// once, from the service to the output, besides one text that found no room there.
+    /// While such a text waits, nothing more is taken from the service for it and nothing
+    /// more is forwarded from the input.
     pub waiting_bytes: usize,
     /// How long the messages in flight may still take once the input has ended.
     pub closing: Duration,
@@ -114,8 +142,6 @@ struct Outcome {
     session: Option<String>,
 }
 
-/// A text waiting for its writer, with the room it holds until it is written.
-type Queued = (String, Option<OwnedSemaphorePermit>);
 /// Everything one relay run needs.
 #[derive(Debug)]
 pub struct Relay<T, L, C> {
@@ -161,8 +187,20 @@ const ACCESS_REFUSED: &str = "The okf-jawn service refused this request (HTTP 40
 /// What a request is told when its answer was withheld.
 const ANSWER_WITHHELD: &str = "The okf-jawn service's answer repeats the connector credential \
     outside a JSON string, so it was not passed on";
+/// What the error stream is told when an answer is dropped.
+const DROPPED: &str = "dropped an answer of the service that is not a JSON-RPC message";
+/// The longest message or code of a refusal, in bytes as the service wrote it, that the relay
+/// repeats: more than a person reads of a refusal, and little enough that the relay's own
+/// line stays far shorter than an answer.
+const MESSAGE_BYTES: usize = 8192;
 /// What a request is told when the service's answer is no message.
 const NOT_A_MESSAGE: &str = "The okf-jawn service's answer is not a JSON-RPC message";
+/// The longest protocol version, in bytes as the service wrote it, that an `initialize`
+/// answer can put in force: it travels in a header of every later message.
+const VERSION_BYTES: usize = 256;
+/// What the error stream is told when a line is withheld.
+const WITHHELD: &str =
+    "withheld a line that repeats the connector credential outside a JSON string";
 /// How many events of one answer may wait for the relay to take them: the fewest a channel
 /// holds, because each may be as long as a whole answer.
 const AHEAD: usize = 1;
@@ -229,8 +267,8 @@ impl<E: AsyncWrite + Unpin> Progress for Saying<'_, E> {
 
 impl Default for Limits {
     /// The contract's request-body limit for a line; four times that for an answer; sixteen
-    /// messages in flight; for what waits to be written, the length of the longest answer,
-    /// which is the least that still lets every answer through; and two minutes to close.
+    /// messages in flight; for the shared part of the room, the length of the longest answer;
+    /// and two minutes to close.
     fn default() -> Self {
         Self {
             line_bytes: MAX_REQUEST_BODY_BYTES,
@@ -283,31 +321,38 @@ async fn close(mut flight: Flight, limit: Duration, desk: &Desk) -> u8 {
 /// Returns, in plain words, why it was not written. Anything that is not a message is dropped
 /// and logged: the output stream carries protocol messages only.
 async fn deliver(
-    data: String,
+    mut data: Held,
     kind: &Kind,
     initialize: bool,
     desk: &Desk,
     seen: &mut Seen,
 ) -> Result<(), &'static str> {
-    let Some(envelope) = Envelope::read(&data) else {
-        note(
-            desk,
-            "dropped an answer of the service that is not a JSON-RPC message",
-        )
-        .await;
+    // The text itself is passed on: only the line breaks between its tokens are removed.
+    let Some(noted) = data
+        .one_line()
+        .filter(|noted| is_version_2(data.as_str(), noted))
+    else {
+        // Said without waiting for room: more of the answer may be coming.
+        remark(desk, DROPPED).await;
         return Err(NOT_A_MESSAGE);
     };
-    // The text itself is passed on: only the line breaks between its tokens are removed.
-    if !line(desk, one_line(data)).await {
+    let answers = noted.method.is_none()
+        && noted
+            .id
+            .and_then(|(start, end)| data.as_str().get(start..end))
+            .is_some_and(|id| kind.answered_by(id));
+    let negotiated = if answers && initialize {
+        spelled(data.as_str(), noted.version, VERSION_BYTES)
+    } else {
+        None
+    };
+    if !line(desk, data).await {
         return Err(ANSWER_WITHHELD);
     }
-    if let Kind::Request { id, .. } = kind
-        && !envelope.method
-        && envelope.id.as_ref() == Some(id)
-    {
+    if answers {
         seen.answered = true;
         if initialize {
-            seen.negotiated = envelope.negotiated;
+            seen.negotiated = negotiated;
         }
     }
     Ok(())
@@ -320,7 +365,7 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
         kind,
         initialize,
     } = outgoing;
-    let (events, mut arriving) = mpsc::channel::<String>(AHEAD);
+    let (events, mut arriving) = mpsc::channel::<Held>(AHEAD);
     let streamed = async {
         let mut seen = Seen::default();
         while let Some(data) = arriving.recv().await {
@@ -329,7 +374,7 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
         }
         seen
     };
-    let (reply, mut seen) = tokio::join!(transport.send(post, events), streamed);
+    let (reply, mut seen) = tokio::join!(transport.send(post, events, &desk.room), streamed);
     let mut session = None;
     let failure = match reply {
         Err(TransportError(why)) => Some(format!(
@@ -346,7 +391,7 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
                 "The okf-jawn service ended its answer without a response to this request"
                     .to_owned()
             });
-            line(desk, error_line(Some(written), INTERNAL_ERROR, &why)).await;
+            own(desk, error_line(Some(written), INTERNAL_ERROR, &why)).await;
         }
         (Kind::Request { .. }, Some(why)) => {
             note(desk, &format!("after a request was answered: {why}")).await;
@@ -392,7 +437,7 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
             Ok(Frame::End) => break,
             Ok(Frame::TooLong) => {
                 let why = format!("{TOO_LONG} {} bytes", limits.line_bytes);
-                line(desk, error_line(None, INVALID_REQUEST, &why)).await;
+                own(desk, error_line(None, INVALID_REQUEST, &why)).await;
                 continue;
             }
             Err(error) => {
@@ -405,7 +450,7 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
             Ok(Some(outgoing)) => outgoing,
             Ok(None) => continue,
             Err(Refusal::Answer(answer)) => {
-                line(desk, answer).await;
+                own(desk, answer).await;
                 continue;
             }
             Err(Refusal::Log(why)) => {
@@ -414,9 +459,9 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
             }
         };
         drop(bytes);
-        // While what waits to be written fills its room, this one message is held, and
-        // nothing more is read or forwarded.
-        vacancy(desk).await;
+        // While a text waits for room, this one message is held, and nothing more is read or
+        // forwarded.
+        desk.room.vacancy().await;
         if outgoing.initialize {
             flight.drain(desk).await;
             let outcome = exchange(transport.as_ref(), outgoing, desk).await;
@@ -439,29 +484,35 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
 
 /// Queue one protocol line for the output stream, without the credential.
 ///
-/// Every line the relay writes passes here, the service's own and the relay's alike. It waits
-/// until the line has room among what waits to be written. Returns false when the line was
-/// withheld because it could not be cleaned.
-async fn line(desk: &Desk, text: String) -> bool {
-    let Some(clean) = desk.secret.redact_line(text) else {
-        note(
-            desk,
-            "withheld a line that repeats the connector credential outside a JSON string",
-        )
-        .await;
+/// Every line the relay writes passes here, the service's own and the relay's alike. The line
+/// holds its room already and is cleaned where it stands, so nothing here waits for room.
+/// Returns false when the line was withheld because it could not be cleaned.
+async fn line(desk: &Desk, text: Held) -> bool {
+    let Some(clean) = text.cleaned(&desk.secret) else {
+        remark(desk, WITHHELD).await;
         return false;
     };
-    let held = reserve(desk, clean.len()).await;
     // The receiver is gone only when the output stream failed; the relay then stops.
-    let _ = desk.lines.send((clean, held)).await;
+    let _ = desk.lines.send(clean).await;
     true
 }
 
 /// Queue one diagnostic for the error stream, once it has room.
+///
+/// It waits for room, so it is for the moments when nothing of the message it is about is
+/// still to come: the end of an exchange, and the read loop. In the middle of an answer the
+/// relay says a [`remark`].
 async fn note(desk: &Desk, text: &str) {
-    let held = reserve(desk, text.len()).await;
+    let held = desk.room.hold(text.to_owned()).await;
     // The receiver lives until every sender is dropped.
-    let _ = desk.notes.send((text.to_owned(), held)).await;
+    let _ = desk.notes.send(held).await;
+}
+
+/// Queue one line of the relay's own for the output stream, once it has room; returns false
+/// when it was withheld. It waits for room as [`note`] does, and is for the same moments.
+async fn own(desk: &Desk, text: String) -> bool {
+    let held = desk.room.hold(text).await;
+    line(desk, held).await
 }
 
 /// Forward the input until it ends, or until the output stream fails, whichever is first.
@@ -484,24 +535,12 @@ async fn read<T: Transport, I: AsyncRead + Unpin>(
     }
 }
 
-/// Take the room `length` bytes need among what waits to be written, waiting until it is free.
-///
-/// The room is given back when the permit is dropped, which the writer does once the text is
-/// written. A text longer than the whole room takes all of it.
-async fn reserve(desk: &Desk, length: usize) -> Option<OwnedSemaphorePermit> {
-    let wanted = u32::try_from(length)
-        .unwrap_or(u32::MAX)
-        .min(desk.budget)
-        .max(1);
-    // The semaphore is never closed, so the room is always granted in the end.
-    desk.room.clone().acquire_many_owned(wanted).await.ok()
-}
-
-/// Wait until what waits to be written leaves room: one byte free, and no text that asked
-/// for room before this call still waiting for it.
-async fn vacancy(desk: &Desk) {
-    // The semaphore is never closed. The permit is given back at once: this only waits.
-    drop(desk.room.acquire().await);
+/// Queue one diagnostic of fixed words for the error stream. It takes no room and so never
+/// waits for any, which is what lets the relay say it while an answer is still arriving; the
+/// queue bounds how many wait.
+async fn remark(desk: &Desk, text: &'static str) {
+    // The receiver lives until every sender is dropped.
+    let _ = desk.notes.send(desk.room.remark(text)).await;
 }
 
 /// Run the relay: reach the service, then forward messages until the input ends.
@@ -561,23 +600,20 @@ where
             return 1;
         }
     }
-    // A semaphore holds no more permits than this, and one text asks for no more than a `u32`.
-    let most = Semaphore::MAX_PERMITS.min(usize::try_from(u32::MAX).unwrap_or(usize::MAX));
-    let room = limits.waiting_bytes.min(most).max(1);
-    let (lines, queued_lines) = mpsc::channel::<Queued>(QUEUE);
-    let (notes, mut queued_notes) = mpsc::channel::<Queued>(QUEUE);
+    let (lines, queued_lines) = mpsc::channel::<Held>(QUEUE);
+    let (notes, mut queued_notes) = mpsc::channel::<Held>(QUEUE);
     let desk = Desk {
         lines,
         notes,
         secret: secret.clone(),
-        room: Arc::new(Semaphore::new(room)),
-        budget: u32::try_from(room).unwrap_or(u32::MAX),
+        room: Room::new(limits.waiting_bytes),
+        most: limits.answer_bytes,
     };
     let noting = async {
-        while let Some((text, held)) = queued_notes.recv().await {
-            say(&mut stderr, &secret, &text).await;
+        while let Some(text) = queued_notes.recv().await {
+            say(&mut stderr, &secret, text.as_str()).await;
             // Written: its room is free again.
-            drop(held);
+            drop(text);
         }
     };
     let (code, written, ()) = tokio::join!(
@@ -628,79 +664,78 @@ async fn settle(
 ///
 /// A JSON-RPC error answering a request is the request's answer. The service leaves the id
 /// out, or writes `null`, when it refused the request before reading it; the request's id, as
-/// the client wrote it, is then put into the text (`"id":<id>,` after the opening brace, or in
-/// place of the `null`) and no other byte of the text changes. Any other body is a failure,
-/// described with the service's own code and message when it has them.
+/// the client wrote it, is then put into the text where it stands (`"id":<id>,` after the
+/// opening brace, or in place of the `null`) and no other byte of the text changes. Any other
+/// body is a failure, described with the service's own code and message when it has them and
+/// they are short enough to repeat. The body is read as an answer is: in one pass and into
+/// nothing.
 async fn refusal(
     status: u16,
-    text: String,
+    mut text: Held,
     kind: &Kind,
     desk: &Desk,
     seen: &mut Seen,
 ) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(&text).ok();
-    let message = |pointer: &str| {
-        parsed
-            .as_ref()
-            .and_then(|value| value.pointer(pointer))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
+    let plain = format!("The okf-jawn service answered HTTP {status}");
+    let Some(noted) = text.one_line() else {
+        return Some(plain);
     };
-    if let Some(envelope) = Envelope::read(&text)
-        && envelope.error
+    if let Some(opening) = noted.opening
+        && is_version_2(text.as_str(), &noted)
+        && has_error_object(text.as_str(), &noted)
     {
-        let Kind::Request { id, written } = kind else {
-            return Some(format!(
-                "The okf-jawn service answered HTTP {status}: {}",
-                message("/error/message").unwrap_or_default()
-            ));
+        let Kind::Request { written, .. } = kind else {
+            let message = spelled(text.as_str(), noted.error_message, MESSAGE_BYTES);
+            return Some(format!("{plain}: {}", message.unwrap_or_default()));
         };
-        let (answer, answers) = match (&envelope.id, envelope.id_at) {
-            (_, None) => (with_id(&text, written), true),
-            (Some(Value::Null), Some((start, end))) => (
-                text.get(..start)
-                    .zip(text.get(end..))
-                    .map(|(before, after)| format!("{before}{written}{after}")),
-                true,
-            ),
-            (other, Some(_)) => (Some(text), other.as_ref() == Some(id)),
+        let id = noted
+            .id
+            .and_then(|(start, end)| Some((start..end, text.as_str().get(start..end)?)));
+        let answers = match id {
+            // The service named an id: the error is passed on, whoever it answers.
+            Some((_, named)) if named != "null" => kind.answered_by(named),
+            missing => {
+                let placed = if let Some((null, _)) = missing {
+                    text.splice(null, written, desk.most).await
+                } else {
+                    let member = format!("\"id\":{written},");
+                    text.splice(opening..opening, &member, desk.most).await
+                };
+                if !placed {
+                    return Some(format!(
+                        "{plain} with an error that is too long to pass on with the request's id"
+                    ));
+                }
+                true
+            }
         };
-        let Some(answer) = answer else {
-            return Some(NOT_A_MESSAGE.to_owned());
-        };
-        if !line(desk, one_line(answer)).await {
+        if !line(desk, text).await {
             return Some(ANSWER_WITHHELD.to_owned());
         }
-        if answers {
-            seen.answered = true;
-        }
+        seen.answered |= answers;
         return None;
     }
-    Some(match (message("/code"), message("/message")) {
-        (Some(code), Some(message)) => {
-            format!("The okf-jawn service answered HTTP {status} ({code}): {message}")
-        }
-        _ => format!("The okf-jawn service answered HTTP {status}"),
+    let code = spelled(text.as_str(), noted.code, MESSAGE_BYTES);
+    let message = spelled(text.as_str(), noted.message, MESSAGE_BYTES);
+    Some(match (code, message) {
+        (Some(code), Some(message)) => format!("{plain} ({code}): {message}"),
+        _ => plain,
     })
-}
-
-/// The JSON object `text` with the member `"id":<id>` put first, and nothing else changed.
-fn with_id(text: &str, id: &str) -> Option<String> {
-    let (before, after) = text.split_once('{')?;
-    Some(format!("{before}{{\"id\":{id},{after}"))
 }
 
 /// Write each queued line whole, followed by a line feed, until every sender is gone.
 async fn write<O: AsyncWrite + Unpin>(
-    mut queued: mpsc::Receiver<Queued>,
+    mut queued: mpsc::Receiver<Held>,
     mut output: O,
 ) -> std::io::Result<()> {
-    while let Some((mut text, held)) = queued.recv().await {
-        text.push('\n');
-        output.write_all(text.as_bytes()).await?;
+    while let Some(text) = queued.recv().await {
+        // The line feed is written after the text, not added to it: adding a byte to a
+        // buffer that is full would copy the whole line.
+        output.write_all(text.as_str().as_bytes()).await?;
+        output.write_all(b"\n").await?;
         output.flush().await?;
         // Written: its room is free again.
-        drop(held);
+        drop(text);
     }
     Ok(())
 }

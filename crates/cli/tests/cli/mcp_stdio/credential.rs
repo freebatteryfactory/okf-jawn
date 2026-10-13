@@ -6,13 +6,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use okf_jawn_cli::Credential;
-use okf_jawn_cli::relay::Body;
 use serde_json::{Value, json};
 
 use super::{notification, request, response};
 use crate::check::{TestResult, err_of, some};
 use crate::support::doubles::{
-    FakeTransport, Script, Setup, accepted, answered, broken, relay, status,
+    Body, FakeTransport, Script, Setup, accepted, answered, broken, relay, status,
 };
 use crate::support::http::{Answering, json as json_answer};
 use crate::support::{TOKEN, Untouched, cli, cli_reading, file};
@@ -542,5 +541,38 @@ async fn mcp_stdio_credential_shorter_than_sixteen_characters_is_refused() -> Te
         operated.stderr
     );
     assert!(listener.heard()?.is_empty());
+    Ok(())
+}
+
+/// A line is cleaned in the buffer it stands in (the re-review's F1): what comes back is the
+/// same buffer, shorter, so removing the credential costs no memory beyond the line, however
+/// often the line repeats it. A credential of the least length still leaves the mark its
+/// place. A text that is cut short, which is no JSON, comes back as it went in.
+#[test]
+fn mcp_stdio_credential_is_removed_in_the_buffer_the_line_stands_in() -> TestResult {
+    let credential = some(Credential::parse(TOKEN, "the test")?, "a credential")?;
+    let line = format!("{{\"a\":\"{TOKEN}\",\"b\":\"x{TOKEN}{TOKEN}y\",\"\u{e9}\":1}}");
+    let (place, capacity) = (line.as_ptr(), line.capacity());
+    let clean = some(credential.redact_line(line), "a clean line")?;
+    assert_eq!(
+        clean,
+        "{\"a\":\"[credential]\",\"b\":\"x[credential][credential]y\",\"\u{e9}\":1}"
+    );
+    assert_eq!((clean.as_ptr(), clean.capacity()), (place, capacity));
+    let least = "sixteen-chars-xy";
+    let shortest = some(Credential::parse(least, "the test")?, "a credential")?;
+    assert_eq!(
+        shortest
+            .redact_line(format!("[\"{least}\",\"{least}{least}\"]"))
+            .as_deref(),
+        Some("[\"[credential]\",\"[credential][credential]\"]")
+    );
+    for cut in ["\"abc\\", "\"abc\\u12", "{\"a\":\"x\\u", "\""] {
+        assert_eq!(
+            credential.redact_line(cut.to_owned()).as_deref(),
+            Some(cut),
+            "{cut}"
+        );
+    }
     Ok(())
 }

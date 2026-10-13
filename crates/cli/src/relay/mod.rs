@@ -7,7 +7,9 @@
 //! only writer (SPEC sections 2 and 11).
 //!
 //! - `frame` reads bounded lines; `message` classifies them and derives the HTTP headers;
-//!   `json` reads an answer of the service without writing it again.
+//!   `json` reads an answer of the service in one pass, without building anything from it.
+//! - `room` is the one budget, counted in bytes, for what the relay holds on its way out: an
+//!   answer from the moment its bytes are taken from the service until they are written.
 //! - `transport` and `launch` are the two seams: sending a message and asking whether the
 //!   service is up, and starting the server process. `http` and `launch::ProcessLauncher` are
 //!   the production sides; tests use doubles.
@@ -37,6 +39,7 @@ pub use self::launch::{
     Arrival, ChildState, Clock, Detachment, Launcher, ProcessLauncher, Progress, StartPolicy,
     SystemClock, server_beside, start_or_connect,
 };
+pub use self::room::{Gathering, Held, Room};
 pub use self::session::{Limits, Relay, serve};
 pub use self::sse::EventParser;
 pub use self::transport::{Body, Post, Probe, Reply, Transport, TransportError};
@@ -46,6 +49,7 @@ mod http;
 mod json;
 mod launch;
 mod message;
+mod room;
 mod session;
 mod sse;
 mod transport;

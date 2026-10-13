@@ -4,12 +4,15 @@
 //! lacks the request's id gets it put into its text, and an id is written back as the client
 //! wrote it.
 
-use okf_jawn_cli::relay::Body;
 use serde_json::{Value, json};
 
-use super::request;
+use super::{notification, request, response};
 use crate::check::{TestResult, some};
-use crate::support::doubles::{FakeTransport, Script, Setup, broken, relay, status};
+use okf_jawn_cli::relay::Limits;
+
+use crate::support::doubles::{
+    Body, FakeTransport, Script, Setup, answered, broken, header, relay, status,
+};
 
 /// A `\u` escape of the UTF-16 code unit `code`, four hexadecimal digits.
 fn escape(code: &str) -> String {
@@ -203,6 +206,214 @@ async fn a_request_id_is_written_back_as_the_client_wrote_it() -> TestResult {
             "{id}: {}",
             refused.stdout
         );
+    }
+    Ok(())
+}
+
+/// One request with the id `id`, as written, against a service that answers with `body`.
+async fn asked_as(id: &str, body: &str) -> crate::support::Outcome<crate::support::Ran> {
+    let body = body.to_owned();
+    let transport = FakeTransport::scripted(move |_| status(200, Body::Json(body.clone())));
+    let sent = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"ping\"}}\n");
+    relay(Setup::new(&transport), sent.as_bytes()).await
+}
+
+/// An id is matched exactly (the re-review's note N8). A number is the text the client
+/// wrote and is never read into a number: two long integers that differ in their last digit
+/// are two ids, and `1.0` is not `1`. A string is the characters it spells, whatever escape
+/// spells them. An answer that is not the request's is passed on, and the request still gets
+/// one error of its own.
+#[tokio::test]
+async fn an_id_is_matched_exactly_as_the_client_wrote_it() -> TestResult {
+    let answer = |id: &str| format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{}}}}");
+    for (asked, answered, is_the_answer) in [
+        ("12345678901234567890123", "12345678901234567890123", true),
+        ("12345678901234567890123", "12345678901234567890124", false),
+        ("9007199254740993", "9007199254740992", false),
+        ("1", "1", true),
+        ("1", "1.0", false),
+        ("1.0", "1.0", true),
+        ("1.0", "1", false),
+        ("1", "\"1\"", false),
+        ("\"1\"", "1", false),
+        ("\"a\\/b\"", "\"a/b\"", true),
+        ("\"a/b\"", "\"\\u0061\\/b\"", true),
+        ("\"a/b\"", "\"a/c\"", false),
+        ("\"a/b\"", "\"a/b \"", false),
+        ("\"\"", "\"\"", true),
+    ] {
+        let ran = asked_as(asked, &answer(answered)).await?;
+        let passed_on = format!("{}\n", answer(answered));
+        if is_the_answer {
+            assert_eq!(ran.stdout, passed_on, "{asked} answered by {answered}");
+        } else {
+            let own = some(ran.stdout.strip_prefix(&passed_on), "the answer passed on")?;
+            let start =
+                format!("{{\"jsonrpc\":\"2.0\",\"id\":{asked},\"error\":{{\"code\":-32603,");
+            assert!(
+                own.starts_with(&start),
+                "{asked} answered by {answered}: {own}"
+            );
+            assert_eq!(ran.lines()?.len(), 2);
+        }
+    }
+    Ok(())
+}
+
+/// The protocol version an `initialize` answer names travels in a header of every later
+/// message, so it is bounded: 256 bytes as the service wrote it are put in force, and one
+/// byte more is not.
+#[tokio::test]
+async fn a_protocol_version_is_put_in_force_up_to_its_bound() -> TestResult {
+    for (length, in_force) in [(254_usize, true), (255, false)] {
+        let version = "v".repeat(length);
+        let named = version.clone();
+        let transport = FakeTransport::scripted(move |message| {
+            let id = message.get("id").unwrap_or(&Value::Null);
+            match message.get("method").and_then(Value::as_str) {
+                Some("initialize") => answered(&response(id, &json!({"protocolVersion": named}))),
+                _ => answered(&response(id, &json!({}))),
+            }
+        });
+        let input = format!(
+            "{}{}",
+            request(&json!(0), "initialize", &json!({})),
+            request(&json!(1), "ping", &json!({}))
+        );
+        let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
+        assert_eq!(ran.lines()?.len(), 2, "{}", ran.stdout);
+        let posts = transport.posts()?;
+        let ping = some(posts.get(1), "the second message")?;
+        assert_eq!(
+            header(ping, "MCP-Protocol-Version"),
+            in_force.then_some(version.as_str()),
+            "a version of {length} characters"
+        );
+    }
+    Ok(())
+}
+
+/// What the relay repeats of a refusal is bounded: a message of 8192 bytes as the service
+/// wrote it is repeated, and one of a byte more is not, so the relay's own line stays short.
+/// The refusal's status is said either way.
+#[tokio::test]
+async fn a_refusal_s_message_is_repeated_up_to_its_bound() -> TestResult {
+    for (length, repeated) in [(8190_usize, true), (8191, false)] {
+        let message = "m".repeat(length);
+        // The service's own refusal of a request.
+        let plain = format!("{{\"code\":\"internal\",\"message\":\"{message}\"}}");
+        let ran = answered_with(500, &plain).await?;
+        let lines = ran.lines()?;
+        let said = some(
+            some(lines.first(), "an answer")?
+                .pointer("/error/message")
+                .and_then(Value::as_str),
+            "a message",
+        )?;
+        assert_eq!(said.contains(&message), repeated, "{length}");
+        assert!(said.contains("HTTP 500"), "{said}");
+        assert_eq!(
+            said.len() < 300,
+            !repeated,
+            "{length}: {} bytes",
+            said.len()
+        );
+        // A code is bounded the same way: one too long to repeat leaves the status alone.
+        let coded = format!("{{\"code\":\"{message}\",\"message\":\"brief words\"}}");
+        let ran = answered_with(500, &coded).await?;
+        assert_eq!(ran.stdout.contains("brief words"), repeated, "{length}");
+        // A JSON-RPC error that refuses a notification, which is said on the error stream.
+        let error =
+            format!("{{\"jsonrpc\":\"2.0\",\"error\":{{\"code\":-1,\"message\":\"{message}\"}}}}");
+        let transport = FakeTransport::scripted(move |_| status(400, Body::Json(error.clone())));
+        let ran = relay(
+            Setup::new(&transport),
+            notification("notifications/progress").as_bytes(),
+        )
+        .await?;
+        assert_eq!(ran.stdout, "");
+        assert_eq!(ran.stderr.contains(&message), repeated, "{length}");
+        assert!(ran.stderr.contains("HTTP 400"), "{}", ran.stderr);
+    }
+    Ok(())
+}
+
+/// A refusal that is given the request's id grows by it, and no text of the service is held
+/// longer than an answer may be: at the bound the id is put in and the refusal passed on,
+/// and one byte over the request gets the relay's own error, which says why.
+#[tokio::test]
+async fn a_refusal_given_the_request_id_stays_within_the_answer_bound() -> TestResult {
+    const BOUND: usize = 200;
+    let member = "\"id\":1,".len();
+    for (over, passed_on) in [(0_usize, true), (1, false)] {
+        let frame = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"\"}}".len();
+        let pad = BOUND
+            .saturating_sub(frame)
+            .saturating_sub(member)
+            .saturating_add(over);
+        let body = format!(
+            "{{\"jsonrpc\":\"2.0\",\"error\":{{\"code\":-1,\"message\":\"{}\"}}}}",
+            "m".repeat(pad)
+        );
+        assert_eq!(
+            body.len().saturating_add(member),
+            BOUND.saturating_add(over)
+        );
+        let sent = body.clone();
+        let transport = FakeTransport::scripted(move |_| status(400, Body::Json(sent.clone())));
+        let setup = Setup {
+            limits: Limits {
+                answer_bytes: BOUND,
+                ..Limits::default()
+            },
+            ..Setup::new(&transport)
+        };
+        let ran = relay(
+            setup,
+            request(&json!(1), "tools/call", &json!({})).as_bytes(),
+        )
+        .await?;
+        let lines = ran.lines()?;
+        let only = some(lines.first(), "an answer")?;
+        assert_eq!((lines.len(), only.get("id")), (1, Some(&json!(1))));
+        if passed_on {
+            assert_eq!(ran.stdout.len(), BOUND.saturating_add(1), "{}", ran.stdout);
+            assert_eq!(only.pointer("/error/code"), Some(&json!(-1)));
+        } else {
+            assert_eq!(only.pointer("/error/code"), Some(&json!(-32603)));
+            assert!(
+                ran.stdout
+                    .contains("too long to pass on with the request's id"),
+                "{}",
+                ran.stdout
+            );
+        }
+        // An id put in the place of `null` is bounded the same way.
+        let null = body.replacen('{', "{\"id\":null,", 1);
+        let room = null.len().saturating_sub("null".len()).saturating_add(1);
+        for (bound, passed_on) in [(room, true), (room.saturating_sub(1), false)] {
+            let sent = null.clone();
+            let transport = FakeTransport::scripted(move |_| status(400, Body::Json(sent.clone())));
+            let setup = Setup {
+                limits: Limits {
+                    answer_bytes: bound,
+                    ..Limits::default()
+                },
+                ..Setup::new(&transport)
+            };
+            let ran = relay(
+                setup,
+                request(&json!(1), "tools/call", &json!({})).as_bytes(),
+            )
+            .await?;
+            assert_eq!(
+                ran.stdout.contains("too long to pass on"),
+                !passed_on,
+                "{}",
+                ran.stdout
+            );
+            assert_eq!(ran.lines()?.len(), 1);
+        }
     }
     Ok(())
 }

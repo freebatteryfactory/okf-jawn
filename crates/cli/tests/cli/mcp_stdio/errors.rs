@@ -5,7 +5,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use okf_jawn_cli::relay::Body;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Notify, mpsc};
@@ -13,7 +12,7 @@ use tokio::sync::{Notify, mpsc};
 use super::{notification, request, response};
 use crate::check::{TestResult, some};
 use crate::support::doubles::{
-    Broken, FakeTransport, Setup, accepted, answered, broken, relay, relay_over, status,
+    Body, Broken, FakeTransport, Setup, accepted, answered, broken, relay, relay_over, status,
 };
 use crate::support::{Outcome, Ran};
 

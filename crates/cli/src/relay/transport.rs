@@ -8,6 +8,8 @@ use std::future::Future;
 
 use tokio::sync::mpsc;
 
+use super::room::{Held, Room};
+
 /// One message to send to the service's MCP endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Post {
@@ -19,7 +21,7 @@ pub struct Post {
 }
 
 /// What the service sent back for one [`Post`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Reply {
     /// The HTTP status.
     pub status: u16,
@@ -30,12 +32,12 @@ pub struct Reply {
 }
 
 /// The body of a [`Reply`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Body {
     /// No body: an accepted notification, or any other empty answer.
     Empty,
-    /// One JSON document.
-    Json(String),
+    /// One JSON document, with the room it holds.
+    Json(Held),
     /// An event stream that has ended; each event's data was passed on as it arrived.
     Events,
     /// A body that is neither JSON nor an event stream.
@@ -69,12 +71,17 @@ pub trait Transport: Send + Sync + 'static {
     /// When the answer is an event stream, the data of each event is sent to `events` as it
     /// arrives, and the call returns once the stream has ended.
     ///
+    /// Every text handed over holds its room: the transport takes the room for an answer's
+    /// bytes from `room` before it holds them, and waits while there is none, so it reads no
+    /// further from the service while the room is full. The room goes with the text.
+    ///
     /// # Errors
     /// Returns a [`TransportError`] when the message could not be sent or its answer was cut
     /// off; events delivered before the failure stay delivered.
     fn send(
         &self,
         post: Post,
-        events: mpsc::Sender<String>,
+        events: mpsc::Sender<Held>,
+        room: &Room,
     ) -> impl Future<Output = Result<Reply, TransportError>> + Send;
 }

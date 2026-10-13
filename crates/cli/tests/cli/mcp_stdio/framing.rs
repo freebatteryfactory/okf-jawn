@@ -1,13 +1,13 @@
 //! Ruling 1, framing: one JSON-RPC message per line in each direction, a bounded line, a
 //! parse error for a line that is not JSON, and nothing but protocol messages on stdout.
 
-use okf_jawn_cli::relay::{Body, Frame, Frames, Limits, Probe};
+use okf_jawn_cli::relay::{Frame, Frames, Limits, Probe};
 use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 use serde_json::{Value, json};
 
 use super::{notification, request};
 use crate::check::{TestResult, some};
-use crate::support::doubles::{FakeTransport, Setup, accepted, broken, relay, status};
+use crate::support::doubles::{Body, FakeTransport, Setup, accepted, broken, relay, status};
 
 /// Read every frame of `input` at `limit`.
 async fn frames(input: &[u8], limit: usize) -> std::io::Result<Vec<Frame>> {

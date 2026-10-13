@@ -2,8 +2,11 @@
 //!
 //! The transport double records every message it is asked to send and answers through a
 //! handler the test supplies. It encodes only what the `Transport` doc states: events are
-//! passed on as they arrive, and a failure leaves the delivered events delivered. The launcher
-//! double counts launches and reports the child state it was given.
+//! passed on as they arrive, a failure leaves the delivered events delivered, and every text
+//! handed over holds its room: the double takes room for a text before it hands it over and
+//! waits while there is none, as the transport does for the bytes it reads. A test scripts
+//! plain texts ([`Body`], [`Reply`], [`Events`]); the double counts them. The launcher double
+//! counts launches and reports the child state it was given.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -14,7 +17,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use okf_jawn_cli::relay::{
-    Body, ChildState, Clock, Launcher, Limits, Post, Probe, Progress, Relay, Reply, StartPolicy,
+    ChildState, Clock, Held, Launcher, Limits, Post, Probe, Progress, Relay, Room, StartPolicy,
     Transport, TransportError, serve,
 };
 use okf_jawn_cli::{Credential, Streams};
@@ -25,8 +28,28 @@ use tokio::sync::mpsc;
 use super::{Outcome, Ran, TOKEN};
 use crate::check::some;
 
+/// The body of a scripted [`Reply`]: the transport's own, with a plain text for the double
+/// to take room for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Body {
+    Empty,
+    Json(String),
+    Events,
+    Other,
+}
+
 /// An output stream that fails every write.
 pub struct Broken;
+
+/// Where a scripted answer hands over the events of a stream.
+pub struct Events {
+    to: mpsc::Sender<Held>,
+    room: Room,
+}
+
+/// The relay stopped taking events.
+#[derive(Debug)]
+pub struct Gone;
 
 /// A clock that tests move: time passes only when something waits on it.
 ///
@@ -80,6 +103,8 @@ pub struct FakeTransport {
     probes: Mutex<VecDeque<Probe>>,
     otherwise: Probe,
     probed: AtomicUsize,
+    /// How many JSON answers had their room and were handed over.
+    handed: AtomicUsize,
     /// What each liveness check costs on the clock, in order; then `cost`.
     costs: Mutex<VecDeque<Duration>>,
     cost: Duration,
@@ -88,6 +113,14 @@ pub struct FakeTransport {
 
 /// An output stream that hands each write to a channel, so a test can watch it mid-run.
 pub struct Piped(pub mpsc::UnboundedSender<Vec<u8>>);
+
+/// A scripted answer at the HTTP level, as the transport reports one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reply {
+    pub status: u16,
+    pub session: Option<String>,
+    pub body: Body,
+}
 
 /// One scripted answer: the events of a stream, then the reply or the failure.
 pub struct Script {
@@ -108,10 +141,19 @@ pub struct Setup {
     pub token: &'static str,
 }
 
-type Handler = Box<dyn Fn(Post, mpsc::Sender<String>) -> Sending + Send + Sync>;
+type Handler = Box<dyn Fn(Post, Events) -> Sending + Send + Sync>;
 
 /// The future of one scripted send.
 pub type Sending = Pin<Box<dyn Future<Output = Result<Reply, TransportError>> + Send>>;
+
+impl Events {
+    /// Hand over the data of one event: take room for it, waiting while there is none, and
+    /// pass it on.
+    pub async fn send(&self, text: String) -> Result<(), Gone> {
+        let held = self.room.hold(text).await;
+        self.to.send(held).await.map_err(|_| Gone)
+    }
+}
 
 impl Clock for FakeClock {
     fn now(&self) -> Duration {
@@ -279,10 +321,13 @@ impl FakeTransport {
         })
     }
 
+    /// How many JSON answers the double could hand over: each had to have its room first.
+    pub fn handed(&self) -> usize {
+        self.handed.load(Ordering::SeqCst)
+    }
+
     /// A transport that answers each send through `handler`; the service is up.
-    pub fn new(
-        handler: impl Fn(Post, mpsc::Sender<String>) -> Sending + Send + Sync + 'static,
-    ) -> Arc<Self> {
+    pub fn new(handler: impl Fn(Post, Events) -> Sending + Send + Sync + 'static) -> Arc<Self> {
         Self::probing(handler, Vec::new(), Probe::Up)
     }
 
@@ -315,6 +360,7 @@ impl FakeTransport {
             probes: Mutex::new(probes.into()),
             otherwise,
             probed: AtomicUsize::new(0),
+            handed: AtomicUsize::new(0),
             costs: Mutex::new(costs.into()),
             cost,
             clock: Some(clock.clone()),
@@ -323,7 +369,7 @@ impl FakeTransport {
 
     /// A transport whose liveness checks answer `probes` in order and then `otherwise`.
     pub fn probing(
-        handler: impl Fn(Post, mpsc::Sender<String>) -> Sending + Send + Sync + 'static,
+        handler: impl Fn(Post, Events) -> Sending + Send + Sync + 'static,
         probes: Vec<Probe>,
         otherwise: Probe,
     ) -> Arc<Self> {
@@ -333,6 +379,7 @@ impl FakeTransport {
             probes: Mutex::new(probes.into()),
             otherwise,
             probed: AtomicUsize::new(0),
+            handed: AtomicUsize::new(0),
             costs: Mutex::new(VecDeque::new()),
             cost: Duration::ZERO,
             clock: None,
@@ -384,12 +431,32 @@ impl Transport for FakeTransport {
     async fn send(
         &self,
         post: Post,
-        events: mpsc::Sender<String>,
-    ) -> Result<Reply, TransportError> {
+        events: mpsc::Sender<Held>,
+        room: &Room,
+    ) -> Result<okf_jawn_cli::relay::Reply, TransportError> {
         if let Ok(mut posts) = self.posts.lock() {
             posts.push(post.clone());
         }
-        (self.handler)(post, events).await
+        let events = Events {
+            to: events,
+            room: room.clone(),
+        };
+        let reply = (self.handler)(post, events).await?;
+        let body = match reply.body {
+            Body::Empty => okf_jawn_cli::relay::Body::Empty,
+            Body::Json(text) => {
+                let held = room.hold(text).await;
+                self.handed.fetch_add(1, Ordering::SeqCst);
+                okf_jawn_cli::relay::Body::Json(held)
+            }
+            Body::Events => okf_jawn_cli::relay::Body::Events,
+            Body::Other => okf_jawn_cli::relay::Body::Other,
+        };
+        Ok(okf_jawn_cli::relay::Reply {
+            status: reply.status,
+            session: reply.session,
+            body,
+        })
     }
 }
 

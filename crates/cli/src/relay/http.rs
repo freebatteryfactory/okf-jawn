@@ -4,7 +4,8 @@
 //! and carries the connector credential as a bearer token. The liveness check is a `GET` of
 //! the public liveness path and carries no credential. The client comes from
 //! `Endpoint::client`, so no redirect is followed. One answer, a JSON body or one event of a
-//! stream, is read up to the answer limit and no further.
+//! stream, is read up to the answer limit and no further, and its bytes are held only in room
+//! taken for them first (`Room`): while the room is full, nothing more is read from the service.
 //!
 //! A message has no overall time limit, because an event stream has no fixed length; a
 //! connection attempt and a liveness check are bounded.
@@ -15,6 +16,7 @@ use okf_jawn_contract::error::ApiError;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use tokio::sync::mpsc;
 
+use super::room::{Gathering, Held, Room};
 use super::sse::EventParser;
 use super::transport::{Body, Post, Probe, Reply, Transport, TransportError};
 use crate::credential::Credential;
@@ -64,9 +66,19 @@ impl HttpTransport {
         })
     }
 
-    /// Read a whole body, up to the answer limit.
-    async fn body(&self, response: &mut reqwest::Response) -> Result<Vec<u8>, TransportError> {
-        let mut body = Vec::new();
+    /// Read a whole body, up to the answer limit, into room taken for it.
+    async fn body(
+        &self,
+        response: &mut reqwest::Response,
+        room: &Room,
+    ) -> Result<Gathering, TransportError> {
+        let mut body = room.gather(self.answer_bytes);
+        // The length the service announces spares the buffer its growing and decides nothing:
+        // the bytes that arrive are what is checked against the limit.
+        if let Some(length) = response.content_length() {
+            body.expect(usize::try_from(length).unwrap_or(usize::MAX))
+                .await;
+        }
         while let Some(chunk) = response.chunk().await.map_err(|error| failed(&error))? {
             if body.len().saturating_add(chunk.len()) > self.answer_bytes {
                 return Err(TransportError(format!(
@@ -74,7 +86,7 @@ impl HttpTransport {
                     self.answer_bytes
                 )));
             }
-            body.extend_from_slice(&chunk);
+            body.extend(&chunk).await;
         }
         Ok(body)
     }
@@ -99,7 +111,8 @@ impl Transport for HttpTransport {
     async fn send(
         &self,
         post: Post,
-        events: mpsc::Sender<String>,
+        events: mpsc::Sender<Held>,
+        room: &Room,
     ) -> Result<Reply, TransportError> {
         let mut request = self
             .client
@@ -128,25 +141,24 @@ impl Transport for HttpTransport {
             .unwrap_or_default()
             .to_ascii_lowercase();
         let body = if status.is_success() && media.starts_with(EVENT_STREAM) {
-            let mut parser = EventParser::new(self.answer_bytes);
+            let mut parser = EventParser::new(self.answer_bytes, room);
             while let Some(chunk) = response.chunk().await.map_err(|error| failed(&error))? {
-                // What a chunk completes is passed on even when its tail is refused.
-                let mut ready = Vec::new();
-                let fed = parser.feed(&chunk, &mut ready);
-                for data in ready {
+                // Each event is passed on as soon as it is whole, so what a chunk completes
+                // is passed on even when its tail is refused.
+                let mut rest = chunk.as_ref();
+                while let Some(data) = parser.next(&mut rest).await? {
                     events.send(data).await.map_err(|_| {
                         TransportError("the relay stopped reading the event stream".to_owned())
                     })?;
                 }
-                fed?;
             }
             Body::Events
         } else {
-            let bytes = self.body(&mut response).await?;
+            let bytes = self.body(&mut response, room).await?;
             if bytes.is_empty() {
                 Body::Empty
             } else if media.starts_with(JSON) {
-                Body::Json(String::from_utf8(bytes).map_err(|_| {
+                Body::Json(bytes.into_text().ok_or_else(|| {
                     TransportError("the service's JSON answer is not UTF-8".to_owned())
                 })?)
             } else {

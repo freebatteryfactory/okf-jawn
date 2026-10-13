@@ -14,7 +14,9 @@
 //!   the line as a JSON parser would, so the secret is found under the spellings JSON has for
 //!   its characters (an escaped quote, backslash or slash, and a `\u` escape), and replaces
 //!   those bytes and no others. A line that spells the secret outside a string, as a number
-//!   does, cannot be both clean and still JSON: it is refused whole.
+//!   does, cannot be both clean and still JSON: it is refused whole. The line is cleaned in
+//!   the buffer it stands in, in one pass that keeps no record of what it found: the line
+//!   only becomes shorter, so cleaning needs no memory beyond the line itself.
 //!
 //! Neither finds a secret that was transformed (Base64, a hash, split over two strings).
 
@@ -43,10 +45,10 @@ struct Unit {
     inside: bool,
 }
 
-/// Walks a JSON line unit by unit, decoding the escapes inside its strings.
-#[derive(Debug)]
-struct Units<'line> {
-    bytes: &'line [u8],
+/// Walks a JSON line unit by unit, decoding the escapes inside its strings. It holds its
+/// place and not the line, so the line can be rewritten behind it.
+#[derive(Debug, Default)]
+struct Units {
     at: usize,
     inside: bool,
 }
@@ -214,6 +216,11 @@ impl Credential {
     /// One JSON `line` with the secret replaced in every string that spells it, whatever
     /// escapes spell it; a line without the secret comes back as it is.
     ///
+    /// The line is cleaned in the buffer it came in, which is returned: each unit is moved
+    /// back over what was removed before it, and a spelling of the secret is overwritten by
+    /// the mark. The mark always has its place: it is 12 bytes, and a secret is at least 16
+    /// characters, each spelled with a byte or more.
+    ///
     /// Returns `None` when the line spells the secret outside a string or across two of them:
     /// replacing it there would leave no JSON, so the line must not be written at all.
     #[must_use]
@@ -222,18 +229,26 @@ impl Credential {
         let fallback = fallbacks(secret);
         let mut matched = 0_usize;
         let mut run = 0_usize;
+        // Where, in the clean text, each of the last units starts: as many as the secret is long.
         let mut starts = VecDeque::with_capacity(secret.len().saturating_add(1));
-        let mut found = Vec::new();
-        for unit in Units::new(&line) {
+        let mut bytes = line.into_bytes();
+        let mut units = Units::default();
+        // Where the clean text ends so far; never past the unit being read.
+        let mut clean = 0_usize;
+        while let Some(unit) = units.next(&bytes) {
             run = if unit.inside {
                 run.saturating_add(1)
             } else {
                 0
             };
-            starts.push_back(unit.start);
+            starts.push_back(clean);
             if starts.len() > secret.len() {
                 starts.pop_front();
             }
+            if clean != unit.start {
+                bytes.copy_within(unit.start..unit.end, clean);
+            }
+            clean = clean.saturating_add(unit.end.saturating_sub(unit.start));
             while matched > 0 && secret.get(matched) != Some(&unit.byte) {
                 matched = fallback
                     .get(matched.saturating_sub(1))
@@ -247,22 +262,19 @@ impl Credential {
                 if run < secret.len() {
                     return None;
                 }
-                found.push((starts.front().copied()?, unit.end));
+                let from = starts.front().copied()?;
+                bytes
+                    .get_mut(from..clean)?
+                    .get_mut(..REDACTED.len())?
+                    .copy_from_slice(REDACTED.as_bytes());
+                clean = from.saturating_add(REDACTED.len());
+                starts.clear();
                 matched = 0;
             }
         }
-        if found.is_empty() {
-            return Some(line);
-        }
-        let mut clean = String::with_capacity(line.len());
-        let mut copied = 0;
-        for (start, end) in found {
-            clean.push_str(line.get(copied..start)?);
-            clean.push_str(REDACTED);
-            copied = end;
-        }
-        clean.push_str(line.get(copied..)?);
-        Some(clean)
+        bytes.truncate(clean);
+        // Whole units were moved or replaced by ASCII, so the text is UTF-8 as it was.
+        String::from_utf8(bytes).ok()
     }
 }
 
@@ -272,12 +284,11 @@ impl Debug for Credential {
     }
 }
 
-impl Iterator for Units<'_> {
-    type Item = Unit;
-
-    fn next(&mut self) -> Option<Unit> {
+impl Units {
+    /// The next unit of `bytes`, which is the line from the place this has reached on.
+    fn next(&mut self, bytes: &[u8]) -> Option<Unit> {
         let start = self.at;
-        let first = *self.bytes.get(start)?;
+        let first = *bytes.get(start)?;
         let (byte, length, inside) = match (self.inside, first) {
             (false, _) => {
                 self.inside = first == b'"';
@@ -288,28 +299,19 @@ impl Iterator for Units<'_> {
                 (first, 1, false)
             }
             (true, b'\\') => {
-                let (byte, length) = escape(self.bytes.get(start.saturating_add(1)..));
+                let (byte, length) = escape(bytes.get(start.saturating_add(1)..));
                 (byte, length, true)
             }
             (true, _) => (first, 1, true),
         };
-        self.at = start.saturating_add(length);
+        // An escape the line cuts short ends where the line does.
+        self.at = start.saturating_add(length).min(bytes.len());
         Some(Unit {
             start,
             end: self.at,
             byte,
             inside,
         })
-    }
-}
-
-impl<'line> Units<'line> {
-    fn new(line: &'line str) -> Self {
-        Self {
-            bytes: line.as_bytes(),
-            at: 0,
-            inside: false,
-        }
     }
 }
 

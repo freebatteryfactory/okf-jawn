@@ -6,18 +6,28 @@
 //! event. An event is yielded when its type is absent or `message` and its data is not blank;
 //! comments, `id`, `retry`, other event types and blank priming events are dropped. An event
 //! that the stream never ends with a blank line is dropped, as the event-stream format says.
-//! One event's buffered bytes never exceed the limit.
+//!
+//! Invariants:
+//! - One event's buffered bytes never exceed the limit.
+//! - What is buffered of an event stands in one buffer that holds room for its capacity
+//!   ([`Gathering`]): the data read so far, then the line being read. A `data` line is moved
+//!   back within that buffer, not copied to another, and an event is handed over as soon as
+//!   its blank line is read, before anything more is taken from the bytes at hand.
 
+use super::room::{Gathering, Held, Room};
 use super::transport::TransportError;
 
 /// Splits the bytes of an event stream into event data.
 #[derive(Debug)]
 pub struct EventParser {
     limit: usize,
-    line: Vec<u8>,
-    data: Vec<u8>,
-    kind: Vec<u8>,
+    /// The data of the event being read, then the line being read.
+    held: Gathering,
+    /// Where the data ends and the line being read starts.
+    data: usize,
     has_data: bool,
+    /// Whether the event names a type other than `message`.
+    other: bool,
     started: bool,
 }
 
@@ -25,101 +35,115 @@ pub struct EventParser {
 const BYTE_ORDER_MARK: &[u8] = b"\xEF\xBB\xBF";
 
 impl EventParser {
-    /// A parser that refuses an event whose buffered bytes exceed `limit`.
+    /// End the current event and yield its data when it is a message.
+    fn end_event(&mut self) -> Result<Option<Held>, TransportError> {
+        self.held.truncate(self.data);
+        let data = self.held.take();
+        let other = std::mem::take(&mut self.other);
+        self.data = 0;
+        self.has_data = false;
+        if other {
+            return Ok(None);
+        }
+        let text = data.into_text().ok_or_else(|| {
+            TransportError("an event of the service's event stream is not UTF-8".to_owned())
+        })?;
+        Ok(Some(text).filter(|text| !text.as_str().trim().is_empty()))
+    }
+
+    /// Take one finished line, which stands after the data in the buffer: a field of the
+    /// current event, or the blank line that ends it and yields its data.
+    fn end_line(&mut self) -> Result<Option<Held>, TransportError> {
+        // The line is read where it stands, and its places noted, before anything moves.
+        let all = self.held.bytes();
+        let mut end = all.len();
+        let mut start = self.data.min(end);
+        if end > start && all.last() == Some(&b'\r') {
+            end = end.saturating_sub(1);
+        }
+        let mut line = all.get(start..end).unwrap_or_default();
+        if !self.started {
+            self.started = true;
+            if let Some(rest) = line.strip_prefix(BYTE_ORDER_MARK) {
+                start = start.saturating_add(BYTE_ORDER_MARK.len());
+                line = rest;
+            }
+        }
+        if line.is_empty() {
+            return self.end_event();
+        }
+        let colon = line.iter().position(|byte| *byte == b':');
+        let field = colon.map_or(line, |colon| line.get(..colon).unwrap_or_default());
+        let (data, event) = (field == b"data", field == b"event");
+        let mut value_at = colon.map_or(end, |colon| start.saturating_add(colon).saturating_add(1));
+        if value_at < end && all.get(value_at) == Some(&b' ') {
+            value_at = value_at.saturating_add(1);
+        }
+        let value = all.get(value_at..end).unwrap_or_default();
+        let named_other = !(value.is_empty() || value == b"message");
+        if data {
+            // The value is moved back to stand after the data read so far, with a line feed
+            // between them. It never moves forward: `data:` stood before it.
+            self.held.truncate(end);
+            let to = if self.has_data {
+                self.held.put(self.data, b'\n');
+                self.data.saturating_add(1)
+            } else {
+                self.data
+            };
+            self.held.keep_from(value_at, to);
+            self.data = self.held.len();
+            self.has_data = true;
+        } else {
+            if event {
+                self.other = named_other;
+            }
+            self.held.truncate(self.data);
+        }
+        Ok(None)
+    }
+
+    /// A parser that refuses an event whose buffered bytes exceed `limit`, and takes the room
+    /// for what it buffers from `room`.
     #[must_use]
-    pub fn new(limit: usize) -> Self {
+    pub fn new(limit: usize, room: &Room) -> Self {
         Self {
             limit,
-            line: Vec::new(),
-            data: Vec::new(),
-            kind: Vec::new(),
+            held: room.gather(limit),
+            data: 0,
             has_data: false,
+            other: false,
             started: false,
         }
     }
 
-    /// Take the next bytes of the stream and add the data of each event they complete to
-    /// `events`.
+    /// Take bytes of the stream from the front of `bytes` until they complete an event, and
+    /// return its data; `None` when `bytes` are used up first. Call it again with what is
+    /// left of `bytes` once the event is handed over. Waits while there is no room for what
+    /// it has to buffer.
     ///
     /// # Errors
     /// Returns a [`TransportError`] when an event is larger than the limit or is not UTF-8;
-    /// the events completed before it are in `events` all the same.
-    pub fn feed(&mut self, bytes: &[u8], events: &mut Vec<String>) -> Result<(), TransportError> {
-        let mut parts = bytes.split(|byte| *byte == b'\n').peekable();
-        while let Some(part) = parts.next() {
-            if self
-                .line
-                .len()
-                .saturating_add(self.data.len())
-                .saturating_add(part.len())
-                > self.limit
-            {
+    /// the events returned before it stay returned.
+    pub async fn next(&mut self, bytes: &mut &[u8]) -> Result<Option<Held>, TransportError> {
+        while !bytes.is_empty() {
+            let feed = bytes.iter().position(|byte| *byte == b'\n');
+            let part = bytes.get(..feed.unwrap_or(bytes.len())).unwrap_or_default();
+            if self.held.len().saturating_add(part.len()) > self.limit {
                 return Err(TransportError(format!(
                     "one event of the service's event stream exceeds {} bytes",
                     self.limit
                 )));
             }
-            self.line.extend_from_slice(part);
-            if parts.peek().is_some() {
-                self.end_line(events)?;
+            self.held.extend(part).await;
+            let used = part.len().saturating_add(usize::from(feed.is_some()));
+            *bytes = bytes.get(used..).unwrap_or_default();
+            if feed.is_some()
+                && let Some(event) = self.end_line()?
+            {
+                return Ok(Some(event));
             }
         }
-        Ok(())
-    }
-
-    /// Take one finished line: a field of the current event, or the blank line that ends it.
-    fn end_line(&mut self, events: &mut Vec<String>) -> Result<(), TransportError> {
-        let mut line = std::mem::take(&mut self.line);
-        if line.last() == Some(&b'\r') {
-            line.pop();
-        }
-        let line = if self.started {
-            line.as_slice()
-        } else {
-            self.started = true;
-            line.strip_prefix(BYTE_ORDER_MARK).unwrap_or(&line)
-        };
-        if line.is_empty() {
-            return self.end_event(events);
-        }
-        let (field, value) = match line.iter().position(|byte| *byte == b':') {
-            Some(at) => {
-                let value = line.get(at.saturating_add(1)..).unwrap_or_default();
-                (
-                    line.get(..at).unwrap_or_default(),
-                    value.strip_prefix(b" ").unwrap_or(value),
-                )
-            }
-            None => (line, b"".as_slice()),
-        };
-        match field {
-            b"data" => {
-                if self.has_data {
-                    self.data.push(b'\n');
-                }
-                self.data.extend_from_slice(value);
-                self.has_data = true;
-            }
-            b"event" => self.kind = value.to_vec(),
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// End the current event and yield its data when it is a message.
-    fn end_event(&mut self, events: &mut Vec<String>) -> Result<(), TransportError> {
-        let data = std::mem::take(&mut self.data);
-        let kind = std::mem::take(&mut self.kind);
-        self.has_data = false;
-        if !(kind.is_empty() || kind == b"message") {
-            return Ok(());
-        }
-        let text = String::from_utf8(data).map_err(|_| {
-            TransportError("an event of the service's event stream is not UTF-8".to_owned())
-        })?;
-        if !text.trim().is_empty() {
-            events.push(text);
-        }
-        Ok(())
+        Ok(None)
     }
 }

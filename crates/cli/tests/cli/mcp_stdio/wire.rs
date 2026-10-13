@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use okf_jawn_cli::relay::{
-    Body, EventParser, HttpTransport, Post, Probe, Transport, TransportError,
+    EventParser, HttpTransport, Post, Probe, Room, Transport, TransportError,
 };
 use okf_jawn_cli::{Credential, Endpoint};
 use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 
 use super::{notification, request};
 use crate::check::{TestResult, err_of, some};
+use crate::support::doubles::{Body, Reply};
 use crate::support::http::{Answering, Heard, answer, closed, events, json as json_answer};
 use crate::support::{Outcome, TOKEN, Untouched, cli, cli_reading};
 
@@ -31,19 +32,47 @@ fn mentioning<'heard>(heard: &'heard [Heard], text: &str) -> Outcome<&'heard Hea
     )?)
 }
 
+/// Feed `bytes` to `parser` and add the data of each event they complete to `events`.
+async fn fed(
+    parser: &mut EventParser,
+    mut bytes: &[u8],
+    events: &mut Vec<String>,
+) -> Result<(), TransportError> {
+    while let Some(event) = parser.next(&mut bytes).await? {
+        events.push(event.as_str().to_owned());
+    }
+    Ok(())
+}
+
 /// Send `post` through `transport` and collect the reply and the events passed on.
 async fn send(
     transport: &HttpTransport,
     post: Post,
-) -> (
-    Result<okf_jawn_cli::relay::Reply, TransportError>,
-    Vec<String>,
-) {
+) -> (Result<Reply, TransportError>, Vec<String>) {
+    send_within(transport, post, &Room::new(1_048_576)).await
+}
+
+/// [`send`], with the room the transport takes for what it reads. The reply and the events
+/// come back as plain texts, and the room they held is free again.
+async fn send_within(
+    transport: &HttpTransport,
+    post: Post,
+    room: &Room,
+) -> (Result<Reply, TransportError>, Vec<String>) {
     let (sender, mut receiver) = mpsc::channel(64);
-    let reply = transport.send(post, sender).await;
+    let reply = transport.send(post, sender, room).await.map(|reply| Reply {
+        status: reply.status,
+        session: reply.session,
+        body: match reply.body {
+            okf_jawn_cli::relay::Body::Empty => Body::Empty,
+            okf_jawn_cli::relay::Body::Json(text) => Body::Json(text.as_str().to_owned()),
+            okf_jawn_cli::relay::Body::Events => Body::Events,
+            okf_jawn_cli::relay::Body::Other => Body::Other,
+        },
+    });
     let mut passed = Vec::new();
     while let Some(event) = receiver.recv().await {
-        passed.push(event);
+        passed.push(event.as_str().to_owned());
     }
     (reply, passed)
 }
@@ -385,8 +414,9 @@ async fn an_answer_without_a_body_or_of_another_kind_is_told_apart() -> TestResu
 }
 
 /// The event-stream framing: however the bytes are split, the same events come out.
-#[test]
-fn mcp_stdio_event_stream_framing() -> TestResult {
+#[tokio::test]
+async fn mcp_stdio_event_stream_framing() -> TestResult {
+    let room = Room::new(1_048_576);
     let stream = "\u{feff}: a comment\n\
                   data: one\n\n\
                   event: message\ndata:two\ndata: lines\n\n\
@@ -397,37 +427,48 @@ fn mcp_stdio_event_stream_framing() -> TestResult {
                   unknown: field\ndata:  four\n\n\
                   data: never ended";
     let expected = ["one", "two\nlines", "three", " four"];
-    let mut whole = EventParser::new(1024);
+    let mut whole = EventParser::new(1024, &room);
     let mut events = Vec::new();
-    whole
-        .feed(stream.as_bytes(), &mut events)
+    fed(&mut whole, stream.as_bytes(), &mut events)
+        .await
         .map_err(|error| error.0)?;
     assert_eq!(events, expected);
-    let mut split = EventParser::new(1024);
+    let mut split = EventParser::new(1024, &room);
     let mut events = Vec::new();
     for byte in stream.as_bytes() {
-        split
-            .feed(std::slice::from_ref(byte), &mut events)
+        fed(&mut split, std::slice::from_ref(byte), &mut events)
+            .await
             .map_err(|error| error.0)?;
     }
     assert_eq!(events, expected);
 
-    let mut bounded = EventParser::new(16);
+    let mut bounded = EventParser::new(16, &room);
     let mut events = Vec::new();
-    bounded
-        .feed(b"data: 0123456789\n\ndata: 0123456789\n\n", &mut events)
-        .map_err(|error| error.0)?;
+    fed(
+        &mut bounded,
+        b"data: 0123456789\n\ndata: 0123456789\n\n",
+        &mut events,
+    )
+    .await
+    .map_err(|error| error.0)?;
     assert_eq!(events, ["0123456789", "0123456789"]);
-    let refused = err_of(bounded.feed(b"data: kept\n\ndata: 0123456789a", &mut events))?;
+    let refused = err_of(
+        fed(
+            &mut bounded,
+            b"data: kept\n\ndata: 0123456789a",
+            &mut events,
+        )
+        .await,
+    )?;
     assert!(refused.0.contains("16 bytes"), "{}", refused.0);
     assert_eq!(
         events.len(),
         3,
         "the event before the oversized one is kept"
     );
-    let mut invalid = EventParser::new(64);
+    let mut invalid = EventParser::new(64, &room);
     assert!(
-        err_of(invalid.feed(b"data: \xff\xfe\n\n", &mut events))?
+        err_of(fed(&mut invalid, b"data: \xff\xfe\n\n", &mut events).await)?
             .0
             .contains("UTF-8")
     );
@@ -468,5 +509,66 @@ async fn the_relay_as_shipped_explains_a_server_it_cannot_start() -> TestResult 
     );
     assert!(ran.stderr.contains(&missing), "{}", ran.stderr);
     assert!(!read.load(Ordering::SeqCst), "stdin was read");
+    Ok(())
+}
+
+/// The production transport holds the bytes of an answer only in room it took for them (the
+/// re-review's F1). A JSON answer whose length the service announced holds exactly that
+/// length; the data of an event holds room too; each gives it back when it is dropped. And
+/// while the room has no place, the transport waits: the answer lies ready on the wire and
+/// is not taken until the text that holds the place is gone.
+#[tokio::test]
+async fn the_transport_holds_an_answer_only_in_room_it_took() -> TestResult {
+    let body = format!("\"{}\"", "a".repeat(298));
+    let listener = Answering::with(vec![
+        json_answer("200 OK", &body),
+        events(&format!("data: {}\n\n", "b".repeat(300))),
+        json_answer("200 OK", &body),
+    ])
+    .await?;
+    let transport = transport(&listener.origin(), 1024)?;
+    let post = || Post {
+        body: b"{}".to_vec(),
+        headers: Vec::new(),
+    };
+    let room = Room::new(1000);
+    let (sender, _receiver) = mpsc::channel(4);
+    let reply = transport
+        .send(post(), sender, &room)
+        .await
+        .map_err(|error| error.0)?;
+    assert_eq!(
+        room.free(),
+        700,
+        "a body of 300 bytes holds 300 bytes of room"
+    );
+    drop(reply);
+    assert_eq!(room.free(), 1000);
+    let (sender, mut receiver) = mpsc::channel(4);
+    transport
+        .send(post(), sender, &room)
+        .await
+        .map_err(|error| error.0)?;
+    let event = some(receiver.recv().await, "an event")?;
+    assert_eq!(event.len(), 300);
+    assert!(room.free() <= 700, "the event holds {} bytes", room.free());
+    drop(event);
+    assert_eq!(room.free(), 1000);
+    // No shared part, and the one place beside it is taken.
+    let narrow = Room::new(0);
+    let first = narrow.hold("a text that has the place".to_owned()).await;
+    let (sender, _receiver) = mpsc::channel(4);
+    let mut sending = Box::pin(transport.send(post(), sender, &narrow));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut sending)
+            .await
+            .is_err(),
+        "the transport took an answer it had no room for"
+    );
+    drop(first);
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(30), sending)
+        .await?
+        .map_err(|error| error.0)?;
+    assert_eq!(reply.status, 200);
     Ok(())
 }

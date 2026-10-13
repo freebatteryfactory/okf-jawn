@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use okf_jawn_cli::relay::{Body, Limits, Reply};
+use okf_jawn_cli::relay::Limits;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, Semaphore, mpsc};
 
@@ -14,7 +14,8 @@ use super::{notification, request, response};
 use crate::check::{TestResult, some};
 use crate::support::Outcome;
 use crate::support::doubles::{
-    FakeTransport, Piped, Setup, accepted, answered, header, relay, relay_over, status, stream,
+    Body, FakeTransport, Piped, Reply, Setup, accepted, answered, header, relay, relay_over,
+    status, stream,
 };
 
 /// How long a test waits for something that a correct relay does at once.
@@ -73,6 +74,8 @@ async fn an_event_reaches_the_client_before_the_stream_ends() -> TestResult {
     let watching = async {
         let first = some(reading.recv().await, "a first line")?;
         assert!(String::from_utf8(first)?.contains("notifications/progress"));
+        // The line feed that ends a line is written after it.
+        assert_eq!(reading.recv().await.as_deref(), Some(b"\n".as_slice()));
         seen.notify_one();
         let last = some(reading.recv().await, "a last line")?;
         assert!(String::from_utf8(last)?.contains("\"result\""));
