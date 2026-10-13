@@ -619,7 +619,7 @@ test.describe('changing the tree and the naming rules', () => {
       'The text of the YAML view is still being read. Nothing was sent or changed',
       { timeout: 1_000 },
     );
-    expect(page.workers()).toHaveLength(1);
+    await expect.poll(() => page.workers().length).toBe(1);
     // At the limit the reading is ended, and the person is told in plain words.
     await expect(alert).toContainText('This YAML cannot be read. Nothing of it is sent.');
     await expect(alert).toContainText(tooComplex);
