@@ -170,6 +170,18 @@ export function extractionLabels(extraction: ExtractionSummary | null | undefine
   return labels;
 }
 
+/**
+ * The labels of a source's text that say whose text it is: not the converter's, or corrected by a
+ * person. How the conversion itself stands is said apart (`ConversionState`).
+ */
+export function textLabels(extraction: ExtractionSummary | null | undefined): string[] {
+  if (extraction === null || extraction === undefined) return [];
+  const labels: string[] = [];
+  if (extraction.text_origin !== 'converter') labels.push(TEXT_ORIGIN[extraction.text_origin]);
+  if (extraction.corrected) labels.push(CORRECTED);
+  return labels;
+}
+
 export function describeFailure(reason: FailureReason): string {
   switch (reason.kind) {
     case 'damaged':

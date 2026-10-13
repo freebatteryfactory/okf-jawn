@@ -12,6 +12,12 @@
  * A tab's name carries how the item's draft stands, in brackets after its title: "(draft)",
  * "(unsaved)" or "(not saved)". The mark is the item's, so a tab that shows a cited revision has it
  * too.
+ *
+ * A tab also carries what is said of its item besides its name, in brackets after the title: for
+ * a source that is anything but converted, its conversion mark ("(conversion pending)", "(format
+ * not supported)"), as its row of the tree has it. These words are the tab's description
+ * (`aria-describedby`), not part of its name: the name stays the item's title, and the words are
+ * read after it.
  */
 import { Tabs } from '@base-ui/react/tabs';
 import { useQuery } from '@tanstack/react-query';
@@ -19,6 +25,7 @@ import { Fragment, useEffect, useRef } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import type { Revision } from '../../api/generated/types.gen';
 import { DocumentView, itemOptions } from '../documents/DocumentView';
+import { conversionWord } from '../documents/describe';
 import { useDraftMarks } from '../drafts/marks';
 import type { Snapshotted } from '../drafts/snapshot';
 import type { ItemSelection } from './search-params';
@@ -198,6 +205,7 @@ function DocumentPane({
                   key={itemId}
                   value={itemId}
                   data-item-id={itemId}
+                  aria-describedby={tabStateId(pane.id, itemId)}
                   className="tab"
                   onKeyDown={(event) => {
                     if (event.key !== 'Delete') return;
@@ -205,7 +213,12 @@ function DocumentPane({
                     onClose(pane.id, itemId);
                   }}
                 >
-                  <TabLabel workspaceId={workspaceId} itemId={itemId} head={head} />
+                  <TabLabel
+                    workspaceId={workspaceId}
+                    itemId={itemId}
+                    head={head}
+                    stateId={tabStateId(pane.id, itemId)}
+                  />
                 </Tabs.Tab>
               ))}
             </Tabs.List>
@@ -272,6 +285,9 @@ function DocumentPane({
   );
 }
 
+/** The identity of the element that describes a tab: one for each tab of each pane. */
+const tabStateId = (paneId: string, itemId: string) => `tab-state-${paneId}-${itemId}`;
+
 /**
  * A tab's name is the item's title from the cache (until it is known, a short identity), then how
  * the item's draft stands. Both are read at the head the workspace shows, whatever revision the
@@ -281,10 +297,13 @@ function TabLabel({
   workspaceId,
   itemId,
   head,
+  stateId,
 }: {
   workspaceId: string;
   itemId: string;
   head: Revision;
+  /** The identity of the element that holds the tab's description. */
+  stateId: string;
 }) {
   const item = useQuery(itemOptions(workspaceId, itemId, head));
   const summary = item.data?.summary;
@@ -292,10 +311,15 @@ function TabLabel({
   // The service holds a draft when `get_item` carries one or `list_drafts` lists the item.
   const listed = useDraftMarks(workspaceId)(itemId);
   const mark = listed ?? ((item.data?.draft ?? null) !== null ? 'draft' : null);
+  const conversion = conversionWord(summary?.extraction);
   return (
     <span className="tab-label">
       {name}
       {mark === null ? null : <span className="tab-mark"> ({mark})</span>}
+      {/* Always there, so the tab's description always names an element; hidden from the name. */}
+      <span id={stateId} aria-hidden="true" className="tab-mark">
+        {conversion === null ? '' : ` (${conversion})`}
+      </span>
     </span>
   );
 }

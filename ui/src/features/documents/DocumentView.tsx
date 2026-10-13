@@ -5,7 +5,8 @@
  *
  * A partial read says so and offers its continuation, which resumes the same resolved read;
  * continuing moves keyboard focus to the part it loaded, and a live region says what happened.
- * Warnings, partial extraction and agent-supplied text are shown, never smoothed over. Each
+ * Warnings, partial extraction and agent-supplied text are shown, never smoothed over. A source
+ * says how its conversion stands, whatever the state (`ConversionState`). Each
  * operation's failure is shown where its content would have been, and stays there while it is
  * tried again (`useRetry`), so a retry never drops keyboard focus.
  *
@@ -48,7 +49,8 @@ import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
 import { type FailureRetry, useRetry } from '../errors/retry';
 import type { ItemSelection } from '../explorer/search-params';
-import { describeSelection, extractionLabels, short } from './describe';
+import { ConversionState } from './ConversionState';
+import { describeSelection, short, textLabels } from './describe';
 import { Properties } from './Properties';
 import { PropertiesForm } from './PropertiesForm';
 import { SafeMarkdown } from './SafeMarkdown';
@@ -425,6 +427,11 @@ export function DocumentView({
         {summary?.description ? <p>{summary.description}</p> : null}
       </header>
 
+      <ConversionState
+        workspaceId={workspaceId}
+        outcome={document?.source?.extraction.outcome ?? null}
+        status={summary?.extraction?.status ?? extraction?.status ?? null}
+      />
       {pinned && (
         <PinnedRevision
           workspaceId={workspaceId}
@@ -545,7 +552,7 @@ export function DocumentView({
             </details>
           )}
 
-          {extractionLabels(extraction).map((label) => (
+          {textLabels(extraction).map((label) => (
             <p key={label} role="note" className="notice">
               {label}
             </p>

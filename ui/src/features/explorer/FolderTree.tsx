@@ -40,6 +40,7 @@ import {
   type TreeApi,
 } from 'react-arborist';
 import type { ItemSummary, Revision } from '../../api/generated/types.gen';
+import { conversionWord } from '../documents/describe';
 import { type DraftMark, useDraftMarks } from '../drafts/marks';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
@@ -82,12 +83,6 @@ export interface FolderTreeProps {
 /** The height of a one-line row; a row whose name wraps measures taller. */
 const ROW_HEIGHT = 30;
 const ROLE_ICON = { note: FileText, source: FileBox, view: ChartColumn } as const;
-const EXTRACTION_WORD = {
-  pending: 'conversion pending',
-  partial: 'partly converted',
-  failed: 'conversion failed',
-  unsupported: 'format not supported',
-} as const;
 
 const folderId = (folder: string) => `folder:${folder}`;
 const itemNodeId = (itemId: string) => `item:${itemId}`;
@@ -505,9 +500,7 @@ export function FolderTree({
 }
 
 function extractionWord(item: ItemSummary | null): string | null {
-  return item?.extraction && item.extraction.status !== 'completed'
-    ? EXTRACTION_WORD[item.extraction.status]
-    : null;
+  return conversionWord(item?.extraction);
 }
 
 /** The row's accessible name: the label, then the type name and any conversion state. */
