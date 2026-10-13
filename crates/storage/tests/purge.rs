@@ -58,6 +58,9 @@ macro_rules! uuid {
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
+/// A ledger row as the table holds it: state, token, lease expiry, response and finish time.
+type RowState = (String, i64, i64, Option<String>, Option<i64>);
+
 /// Accepts every candidate.
 struct Accept;
 
@@ -1039,9 +1042,6 @@ async fn purge_empties_the_ledger_of_a_copy_that_records_no_workspace() -> TestR
     );
     Ok(())
 }
-
-/// A ledger row as the table holds it: state, token, lease expiry, response and finish time.
-type RowState = (String, i64, i64, Option<String>, Option<i64>);
 
 /// The row under the idempotency key numbered `n`.
 fn ledger_row(records: &Path, n: u32) -> Fallible<RowState> {
