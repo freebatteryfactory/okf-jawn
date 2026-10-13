@@ -4,25 +4,30 @@
  * against expected length/hash").
  *
  * The uploads run here, not in the import page, so they go on when the page's components are
- * unmounted. `UPLOADS_AT_ONCE` files are under way at a time; a file that fails keeps its place in
- * the list and the others go on.
+ * unmounted. Up to `UPLOADS_AT_ONCE` files are under way at a time, and together no more than
+ * `HELD_BYTES_AT_ONCE` of them (a file under way is held in memory, see below); a file that fails
+ * keeps its place in the list and the others go on.
  *
  * One try of one file:
- * 1. The file is read once for its hash (`hash.ts`), one file at a time, so one file's content is
- *    in memory at once whatever the number under way.
+ * 1. The file is read once (`hash.ts`), one file at a time. That one reading gives the hash and
+ *    the bytes that are sent: the bytes sent are the bytes hashed. The reading is held until the
+ *    try ends. A reading whose length is not the one listed is a file that changed since it was
+ *    chosen, and nothing is asked for it. A reading whose hash is not the one an earlier try
+ *    announced is a file that changed between two tries: the slot that try opened was announced
+ *    for other content, so this try opens a new one.
  * 2. `create_upload` announces the name, the folder, the length (a decimal count) and the hash,
  *    under the entry's slot key. It is asked at the start of every try: a repeat under the same key
  *    opens nothing and answers the slot the service already holds, with the bytes it holds
  *    (`received_bytes`).
- * 3. `upload_content` sends the bytes the slot lacks: the whole file into a fresh slot, the rest
- *    of it into one that holds a part (the service appends). It is skipped when the slot holds
+ * 3. `upload_content` sends the bytes the slot lacks: the whole reading into a fresh slot, the
+ *    rest of it into one that holds a part (the service appends). It is skipped when the slot holds
  *    them all. The answer must say that the slot now holds exactly the file's length.
  * 4. `complete_upload` carries the hash, under the entry's finish key. The file counts as uploaded
  *    only when the answer says `complete` and holds exactly the file's length. Anything else is a
  *    failure, never "uploaded".
  *
  * A retry is a new try of the same file on the same slot under the same keys, so nothing is opened
- * or sent twice. The exception is a slot that cannot take this file any more: `complete_upload` or
+ * or sent twice; it reads the file again, since nothing of a file is kept in memory between tries. The exception is a slot that cannot take this file any more: `complete_upload` or
  * `create_upload` answered `conflict` (what the slot holds, or how it was announced, does not match
  * the file), the slot is gone (`not_found`), its count of bytes could not be read, or its finish
  * was not confirmed. Then the next try reads the file again and opens a new slot under new keys.
@@ -36,12 +41,28 @@
  *
  * Progress is written to the list when the whole-percent value changes, not at every report of
  * the browser, so a large list is not redrawn many times a second.
+ *
+ * Memory. Each file under way holds its reading: its length, from when it is read until its try
+ * ends, and about twice that while it is hashed (`hash.ts` says why). A file is given its turn
+ * only when the lengths of the files under way and its own are together within
+ * `HELD_BYTES_AT_ONCE` (a file alone always is: no file over `MAX_FILE_BYTES` is ever given a
+ * turn); files take their turn in list order, so a large file is not passed over by the small
+ * ones behind it. With one file read at a time, the
+ * page holds at most about `HELD_BYTES_AT_ONCE` plus the length of the file being hashed: 1 GiB
+ * for the largest file alone, and no more than that for any list.
  */
 import { completeUpload, createUpload, uploadContent } from '../../api/generated/sdk.gen';
 import { bytesSender } from '../../app/upload-transport';
 import { classifyFailure } from '../errors/failure';
-import { sha256Hex } from './hash';
-import { toBeSent, type UploadEntry, type UploadStep, underWay, useUploads } from './upload-list';
+import { type FileReading, readForUpload } from './hash';
+import {
+  MAX_FILE_BYTES,
+  toBeSent,
+  type UploadEntry,
+  type UploadStep,
+  underWay,
+  useUploads,
+} from './upload-list';
 
 /**
  * How many files are under way at once: three.
@@ -52,6 +73,26 @@ import { toBeSent, type UploadEntry, type UploadStep, underWay, useUploads } fro
  * requests of small files.
  */
 export const UPLOADS_AT_ONCE = 3;
+
+/**
+ * How many bytes of files may be under way at once, by their listed lengths: as much as the
+ * largest single file the page takes. Small files run `UPLOADS_AT_ONCE` at a time as before; two
+ * files that together are larger than this run one after the other.
+ */
+export const HELD_BYTES_AT_ONCE = MAX_FILE_BYTES;
+
+/** The reading of a file does not have the length it was listed with: it changed since. */
+export class FileChanged extends Error {
+  readonly listed: number;
+  readonly read: number;
+
+  constructor(listed: number, read: number) {
+    super(`The file was listed with ${listed} bytes and read with ${read}`);
+    this.name = 'FileChanged';
+    this.listed = listed;
+    this.read = read;
+  }
+}
 
 /** The service answered `upload_content` holding another count than the file's length. */
 export class UploadIncomplete extends Error {
@@ -96,10 +137,10 @@ function bytesIn(count: string): number | null {
   return /^\d+$/.test(count) ? Number(count) : null;
 }
 
-function readInTurn(file: File, signal: AbortSignal): Promise<string> {
+function readInTurn(file: File, signal: AbortSignal): Promise<FileReading> {
   const turn = reading.then(() => {
     if (signal.aborted) throw new DOMException('The upload was removed', 'AbortError');
-    return sha256Hex(file);
+    return readForUpload(file);
   });
   reading = turn.catch(() => undefined);
   return turn;
@@ -126,10 +167,16 @@ async function run(id: string): Promise<void> {
     // For the type: only an entry that is `chosen` or `failed` is given a turn, and each has a File.
     if (file === null) return;
     uploads().change(id, { state: 'reading', sent: 0 });
-    const sha256 = entry.sha256 ?? (await readInTurn(file, signal));
+    // The one reading of this try: its bytes are what is sent, its hash what is announced.
+    const { bytes, sha256 } = await readInTurn(file, signal);
     // Removed while it was read: nothing is asked for it.
     if (signal.aborted) return;
-    uploads().change(id, { sha256 });
+    if (bytes.size !== size) throw new FileChanged(size, bytes.size);
+    // An earlier try announced a slot for other content: the file changed between the tries.
+    const changed = entry.sha256 !== null && entry.sha256 !== sha256;
+    const slotKey = changed ? crypto.randomUUID() : entry.slotKey;
+    const finishKey = changed ? crypto.randomUUID() : entry.finishKey;
+    uploads().change(id, { sha256, slotKey, finishKey });
 
     step = 'slot';
     const { data: slot } = await createUpload({
@@ -139,7 +186,7 @@ async function run(id: string): Promise<void> {
         relative_path: entry.folder,
         size: String(size),
         sha256,
-        idempotency_key: entry.slotKey,
+        idempotency_key: slotKey,
       },
       signal,
       throwOnError: true,
@@ -150,7 +197,7 @@ async function run(id: string): Promise<void> {
     if (held < size) {
       step = 'bytes';
       uploads().change(id, { state: 'sending', sent: held });
-      const rest = held === 0 ? file : file.slice(held);
+      const rest = held === 0 ? bytes : bytes.slice(held);
       let shown = Math.floor((100 * held) / size);
       const { data: sent } = await uploadContent({
         path: { workspace_id: workspaceId, upload_id: slot.id },
@@ -175,7 +222,7 @@ async function run(id: string): Promise<void> {
         workspace_id: workspaceId,
         upload_id: slot.id,
         sha256,
-        idempotency_key: entry.finishKey,
+        idempotency_key: finishKey,
       },
       signal,
       throwOnError: true,
@@ -202,11 +249,19 @@ async function run(id: string): Promise<void> {
   }
 }
 
-/** Start the waiting files, in list order, up to `UPLOADS_AT_ONCE` under way. */
+/**
+ * Start the waiting files, in list order: up to `UPLOADS_AT_ONCE` under way, and together within
+ * `HELD_BYTES_AT_ONCE`. The first that does not fit ends the round, so the order is kept.
+ */
 function pump() {
   for (const entry of uploads().entries) {
     if (running.size >= UPLOADS_AT_ONCE) return;
-    if (entry.state === 'waiting' && !running.has(entry.id)) void run(entry.id);
+    if (entry.state !== 'waiting' || running.has(entry.id)) continue;
+    const held = uploads()
+      .entries.filter((other) => running.has(other.id))
+      .reduce((sum, other) => sum + other.size, 0);
+    if (held + entry.size > HELD_BYTES_AT_ONCE) return;
+    void run(entry.id);
   }
 }
 

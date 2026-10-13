@@ -30,12 +30,14 @@ import { collisionKey, type PathProblem, pathProblem } from './paths';
  * The largest file this page uploads: 512 MiB.
  *
  * Finishing an upload needs the file's SHA-256 (`complete_upload`), and the browser's hash takes
- * the whole content as one buffer (`hash.ts`), so a file must fit in memory once. The generated
- * client states no bound (`CreateUploadRequest.size` is any decimal count) and no operation
- * reports the service's, so this bound is the page's own, chosen and not measured: one buffer of
- * this size at a time (files are hashed one after another) stays well inside what a browser tab
- * may hold on an ordinary computer, and is larger than any document the workspace is designed
- * around. A file the service itself finds too large is refused there and shown as such.
+ * the whole content as one buffer (`hash.ts`), so a file is held in memory while it is uploaded:
+ * its length, and about twice that while it is hashed. For this bound that is about 1 GiB at the
+ * peak and 512 MiB while the file is sent (`hash.ts` and `uploading.ts` say what is held and what
+ * bounds it across a list). The generated client states no bound (`CreateUploadRequest.size` is
+ * any decimal count) and no operation reports the service's, so this bound is the page's own,
+ * chosen and not measured: it is larger than any document the workspace is designed around, and
+ * its peak is what a browser tab can be expected to hold on an ordinary computer, not what every
+ * tab can. A file the service itself finds too large is refused there and shown as such.
  */
 export const MAX_FILE_BYTES = 512 * 1024 * 1024;
 

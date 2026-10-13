@@ -411,14 +411,17 @@ describe('choosing files', () => {
       'Too large: this page uploads files of up to 512 MB. It will not be sent.',
     );
     expect(rowOf('at.bin').textContent).toContain('Not sent yet.');
-    // Only the two that can be sent are counted.
+    expect(rowOf('under.bin').textContent).toContain('Not sent yet.');
+    // Only the two that can be sent are counted, and the one over the bound is given no turn.
+    // (These stand-in files report a length they do not have, so nothing of them is uploaded:
+    // each reads as changed since it was chosen. The bound is decided before that, from the
+    // length the browser reports.)
     fireEvent.click(screen.getByRole('button', { name: 'Upload 2 files' }));
-    await waitFor(() => expect(api.callsTo(CREATE)).toHaveLength(2));
-    expect(api.callsTo(CREATE).map((body) => [body.filename, body.size])).toEqual([
-      ['under.bin', String(MAX_FILE_BYTES - 1)],
-      ['at.bin', String(MAX_FILE_BYTES)],
-    ]);
+    await notUploaded('under.bin');
+    await notUploaded('at.bin');
     expect(rowOf('over.bin').textContent).toContain('Too large');
+    expect(rowOf('over.bin').textContent).not.toContain('Not uploaded.');
+    expect(api.callsTo(CREATE)).toEqual([]);
   });
 
   it('offers nothing to a person who may only read', async () => {
@@ -728,7 +731,7 @@ describe('uploading', () => {
       transfer.breakConnection();
       return undefined;
     });
-    const { sent } = setup(service);
+    const { api, sent } = setup(service);
     await openImport();
     const file = fileOf('a.txt', 'abc');
     const read = vi.spyOn(file, 'arrayBuffer');
@@ -737,12 +740,127 @@ describe('uploading', () => {
     await notUploaded('a.txt');
     fireEvent.click(within(rowOf('a.txt')).getByRole('button', { name: 'Try again' }));
     await uploaded('a.txt');
-    // The same slot: the file was read once, for its hash, and not again.
-    expect(read).toHaveBeenCalledTimes(1);
+    // Each try reads the file once: nothing of it is kept in memory between two tries.
+    expect(read).toHaveBeenCalledTimes(2);
+    // The same slot, asked again under the same key with the same hash.
+    const creates = api.callsTo(CREATE);
+    expect(creates).toHaveLength(2);
+    expect(creates.at(1)).toEqual(creates.at(0));
     // The slot said it holds the whole file: no byte was sent a second time.
     expect(sent.transfers).toHaveLength(1);
     expect(service.slots).toHaveLength(1);
     expect(await service.held(service.slots.at(0))).toBe('abc');
+  });
+
+  it('sends the bytes it hashed: one reading of the file gives both', async () => {
+    const service = uploadService();
+    const { api, sent } = setup(service);
+    await openImport();
+    // A file that is being written: every reading of it gives other content.
+    const file = fileOf('a.txt', 'abc');
+    let readings = 0;
+    vi.spyOn(file, 'arrayBuffer').mockImplementation(() => {
+      readings += 1;
+      return Promise.resolve(new TextEncoder().encode(readings === 1 ? 'one' : 'two').buffer);
+    });
+    // A browser reads a File it is given to send; a reading taken here is not read again.
+    const sliced = vi.spyOn(file, 'slice');
+    choose('Choose files…', [file]);
+    upload();
+    await uploaded('a.txt');
+    expect(readings).toBe(1);
+    expect(sliced).not.toHaveBeenCalled();
+    // What was sent is that reading, and not the File: the service, which hashes what arrives,
+    // verified it against the hash that was announced.
+    const transfer = sent.transfers.at(0);
+    expect(transfer?.bytes).not.toBe(file);
+    expect(await transfer?.bytes.text()).toBe('one');
+    expect(await service.held(service.slots.at(0))).toBe('one');
+    expect(api.callsTo(CREATE).at(0)?.sha256).toBe(api.callsTo(COMPLETE).at(0)?.sha256);
+    expect(service.slots.at(0)?.complete).toBe(true);
+  });
+
+  it('opens a new slot when the file changed between two tries: the first slot was announced for other content', async () => {
+    const service = uploadService();
+    // The first try's bytes arrive in part, then the connection breaks.
+    service.script.put.push((transfer) => {
+      service.slots.at(0)?.parts.push(transfer.bytes.slice(0, 2));
+      transfer.breakConnection();
+      return undefined;
+    });
+    const { api, sent } = setup(service);
+    await openImport();
+    const file = fileOf('a.txt', 'abc');
+    let readings = 0;
+    vi.spyOn(file, 'arrayBuffer').mockImplementation(() => {
+      readings += 1;
+      return Promise.resolve(new TextEncoder().encode(readings === 1 ? 'abc' : 'xyz').buffer);
+    });
+    choose('Choose files…', [file]);
+    upload();
+    await notUploaded('a.txt');
+    fireEvent.click(within(rowOf('a.txt')).getByRole('button', { name: 'Try again' }));
+    await uploaded('a.txt');
+    // The slot that holds "ab" of the old content is not finished with the new one's rest.
+    const creates = api.callsTo(CREATE);
+    expect(creates).toHaveLength(2);
+    expect(creates.at(1)?.idempotency_key).not.toBe(creates.at(0)?.idempotency_key);
+    expect(creates.at(1)?.sha256).not.toBe(creates.at(0)?.sha256);
+    expect(service.slots).toHaveLength(2);
+    expect(await sent.transfers.at(1)?.bytes.text()).toBe('xyz');
+    expect(await service.held(service.slots.at(1))).toBe('xyz');
+    expect(service.slots.map((slot) => slot.complete)).toEqual([false, true]);
+  });
+
+  it('asks nothing for a file whose length is not the one it was listed with, and says it changed', async () => {
+    const { api, sent } = setup();
+    await openImport();
+    // Listed with 3 bytes; by the time it is read it has 5.
+    const file = fileOf('a.txt', 'abc');
+    vi.spyOn(file, 'arrayBuffer').mockResolvedValue(new TextEncoder().encode('abcde').buffer);
+    choose('Choose files…', [file]);
+    upload();
+    await notUploaded('a.txt');
+    const row = rowOf('a.txt');
+    expect(row.textContent).toContain('Uploading a.txt: This file changed since you chose it.');
+    expect(row.textContent).toContain(
+      'It was listed with 3 bytes and now has 5. Nothing of it was sent. Remove it from the list and choose it again.',
+    );
+    // The same reading would come again: no retry is offered.
+    expect(within(row).queryByRole('button', { name: /again/i })).toBeNull();
+    expect(api.callsTo(CREATE)).toEqual([]);
+    expect(sent.transfers).toEqual([]);
+  });
+
+  it('gives a file its turn only when it fits in memory beside the files under way, and keeps the order', async () => {
+    setup();
+    await openImport();
+    // Two files that do not fit together, and a small one behind them.
+    const half = MAX_FILE_BYTES / 2 + 1;
+    const first = fileOfSize('first.bin', half);
+    const second = fileOfSize('second.bin', half);
+    let finishFirst: (read: ArrayBuffer) => void = () => undefined;
+    vi.spyOn(first, 'arrayBuffer').mockReturnValue(
+      new Promise<ArrayBuffer>((resolve) => {
+        finishFirst = resolve;
+      }),
+    );
+    const readSecond = vi.spyOn(second, 'arrayBuffer');
+    const small = fileOf('small.txt', 'abc');
+    const readSmall = vi.spyOn(small, 'arrayBuffer');
+    choose('Choose files…', [first, second, small]);
+    fireEvent.click(screen.getByRole('button', { name: 'Upload 3 files' }));
+    await waitFor(() => expect(rowOf('first.bin').textContent).toContain('Reading the file…'));
+    // The second would not fit beside the first; the small one would, and waits behind it.
+    expect(rowOf('second.bin').textContent).toContain('Waiting for its turn.');
+    expect(rowOf('small.txt').textContent).toContain('Waiting for its turn.');
+    expect(readSecond).not.toHaveBeenCalled();
+    expect(readSmall).not.toHaveBeenCalled();
+    // The first ends (its stand-in does not have the length it reports): the others get their turn.
+    finishFirst(new ArrayBuffer(3));
+    await notUploaded('first.bin');
+    await uploaded('small.txt');
+    expect(readSecond).toHaveBeenCalledTimes(1);
   });
 
   it('opens a new slot, and reads the file again, after the service refused the finish', async () => {

@@ -10,7 +10,7 @@
 import { classifyFailure, type FailureMessage } from '../errors/failure';
 import { FileUnreadable, HashUnavailable } from './hash';
 import type { UploadStep } from './upload-list';
-import { SlotUnusable, UploadIncomplete, UploadNotConfirmed } from './uploading';
+import { FileChanged, SlotUnusable, UploadIncomplete, UploadNotConfirmed } from './uploading';
 
 const TRY_AGAIN = { kind: 'retry', label: 'Try again' } as const;
 const SEND_AGAIN = { kind: 'retry', label: 'Send it again' } as const;
@@ -26,6 +26,13 @@ export function uploadWords(failure: {
       advice:
         'It may have been moved, changed or deleted since you chose it, or be too large for this browser to read at once. Try again, or remove it and choose it again.',
       action: TRY_AGAIN,
+    };
+  }
+  if (error instanceof FileChanged) {
+    return {
+      title: 'This file changed since you chose it.',
+      advice: `It was listed with ${error.listed} bytes and now has ${error.read}. Nothing of it was sent. Remove it from the list and choose it again.`,
+      action: { kind: 'none' },
     };
   }
   if (error instanceof HashUnavailable) {
