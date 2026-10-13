@@ -3,7 +3,7 @@
 //! tests move. The keys in `tests/keys/` exist only for these tests.
 #![cfg(feature = "runtime")]
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -37,6 +37,8 @@ struct Issuer {
     answers: AtomicUsize,
     /// Signalled when a fetch gives its answer.
     answered: Notify,
+    /// The next fetch panics instead of answering: a key source that is broken, not down.
+    broken: AtomicBool,
 }
 
 /// A clock that moves only when a test advances it.
@@ -81,6 +83,10 @@ impl KeySource for Issuer {
                 self.waiting.notify_one();
                 gate.notified().await;
             }
+            assert!(
+                !self.broken.swap(false, Ordering::SeqCst),
+                "the key source broke"
+            );
             self.answers.fetch_add(1, Ordering::SeqCst);
             self.answered.notify_one();
             published.ok_or_else(|| ApiError::new(ErrorCode::Unavailable, "the issuer is down"))
@@ -98,6 +104,7 @@ impl Issuer {
             waiting: Notify::new(),
             answers: AtomicUsize::new(0),
             answered: Notify::new(),
+            broken: AtomicBool::new(false),
         });
         issuer.publish(set)?;
         Ok(issuer)
@@ -125,6 +132,11 @@ impl Issuer {
     /// error, so a test whose fetch never begins fails instead of waiting for ever.
     async fn held(&self) -> Result<(), Elapsed> {
         timeout(Duration::from_secs(10), self.waiting.notified()).await
+    }
+
+    /// Make the next fetch panic.
+    fn break_next(&self) {
+        self.broken.store(true, Ordering::SeqCst);
     }
 
     /// Wait until `count` fetches have given their answer.
@@ -756,6 +768,28 @@ async fn the_request_that_fetched_is_judged_at_the_instant_after_its_fetch() -> 
     // The set is older than the hour when the request is answered: it is not accepted from it.
     assert_eq!(waiting.await?, Some(ErrorCode::Unavailable));
     assert_eq!(setup.issuer.fetches(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_key_source_that_panics_judges_nothing() -> TestResult {
+    let setup = Setup::new(Some(KEY_SET))?;
+    let valid = sign(&claims()?, Some(KID))?;
+    let not_yet = (ErrorCode::Unavailable, Some(60));
+    // With no set yet: the request whose fetch panicked cannot be judged; a minute later it is.
+    setup.issuer.break_next();
+    let first = timeout(AT_ONCE, setup.refusal_of(&valid)).await??;
+    assert_eq!(first, not_yet);
+    setup.clock.advance(Duration::from_secs(60))?;
+    setup.verifier.verify(&valid).await?;
+    // With a cached set: a token of an unknown key whose own fetch panicked is not called
+    // false. A fetch that did not finish brought no verdict.
+    setup.clock.advance(Duration::from_secs(60))?;
+    setup.issuer.break_next();
+    let unknown = sign(&claims()?, Some("unknown-key"))?;
+    let second = timeout(AT_ONCE, setup.refusal_of(&unknown)).await??;
+    assert_eq!(second, not_yet);
+    assert_eq!(setup.issuer.fetches(), 3);
     Ok(())
 }
 
