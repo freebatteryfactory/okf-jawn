@@ -41,6 +41,7 @@ import {
 } from './support/workspace';
 
 const OPEN = '/api/workspaces/open-workspace';
+const WORKSPACES = '/api/workspaces/list-workspaces';
 const TOKEN = '0123456789abcdef0123456789abcdef';
 
 // On a loaded machine an answer has taken longer than the default second to reach the page.
@@ -776,6 +777,33 @@ describe('leaving with uploads', () => {
     // Uploaded, and only this page knows its slot.
     expect(leaving()).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Remove a.txt' }));
+    expect(leaving()).toBe(false);
+  });
+
+  it('asks on the list of workspaces too, while a file is under way: the question follows the uploads', async () => {
+    const service = uploadService();
+    // The transfer is left open: the file is under way.
+    service.script.put.push(() => undefined);
+    const { sent } = setup(service, {
+      [WORKSPACES]: () => ok({ items: [workspace], next_cursor: null }),
+    });
+    await openImport();
+    choose('Choose files…', [fileOf('a.txt', 'abc')]);
+    upload();
+    await waitFor(() => expect(sent.transfers).toHaveLength(1));
+    expect(leaving()).toBe(true);
+    // The wordmark, on every page, leads to the list of workspaces: out of the workspace.
+    fireEvent.click(screen.getByRole('link', { name: 'okf-jawn' }));
+    await screen.findByRole('link', { name: 'Workshop notes' });
+    expect(screen.queryByRole('heading', { name: 'Import files' })).toBeNull();
+    // The upload goes on there, and closing the tab would end it.
+    expect(sent.transfers.at(0)?.aborted).toBe(false);
+    expect(leaving()).toBe(true);
+    // Back in the workspace the file is still listed; removed, nothing is at risk anywhere.
+    fireEvent.click(screen.getByRole('link', { name: 'Workshop notes' }));
+    await screen.findByRole('heading', { name: 'Workshop notes', level: 1 });
+    expect(leaving()).toBe(true);
+    act(() => resetUploads());
     expect(leaving()).toBe(false);
   });
 

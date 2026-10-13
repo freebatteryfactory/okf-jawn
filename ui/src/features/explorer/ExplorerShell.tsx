@@ -30,7 +30,6 @@ import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
-import { useUploadLeaveGuard } from '../imports/leave-guard';
 import { SearchForm, SearchResults } from '../search/SearchPanel';
 import { matchingLayout } from './DocumentPanes';
 import { FolderTree } from './FolderTree';
@@ -94,7 +93,6 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   const repin = useExplorerStore((state) => state.repin);
   const canWrite = workspace.permissions.includes('write');
   useLeaveGuard();
-  useUploadLeaveGuard();
   const page = useWorkspacePage();
 
   // The URL is the truth for the focused pane: whatever item it names is open there, at the
