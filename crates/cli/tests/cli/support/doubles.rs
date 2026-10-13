@@ -88,6 +88,9 @@ struct Times {
     idle: u32,
 }
 
+/// An output stream that takes nothing and never fails: every write waits for ever.
+pub struct Stuck;
+
 /// A launcher that counts its launches.
 #[derive(Clone)]
 pub struct FakeLauncher {
@@ -279,6 +282,27 @@ impl AsyncWrite for Broken {
         _bytes: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+    }
+}
+
+impl AsyncWrite for Stuck {
+    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Pending
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Pending
+    }
+
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        _bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Pending
     }
 }
 

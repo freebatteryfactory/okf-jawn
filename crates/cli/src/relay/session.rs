@@ -37,8 +37,9 @@
 //! flight. An answer is then read, made one line, cleaned of the credential and given the
 //! request's id in the buffer it arrived in; nothing copies it and nothing is built from it,
 //! so an answer of many members costs what an answer of one long string costs. While a text
-//! waits for the one place beside the shared part, the read loop holds the one message it
-//! has read and neither forwards it nor reads another.
+//! waits for the one place beside the shared part, no further message is forwarded: each
+//! waits in its own turn, of which there are sixteen, and the read loop reads on, so that it
+//! sees the end of the input.
 //!
 //! What the relay holds besides, which no budget covers:
 //! - Each message in flight holds its request line (at most 16 MiB; sixteen in flight, 256
@@ -65,25 +66,33 @@
 //! client that reads nothing cost 127 MiB, long strings and many members alike, and 128 MiB
 //! by the time all are written (before: 1,269 MiB for sixteen long strings).
 //!
-//! How it ends. When the input ends, the messages in flight get `Limits::closing` (two
-//! minutes, what the CLI gives one operation) to finish; the relay then returns 0, or names
-//! on the error stream the messages that had not finished and returns 1. When the output
-//! stream fails, the relay stops at once and returns 1, whatever it was waiting for.
+//! How it ends. When the input ends, the relay has `Limits::closing` (two minutes, what the
+//! CLI gives one operation) to finish: for the messages in flight to be answered and for every
+//! line to be written. Then it returns 0. When the time runs out it returns 1 without waiting
+//! for anything, the writer included, and says on the error stream what it leaves: the
+//! messages that had not finished, by name, and how many lines the output had not taken. An
+//! output that takes nothing and does not fail is therefore no reason to stay. The last
+//! words go straight to the error stream and get two seconds, so an error stream that takes
+//! nothing does not keep the relay either. When the output stream fails, the relay stops at
+//! once and returns 1, whatever it was waiting for.
 //!
 //! Known limits:
 //! - A forwarded message has no limit in time: a tool call may run long, and an event stream
 //!   has no fixed length. Sixteen messages that do not end therefore hold every turn, the
 //!   relay reads no further line, and it learns that its input ended only when one of them
-//!   ends; `initialize` likewise waits for the messages in flight.
+//!   ends; `initialize` likewise waits for the messages in flight. An output that takes
+//!   nothing has the same effect once sixteen messages wait for it: with more lines still
+//!   unread, the relay does not learn that its input ended, and stays.
 //! - A response the service sends for another request's id is passed on as it is.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::{Id, JoinError, JoinSet};
 
 use super::frame::{Frame, Frames};
@@ -107,12 +116,14 @@ struct Desk {
     room: Room,
     /// The longest a text of the service may be; a refusal given the request's id included.
     most: usize,
+    /// How many lines were queued for the output stream and are not written yet.
+    unwritten: Arc<AtomicUsize>,
 }
 
 /// The messages in flight: their tasks, and what each is called when it has to be named.
 struct Flight {
     tasks: JoinSet<()>,
-    names: HashMap<Id, String>,
+    names: Names,
 }
 
 /// The relay's bounds.
@@ -129,9 +140,14 @@ pub struct Limits {
     /// While such a text waits, nothing more is taken from the service for it and nothing
     /// more is forwarded from the input.
     pub waiting_bytes: usize,
-    /// How long the messages in flight may still take once the input has ended.
+    /// How long the relay may still take once the input has ended: for the messages in flight
+    /// to finish and for every line to be written.
     pub closing: Duration,
 }
+
+/// What each message in flight is called, kept where the relay can still read it when it
+/// gives up everything else.
+type Names = Arc<Mutex<HashMap<Id, String>>>;
 
 /// What an exchange learned for the messages that follow it.
 #[derive(Debug, Default)]
@@ -208,6 +224,9 @@ const AHEAD: usize = 1;
 /// gives one operation, so a script that pipes its requests in gets its last answers, and a
 /// client that only closes the input does not keep the relay for longer than that.
 const CLOSING: Duration = Duration::from_secs(120);
+/// How long the relay's last words may take when it gives up: the error stream may take
+/// nothing either.
+const LAST_WORDS: Duration = Duration::from_secs(2);
 /// How many answers or diagnostics may wait for their writer.
 const QUEUE: usize = 64;
 /// The line the relay writes for a line over the limit.
@@ -224,11 +243,9 @@ impl Flight {
     /// Forget one finished message; an exchange that ended abnormally is said.
     async fn landed(&mut self, joined: Result<(Id, ()), JoinError>, desk: &Desk) {
         match joined {
-            Ok((id, ())) => {
-                self.names.remove(&id);
-            }
+            Ok((id, ())) => self.forget(id),
             Err(error) => {
-                self.names.remove(&error.id());
+                self.forget(error.id());
                 note(
                     desk,
                     &format!("a message's exchange ended abnormally: {error}"),
@@ -238,10 +255,18 @@ impl Flight {
         }
     }
 
-    fn new() -> Self {
+    /// Forget the name of a message that has finished.
+    fn forget(&self, id: Id) {
+        // A lock that a panic poisoned is left alone: the names are only ever read to be said.
+        if let Ok(mut names) = self.names.lock() {
+            names.remove(&id);
+        }
+    }
+
+    fn new(names: Names) -> Self {
         Self {
             tasks: JoinSet::new(),
-            names: HashMap::new(),
+            names,
         }
     }
 
@@ -255,7 +280,9 @@ impl Flight {
     /// Start `work` as the message called `name`.
     fn start(&mut self, name: String, work: impl Future<Output = ()> + Send + 'static) {
         let id = self.tasks.spawn(work).id();
-        self.names.insert(id, name);
+        if let Ok(mut names) = self.names.lock() {
+            names.insert(id, name);
+        }
     }
 }
 
@@ -287,32 +314,6 @@ fn called(kind: &Kind) -> String {
         Kind::Notification { method } => format!("notification {method:?}"),
         Kind::Response => "a response to the service".to_owned(),
     }
-}
-
-/// Let the messages in flight finish, for at most `limit` after the input has ended.
-///
-/// Returns the exit code: 0 when all finished, 1 when some had not; those are named on the
-/// error stream, and they end with the relay.
-async fn close(mut flight: Flight, limit: Duration, desk: &Desk) -> u8 {
-    if tokio::time::timeout(limit, flight.drain(desk))
-        .await
-        .is_ok()
-    {
-        return 0;
-    }
-    let mut left: Vec<String> = flight.names.into_values().collect();
-    left.sort();
-    note(
-        desk,
-        &format!(
-            "the input ended and {} of its messages had not finished {limit:?} later; the relay \
-             stops and leaves them unanswered: {}",
-            left.len(),
-            left.join(", ")
-        ),
-    )
-    .await;
-    1
 }
 
 /// Write one answer of the service to the client, if it is a JSON-RPC message.
@@ -425,9 +426,11 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
     input: I,
     limits: Limits,
     desk: &Desk,
+    names: Names,
+    ended: oneshot::Sender<()>,
 ) -> u8 {
     let mut frames = Frames::new(BufReader::new(input), limits.line_bytes);
-    let mut flight = Flight::new();
+    let mut flight = Flight::new(names);
     let mut lifecycle = Lifecycle::default();
     let permits = Arc::new(Semaphore::new(limits.in_flight));
     let mut code = 0;
@@ -459,11 +462,9 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
             }
         };
         drop(bytes);
-        // While a text waits for room, this one message is held, and nothing more is read or
-        // forwarded.
-        desk.room.vacancy().await;
         if outgoing.initialize {
             flight.drain(desk).await;
+            desk.room.vacancy().await;
             let outcome = exchange(transport.as_ref(), outgoing, desk).await;
             lifecycle.version = outcome.negotiated;
             lifecycle.session = outcome.session;
@@ -474,12 +475,52 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
             let (transport, desk) = (transport.clone(), desk.clone());
             flight.start(name, async move {
                 let _permit = permit;
+                // While a text waits for room, this message is held here and not forwarded.
+                // The read loop goes on meanwhile, so that it sees the end of the input.
+                desk.room.vacancy().await;
                 exchange(transport.as_ref(), outgoing, &desk).await;
             });
         }
         flight.reap(desk).await;
     }
-    code.max(close(flight, limits.closing, desk).await)
+    // The input has ended: from here the relay has its closing time, which `serve` counts.
+    // Nobody listens only when the relay is already being given up.
+    let _ = ended.send(());
+    flight.drain(desk).await;
+    code
+}
+
+/// Say on the error stream what the relay leaves when its closing time has run out: the
+/// messages that had not finished, by name, and how many lines the output had not taken.
+/// It writes to the stream itself: nothing of the session is left to queue it with.
+async fn leave<E: AsyncWrite + Unpin>(
+    stderr: &mut E,
+    secret: &Credential,
+    after: Duration,
+    names: &Names,
+    lines: usize,
+) {
+    let mut left: Vec<String> = names
+        .lock()
+        .map(|names| names.values().cloned().collect())
+        .unwrap_or_default();
+    left.sort();
+    if !left.is_empty() {
+        let text = format!(
+            "the input ended and {} of its messages had not finished {after:?} later; the relay \
+             stops and leaves them unanswered: {}",
+            left.len(),
+            left.join(", ")
+        );
+        say(stderr, secret, &text).await;
+    }
+    if lines > 0 {
+        let text = format!(
+            "the input ended and {lines} of the lines for the output had not been written \
+             {after:?} later; the relay stops without writing them"
+        );
+        say(stderr, secret, &text).await;
+    }
 }
 
 /// Queue one protocol line for the output stream, without the credential.
@@ -492,6 +533,7 @@ async fn line(desk: &Desk, text: Held) -> bool {
         remark(desk, WITHHELD).await;
         return false;
     };
+    desk.unwritten.fetch_add(1, Ordering::SeqCst);
     // The receiver is gone only when the output stream failed; the relay then stops.
     let _ = desk.lines.send(clean).await;
     true
@@ -519,15 +561,17 @@ async fn own(desk: &Desk, text: String) -> bool {
 ///
 /// A failed output is noticed at any moment: while a line is awaited, while `initialize` is
 /// exchanged, while a message waits for its turn or for room, and while the relay closes.
-/// The messages in flight then end with the relay.
+/// The messages in flight then end with the relay. `ended` is told when the input ends.
 async fn read<T: Transport, I: AsyncRead + Unpin>(
     transport: Arc<T>,
     input: I,
     limits: Limits,
     desk: Desk,
+    names: Names,
+    ended: oneshot::Sender<()>,
 ) -> u8 {
     tokio::select! {
-        code = forward(transport, input, limits, &desk) => code,
+        code = forward(transport, input, limits, &desk, names, ended) => code,
         () = desk.lines.closed() => {
             note(&desk, "the output stream failed; the relay stops").await;
             1
@@ -545,8 +589,9 @@ async fn remark(desk: &Desk, text: &'static str) {
 
 /// Run the relay: reach the service, then forward messages until the input ends.
 ///
-/// Returns the exit code: 0 when the input ended, 1 when no service could be reached or
-/// started, or when a standard stream failed.
+/// Returns the exit code: 0 when the input ended and everything was written, 1 when no
+/// service could be reached or started, when a standard stream failed, or when the closing
+/// time ran out with messages unfinished or lines unwritten.
 pub async fn serve<T, L, C, I, O, E>(relay: Relay<T, L, C>, streams: Streams<I, O, E>) -> u8
 where
     T: Transport,
@@ -602,26 +647,55 @@ where
     }
     let (lines, queued_lines) = mpsc::channel::<Held>(QUEUE);
     let (notes, mut queued_notes) = mpsc::channel::<Held>(QUEUE);
+    let unwritten = Arc::new(AtomicUsize::new(0));
+    let names = Names::default();
     let desk = Desk {
         lines,
         notes,
         secret: secret.clone(),
         room: Room::new(limits.waiting_bytes),
         most: limits.answer_bytes,
+        unwritten: unwritten.clone(),
     };
-    let noting = async {
-        while let Some(text) = queued_notes.recv().await {
-            say(&mut stderr, &secret, text.as_str()).await;
-            // Written: its room is free again.
-            drop(text);
-        }
+    let (ended, closing) = oneshot::channel();
+    let mut session = Box::pin(async {
+        let noting = async {
+            while let Some(text) = queued_notes.recv().await {
+                say(&mut stderr, &secret, text.as_str()).await;
+                // Written: its room is free again.
+                drop(text);
+            }
+        };
+        let (code, written, ()) = tokio::join!(
+            read(transport, stdin, limits, desk, names.clone(), ended),
+            write(queued_lines, stdout, &unwritten),
+            noting
+        );
+        if written.is_err() { 1 } else { code }
+    });
+    // While the input is open the relay stays for as long as its client keeps it.
+    let early = tokio::select! {
+        code = &mut session => Some(code),
+        // Told, or the reading was given up because the output failed: either way it closes.
+        _ = closing => None,
     };
-    let (code, written, ()) = tokio::join!(
-        read(transport, stdin, limits, desk),
-        write(queued_lines, stdout),
-        noting
-    );
-    if written.is_err() { 1 } else { code }
+    if let Some(code) = early {
+        return code;
+    }
+    // From the end of the input, everything left has the closing time and no more.
+    if let Ok(code) = tokio::time::timeout(limits.closing, &mut session).await {
+        return code;
+    }
+    // Given up as it stands: nothing is waited for, the writer included.
+    drop(session);
+    let lines = unwritten.load(Ordering::SeqCst);
+    // An error stream that takes nothing must not keep the relay either.
+    let _ = tokio::time::timeout(
+        LAST_WORDS,
+        leave(&mut stderr, &secret, limits.closing, &names, lines),
+    )
+    .await;
+    1
 }
 
 /// Write one diagnostic line to the error stream, without the credential.
@@ -727,6 +801,7 @@ async fn refusal(
 async fn write<O: AsyncWrite + Unpin>(
     mut queued: mpsc::Receiver<Held>,
     mut output: O,
+    unwritten: &AtomicUsize,
 ) -> std::io::Result<()> {
     while let Some(text) = queued.recv().await {
         // The line feed is written after the text, not added to it: adding a byte to a
@@ -734,6 +809,7 @@ async fn write<O: AsyncWrite + Unpin>(
         output.write_all(text.as_str().as_bytes()).await?;
         output.write_all(b"\n").await?;
         output.flush().await?;
+        unwritten.fetch_sub(1, Ordering::SeqCst);
         // Written: its room is free again.
         drop(text);
     }

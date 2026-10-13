@@ -20,8 +20,8 @@ use super::{notification, request, response};
 use crate::check::TestResult;
 use crate::support::Outcome;
 use crate::support::doubles::{
-    Body, Broken, FakeTransport, Script, Setup, answered, broken, relay, relay_on, relay_over,
-    status,
+    Body, Broken, FakeTransport, Script, Setup, Stuck, answered, broken, relay, relay_on,
+    relay_over, status,
 };
 
 /// The length of every line the service's double answers with in the tests of the room.
@@ -418,6 +418,93 @@ async fn after_the_input_ends_what_is_in_flight_gets_a_bounded_time() -> TestRes
          relay stops and leaves them unanswered: notification \"notifications/progress\", \
          request \"three\", request 1\n"
     );
+    Ok(())
+}
+
+/// The closing time also covers an output that takes nothing and does not fail (the
+/// re-review's F2). Four requests are answered at once, the input ends, and the output never
+/// takes a byte: when the closing time is over the relay returns 1 without waiting for its
+/// writer, and says what it leaves. With the shared room of the shipped relay every answer
+/// waits to be written, and their number is said. With a shared part of exactly one answer,
+/// one answer waits there and one in the place beside it; the other two requests wait for
+/// that place, and are named.
+#[tokio::test]
+async fn the_relay_ends_when_its_output_takes_nothing_after_the_input_ended() -> TestResult {
+    let one = relay(
+        Setup::new(&FakeTransport::echoing()),
+        request(&json!(0), "tools/call", &json!({})).as_bytes(),
+    )
+    .await?;
+    let line = one.stdout.len().saturating_sub(1);
+    assert!(line > 20, "{}", one.stdout);
+    let unwritten = |lines: usize| {
+        format!(
+            "okf-jawn mcp: the input ended and {lines} of the lines for the output had not been \
+             written 300ms later; the relay stops without writing them\n"
+        )
+    };
+    let unfinished = "okf-jawn mcp: the input ended and 2 of its messages had not finished \
+                      300ms later; the relay stops and leaves them unanswered: request 2, \
+                      request 3\n";
+    for (room, said, forwarded) in [
+        (Limits::default().waiting_bytes, unwritten(4), 4),
+        (line, format!("{unfinished}{}", unwritten(2)), 2),
+    ] {
+        let transport = FakeTransport::echoing();
+        let setup = Setup {
+            limits: Limits {
+                waiting_bytes: room,
+                closing: Duration::from_millis(300),
+                ..Limits::default()
+            },
+            ..Setup::new(&transport)
+        };
+        let input: String = (0..4)
+            .map(|id| request(&json!(id), "tools/call", &json!({})))
+            .collect();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(
+            PATIENCE,
+            relay_on(setup, input.as_bytes(), Stuck, &mut stderr),
+        )
+        .await
+        .map_err(|_| "the relay had not ended long after its closing time of 300 ms")??;
+        assert_eq!(
+            (code, String::from_utf8(stderr)?),
+            (1, said),
+            "a shared part of {room} bytes"
+        );
+        // The two that waited for the place were read, which is how the end of the input
+        // was seen, and were not forwarded.
+        assert_eq!(transport.posts()?.len(), forwarded);
+    }
+    Ok(())
+}
+
+/// An error stream that takes nothing does not keep the relay either: its last words have
+/// a bounded time of their own, and then it returns 1 having said nothing.
+#[tokio::test]
+async fn the_relay_ends_when_neither_output_stream_takes_anything() -> TestResult {
+    let transport = FakeTransport::echoing();
+    let setup = Setup {
+        limits: Limits {
+            closing: Duration::from_millis(300),
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let code = tokio::time::timeout(
+        PATIENCE,
+        relay_on(
+            setup,
+            request(&json!(1), "tools/call", &json!({})).as_bytes(),
+            Stuck,
+            Stuck,
+        ),
+    )
+    .await
+    .map_err(|_| "the relay waited for an error stream that takes nothing")??;
+    assert_eq!(code, 1);
     Ok(())
 }
 
