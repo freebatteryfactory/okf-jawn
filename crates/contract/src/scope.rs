@@ -158,8 +158,9 @@ pub trait RequestScope {
     /// JSON pointer into the response to the one workspace a mutation authorized at the tenant
     /// is about (the workspace it creates, or a purge's target); `None` for every other
     /// request. The mutation ledger records that workspace when the mutation completes, so a
-    /// purge of it reaches the stored response by identity, never by its text. A response in
-    /// which the pointer finds nothing names no workspace (a tenant job's absent
+    /// purge of it reaches the stored response by identity, never by its text, except for the
+    /// two purge operations, whose rows are kept (their response is the purge record). A
+    /// response in which the pointer finds nothing names no workspace (a tenant job's absent
     /// `workspace_id`). A response that names workspaces only in a list (a connector's grants)
     /// names no one workspace and declares none.
     const RESPONSE_WORKSPACE: Option<&'static str> = None;

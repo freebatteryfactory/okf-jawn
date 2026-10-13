@@ -47,7 +47,9 @@
 //! never the response text: it empties the completed rows of the purged workspace (the
 //! response is dropped and the row released, its id kept), so a retry under the same key
 //! re-runs under the same `MutationId` and is refused by the purge, and no other workspace's
-//! row is touched.
+//! row is touched. The rows of `purge_workspace` and `purge_item` recorded under the
+//! workspace are kept: their response is the purge record, identities and counts only, and a
+//! retried purge replays it.
 //!
 //! Two known limits of that purge:
 //! - A row completed before the ledger recorded workspaces (storage's records schema 2) has no

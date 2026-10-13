@@ -41,6 +41,13 @@
 //!   days or more after the row completed (`mutations::RETENTION_SECONDS`).
 //! - A row whose `complete` lands after the purge's last pass over the rows (its step 5) keeps
 //!   its response until the ledger drops it the same way.
+//! - An emptied row keeps the digest of the request and its idempotency key. The digest is a
+//!   SHA-256 of the canonical request (a workspace's name and description, a draft's body, a
+//!   comment's text), so a guessed text could be confirmed against it.
+//! - A retry of an emptied row restarts that row's seven days: the refused retry resumes it
+//!   (`finished_ms` cleared) and releases it again (`finished_ms` now).
+//! - A `mutations` table that lacks one of the four columns the purge reads (`tenant_id`,
+//!   `operation`, `state`, `response`) is not looked at, by `holds` or by `remove`.
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::identity::PurgeId;
