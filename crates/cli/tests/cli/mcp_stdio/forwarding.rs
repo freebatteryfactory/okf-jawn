@@ -339,12 +339,16 @@ async fn a_request_meta_version_sets_the_standard_headers() -> TestResult {
 
 /// The Base64 header form is not built: a name that needs it is refused with the request's
 /// id and never sent, and a notification that cannot be sent is logged.
+///
+/// The notification's method has to travel in a header only under protocol `2026-07-28`. The
+/// four requests before it are refused and so put no version in force; the fifth is sent, and
+/// puts it in force for the notification.
 #[tokio::test]
 async fn a_name_or_method_that_cannot_travel_in_a_header_is_refused() -> TestResult {
     let transport = FakeTransport::echoing();
     let modern = meta("2026-07-28");
     let input = format!(
-        "{}{}{}{}{}",
+        "{}{}{}{}{}{}",
         request(
             &json!(1),
             "tools/call",
@@ -365,18 +369,133 @@ async fn a_name_or_method_that_cannot_travel_in_a_header_is_refused() -> TestRes
             "tools/list",
             &json!({"_meta": meta("2026-07-28\r\nX-Injected: 1")})
         ),
+        request(&json!(5), "tools/list", &json!({"_meta": modern})),
         notification("notifications/line\nbreak"),
     );
     let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
     assert_eq!(ran.code, 0);
     let answers = ran.lines()?;
-    assert_eq!(answers.len(), 4);
+    assert_eq!(answers.len(), 5);
     for (answer, id) in answers.iter().zip(1..=4) {
         assert_eq!(answer.get("id"), Some(&json!(id)));
         assert_eq!(answer.pointer("/error/code"), Some(&json!(-32600)));
     }
+    assert_eq!(
+        answers.get(4),
+        Some(&response(&json!(5), &json!({"method": "tools/list"})))
+    );
     assert!(ran.stderr.contains("was not sent"), "{}", ran.stderr);
-    assert_eq!(transport.posts()?, Vec::new(), "nothing was forwarded");
+    let posts = transport.posts()?;
+    let only = some(posts.first(), "the fifth request")?;
+    assert_eq!(
+        (posts.len(), id_of(&only.body)?.as_str()),
+        (1, "5"),
+        "none of the refused messages was forwarded"
+    );
+    Ok(())
+}
+
+/// A message the relay refuses changes nothing (the pull request's finding 2). A request that
+/// names a new protocol version in its `_meta` and is refused, for its name or for its
+/// method, was never sent, so the service never heard of that version: the `ping` after it
+/// goes out under the version that was in force before, whether that is none, the one the
+/// handshake negotiated, or the one an earlier request put in force.
+#[tokio::test]
+async fn a_request_the_relay_refuses_puts_no_protocol_version_in_force() -> TestResult {
+    let modern = meta("2026-07-28");
+    let refused = [
+        (
+            "a name that is not ASCII",
+            request(
+                &json!(7),
+                "tools/call",
+                &json!({"name": "caf\u{e9}", "_meta": modern}),
+            ),
+        ),
+        (
+            "a name shaped like the Base64 form",
+            request(
+                &json!(7),
+                "prompts/get",
+                &json!({"name": "=?base64?eA==?=", "_meta": modern}),
+            ),
+        ),
+        (
+            "a method that is not ASCII",
+            request(&json!(7), "tools/c\u{e9}ll", &json!({"_meta": modern})),
+        ),
+        (
+            "a method with a blank before it",
+            request(&json!(7), " tools/list", &json!({"_meta": modern})),
+        ),
+    ];
+    let ping = request(&json!(8), "ping", &json!({}));
+    let before = [
+        ("no version", String::new(), None),
+        (
+            "the version of the handshake",
+            request(&json!(0), "initialize", &json!({})),
+            Some("2025-06-18"),
+        ),
+        (
+            "the version of an earlier request",
+            request(
+                &json!(6),
+                "tools/list",
+                &json!({"_meta": meta("2025-11-25")}),
+            ),
+            Some("2025-11-25"),
+        ),
+    ];
+    for (what, line) in &refused {
+        for (state, first, in_force) in &before {
+            let transport = FakeTransport::scripted(|message| {
+                let id = message.get("id").unwrap_or(&Value::Null);
+                match message.get("method").and_then(Value::as_str) {
+                    Some("initialize") => {
+                        answered(&response(id, &json!({"protocolVersion": "2025-06-18"})))
+                    }
+                    _ => answered(&response(id, &json!({}))),
+                }
+            });
+            let input = format!("{first}{line}{ping}");
+            let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
+            assert_eq!((ran.code, ran.stderr.as_str()), (0, ""), "{what}, {state}");
+            let answers = ran.lines()?;
+            let own = some(
+                answers
+                    .iter()
+                    .find(|answer| answer.get("id") == Some(&json!(7))),
+                "an answer to the refused request",
+            )?;
+            assert_eq!(
+                own.pointer("/error/code"),
+                Some(&json!(-32600)),
+                "{what}, {state}"
+            );
+            let posts = transport.posts()?;
+            let mut sent = Vec::new();
+            for post in &posts {
+                sent.push(id_of(&post.body)?);
+            }
+            assert!(
+                !sent.contains(&"7".to_owned()),
+                "{what}, {state}: the refused request was sent"
+            );
+            let after = some(
+                posts
+                    .iter()
+                    .zip(&sent)
+                    .find_map(|(post, id)| (id == "8").then_some(post)),
+                "the ping",
+            )?;
+            let expected: Vec<(&str, String)> = in_force
+                .iter()
+                .map(|version| ("MCP-Protocol-Version", (*version).to_owned()))
+                .collect();
+            assert_eq!(after.headers, expected, "{what}, {state}");
+        }
+    }
     Ok(())
 }
 

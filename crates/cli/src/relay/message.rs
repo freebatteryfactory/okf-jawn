@@ -6,7 +6,8 @@
 //! - `initialize` carries no `MCP-Protocol-Version`: the handshake is what negotiates it.
 //! - After it, every message carries the version the service answered with.
 //! - A request whose `_meta` names a protocol version carries that version, which then also
-//!   applies to the messages that follow.
+//!   applies to the messages that follow. A request the relay refuses is not sent, and the
+//!   version it names is not put in force: the service never heard of it.
 //! - From protocol `2026-07-28`, a request or notification also carries `Mcp-Method`, and
 //!   `Mcp-Name` when its method names a tool, prompt, resource or task.
 //!
@@ -143,6 +144,10 @@ pub(super) fn error_line(id: Option<&str>, code: i64, message: &str) -> String {
 }
 
 /// The headers of one message, which also moves `lifecycle` forward.
+///
+/// `lifecycle` moves only when the headers are returned: the message is then going to be
+/// sent. A message that is refused here leaves it as it was, so the protocol version a
+/// refused request names is not in force for the messages that follow.
 fn headers(
     message: &Map<String, Value>,
     method: Option<&str>,
@@ -158,26 +163,22 @@ fn headers(
         .and_then(|meta| meta.get(META_PROTOCOL_VERSION))
         .and_then(Value::as_str)
         .filter(|_| request);
-    if let Some(version) = inline {
-        if !bare(version) || version.is_empty() {
-            return Err(
-                "The protocol version in the request's _meta cannot travel in an HTTP header"
-                    .to_owned(),
-            );
-        }
-        lifecycle.version = Some(version.to_owned());
+    if inline.is_some_and(|version| !bare(version) || version.is_empty()) {
+        return Err(
+            "The protocol version in the request's _meta cannot travel in an HTTP header"
+                .to_owned(),
+        );
     }
+    // The version this message travels under: its own, or else the one in force.
+    let version = inline.or(lifecycle.version.as_deref());
     let mut headers = Vec::new();
-    if let Some(version) = &lifecycle.version {
-        headers.push((HEADER_PROTOCOL_VERSION, version.clone()));
+    if let Some(version) = version {
+        headers.push((HEADER_PROTOCOL_VERSION, version.to_owned()));
     }
     if let Some(session) = &lifecycle.session {
         headers.push((HEADER_SESSION, session.clone()));
     }
-    let standard = lifecycle
-        .version
-        .as_deref()
-        .is_some_and(|version| version >= STANDARD_HEADERS_SINCE);
+    let standard = version.is_some_and(|version| version >= STANDARD_HEADERS_SINCE);
     if let (true, Some(method)) = (standard, method) {
         if !bare(method) {
             return Err("The method cannot travel in the Mcp-Method header".to_owned());
@@ -192,6 +193,10 @@ fn headers(
             }
             headers.push((HEADER_NAME, name.to_owned()));
         }
+    }
+    // Nothing refuses the message after this, so the version it names is now in force.
+    if let Some(version) = inline {
+        lifecycle.version = Some(version.to_owned());
     }
     Ok(headers)
 }
