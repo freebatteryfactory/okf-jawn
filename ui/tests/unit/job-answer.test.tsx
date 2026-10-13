@@ -50,7 +50,9 @@ describe('a job started while the event stream is open', () => {
           jobs.set(id, jobOf('succeeded', { id, item_ids: [NOTE], revision: IMPORTED }));
           if (starts === 2) {
             // Its events go out on the open stream before the answer is read.
-            events.current?.streams.at(-1)?.send('41', eventOf('job_updated', '41', { job_id: id }));
+            events.current?.streams
+              .at(-1)
+              ?.send('41', eventOf('job_updated', '41', { job_id: id }));
             events.current?.streams.at(-1)?.send('42', eventOf('imported', '42', { job_id: id }));
             await new Promise((resolve) => setTimeout(resolve, 150));
           }
@@ -67,11 +69,11 @@ describe('a job started while the event stream is open', () => {
     const row = (id: string) => document.querySelector<HTMLElement>(`li[data-job="${id}"]`);
     const importOne = async (file: File) => {
       const opened: HTMLInputElement[] = [];
-      const click = vi
-        .spyOn(HTMLInputElement.prototype, 'click')
-        .mockImplementation(function open(this: HTMLInputElement) {
-          opened.push(this);
-        });
+      const click = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function open(
+        this: HTMLInputElement,
+      ) {
+        opened.push(this);
+      });
       fireEvent.click(screen.getByRole('button', { name: 'Choose files…' }));
       click.mockRestore();
       const picker = opened.at(0) as HTMLInputElement;

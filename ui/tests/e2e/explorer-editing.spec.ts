@@ -591,6 +591,67 @@ test.describe('editing a document', () => {
     expect(played.sent.filter((request) => request.path === 'save_draft')).toHaveLength(1);
   });
 
+  for (const tree of ['listed', 'not listed'] as const) {
+    test(`a file let go on the draft editor inserts nothing and a text drag does (folder tree ${tree})`, async ({
+      page,
+      context,
+      browserName,
+    }) => {
+      // A drag of files can only be delivered as a browser does through Chromium's protocol.
+      test.skip(browserName !== 'chromium', 'Chromium delivers the drag');
+      const { mkdtemp, writeFile } = await import('node:fs/promises');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const dir = await mkdtemp(join(tmpdir(), 'okf-editor-drop-'));
+      const file = join(dir, 'private-notes.txt');
+      await writeFile(file, 'DROPPED-FROM-DISK: a private line.');
+      const played = service();
+      await routeApi(page, {
+        ...played.answers,
+        ...(tree === 'listed'
+          ? {}
+          : {
+              '/api/items/list-items': () => ({
+                status: 500,
+                body: { code: 'internal', message: 'the listing failed' },
+              }),
+            }),
+      });
+      await context.addCookies([{ name: 'okf-csrf', value: TOKEN, url: server.origin() }]);
+      await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}`);
+      await press(page, 'Edit');
+      await expect(textBox(page)).toBeFocused();
+      const devtools = await page.context().newCDPSession(page);
+      const dragTo = async (data: {
+        items: Array<{ mimeType: string; data: string }>;
+        files?: string[];
+      }) => {
+        const box = await textBox(page).boundingBox();
+        if (box === null) throw new Error('the editor is not on screen');
+        const at = { x: Math.round(box.x + 60), y: Math.round(box.y + 14) };
+        for (const type of ['dragEnter', 'dragOver', 'drop'] as const) {
+          await devtools.send('Input.dispatchDragEvent', {
+            type,
+            ...at,
+            data: { dragOperationsMask: 1, ...data },
+          });
+        }
+      };
+      const url = page.url();
+      await dragTo({ items: [], files: [file] });
+      await page.waitForTimeout(1_500);
+      await expect(textBox(page)).not.toContainText('DROPPED-FROM-DISK');
+      expect(page.url()).toBe(url);
+      // Text dragged in from another application still goes into the draft.
+      await dragTo({ items: [{ mimeType: 'text/plain', data: 'DRAGGED-WORDS' }] });
+      await expect(textBox(page)).toContainText('DRAGGED-WORDS');
+      await expect(textBox(page)).not.toContainText('DROPPED-FROM-DISK');
+      await expect(saveState(page)).toContainText('Saved as a draft at');
+      expect(JSON.stringify(played.sent)).not.toContain('DROPPED-FROM-DISK');
+      await expectNoAxeViolations(page, 'the draft editor after a drop');
+    });
+  }
+
   test('a type that offers a choice: the choice has a name, and what it takes out is said', async ({
     page,
   }) => {

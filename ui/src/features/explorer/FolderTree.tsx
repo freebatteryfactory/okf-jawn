@@ -483,6 +483,10 @@ export function FolderTree({
               disableEdit
               disableDrag
               disableDrop
+              // The tree takes no drag, so its drag backend is kept to the tree's own box: left on the
+              // window it cancels every dragged text on the page (a drop on the draft editor among
+              // them), and the page's one answer to a drag of files is the root guard's.
+              dndRootElement={boxRef.current}
               disableSelect={(entry) => entry.kind === 'status'}
               // Arborist memoizes on its props as a list, so every prop is always passed: no
               // selection is the empty string.

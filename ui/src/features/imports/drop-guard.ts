@@ -11,13 +11,15 @@
  * handler and cancels nothing itself, so this listener is also what makes a browser deliver a
  * drop to it (a browser delivers a drop only where the `dragover` was cancelled).
  *
- * A drag that carries no file (a row of the folder tree, a selection of text) is not touched.
+ * A drag that carries no file (a row of the folder tree, a selection of text, text dragged in from
+ * another application) is not touched: it is told from a file drag by the `Files` entry in the
+ * transfer's types, which a file drag has and a text drag has not.
  *
- * Limit. The listener is in the bubbling phase, so it does not switch off a part of the page that
- * handles a dropped file itself: the draft editor's library (CodeMirror) has a drop handler that
- * reads a dropped text file into the text, and this listener leaves it as it was. Moving the
- * listener to the capturing phase would switch that off too (CodeMirror skips an event that is
- * already cancelled); that is a decision about the editor, not made here.
+ * One answer everywhere. The listeners are in the capturing phase, so a drag of files is cancelled
+ * before any part of the page sees it. The draft editor's library (CodeMirror) skips an event that
+ * is already cancelled, so it never reads a dropped text file into a draft: whether the folder tree
+ * is listed (its drag backend cancels drags too) makes no difference. A text drag still reaches the
+ * editor and inserts.
  */
 import { useEffect } from 'react';
 import { carriesFiles } from './files';
@@ -29,11 +31,11 @@ function cancelFileDrag(event: DragEvent) {
 /** Cancel every drag and drop of files, wherever on the page it lands. Mount once, at the root. */
 export function useFileDropGuard() {
   useEffect(() => {
-    window.addEventListener('dragover', cancelFileDrag);
-    window.addEventListener('drop', cancelFileDrag);
+    window.addEventListener('dragover', cancelFileDrag, { capture: true });
+    window.addEventListener('drop', cancelFileDrag, { capture: true });
     return () => {
-      window.removeEventListener('dragover', cancelFileDrag);
-      window.removeEventListener('drop', cancelFileDrag);
+      window.removeEventListener('dragover', cancelFileDrag, { capture: true });
+      window.removeEventListener('drop', cancelFileDrag, { capture: true });
     };
   }, []);
 }
