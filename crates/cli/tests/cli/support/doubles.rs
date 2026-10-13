@@ -61,6 +61,8 @@ pub struct Setup {
     pub loopback: bool,
     pub start: StartPolicy,
     pub limits: Limits,
+    /// The connector credential the relay holds.
+    pub token: &'static str,
 }
 
 type Handler = Box<dyn Fn(Post, mpsc::Sender<String>) -> Sending + Send + Sync>;
@@ -245,6 +247,7 @@ impl Setup {
                 pause: Duration::ZERO,
             },
             limits: Limits::default(),
+            token: TOKEN,
         }
     }
 }
@@ -294,7 +297,7 @@ pub async fn relay_over<I: AsyncRead + Unpin, O: AsyncWrite + Unpin>(
     stdout: O,
 ) -> Outcome<(u8, String)> {
     let mut stderr = Vec::new();
-    let secret = some(Credential::parse(TOKEN, "the test")?, "a credential")?;
+    let secret = some(Credential::parse(setup.token, "the test")?, "a credential")?;
     let code = serve(
         Relay {
             transport: setup.transport,

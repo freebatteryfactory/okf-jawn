@@ -10,7 +10,12 @@
 //!   many are in flight no further line is read. `initialize` is exchanged alone, because the
 //!   headers of every later message come from its answer.
 //! - When the input ends, the messages in flight finish before the relay returns 0.
-//! - The connector credential is removed from every line the relay itself composes.
+//! - The connector credential is never written, whoever wrote the line: every line for the
+//!   output stream, the service's own included, passes `Credential::redact_line` in `line`,
+//!   the one place a line is queued, and every diagnostic passes `Credential::redact`. A line
+//!   that spells the credential outside a JSON string cannot be cleaned and stay JSON: it is
+//!   not written, the error stream says so, and a request it would have answered gets the
+//!   relay's own error instead.
 //!
 //! An answer is written again from its parsed JSON, so that it holds no line break: member
 //! order and insignificant white space are not kept. A message to the service is sent as the
@@ -95,6 +100,11 @@ const CREDENTIAL_REFUSED: &str = "The okf-jawn service refused the connector cre
 /// The service refused what the credential asked for.
 const ACCESS_REFUSED: &str = "The okf-jawn service refused this request (HTTP 403): the \
     connector credential does not grant it";
+/// What a request is told when its answer was withheld.
+const ANSWER_WITHHELD: &str = "The okf-jawn service's answer repeats the connector credential \
+    outside a JSON string, so it was not passed on";
+/// What a request is told when the service's answer is no message.
+const NOT_A_MESSAGE: &str = "The okf-jawn service's answer is not a JSON-RPC message";
 /// How many answers or diagnostics may wait for their writer.
 const QUEUE: usize = 64;
 /// The line the relay writes for a line over the limit.
@@ -114,9 +124,16 @@ impl Default for Limits {
 
 /// Write one answer of the service to the client, if it is a JSON-RPC message.
 ///
-/// Returns whether it was written. Anything else is dropped and logged: the output stream
-/// carries protocol messages only.
-async fn deliver(data: &str, kind: &Kind, initialize: bool, desk: &Desk, seen: &mut Seen) -> bool {
+/// # Errors
+/// Returns, in plain words, why it was not written. Anything that is not a message is dropped
+/// and logged: the output stream carries protocol messages only.
+async fn deliver(
+    data: &str,
+    kind: &Kind,
+    initialize: bool,
+    desk: &Desk,
+    seen: &mut Seen,
+) -> Result<(), &'static str> {
     let value = match serde_json::from_str::<Value>(data) {
         Ok(value) if is_message(&value) => value,
         _ => {
@@ -125,9 +142,12 @@ async fn deliver(data: &str, kind: &Kind, initialize: bool, desk: &Desk, seen: &
                 "dropped an answer of the service that is not a JSON-RPC message",
             )
             .await;
-            return false;
+            return Err(NOT_A_MESSAGE);
         }
     };
+    if !line(desk, value.to_string()).await {
+        return Err(ANSWER_WITHHELD);
+    }
     if let Kind::Request { id } = kind
         && value.get("method").is_none()
         && value.get("id") == Some(id)
@@ -140,8 +160,7 @@ async fn deliver(data: &str, kind: &Kind, initialize: bool, desk: &Desk, seen: &
                 .map(str::to_owned);
         }
     }
-    line(desk, value.to_string()).await;
-    true
+    Ok(())
 }
 
 /// Wait for every message in flight.
@@ -168,7 +187,8 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
     let streamed = async {
         let mut seen = Seen::default();
         while let Some(data) = arriving.recv().await {
-            deliver(&data, &kind, initialize, desk, &mut seen).await;
+            // What is not passed on is said on the error stream by `deliver` and `line`.
+            let _ = deliver(&data, &kind, initialize, desk, &mut seen).await;
         }
         seen
     };
@@ -189,7 +209,6 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
                 "The okf-jawn service ended its answer without a response to this request"
                     .to_owned()
             });
-            let why = desk.secret.redact(&why);
             line(desk, error_line(Some(id), INTERNAL_ERROR, &why)).await;
         }
         (Kind::Request { .. }, Some(why)) => {
@@ -217,10 +236,22 @@ async fn exchange<T: Transport>(transport: &T, outgoing: Outgoing, desk: &Desk) 
     }
 }
 
-/// Queue one protocol line for the output stream.
-async fn line(desk: &Desk, text: String) {
+/// Queue one protocol line for the output stream, without the credential.
+///
+/// Every line the relay writes passes here, the service's own and the relay's alike. Returns
+/// false when the line was withheld because it could not be cleaned.
+async fn line(desk: &Desk, text: String) -> bool {
+    let Some(clean) = desk.secret.redact_line(text) else {
+        note(
+            desk,
+            "withheld a line that repeats the connector credential outside a JSON string",
+        )
+        .await;
+        return false;
+    };
     // The receiver is gone only when the output stream failed; the read loop then ends.
-    let _ = desk.lines.send(text).await;
+    let _ = desk.lines.send(clean).await;
+    true
 }
 
 /// Queue one diagnostic for the error stream.
@@ -386,8 +417,10 @@ async fn settle(
         (401, _) => Some(CREDENTIAL_REFUSED.to_owned()),
         (403, _) => Some(ACCESS_REFUSED.to_owned()),
         (200..=299, Body::Empty | Body::Events) => None,
-        (200..=299, Body::Json(text)) => (!deliver(&text, kind, initialize, desk, seen).await)
-            .then(|| "The okf-jawn service's answer is not a JSON-RPC message".to_owned()),
+        (200..=299, Body::Json(text)) => deliver(&text, kind, initialize, desk, seen)
+            .await
+            .err()
+            .map(str::to_owned),
         (200..=299, Body::Other) => Some(format!(
             "The okf-jawn service answered HTTP {status} with a body that is neither JSON nor \
              an event stream"
@@ -434,8 +467,11 @@ async fn refusal(
         if error.get("id").is_none_or(Value::is_null) {
             error.insert("id".to_owned(), id.clone());
         }
-        seen.answered = error.get("id") == Some(id);
-        line(desk, Value::Object(error).to_string()).await;
+        let answers = error.get("id") == Some(id);
+        if !line(desk, Value::Object(error).to_string()).await {
+            return Some(ANSWER_WITHHELD.to_owned());
+        }
+        seen.answered = answers;
         return None;
     }
     Some(match (message("/code"), message("/message")) {
