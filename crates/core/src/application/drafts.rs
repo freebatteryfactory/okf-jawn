@@ -11,9 +11,12 @@
 //! is recorded as given. A draft may leave the application header out
 //! or echo it unchanged; any other value is refused before the draft is written.
 //!
-//! A draft never changes the text of a source card: its body is compared byte for byte with the
-//! body the item has at the draft's base (the service normalizes neither line ends nor a
-//! trailing newline anywhere), and a source's text is changed by `correct_digest`. A View has no
+//! A draft never changes the text of a source card: its body is compared with the body the item
+//! has at the draft's base as a read shows it (storage's reader folds `\r\n` to `\n` and drops
+//! one final newline, see `as_a_read_shows`), so the body a client sends back from `get_item` is
+//! never refused for those bytes alone. Whatever the request's body was, the draft of a source
+//! card holds the item's own body at the draft's base, byte for byte, so a Snapshot never commits
+//! the client's spelling. A source's text is changed by `correct_digest`. A View has no
 //! draft until its layout and validation land (construction plan M1.6). `commit_items` applies
 //! the same two rules (`refuse_unsupported_draft`) to drafts that predate them.
 
@@ -70,6 +73,7 @@ pub(super) async fn save_draft(
             request.base_revision
         }
     };
+    let mut body = request.body;
     if current.summary.kind == ItemKind::Source {
         // The text the draft is measured against is the item's at the draft's base.
         let at_base = if base_revision == head {
@@ -81,12 +85,14 @@ pub(super) async fn save_draft(
                 .await?
                 .body
         };
-        refuse_source_text_change(request.item_id, &at_base, &request.body)?;
+        refuse_source_text_change(request.item_id, &at_base, &body)?;
+        // The draft holds the item's own text, not the request's spelling of it.
+        body = at_base;
     }
     // The digest of the drafted body and properties, computed as the item they would commit
     // is, so a draft and that item compare.
     let drafted = ItemDocument {
-        body: request.body,
+        body,
         properties: request.properties,
         ..current
     };
@@ -128,11 +134,12 @@ fn view_has_no_draft(item: ItemId) -> ApiError {
 
 /// Refuse a draft body that differs from the body a source card has at the draft's base.
 ///
-/// The comparison is exact. A card's text is generated extraction or a recorded correction, and
-/// only `correct_digest` records the second (SPEC section 5); a draft would replace the shown
-/// text with no record and the next re-extraction would erase it.
+/// Both texts are compared as a read shows them (`as_a_read_shows`). A card's text is generated
+/// extraction or a recorded correction, and only `correct_digest` records the second (SPEC
+/// section 5); a draft would replace the shown text with no record and the next re-extraction
+/// would erase it.
 fn refuse_source_text_change(item: ItemId, at_base: &str, drafted: &str) -> Result<(), ApiError> {
-    if at_base == drafted {
+    if as_a_read_shows(at_base) == as_a_read_shows(drafted) {
         return Ok(());
     }
     Err(invalid(
@@ -143,6 +150,21 @@ fn refuse_source_text_change(item: ItemId, at_base: &str, drafted: &str) -> Resu
         ),
         "/body",
     ))
+}
+
+/// A body spelled the way storage's reader gives it back: line ends folded to `\n` and one final
+/// newline dropped.
+///
+/// okf-core's `Document::parse` (0.2.7, `document.rs`) rebuilds a body from `text.lines()` joined
+/// with `\n`, and `serialize` puts one final newline back, so two bodies that differ only in
+/// those bytes are the same text to every read of the item. A lone `\r` is kept, as `lines`
+/// keeps it.
+fn as_a_read_shows(body: &str) -> String {
+    let folded = body.replace("\r\n", "\n");
+    match folded.strip_suffix('\n') {
+        Some(without) => without.to_owned(),
+        None => folded,
+    }
 }
 
 /// The two draft rules for a draft that already exists, as a Snapshot is about to commit it:

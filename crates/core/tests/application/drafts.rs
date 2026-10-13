@@ -316,9 +316,12 @@ async fn a_draft_of_a_source_card_may_not_change_its_text() -> TestResult {
         refused.message
     );
     assert!(world.drafts.saves()?.is_empty());
-    // The comparison is exact: the service normalizes neither a trailing newline nor line ends
-    // anywhere, so these differ too.
-    for body in [format!("{CARD_BODY}\n"), CARD_BODY.replace('\n', "\r\n")] {
+    // A body that differs in one character is refused whatever its line ends and final newline.
+    for body in [
+        CARD_BODY.replace("first", "firsT"),
+        CARD_BODY.replace("first", "firsT").replace('\n', "\r\n"),
+        format!("{CARD_BODY}x"),
+    ] {
         let refused = err_of(
             world
                 .service
@@ -331,6 +334,50 @@ async fn a_draft_of_a_source_card_may_not_change_its_text() -> TestResult {
         assert_eq!(refused.field.as_deref(), Some("/body"));
     }
     assert!(world.drafts.saves()?.is_empty());
+    Ok(())
+}
+
+/// Storage's reader drops a body's final newline and turns `\r\n` into `\n`, so a client that
+/// sends back the stored file's spelling sends the same text `show` gave it.
+#[tokio::test]
+async fn a_properties_only_draft_of_a_source_card_is_accepted_with_a_final_newline_or_crlf()
+-> TestResult {
+    let world = world_with_a_card_a_view_and_the_note()?;
+    let at = revision('a')?;
+    // The body as `show` gives it: no final newline.
+    let shown = CARD_BODY.trim_end_matches('\n');
+    world.versions.replace_document(
+        &at,
+        source_card(
+            CARD,
+            &at,
+            "sources/report-pdf.md",
+            shown,
+            converted(&digest('b')?),
+        )?,
+    )?;
+    let spellings = [
+        ("a final newline", format!("{shown}\n")),
+        ("CRLF line ends", shown.replace('\n', "\r\n")),
+        ("both", format!("{}\r\n", shown.replace('\n', "\r\n"))),
+    ];
+    for (number, (name, body)) in (1..).zip(spellings) {
+        let saved = world
+            .service
+            .save_draft(
+                &alice(OperationName::SaveDraft, Some(mutation(number)))?,
+                card_save(
+                    at.clone(),
+                    &body,
+                    json!({ "type": "Source", "tags": ["quarterly"] }),
+                )?,
+            )
+            .await;
+        assert!(saved.is_ok(), "{name}: {saved:?}");
+        // What is stored is the item's own body, never the request's spelling.
+        let held = world.drafts.held()?;
+        assert_eq!(some(held.first(), "the draft")?.body, shown, "{name}");
+    }
     Ok(())
 }
 
@@ -783,7 +830,11 @@ async fn a_later_save_that_names_another_revision_keeps_the_drafts_base() -> Tes
             save(revision('b')?, json!({ "type": "Note" }))?,
         )
         .await?;
-    assert_eq!(later.base_revision, revision('a')?, "a later save keeps the base");
+    assert_eq!(
+        later.base_revision,
+        revision('a')?,
+        "a later save keeps the base"
+    );
     let refused = err_of(
         world
             .service
