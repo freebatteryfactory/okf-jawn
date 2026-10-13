@@ -479,9 +479,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
             <button
               type="button"
               onClick={() => {
-                // Focus leaves this button before it goes: back to what asked to leave, so a
-                // navigation that follows begins with focus on the page, never on its body.
-                focusNext.current = 'opener';
+                // The one who asked places focus when the rules have left the page.
                 setLeaving(null);
                 leaving.proceed();
               }}

@@ -1541,6 +1541,19 @@ describe('leaving the workspace page with rule edits that are not saved', () => 
     expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull();
   });
 
+  it('shows the item of a search result’s link when it is the item the address already names', async () => {
+    service({ [SEARCH]: found });
+    // The address names the note, as read at the head; the result cites lines of it.
+    const { router } = await openRules(`/w/${WS}/i/${NOTE}?q=budget`);
+    // The documents are behind the rules: not on the page for anyone.
+    expect(screen.queryByRole('region', { name: 'Documents' })).toBeNull();
+    await userEvent.click(await hit());
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ rev: HEAD }));
+    expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Naming rules' })).toBeNull());
+    expect(screen.getByRole('region', { name: 'Documents' })).toBeTruthy();
+  });
+
   it('asks nothing, and keeps the rules open, when only the search changes', async () => {
     service({ [SEARCH]: found });
     const { router } = await openRules();
@@ -1690,6 +1703,7 @@ describe('saving over rules someone else saved meanwhile', () => {
     const replace = button('Replace the saved rules with mine…');
     expect(replace.getAttribute('aria-disabled')).not.toBe('true');
     expect(replace.getAttribute('aria-describedby')).toBeNull();
+    expect(panel().textContent).not.toContain('Saving is not available now');
     expect(own.api.callsTo(SET)).toHaveLength(1);
   });
 
