@@ -1,0 +1,777 @@
+//! Archives written by an earlier build, kept as fixtures, and the writer that makes them
+//! (SPEC section 12: a backup is independently recoverable).
+//!
+//! `tests/fixtures/archives/records-schema-<n>/` holds one workspace archive and one
+//! installation archive that the build at records schema `n` wrote; its `README.md` says which
+//! commit wrote them and what they hold. They are never written again: a later build has to
+//! restore the bytes an earlier build wrote.
+//!
+//! # Writing the fixtures of a schema
+//!
+//! Before a change to the records schema, or to anything else an archive stores, run the writer
+//! on the build that is about to change (the commit before the change), from the repository
+//! root, in PowerShell:
+//!
+//! ```text
+//! $env:OKF_JAWN_FIXTURE_OUT = "$PWD\crates\storage\tests\fixtures\archives"
+//! cargo test --locked --all-features -p okf-jawn-storage --test archive_fixtures -- --ignored --nocapture write_archive_fixtures
+//! ```
+//!
+//! It writes `records-schema-<n>/workspace.zip` and `records-schema-<n>/installation.zip` under
+//! that directory, `n` being the records `user_version` of the data directory it built, and
+//! says on standard error what it wrote. It refuses to replace a fixture that exists. Without
+//! the variable the writer writes nothing. Then add the directory's `README.md` and a restore
+//! test for it beside the ones here, and make the schema change.
+//!
+//! Everything the writer stores is synthetic (`fixture-owner`, `fixtures.invalid`): a fixture
+//! is a tracked file, and no tracked file holds a personal name, address or machine path.
+#![cfg(feature = "runtime")]
+
+use std::collections::BTreeMap;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use okf_jawn_contract::access::{AccessRoute, Principal};
+use okf_jawn_contract::common::Warning;
+use okf_jawn_contract::error::ApiError;
+use okf_jawn_contract::events::EventKind;
+use okf_jawn_contract::identity::{Digest, Revision, TenantId, WorkspacePath};
+use okf_jawn_contract::item::ItemKind;
+use okf_jawn_contract::workspace::ArtifactKind;
+use okf_jawn_core::access::AccessControl;
+use okf_jawn_core::credentials::{CredentialStore, NewConnector};
+use okf_jawn_core::drafts::{DraftStore, DraftWrite};
+use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
+use okf_jawn_core::jobs::{
+    DerivedKind, DerivedObject, JobCompletion, JobScope, JobSpec, NewArtifact, NewJob, RecordStore,
+};
+use okf_jawn_core::proposals::ProposalStore;
+use okf_jawn_core::storage::{
+    Backups, BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, Provenance,
+    SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
+};
+use okf_jawn_core::uploads::{NewUpload, UploadStore};
+use okf_jawn_storage::Storage;
+use serde_json::json;
+
+use check::{TestResult, some};
+
+/// The identity numbered `n`, of the type the context names.
+macro_rules! uuid {
+    ($n:expr) => {
+        serde_json::from_value(json!(uuid_text($n)))
+    };
+}
+
+type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// Accepts every candidate.
+struct Accept;
+
+/// What the writer built before it took the archives.
+struct Seeded {
+    storage: Storage,
+    /// The workspace the workspace archive is of.
+    workspace: StorageScope,
+    /// A second workspace of the same tenant, which no fixture archive holds.
+    second: StorageScope,
+    /// The first workspace's head.
+    head: Revision,
+    /// The candidate of the first workspace's proposal.
+    candidate: Revision,
+}
+
+/// The environment variable naming the directory the writer writes under.
+const OUT: &str = "OKF_JAWN_FIXTURE_OUT";
+/// The tenant of everything in the fixtures.
+const TENANT: &str = "fixture-tenant";
+/// The subject that created, wrote and reviewed everything.
+const OWNER: &str = "fixture-owner";
+/// A second editor, with a draft of its own; spelled as an address to show the only addresses
+/// in a fixture are at `fixtures.invalid`.
+const EDITOR: &str = "fixture-editor@fixtures.invalid";
+/// The archived workspace's name and description.
+const WORKSPACE: (&str, &str) = ("Fixture workspace", "Synthetic content for restore tests.");
+/// The second workspace's name, which no row of the archived records may hold.
+const SECOND: &str = "Second fixture workspace";
+/// The notes at the head: item number, path and body. The harbor note links to the two others;
+/// the budget note was written once and then edited.
+const NOTES: [(u32, &str, &str); 3] = [
+    (
+        10,
+        "notes/harbor.md",
+        "The harbor plan.\n\nSee [budget](budget.md) and the [schedule](../plans/schedule.md).",
+    ),
+    (11, "notes/budget.md", "The budget for the harbor, revised."),
+    (
+        12,
+        "plans/schedule.md",
+        "The schedule follows the harbor plan.",
+    ),
+];
+/// The budget note's body in the first commit, before its edit.
+const BUDGET_FIRST: &str = "The budget for the harbor.";
+/// The source card: item number, path, title and body.
+const CARD: (u32, &str, &str, &str) = (
+    13,
+    "sources/report-pdf.md",
+    "report.pdf",
+    "Converted text of the fixture report.",
+);
+/// The bytes of the card's original object.
+const ORIGINAL: &[u8] = b"fixture original bytes";
+/// The bytes of the structured export and of the page render the card's conversion record names.
+const DERIVATIVES: (&[u8], &[u8]) = (
+    b"{\"fixture\": \"structured export\"}",
+    b"fixture page render",
+);
+/// The bytes of the dataset derived from the card.
+const DATASET: &[u8] = b"harbor,budget\n1,2\n";
+/// The bytes of the retained export the finished job produced.
+const EXPORT: &[u8] = b"fixture export bytes";
+/// The bytes of the completed upload, and its file name.
+const UPLOAD: (&[u8], &str) = (b"fixture upload bytes", "fixture-upload.txt");
+/// The note only the proposal's candidate holds: item number, path and body.
+const PROPOSED: (u32, &str, &str) = (14, "notes/idea.md", "A proposed idea.");
+/// The proposal: its number, title and description.
+const PROPOSAL: (u32, &str, &str) = (20, "Fixture proposal", "A proposal kept by the archive.");
+/// The proposal's one comment: its identity and text.
+const COMMENT: (&str, &str) = ("fixture-comment-1", "A fixture comment.");
+/// The draft bodies of `OWNER` and of `EDITOR`, both of the harbor note.
+const DRAFTS: (&str, &str) = (
+    "The harbor plan, drafted by the owner.",
+    "The harbor plan, drafted by the editor.",
+);
+/// The connector's label.
+const CONNECTOR: &str = "Fixture connector";
+/// The number of the review.
+const REVIEW: u32 = 60;
+/// The number of the receipt.
+const RECEIPT: u32 = 61;
+/// The mutations of the first workspace's commits, in order: the notes and the card, the budget
+/// note's edit, the naming rules.
+const COMMITS: [u32; 3] = [3, 4, 5];
+/// A time for the records that carry one the caller gives.
+const WHEN: &str = "2026-10-09T12:00:00.000Z";
+
+impl CandidateCheck for Accept {
+    fn check(&self, _root: &Path, _rewritten: &[WorkspacePath]) -> Result<Vec<Warning>, ApiError> {
+        Ok(Vec::new())
+    }
+}
+
+fn uuid_text(n: u32) -> String {
+    format!("00000000-0000-4000-8000-{n:012}")
+}
+
+fn person(subject: &str) -> Provenance {
+    Provenance {
+        subject: subject.to_owned(),
+        route: AccessRoute::LocalOwner,
+        client_id: None,
+    }
+}
+
+fn tenant() -> Fallible<TenantId> {
+    Ok(TenantId::try_from(TENANT.to_owned())?)
+}
+
+fn note(item: u32, at: &str, body: &str) -> Fallible<TreeEdit> {
+    Ok(TreeEdit::CreateItem {
+        item_id: uuid!(item)?,
+        path: WorkspacePath::try_from(at.to_owned())?,
+        title: None,
+        type_name: "Note".to_owned(),
+        kind: ItemKind::Note,
+        body: body.to_owned(),
+        properties: BTreeMap::new(),
+    })
+}
+
+/// The converter a conversion record and its card name.
+fn converter() -> serde_json::Value {
+    json!({
+        "name": "docling",
+        "version": "2.3.0",
+        "packages": [],
+        "settings": {
+            "ocr": "auto",
+            "table_structure": true,
+            "page_images": true,
+            "page_image_dpi": 144
+        },
+        "models": [{ "stage": "layout", "file": "layout.onnx", "size": "1", "sha256": "7".repeat(64) }]
+    })
+}
+
+/// A conversion record naming the structured export `structured` and the page render `asset`.
+fn conversion_record(structured: &Digest, asset: &Digest) -> Fallible<Vec<u8>> {
+    Ok(serde_json::to_vec(&json!({
+        "converter": converter(),
+        "outcome": { "status": "completed" },
+        "page_count": 1,
+        "structured": [{ "digest": structured.as_str() }],
+        "markdown": "8".repeat(64),
+        "locations": [{ "lines": { "start": 0, "end": 0 }, "page_no": 1 }],
+        "outline": [],
+        "tables": [],
+        "assets": [{
+            "digest": asset.as_str(),
+            "media_type": "image/png",
+            "role": "page_render",
+            "location": { "page_no": 1 }
+        }],
+        "warnings": []
+    }))?)
+}
+
+/// The source card over `original` whose completed extraction names the conversion `record`.
+fn card(original: &Digest, record: &Digest) -> Fallible<TreeEdit> {
+    let (item, path, title, body) = CARD;
+    Ok(TreeEdit::WriteSourceCard(Box::new(SourceCard {
+        item_id: uuid!(item)?,
+        path: WorkspacePath::try_from(path.to_owned())?,
+        title: title.to_owned(),
+        type_name: "Source".to_owned(),
+        body: body.to_owned(),
+        properties: BTreeMap::new(),
+        appearance: serde_json::from_value(json!({
+            "object": original.as_str(),
+            "names": [{
+                "filename": title,
+                "folder": "",
+                "observed_at": WHEN,
+                "supplied_by": OWNER
+            }],
+            "media_type": "application/pdf",
+            "size": ORIGINAL.len().to_string(),
+            "metadata": {},
+            "extraction": {
+                "outcome": { "status": "completed" },
+                "converter": converter(),
+                "digest": record.as_str(),
+                "page_count": 1,
+                "text_origin": "converter",
+                "corrected": false,
+                "warnings": []
+            }
+        }))?,
+    })))
+}
+
+/// The naming rules the first workspace keeps, as the contract spells them.
+fn naming_rules() -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "rules": [{
+            "glob": "notes/**",
+            "case": "kebab",
+            "separator": "-",
+            "prefix": "",
+            "date_order": "ymd",
+            "date_format": "%Y-%m-%d",
+            "strip_version_suffix": false,
+            "extension_policy": "lowercase",
+            "alias_preservation": true,
+            "collision": "reject"
+        }]
+    })
+}
+
+async fn put(storage: &Storage, scope: &StorageScope, bytes: &[u8]) -> Fallible<Digest> {
+    Ok(storage
+        .blobs()
+        .put(
+            scope,
+            Box::pin(std::io::Cursor::new(bytes.to_vec())),
+            1 << 20,
+            None,
+        )
+        .await?
+        .digest)
+}
+
+async fn create(
+    storage: &Storage,
+    mutation: u32,
+    name: &str,
+    description: &str,
+) -> Fallible<(StorageScope, Revision)> {
+    let created = storage
+        .catalog()
+        .create(
+            &tenant()?,
+            uuid!(mutation)?,
+            NewWorkspace {
+                name: name.to_owned(),
+                description: description.to_owned(),
+                creator: person(OWNER),
+            },
+        )
+        .await?;
+    Ok((
+        StorageScope {
+            tenant_id: tenant()?,
+            workspace_id: created.id,
+        },
+        created.head,
+    ))
+}
+
+async fn commit(
+    storage: &Storage,
+    scope: &StorageScope,
+    mutation: u32,
+    head: &Revision,
+    message: &str,
+    edits: Vec<TreeEdit>,
+) -> Fallible<Revision> {
+    Ok(storage
+        .versions()
+        .commit(
+            scope,
+            CommitChanges {
+                mutation_id: uuid!(mutation)?,
+                expected_head: head.clone(),
+                author: person(OWNER),
+                message: message.to_owned(),
+                edits,
+            },
+            Arc::new(Accept),
+        )
+        .await?
+        .revision)
+}
+
+fn count(database: &Path, query: &str) -> Fallible<i64> {
+    let connection = rusqlite::Connection::open(database)?;
+    Ok(connection.query_row(query, [], |row| row.get(0))?)
+}
+
+/// The bytes of the entry `name` of the archive at `path`.
+fn entry(path: &Path, name: &str) -> Fallible<Vec<u8>> {
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
+    let mut bytes = Vec::new();
+    archive.by_name(name)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// The two workspaces and the first one's history: three notes in two folders, a source card
+/// over an original with a conversion record, an edit, the naming rules, and a proposal's
+/// candidate.
+async fn seed_history(directory: &Path) -> Fallible<Seeded> {
+    let storage = Storage::open(directory)?;
+    let (workspace, created) = create(&storage, 1, WORKSPACE.0, WORKSPACE.1).await?;
+    let (second, second_head) = create(&storage, 2, SECOND, "").await?;
+    let original = put(&storage, &workspace, ORIGINAL).await?;
+    let structured = put(&storage, &workspace, DERIVATIVES.0).await?;
+    let asset = put(&storage, &workspace, DERIVATIVES.1).await?;
+    let record = put(
+        &storage,
+        &workspace,
+        &conversion_record(&structured, &asset)?,
+    )
+    .await?;
+    let mut edits = Vec::new();
+    for (item, path, body) in NOTES {
+        let body = if item == 11 { BUDGET_FIRST } else { body };
+        edits.push(note(item, path, body)?);
+    }
+    edits.push(card(&original, &record)?);
+    let [first, revise, rule] = COMMITS;
+    let written = commit(&storage, &workspace, first, &created, "Seed", edits).await?;
+    let &(budget, _, revised) = some(NOTES.get(1), "the budget note")?;
+    let edit = TreeEdit::EditItem {
+        item_id: uuid!(budget)?,
+        body: revised.to_owned(),
+        properties: BTreeMap::new(),
+    };
+    let edited = commit(&storage, &workspace, revise, &written, "Revise", vec![edit]).await?;
+    let rules = TreeEdit::SetRules {
+        rules: serde_json::from_value(naming_rules())?,
+    };
+    let head = commit(&storage, &workspace, rule, &edited, "Rules", vec![rules]).await?;
+    let (proposal, _, _) = PROPOSAL;
+    let (item, path, body) = PROPOSED;
+    let candidate = storage
+        .versions()
+        .create_candidate(
+            &workspace,
+            uuid!(proposal)?,
+            CandidateChanges {
+                mutation_id: uuid!(6)?,
+                base: head.clone(),
+                author: person(EDITOR),
+                message: "Propose".to_owned(),
+                edits: vec![note(item, path, body)?],
+            },
+            Arc::new(Accept),
+        )
+        .await?;
+    let marked = "Content of the second workspace.";
+    let elsewhere = vec![note(15, "notes/elsewhere.md", marked)?];
+    commit(&storage, &second, 7, &second_head, "Seed", elsewhere).await?;
+    Ok(Seeded {
+        storage,
+        workspace,
+        second,
+        head,
+        candidate,
+    })
+}
+
+/// The first workspace's drafts, derived dataset and completed upload.
+async fn seed_content_records(seeded: &Seeded) -> TestResult {
+    let (storage, workspace) = (&seeded.storage, &seeded.workspace);
+    for (mutation, editor, body) in [(20_u32, OWNER, DRAFTS.0), (21, EDITOR, DRAFTS.1)] {
+        storage
+            .drafts()
+            .save(
+                workspace,
+                uuid!(mutation)?,
+                DraftWrite {
+                    item_id: uuid!(10)?,
+                    editor: editor.to_owned(),
+                    base_revision: seeded.head.clone(),
+                    body: body.to_owned(),
+                    properties: BTreeMap::new(),
+                    content_digest: Digest::try_from("e".repeat(64))?,
+                },
+            )
+            .await?;
+    }
+    let dataset = put(storage, workspace, DATASET).await?;
+    storage
+        .records()
+        .record_derived_object(
+            workspace,
+            DerivedObject {
+                item_id: uuid!(CARD.0)?,
+                revision: seeded.head.clone(),
+                digest: dataset,
+                kind: DerivedKind::Dataset,
+                media_type: "text/csv".to_owned(),
+            },
+        )
+        .await?;
+    let (bytes, filename) = UPLOAD;
+    let uploaded = put(storage, workspace, bytes).await?;
+    let uploads = storage.uploads();
+    let slot = uploads
+        .create(
+            workspace,
+            uuid!(22)?,
+            NewUpload {
+                filename: filename.to_owned(),
+                relative_path: String::new(),
+                expected_size: u64::try_from(bytes.len())?,
+                expected_sha256: None,
+                supplied_by: person(OWNER),
+            },
+        )
+        .await?;
+    uploads
+        .put_content(
+            workspace,
+            slot.id,
+            Box::pin(std::io::Cursor::new(bytes.to_vec())),
+            1 << 20,
+        )
+        .await?;
+    uploads.complete(workspace, slot.id, uploaded).await?;
+    Ok(())
+}
+
+/// A finished export job of the first workspace, with its retained export as its artifact and
+/// its output.
+async fn seed_job(seeded: &Seeded) -> TestResult {
+    let (storage, workspace) = (&seeded.storage, &seeded.workspace);
+    let scope = JobScope::Workspace(workspace.clone());
+    let records = storage.records();
+    let job = records
+        .create_job(
+            &scope,
+            NewJob {
+                mutation_id: uuid!(30)?,
+                initiator: person(OWNER),
+                spec: JobSpec::ExportWorkspace {
+                    revision: seeded.head.clone(),
+                    include_history: false,
+                },
+            },
+        )
+        .await?;
+    let claimed = some(records.claim_job(job.id).await?, "the claimed job")?;
+    let export = storage
+        .blobs()
+        .put(
+            workspace,
+            Box::pin(std::io::Cursor::new(EXPORT.to_vec())),
+            1 << 20,
+            None,
+        )
+        .await?;
+    let artifact = records
+        .record_artifact(
+            &scope,
+            uuid!(31)?,
+            NewArtifact {
+                kind: ArtifactKind::Export,
+                object: export.clone(),
+                media_type: "application/zip".to_owned(),
+                created_by_job: job.id,
+            },
+        )
+        .await?;
+    records
+        .complete_job(JobCompletion {
+            lease: claimed.lease,
+            revision: None,
+            item_ids: Vec::new(),
+            artifact: Some(artifact.id),
+            restore: None,
+            outputs: vec![export.digest],
+            warnings: Vec::new(),
+        })
+        .await?;
+    Ok(())
+}
+
+/// The first workspace's review and receipt of the harbor note, and an event about it.
+async fn seed_review(seeded: &Seeded) -> TestResult {
+    let (storage, workspace) = (&seeded.storage, &seeded.workspace);
+    let (harbor, path, _) = some(NOTES.first(), "the harbor note")?;
+    let source = json!({
+        "workspace_id": workspace.workspace_id,
+        "item_id": uuid_text(*harbor),
+        "path": path,
+        "revision": seeded.head,
+        "selection": { "kind": "all" }
+    });
+    let review = serde_json::from_value(json!({
+        "id": uuid_text(REVIEW),
+        "source": source,
+        "content_digest": "d".repeat(64),
+        "reviewer_subject": OWNER,
+        "reviewed_at": WHEN,
+        "coverage": "current"
+    }))?;
+    let records = storage.records();
+    records.insert_review(workspace, uuid!(40)?, review).await?;
+    let receipt = serde_json::from_value(json!({
+        "id": uuid_text(RECEIPT),
+        "workspace_id": workspace.workspace_id,
+        "operation_id": "get_item",
+        "principal_subject": OWNER,
+        "route": "local_owner",
+        "sources": [source],
+        "returned_at": WHEN,
+        "audience": "human_display"
+    }))?;
+    records
+        .insert_receipt(workspace, Some(uuid!(41)?), receipt)
+        .await?;
+    let changed = NewEvent {
+        kind: EventKind::Changed,
+        revision: Some(seeded.head.clone()),
+        item_id: Some(uuid!(*harbor)?),
+        job_id: None,
+        connector_id: None,
+        actor: None,
+        operation: None,
+    };
+    storage
+        .events()
+        .append(&EventScope::Workspace(workspace.clone()), None, changed)
+        .await?;
+    Ok(())
+}
+
+/// The first workspace's open proposal with its comment, and the second editor's grant.
+async fn seed_proposal(seeded: &Seeded) -> TestResult {
+    let (storage, workspace) = (&seeded.storage, &seeded.workspace);
+    let (number, title, description) = PROPOSAL;
+    let proposal = serde_json::from_value(json!({
+        "id": uuid_text(number),
+        "workspace_id": workspace.workspace_id,
+        "base_revision": seeded.head,
+        "proposal_revision": seeded.candidate,
+        "content_digest": "d".repeat(64),
+        "title": title,
+        "description": description,
+        "changes": [],
+        "kind": "content",
+        "status": "open",
+        "created_by": EDITOR,
+        "created_via": "mcp_delegation",
+        "created_at": WHEN
+    }))?;
+    let proposals = storage.proposals();
+    let open = proposals.insert(workspace, uuid!(42)?, proposal).await?;
+    let comment = serde_json::from_value(json!({
+        "id": COMMENT.0,
+        "author": OWNER,
+        "text": COMMENT.1,
+        "created_at": WHEN
+    }))?;
+    proposals
+        .add_comment(workspace, uuid!(43)?, open.id, comment)
+        .await?;
+    let editor = Principal {
+        subject: EDITOR.to_owned(),
+        tenant_id: tenant()?,
+        route: AccessRoute::LocalOwner,
+        client_id: None,
+        delegation: None,
+    };
+    storage
+        .access()
+        .grant_creator(&editor, workspace.workspace_id)
+        .await?;
+    Ok(())
+}
+
+/// What only the installation archive carries: the installation's identity, a connector that
+/// may read both workspaces, and a tenant event.
+async fn seed_installation(seeded: &Seeded) -> TestResult {
+    let storage = &seeded.storage;
+    storage.credentials().installation_identity().await?;
+    storage
+        .credentials()
+        .create_connector(
+            uuid!(50)?,
+            NewConnector {
+                label: CONNECTOR.to_owned(),
+                workspace_ids: vec![seeded.workspace.workspace_id, seeded.second.workspace_id],
+                allow_propose: true,
+            },
+        )
+        .await?;
+    let signed_in = NewEvent {
+        kind: EventKind::SignedIn,
+        revision: None,
+        item_id: None,
+        job_id: None,
+        connector_id: None,
+        actor: None,
+        operation: None,
+    };
+    storage
+        .events()
+        .append(&EventScope::Tenant(tenant()?), None, signed_in)
+        .await?;
+    Ok(())
+}
+
+/// Take the two archives of `seeded` and write them under `target`; returns their paths, the
+/// workspace archive first.
+async fn take_archives(seeded: &Seeded, target: &Path) -> Fallible<(PathBuf, PathBuf)> {
+    let (storage, backups) = (&seeded.storage, seeded.storage.backups());
+    let paths = (
+        target.join("workspace.zip"),
+        target.join("installation.zip"),
+    );
+    for path in [&paths.0, &paths.1] {
+        if path.exists() {
+            return Err(format!(
+                "{} exists: a fixture an earlier build wrote is never written again",
+                path.display()
+            )
+            .into());
+        }
+    }
+    std::fs::create_dir_all(target)?;
+    let archive = backups
+        .write_workspace_archive(&seeded.workspace, uuid!(70)?)
+        .await?;
+    let stored = storage
+        .data()
+        .objects_path()
+        .join(TENANT)
+        .join(archive.digest.as_str().get(..2).unwrap_or_default())
+        .join(archive.digest.as_str());
+    std::fs::copy(stored, &paths.0)?;
+    let tenant = tenant()?;
+    let object = backups
+        .write_installation_archive(&tenant, uuid!(71)?)
+        .await?;
+    let mut read = backups
+        .open_installation_archive(&tenant, &object.digest, 0, object.size)
+        .await?;
+    let mut bytes = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut read.body, &mut bytes).await?;
+    std::fs::write(&paths.1, &bytes)?;
+    Ok(paths)
+}
+
+/// Say on standard error what was written: the versions the README of a fixture directory
+/// states.
+fn describe(directory: &Path, schema: i64, paths: &(PathBuf, PathBuf)) -> TestResult {
+    let layout = std::fs::read_to_string(directory.join("format.json"))?;
+    let workspace: serde_json::Value = serde_json::from_slice(&entry(&paths.0, "manifest.json")?)?;
+    let installation: serde_json::Value =
+        serde_json::from_slice(&entry(&paths.1, "installation.json")?)?;
+    let scratch = tempfile::tempdir()?;
+    let archived = scratch.path().join("records.sqlite");
+    std::fs::write(&archived, entry(&paths.0, "records.sqlite")?)?;
+    eprintln!("records user_version of the data directory: {schema}");
+    eprintln!("data directory format.json: {}", layout.trim());
+    for (path, manifest) in [(&paths.0, &workspace), (&paths.1, &installation)] {
+        eprintln!(
+            "{}: {} bytes, format {}, version {}",
+            path.display(),
+            std::fs::metadata(path)?.len(),
+            manifest.get("format").unwrap_or(&serde_json::Value::Null),
+            manifest.get("version").unwrap_or(&serde_json::Value::Null),
+        );
+    }
+    eprintln!(
+        "records user_version inside the workspace archive: {}",
+        count(&archived, "PRAGMA user_version")?
+    );
+    eprintln!(
+        "workspace {} of tenant {}, references {}",
+        workspace
+            .get("workspace_id")
+            .unwrap_or(&serde_json::Value::Null),
+        workspace
+            .get("tenant_id")
+            .unwrap_or(&serde_json::Value::Null),
+        workspace
+            .get("references")
+            .unwrap_or(&serde_json::Value::Null),
+    );
+    Ok(())
+}
+
+/// The writer (see this file's header): builds a data directory on this build and writes its
+/// two archives under `OKF_JAWN_FIXTURE_OUT`, in `records-schema-<n>`. Without the variable it
+/// writes nothing.
+#[tokio::test]
+#[ignore = "writes fixtures; run it by name with OKF_JAWN_FIXTURE_OUT set (see the file header)"]
+async fn write_archive_fixtures() -> TestResult {
+    let Some(out) = std::env::var_os(OUT) else {
+        eprintln!("{OUT} is not set: no fixture was written");
+        return Ok(());
+    };
+    let directory = tempfile::tempdir()?;
+    let seeded = seed_history(directory.path()).await?;
+    seed_content_records(&seeded).await?;
+    seed_job(&seeded).await?;
+    seed_review(&seeded).await?;
+    seed_proposal(&seeded).await?;
+    seed_installation(&seeded).await?;
+    let schema = count(&seeded.storage.data().records_path(), "PRAGMA user_version")?;
+    let target = PathBuf::from(out).join(format!("records-schema-{schema}"));
+    let paths = take_archives(&seeded, &target).await?;
+    let held = String::from_utf8_lossy(&entry(&paths.0, "records.sqlite")?).into_owned();
+    assert!(
+        !held.contains(SECOND),
+        "the workspace archive holds nothing of the second workspace"
+    );
+    describe(directory.path(), schema, &paths)
+}
+
+#[path = "../../../tests/support/check.rs"]
+mod check;
