@@ -1541,6 +1541,34 @@ describe('a Snapshot that conflicts', () => {
       expect(kept?.idempotency_key).not.toBe(failed?.idempotency_key);
     });
 
+    it('says why a draft whose text is not in the page was not kept, and asks nothing', async () => {
+      // The list of drafts names the note, and the Snapshot of it conflicts; `get_item` carries
+      // no draft of it (it was discarded elsewhere in between), so there is no text here to keep.
+      const { api } = withConflict(
+        {},
+        { [ITEM]: (body) => ok(itemDocument(body.item_id === NOTE ? noteSummary : otherSummary)) },
+      );
+      renderAt(`/w/${WS}`);
+      await screen.findByRole('region', { name: 'Drafts (2)' });
+      await pressSnapshot('Tidy');
+      await within(panel()).findByRole('alert');
+      fireEvent.click(within(panel()).getByRole('button', { name: 'Meeting notes' }));
+      const notice = await screen.findByRole('region', {
+        name: 'Meeting notes changed since your draft was started',
+      });
+      await screen.findByText('Text of Meeting notes');
+      expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+      const before = api.calls.length;
+      fireEvent.click(within(notice).getByRole('button', { name: 'Keep mine' }));
+      const alert = await within(notice).findByRole('alert');
+      expect(alert.textContent).toContain('Your draft was not kept.');
+      expect(alert.textContent).toContain('This page has no draft of this item to keep');
+      expect(alert.textContent).not.toContain('editor below');
+      const asked = api.calls.slice(before).map((call) => call.path);
+      expect(asked.filter((path) => path === SAVE || path === COMMIT)).toEqual([]);
+      expect(within(notice).getByRole('button', { name: 'Take theirs' })).toBeDefined();
+    });
+
     it('says why a draft too long to save was not kept, and asks nothing', async () => {
       const { api, notice } = await openConflict();
       vi.useFakeTimers();
