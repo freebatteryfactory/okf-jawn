@@ -582,6 +582,19 @@ async fn an_image_whose_bytes_do_not_begin_with_its_types_signature_is_described
     Ok(())
 }
 
+/// The served type is read by its essence: spaces around it and a parameter after it do not
+/// stop a PNG's bytes from being shown as an image.
+#[tokio::test]
+async fn a_served_type_with_spaces_and_a_parameter_is_read_by_its_essence() -> TestResult {
+    check_served(
+        "images-type-spaces.html",
+        " image/png ; charset=binary ",
+        &PNG_SIGNATURE,
+        true,
+    )
+    .await
+}
+
 /// Bytes that end before the signature does are described: one byte short for each type, and
 /// no bytes at all.
 #[tokio::test]
