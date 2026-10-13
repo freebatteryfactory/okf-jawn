@@ -50,7 +50,11 @@ export interface Call {
   headers: Record<string, string>;
 }
 
-const CONTRACT: Record<string, { request: ZodType; response: ZodType }> = {
+/**
+ * The request and response schema of each operation path a test may answer. Support modules of
+ * other features add their operations to it (`imports.ts`).
+ */
+export const CONTRACT: Record<string, { request: ZodType; response: ZodType }> = {
   '/api/workspaces/list-workspaces': {
     request: zListWorkspacesRequest,
     response: zListWorkspacesResponse,

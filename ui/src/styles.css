@@ -576,3 +576,63 @@ main.app-main:has(.explorer) {
 .patch-lines > span {
   padding-left: calc(0.25rem + 3px);
 }
+/* The workspace's own pages (import, jobs, Attention). Plain and system-colored, like the rest. */
+.workspace-nav {
+  display: flex;
+  gap: 0.75rem;
+}
+.workspace-nav a {
+  text-decoration: underline;
+}
+.workspace-nav a[aria-current="page"] {
+  font-weight: 700;
+  text-decoration: none;
+}
+.workspace-page {
+  display: grid;
+  gap: 0.5rem;
+  max-width: 60rem;
+}
+.workspace-page > * {
+  margin: 0;
+}
+.page-heading {
+  font-size: 1.4rem;
+  font-weight: 700;
+}
+.drop-target {
+  border: 1px dashed GrayText;
+  border-radius: 0.25rem;
+  padding: 0.75rem;
+}
+.drop-target-over {
+  border-style: solid;
+  border-width: 3px;
+  border-color: Highlight;
+}
+.upload-list,
+.job-list,
+.attention-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.upload-row,
+.job,
+.attention-row {
+  border-top: 1px solid color-mix(in srgb, GrayText 50%, transparent);
+  padding-top: 0.5rem;
+  overflow-wrap: anywhere;
+}
+.upload-path,
+.job-title {
+  font-weight: 700;
+}
+.upload-row button {
+  padding: 0.2rem 0.6rem;
+}
+.app-main progress {
+  appearance: auto;
+  vertical-align: middle;
+}

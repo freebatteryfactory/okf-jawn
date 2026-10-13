@@ -9,6 +9,9 @@
  * for a newer head and says so; only Refresh re-resolves the listed head, and then the tree keeps
  * its place. (SPEC section 3: a latest selector is resolved once, by a request; section 7:
  * pagination stays tied to the same revision.)
+ *
+ * The workspace's own pages (`WorkspacePages.tsx`) are shown in place of the documents; the links
+ * to them are in the bar.
  */
 import { useQuery } from '@tanstack/react-query';
 import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router';
@@ -27,12 +30,14 @@ import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
+import { useUploadLeaveGuard } from '../imports/leave-guard';
 import { SearchForm, SearchResults } from '../search/SearchPanel';
-import { DocumentPanes, matchingLayout } from './DocumentPanes';
+import { matchingLayout } from './DocumentPanes';
 import { FolderTree } from './FolderTree';
 import { SourcePanel } from './SourcePanel';
 import { type ItemSelection, validateItemSearch, validateWorkspaceSearch } from './search-params';
 import { type PaneLocation, tabLocation, useExplorerStore, useWorkspaceView } from './store';
+import { DocumentsOrPage, useWorkspacePage, WorkspaceNav } from './WorkspacePages';
 
 /** The resolved head the shell is pinned to: when it was resolved, and how to resolve it again. */
 export interface HeadState {
@@ -89,6 +94,8 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   const repin = useExplorerStore((state) => state.repin);
   const canWrite = workspace.permissions.includes('write');
   useLeaveGuard();
+  useUploadLeaveGuard();
+  const page = useWorkspacePage();
 
   // The URL is the truth for the focused pane: whatever item it names is open there, at the
   // selection and cited revision it names. The pane remembers them for when it loses focus.
@@ -187,6 +194,11 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
           {workspace.name}
         </h1>
         {workspace.description ? <p className="meta">{workspace.description}</p> : null}
+        <WorkspaceNav
+          workspaceId={workspaceId}
+          query={query}
+          documents={view.panes.find((pane) => pane.id === view.focusedPaneId) ?? null}
+        />
         <HeadLine workspace={workspace} state={headState} />
       </div>
       <Group
@@ -226,7 +238,8 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
         </Panel>
         <Separator className="separator" aria-label="Resize the navigation column" />
         <Panel id="documents" minSize="30%">
-          <DocumentPanes
+          <DocumentsOrPage
+            page={page}
             workspaceId={workspaceId}
             head={head}
             panes={view.panes}
