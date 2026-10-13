@@ -725,6 +725,25 @@ async fn a_version_of_the_service_that_cannot_be_a_header_value_is_not_put_in_fo
         assert_eq!(header(later, "MCP-Protocol-Version"), Some("2025-06-18"));
         assert_eq!(header(later, "Mcp-Session-Id"), Some("session-7"));
     }
+    // An answer that names no version at all, as a result or as a refusal, names none the
+    // relay cannot use: none is in force, and nothing is said.
+    for unnamed in [
+        "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"capabilities\":{}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":0,\"error\":{\"code\":-32602,\"message\":\"no\"}}",
+    ] {
+        let transport = initialized_with(unnamed);
+        let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
+        assert_eq!((ran.code, ran.stderr.as_str()), (0, ""), "{unnamed}");
+        let posts = transport.posts()?;
+        assert_eq!(posts.len(), 3, "{unnamed}");
+        for later in posts.iter().skip(1) {
+            assert_eq!(
+                later.headers,
+                [("Mcp-Session-Id", "session-7".to_owned())],
+                "{unnamed}"
+            );
+        }
+    }
     Ok(())
 }
 
