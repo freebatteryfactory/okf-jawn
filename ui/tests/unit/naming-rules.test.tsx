@@ -2453,6 +2453,30 @@ describe('the YAML view of the rules when the version shown changes', () => {
     expect(own.api.callsTo(SET)).toEqual([]);
   });
 
+  it('leaves the box as it is when the version shown changes and the rules do not: the caret stays where the person put it', async () => {
+    const own = service();
+    const { box } = await openYamlView(own);
+    putCaret(box, 12);
+    // Someone else changes the workspace, not its rules.
+    const next = own.moveHead();
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the workspace as of/).textContent).toContain(
+        next.slice(0, 10),
+      ),
+    );
+    await waitFor(() => expect(own.api.callsTo(RULES).length).toBeGreaterThan(1));
+    await turn();
+    expect(panel().textContent).toContain(
+      `These are the rules of the version shown, revision ${next.slice(0, 10)}.`,
+    );
+    // The rules read at the new version are another answer that says the same: nothing starts
+    // again, so the box is the one that was there, with the caret where it was.
+    expect(box.isConnected).toBe(true);
+    expect(caretIn(box)).toBe(12);
+    expect(textIn(box)).toContain('prefix: ""');
+  });
+
   it('keeps the text the person typed through a Refresh, and says the rules changed underneath', async () => {
     const own = service();
     const { box } = await openYamlView(own);
