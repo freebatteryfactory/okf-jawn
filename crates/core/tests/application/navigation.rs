@@ -843,6 +843,80 @@ async fn a_search_continues_at_the_revision_its_first_page_resolved() -> TestRes
 }
 
 #[tokio::test]
+async fn a_search_of_three_pages_reads_every_page_at_the_revision_the_first_resolved() -> TestResult
+{
+    // The cursor a continuation returns carries the first page's revision too: a write lands
+    // after each page, and the index has built no later head.
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    for id in 20..25_u128 {
+        world
+            .search
+            .put_entry(&at, summary(id, &format!("notes/{id}.md"))?, "the plan")?;
+    }
+    let mut hits = Vec::new();
+    let mut cursor = None;
+    for landing in ['b', 'c', 'd'] {
+        let mut request = search("plan", false)?;
+        request.page = PageRequest {
+            cursor: cursor.take(),
+            limit: 2,
+        };
+        let found = world
+            .service
+            .search_items(&alice(OperationName::SearchItems, None)?, request)
+            .await?;
+        assert_eq!(found.revision, at);
+        hits.extend(hit_items(&found));
+        cursor = found.next_cursor;
+        world.versions.set_head(revision(landing)?)?;
+    }
+    assert_eq!(cursor, None, "three pages");
+    let expected: Vec<ItemId> = (20..25_u128).map(item).collect();
+    assert_eq!(hits, expected, "each hit once, over three pages");
+    assert_eq!(world.search.builds(), 0, "no later head was asked for");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_items_links_of_three_pages_read_every_page_at_the_revision_the_first_resolved()
+-> TestResult {
+    let world = World::new()?;
+    let at = revision('a')?;
+    world.search.mark_indexed(&at)?;
+    for line in 1..=5_u32 {
+        world.search.put_link(&at, link(NOTE, OTHER, line))?;
+    }
+    linking_items(&world, &at)?;
+    let mut lines = Vec::new();
+    let mut cursor = None;
+    for landing in ['b', 'c', 'd'] {
+        let mut request = links(LinkDirection::Outgoing, At::Latest)?;
+        request.page = PageRequest {
+            cursor: cursor.take(),
+            limit: 2,
+        };
+        let linked = world
+            .service
+            .get_links(&alice(OperationName::GetLinks, None)?, request)
+            .await?;
+        assert_eq!(linked.revision, at);
+        lines.extend(linked.links.iter().map(|link| link.line));
+        cursor = linked.next_cursor;
+        world.versions.set_head(revision(landing)?)?;
+    }
+    assert_eq!(cursor, None, "three pages");
+    assert_eq!(
+        lines,
+        vec![1, 2, 3, 4, 5],
+        "each link once, over three pages"
+    );
+    assert_eq!(world.search.builds(), 0, "no later head was asked for");
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_items_links_continue_at_the_revision_their_first_page_resolved() -> TestResult {
     let world = World::new()?;
     let at = revision('a')?;

@@ -357,6 +357,65 @@ async fn a_timeline_cursor_minted_before_a_purge_does_not_read_the_purged_revisi
 }
 
 #[tokio::test]
+async fn a_timeline_of_three_pages_reads_every_page_at_the_tip_the_first_resolved() -> TestResult {
+    // The cursor a continuation returns carries the first page's tip too: a Snapshot lands
+    // after each page, and each later head has another history.
+    let world = World::new()?;
+    let history = |fills: &[char]| -> Built<LogResponse> {
+        Ok(LogResponse {
+            commits: fills
+                .iter()
+                .map(|fill| wire_commit(*fill))
+                .collect::<Built<_>>()?,
+            next_cursor: None,
+        })
+    };
+    for (tip, fills) in [
+        ('a', "54321"),
+        ('b', "b54321"),
+        ('c', "cb54321"),
+        ('d', "dcb54321"),
+    ] {
+        let fills: Vec<char> = fills.chars().collect();
+        world
+            .versions
+            .put_log(&revision(tip)?, None, history(&fills)?)?;
+    }
+    world.versions.page_log(2)?;
+    let caller = alice(OperationName::LogItems, None)?;
+    let mut listed = Vec::new();
+    let mut cursor = None;
+    for landing in ['b', 'c', 'd'] {
+        let page = world
+            .service
+            .log_items(&caller, timeline(At::Latest, cursor.take(), 2)?)
+            .await?;
+        listed.extend(page.commits.into_iter().map(|commit| commit.revision));
+        cursor = page.next_cursor;
+        world.versions.set_head(revision(landing)?)?;
+    }
+    assert_eq!(cursor, None, "three pages");
+    let expected: Vec<_> = "54321".chars().map(revision).collect::<Built<_>>()?;
+    assert_eq!(listed, expected, "each commit once, over three pages");
+    let asked: Vec<_> = world
+        .versions
+        .log_queries()?
+        .into_iter()
+        .map(|query| (query.tip, query.page.cursor))
+        .collect();
+    let tip = revision('a')?;
+    assert_eq!(
+        asked,
+        vec![
+            (tip.clone(), None),
+            (tip.clone(), Some("2".to_owned())),
+            (tip, Some("4".to_owned()))
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_timeline_continuation_that_names_its_revision_is_purge_checked() -> TestResult {
     // A caller that pins its reads to a revision: on a continuation `at` is not resolved again,
     // so the check of the cursor's tip is the only purge check of the revision it names.

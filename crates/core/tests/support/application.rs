@@ -46,7 +46,9 @@
 //! flag unless archived items are included, the extraction filter, the folder and the text.
 //! Search hits and links are paged as storage pages them: from the offset the decimal cursor
 //! names, with the next offset as the cursor while entries remain. `list` records the page each
-//! call asked for (`list_queries`) and answers the scripted listing whatever the page.
+//! call asked for (`list_queries`). It answers a listing whole, whatever the page, unless a test
+//! asks for pages (`page_listings`): then a listing, scripted or derived, is paged as storage
+//! pages a folder, its child folders first.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -174,6 +176,7 @@ struct VersionState {
     landed: Vec<(Revision, Revision)>,
     landing: Vec<Revision>,
     log_page: Option<usize>,
+    list_page: Option<usize>,
     logs: Vec<(Revision, Option<ItemId>, LogResponse)>,
     diffs: Vec<(Revision, Revision, Option<ItemId>, Vec<FileChange>)>,
     blames: Vec<(Revision, ItemId, Vec<BlameLine>)>,
@@ -542,6 +545,16 @@ impl FakeVersions {
     /// Returns when the lock is poisoned.
     pub fn log_queries(&self) -> Built<Vec<LogQuery>> {
         Ok(lock(&self.state)?.log_queries.clone())
+    }
+
+    /// Page `list` as storage does (`paged_listing`): a listing, scripted or derived, is
+    /// answered `size` entries at a time. Without it, `list` answers the listing whole.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn page_listings(&self, size: usize) -> Built<()> {
+        lock(&self.state)?.list_page = Some(size);
+        Ok(())
     }
 
     /// Every `list` call, in order: the revision, the folder and the page asked for.
@@ -1062,15 +1075,19 @@ impl VersionStore for FakeVersions {
             let mut state = lock_api(&self.state)?;
             state
                 .list_queries
-                .push((revision.clone(), folder.cloned(), page));
-            if let Some((_, _, listing)) = state
+                .push((revision.clone(), folder.cloned(), page.clone()));
+            let whole = match state
                 .listings
                 .iter()
                 .find(|(at, listed, _)| at == revision && listed.as_ref() == folder)
             {
-                return Ok(listing.clone());
+                Some((_, _, listing)) => listing.clone(),
+                None => state.derived_listing(revision, folder)?,
+            };
+            match state.list_page {
+                Some(size) => paged_listing(whole, &page, size),
+                None => Ok(whole),
             }
-            state.derived_listing(revision, folder)
         })
     }
     fn item_at_path<'a>(
@@ -2643,6 +2660,45 @@ fn metadata(write: &DraftWrite) -> Result<Draft, okf_jawn_contract::identity::Id
         base_revision: write.base_revision.clone(),
         content_digest: write.content_digest.clone(),
         saved_at: instant()?,
+    })
+}
+
+/// One page of `whole` as storage pages a folder: its child folders, then its items, from the
+/// offset the decimal cursor names, at most `size` entries (or fewer when the page asks for
+/// fewer), with the next offset as the cursor while entries remain. A cursor that is no offset
+/// is `InvalidInput` on `/page/cursor`, as storage answers it.
+fn paged_listing(
+    whole: FolderListing,
+    page: &Page,
+    size: usize,
+) -> Result<FolderListing, ApiError> {
+    let start = match page.cursor.as_deref() {
+        None => 0,
+        Some(cursor) => cursor.parse::<usize>().map_err(|_| {
+            ApiError::new(ErrorCode::InvalidInput, "not a listing cursor")
+                .with_field("/page/cursor")
+        })?,
+    };
+    let limit = size.min(usize::from(page.limit)).max(1);
+    let folders = whole.folders.len();
+    let total = folders.saturating_add(whole.items.len());
+    let end = start.saturating_add(limit).min(total);
+    Ok(FolderListing {
+        folders: whole
+            .folders
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| (start..end).contains(index))
+            .map(|(_, folder)| folder)
+            .collect(),
+        items: whole
+            .items
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| (start..end).contains(&index.saturating_add(folders)))
+            .map(|(_, item)| item)
+            .collect(),
+        next_cursor: (end < total).then(|| end.to_string()),
     })
 }
 

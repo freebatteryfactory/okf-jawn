@@ -155,6 +155,57 @@ fn listing_of_notes(at: At, cursor: Option<String>) -> Built<ListItemsRequest> {
 }
 
 #[tokio::test]
+async fn a_listing_of_three_pages_reads_every_page_at_the_revision_the_first_resolved() -> TestResult
+{
+    // The cursor a continuation returns carries the first page's revision too: a write lands
+    // after each page, and no later head holds the folder.
+    let world = World::new()?;
+    world.versions.put_listing(
+        &revision('a')?,
+        Some(path("notes")?),
+        FolderListing {
+            items: (1..=5_u128)
+                .map(|id| listed(id, None))
+                .collect::<Built<_>>()?,
+            folders: Vec::new(),
+            next_cursor: None,
+        },
+    )?;
+    world.versions.page_listings(2)?;
+    let caller = alice(OperationName::ListItems, None)?;
+    let mut ids = Vec::new();
+    let mut cursor = None;
+    for landing in ['b', 'c', 'd'] {
+        let mut request = listing_of_notes(At::Latest, cursor.take())?;
+        request.page.limit = 2;
+        let page = world.service.list_items(&caller, request).await?;
+        assert_eq!(page.revision, revision('a')?);
+        ids.extend(page.items.iter().map(|item| item.id));
+        cursor = page.next_cursor;
+        world.versions.set_head(revision(landing)?)?;
+    }
+    assert_eq!(cursor, None, "three pages");
+    let expected: Vec<ItemId> = (1..=5_u128).map(|id| ItemId(Uuid::from_u128(id))).collect();
+    assert_eq!(ids, expected, "each item once, over three pages");
+    let asked: Vec<_> = world
+        .versions
+        .list_queries()?
+        .into_iter()
+        .map(|(at, _, page)| (at, page.cursor))
+        .collect();
+    let at = revision('a')?;
+    assert_eq!(
+        asked,
+        vec![
+            (at.clone(), None),
+            (at.clone(), Some("2".to_owned())),
+            (at, Some("4".to_owned()))
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_listing_continues_at_the_revision_its_first_page_resolved() -> TestResult {
     let world = World::new()?;
     let mut archived = listed(2, None)?;
