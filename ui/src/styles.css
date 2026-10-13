@@ -656,3 +656,11 @@ main.app-main:has(.explorer) {
   line-height: 1.5;
   padding: 0.5rem;
 }
+.kept-text {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0.25rem 0;
+  padding: 0.5rem;
+  border: 1px solid currentColor;
+}

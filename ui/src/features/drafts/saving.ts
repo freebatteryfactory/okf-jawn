@@ -52,6 +52,9 @@
  * A save that has been under way for 30 seconds is said to be still sending, and the person may
  * stop it (`stopSaving`): the request is aborted, and since it may have been applied, the session
  * is then as after any save with no answer.
+ *
+ * An item that a later read says is not a Note is refused (`refuseSaving`): nothing of its session
+ * is sent from then on, its text stays in the session, and the page shows it read-only.
  */
 import { isCancelledError, type QueryClient } from '@tanstack/react-query';
 import {
@@ -105,6 +108,8 @@ const changedMeanwhile = new Set<string>();
 const discardKeys = new Map<string, string>();
 /** What stops the save in flight, by session. */
 const stoppers = new Map<string, AbortController>();
+/** Items whose draft is not saved: a read says the item is not a Note, and the service refuses it. */
+const refused = new Set<string>();
 
 /** Why a draft could not be kept on a newer revision, when no request failed. */
 export class DraftNotKept extends Error {
@@ -224,6 +229,21 @@ export function releaseEditor(workspaceId: string, itemId: string, pane: string)
   if (sessions().sessions[key]?.editor === pane) sessions().change(key, { editor: null });
 }
 
+/**
+ * Save nothing of this item's session, or save again: the item is no longer a Note, so a draft of
+ * it would be refused. The text stays in the session, and what was waiting to be sent is not.
+ */
+export function refuseSaving(workspaceId: string, itemId: string, refuse: boolean) {
+  const key = sessionKey(workspaceId, itemId);
+  if (!refuse) {
+    refused.delete(key);
+    return;
+  }
+  refused.add(key);
+  cancelTimer(key);
+  changedMeanwhile.delete(key);
+}
+
 function cancelTimer(key: string) {
   const timer = timers.get(key);
   if (timer !== undefined) clearTimeout(timer);
@@ -291,6 +311,7 @@ export function anySessionAtRisk(): boolean {
 }
 
 function save(client: QueryClient, key: string): Promise<void> {
+  if (refused.has(key)) return Promise.resolve();
   const running = inFlight.get(key);
   if (running !== undefined) {
     changedMeanwhile.add(key);
@@ -569,6 +590,7 @@ export function endSession(workspaceId: string, itemId: string) {
   const key = sessionKey(workspaceId, itemId);
   cancelTimer(key);
   changedMeanwhile.delete(key);
+  refused.delete(key);
   sessions().remove(key);
 }
 
@@ -579,6 +601,7 @@ export function resetDraftSessions() {
   changedMeanwhile.clear();
   inFlight.clear();
   discardKeys.clear();
+  refused.clear();
   // A save still in flight is let go, not stopped: its answer finds no session.
   stoppers.clear();
   useDraftSessions.setState({ sessions: {}, conflicts: {}, said: {}, asked: {} });

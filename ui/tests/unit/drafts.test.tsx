@@ -266,6 +266,38 @@ describe('who may edit, and where', () => {
       await waitFor(() => expect(edit.getAttribute('aria-disabled')).toBe('false'));
       expect(document.activeElement).toBe(edit);
     });
+
+    it('an open editor stops saving, says why in a line, and keeps the typed text read-only on screen', async () => {
+      const { held, api } = becomesSource();
+      const { box } = await startEditing();
+      act(() => box.focus());
+      typeInto(box, ' and more');
+      // A change still waiting for its autosave when the read says the item is a Source.
+      await pass(100);
+      held.head = NEWER;
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await eventually(() =>
+        expect(
+          screen.getByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`),
+        ).toBeDefined(),
+      );
+      await pass(500);
+      const kept = await eventuallyGet(() => screen.getByLabelText('Your text, read only'));
+      expect(kept).toHaveProperty('value', `${COMMITTED} and more`);
+      expect(kept).toHaveProperty('readOnly', true);
+      expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+      expect(
+        screen.getByText(
+          'This item is now a Source, which is not edited as a draft, so your text is no longer saved. It is kept here: copy what you need.',
+        ),
+      ).toBeDefined();
+      // Focus that was in the editor goes to the kept text, not to the page body.
+      expect(document.activeElement).toBe(kept);
+      // Nothing is sent, not by the waiting autosave and not later.
+      await pass(AUTOSAVE_DELAY_MS * 15);
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+      expect(screen.getByRole('tab', { name: 'Meeting notes (unsaved)' })).toBeDefined();
+    });
   });
 });
 

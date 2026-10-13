@@ -67,8 +67,9 @@ import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
 import { ConflictNotice } from '../drafts/ConflictNotice';
 import { DraftEditor } from '../drafts/DraftEditor';
+import { KeptText } from '../drafts/KeptText';
 import { draftMarkOf } from '../drafts/marks';
-import { beginSession, claimEditor, releaseEditor } from '../drafts/saving';
+import { beginSession, claimEditor, refuseSaving, releaseEditor } from '../drafts/saving';
 import { saveStateOf, useConflict, useDraftSession } from '../drafts/sessions';
 import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -371,6 +372,15 @@ export function DocumentView({
     setTypeName(document.summary.type_name);
   }
   const isNote = session !== undefined || kind === 'note';
+  // A session whose item a later read says is not a Note: nothing of it is saved from then on
+  // (the service would refuse it), and its text stays on screen, read-only. Set in a layout
+  // effect, so it holds before the editor's own cleanup saves what it holds on its way out.
+  const notANote = session !== undefined && kind !== null && kind !== 'note' ? kind : null;
+  const sessionHere = session !== undefined;
+  useLayoutEffect(() => {
+    if (!sessionHere) return;
+    refuseSaving(workspaceId, itemId, notANote !== null);
+  }, [sessionHere, notANote, workspaceId, itemId]);
   const editable = atShown && isNote;
   const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
   const [chosen, setChosen] = useState<'read' | 'edit' | null>(null);
@@ -533,6 +543,11 @@ export function DocumentView({
   // pane's switch, as after the other ways out of the editor; with no switch, to the page's heading.
   const heldFocus = useRef<HTMLElement | null>(null);
   const [, editingRef] = useWatchedPart<HTMLDivElement>(heldFocus);
+  // The editor gives way to the kept text when the item is read as not a Note: focus that was in
+  // the editor goes to the text, which is read-only and selectable.
+  const heldEditor = useRef<HTMLElement | null>(null);
+  const [, liveRef] = useWatchedPart<HTMLDivElement>(heldEditor);
+  const keptRef = useRef<HTMLTextAreaElement | null>(null);
   // The switch itself leaves when the pane stops being editable (a read says the item is not a
   // Note any more, the pane no longer reads the version shown, or the person deleted the item).
   // Focus on it goes to "Close this tab" of a deleted item, else to the page's heading.
@@ -541,6 +556,7 @@ export function DocumentView({
   useLayoutEffect(() => {
     if (takeHeld(heldFocus)) (switchRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldSwitch)) (closeRef.current ?? pageHeading())?.focus();
+    if (takeHeld(heldEditor)) keptRef.current?.focus();
   });
   const reading = JSON.stringify(request);
   const itemFailure = useRetry({
@@ -701,6 +717,9 @@ export function DocumentView({
             ? 'This item is being edited in another pane.'
             : DRAFT_STANDS[saveStateOf(session)]}{' '}
           Below is the committed text.
+          {notANote === null
+            ? ''
+            : ` This item is now a ${ROLE[notANote]}, so your draft of it is no longer saved.`}
         </p>
       )}
       {selection && !editing && (
@@ -725,15 +744,21 @@ export function DocumentView({
       )}
       {gone ? null : editing ? (
         <div ref={editingRef} className="editing">
-          {typeName === null ? null : <PropertiesViews session={session} typeName={typeName} />}
-          <DraftEditor
-            session={session}
-            title={title}
-            onDiscarded={() => {
-              focusNext.current = 'switch';
-              setChosen('read');
-            }}
-          />
+          {notANote !== null ? (
+            <KeptText session={session} title={title} kind={ROLE[notANote]} boxRef={keptRef} />
+          ) : (
+            <div ref={liveRef}>
+              {typeName === null ? null : <PropertiesViews session={session} typeName={typeName} />}
+              <DraftEditor
+                session={session}
+                title={title}
+                onDiscarded={() => {
+                  focusNext.current = 'switch';
+                  setChosen('read');
+                }}
+              />
+            </div>
+          )}
         </div>
       ) : (
         <>
