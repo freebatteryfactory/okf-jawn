@@ -572,3 +572,56 @@ async fn the_transport_holds_an_answer_only_in_room_it_took() -> TestResult {
     assert_eq!(reply.status, 200);
     Ok(())
 }
+
+/// The answer bound of the relay as shipped is the stated one, all the way to its transport
+/// (the re-review's F4). Through the entry point: an answer of exactly 64 MiB is passed on
+/// whole, and one of a byte more is refused for its request in words that name the bound.
+#[tokio::test]
+async fn the_relay_as_shipped_reads_an_answer_up_to_the_stated_bound() -> TestResult {
+    let bound = okf_jawn_cli::relay::Limits::default().answer_bytes;
+    assert_eq!(bound, 67_108_864);
+    let frame = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"s\":\"\"}}".len();
+    for (extra, passes) in [(0_usize, true), (1, false)] {
+        let body = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"s\":\"{}\"}}}}",
+            "a".repeat(bound.saturating_sub(frame).saturating_add(extra))
+        );
+        assert_eq!(body.len(), bound.saturating_add(extra));
+        let served = Arc::new(json_answer("200 OK", &body));
+        drop(body);
+        let listener = Answering::routed(move |heard| {
+            if heard.line().starts_with("GET ") {
+                json_answer("200 OK", "{}")
+            } else {
+                served.as_ref().clone()
+            }
+        })
+        .await?;
+        let ran = cli(
+            &["mcp", "--stdio", "--server", &listener.origin()],
+            Some(TOKEN),
+            request(&json!(1), "tools/call", &json!({})).as_bytes(),
+        )
+        .await?;
+        if passes {
+            assert_eq!(
+                (ran.stdout.len(), ran.stderr.as_str()),
+                (bound.saturating_add(1), "")
+            );
+        } else {
+            let lines = ran.lines()?;
+            let only = some(lines.first(), "an answer")?;
+            assert_eq!(
+                (lines.len(), only.get("id"), only.pointer("/error/code")),
+                (1, Some(&json!(1)), Some(&json!(-32603)))
+            );
+            assert!(
+                ran.stdout
+                    .contains("the service's answer exceeds 67108864 bytes"),
+                "{}",
+                ran.stdout
+            );
+        }
+    }
+    Ok(())
+}
