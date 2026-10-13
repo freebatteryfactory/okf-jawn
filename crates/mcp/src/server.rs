@@ -647,8 +647,8 @@ fn is_webp(bytes: &[u8]) -> bool {
 /// The first bytes padded base64 text decodes to, at most `SIGNATURE_SPAN` of them.
 ///
 /// Only the leading `SIGNATURE_CHARACTERS` are read, by the standard alphabet. Decoding ends at
-/// the padding and at any other character outside the alphabet, so malformed text yields fewer
-/// bytes; a signature check then fails, and the image is described.
+/// the padding and at any other character outside the alphabet, so malformed text yields the
+/// bytes before the fault and no others. Text past those characters is not looked at here.
 fn leading_bytes(base64: &str) -> Vec<u8> {
     let sextets: Vec<u32> = base64
         .bytes()
