@@ -14,7 +14,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { expect, type Page, test } from '@playwright/test';
+import { expect, type Locator, type Page, test } from '@playwright/test';
 import {
   type Answers,
   expectNoAxeViolations,
@@ -254,8 +254,8 @@ async function service(): Promise<Service> {
 }
 
 /** Press a control from the keyboard: focus it, then Enter. */
-async function press(page: Page, name: string | RegExp) {
-  const button = page.getByRole('button', { name });
+async function press(page: Page, name: string | RegExp, within: Locator | Page = page) {
+  const button = within.getByRole('button', { name, exact: true });
   await expect(button).not.toHaveAttribute('aria-disabled', 'true');
   await button.focus();
   await page.keyboard.press('Enter');
@@ -267,7 +267,10 @@ async function focusSettled(page: Page): Promise<string> {
   return focused(page);
 }
 
-const row = (page: Page, name: string | RegExp) => page.getByRole('treeitem', { name });
+const row = (page: Page, name: string | RegExp) =>
+  page.getByRole('treeitem', { name, exact: true });
+/** The one pane of documents: the item's own controls are in it, the tree's bar is not. */
+const documents = (page: Page) => page.getByRole('region', { name: 'Documents' });
 const headLine = (page: Page) => page.locator('.head-line');
 const revision = (index: number) => `revision ${(MADE[index] ?? '').slice(0, 10)}`;
 
@@ -337,7 +340,7 @@ test.describe('changing the tree and the naming rules', () => {
     await page.goto(`${server.origin()}/w/${WS}/i/${NOTE}`);
     await expect(page.getByText('Revenue grew by 12% in 2025.')).toBeVisible();
 
-    await press(page, 'Rename or move');
+    await press(page, 'Rename or move', documents(page));
     const name = page.getByRole('textbox', { name: 'File name' });
     await expect(name).toBeFocused();
     await expect(name).toHaveValue('meeting.md');
@@ -347,8 +350,7 @@ test.describe('changing the tree and the naming rules', () => {
     await shot(page, '21-rename-form');
     await page.keyboard.press('Enter');
 
-    const pane = page.getByRole('region', { name: 'Documents' });
-    await expect(pane.getByText('notes/minutes.md', { exact: true })).toBeVisible();
+    await expect(documents(page).getByText('notes/minutes.md', { exact: true })).toBeVisible();
     await expect(page.getByRole('tab')).toHaveCount(1);
     await expect(page.getByRole('tab', { name: 'Meeting notes' })).toHaveAttribute(
       'data-item-id',
