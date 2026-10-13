@@ -30,8 +30,12 @@
  * 2^53 - 1 (`Number.MAX_SAFE_INTEGER`). So integers are read as `bigint` (`intAsBigInt`), which
  * shows the digits that were typed: one inside that range becomes a number, one outside it is
  * refused, never rounded. (The one whole number of the naming rules, `schema_version`, is a
- * uint32.) A number written with a fraction or an exponent is a float, and is read as the
- * nearest double, as every YAML reader reads it.
+ * uint32.) A number written with a fraction or an exponent is a float. When its digits denote a
+ * whole number all the same (`9007199254740993.0`, `9007199254740993e0`,
+ * `9.007199254740993e15`), it is held to the same promise: it is refused when a JavaScript
+ * number cannot hold that whole number exactly, and read when it can (`1e20`,
+ * `9007199254740992.0`). A real fraction (`0.1`, `1.5e-3`) is read as the nearest double, as
+ * every YAML reader reads it.
  *
  * The bounds are a first line, not the guarantee. This reader is not run on the page's thread:
  * `lib/yaml-reading.ts` runs it in a worker and ends it after a second, because no bound on length
@@ -174,6 +178,28 @@ export function deepestNesting(text: string): { depth: number; line: number } {
 
 const refusedWhole = (message: string): YamlRead => ({ ok: false, problems: [whole(message)] });
 
+/**
+ * The whole number that the digits of a float denote (`12.0`, `1.2e1`), counted exactly; null
+ * when they denote a real fraction. `source` is a float as the YAML core schema writes one, of a
+ * finite value: so the power of ten that is raised here is at most that of the largest double,
+ * and a fraction smaller than one is told without raising any.
+ */
+function wholeNumberOf(source: string): bigint | null {
+  const parts = /^([-+]?)(\d*)\.?(\d*)(?:[eE]([-+]?\d+))?$/.exec(source);
+  if (parts === null) return null;
+  const [, sign = '', before = '', after = '', power = '0'] = parts;
+  const digits = `${before}${after}`.replace(/^0+/, '');
+  if (digits === '') return 0n;
+  const signed = (amount: bigint) => (sign === '-' ? -amount : amount);
+  const shift = Number(power) - after.length;
+  if (shift >= 0) return signed(BigInt(digits) * 10n ** BigInt(shift));
+  // Fewer digits than places after the point: less than one, and not zero.
+  if (-shift >= digits.length) return null;
+  const unit = 10n ** BigInt(-shift);
+  const amount = BigInt(digits);
+  return amount % unit === 0n ? signed(amount / unit) : null;
+}
+
 /** Read `typed` as one YAML document of values JSON can carry. */
 export function readYaml(typed: string): YamlRead {
   // Before anything else: a byte order mark is not part of the text.
@@ -252,6 +278,25 @@ export function readYaml(typed: string): YamlRead {
               `This whole number cannot be sent exactly: whole numbers go from -${Number.MAX_SAFE_INTEGER} to ${Number.MAX_SAFE_INTEGER}. Put it in quotes to keep it as text.`,
             ),
           );
+        }
+        // A float whose digits denote a whole number: refused when the number it became is
+        // another one.
+        if (
+          isScalar(node) &&
+          typeof node.value === 'number' &&
+          Number.isFinite(node.value) &&
+          typeof node.source === 'string'
+        ) {
+          const written = wholeNumberOf(node.source);
+          const became = BigInt(Math.trunc(node.value));
+          if (written !== null && written !== became) {
+            problems.push(
+              at(
+                offset,
+                `This whole number cannot be sent exactly: it would become ${became}. Put it in quotes to keep it as text.`,
+              ),
+            );
+          }
         }
         return undefined;
       },

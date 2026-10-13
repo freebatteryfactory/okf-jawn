@@ -236,6 +236,50 @@ describe('what is refused before or instead of being followed', () => {
     expect(JSON.stringify(value('a: 7\n'))).toBe('{"a":7}');
   });
 
+  it('refuses a whole number written with a fraction or an exponent when a number cannot hold it, and reads a real fraction', () => {
+    const cannot = (became: string) =>
+      `Line 1, column 4: This whole number cannot be sent exactly: it would become ${became}. Put it in quotes to keep it as text.`;
+    // The digits denote a whole number, and the nearest double is another one.
+    expect(problems('a: 9007199254740993.0\n')).toEqual([cannot('9007199254740992')]);
+    expect(problems('a: 9007199254740993e0\n')).toEqual([cannot('9007199254740992')]);
+    expect(problems('a: 9.007199254740993e15\n')).toEqual([cannot('9007199254740992')]);
+    expect(problems('a: -9007199254740993.0\n')).toEqual([cannot('-9007199254740992')]);
+    expect(problems('a: 900719925474099.3e1\n')).toEqual([cannot('9007199254740992')]);
+    expect(problems('a: 90071992547409930e-1\n')).toEqual([cannot('9007199254740992')]);
+    expect(problems('a: 6.02e23\n')).toEqual([cannot('601999999999999995805696')]);
+    // A whole number a double holds exactly is read, however it is written.
+    expect(
+      value(
+        'a: 9007199254740992.0\nb: 1e20\nc: 12.0\nd: 1.2e1\ne: 0.0\nf: 120e-1\ng: +4.e2\nh: -12.0\n',
+      ),
+    ).toEqual({ a: 9007199254740992, b: 1e20, c: 12, d: 12, e: 0, f: 12, g: 400, h: -12 });
+    // A real fraction is read as the nearest double, as every YAML reader reads it.
+    expect(
+      value('a: 0.1\nb: 1.5e-3\nc: 9007199254740993.5\nd: 123456789.123456789\ne: .5\nf: 1e-400\n'),
+    ).toEqual({
+      a: 0.1,
+      b: 0.0015,
+      c: 9007199254740994,
+      d: 123456789.12345679,
+      e: 0.5,
+      f: 0,
+    });
+    // In quotes it is text, digit for digit.
+    expect(value('a: "9007199254740993.0"\n')).toEqual({ a: '9007199254740993.0' });
+  });
+
+  it('judges a number with an enormous exponent without raising a power of ten that size', () => {
+    const started = performance.now();
+    expect(
+      value('a: 0e999999999\nb: 0.0e-999999999\nc: 1e-999999999\nd: 12345e-999999999\n'),
+    ).toEqual({ a: 0, b: 0, c: 0, d: 0 });
+    // Not finite: refused as that, before any counting.
+    expect(problems('a: 1e999999999\n')).toEqual([
+      'Line 1, column 4: A number must be finite: .inf and .nan cannot be sent.',
+    ]);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   it('says in its own words that the rest of an unclosed text could not be read', () => {
     // The parser's second error for this text has an engine's words; they are never shown.
     expect(problems('a: [\n')).toEqual([
