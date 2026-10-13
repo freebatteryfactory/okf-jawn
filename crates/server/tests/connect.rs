@@ -232,6 +232,20 @@ async fn a_valid_token_names_subject_organization_and_client_apart() -> TestResu
 }
 
 #[tokio::test]
+async fn a_verified_token_carries_its_own_expiry() -> TestResult {
+    let setup = Setup::new(Some(KEY_SET))?;
+    // Two tokens, two expiries: what an event stream later compares with the clock is the
+    // token's signed `exp`, not a constant.
+    for ahead in [300_u64, 7200] {
+        let exp = now()?.saturating_add(ahead);
+        let token = sign(&with("exp", json!(exp))?, Some(KID))?;
+        let identity = setup.verifier.verify(&token).await?;
+        assert_eq!(identity.expires_at, exp);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_wrong_issuer_or_audience_or_a_missing_claim_is_refused() -> TestResult {
     let setup = Setup::new(Some(KEY_SET))?;
     for claims in [

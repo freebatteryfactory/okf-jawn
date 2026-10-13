@@ -4,6 +4,7 @@
 
 use std::collections::VecDeque;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,17 +22,22 @@ use okf_jawn_core::context::OperationContext;
 use okf_jawn_core::credentials::{CredentialStore, SessionRecord};
 use okf_jawn_core::ports::{Application, PortFuture};
 use okf_jawn_core::storage::ByteReader;
+use okf_jawn_server::app::{ServiceParts, service};
+use okf_jawn_server::cookies::CrateCookies;
 use okf_jawn_server::events::EventStreams;
-use okf_jawn_server::identity::session_id_of;
+use okf_jawn_server::identity::{
+    BearerAuth, ConnectIdentity, Identity, IdentityPorts, WallClock, session_id_of,
+};
 use okf_jawn_server::transfers::{ByteRange, Download, TransferCaller, Transfers};
 use okf_jawn_server::{BoundApplication, events, transfers};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
+use tokio::time::timeout;
 use tower::ServiceExt;
 
 use check::{TestResult, some};
 use fixtures::workspace;
-use support::{CONNECTOR, HOST, LocalApp, OWNER, SECRET, WORKSPACE};
+use support::{CONNECTOR, HOST, LocalApp, ORIGIN, OWNER, OneToken, SECRET, WORKSPACE};
 
 macro_rules! scripted_operations {
     ($(($id:ident, $request:ty, $response:ty, $path:literal, $label:literal, $alias:literal,
@@ -67,6 +73,9 @@ struct Bytes {
 struct Scripted {
     pages: Mutex<VecDeque<Value>>,
     asked: Mutex<Vec<Value>>,
+    /// When set, every `list_events` after this many is refused as `Forbidden`: the caller's
+    /// grant was revoked.
+    allowed: Mutex<Option<usize>>,
 }
 
 /// One open stream and what it was built over.
@@ -75,6 +84,12 @@ struct Stream {
     scripted: Arc<Scripted>,
     app: Router,
 }
+
+/// A wall clock a test sets, in milliseconds since the Unix epoch.
+struct WallAt(AtomicU64);
+
+/// The one Connect token the hosted stream service accepts.
+const CONNECT_TOKEN: &str = "connect-token";
 
 const FAR_FUTURE: &str = "2999-01-01T00:00:00.000Z";
 const LONG_PAST: &str = "2000-01-01T00:00:00.000Z";
@@ -90,7 +105,15 @@ impl Scripted {
         if operation != "list_events" {
             return Err(ApiError::new(ErrorCode::NotImplemented, "not scripted"));
         }
-        self.asked.lock().map_err(|_| poisoned())?.push(asked);
+        let polls = {
+            let mut all = self.asked.lock().map_err(|_| poisoned())?;
+            all.push(asked);
+            all.len()
+        };
+        let allowed = *self.allowed.lock().map_err(|_| poisoned())?;
+        if allowed.is_some_and(|allowed| polls > allowed) {
+            return Err(ApiError::new(ErrorCode::Forbidden, "the grant was revoked"));
+        }
         Ok(self
             .pages
             .lock()
@@ -104,28 +127,94 @@ impl Scripted {
     }
 }
 
+impl WallClock for WallAt {
+    fn unix_millis(&self) -> u128 {
+        u128::from(self.0.load(Ordering::SeqCst))
+    }
+}
+
 impl Stream {
-    /// A stream service polling every `interval` over `pages`.
+    /// A local stream service polling every `interval` over `pages`.
     fn new(interval: Duration, pages: Vec<Value>) -> Result<Self, Box<dyn std::error::Error>> {
         let base = LocalApp::new()?;
+        let identity = base.identity();
+        Self::over(base, identity, interval, pages)
+    }
+
+    /// A hosted stream service: its verifier accepts [`CONNECT_TOKEN`] and says it expires at
+    /// `expires_at` (seconds since the Unix epoch), and the service reads the time from `clock`.
+    fn hosted(
+        interval: Duration,
+        pages: Vec<Value>,
+        expires_at: u64,
+        clock: Arc<WallAt>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let base = LocalApp::new()?;
+        let identity = Identity::with_clock(
+            BearerAuth::Hosted {
+                connect: Arc::new(OneToken {
+                    token: CONNECT_TOKEN.to_owned(),
+                    identity: ConnectIdentity {
+                        subject: OWNER.to_owned(),
+                        organization_id: "org_01".to_owned(),
+                        client_id: "client_mcp".to_owned(),
+                        expires_at,
+                    },
+                }),
+                resource_metadata: "https://okf.example.test/.well-known/oauth-protected-resource"
+                    .to_owned(),
+            },
+            IdentityPorts {
+                credentials: base.credentials.clone(),
+                events: base.ports.events.clone(),
+                cookies: Arc::new(CrateCookies),
+            },
+            vec![ORIGIN.to_owned()],
+            clock,
+        );
+        Self::over(base, identity, interval, pages)
+    }
+
+    /// The stream service over `base`, authenticating and re-checking with `identity`.
+    fn over(
+        base: LocalApp,
+        identity: Identity,
+        interval: Duration,
+        pages: Vec<Value>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let scripted = Arc::new(Scripted {
             pages: Mutex::new(pages.into()),
             asked: Mutex::new(Vec::new()),
+            allowed: Mutex::new(None),
         });
         let streams = EventStreams {
             bound: BoundApplication {
                 application: scripted.clone(),
                 ..base.bound()
             },
-            identity: base.identity(),
+            identity: identity.clone(),
             interval,
         };
-        let app = base.service(events::routes(streams), Vec::new(), None)?;
+        let app = service(ServiceParts {
+            bound: base.bound(),
+            identity,
+            hosts: vec![HOST.to_owned()],
+            hosted: None,
+            cors_origins: Vec::new(),
+            ui_dir: None,
+            extra: events::routes(streams),
+        })?;
         Ok(Self {
             base,
             scripted,
             app,
         })
+    }
+
+    /// Refuse every `list_events` after the first `polls`, as a revoked grant would.
+    fn refuse_after(&self, polls: usize) -> Result<(), ApiError> {
+        *self.scripted.allowed.lock().map_err(|_| poisoned())? = Some(polls);
+        Ok(())
     }
 
     /// Open the stream with `headers`; the response of the first poll.
@@ -766,6 +855,111 @@ async fn a_stream_ends_when_its_connector_is_revoked() -> TestResult {
     let (seen, ended) = read(response, 2).await?;
     assert!(ended, "the stream outlived its connector");
     assert!(!seen.contains("id: 99") && !seen.contains("id:99"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_hosted_stream_ends_when_its_connect_token_expires() -> TestResult {
+    // The verifier says the token expires at second 1000; the service's clock stands one
+    // millisecond before that.
+    let clock = Arc::new(WallAt(AtomicU64::new(999_999)));
+    let pages = vec![page(1, 1), page(99, 1), page(100, 1), page(101, 1)];
+    let stream = Stream::hosted(SHORT, pages, 1_000, clock.clone())?;
+    let bearer = format!("Bearer {CONNECT_TOKEN}");
+    // While the token lives the stream delivers poll after poll.
+    let response = stream.open(&[("authorization", &bearer)]).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let (seen, ended) = read(response, 2).await?;
+    assert!(!ended);
+    assert!(seen.contains("id: 99") || seen.contains("id:99"));
+
+    // A second stream opens inside the token's life; the token expires before its second poll.
+    let response = stream.open(&[("authorization", &bearer)]).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let polls = stream.scripted.asked()?.len();
+    clock.0.store(1_000_000, Ordering::SeqCst);
+    let (seen, ended) = read(response, 2).await?;
+    assert!(ended, "the stream outlived its token's expiry");
+    assert!(seen.contains("id: 100") || seen.contains("id:100"));
+    assert!(!seen.contains("id: 101") && !seen.contains("id:101"));
+    assert_eq!(stream.scripted.asked()?.len(), polls);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_credential_that_dies_ends_the_stream_before_the_poll_that_follows_a_full_page()
+-> TestResult {
+    // The interval is an hour: page two could only arrive by the poll that follows a full page
+    // at once, and that poll must ask about the credential first.
+    let stream = Stream::new(NEVER, vec![page(1, 100), page(101, 1)])?;
+    let cookie = stream.session("stream-session-secret", FAR_FUTURE)?;
+    let response = stream.open(&[("cookie", &cookie)]).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    stream
+        .base
+        .credentials
+        .revoke_session(&session_id_of("stream-session-secret"))
+        .await?;
+    // The page fetched while the session lived is delivered; nothing is fetched after it.
+    let (seen, ended) = read(response, 101).await?;
+    assert!(ended, "the stream outlived its session");
+    assert_eq!(seen.matches("\"kind\"").count(), 100);
+    assert_eq!(stream.scripted.asked()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_credential_that_dies_during_the_wait_ends_the_stream_before_the_next_poll() -> TestResult
+{
+    let stream = Stream::new(SHORT, vec![page(1, 1), page(99, 1)])?;
+    let cookie = stream.session("stream-session-secret", FAR_FUTURE)?;
+    let response = stream.open(&[("cookie", &cookie)]).await?;
+    let mut frames = response.into_body().into_data_stream();
+    let first = some(frames.next().await, "the first event")??;
+    assert!(String::from_utf8_lossy(&first).contains("\"kind\""));
+    // One poll of the stream, and no more: it has nothing pending, so it begins its wait.
+    let waiting = timeout(Duration::ZERO, frames.next()).await;
+    assert!(
+        waiting.is_err(),
+        "nothing can arrive before the wait is over"
+    );
+    // The session ends while the stream waits.
+    stream
+        .base
+        .credentials
+        .revoke_session(&session_id_of("stream-session-secret"))
+        .await?;
+    let rest = async {
+        let mut rest = String::new();
+        while let Some(chunk) = frames.next().await {
+            rest.push_str(&String::from_utf8_lossy(&chunk?));
+        }
+        Ok::<String, axum::Error>(rest)
+    };
+    // The credential is asked about after the wait, so the stream ends without polling again.
+    let rest = timeout(Duration::from_secs(10), rest).await??;
+    assert!(
+        !rest.contains("\"kind\""),
+        "delivered after the session ended: {rest}"
+    );
+    assert_eq!(stream.scripted.asked()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_poll_that_is_refused_ends_the_stream() -> TestResult {
+    let stream = Stream::new(SHORT, vec![page(1, 1)])?;
+    // The connector stays valid; the caller's grant is revoked after the first poll.
+    stream.refuse_after(1)?;
+    let response = stream
+        .open(&[("authorization", &format!("Bearer {SECRET}"))])
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let (seen, ended) = read(response, 2).await?;
+    assert!(ended, "the stream went on after its poll was refused");
+    assert_eq!(seen.matches("\"kind\"").count(), 1);
+    // The refused poll was the last: the stream does not ask again.
+    assert_eq!(stream.scripted.asked()?.len(), 2);
     Ok(())
 }
 
