@@ -1353,3 +1353,97 @@ describe('leaving the naming rules with edits that are not saved', () => {
     expect(leavingAsks()).toBe(false);
   });
 });
+
+describe('saving over rules someone else saved meanwhile', () => {
+  const theirs: NamingRules = {
+    schema_version: 1,
+    rules: [{ ...rule, prefix: 'theirs-', separator: '_' }],
+  };
+  const savedNow = () =>
+    screen.queryByRole('textbox', { name: 'The rules as they are saved now (read-only)' });
+  const replaceQuestion = () =>
+    screen.queryByRole('group', { name: 'Replace the saved rules with yours?' });
+  /** The person edits; someone else saves other rules; the person's save is refused; they refresh. */
+  async function refusedThenRefreshed() {
+    const own = service();
+    await openRules();
+    await setPrefix('mine-');
+    const next = own.moveHead();
+    own.state.rules.set(next, theirs);
+    await userEvent.click(button('Save the rules'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Refresh the workspace' }));
+    await waitFor(() => expect(savedNow()).not.toBeNull());
+    return { ...own, next };
+  }
+
+  it('shows the rules as they are saved now beside the person’s own, and names the save for what it does', async () => {
+    const { api } = await refusedThenRefreshed();
+    const shown = savedNow() as HTMLTextAreaElement;
+    expect(shown.readOnly).toBe(true);
+    expect(shown.value).toContain('prefix: theirs-');
+    expect(shown.value).toContain('separator: _');
+    // The person's own rules are still in the form, untouched.
+    expect(prefix()).toHaveProperty('value', 'mine-');
+    expect(panel().textContent).toContain(
+      'The saved rules are no longer the ones you started from.',
+    );
+    // No plain "Save": the button says that it replaces.
+    expect(screen.queryByRole('button', { name: 'Save the rules' })).toBeNull();
+    expect(button('Replace the saved rules with mine…')).toBeTruthy();
+    expect(api.callsTo(SET)).toHaveLength(1);
+  });
+
+  it('asks before it replaces, keeps the saved rules on that choice, and sends the person’s rules whole on the other', async () => {
+    const { api, next } = await refusedThenRefreshed();
+    const replace = button('Replace the saved rules with mine…');
+    await userEvent.click(replace);
+    expect(replaceQuestion()).not.toBeNull();
+    expect(document.activeElement).toBe(button('Keep the saved rules'));
+    expect(api.callsTo(SET)).toHaveLength(1);
+    await userEvent.keyboard('{Enter}');
+    expect(replaceQuestion()).toBeNull();
+    expect(document.activeElement).toBe(replace);
+    expect(api.callsTo(SET)).toHaveLength(1);
+
+    await userEvent.click(replace);
+    await userEvent.click(button('Replace them with mine'));
+    await waitFor(() => expect(said()).toContain('The rules are saved.'));
+    expect(api.callsTo(SET).at(1)).toMatchObject({
+      base_revision: next,
+      rules: { schema_version: 1, rules: [{ ...rule, prefix: 'mine-' }] },
+    });
+    // Saved, they are the saved rules: nothing is beside them any more, and Save is Save again.
+    await waitFor(() => expect(savedNow()).toBeNull());
+    expect(button('Save the rules')).toBeTruthy();
+  });
+
+  it('takes the saved rules and drops the edits when the person chooses so', async () => {
+    const { api } = await refusedThenRefreshed();
+    await userEvent.click(button('Take the saved rules, and drop mine'));
+    expect(prefix()).toHaveProperty('value', 'theirs-');
+    expect(savedNow()).toBeNull();
+    expect(said()).toBe('These are the saved rules now. Your changes were dropped.');
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Naming rules' }));
+    expect(panel().textContent).toContain('These are the saved rules, unchanged.');
+    expect(api.callsTo(SET)).toHaveLength(1);
+    // The YAML view starts again from them too.
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    expect(textIn(await findTextBox('The naming rules as YAML'))).toContain('prefix: theirs-');
+  });
+
+  it('is an ordinary save when the version shown moved and the saved rules did not', async () => {
+    const own = service();
+    await openRules();
+    await setPrefix('mine-');
+    own.moveHead();
+    await userEvent.click(button('Save the rules'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Refresh the workspace' }));
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc'),
+    );
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(said()).toContain('The rules are saved.'));
+    expect(savedNow()).toBeNull();
+    expect(replaceQuestion()).toBeNull();
+  });
+});

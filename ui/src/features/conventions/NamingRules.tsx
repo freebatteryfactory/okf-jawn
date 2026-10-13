@@ -24,6 +24,14 @@
  * stale preview must not silently apply to changed source state"). A save that failed is tried
  * again only while the rules on screen are the ones it carried.
  *
+ * Saving over rules someone else saved is a choice, never one plain "Save". The edits start
+ * from the saved rules of the version shown. When the version shown comes to hold other saved
+ * rules while there are edits (a save was refused because the head moved, and the person
+ * refreshed), the page shows the rules as they are saved now, read-only, beside the person's own;
+ * the save button then reads "Replace the saved rules with mine…", and asks before it sends: the
+ * rules are sent whole, and nothing of the others is merged in. The other way out takes the
+ * saved rules and drops the edits.
+ *
  * Edits that are not saved are not lost silently. While the rules differ from the saved ones, or
  * the YAML view holds text that cannot be read, leaving asks first: "Close the naming rules",
  * the shell's own ways out (its "Naming rules" button, opening an item, which puts the
@@ -175,6 +183,21 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   const changed =
     edited !== undefined && saved.data !== undefined && !sameRules(edited, saved.data);
 
+  // The saved rules the edits started from. While nothing is edited they follow the rules of the
+  // version shown; once there are edits they stay, so other rules saved meanwhile are seen.
+  const atHead = saved.isPlaceholderData ? undefined : saved.data;
+  const [basis, setBasis] = useState<NamingRules | undefined>(undefined);
+  if (atHead !== undefined && !changed && (basis === undefined || !sameRules(basis, atHead))) {
+    setBasis(atHead);
+  }
+  const replaced =
+    changed && atHead !== undefined && basis !== undefined && !sameRules(basis, atHead);
+  const [replacing, setReplacing] = useState(false);
+  const theirsId = useId();
+  const keepSavedButton = useRef<HTMLButtonElement | null>(null);
+  /** Counts the times the edits were dropped: the YAML view then starts again from the value. */
+  const [dropped, setDropped] = useState(0);
+
   const [said, setSaid] = useState('');
   const [folder, setFolder] = useState('');
   const [folderWrong, setFolderWrong] = useState<string | null>(null);
@@ -183,7 +206,16 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   const [asking, setAsking] = useState(false);
   // Where focus goes in the commit that shows what an action did.
   const focusNext = useRef<
-    'heading' | 'preview' | 'keep' | 'apply' | 'problems' | 'stay' | 'opener' | null
+    | 'heading'
+    | 'preview'
+    | 'keep'
+    | 'apply'
+    | 'problems'
+    | 'stay'
+    | 'opener'
+    | 'keepSaved'
+    | 'save'
+    | null
   >('heading');
   const stayButton = useRef<HTMLButtonElement | null>(null);
   /** What asked to leave: where focus goes back when the person stays. */
@@ -204,6 +236,8 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
             apply: applyButton,
             problems: problemsRef,
             stay: stayButton,
+            keepSaved: keepSavedButton,
+            save: saveButton,
             // What asked to leave, when it is still on the page; else the panel's heading.
             opener: opener.current?.isConnected === true ? opener : headingRef,
           }[next].current;
@@ -358,6 +392,21 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
     setSaid('');
     save.start(asked);
   };
+  /** Saving would replace rules someone else saved: that is asked first. */
+  const askReplace = () => {
+    if (sendable() === null) return;
+    focusNext.current = 'keepSaved';
+    setReplacing(true);
+  };
+  const takeSaved = () => {
+    reading.flush();
+    setEdited(undefined);
+    setTyped(null);
+    setDropped((count) => count + 1);
+    setReplacing(false);
+    setSaid('These are the saved rules now. Your changes were dropped.');
+    focusNext.current = 'heading';
+  };
 
   return (
     <section className="naming-rules" aria-labelledby={heading}>
@@ -477,6 +526,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
             </Tabs.Panel>
             <Tabs.Panel value="yaml">
               <YamlEditor
+                key={dropped}
                 label="The naming rules as YAML"
                 initialText={typed?.text ?? writeYaml(value)}
                 describedBy={findingsId}
@@ -534,6 +584,60 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
               </p>
             )}
           </div>
+          {replaced && atHead !== undefined && (
+            <div role="note" className="notice">
+              <p>
+                <strong>The saved rules are no longer the ones you started from.</strong> Other
+                rules were saved while you were editing. Below are the rules as they are saved now;
+                yours are above. Saving yours replaces them whole: nothing of the others is merged
+                in.
+              </p>
+              <label htmlFor={theirsId}>The rules as they are saved now (read-only)</label>
+              <textarea
+                id={theirsId}
+                className="left-draft"
+                readOnly
+                rows={10}
+                value={writeYaml(atHead)}
+              />
+              <p className="change-buttons">
+                <button type="button" onClick={takeSaved}>
+                  Take the saved rules, and drop mine
+                </button>
+              </p>
+            </div>
+          )}
+          {replacing && replaced && (
+            <fieldset className="confirm">
+              <legend>Replace the saved rules with yours?</legend>
+              <p>
+                The rules saved now are not the ones you started from. Saving yours replaces them
+                whole.
+              </p>
+              <p className="change-buttons">
+                <button
+                  type="button"
+                  ref={keepSavedButton}
+                  onClick={() => {
+                    focusNext.current = 'save';
+                    setReplacing(false);
+                  }}
+                >
+                  Keep the saved rules
+                </button>{' '}
+                <button
+                  type="button"
+                  onClick={() => {
+                    focusNext.current = 'save';
+                    setReplacing(false);
+                    startSave();
+                  }}
+                >
+                  Replace them with mine
+                </button>
+              </p>
+            </fieldset>
+          )}
           <p className="change-buttons">
             {/* aria-disabled rather than disabled: each keeps focus while it works. */}
             <button
@@ -549,9 +653,13 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
                 type="button"
                 ref={saveButton}
                 aria-disabled={save.pending || !changed}
-                onClick={startSave}
+                onClick={replaced ? askReplace : startSave}
               >
-                {save.pending ? 'Saving…' : 'Save the rules'}
+                {save.pending
+                  ? 'Saving…'
+                  : replaced
+                    ? 'Replace the saved rules with mine…'
+                    : 'Save the rules'}
               </button>
             )}
           </p>
