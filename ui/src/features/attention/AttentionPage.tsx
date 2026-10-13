@@ -30,7 +30,7 @@ import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import {
   ADVISORY,
-  ATTENTION_KIND,
+  attentionKind,
   NOT_A_CERTIFICATE,
   nextStep,
   useAttention,
@@ -190,7 +190,7 @@ function WarningRow({
   return (
     <li tabIndex={-1} className="attention-row">
       <p>
-        <strong>{ATTENTION_KIND[warning.kind]}</strong>
+        <strong>{attentionKind(warning.kind)}</strong>
         {itemId === null ? (
           <span className="meta"> (the workspace as a whole)</span>
         ) : (

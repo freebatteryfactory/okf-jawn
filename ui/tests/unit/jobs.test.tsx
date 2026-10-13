@@ -9,7 +9,7 @@ import type { Job } from '../../src/api/generated/types.gen';
 import { MAX_RECONNECT_MS, RECONNECT_MS } from '../../src/features/jobs/feed';
 import { JOB_ITEMS_STEP } from '../../src/features/jobs/JobRow';
 import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS } from '../../src/features/jobs/jobs';
-import { fail, type Handler, type Json, mockApi, ok } from './support/api';
+import { fail, fromNewerService, type Handler, type Json, mockApi, ok } from './support/api';
 import {
   accepted,
   CANCEL,
@@ -259,6 +259,72 @@ describe('what a job’s row says', () => {
     await eventually(() => expect(links()).toHaveLength(JOB_ITEMS_STEP + 2));
     expect(document.activeElement).toBe(links().at(JOB_ITEMS_STEP));
     expect(within(rowOf()).queryByRole('button', { name: /^Show/ })).toBeNull();
+  });
+
+  it('says that a job is in a state this page does not know, with the service’s word, and goes on asking about it', async () => {
+    const { api } = await openJobs({
+      [JOBS]: () =>
+        listOf([{ ...jobOf('running', { progress: 40 }), state: fromNewerService('paused') }]),
+    });
+    await listed();
+    expect(rowOf().textContent).toBe(
+      'Import, job 88888888In a state this page does not know (“paused”).',
+    );
+    // Nothing is guessed from it: no progress bar, no cancel, no retry.
+    expect(within(rowOf()).queryByRole('progressbar')).toBeNull();
+    expect(within(rowOf()).queryByRole('button')).toBeNull();
+    // It is not known to have ended, so the clock goes on.
+    expect(api.callsTo(JOBS)).toHaveLength(1);
+    await pass(JOBS_POLL_MS);
+    await later(() => expect(api.callsTo(JOBS)).toHaveLength(2));
+    // The mock saw exactly the answers this test meant to send.
+    expect(api.violations.every((seen) => seen.startsWith(`${JOBS} response:`))).toBe(true);
+    expect(api.violations.length).toBeGreaterThan(0);
+  });
+
+  it('says, by the job’s name, when a job enters a state this page does not know', async () => {
+    let paused = false;
+    await openJobs({
+      [JOBS]: () =>
+        listOf([
+          paused ? { ...jobOf('running'), state: fromNewerService('Paused') } : jobOf('running'),
+        ]),
+    });
+    await listed();
+    paused = true;
+    await pass(JOBS_POLL_MS);
+    await later(() =>
+      screen.getByText('Import, job 88888888: in a state this page does not know (“Paused”).'),
+    );
+  });
+
+  it('names a job of a kind this page does not know as unknown, with the service’s word', async () => {
+    await openJobs({
+      [JOBS]: () =>
+        listOf([
+          {
+            ...jobOf('succeeded', {
+              artifact: {
+                artifact_id: '99999999-9999-4999-8999-999999999999',
+                download_path: `/api/workspaces/${WS}/artifacts/99999999-9999-4999-8999-999999999999`,
+                kind: fromNewerService('audit_trail'),
+                sha256: 'c'.repeat(64),
+                size: '120',
+              },
+            }),
+            kind: fromNewerService('defragment'),
+          },
+        ]),
+    });
+    await listed();
+    expect(rowOf().textContent).toContain(
+      'A job of a kind this page does not know (“defragment”), job 88888888',
+    );
+    expect(rowOf().textContent).toContain('Finished.');
+    expect(rowOf().textContent).toContain(
+      'It produced something of a kind this page does not know (“audit_trail”): 120 bytes.',
+    );
+    expect(rowOf().textContent).not.toContain('undefined');
   });
 
   it('shows the warnings a job recorded', async () => {

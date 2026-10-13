@@ -14,7 +14,7 @@ import { Link } from '@tanstack/react-router';
 import type { Revision } from '../../api/generated/types.gen';
 import { keyed } from '../../lib/keys';
 import { short } from '../documents/describe';
-import { ATTENTION_KIND, useAttention, warningsFor, warningsOf } from './attention';
+import { attentionKind, useAttention, warningsFor, warningsOf } from './attention';
 
 export interface ItemAttentionProps {
   workspaceId: string;
@@ -37,7 +37,7 @@ export function ItemAttention({ workspaceId, itemId, head }: ItemAttentionProps)
       <ul>
         {keyed(mine, (warning) => JSON.stringify(warning)).map(({ key, value: warning }) => (
           <li key={key}>
-            <strong>{ATTENTION_KIND[warning.kind]}:</strong> {warning.message}
+            <strong>{attentionKind(warning.kind)}:</strong> {warning.message}
           </li>
         ))}
       </ul>

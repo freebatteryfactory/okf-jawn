@@ -34,12 +34,13 @@ import { cancelJob, retryJob } from '../../api/generated/sdk.gen';
 import type { ArtifactKind, Job, Revision } from '../../api/generated/types.gen';
 import { type HeldFocus, takeHeld, useWatchedPart } from '../../lib/focus';
 import { keyed } from '../../lib/keys';
+import { wordsFor } from '../../lib/words';
 import { itemOptions } from '../documents/DocumentView';
 import { conversionWord, short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { classifyFailure, type FailureMessage, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
-import { canCancel, canRetry, JOB_STATE, jobName } from './job-words';
+import { canCancel, canRetry, jobName, jobState } from './job-words';
 import { jobUncertain, rememberJob, unfinished } from './jobs';
 
 export interface JobRowProps {
@@ -153,7 +154,7 @@ export function JobRow({ workspaceId, job, canWrite }: JobRowProps) {
         {name}
       </p>
       <p>
-        {JOB_STATE[job.state]}
+        {jobState(job.state)}
         {job.attempt > 1 ? `, attempt ${job.attempt}` : ''}.
         {unfinished(job) && (
           <>
@@ -274,7 +275,10 @@ function Outcome({ workspaceId, job }: { workspaceId: string; job: Job }) {
       )}
       {artifact !== null && (
         <p>
-          It produced {ARTIFACT[artifact.kind]}: {artifact.size} bytes.
+          It produced{' '}
+          {wordsFor(ARTIFACT, artifact.kind) ??
+            `something of a kind this page does not know (“${artifact.kind}”)`}
+          : {artifact.size} bytes.
         </p>
       )}
       {restore !== null && (

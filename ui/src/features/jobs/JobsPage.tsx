@@ -25,7 +25,7 @@ import { classifyFailure, messageFor } from '../errors/failure';
 import { useRetry } from '../errors/retry';
 import { type Feed, NotAnEventStream, useJobsFeed } from './feed';
 import { JobRow } from './JobRow';
-import { JOB_STATE, jobName } from './job-words';
+import { jobName, jobStateSaid } from './job-words';
 import { JOBS_POLL_MS, JOBS_SAFETY_POLL_MS, jobsOptions } from './jobs';
 
 export interface JobsPageProps {
@@ -57,7 +57,7 @@ function useStateChanges(jobs: readonly Job[]): string {
     for (const job of jobs) {
       const before = seen.current.get(job.id);
       if (before !== undefined && before !== job.state) {
-        changes.push(`${jobName(job)}: ${JOB_STATE[job.state].toLowerCase()}.`);
+        changes.push(`${jobName(job)}: ${jobStateSaid(job.state)}.`);
       }
       seen.current.set(job.id, job.state);
     }

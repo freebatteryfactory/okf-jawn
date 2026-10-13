@@ -27,7 +27,7 @@ import { useRetry } from '../errors/retry';
 import type { FolderListing } from '../explorer/folder-listing';
 import { useJobsFeed } from '../jobs/feed';
 import { JobRow } from '../jobs/JobRow';
-import { JOB_STATE, jobName } from '../jobs/job-words';
+import { jobName, jobStateSaid } from '../jobs/job-words';
 import { jobOptions } from '../jobs/jobs';
 import { beginImport, type ImportAttempt, importAttempt } from './import-start';
 import { type UploadEntry, useUploads } from './upload-list';
@@ -86,7 +86,7 @@ export function ImportStart({ workspaceId, head, entries }: ImportStartProps) {
       const where =
         attempt.destination === '' ? 'the top of the workspace' : `“${attempt.destination}”`;
       setSaid(
-        `Import of ${count(attempt.uploadIds.length, 'file', 'files')} into ${where} was accepted as ${jobName(job)}. It is not finished: its state is “${JOB_STATE[job.state].toLowerCase()}”.`,
+        `Import of ${count(attempt.uploadIds.length, 'file', 'files')} into ${where} was accepted as ${jobName(job)}. It is not finished: its state is “${jobStateSaid(job.state)}”.`,
       );
     },
   });

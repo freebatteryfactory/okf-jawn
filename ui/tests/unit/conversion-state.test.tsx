@@ -10,7 +10,7 @@ import type {
   ExtractionSummary,
   ItemSummary,
 } from '../../src/api/generated/types.gen';
-import { fail, mockApi, ok } from './support/api';
+import { fail, fromNewerService, mockApi, ok } from './support/api';
 import {
   explorerHandlers,
   itemDocument,
@@ -175,6 +175,44 @@ describe('the state of an imported item', () => {
     expect(
       document.getElementById(noteTab.getAttribute('aria-describedby') ?? '')?.textContent,
     ).toBe('');
+  });
+
+  it('says that a conversion is in a state this page does not know, and never shows it as converted', async () => {
+    // A newer service names a state this build's types do not.
+    const { note } = await open({ status: fromNewerService<'unsupported'>('quarantined') });
+    expect(note?.textContent).toBe(
+      'Conversion: The conversion is in a state this page does not know (“quarantined”). It is not known to be converted.',
+    );
+    expect(note?.textContent).not.toContain('Converted.');
+    // In the tree it carries a mark: no mark is how a converted source looks.
+    expect(treeRow().getAttribute('aria-label')).toBe(
+      'Annual report, type report, conversion state not known: “quarantined”',
+    );
+    expect(within(treeRow()).getByText('conversion state not known: “quarantined”')).toBeDefined();
+    expect(tabSays()).toBe(' (conversion state not known: “quarantined”)');
+    expect(tab().textContent).toContain('(conversion state not known: “quarantined”)');
+    expect(document.body.textContent).not.toContain('undefined');
+  });
+
+  it('says the same where only the listing’s verdict is known', async () => {
+    const extraction = {
+      status: fromNewerService<ExtractionSummary['status']>('quarantined'),
+      text_origin: 'converter' as const,
+      corrected: false,
+    };
+    const summary: ItemSummary = { ...sourceSummary, extraction };
+    mockApi(
+      explorerHandlers({
+        '/api/items/list-items': () => ok(listing([], [summary])),
+        [ITEM]: () => ok(itemDocument(summary)),
+        '/api/reads/read-item': () => ok(readResponse(summary, 'Text', { extraction })),
+      }),
+    );
+    renderAt(`/w/${WS}/i/${SOURCE}`);
+    const state = await screen.findByText('Conversion:');
+    expect(state.closest('[role="note"]')?.textContent).toBe(
+      'Conversion: The conversion is in a state this page does not know (“quarantined”). It is not known to be converted.',
+    );
   });
 
   it('gives the verdict alone when only the reading knows it', async () => {

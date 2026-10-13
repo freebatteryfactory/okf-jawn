@@ -8,6 +8,10 @@
  * service does for unbuilt operations. A handler may answer later (a promise), so a test can look
  * at the page while a request is in flight. A request aborted meanwhile rejects, as `fetch` does:
  * a cancelled query's request, or one that outlived the client's bounded wait, does not go on.
+ *
+ * An answer that does not fit its schema is still answered as it is (a service newer than this
+ * build can send one) and is recorded in `violations`: a test that means to send one says so
+ * with `fromNewerService`, and every other test asserts that none was seen.
  */
 import { vi } from 'vitest';
 import type { ZodType } from 'zod';
@@ -71,6 +75,17 @@ export const CONTRACT: Record<string, { request: ZodType; response: ZodType }> =
   '/api/reads/get-sources': { request: zGetSourcesRequest, response: zGetSourcesResponse },
   '/api/search/search-items': { request: zSearchRequest, response: zSearchResponse },
 };
+
+/**
+ * A value of a newer service: one the generated types of this build do not name, typed as
+ * whatever the place it is put in expects. With it a test answers a state, a kind or a status
+ * this build does not know, as a service newer than the client would. The mock answers it as it
+ * is and records the contract violation that it is, so such a test expects that violation
+ * (`MockedApi.violations`) and no other.
+ */
+export function fromNewerService<T extends string>(value: string): T {
+  return value as T;
+}
 
 export const ok = (body: unknown): Reply => ({ status: 200, body });
 export const fail = (status: number, code: string, message: string): Reply => ({

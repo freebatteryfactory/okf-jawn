@@ -20,6 +20,7 @@ import type {
   zUncitedReason,
   zUnresolvedReason,
 } from '../../api/generated/zod.gen';
+import { wordsFor } from '../../lib/words';
 
 type CellRange = z.infer<typeof zCellRange>;
 type ConversionOutcome = z.infer<typeof zConversionOutcome>;
@@ -140,11 +141,27 @@ export const CONVERSION_MARK: Record<Exclude<ExtractionStatus, 'completed'>, str
   unsupported: 'format not supported',
 };
 
+/**
+ * A state this build does not know (a newer service) is marked as unknown, with the service's own
+ * word. It is never left unmarked: no mark is how a converted source looks.
+ */
 export function conversionWord(
   extraction: { status: ExtractionStatus } | null | undefined,
 ): string | null {
   if (extraction === null || extraction === undefined) return null;
-  return extraction.status === 'completed' ? null : CONVERSION_MARK[extraction.status];
+  if (extraction.status === 'completed') return null;
+  return (
+    wordsFor(CONVERSION_MARK, extraction.status) ??
+    `conversion state not known: “${extraction.status}”`
+  );
+}
+
+/** How a conversion stands, as a sentence; a state this build does not know is said to be unknown. */
+export function extractionSentence(status: string): string {
+  return (
+    wordsFor(EXTRACTION_STATUS, status) ??
+    `The conversion is in a state this page does not know (“${status}”). It is not known to be converted.`
+  );
 }
 
 export const TEXT_ORIGIN: Record<TextOrigin, string> = {
@@ -206,7 +223,7 @@ export function describeOutcome(outcome: ConversionOutcome): string {
     case 'failed':
       return `Conversion failed because ${describeFailure(outcome.reason)}; the original bytes are kept.`;
     default:
-      return EXTRACTION_STATUS[outcome.status];
+      return extractionSentence(outcome.status);
   }
 }
 

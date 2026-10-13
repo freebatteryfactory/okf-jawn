@@ -1,6 +1,8 @@
 /**
  * How the conversion of a source stands, in the reader: always in words, for every state the
- * generated types name (SPEC section 5: the item shows that state accurately).
+ * generated types name (SPEC section 5: the item shows that state accurately), and for a state
+ * they do not name (a newer service): that one is said to be unknown, with the service's word,
+ * and is not called converted.
  *
  * - pending: the original is kept and its text is not ready; it is not an empty document;
  * - failed: with the reason the wire gives (`FailureReason`) and what the converter recorded;
@@ -20,7 +22,7 @@ import { Link } from '@tanstack/react-router';
 import type { z } from 'zod';
 import type { zConversionOutcome, zExtractionStatus } from '../../api/generated/zod.gen';
 import { keyed } from '../../lib/keys';
-import { describeOutcome, EXTRACTION_STATUS } from './describe';
+import { describeOutcome, extractionSentence } from './describe';
 
 type ConversionOutcome = z.infer<typeof zConversionOutcome>;
 type ExtractionStatus = z.infer<typeof zExtractionStatus>;
@@ -43,7 +45,7 @@ const MEANS: Partial<Record<ExtractionStatus, string>> = {
 export function ConversionState({ workspaceId, outcome, status }: ConversionStateProps) {
   const state = outcome?.status ?? status;
   if (state === null) return null;
-  const sentence = outcome === null ? EXTRACTION_STATUS[state] : describeOutcome(outcome);
+  const sentence = outcome === null ? extractionSentence(state) : describeOutcome(outcome);
   const issues =
     outcome?.status === 'failed' || outcome?.status === 'partial' ? outcome.issues : [];
   return (

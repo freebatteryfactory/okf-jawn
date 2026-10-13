@@ -6,8 +6,13 @@
  * running work" (`queued`, `running`); `retry_job` takes an "existing failed job" (`failed`). The
  * wire does not say whether a failed job can be retried, so a retry is offered for every failed
  * job and a refusal is shown as one.
+ *
+ * A kind or a state this build does not know (a newer service) is said to be unknown, with the
+ * service's own word: never a blank, never another state's words. Such a job is offered neither
+ * a cancel nor a retry, and is not taken to have ended (`jobs.ts` goes on asking about it).
  */
 import type { Job, JobKind, JobState } from '../../api/generated/types.gen';
+import { wordsFor } from '../../lib/words';
 
 export const JOB_KIND: Record<JobKind, string> = {
   import: 'Import',
@@ -30,9 +35,23 @@ export const JOB_STATE: Record<JobState, string> = {
   cancelled: 'Cancelled',
 };
 
+/** How a job stands, as the start of a sentence. */
+export function jobState(state: string): string {
+  return wordsFor(JOB_STATE, state) ?? `In a state this page does not know (“${state}”)`;
+}
+
+/** How a job stands, inside a sentence: the same words without their capital. */
+export function jobStateSaid(state: string): string {
+  return (
+    wordsFor(JOB_STATE, state)?.toLowerCase() ?? `in a state this page does not know (“${state}”)`
+  );
+}
+
 /** The name a job is called by: what it is, and enough of its identity to tell it from another. */
 export function jobName(job: Job): string {
-  return `${JOB_KIND[job.kind]}, job ${job.id.slice(0, 8)}`;
+  const kind =
+    wordsFor(JOB_KIND, job.kind) ?? `A job of a kind this page does not know (“${job.kind}”)`;
+  return `${kind}, job ${job.id.slice(0, 8)}`;
 }
 
 export const canCancel = (job: Job) => job.state === 'queued' || job.state === 'running';

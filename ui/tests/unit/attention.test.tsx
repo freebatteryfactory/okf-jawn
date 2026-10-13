@@ -13,7 +13,7 @@ import {
   ATTENTION_PAGE,
   NOT_A_CERTIFICATE,
 } from '../../src/features/attention/attention';
-import { fail, type Handler, type Json, mockApi, ok } from './support/api';
+import { fail, fromNewerService, type Handler, type Json, mockApi, ok } from './support/api';
 import { ATTENTION } from './support/imports';
 import {
   explorerHandlers,
@@ -137,6 +137,28 @@ describe('the list of warnings', () => {
         ),
     ).toBe(true);
     expect(screen.getByText(/for\s+revision/).textContent).toContain('bbbbbbbbbb');
+  });
+
+  it('says that a warning is of a kind this page does not know, by the service’s name for it', async () => {
+    const odd: AttentionItem = {
+      ...warning('stale', 'A macro runs when the file is opened.', NOTE),
+      kind: fromNewerService('poisoned_macro'),
+    };
+    setup(() => answer([odd]));
+    await openAttention();
+    const row = (await screen.findByText('A macro runs when the file is opened.')).closest('li');
+    expect(row?.querySelector('strong')?.textContent).toBe(
+      'A warning of a kind this page does not know (“poisoned_macro”)',
+    );
+    // In the reader's notice too.
+    cleanup();
+    setup(() => answer([odd]));
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    const notice = (await screen.findByText('Attention:')).closest('[role="note"]');
+    expect(notice?.textContent).toContain(
+      'A warning of a kind this page does not know (“poisoned_macro”): A macro runs when the file is opened.',
+    );
+    expect(document.body.textContent).not.toContain('undefined');
   });
 
   it('names a suggested operation it has no words for as the wire names it', async () => {

@@ -29,7 +29,7 @@ import {
 import { z } from 'zod';
 import { getJobOptions, listJobsQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { listJobs } from '../../api/generated/sdk.gen';
-import type { Job, ListJobsResponse } from '../../api/generated/types.gen';
+import type { Job, JobState, ListJobsResponse } from '../../api/generated/types.gen';
 
 /** Jobs requested per page. */
 export const JOBS_PAGE = 50;
@@ -47,16 +47,25 @@ export const JOBS_POLL_MS = 5_000;
  */
 export const JOBS_SAFETY_POLL_MS = 30_000;
 
-/** The clock for jobs on screen: none once all have ended. */
-function pollEvery(live: boolean, anyUnfinished: boolean): number | false {
-  if (!anyUnfinished) return false;
+/** The clock for jobs on screen: none once all are known to have ended. */
+function pollEvery(live: boolean, anyMayChange: boolean): number | false {
+  if (!anyMayChange) return false;
   return live ? JOBS_SAFETY_POLL_MS : JOBS_POLL_MS;
 }
 
 type JobPages = InfiniteData<ListJobsResponse, string | null>;
 
-/** A job that has not ended: the only kind worth asking about again. */
+/** A job that is waiting or running: the states in which the wire's progress means something. */
 export const unfinished = (job: Job) => job.state === 'queued' || job.state === 'running';
+
+/** The states in which a job has ended, as this build's types name them. */
+const ENDED: ReadonlySet<string> = new Set<JobState>(['succeeded', 'failed', 'cancelled']);
+
+/**
+ * A job worth asking about again: one that is not known to have ended. A state this build does
+ * not know is not known to be an end, so such a job is asked about like one that is running.
+ */
+export const mayChange = (job: Job) => !ENDED.has(job.state);
 
 export function jobsQueryKey(workspaceId: string) {
   const body = { workspace_id: workspaceId, page: { limit: JOBS_PAGE } };
@@ -82,7 +91,7 @@ export function jobsOptions(workspaceId: string, live: boolean) {
     refetchInterval: (query) =>
       pollEvery(
         live,
-        (query.state.data?.pages ?? []).some((page) => page.items.some(unfinished)),
+        (query.state.data?.pages ?? []).some((page) => page.items.some(mayChange)),
       ),
   });
 }
@@ -94,7 +103,7 @@ export function jobOptions(workspaceId: string, jobId: string, live: boolean) {
     staleTime: JOBS_POLL_MS,
     refetchOnWindowFocus: true,
     refetchInterval: (query) =>
-      pollEvery(live, query.state.data !== undefined && unfinished(query.state.data)),
+      pollEvery(live, query.state.data !== undefined && mayChange(query.state.data)),
   });
 }
 

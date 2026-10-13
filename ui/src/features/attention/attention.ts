@@ -26,6 +26,7 @@ import type {
   OperationName,
   Revision,
 } from '../../api/generated/types.gen';
+import { wordsFor } from '../../lib/words';
 
 /** Warnings requested per page: the most the operation allows. */
 export const ATTENTION_PAGE = 200;
@@ -102,6 +103,13 @@ export const ATTENTION_KIND: Record<AttentionKind, string> = {
   invalidated: 'Refers to content that was removed',
   unparseable_header: 'A header that could not be read',
 };
+
+/** A warning's kind in words; a kind this build does not know is said to be unknown, by its name. */
+export function attentionKind(kind: string): string {
+  return (
+    wordsFor(ATTENTION_KIND, kind) ?? `A warning of a kind this page does not know (“${kind}”)`
+  );
+}
 
 /** What the checks are, said wherever warnings are shown. */
 export const ADVISORY =
