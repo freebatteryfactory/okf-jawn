@@ -1,5 +1,5 @@
 {
-  "git_sha": "137f8c64f8896c399d11bbe438c9292f619be67c",
+  "git_sha": "9a8dfa1ca5b80c042efe638fa1dc638dc25fcfad",
   "inputs": [
     ".bun-version",
     ".cargo/config.toml",
@@ -23,7 +23,7 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts"
   ],
-  "produced_at": "2026-10-13T00:47:32.874Z",
+  "produced_at": "2026-10-13T01:50:25.140Z",
   "component": "mcp-apps-protocol-qualification",
   "gate": "mcp-apps-protocol-qualification",
   "result": "PASS",
@@ -212,7 +212,7 @@
   ],
   "not_judged": [],
   "harness_error_detail": [],
-  "finished_at": "2026-10-13T00:48:53.274Z",
+  "finished_at": "2026-10-13T01:52:20.190Z",
   "scope": {
     "summary": "This run renders the real MCP App bundle in a real MCP Apps host, against a fixture MCP server. It qualifies the App side and the protocol libraries; it does not test the product server.",
     "real": [
@@ -311,7 +311,7 @@
     ]
   },
   "bundle_sizes": {
-    "app": 1586467
+    "app": 1601694
   },
   "app_bundle": {
     "node_env": "development",
@@ -336,7 +336,7 @@
     "resource_count": 1,
     "resources": [
       {
-        "byteLength": 1586467,
+        "byteLength": 1601694,
         "metaUi": {
           "csp": {
             "connectDomains": [],
@@ -348,7 +348,7 @@
         "name": "app",
         "path": "ui/dist-apps/app.html",
         "readable": true,
-        "sha256": "25c5dd8fd25746fb68426c2a3499441478ec3eb6dd524cd7689e8ebea8febd88",
+        "sha256": "5402f94fa0b2edd3477f6ba4dd953e012cf0bb57276eeaf433bfc6e36c55f5b0",
         "uri": "ui://okf-jawn/app.html"
       }
     ],
@@ -451,7 +451,7 @@
       {
         "uri": "ui://okf-jawn/app.html",
         "mime_type": "text/html;profile=mcp-app",
-        "text_sha256": "25c5dd8fd25746fb68426c2a3499441478ec3eb6dd524cd7689e8ebea8febd88",
+        "text_sha256": "5402f94fa0b2edd3477f6ba4dd953e012cf0bb57276eeaf433bfc6e36c55f5b0",
         "csp": {
           "connectDomains": [],
           "resourceDomains": []
@@ -545,14 +545,14 @@
       "repository": "https://github.com/modelcontextprotocol/ext-apps",
       "requested_tag": "v2.0.3",
       "commit": "82221c0c8ce7661efa6771c9d461511b1650495f",
-      "commit_resolved_at": "2026-10-13T00:42:09.485Z",
+      "commit_resolved_at": "2026-10-12T07:26:17.310Z",
       "files_verified": 14,
       "files_expected": 14,
       "package": {
         "name": "@modelcontextprotocol/ext-apps-basic-host",
         "version": "2.0.3"
       },
-      "lockfile_sha256": "da6693ddb3be1f9220ee8f481813e05b19178ec13201d558e0be339bdb8825dc"
+      "lockfile_sha256": "60b5b4578594f66b3223897f79320f1e320e22c57b900a515def7b7dcee56abd"
     },
     "browser": {
       "name": "chromium",
@@ -857,12 +857,9 @@
     "note": "OKF_MCP_APPS_NGROK is not 1"
   },
   "host_render": {
-    "status": "evidence_present",
-    "gate": "mcp-apps-web-hosts",
-    "files": [
-      ".artifacts/qualification/mcp-apps/hosts/2026-10-05-bounded-upstream-exception.md"
-    ],
-    "meaning": "Evidence files were found under hosts/. Status is not PASS; an integrator must label each file as observed render, text-only fallback, or rejection by host and date. Harness screenshots are not host renders."
+    "status": "not_run",
+    "meaning": "hosts/ directory exists but is empty. Place screenshots or notes from claude.ai / ChatGPT before claiming an observed host render.",
+    "gate": "mcp-apps-web-hosts"
   },
   "static_bundle_smoke": {
     "status": "not_run",

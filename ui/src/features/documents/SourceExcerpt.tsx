@@ -1,9 +1,7 @@
 /** Source content is supplied by the application's read result, never model-written quotation props. */
-import Markdown from 'react-markdown';
-import rehypeSanitize from 'rehype-sanitize';
-import remarkGfm from 'remark-gfm';
 import type { z } from 'zod';
 import type { zReadItemResponse } from '../../api/generated/zod.gen';
+import { SafeMarkdown } from './SafeMarkdown';
 
 export interface SourceExcerptProps {
   result: z.infer<typeof zReadItemResponse>;
@@ -16,17 +14,7 @@ export function SourceExcerpt({ result }: SourceExcerptProps) {
         <strong>{result.source.path}</strong>
         <code>{result.source.revision}</code>
       </header>
-      <Markdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeSanitize]}
-        skipHtml
-        components={{
-          a: ({ children }) => <span>{children}</span>,
-          img: ({ alt }) => <span>[Image: {alt ?? 'source image'}]</span>,
-        }}
-      >
-        {result.markdown}
-      </Markdown>
+      <SafeMarkdown markdown={result.markdown} />
       {result.warnings.map((warning) => (
         <p key={`${warning.code}:${warning.message}`} role="note">
           {warning.message}
