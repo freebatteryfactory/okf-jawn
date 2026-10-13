@@ -2,12 +2,17 @@
 //!
 //! A draft belongs to the authenticated subject; no request names its editor, so a caller only
 //! ever saves, lists or discards its own. Saving never creates a revision and always succeeds
-//! when the head has moved: the first save takes the current head as its base, a later save
-//! keeps the draft's base, and a save whose `base_revision` is the current head rebases it
-//! (resolving a Snapshot conflict as "keep mine"). A draft may leave the application header out
+//! when the head has moved: the first save records the request's `base_revision`, the revision
+//! the editor saw, as the draft's base, so a Snapshot is blocked when the item changed between
+//! that revision and the head (SPEC section 8); a later save keeps the draft's base, and a save
+//! whose `base_revision` is the current head rebases it (resolving a Snapshot conflict as
+//! "keep mine"). A first save is refused when the item does not exist at its base. The base is
+//! not checked to lie on the head's history: a revision of this workspace that holds the item
+//! is recorded as given. A draft may leave the application header out
 //! or echo it unchanged; any other value is refused before the draft is written.
 
-use okf_jawn_contract::error::ApiError;
+use okf_jawn_contract::error::{ApiError, ErrorCode};
+use okf_jawn_contract::identity::{ItemId, Revision};
 use okf_jawn_contract::item::{
     DiscardDraftRequest, Draft, ItemDocument, ListDraftsRequest, ListDraftsResponse,
     SaveDraftRequest,
@@ -19,13 +24,15 @@ use crate::context::OperationContext;
 use crate::drafts::DraftWrite;
 use crate::items::refuse_header_change;
 use crate::portable::item_content_digest;
+use crate::storage::StorageScope;
 
 /// Save or replace the caller's draft of one item.
 ///
 /// # Errors
 /// Returns the typed `NotFound` of an invalidated base revision, `NotFound` when the item does
-/// not exist at the head, `InvalidInput` on `/properties/okf_jawn` for a changed application
-/// header, or any port error.
+/// not exist at the head, `NotFound` on `/base_revision` when a first save names a revision at
+/// which the item does not exist, `InvalidInput` on `/properties/okf_jawn` for a changed
+/// application header, or any port error.
 pub(super) async fn save_draft(
     service: &ApplicationService,
     context: &OperationContext,
@@ -41,8 +48,16 @@ pub(super) async fn save_draft(
     refuse_header_change(&current.properties, &request.properties, "/properties")?;
     let existing = ports.drafts.get(&scope, request.item_id, editor).await?;
     let base_revision = match existing {
+        // A later save keeps the draft's base; naming the head is the explicit rebase.
         Some(saved) if request.base_revision != head => saved.draft.base_revision,
-        _ => head,
+        Some(_) => head,
+        // A first save records the revision the editor saw, which may be behind the head.
+        None => {
+            if request.base_revision != head {
+                require_item_at(service, &scope, &request.base_revision, request.item_id).await?;
+            }
+            request.base_revision
+        }
     };
     // The digest of the drafted body and properties, computed as the item they would commit
     // is, so a draft and that item compare.
@@ -67,6 +82,26 @@ pub(super) async fn save_draft(
             },
         )
         .await
+}
+
+/// Refuse a first save whose base does not hold the item: the resource the draft is based on
+/// is absent, which the contract's error rules name `NotFound` (the store's own answer for an
+/// item a revision does not hold, and for a revision it does not hold).
+async fn require_item_at(
+    service: &ApplicationService,
+    scope: &StorageScope,
+    base: &Revision,
+    item: ItemId,
+) -> Result<(), ApiError> {
+    match service.ports().versions.show(scope, base, item).await {
+        Ok(_) => Ok(()),
+        Err(error) if error.code == ErrorCode::NotFound => Err(ApiError::new(
+            ErrorCode::NotFound,
+            "the item does not exist at the revision this draft is based on",
+        )
+        .with_field("/base_revision")),
+        Err(error) => Err(error),
+    }
 }
 
 /// One page of the caller's drafts in the workspace, most recently saved first.

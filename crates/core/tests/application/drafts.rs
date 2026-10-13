@@ -4,6 +4,7 @@
 use okf_jawn_contract::access::AccessRoute;
 use okf_jawn_contract::common::PageRequest;
 use okf_jawn_contract::error::{ErrorCode, ErrorDetail};
+use okf_jawn_contract::history::{CommitRequest, FileChange, FileChangeKind};
 use okf_jawn_contract::identity::{IdempotencyKey, ItemId, PurgeId, Revision};
 use okf_jawn_contract::item::{
     APP_HEADER_KEY, DiscardDraftRequest, ListDraftsRequest, SaveDraftRequest,
@@ -56,11 +57,12 @@ async fn a_first_save_bases_on_the_head_a_later_one_keeps_its_base_until_it_reba
     let world = World::new()?;
     stored_at(&world, 'a')?;
     stored_at(&world, 'b')?;
+    // The editor saw the head: the first save's base is the head, as it was before.
     let first = world
         .service
         .save_draft(
             &alice(OperationName::SaveDraft, Some(mutation(1)))?,
-            save(revision('c')?, json!({ "type": "Note" }))?,
+            save(revision('a')?, json!({ "type": "Note" }))?,
         )
         .await?;
     assert_eq!(first.base_revision, revision('a')?);
@@ -92,6 +94,143 @@ async fn a_first_save_bases_on_the_head_a_later_one_keeps_its_base_until_it_reba
         content_digest(&written.body, &written.properties)?
     );
     assert!(world.versions.commits()?.is_empty());
+    Ok(())
+}
+
+/// A world whose head is `b`, with the fixture note at `a` and at `b`: the editor's view is
+/// still at `a`. `changed` says whether the commit between them changed the note itself.
+fn behind_the_head(changed: bool) -> Built<World> {
+    let world = World::new()?;
+    stored_at(&world, 'a')?;
+    stored_at(&world, 'b')?;
+    world.versions.set_head(revision('b')?)?;
+    if changed {
+        world.versions.put_diff(
+            &revision('a')?,
+            &revision('b')?,
+            Some(ItemId(Uuid::from_u128(NOTE))),
+            vec![FileChange {
+                old_path: Some("notes/plan.md".to_owned()),
+                new_path: Some("notes/plan.md".to_owned()),
+                patch: "@@ -1 +1 @@\n-before\n+after\n".to_owned(),
+                binary: false,
+                kind: FileChangeKind::Modified,
+            }],
+        )?;
+    }
+    world.versions.queue_revision(revision('c')?)?;
+    Ok(world)
+}
+
+fn snapshot_of_the_note() -> Built<CommitRequest> {
+    Ok(CommitRequest {
+        workspace_id: scope()?.workspace_id,
+        item_ids: vec![ItemId(Uuid::from_u128(NOTE))],
+        message: "Snapshot".to_owned(),
+        idempotency_key: IdempotencyKey(Uuid::from_u128(78)),
+    })
+}
+
+#[tokio::test]
+async fn a_first_save_records_the_revision_the_editor_saw_so_a_snapshot_conflicts_on_it()
+-> TestResult {
+    // The editor began from a view at `a`; another editor changed the same note at `b`.
+    let world = behind_the_head(true)?;
+    let first = world
+        .service
+        .save_draft(
+            &alice(OperationName::SaveDraft, Some(mutation(1)))?,
+            save(revision('a')?, json!({ "type": "Note" }))?,
+        )
+        .await?;
+    assert_eq!(first.base_revision, revision('a')?);
+    let refused = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(2)))?,
+                snapshot_of_the_note()?,
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    let Some(ErrorDetail::DraftConflict { items }) = refused.detail.as_deref() else {
+        return Err(format!("not a draft conflict: {refused:?}").into());
+    };
+    let listed: Vec<_> = items
+        .iter()
+        .map(|item| (item.item_id, &item.draft_base, &item.current_revision))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![(
+            ItemId(Uuid::from_u128(NOTE)),
+            &revision('a')?,
+            &revision('b')?
+        )]
+    );
+    assert!(world.versions.commits()?.is_empty(), "nothing overwritten");
+    // The rebase still works: a save that names the head moves the base, and the Snapshot
+    // lands.
+    let rebased = world
+        .service
+        .save_draft(
+            &alice(OperationName::SaveDraft, Some(mutation(3)))?,
+            save(revision('b')?, json!({ "type": "Note" }))?,
+        )
+        .await?;
+    assert_eq!(rebased.base_revision, revision('b')?);
+    let landed = world
+        .service
+        .commit_items(
+            &alice(OperationName::CommitItems, Some(mutation(4)))?,
+            snapshot_of_the_note()?,
+        )
+        .await?;
+    assert_eq!(landed.revision, revision('c')?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_first_save_behind_an_unrelated_change_does_not_block_its_snapshot() -> TestResult {
+    // The commit between the editor's view and the head changed another item.
+    let world = behind_the_head(false)?;
+    let first = world
+        .service
+        .save_draft(
+            &alice(OperationName::SaveDraft, Some(mutation(1)))?,
+            save(revision('a')?, json!({ "type": "Note" }))?,
+        )
+        .await?;
+    assert_eq!(first.base_revision, revision('a')?);
+    let landed = world
+        .service
+        .commit_items(
+            &alice(OperationName::CommitItems, Some(mutation(2)))?,
+            snapshot_of_the_note()?,
+        )
+        .await?;
+    assert_eq!(landed.revision, revision('c')?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_first_save_based_where_the_item_does_not_exist_is_refused_not_recorded() -> TestResult {
+    // The note exists at the head `b` only.
+    let world = World::new()?;
+    stored_at(&world, 'b')?;
+    world.versions.set_head(revision('b')?)?;
+    let caller = alice(OperationName::SaveDraft, Some(mutation(1)))?;
+    let request = || save(revision('a')?, json!({ "type": "Note" }));
+    let refused = err_of(world.service.save_draft(&caller, request()?).await)?;
+    assert_eq!(refused.code, ErrorCode::NotFound);
+    assert_eq!(refused.field.as_deref(), Some("/base_revision"));
+    // A store fault while reading the base is the store's error, not "no such item".
+    world.versions.fail_show_number(2, ErrorCode::Unavailable)?;
+    let failed = err_of(world.service.save_draft(&caller, request()?).await)?;
+    assert_eq!(failed.code, ErrorCode::Unavailable);
+    assert_eq!(failed.field, None);
+    assert!(world.drafts.saves()?.is_empty());
     Ok(())
 }
 

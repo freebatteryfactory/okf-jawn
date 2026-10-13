@@ -22,7 +22,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Save the caller's draft; always succeeds even when the head has moved.\n\nThe first save takes the item's head revision as its base. Later saves keep the draft's\nbase unless `base_revision` equals the current head, which is the explicit rebase.",
+  "description": "Save the caller's draft; always succeeds even when the head has moved.\n\nThe first save records `base_revision`, the revision the editor saw, as the draft's base;\nthe item must exist at that revision. Later saves keep the draft's base unless\n`base_revision` equals the current head, which is the explicit rebase.",
   "properties": {
     "base_revision": {
       "$ref": "#/$defs/Revision",
