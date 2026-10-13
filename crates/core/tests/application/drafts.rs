@@ -464,6 +464,38 @@ async fn a_source_draft_is_measured_against_its_base_not_the_head() -> TestResul
         )
         .await?;
     assert_eq!(first.base_revision, revision('a')?);
+    // Snapshotted now, the draft is measured against its base too: the card's file changed
+    // between `a` and the head, so this is the draft conflict, not a refusal of the text.
+    world.versions.put_diff(
+        &revision('a')?,
+        &b,
+        Some(ItemId(Uuid::from_u128(CARD))),
+        vec![FileChange {
+            old_path: Some("sources/report-pdf.md".to_owned()),
+            new_path: Some("sources/report-pdf.md".to_owned()),
+            patch: "@@ -1 +1 @@\n-before\n+after\n".to_owned(),
+            binary: false,
+            kind: FileChangeKind::Modified,
+        }],
+    )?;
+    let conflict = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(5)))?,
+                card_snapshot(&[CARD])?,
+            )
+            .await,
+    )?;
+    assert_eq!(conflict.code, ErrorCode::Conflict);
+    assert!(
+        matches!(
+            conflict.detail.as_deref(),
+            Some(ErrorDetail::DraftConflict { .. })
+        ),
+        "{conflict:?}"
+    );
+    assert!(world.versions.commits()?.is_empty());
     // The head's text is not the text at the draft's base: a later save that keeps the base
     // refuses it.
     let refused = err_of(
@@ -513,6 +545,32 @@ async fn a_draft_of_a_view_is_refused_and_nothing_is_saved() -> TestResult {
                 SaveDraftRequest {
                     item_id: ItemId(Uuid::from_u128(VIEW)),
                     body: "# Board\n".to_owned(),
+                    ..save(revision('a')?, json!({ "type": "View" }))?
+                },
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::NotImplemented);
+    assert_eq!(refused.field.as_deref(), Some("/item_id"));
+    assert!(world.drafts.saves()?.is_empty());
+    Ok(())
+}
+
+/// A View's draft that already exists (saved before the rule) takes no further save either.
+#[tokio::test]
+async fn a_view_with_a_draft_that_predates_the_rule_takes_no_further_save() -> TestResult {
+    let world = world_with_a_card_a_view_and_the_note()?;
+    world
+        .drafts
+        .put_draft(draft_of(VIEW, ALICE, &revision('a')?, "# Not the text\n")?)?;
+    let refused = err_of(
+        world
+            .service
+            .save_draft(
+                &alice(OperationName::SaveDraft, Some(mutation(1)))?,
+                SaveDraftRequest {
+                    item_id: ItemId(Uuid::from_u128(VIEW)),
+                    body: "# Board, again\n".to_owned(),
                     ..save(revision('a')?, json!({ "type": "View" }))?
                 },
             )
