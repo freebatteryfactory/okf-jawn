@@ -4,8 +4,14 @@
  *
  * The list: the drafts the service holds (`list_drafts`, every page) and any text still only in
  * this page (typed and not saved yet, or whose save failed), each with how it stands. A row opens
- * its item. `list_drafts` answers item ids, so each row reads its item's title from `get_item` at
- * the head the workspace shows; until that answers, the row shows a short identity.
+ * its item. `list_drafts` answers item ids, so each row's item is read with `get_item` at the head
+ * the workspace shows, for its title and its kind; until that answers, the row shows a short
+ * identity.
+ *
+ * A draft of a Source or a View can only have been made elsewhere: this workspace edits Notes as
+ * drafts. The service takes no such draft into a Snapshot, so its row says its kind and why, its
+ * box is unticked and cannot be ticked, and it offers "Discard draft", which asks first. Until a
+ * row's item has been read its kind is not known, and the row is offered like any other.
  *
  * This panel asks for the list's further pages by itself, one after another, so the marks in the
  * tree and on the tabs cover every draft. A page that fails stops that, says so here and offers
@@ -15,15 +21,16 @@
  * Snapshot conflicted is left out until the person resolves it in its own pane, so the others are
  * one press away. An item whose properties form holds input back says so in its row, before a
  * Snapshot is taken: the Snapshot takes its saved draft, without that input; when nothing of the
- * item is saved, its box cannot be ticked. A Snapshot has a name; an empty one is not sent and the field says so. While it
+ * item is saved, its box cannot be ticked. A Snapshot has a name; an empty one is not sent and
+ * the field says so. While it
  * is taken the button keeps keyboard focus (`aria-disabled`); it is always there, so it never
  * leaves with focus on it. A polite status says what happened, here and after a conflict is
  * resolved in a pane: the name, how many items, and the revision the workspace now shows. When
  * the service finds a conflict it has snapshotted nothing, and the panel says so.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueries, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import type { Draft, Revision } from '../../api/generated/types.gen';
+import type { Draft, ItemSummary, Revision } from '../../api/generated/types.gen';
 import { type HeldFocus, takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
@@ -31,6 +38,7 @@ import { itemOptions } from '../documents/DocumentView';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { draftsByItem, useDrafts } from './drafts-list';
+import { discardSession } from './saving';
 import {
   type DraftSession,
   type SnapshotConflict,
@@ -65,7 +73,19 @@ interface Row {
   session: DraftSession | null;
   /** The Snapshot that did not include it, until the person resolves it. */
   conflict: SnapshotConflict | null;
+  /** The item as `get_item` answers it at the head shown; undefined until it has. */
+  summary: ItemSummary | undefined;
 }
+
+/** The kinds of item that are not edited as a draft here, as the person is told. */
+const OTHER_KIND = { source: 'Source', view: 'View' } as const;
+
+/**
+ * The draft is of a Source or a View: one made elsewhere, since this workspace edits only Notes
+ * as drafts. The service takes no such draft into a Snapshot. Not known until the item is read.
+ */
+const otherKind = (row: Row) =>
+  row.summary === undefined || row.summary.kind === 'note' ? null : OTHER_KIND[row.summary.kind];
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -79,8 +99,12 @@ const savedDraft = (row: Row) => row.session?.confirmed?.draft ?? row.draft;
 const nothingSaved = (row: Row) =>
   row.session !== null && saveStateOf(row.session) === 'held-back' && savedDraft(row) === null;
 
-/** The draft is offered for a Snapshot: it has no open conflict, and something of it is saved. */
-const offered = (row: Row) => row.conflict === null && !nothingSaved(row);
+/**
+ * The draft is offered for a Snapshot: it has no open conflict, something of it is saved, and it
+ * is not known to be a draft of a Source or a View.
+ */
+const offered = (row: Row) =>
+  row.conflict === null && !nothingSaved(row) && otherKind(row) === null;
 
 export function DraftsPanel({
   workspaceId,
@@ -109,25 +133,35 @@ export function DraftsPanel({
 
   const conflictOf = (itemId: string) => conflicts[sessionKey(workspaceId, itemId)] ?? null;
   const listed = draftsByItem(drafts.data?.pages);
-  const rows: Row[] = [...listed.values()].map((draft) => ({
+  const unread: Row[] = [...listed.values()].map((draft) => ({
     itemId: draft.item_id,
     draft,
     session: null,
     conflict: conflictOf(draft.item_id),
+    summary: undefined,
   }));
   for (const session of Object.values(sessions)) {
     if (session.workspaceId !== workspaceId) continue;
-    const row = rows.find((candidate) => candidate.itemId === session.itemId);
+    const row = unread.find((candidate) => candidate.itemId === session.itemId);
     if (row !== undefined) row.session = session;
     else if (saveStateOf(session) !== 'unchanged') {
-      rows.push({
+      unread.push({
         itemId: session.itemId,
         draft: null,
         session,
         conflict: conflictOf(session.itemId),
+        summary: undefined,
       });
     }
   }
+  // Each row's item, read at the head shown: its title, and what kind of item it is.
+  const items = useQueries({
+    queries: unread.map((row) => itemOptions(workspaceId, row.itemId, head)),
+  });
+  const rows: Row[] = unread.map((row, index) => ({
+    ...row,
+    summary: items.at(index)?.data?.summary,
+  }));
 
   // The list failed with nothing listed, or with some listed: then those stay and the rest waits.
   const nothingListed = drafts.data === undefined;
@@ -228,7 +262,6 @@ export function DraftsPanel({
               index={index}
               held={heldRow}
               workspaceId={workspaceId}
-              head={head}
               row={row}
               selectable={canWrite}
               selected={offered(row) && !left.has(row.itemId)}
@@ -372,7 +405,6 @@ function DraftRow({
   index,
   held,
   workspaceId,
-  head,
   row,
   selectable,
   selected,
@@ -383,16 +415,15 @@ function DraftRow({
   index: number;
   held: HeldFocus;
   workspaceId: string;
-  head: Revision;
   row: Row;
   selectable: boolean;
   selected: boolean;
   onSelect: (include: boolean) => void;
   onOpenItem: (itemId: string) => void;
 }) {
-  const item = useQuery(itemOptions(workspaceId, row.itemId, head));
-  const summary = item.data?.summary;
+  const summary = row.summary;
   const name = summary ? summary.title || summary.path : `Item ${row.itemId.slice(0, 8)}`;
+  const kind = otherKind(row);
   const [, rowRef] = useWatchedPart<HTMLLIElement>(held);
   return (
     <li ref={rowRef} data-row={index}>
@@ -412,8 +443,120 @@ function DraftRow({
         {name}
       </button>{' '}
       <span className="meta">
+        {kind === null ? null : `${kind} · `}
         <Standing row={row} />
       </span>
+      {kind !== null && (
+        <OtherKindDraft
+          workspaceId={workspaceId}
+          itemId={row.itemId}
+          name={name}
+          kind={kind}
+          discardable={selectable}
+        />
+      )}
     </li>
+  );
+}
+
+/**
+ * What a draft of a Source or a View carries in its row: why it cannot be snapshotted, and the
+ * way to discard it, which asks first, in place ("Keep the draft" takes keyboard focus, and
+ * choosing it gives focus back to "Discard draft"). The discard is the item's own (`saving.ts`):
+ * this page has no session of such an item, so the service is asked. When it is done the row
+ * leaves, and the panel says where keyboard focus goes.
+ */
+function OtherKindDraft({
+  workspaceId,
+  itemId,
+  name,
+  kind,
+  discardable,
+}: {
+  workspaceId: string;
+  itemId: string;
+  name: string;
+  kind: (typeof OTHER_KIND)[keyof typeof OTHER_KIND];
+  /** The person may write in this workspace. */
+  discardable: boolean;
+}) {
+  const client = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+  const discardRef = useRef<HTMLButtonElement | null>(null);
+  const keepRef = useRef<HTMLButtonElement | null>(null);
+  const focusAfterConfirm = useRef<'keep' | 'discard' | null>(null);
+  useEffect(() => {
+    const target = focusAfterConfirm.current;
+    focusAfterConfirm.current = null;
+    if (target === 'keep') keepRef.current?.focus();
+    else if (target === 'discard') discardRef.current?.focus();
+  });
+  const discard = useMutation({
+    mutationFn: () => discardSession(client, workspaceId, itemId),
+    onSuccess: () =>
+      useDraftSessions.getState().say(workspaceId, `Your draft of ${name} was discarded.`),
+  });
+  const discardFailure = useRetry({
+    request: `${workspaceId}/${itemId}`,
+    failed: discard.isError,
+    error: discard.error,
+    run: () => discard.mutateAsync(),
+    loaded: () => null,
+  });
+  return (
+    <>
+      <p className="meta">
+        A draft of a {kind} cannot be snapshotted: only a Note is edited as a draft.
+        {discardable ? ' It can be discarded here.' : ''}
+      </p>
+      {!discardable ? null : confirming ? (
+        <fieldset className="confirm">
+          <legend>Discard the draft of {name}?</legend>
+          <p>The draft will be removed. The committed {kind} stays as it is.</p>
+          <button
+            type="button"
+            ref={keepRef}
+            onClick={() => {
+              focusAfterConfirm.current = 'discard';
+              setConfirming(false);
+            }}
+          >
+            Keep the draft
+          </button>{' '}
+          {/* aria-disabled rather than disabled: the button keeps focus while it works. */}
+          <button
+            type="button"
+            aria-disabled={discard.isPending}
+            onClick={() => {
+              if (!discard.isPending) discard.mutate();
+            }}
+          >
+            {discard.isPending ? 'Discarding…' : 'Discard the draft'}
+          </button>
+        </fieldset>
+      ) : (
+        <p className="draft-actions">
+          <button
+            type="button"
+            ref={discardRef}
+            aria-label={`Discard draft of ${name}`}
+            onClick={() => {
+              focusAfterConfirm.current = 'keep';
+              setConfirming(true);
+            }}
+          >
+            Discard draft
+          </button>
+        </p>
+      )}
+      {discardFailure.shown && (
+        <FailureNotice
+          context={`Discarding the draft of ${name}`}
+          error={discardFailure.error}
+          retry={discardFailure}
+          workspaceId={workspaceId}
+        />
+      )}
+    </>
   );
 }

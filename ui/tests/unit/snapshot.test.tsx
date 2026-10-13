@@ -29,6 +29,7 @@ import {
   renderAt,
   SOURCE,
   sourceSummary,
+  summary,
   WS,
   writableWorkspace,
 } from './support/workspace';
@@ -1106,6 +1107,155 @@ describe('taking a Snapshot', () => {
     await eventuallyReal(() => expect(router.state.location.search).toEqual({ rev: MADE }));
     // It reads what was just committed, and can be edited again.
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeDefined();
+  });
+});
+
+// This workspace edits only Notes as drafts, and the service refuses any other draft at a
+// Snapshot. One made elsewhere is listed all the same: the person has to be able to see it go.
+describe('a draft of a Source or a View made elsewhere', () => {
+  const KINDS = [
+    ['a Source', 'source', 'Source'],
+    ['a View', 'view', 'View'],
+  ] as const;
+
+  /** The person has a draft of the note, and one of an item of another kind. */
+  function withOther(kind: 'source' | 'view', overrides: Record<string, Handler> = {}) {
+    const item = summary(SOURCE, 'things/it.md', 'Annual report', 'report', kind);
+    const made = service(
+      {
+        [ITEM]: (body) => {
+          const itemId = String(body.item_id);
+          const document = itemDocument(
+            itemId === NOTE ? noteSummary : itemId === SOURCE ? item : otherSummary,
+          );
+          return ok(
+            made.state.drafts.has(itemId)
+              ? {
+                  ...document,
+                  draft: {
+                    body: 'a draft made elsewhere',
+                    properties: document.properties,
+                    draft: draftOf(itemId, HEAD, LATER),
+                  },
+                }
+              : document,
+          );
+        },
+        ...overrides,
+      },
+      [NOTE, SOURCE],
+    );
+    return made;
+  }
+  const row = () =>
+    within(panel()).getByRole('button', { name: 'Annual report' }).closest('li')?.textContent ?? '';
+  const box = () =>
+    within(panel()).getByRole('checkbox', { name: 'Include Annual report in the Snapshot' });
+  const discardButton = () =>
+    within(panel()).getByRole('button', { name: 'Discard draft of Annual report' });
+
+  async function listed(kind: 'source' | 'view', overrides: Record<string, Handler> = {}) {
+    const made = withOther(kind, overrides);
+    renderAt(`/w/${WS}`);
+    await screen.findByRole('region', { name: 'Drafts (2)' });
+    // The row's item has been read: its kind is known.
+    await eventuallyReal(() => expect(row()).toContain('cannot be snapshotted'));
+    return made;
+  }
+
+  it.each(KINDS)(
+    'of %s: is listed with its kind, cannot be ticked, says why, and a Snapshot leaves it out',
+    async (_what, kind, word) => {
+      const { api } = await listed(kind);
+      expect(row()).toContain(`${word} · saved`);
+      expect(row()).toContain(
+        `A draft of a ${word} cannot be snapshotted: only a Note is edited as a draft. It can be discarded here.`,
+      );
+      expect(box()).toHaveProperty('checked', false);
+      expect(box().getAttribute('aria-disabled')).toBe('true');
+      fireEvent.click(box());
+      expect(box()).toHaveProperty('checked', false);
+      // The Note beside it is a draft like any other: ticked, and with no discard of its own here.
+      expect(
+        within(panel()).getByRole('checkbox', { name: 'Include Meeting notes in the Snapshot' }),
+      ).toHaveProperty('checked', true);
+      expect(within(panel()).getAllByRole('button', { name: /^Discard draft/ })).toHaveLength(1);
+      expect(snapshotButton().textContent).toBe('Snapshot 1 draft');
+      await pressSnapshot('Tidy');
+      await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Tidy” taken: 1 item\./));
+      expect(api.callsTo(COMMIT).map((sent) => sent.item_ids)).toEqual([[NOTE]]);
+      // It is still there to be discarded.
+      expect(await screen.findByRole('region', { name: 'Drafts (1)' })).toBeDefined();
+      expect(row()).toContain('cannot be snapshotted');
+      expect(api.violations).toEqual([]);
+    },
+  );
+
+  it('offers "Discard draft", which asks first; then the draft is gone and focus is on a row', async () => {
+    const { api, state } = await listed('source');
+    act(() => discardButton().focus());
+    fireEvent.click(discardButton());
+    const question = within(panel()).getByRole('group', {
+      name: 'Discard the draft of Annual report?',
+    });
+    const keep = within(question).getByRole('button', { name: 'Keep the draft' });
+    expect(document.activeElement).toBe(keep);
+    expect(api.callsTo(DISCARD)).toHaveLength(0);
+    fireEvent.click(keep);
+    expect(document.activeElement).toBe(discardButton());
+    expect(api.callsTo(DISCARD)).toHaveLength(0);
+
+    fireEvent.click(discardButton());
+    const confirm = within(panel()).getByRole('button', { name: 'Discard the draft' });
+    act(() => confirm.focus());
+    fireEvent.click(confirm);
+    await screen.findByRole('region', { name: 'Drafts (1)' });
+    // This page had no session of the item: the service was asked.
+    expect(api.callsTo(DISCARD)).toHaveLength(1);
+    expect(api.callsTo(DISCARD).at(0)).toMatchObject({ workspace_id: WS, item_id: SOURCE });
+    expect(state.drafts.has(SOURCE)).toBe(false);
+    expect(within(panel()).queryByRole('button', { name: 'Annual report' })).toBeNull();
+    expect(said()).toBe('Your draft of Annual report was discarded.');
+    // It was the last row: focus goes to the one before it, not to the page.
+    expect(document.activeElement).toBe(
+      within(panel()).getByRole('button', { name: 'Meeting notes' }),
+    );
+    expect(api.violations).toEqual([]);
+  });
+
+  it('keeps the row when the discard fails, says so there, and repeats it under the same key', async () => {
+    let failing = true;
+    const { api, state } = await listed('view', {
+      [DISCARD]: (body) => {
+        if (failing) return fail(503, 'unavailable', 'busy');
+        state.drafts.delete(String(body.item_id));
+        return ok(draftOf(String(body.item_id), HEAD, LATER));
+      },
+    });
+    fireEvent.click(discardButton());
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Discard the draft' }));
+    expect(
+      await within(panel()).findByText(
+        'Discarding the draft of Annual report: The service is temporarily unavailable.',
+      ),
+    ).toBeDefined();
+    expect(row()).toContain('cannot be snapshotted');
+    failing = false;
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Try again' }));
+    await screen.findByRole('region', { name: 'Drafts (1)' });
+    const [first, second] = api.callsTo(DISCARD);
+    expect(api.callsTo(DISCARD)).toHaveLength(2);
+    expect(second).toEqual(first);
+  });
+
+  it('is listed with its reason for a person who may only read, with nothing to press', async () => {
+    await listed('source', { [OPEN]: () => ok({ ...writableWorkspace, permissions: ['read'] }) });
+    expect(row()).toContain(
+      'A draft of a Source cannot be snapshotted: only a Note is edited as a draft.',
+    );
+    expect(row()).not.toContain('It can be discarded here.');
+    expect(within(panel()).queryByRole('button', { name: /^Discard draft/ })).toBeNull();
+    expect(within(panel()).queryByRole('checkbox')).toBeNull();
   });
 });
 
