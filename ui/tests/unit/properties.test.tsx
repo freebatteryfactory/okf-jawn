@@ -491,6 +491,22 @@ describe('the properties form', () => {
       expect(saidAbove()).toContain(HELD_BACK);
     });
 
+    it('judges what a save would carry, not what the form library filled in for itself', async () => {
+      // The type requires a property whose value it fixes. The library shows that value in its
+      // field; the item does not hold it, and the form writes nothing the person did not enter.
+      const api = service({
+        type: 'object',
+        required: ['format'],
+        properties: { owner, format: { type: 'string', title: 'Format', const: 'minutes' } },
+      });
+      await editNote();
+      expect(saidAbove()).toContain('“format” is required, and this item does not have it.');
+      set('Owner', 'Grace');
+      await pass(AUTOSAVE_DELAY_MS * 3);
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+      expect(saidAbove()).toContain(HELD_BACK);
+    });
+
     it('lets a type that allows no other property save an item that holds only the header beside its own', async () => {
       const api = service(
         { type: 'object', additionalProperties: false, properties: { owner } },
