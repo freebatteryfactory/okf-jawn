@@ -8,6 +8,11 @@
 //! - A request whose `_meta` names a protocol version carries that version, which then also
 //!   applies to the messages that follow. A request the relay refuses is not sent, and the
 //!   version it names is not put in force: the service never heard of it.
+//! - A version is put in force only when it can stand in the header as it is
+//!   ([`usable_version`]), whoever names it. The client's request that names another is
+//!   refused. The service's answer to `initialize` that names another is passed on, and no
+//!   version is in force after it, as when the answer names none (`session` says so on the
+//!   error stream).
 //! - From protocol `2026-07-28`, a request or notification also carries `Mcp-Method`, and
 //!   `Mcp-Name` when its method names a tool, prompt, resource or task.
 //!
@@ -163,7 +168,7 @@ fn headers(
         .and_then(|meta| meta.get(META_PROTOCOL_VERSION))
         .and_then(Value::as_str)
         .filter(|_| request);
-    if inline.is_some_and(|version| !bare(version) || version.is_empty()) {
+    if inline.is_some_and(|version| !usable_version(version)) {
         return Err(
             "The protocol version in the request's _meta cannot travel in an HTTP header"
                 .to_owned(),
@@ -332,6 +337,14 @@ pub(super) fn spelled(text: &str, place: Option<Span>, most: usize) -> Option<St
         return None;
     }
     serde_json::from_str::<String>(written).ok()
+}
+
+/// Whether a protocol version can be put in force. It travels in the `MCP-Protocol-Version`
+/// header of every later message as it is, so it is not empty and is a [`bare`] value. This
+/// is the one check for a version: the one a request names in its `_meta`, and the one the
+/// service names in its answer to `initialize`.
+pub(super) fn usable_version(version: &str) -> bool {
+    !version.is_empty() && bare(version)
 }
 
 /// The id of the message on `line`, as the client wrote it.

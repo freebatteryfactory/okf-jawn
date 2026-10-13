@@ -29,6 +29,11 @@
 //! - An answer is a request's answer when it names the request's id exactly: a number as the
 //!   text the client wrote, never as a 64-bit float, and a string by the characters it
 //!   spells (`Kind::answered_by`).
+//! - The protocol version the answer to `initialize` names is put in force only when it can
+//!   stand in an HTTP header as it is (`message::usable_version`, the check a version in a
+//!   request's `_meta` passes). An answer that names another is passed on all the same; no
+//!   version is then in force, as when the answer names none, and the error stream is told
+//!   so when that answer is passed on, in words that repeat nothing of the version.
 //!
 //! What the relay holds of the service's answers. One room (`Room`) is the budget for every
 //! answer from the moment its bytes are taken from the service until they are written, and
@@ -121,7 +126,7 @@ use super::frame::{Frame, Frames};
 use super::launch::{Arrival, Clock, Launcher, Progress, StartPolicy, start_or_connect};
 use super::message::{
     INTERNAL_ERROR, INVALID_REQUEST, Kind, Lifecycle, Outgoing, Refusal, error_line,
-    has_error_object, is_version_2, prepare, spelled,
+    has_error_object, is_version_2, prepare, spelled, usable_version,
 };
 use super::room::{Held, Room};
 use super::transport::{Body, Transport, TransportError};
@@ -194,7 +199,7 @@ pub struct Limits {
 /// What an exchange learned for the messages that follow it.
 #[derive(Debug, Default)]
 struct Outcome {
-    /// The protocol version an `initialize` answer carried.
+    /// The protocol version an `initialize` answer put in force.
     negotiated: Option<String>,
     /// The session the service issued.
     session: Option<String>,
@@ -231,7 +236,7 @@ struct Saying<'run, E> {
 struct Seen {
     /// A response or error with the request's id was written.
     answered: bool,
-    /// The protocol version of an `initialize` result.
+    /// The protocol version of an `initialize` result, when it can be put in force.
     negotiated: Option<String>,
 }
 
@@ -287,6 +292,12 @@ const NOT_A_MESSAGE: &str = "The okf-jawn service's answer is not a JSON-RPC mes
 /// The longest protocol version, in bytes as the service wrote it, that an `initialize`
 /// answer can put in force: it travels in a header of every later message.
 const VERSION_BYTES: usize = 256;
+/// What the error stream is told when the answer to `initialize` names a protocol version
+/// that is not put in force. The words are the relay's own and repeat nothing of the version.
+const VERSION_UNUSABLE: &str = "the okf-jawn service's answer to initialize names a protocol \
+    version the relay cannot use: it is not a short string of printable ASCII that can stand in \
+    an HTTP header as it is. No protocol version is in force for the messages that follow, as \
+    if the service had named none";
 /// What the error stream is told when a line is withheld.
 const WITHHELD: &str =
     "withheld a line that repeats the connector credential outside a JSON string";
@@ -587,17 +598,22 @@ async fn deliver(
             .id
             .and_then(|(start, end)| data.as_str().get(start..end))
             .is_some_and(|id| kind.answered_by(id));
-    let negotiated = if answers && initialize {
-        spelled(data.as_str(), noted.version, VERSION_BYTES)
-    } else {
-        None
-    };
+    // Where the answer to `initialize` names a protocol version, whatever stands there.
+    let named = noted.version.filter(|_| answers && initialize);
+    // The version is checked here, where it is taken from the answer, by the check a version
+    // in a request's `_meta` passes: it goes into a header of every later message.
+    let negotiated =
+        spelled(data.as_str(), named, VERSION_BYTES).filter(|version| usable_version(version));
+    // The answer is passed on whatever version it names: the relay does not judge it.
     if !line(desk, data).await {
         return Err(ANSWER_WITHHELD);
     }
     if answers {
         seen.answered = true;
         if initialize {
+            if named.is_some() && negotiated.is_none() {
+                remark(desk, VERSION_UNUSABLE).await;
+            }
             seen.negotiated = negotiated;
         }
     }

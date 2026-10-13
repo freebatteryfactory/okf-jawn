@@ -11,8 +11,10 @@ use crate::check::{TestResult, some};
 use okf_jawn_cli::relay::Limits;
 
 use crate::support::doubles::{
-    Body, FakeTransport, Script, Setup, answered, broken, header, relay, status,
+    Body, FakeTransport, Reply, Script, Setup, answered, broken, header, relay, status,
 };
+use crate::support::http::{Answering, answer, json as json_answer};
+use crate::support::{TOKEN, cli};
 
 /// A `\u` escape of the UTF-16 code unit `code`, four hexadecimal digits.
 fn escape(code: &str) -> String {
@@ -623,5 +625,198 @@ async fn a_key_that_only_starts_with_protocol_version_names_no_version() -> Test
         let ping = some(posts.get(1), "the second message")?;
         assert_eq!(header(ping, "MCP-Protocol-Version"), in_force, "{result}");
     }
+    Ok(())
+}
+
+/// The answer to `initialize` whose result names the protocol version `written`, a JSON value
+/// as the service writes it, and no other member that could be taken for one.
+fn naming(written: &str) -> String {
+    format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"protocolVersion\":{written},\"capabilities\":{{}}}}}}"
+    )
+}
+
+/// A service that answers `initialize` with `body` and the session `session-7`, accepts a
+/// notification, and answers every other request with an empty result.
+fn initialized_with(body: &str) -> std::sync::Arc<FakeTransport> {
+    let body = body.to_owned();
+    FakeTransport::scripted(move |message| {
+        let id = message.get("id").unwrap_or(&Value::Null);
+        match message.get("method").and_then(Value::as_str) {
+            Some("initialize") => {
+                let mut script = status(200, Body::Json(body.clone()));
+                script.reply = script.reply.map(|reply| Reply {
+                    session: Some("session-7".to_owned()),
+                    ..reply
+                });
+                script
+            }
+            Some(_) if id.is_null() => status(202, Body::Empty),
+            _ => answered(&response(id, &json!({}))),
+        }
+    })
+}
+
+/// The protocol version the service names in its answer to `initialize` travels in a header
+/// of every later message, so it passes the check a version in a request's `_meta` passes
+/// (the pull request's finding 3). One that does not is not put in force: the answer is
+/// still handed to the client as the service wrote it, the relay says so once on the error
+/// stream in words of its own, which repeat nothing of the version, and the messages that
+/// follow go out as they do when no version was negotiated, the session with them.
+#[tokio::test]
+async fn a_version_of_the_service_that_cannot_be_a_header_value_is_not_put_in_force() -> TestResult
+{
+    let long = format!("\"{}\"", "v".repeat(300));
+    let escaped = format!("\"2025-06-18{}[31m\"", escape("001b"));
+    let deleted = format!("\"2025-06-18{}\"", escape("007f"));
+    let unusable = [
+        ("a line feed", "\"2025-06-18\\n\""),
+        ("an escape character", escaped.as_str()),
+        ("a letter that is not ASCII", "\"2025-06-18\u{e9}\""),
+        ("an empty string", "\"\""),
+        ("300 characters", long.as_str()),
+        ("a carriage return and a header", "\"1\\r\\nX-Injected: 1\""),
+        ("a tab inside", "\"2025\\t06\""),
+        ("a delete character", deleted.as_str()),
+        ("a blank before it", "\" 2025-06-18\""),
+        ("a blank after it", "\"2025-06-18 \""),
+        ("the Base64 form", "\"=?base64?eA==?=\""),
+        ("a number", "20250618"),
+        ("null", "null"),
+    ];
+    let input = format!(
+        "{}{}{}",
+        request(&json!(0), "initialize", &json!({})),
+        request(&json!(1), "ping", &json!({})),
+        notification("notifications/initialized")
+    );
+    for (what, written) in unusable {
+        let body = naming(written);
+        let transport = initialized_with(&body);
+        let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
+        assert_eq!(ran.code, 0, "{what}");
+        // The relay is not the judge of the answer's content.
+        assert_eq!(ran.stdout.split('\n').next(), Some(body.as_str()), "{what}");
+        assert_eq!(ran.lines()?.len(), 2, "{what}: {}", ran.stdout);
+        let posts = transport.posts()?;
+        assert_eq!(posts.len(), 3, "{what}");
+        for later in posts.iter().skip(1) {
+            assert_eq!(
+                later.headers,
+                [("Mcp-Session-Id", "session-7".to_owned())],
+                "{what}: a later message carries the session and no version"
+            );
+        }
+        assert_eq!(
+            ran.stderr,
+            "okf-jawn mcp: the okf-jawn service's answer to initialize names a protocol \
+             version the relay cannot use: it is not a short string of printable ASCII that \
+             can stand in an HTTP header as it is. No protocol version is in force for the \
+             messages that follow, as if the service had named none\n",
+            "{what}"
+        );
+    }
+    // The other side: a version that can be a header value is put in force, and nothing is
+    // said.
+    let transport = initialized_with(&naming("\"2025-06-18\""));
+    let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
+    assert_eq!((ran.code, ran.stderr.as_str()), (0, ""));
+    for later in transport.posts()?.iter().skip(1) {
+        assert_eq!(header(later, "MCP-Protocol-Version"), Some("2025-06-18"));
+        assert_eq!(header(later, "Mcp-Session-Id"), Some("session-7"));
+    }
+    Ok(())
+}
+
+/// A version that is not put in force leaves none in force: not the one an earlier handshake
+/// negotiated either.
+#[tokio::test]
+async fn a_version_that_is_not_put_in_force_does_not_leave_an_earlier_one() -> TestResult {
+    let transport = FakeTransport::scripted(|message| {
+        let id = message.get("id").unwrap_or(&Value::Null);
+        match message.get("method").and_then(Value::as_str) {
+            Some("initialize") if message.pointer("/params/second").is_some() => {
+                status(200, Body::Json(naming("\"2025-06-18\\n\"")))
+            }
+            Some("initialize") => status(200, Body::Json(naming("\"2025-06-18\""))),
+            _ => answered(&response(id, &json!({}))),
+        }
+    });
+    let input = format!(
+        "{}{}{}{}",
+        request(&json!(0), "initialize", &json!({})),
+        request(&json!(1), "ping", &json!({})),
+        request(&json!(0), "initialize", &json!({"second": true})),
+        request(&json!(2), "ping", &json!({})),
+    );
+    let ran = relay(Setup::new(&transport), input.as_bytes()).await?;
+    assert_eq!(ran.lines()?.len(), 4, "{}", ran.stdout);
+    let posts = transport.posts()?;
+    let versions: Vec<Option<&str>> = posts
+        .iter()
+        .map(|post| header(post, "MCP-Protocol-Version"))
+        .collect();
+    assert_eq!(versions, [None, Some("2025-06-18"), None, None]);
+    assert_eq!(ran.stderr.matches("names a protocol version").count(), 1);
+    Ok(())
+}
+
+/// The same through the relay as shipped and real HTTP, where a header value is built: after
+/// a handshake whose answer names `2025-06-18` and a line feed, the notification and the
+/// request that follow reach the service, without a version header, and the request gets the
+/// service's answer.
+#[tokio::test]
+async fn the_relay_as_shipped_goes_on_after_a_version_it_cannot_send() -> TestResult {
+    let handshake = naming("\"2025-06-18\\n\"");
+    let answer_to_it = handshake.clone();
+    let listener = Answering::routed(move |heard| {
+        let body = String::from_utf8_lossy(&heard.body).into_owned();
+        if heard.line().starts_with("GET ") {
+            json_answer("200 OK", "{}")
+        } else if body.contains("\"initialize\"") {
+            json_answer("200 OK", &answer_to_it)
+        } else if body.contains("notifications/initialized") {
+            answer("202 Accepted", &[], "")
+        } else {
+            json_answer("200 OK", "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}")
+        }
+    })
+    .await?;
+    let input = format!(
+        "{}{}{}",
+        request(&json!(0), "initialize", &json!({})),
+        notification("notifications/initialized"),
+        request(&json!(1), "ping", &json!({})),
+    );
+    let ran = cli(
+        &["mcp", "--stdio", "--server", &listener.origin()],
+        Some(TOKEN),
+        input.as_bytes(),
+    )
+    .await?;
+    let heard = listener.heard()?;
+    assert_eq!(
+        (ran.code, heard.len()),
+        (0, 4),
+        "the liveness check and three messages; stdout: {} stderr: {}",
+        ran.stdout,
+        ran.stderr
+    );
+    assert_eq!(
+        ran.stdout,
+        format!("{handshake}\n{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}\n")
+    );
+    for later in heard.iter().skip(2) {
+        assert_eq!(later.header("mcp-protocol-version"), None, "{}", later.head);
+    }
+    assert_eq!(
+        (
+            ran.stderr.lines().count(),
+            ran.stderr.matches("names a protocol version").count()
+        ),
+        (1, 1),
+        "{}",
+        ran.stderr
+    );
     Ok(())
 }
