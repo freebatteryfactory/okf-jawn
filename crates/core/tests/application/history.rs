@@ -357,6 +357,32 @@ async fn a_timeline_cursor_minted_before_a_purge_does_not_read_the_purged_revisi
 }
 
 #[tokio::test]
+async fn a_timeline_continuation_that_names_its_revision_is_purge_checked() -> TestResult {
+    // A caller that pins its reads to a revision: on a continuation `at` is not resolved again,
+    // so the check of the cursor's tip is the only purge check of the revision it names.
+    let world = paged_timeline()?;
+    let caller = alice(OperationName::LogItems, None)?;
+    let first = world
+        .service
+        .log_items(&caller, timeline(At::Latest, None, 2)?)
+        .await?;
+    let cursor = some(first.next_cursor, "a continuation")?;
+    let purge_id = purge(&world, 'a')?;
+    let named = At::Revision {
+        revision: revision('a')?,
+    };
+    let refused = err_of(
+        world
+            .service
+            .log_items(&caller, timeline(named, Some(cursor), 2)?)
+            .await,
+    )?;
+    assert_invalidated(&refused, purge_id);
+    assert_eq!(world.versions.log_queries()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn diff_items_compares_the_two_named_revisions_of_one_item() -> TestResult {
     let world = World::new()?;
     let changes = vec![change(
