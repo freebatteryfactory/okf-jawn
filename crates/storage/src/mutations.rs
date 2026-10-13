@@ -7,9 +7,12 @@
 //! A completed or released row is kept 7 days from when it finished; a row whose lease expired
 //! without either stays until a later attempt reconciles it. The lease length is
 //! `MUTATION_LEASE_SECONDS`.
+//!
+//! `workspace_id` is written by the `begin` that inserts the row and, while it is still `NULL`,
+//! by the `complete` that stores the response; a workspace purge reads it (`purge::rows`).
 
 use okf_jawn_contract::error::{ApiError, ErrorCode};
-use okf_jawn_contract::identity::{Digest, MutationId};
+use okf_jawn_contract::identity::{Digest, MutationId, WorkspaceId};
 use okf_jawn_core::mutations::{
     BeginOutcome, MutationKey, MutationLease, MutationStore, StoredResponse,
 };
@@ -51,25 +54,33 @@ impl MutationStore for SqliteMutations {
         &'a self,
         key: &'a MutationKey,
         digest: &'a Digest,
+        workspace: Option<WorkspaceId>,
     ) -> PortFuture<'a, BeginOutcome> {
         let key = key.clone();
         let digest = digest.clone();
         Box::pin(
             self.db
-                .transaction(move |transaction| begin(transaction, &key, &digest)),
+                .transaction(move |transaction| begin(transaction, &key, &digest, workspace)),
         )
     }
 
-    fn complete(&self, lease: MutationLease, response: serde_json::Value) -> PortFuture<'_, ()> {
+    fn complete(
+        &self,
+        lease: MutationLease,
+        response: serde_json::Value,
+        workspace: Option<WorkspaceId>,
+    ) -> PortFuture<'_, ()> {
         Box::pin(self.db.transaction(move |transaction| {
             let body = serde_json::to_string(&response).map_err(|error| json(&error))?;
             let token = token_of(lease)?;
             let mutation = lease.mutation_id.0.to_string();
+            let named = workspace.map(|workspace| workspace.0.to_string());
             let changed = transaction
                 .execute(
-                    "UPDATE mutations SET state = 'completed', response = ?1, finished_ms = ?2
+                    "UPDATE mutations SET state = 'completed', response = ?1, finished_ms = ?2,
+                         workspace_id = coalesce(workspace_id, ?5)
                      WHERE mutation_id = ?3 AND token = ?4 AND state = 'leased'",
-                    params![body, seam::now_ms()?, mutation, token],
+                    params![body, seam::now_ms()?, mutation, token, named],
                 )
                 .map_err(|error| sql(&error))?;
             if changed == 1 {
@@ -116,6 +127,7 @@ fn begin(
     transaction: &Transaction<'_>,
     key: &MutationKey,
     digest: &Digest,
+    workspace: Option<WorkspaceId>,
 ) -> Result<BeginOutcome, ApiError> {
     let now = seam::now_ms()?;
     let retention_ms = RETENTION_SECONDS.saturating_mul(1000);
@@ -158,25 +170,27 @@ fn begin(
         .map_err(|error| sql(&error))?;
     let expires = now.saturating_add(MUTATION_LEASE_SECONDS.saturating_mul(1000));
     let Some(row) = row else {
-        return insert(transaction, key, &client_key, digest, expires);
+        return insert(transaction, key, &client_key, digest, workspace, expires);
     };
     resume(transaction, key, digest, row, now, expires)
 }
 
-/// The first grant of a new mutation.
+/// The first grant of a new mutation, recording the workspace it is about.
 fn insert(
     transaction: &Transaction<'_>,
     key: &MutationKey,
     client_key: &str,
     digest: &Digest,
+    workspace: Option<WorkspaceId>,
     expires: i64,
 ) -> Result<BeginOutcome, ApiError> {
     let mutation_id: MutationId = new_id!()?;
     transaction
         .execute(
             "INSERT INTO mutations (tenant_id, subject, client_key, operation,
-                 idempotency_key, mutation_id, digest, state, token, lease_expires_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'leased', 1, ?8)",
+                 idempotency_key, mutation_id, digest, state, token, lease_expires_ms,
+                 workspace_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'leased', 1, ?8, ?9)",
             params![
                 key.tenant_id.as_str(),
                 key.subject,
@@ -185,7 +199,8 @@ fn insert(
                 key.key.0.to_string(),
                 mutation_id.0.to_string(),
                 digest.as_str(),
-                expires
+                expires,
+                workspace.map(|workspace| workspace.0.to_string())
             ],
         )
         .map_err(|error| sql(&error))?;

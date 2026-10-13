@@ -47,6 +47,11 @@ pub(crate) fn new_uuid() -> serde_json::Value {
     serde_json::Value::String(Uuid::new_v4().to_string())
 }
 
+/// A fresh random (version 4) UUID as text, for a key no other record has.
+pub(crate) fn new_key() -> String {
+    Uuid::new_v4().to_string()
+}
+
 /// `N` bytes from the operating system's random source.
 pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N], ApiError> {
     let mut bytes = [0_u8; N];
