@@ -195,6 +195,78 @@ describe('who may edit, and where', () => {
     renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeDefined();
   });
+
+  // Nothing says an item's kind stays what it was: it is what the last read of the item answered.
+  describe('an item whose kind is another at the next revision', () => {
+    const NEWER = 'd'.repeat(40);
+    const asSource = summary(NOTE, 'notes/meeting.md', 'Meeting notes', 'meeting-note', 'source');
+
+    /** The note at the head shown; at the newer head the same item is a Source. */
+    function becomesSource() {
+      const held = { head: HEAD };
+      const api = writable({
+        '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: held.head }),
+        [ITEM]: (body) =>
+          ok(
+            itemDocument(
+              body.item_id !== NOTE
+                ? otherSummary
+                : JSON.stringify(body.at).includes(NEWER)
+                  ? asSource
+                  : noteSummary,
+            ),
+          ),
+      });
+      return { api, held };
+    }
+
+    it('stops offering "Edit" once a read says it is a Source, and focus on the switch goes to the page’s heading', async () => {
+      const { held } = becomesSource();
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const edit = await screen.findByRole('button', { name: 'Edit' });
+      await screen.findByText('Text of Meeting notes');
+      act(() => edit.focus());
+      held.head = NEWER;
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await screen.findByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`);
+      await screen.findByText(/Source · type/);
+      expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
+      expect(edit.isConnected).toBe(false);
+      expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    it('keeps the switch, with focus, while the item is read again', async () => {
+      const read: { hold: boolean; answer?: () => void } = { hold: false };
+      const held = { head: HEAD };
+      writable({
+        '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: held.head }),
+        [ITEM]: (body) => {
+          const reply = ok(itemDocument(body.item_id === NOTE ? noteSummary : otherSummary));
+          if (body.item_id !== NOTE || !read.hold) return reply;
+          return new Promise<Reply>((resolve) => {
+            read.answer = () => resolve(reply);
+          });
+        },
+      });
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const edit = await screen.findByRole('button', { name: 'Edit' });
+      await screen.findByText('Text of Meeting notes');
+      act(() => edit.focus());
+      held.head = NEWER;
+      read.hold = true;
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await screen.findByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`);
+      await waitFor(() => expect(read.answer).toBeDefined());
+      // The read at the new revision has no answer yet: what the last one said stands.
+      expect(edit.isConnected).toBe(true);
+      expect(document.activeElement).toBe(edit);
+      expect(edit.getAttribute('aria-disabled')).toBe('true');
+      act(() => read.answer?.());
+      await waitFor(() => expect(edit.getAttribute('aria-disabled')).toBe('false'));
+      expect(document.activeElement).toBe(edit);
+    });
+  });
 });
 
 describe('autosave', () => {
