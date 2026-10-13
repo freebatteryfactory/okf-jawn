@@ -123,7 +123,8 @@ pub struct Relay<T, L, C> {
     pub transport: Arc<T>,
     /// Starts the local server.
     pub launcher: L,
-    /// Whether the service address is loopback; only then may the server be started.
+    /// Whether the service address is a plain-HTTP loopback address (`Endpoint::may_start`);
+    /// only then may the server be started.
     pub loopback: bool,
     /// How long to wait for a server the relay started.
     pub start: StartPolicy,

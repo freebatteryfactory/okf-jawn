@@ -2,7 +2,8 @@
 //! accepts connections at a loopback address.
 //!
 //! The relay never becomes a second writer. It launches the server executable at most once,
-//! never for a remote address and never when anything answers at the address. When the
+//! only for a plain-HTTP loopback address (never for a remote one, never for HTTPS) and
+//! never when anything answers at the address. When the
 //! process it launched ends, as it does when another process already owns the data directory,
 //! the relay keeps asking and connects to whichever service answers. It never stops a
 //! service: the one it started is left running, because another client or the browser may be
@@ -296,9 +297,13 @@ fn detach(_command: &mut Command) -> Detachment {
 
 /// The server executable shipped beside the CLI executable `cli`: the same directory, and the
 /// platform's executable suffix.
+///
+/// `None` when `cli` is not an absolute path: a bare or relative name would leave it to the
+/// working directory or to `PATH` which program is started, so there is then no default.
 #[must_use]
-pub fn server_beside(cli: &Path) -> PathBuf {
-    cli.with_file_name(format!("{SERVER_PROGRAM}{}", std::env::consts::EXE_SUFFIX))
+pub fn server_beside(cli: &Path) -> Option<PathBuf> {
+    cli.is_absolute()
+        .then(|| cli.with_file_name(format!("{SERVER_PROGRAM}{}", std::env::consts::EXE_SUFFIX)))
 }
 
 /// Connect to the running service, or start the local one and wait for it.
@@ -325,7 +330,8 @@ pub async fn start_or_connect<T: Transport, L: Launcher, C: Clock, P: Progress>(
         Probe::Refused => {
             return Err(
                 "No service accepts connections at the server address, and the relay never \
-                 starts a remote service"
+                 starts a remote service or one behind HTTPS: it starts a server only for a \
+                 plain-HTTP loopback address"
                     .to_owned(),
             );
         }

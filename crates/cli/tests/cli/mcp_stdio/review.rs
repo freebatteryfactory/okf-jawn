@@ -14,12 +14,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use okf_jawn_cli::Credential;
 use okf_jawn_cli::relay::Limits;
+use okf_jawn_cli::{Credential, Endpoint};
 use okf_jawn_contract::transport::MAX_REQUEST_BODY_BYTES;
 use serde_json::json;
 
-use super::{request, response};
+use super::{notification, request, response};
 use crate::check::{TestResult, some};
 use crate::support::doubles::{FakeTransport, Setup, broken, relay};
 use crate::support::http::{Answering, json as json_answer};
@@ -101,6 +101,90 @@ async fn a_remote_address_is_never_started_by_the_shipped_entry_point() -> TestR
         ran.stderr
     );
     assert!(!read.load(Ordering::SeqCst), "stdin was read");
+    Ok(())
+}
+
+/// N3: loopback means this computer. A plain-HTTP request to `localhost`, however the name
+/// is cased, is sent to the loopback address itself, so no resolver decides where the
+/// credential goes: the listener hears `127.0.0.1` as the host on the relay's liveness check,
+/// on its message and on an operation. Over HTTPS the name is kept.
+#[tokio::test]
+async fn a_plain_http_request_to_localhost_goes_to_the_loopback_address() -> TestResult {
+    let listener = Answering::routed(|heard| {
+        if heard.line().starts_with("GET ") {
+            json_answer("200 OK", "{}")
+        } else {
+            json_answer("202 Accepted", "")
+        }
+    })
+    .await?;
+    let port = listener.address.port();
+    let named = format!("http://LocalHost:{port}");
+    let relayed = cli(
+        &["mcp", "--stdio", "--server", &named],
+        Some(TOKEN),
+        notification("notifications/initialized").as_bytes(),
+    )
+    .await?;
+    assert_eq!((relayed.code, relayed.stderr.as_str()), (0, ""));
+    let operated = cli(&["get_health", "--server", &named], Some(TOKEN), b"").await?;
+    assert_eq!((operated.code, operated.stderr.as_str()), (0, ""));
+    let heard = listener.heard()?;
+    assert_eq!(heard.len(), 3);
+    for request in &heard {
+        assert_eq!(
+            request.header("host"),
+            Some(format!("127.0.0.1:{port}")),
+            "{}",
+            request.line()
+        );
+    }
+    assert_eq!(
+        Endpoint::parse("http://localhost:7711")?
+            .url("/mcp")
+            .as_str(),
+        "http://127.0.0.1:7711/mcp"
+    );
+    assert_eq!(
+        Endpoint::parse("https://localhost:7711")?
+            .url("/mcp")
+            .as_str(),
+        "https://localhost:7711/mcp"
+    );
+    Ok(())
+}
+
+/// N4: a server is started only for a plain-HTTP loopback address. `https://localhost` and an
+/// HTTPS loopback literal are connected to and never started: nothing answers, the relay says
+/// so and names no executable, though one is given.
+#[tokio::test]
+async fn an_https_loopback_address_is_never_started_by_the_shipped_entry_point() -> TestResult {
+    let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-such-okf-jawn-server");
+    for host in ["localhost", "127.0.0.1"] {
+        let read = Arc::new(AtomicBool::new(false));
+        let ran = cli_reading(
+            &[
+                "mcp",
+                "--stdio",
+                "--server",
+                &format!("https://{host}:{}", closed_port()?),
+                "--server-bin",
+                &missing.display().to_string(),
+            ],
+            Some(TOKEN),
+            Untouched(read.clone()),
+        )
+        .await?;
+        assert_eq!((ran.code, ran.stdout.as_str()), (1, ""), "{host}");
+        assert!(
+            ran.stderr
+                .contains("starts a server only for a plain-HTTP loopback address")
+                && !ran.stderr.contains("could not be started"),
+            "{host}: {}",
+            ran.stderr
+        );
+        assert!(!read.load(Ordering::SeqCst), "stdin was read");
+    }
     Ok(())
 }
 

@@ -5,6 +5,12 @@
 //! address is an origin, and each request sets its own path. No refusal repeats the address,
 //! because a refused address may hold a password.
 //!
+//! Loopback means this computer. A loopback IP literal is one by its value. The name
+//! `localhost` is trusted only as a name: over plain HTTP it is replaced by `127.0.0.1` when
+//! the address is read, so every request goes to the loopback address and no resolver is
+//! asked. Over HTTPS the name is kept and resolved as any other, and the relay never starts a
+//! server for it ([`Endpoint::may_start`]).
+//!
 //! [`Endpoint::client`] is the one place an HTTP client is built, so both the operation path
 //! and the relay never follow a redirect and never send a loopback request through a proxy.
 
@@ -23,6 +29,9 @@ pub struct Endpoint {
 
 /// How long a connection attempt may take before it counts as failed.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The address a plain-HTTP request to `localhost` is sent to.
+const LOOPBACK_ADDRESS: &str = "127.0.0.1";
 
 impl Endpoint {
     /// Check a service address.
@@ -64,22 +73,28 @@ impl Endpoint {
                  query or fragment",
             ));
         }
+        let mut origin = origin;
+        if origin.scheme() == "http" && origin.host_str() == Some("localhost") {
+            // Plain HTTP carries the credential in clear, so the name is not left to a
+            // resolver, which a hosts file or a DNS answer can point at another computer.
+            origin.set_host(Some(LOOPBACK_ADDRESS)).map_err(|error| {
+                refuse(format!(
+                    "The server address cannot be read as the loopback address: {error}"
+                ))
+            })?;
+        }
         Ok(Self { origin, loopback })
     }
 
-    /// The address a locally started server binds so that this endpoint reaches it.
-    ///
-    /// The host is kept as written, except that `localhost` becomes `127.0.0.1`: a bind
-    /// address is an IP address and a port.
+    /// The address a locally started server binds so that this endpoint reaches it: an IP
+    /// address and a port. `None` for an address the relay never starts a server for.
     #[must_use]
     pub fn bind_address(&self) -> Option<String> {
+        if !self.may_start() {
+            return None;
+        }
         let host = self.origin.host_str()?;
         let port = self.origin.port_or_known_default()?;
-        let host = if host == "localhost" {
-            "127.0.0.1"
-        } else {
-            host
-        };
         Some(format!("{host}:{port}"))
     }
 
@@ -113,6 +128,14 @@ impl Endpoint {
     #[must_use]
     pub fn is_loopback(&self) -> bool {
         self.loopback
+    }
+
+    /// Whether the relay may start a local server for this address: plain HTTP to a loopback
+    /// address, and nothing else. An HTTPS address is only ever connected to, `localhost`
+    /// included: the server the relay starts speaks plain HTTP.
+    #[must_use]
+    pub fn may_start(&self) -> bool {
+        self.loopback && self.origin.scheme() == "http"
     }
 
     /// The URL of `path` on this origin.

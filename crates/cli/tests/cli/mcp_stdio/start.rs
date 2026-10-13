@@ -359,24 +359,41 @@ async fn a_started_service_is_announced_on_stderr_and_then_used() -> TestResult 
 /// suffix, and the launcher gives it the address the relay will connect to.
 #[test]
 fn mcp_stdio_server_beside_the_cli_is_started_on_the_server_address() -> TestResult {
-    let beside = server_beside(Path::new("/opt/okf-jawn/bin/okf-jawn"));
+    // The built CLI stands for the installed one: its path is absolute on every platform.
+    let cli = Path::new(EXECUTABLE);
+    let beside = some(server_beside(cli), "a default beside an absolute path")?;
     assert_eq!(
         beside,
-        Path::new("/opt/okf-jawn/bin")
+        some(cli.parent(), "the directory of the CLI")?
             .join(format!("okf-jawn-server{}", std::env::consts::EXE_SUFFIX))
     );
+    // A path that is not absolute gives no default: the working directory or `PATH` would
+    // otherwise decide which program is started.
+    for relative in ["okf-jawn", "bin/okf-jawn", "./okf-jawn", ""] {
+        assert_eq!(server_beside(Path::new(relative)), None, "{relative:?}");
+    }
     for (address, bind) in [
         ("http://127.0.0.1:7711", "127.0.0.1:7711"),
         ("http://localhost:8123", "127.0.0.1:8123"),
         ("http://[::1]:9000", "[::1]:9000"),
         ("http://127.0.0.1", "127.0.0.1:80"),
-        ("https://localhost", "127.0.0.1:443"),
     ] {
-        assert_eq!(
-            Endpoint::parse(address)?.bind_address().as_deref(),
-            Some(bind),
-            "{address}"
-        );
+        let endpoint = Endpoint::parse(address)?;
+        assert!(endpoint.may_start(), "{address}");
+        assert_eq!(endpoint.bind_address().as_deref(), Some(bind), "{address}");
+    }
+    // A server is started for a plain-HTTP loopback address and for nothing else: HTTPS is
+    // only ever connected to, `localhost` and a loopback literal included.
+    for address in [
+        "https://localhost",
+        "https://localhost:7711",
+        "https://127.0.0.1:7711",
+        "https://[::1]:7711",
+        "https://okf-jawn.invalid",
+    ] {
+        let endpoint = Endpoint::parse(address)?;
+        assert!(!endpoint.may_start(), "{address}");
+        assert_eq!(endpoint.bind_address(), None, "{address}");
     }
     let launcher = ProcessLauncher::new(Some(beside.clone()), Some("127.0.0.1:7711".to_owned()));
     let (command, detachment) = some(launcher.command(), "a command")?;

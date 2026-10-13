@@ -200,12 +200,12 @@ fn relay(
         .or_else(|| {
             std::env::current_exe()
                 .ok()
-                .map(|executable| server_beside(&executable))
+                .and_then(|executable| server_beside(&executable))
         });
     Ok(Relay {
         transport: Arc::new(transport),
         launcher: ProcessLauncher::new(program, endpoint.bind_address()),
-        loopback: endpoint.is_loopback(),
+        loopback: endpoint.may_start(),
         start: StartPolicy::default(),
         clock: SystemClock::default(),
         limits,
