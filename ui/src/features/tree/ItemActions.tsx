@@ -102,7 +102,7 @@ export function ItemActions({ item, mark, busy }: ItemActionsProps) {
           aria-disabled={unavailable}
           onChange={(event) => {
             const next = event.target.value;
-            if (unavailable || !isStatusWord(next) || next === item.status) return;
+            if (unavailable || !isStatusWord(next)) return;
             setSaid('');
             life.start({ itemId: item.id, status: next });
           }}

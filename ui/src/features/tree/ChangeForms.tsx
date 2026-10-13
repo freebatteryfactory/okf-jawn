@@ -115,8 +115,9 @@ export function useChange<T, R extends HeadChange>(
     request: workspaceId,
     failed: mutation.isError,
     error: mutation.error,
-    // A refusal is not repeated as it is: the person changes something first.
-    ...(conflict || refused !== null
+    // A refusal at a field is not repeated as it is: the person changes the value first. (A
+    // conflict's notice offers no retry button whatever is given here.)
+    ...(refused !== null
       ? {}
       : {
           run: () =>
@@ -174,7 +175,16 @@ const CONFLICT_WORDS: Record<Moved, string> = {
 };
 
 /** A change's failure as a notice in its form; a refusal at a field is shown at the field. */
-export function ChangeFailure<T>({ context, change }: { context: string; change: Change<T> }) {
+export function ChangeFailure<T>({
+  context,
+  change,
+  sameWords,
+}: {
+  context: string;
+  change: Change<T>;
+  /** What a conflict means for this change when the head has not moved (not a taken name). */
+  sameWords?: string;
+}) {
   const { workspaceId } = useWorkspaceChanges();
   const { failure, conflict } = change;
   const status = (
@@ -207,7 +217,9 @@ export function ChangeFailure<T>({ context, change }: { context: string; change:
           <p>
             <strong>{context}: nothing was changed.</strong>
           </p>
-          <p>{CONFLICT_WORDS[conflict]}</p>
+          <p>
+            {conflict === 'same' && sameWords !== undefined ? sameWords : CONFLICT_WORDS[conflict]}
+          </p>
           {words.length > 0 && (
             <p>
               The service said: <q>{words}</q>

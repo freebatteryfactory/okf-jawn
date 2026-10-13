@@ -12,13 +12,14 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import { Outlet, useNavigate, useParams, useSearch } from '@tanstack/react-router';
-import { type Ref, useEffect, useRef, useState } from 'react';
+import { type Ref, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { openWorkspaceQueryKey } from '../../api/generated/@tanstack/react-query.gen';
 import { openWorkspace } from '../../api/generated/sdk.gen';
 import type { Workspace } from '../../api/generated/types.gen';
 import { zItemId } from '../../api/generated/zod.gen';
 import { Instant } from '../../lib/instant';
+import { NamingRulesPanel } from '../conventions/NamingRules';
 import { itemOptions } from '../documents/DocumentView';
 import { short } from '../documents/describe';
 import { DraftsPanel } from '../drafts/DraftsPanel';
@@ -96,6 +97,16 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
   const repin = useExplorerStore((state) => state.repin);
   const canWrite = workspace.permissions.includes('write');
   useLeaveGuard();
+  // The naming rules stand in the documents column while they are open. Which column shows what
+  // is this page's own state, like its open tabs. Closing gives focus back to the button.
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const rulesButton = useRef<HTMLButtonElement | null>(null);
+  const focusRulesButton = useRef(false);
+  useLayoutEffect(() => {
+    if (!focusRulesButton.current || rulesOpen) return;
+    focusRulesButton.current = false;
+    rulesButton.current?.focus();
+  });
 
   // The URL is the truth for the focused pane: whatever item it names is open there, at the
   // selection and cited revision it names. The pane remembers them for when it loses focus.
@@ -116,7 +127,9 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
    *   tree, which lists that head. Refresh moves such a tab to the newer head; that is its intent.
    * Links to a workspace (the list, failure notices) name no item revision.
    */
-  const goToItem = (target: string, destination: Destination = {}) =>
+  const goToItem = (target: string, destination: Destination = {}) => {
+    // An item that is opened is shown: the documents come back in place of the naming rules.
+    if (destination.replace !== true) setRulesOpen(false);
     void navigate({
       to: '/w/$workspaceId/i/$itemId',
       params: { workspaceId, itemId: target },
@@ -127,6 +140,7 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
       },
       replace: destination.replace ?? false,
     });
+  };
   const goToWorkspace = () =>
     void navigate({
       to: '/w/$workspaceId',
@@ -206,6 +220,14 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
             {workspace.name}
           </h1>
           {workspace.description ? <p className="meta">{workspace.description}</p> : null}
+          <button
+            type="button"
+            ref={rulesButton}
+            aria-expanded={rulesOpen}
+            onClick={() => setRulesOpen((open) => !open)}
+          >
+            Naming rules
+          </button>
           <HeadLine workspace={workspace} state={headState} />
         </div>
         <Group
@@ -245,44 +267,56 @@ export function ExplorerShell({ workspace, head: headState, nameRef }: ExplorerS
           </Panel>
           <Separator className="separator" aria-label="Resize the navigation column" />
           <Panel id="documents" minSize="30%">
-            <DocumentPanes
-              workspaceId={workspaceId}
-              head={head}
-              panes={view.panes}
-              focusedPaneId={view.focusedPaneId}
-              urlItemId={itemId}
-              invalidItemLink={invalidItemLink}
-              selection={search.sel}
-              revision={search.rev}
-              onActivate={(paneId, target) => {
-                focusPane(workspaceId, paneId);
-                // A tab returned to reads where it read: its selection and cited revision.
-                goToItem(target, paneLocation(paneId, target));
-              }}
-              onFocusPane={(paneId) => {
-                focusPane(workspaceId, paneId);
-                navigateToPane(paneId);
-              }}
-              onClose={(paneId, target) => {
-                const result = closeTab(workspaceId, paneId, target);
-                if (result === null) return;
-                // Keyboard focus never drops to the page: it goes where WAI-ARIA tabs put it.
-                requestFocus(result.focus);
-                if (!result.focusedChanged) return;
-                if (result.show === null) goToWorkspace();
-                else goToItem(result.show.itemId, { ...result.show.location, replace: true });
-              }}
-              onSplit={(paneId, target) => {
-                const location = locationOf(paneId);
-                splitRight(workspaceId, paneId, target, location);
-                goToItem(target, { ...location, replace: true });
-              }}
-              onSelect={(target, location) => goToItem(target, location)}
-              onReadLatest={(target, location) => goToItem(target, location)}
-              canWrite={canWrite}
-              onOpenCurrent={(target) => goToItem(target)}
-              onSnapshotted={followSnapshot}
-            />
+            {rulesOpen && (
+              <div className="pane">
+                <NamingRulesPanel
+                  onClose={() => {
+                    focusRulesButton.current = true;
+                    setRulesOpen(false);
+                  }}
+                />
+              </div>
+            )}
+            <div className="documents-area" hidden={rulesOpen}>
+              <DocumentPanes
+                workspaceId={workspaceId}
+                head={head}
+                panes={view.panes}
+                focusedPaneId={view.focusedPaneId}
+                urlItemId={itemId}
+                invalidItemLink={invalidItemLink}
+                selection={search.sel}
+                revision={search.rev}
+                onActivate={(paneId, target) => {
+                  focusPane(workspaceId, paneId);
+                  // A tab returned to reads where it read: its selection and cited revision.
+                  goToItem(target, paneLocation(paneId, target));
+                }}
+                onFocusPane={(paneId) => {
+                  focusPane(workspaceId, paneId);
+                  navigateToPane(paneId);
+                }}
+                onClose={(paneId, target) => {
+                  const result = closeTab(workspaceId, paneId, target);
+                  if (result === null) return;
+                  // Keyboard focus never drops to the page: it goes where WAI-ARIA tabs put it.
+                  requestFocus(result.focus);
+                  if (!result.focusedChanged) return;
+                  if (result.show === null) goToWorkspace();
+                  else goToItem(result.show.itemId, { ...result.show.location, replace: true });
+                }}
+                onSplit={(paneId, target) => {
+                  const location = locationOf(paneId);
+                  splitRight(workspaceId, paneId, target, location);
+                  goToItem(target, { ...location, replace: true });
+                }}
+                onSelect={(target, location) => goToItem(target, location)}
+                onReadLatest={(target, location) => goToItem(target, location)}
+                canWrite={canWrite}
+                onOpenCurrent={(target) => goToItem(target)}
+                onSnapshotted={followSnapshot}
+              />
+            </div>
           </Panel>
           <Separator className="separator" aria-label="Resize the source panel" />
           <Panel id="sources" defaultSize="26%" minSize="12%">

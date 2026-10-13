@@ -472,12 +472,17 @@ describe('a new note and a new folder', () => {
     await waitFor(() => expect(real.api.callsTo(FOLDER)).toHaveLength(2));
     const [first, second] = real.api.callsTo(FOLDER);
     expect(second).toEqual(first);
+    // The form's own button pressed again, with nothing changed, is that request once more.
+    await screen.findByRole('button', { name: 'Try again' });
+    await userEvent.click(button('Create the folder'));
+    await waitFor(() => expect(real.api.callsTo(FOLDER)).toHaveLength(3));
+    expect(real.api.callsTo(FOLDER).at(2)).toEqual(first);
     // Another name is another request.
     await screen.findByRole('button', { name: 'Try again' });
     await userEvent.type(field('Folder name'), '-2');
     await userEvent.keyboard('{Enter}');
-    await waitFor(() => expect(real.api.callsTo(FOLDER)).toHaveLength(3));
-    const third = real.api.callsTo(FOLDER).at(2);
+    await waitFor(() => expect(real.api.callsTo(FOLDER)).toHaveLength(4));
+    const third = real.api.callsTo(FOLDER).at(3);
     expect(third?.folder).toBe('archive-2');
     expect(third?.idempotency_key).not.toBe(first?.idempotency_key);
   });
