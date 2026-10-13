@@ -22,6 +22,17 @@
  *   name (`getAsFile`), and that File is used only for a dropped thing whose entry says it is a
  *   file, or that has no entry at all.
  *
+ * Bounds. A dropped folder can hold more than a page can list, upload and keep on screen: every
+ * file becomes a row, and `add` in `upload-list.ts` is quadratic in the rows (ten thousand files
+ * took about four seconds in a measurement, with the tab frozen and nothing said). So the walk
+ * stops at `MAX_DROP_FILES` files and goes no deeper than `MAX_DROP_DEPTH` folders below a dropped
+ * one; what it found is listed, and `tooMany` / `tooDeep` say that there was more. Five thousand
+ * is more than a notes vault or a documentation tree holds and a few seconds' work for the page;
+ * thirty-two levels is deeper than any tree a person keeps, and it ends a walk that a link back to
+ * a folder above would otherwise follow until the browser stopped answering. While a folder is
+ * read, the caller is told how many files were found, every `PROGRESS_EVERY` files, so the page can
+ * say so.
+ *
  * Uppy's `getDroppedFiles` did the walk before. It gives up the whole walk of a dropped folder at
  * the first file it cannot read and then lists the folder itself as a file, so it is not used any
  * more.
@@ -78,6 +89,13 @@ export function carriesFiles(transfer: DataTransfer | null): boolean {
   return transfer !== null && Array.from(transfer.types).includes('Files');
 }
 
+/** The most files of one drop that are read; the 5,001st is not, and the drop says so. */
+export const MAX_DROP_FILES = 5_000;
+/** The deepest folder read, counting a dropped folder as level 0; one level deeper is not read. */
+export const MAX_DROP_DEPTH = 32;
+/** How many files are found between two reports of progress. */
+export const PROGRESS_EVERY = 250;
+
 export interface Dropped {
   files: ChosenFile[];
   /** Files the browser named and could not hand over, each by its path. */
@@ -86,7 +104,14 @@ export interface Dropped {
   emptyFolders: string[];
   /** Folders whose entries could not be listed, or not all of them. */
   unlistedFolders: string[];
+  /** The drop holds more files than `MAX_DROP_FILES`: the first ones are listed. */
+  tooMany: boolean;
+  /** Folders deeper than `MAX_DROP_DEPTH` were not read. */
+  tooDeep: boolean;
 }
+
+/** Told how many files a walk of a dropped folder has found, when it begins and as it goes on. */
+export type DropProgress = (filesFound: number) => void;
 
 const isFileEntry = (entry: FileSystemEntry): entry is FileSystemFileEntry => entry.isFile;
 const isFolderEntry = (entry: FileSystemEntry): entry is FileSystemDirectoryEntry =>
@@ -98,11 +123,12 @@ function fileOfEntry(entry: FileSystemFileEntry): Promise<File> {
 
 /**
  * The entries of a folder. A browser gives them in batches and says the end with an empty one;
- * `complete` is false when a batch failed, with what was read before it.
+ * `complete` is false when a batch failed, with what was read before it; `capped` when there were
+ * more than the page reads, and the rest were not asked for.
  */
 async function entriesOf(
   folder: FileSystemDirectoryEntry,
-): Promise<{ entries: FileSystemEntry[]; complete: boolean }> {
+): Promise<{ entries: FileSystemEntry[]; complete: boolean; capped: boolean }> {
   const reader = folder.createReader();
   const entries: FileSystemEntry[] = [];
   for (;;) {
@@ -112,10 +138,14 @@ async function entriesOf(
         reader.readEntries(resolve, reject),
       );
     } catch {
-      return { entries, complete: false };
+      return { entries, complete: false, capped: false };
     }
-    if (batch.length === 0) return { entries, complete: true };
+    if (batch.length === 0) return { entries, complete: true, capped: false };
     entries.push(...batch);
+    // More entries in one folder than files the page reads: no need to know how many more.
+    if (entries.length > MAX_DROP_FILES) {
+      return { entries: entries.slice(0, MAX_DROP_FILES), complete: true, capped: true };
+    }
   }
 }
 
@@ -130,13 +160,21 @@ const within = (folder: string, name: string) => (folder === '' ? name : `${fold
 async function walk(
   entry: FileSystemEntry,
   folder: string,
+  depth: number,
   found: Dropped,
   offered: File | null,
+  progress: DropProgress | undefined,
 ): Promise<void> {
+  if (found.tooMany) return;
   if (isFileEntry(entry)) {
+    if (found.files.length >= MAX_DROP_FILES) {
+      found.tooMany = true;
+      return;
+    }
     try {
       const file = await fileOfEntry(entry);
       found.files.push({ file, ...tidyPath(within(folder, file.name)) });
+      if (found.files.length % PROGRESS_EVERY === 0) progress?.(found.files.length);
     } catch {
       if (offered !== null) found.files.push({ file: offered, ...tidyPath(offered.name) });
       else found.unreadable.push(tidyPath(within(folder, entry.name)));
@@ -144,17 +182,33 @@ async function walk(
     return;
   }
   if (!isFolderEntry(entry)) return;
+  if (depth > MAX_DROP_DEPTH) {
+    found.tooDeep = true;
+    return;
+  }
   const path = within(folder, entry.name);
-  const { entries, complete } = await entriesOf(entry);
+  const { entries, complete, capped } = await entriesOf(entry);
   if (!complete) found.unlistedFolders.push(path);
   else if (entries.length === 0) found.emptyFolders.push(path);
   // One after another: what fails inside one entry is that entry's own.
-  for (const child of entries) await walk(child, path, found, null);
+  for (const child of entries) await walk(child, path, depth + 1, found, null, progress);
+  // After them: the files of the entries that were read are listed before the rest is refused.
+  if (capped) found.tooMany = true;
 }
 
 /** The files of a drop, every dropped folder walked to its end. */
-export async function chosenFromDrop(transfer: DataTransfer): Promise<Dropped> {
-  const found: Dropped = { files: [], unreadable: [], emptyFolders: [], unlistedFolders: [] };
+export async function chosenFromDrop(
+  transfer: DataTransfer,
+  progress?: DropProgress,
+): Promise<Dropped> {
+  const found: Dropped = {
+    files: [],
+    unreadable: [],
+    emptyFolders: [],
+    unlistedFolders: [],
+    tooMany: false,
+    tooDeep: false,
+  };
   // What the drag carries is asked for in this same turn: a browser empties it once the drop's
   // handler has returned.
   // (A thing that is no file, such as dragged text, has neither an entry nor a File.)
@@ -162,11 +216,15 @@ export async function chosenFromDrop(transfer: DataTransfer): Promise<Dropped> {
     entry: item.webkitGetAsEntry(),
     offered: item.getAsFile(),
   }));
+  // A folder takes a while to read: say so before the first of its files is found.
+  if (carried.some(({ entry }) => entry?.isDirectory === true)) progress?.(0);
   for (const { entry, offered } of carried) {
-    if (entry !== null) await walk(entry, '', found, offered);
+    if (found.tooMany) break;
+    if (entry !== null) await walk(entry, '', 0, found, offered, progress);
     // No entry: the browser knows the thing only as a File (a drag a page made, an older browser).
     else if (offered !== null) {
-      found.files.push({ file: offered, ...tidyPath(offered.name) });
+      if (found.files.length >= MAX_DROP_FILES) found.tooMany = true;
+      else found.files.push({ file: offered, ...tidyPath(offered.name) });
     }
   }
   return found;

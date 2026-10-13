@@ -12,7 +12,10 @@
  * A file of a dropped folder that the browser could not hand over is listed by its path as not
  * readable, and never sent; the other files of the folder are listed as usual. A polite status
  * says how many were listed, and what of a drop was not: a file that could not be read, a folder
- * that is empty (nothing is kept of it), a folder that could not be listed in full.
+ * that is empty (nothing is kept of it), a folder that could not be listed in full. While a dropped
+ * folder is being read the same status says so and how many files were found so far (every
+ * `PROGRESS_EVERY` files, not each one); a drop of more than `MAX_DROP_FILES` files, or of folders
+ * nested deeper than `MAX_DROP_DEPTH`, lists what was read and says plainly that there was more.
  *
  * Paths the person did not mean (`paths.ts`). A file whose path the page can see is wrong is
  * listed as one that cannot be imported, with the reason, and is never sent. Two files whose paths
@@ -51,6 +54,8 @@ import {
   chosenFromPicker,
   type Dropped,
   describeSize,
+  MAX_DROP_DEPTH,
+  MAX_DROP_FILES,
   pathOf,
 } from './files';
 import { ImportStart, StartedJobs } from './ImportStart';
@@ -88,9 +93,25 @@ function folders(paths: readonly string[]): string {
 }
 
 /** What of a drop is not a file to send. */
-type DropRemainder = Pick<Dropped, 'unreadable' | 'emptyFolders' | 'unlistedFolders'>;
+type DropRemainder = Pick<
+  Dropped,
+  'unreadable' | 'emptyFolders' | 'unlistedFolders' | 'tooMany' | 'tooDeep'
+>;
 
-const NOTHING_LEFT: DropRemainder = { unreadable: [], emptyFolders: [], unlistedFolders: [] };
+const NOTHING_LEFT: DropRemainder = {
+  unreadable: [],
+  emptyFolders: [],
+  unlistedFolders: [],
+  tooMany: false,
+  tooDeep: false,
+};
+
+/** The status while a dropped folder is being read. */
+export function describeReading(filesFound: number): string {
+  return filesFound === 0
+    ? 'Reading the dropped folder…'
+    : `Reading the dropped folder… ${count(filesFound, 'file', 'files')} found so far.`;
+}
 
 /**
  * What choosing did, for the polite status. `unreadable`: how many files that could not be read
@@ -98,7 +119,7 @@ const NOTHING_LEFT: DropRemainder = { unreadable: [], emptyFolders: [], unlisted
  */
 function describeChoice(
   { added, repeated, unreadable }: { added: number; repeated: number; unreadable: number },
-  rest: Pick<Dropped, 'emptyFolders' | 'unlistedFolders'>,
+  rest: Pick<Dropped, 'emptyFolders' | 'unlistedFolders' | 'tooMany' | 'tooDeep'>,
 ): string {
   const parts = [
     added === 0 ? 'No file was added to the list.' : `${count(added, 'file', 'files')} added.`,
@@ -123,6 +144,14 @@ function describeChoice(
     parts.push(
       `The ${n === 1 ? 'folder' : 'folders'} ${folders(rest.unlistedFolders)} could not be read in full: only what was read of ${n === 1 ? 'it' : 'them'} is listed.`,
     );
+  }
+  if (rest.tooMany) {
+    parts.push(
+      `The drop holds more than this page reads at once: only the first ${MAX_DROP_FILES.toLocaleString('en-US')} files are listed, and the rest were not read. Drop the rest in smaller parts.`,
+    );
+  }
+  if (rest.tooDeep) {
+    parts.push(`Folders nested more than ${MAX_DROP_DEPTH} levels deep were not read.`);
   }
   return parts.join(' ');
 }
@@ -175,7 +204,9 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
     // The application's root cancels the drop itself (`drop-guard.ts`); this box reads it.
     if (!carriesFiles(event.dataTransfer)) return;
     setOver(false);
-    void chosenFromDrop(event.dataTransfer).then((found) => list(found.files, found));
+    void chosenFromDrop(event.dataTransfer, (found) => setChoiceNote(describeReading(found))).then(
+      (found) => list(found.files, found),
+    );
   };
 
   // A row that left with keyboard focus in it: focus goes to the row now in its place.
