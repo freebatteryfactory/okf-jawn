@@ -43,7 +43,9 @@ pub enum ChildState {
 ///
 /// The child's standard streams are closed to it, so nothing it prints, its single-use launch
 /// URL included, reaches the MCP client. It is given `OKF_BIND`, the service's bind setting,
-/// so that it listens where the relay will connect. Dropping the launcher does not stop it.
+/// so that it listens where the relay will connect, and `OKF_JAWN_TOKEN` is removed from its
+/// environment: the connector credential is the relay's own. Dropping the launcher does not
+/// stop it.
 #[derive(Debug)]
 pub struct ProcessLauncher {
     program: Option<PathBuf>,
@@ -99,6 +101,8 @@ impl ProcessLauncher {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // The connector credential is the relay's own; the server has no use for it.
+        command.env_remove(crate::TOKEN_VARIABLE);
         if let Some(bind) = &self.bind {
             command.env(BIND_VARIABLE, bind);
         }

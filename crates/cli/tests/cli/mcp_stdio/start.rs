@@ -249,6 +249,14 @@ fn mcp_stdio_server_beside_the_cli_is_started_on_the_server_address() -> TestRes
         .map(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
         .collect();
     assert_eq!(bind, [Some("127.0.0.1:7711".to_owned())]);
+    // The connector credential is the relay's own: the server it starts, and the conversion
+    // child that server starts, never inherit it.
+    let token: Vec<bool> = command
+        .get_envs()
+        .filter(|(name, _)| *name == "OKF_JAWN_TOKEN")
+        .map(|(_, value)| value.is_none())
+        .collect();
+    assert_eq!(token, [true], "OKF_JAWN_TOKEN is not removed");
     Ok(())
 }
 
