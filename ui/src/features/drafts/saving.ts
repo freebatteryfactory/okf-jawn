@@ -5,7 +5,9 @@
  * The saving runs here, not in the editor, so it goes on when the editor is unmounted. A change
  * made while a save is in flight is saved when that one settles. A failed save keeps the text in
  * the session and is tried again by the next change, by the person (the failure notice's retry) or
- * when the editor is left.
+ * when the editor is left. A save that failed or timed out may have been applied all the same, so
+ * until a save has answered the session is not saved, whatever its text: putting the text back to
+ * what was last confirmed still sends a save of that text.
  *
  * Idempotency: a request is repeated under the key it had while it says the same thing (the same
  * body, properties and base), so a save that timed out and is tried again cannot be applied twice;
@@ -137,13 +139,14 @@ async function send(client: QueryClient, key: string): Promise<void> {
   const session = sessions().sessions[key];
   if (session === undefined) return;
   if (!needsSave(session)) {
-    // Back at what the service holds: there is nothing left to save, or to have failed.
-    sessions().change(key, { failure: null, attempt: null, tooLong: null });
+    // What the service holds is known, and it is this text: there is nothing to save.
+    sessions().change(key, { tooLong: null });
     return;
   }
   const bytes = new TextEncoder().encode(session.body).length;
   if (bytes > MAX_BODY_BYTES) {
-    sessions().change(key, { tooLong: bytes, failure: null, attempt: null });
+    // A failure before this stays: only a save that answers says what the service holds.
+    sessions().change(key, { tooLong: bytes });
     return;
   }
   const text: DraftText = { body: session.body, properties: session.properties };

@@ -5,11 +5,12 @@
  */
 import { act, cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { REQUEST_TIMEOUT_MS } from '../../src/app/api-client';
 import { itemOptions } from '../../src/features/documents/DocumentView';
 import { readPatch } from '../../src/features/drafts/patch';
 import { AUTOSAVE_DELAY_MS, resetDraftSessions } from '../../src/features/drafts/saving';
 import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
-import { findTextBox, textBox, textIn, typeInto } from './support/editor';
+import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
 import {
   draftOf,
   explorerHandlers,
@@ -369,6 +370,52 @@ describe('taking a Snapshot', () => {
       .filter((path) => path === SAVE || path === COMMIT);
     expect(order).toEqual([SAVE, SAVE, COMMIT]);
     expect(api.callsTo(SAVE).at(-1)?.body).toBe(`${DRAFT_BODY} and more`);
+  });
+
+  it('never commits while a save’s outcome is unknown, even with the text put back', async () => {
+    let lost = false;
+    let holds = DRAFT_BODY;
+    const { api, state } = service(
+      {
+        [SAVE]: (body) => {
+          // The service applies the save whether or not its answer arrives.
+          holds = String(body.body);
+          return lost ? new Promise<never>(() => {}) : ok(draftOf(NOTE, HEAD, LATER));
+        },
+        [COMMIT]: () => {
+          state.drafts.clear();
+          state.head = MADE;
+          return committed();
+        },
+      },
+      [NOTE],
+    );
+    renderAt(`/w/${WS}/i/${NOTE}`);
+    const box = await findTextBox('Text of Meeting notes');
+    vi.useFakeTimers();
+    lost = true;
+    typeInto(box, ' WRONG TURN');
+    await pass(AUTOSAVE_DELAY_MS);
+    await pass(REQUEST_TIMEOUT_MS);
+    expect(holds).toBe(`${DRAFT_BODY} WRONG TURN`);
+    replaceText(box, DRAFT_BODY);
+    // The Snapshot saves first; that save has no answer either, so nothing is committed.
+    await pressSnapshot('Tidy');
+    await pass(REQUEST_TIMEOUT_MS + 50);
+    await eventually(() =>
+      expect(within(panel()).getByRole('alert').textContent).toContain('Nothing was snapshotted.'),
+    );
+    expect(api.callsTo(COMMIT)).toHaveLength(0);
+
+    // Once a save answers, the service holds what the editor shows, and that is committed.
+    lost = false;
+    fireEvent.click(snapshotButton());
+    await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(1));
+    expect(holds).toBe(DRAFT_BODY);
+    const order = api.calls
+      .map((call) => call.path)
+      .filter((path) => path === SAVE || path === COMMIT);
+    expect(order.slice(-2)).toEqual([SAVE, COMMIT]);
   });
 
   it('keeps text typed while the Snapshot is taken, as a new draft on the revision it made', async () => {

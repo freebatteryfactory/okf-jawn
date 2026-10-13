@@ -362,6 +362,82 @@ describe('a save that fails', () => {
   });
 });
 
+// A save that failed or timed out may have been applied: what the service holds is then unknown.
+describe('a save with no answer is not forgotten', () => {
+  it('saves the text again when it is put back, and is never called clean before that answers', async () => {
+    let holds: string | null = null;
+    let mode: 'lost' | 'held' | 'ok' = 'lost';
+    const answers: Array<() => void> = [];
+    const api = writable({
+      [SAVE]: (body) => {
+        // The service applies the save whether or not its answer arrives.
+        holds = String(body.body);
+        if (mode === 'lost') return new Promise<never>(() => {});
+        if (mode === 'ok') return saved(body);
+        return new Promise<Reply>((resolve) => answers.push(() => resolve(saved(body))));
+      },
+    });
+    const { box } = await startEditing();
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    await pass(REQUEST_TIMEOUT_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    expect(holds).toBe(`${COMMITTED} one`);
+
+    mode = 'held';
+    replaceText(box, COMMITTED);
+    // The text is what it was, and it is still not called clean: the service may hold " one".
+    expect(saveState()).toBe('Not saved. Your text is kept here.');
+    expect(screen.getByRole('tab', { name: 'Meeting notes (not saved)' })).toBeDefined();
+    await pass(AUTOSAVE_DELAY_MS);
+    expect(api.callsTo(SAVE)).toHaveLength(2);
+    expect(api.callsTo(SAVE).at(1)?.body).toBe(COMMITTED);
+    expect(saveState()).toBe('Saving…');
+    answers.at(0)?.();
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(holds).toBe(textIn(box));
+  });
+
+  it('saves the text again when the save in flight fails after the text was put back', async () => {
+    const answers: Array<(reply: Reply) => void> = [];
+    const api = writable({
+      [SAVE]: () => new Promise<Reply>((resolve) => answers.push(resolve)),
+    });
+    const { box } = await startEditing();
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    replaceText(box, COMMITTED);
+    await pass(AUTOSAVE_DELAY_MS);
+    answers.at(0)?.(fail(503, 'unavailable', 'the store is busy'));
+    // It failed, so it may have been applied: the text on screen is saved, not taken as clean.
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+    expect(api.callsTo(SAVE).at(1)?.body).toBe(COMMITTED);
+    expect(saveState()).not.toBe('No changes to save.');
+    answers.at(1)?.(ok(draftOf(NOTE, HEAD, LATER)));
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+  });
+
+  it('keeps the failure through a text that is too long to send', async () => {
+    let failing = true;
+    const api = writable({
+      [SAVE]: (body) => (failing ? fail(503, 'unavailable', 'busy') : saved(body)),
+    });
+    const { box } = await startEditing();
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    replaceText(box, 'x'.repeat(MAX_BODY_BYTES + 1));
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved: the text is too long.'));
+    failing = false;
+    replaceText(box, COMMITTED);
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(api.callsTo(SAVE).at(-1)?.body).toBe(COMMITTED);
+  });
+});
+
 describe('a text too long to save', () => {
   it('sends a body of exactly the bound, and never one byte more', async () => {
     const api = writable();
