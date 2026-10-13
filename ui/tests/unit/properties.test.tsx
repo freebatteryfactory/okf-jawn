@@ -786,6 +786,94 @@ describe('the properties form', () => {
     });
   });
 
+  // The same choice written as `anyOf`: the library draws it the same way, and the page treats it
+  // the same way.
+  describe('a type whose schema offers a choice (anyOf)', () => {
+    const meeting = {
+      type: 'meeting-note',
+      owner: 'Ada',
+      room: 'Blue',
+      floor: 2,
+      'x-okf-review': { by: 'grace' },
+      okf_jawn: { id: NOTE },
+    };
+    const choosing = {
+      type: 'object',
+      properties: { owner: { type: 'string', title: 'Owner' } },
+      anyOf: [
+        {
+          title: 'In a room',
+          properties: {
+            room: { type: 'string', title: 'Room' },
+            floor: { type: 'integer', title: 'Floor' },
+          },
+          required: ['room'],
+        },
+        {
+          title: 'Remote',
+          properties: { link: { type: 'string', title: 'Link', minLength: 8 } },
+          required: ['link'],
+        },
+      ],
+    };
+    const service = () =>
+      typed({
+        [TYPES]: () => ok({ items: [{ ...meetingNote, properties_schema: choosing }] }),
+        [ITEM]: () => ok({ ...itemDocument(noteSummary), properties: meeting }),
+      });
+    const saidAbove = () => document.querySelector('.form-said')?.textContent ?? '';
+    const choice = () => screen.getByRole('combobox', { name: 'Which of these applies' });
+    const sent = (api: ReturnType<typeof typed>) => Object(api.callsTo(SAVE).at(-1)?.properties);
+
+    it('draws the choice and the fields of the alternative the item fits, and lists none of them as other properties', async () => {
+      service();
+      await editNote();
+      expect(
+        within(choice()).getByRole<HTMLOptionElement>('option', { name: 'In a room' }).selected,
+      ).toBe(true);
+      expect(field('Room')).toHaveProperty('value', 'Blue');
+      expect(field('Floor')).toHaveProperty('value', '2');
+      const others = document.querySelector('.properties')?.textContent?.split('Other properties');
+      expect(others).toHaveLength(2);
+      expect(others?.at(1)).toContain('x-okf-review');
+      expect(others?.at(1)).not.toMatch(/room|floor|link/);
+    });
+
+    it('takes what is typed in a field of the chosen alternative into the draft', async () => {
+      const api = service();
+      await editNote();
+      set('Room', 'Green');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(sent(api)).toEqual({ ...meeting, room: 'Green' });
+    });
+
+    it('says which properties another choice takes out, and loses nothing without saying so', async () => {
+      const api = service();
+      await editNote();
+      const option = within(choice()).getByRole('option', { name: 'Remote' });
+      fireEvent.change(choice(), { target: { value: option.getAttribute('value') } });
+      await waitForField('Link');
+      expect(saidAbove()).toContain(
+        'What you chose takes “room” and “floor” out of this item’s properties.',
+      );
+      // The new alternative lacks its required link: nothing is saved, and the item says so.
+      await pass(AUTOSAVE_DELAY_MS * 3);
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+      expect(screen.getByRole('tab', { name: 'Meeting notes (unsaved)' })).toBeDefined();
+      set('Link', 'https://meet.example/weekly');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      expect(sent(api)).toEqual({
+        type: 'meeting-note',
+        owner: 'Ada',
+        'x-okf-review': { by: 'grace' },
+        okf_jawn: { id: NOTE },
+        link: 'https://meet.example/weekly',
+      });
+    });
+  });
+
   describe('what a change takes out of the form’s data', () => {
     it('names what left at another control, and not what was emptied in its own field', () => {
       const before = { owner: 'Ada', room: 'Blue', floor: 2, place: { room: 'x' } };
