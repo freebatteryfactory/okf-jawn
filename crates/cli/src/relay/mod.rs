@@ -24,9 +24,20 @@
 //!   standalone event stream is opened: the service is stateless and offers neither;
 //! - a response the service sends for another request's id is passed on as it is, so a
 //!   service that misbehaves can answer one request on another's exchange;
+//! - an id is matched exactly, as JSON-RPC says, and a number is matched as the text the
+//!   client wrote, never as a 64-bit float: `1.0` does not answer `1`, and two integers of
+//!   any length that differ in one digit are two ids. A service that writes a number id back
+//!   in another spelling has therefore not answered: its text is passed on, and the request
+//!   gets the relay's own error besides. A string id is the characters it spells;
 //! - a line of the client that is valid JSON nested deeper than 128 levels is answered as not
-//!   JSON (`-32700`): the JSON library stops there. An answer of the service has no such
-//!   limit;
+//!   JSON (`-32700`): the JSON library stops there;
+//! - an answer of the service has no limit on depth. The relay's reader (`json`) does not
+//!   recurse and holds a bit for each level, so an answer nested a million deep is passed on
+//!   as it is, and a client whose JSON library has a limit may then refuse it;
+//! - over plain HTTP, `localhost` is rewritten to `127.0.0.1` (`Endpoint` says why): the
+//!   service hears that host, and one bound to `[::1]` alone is not reached through
+//!   `http://localhost`. The relay would find no service there and start a second server,
+//!   which loses the data directory to the first;
 //! - nothing identifies the service: whatever answers the liveness check with success at the
 //!   address is sent the credential with the next message. On a loopback address that is any
 //!   program of this computer that listens there first;

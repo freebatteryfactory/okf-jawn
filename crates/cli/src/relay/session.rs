@@ -24,6 +24,9 @@
 //!   went in. A refusal that lacks the request's id gets it put into its text. An id is
 //!   written back as the client wrote it. A message to the service is sent as the client
 //!   wrote it.
+//! - An answer is a request's answer when it names the request's id exactly: a number as the
+//!   text the client wrote, never as a 64-bit float, and a string by the characters it
+//!   spells (`Kind::answered_by`).
 //!
 //! What the relay holds of the service's answers. One room (`Room`) is the budget for every
 //! answer from the moment its bytes are taken from the service until they are written, and

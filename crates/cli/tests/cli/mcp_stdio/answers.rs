@@ -504,3 +504,20 @@ async fn an_error_that_is_no_object_is_not_a_json_rpc_error() -> TestResult {
     }
     Ok(())
 }
+
+/// An answer has no limit on depth (the re-review's note N9): one nested a million deep is a
+/// message, and is passed on as the service wrote it.
+#[tokio::test]
+async fn an_answer_nested_a_million_deep_is_passed_on() -> TestResult {
+    const DEPTH: usize = 1_000_000;
+    let deep = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}{}}}",
+        "[".repeat(DEPTH),
+        "]".repeat(DEPTH)
+    );
+    let ran = answered_with(200, &deep).await?;
+    assert_eq!(ran.stdout.len(), deep.len().saturating_add(1));
+    assert!(ran.stdout.starts_with(&deep), "the answer was changed");
+    assert_eq!((ran.stderr.as_str(), ran.code), ("", 0));
+    Ok(())
+}

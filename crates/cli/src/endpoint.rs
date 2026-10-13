@@ -8,8 +8,12 @@
 //! Loopback means this computer. A loopback IP literal is one by its value. The name
 //! `localhost` is trusted only as a name: over plain HTTP it is replaced by `127.0.0.1` when
 //! the address is read, so every request goes to the loopback address and no resolver is
-//! asked. Over HTTPS the name is kept and resolved as any other, and the relay never starts a
-//! server for it ([`Endpoint::may_start`]).
+//! asked. The pin is that rewriting of the host and nothing subtler, with two consequences.
+//! The service hears `Host: 127.0.0.1:<port>`, not `localhost`, and must accept that host.
+//! And only the IPv4 loopback address is reached: a service bound to `[::1]` alone is not
+//! reached through `http://localhost`, and has to be named `http://[::1]:<port>`. Over HTTPS
+//! the name is kept and resolved as any other, and the relay never starts a server for it
+//! ([`Endpoint::may_start`]).
 //!
 //! [`Endpoint::client`] is the one place an HTTP client is built, so both the operation path
 //! and the relay never follow a redirect and never send a loopback request through a proxy.
