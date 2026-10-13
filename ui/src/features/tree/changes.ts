@@ -137,7 +137,7 @@ export async function createNote(
   return { ...changed(client, workspaceId, item.revision, [item.id]), item };
 }
 
-/** Create a folder (with the index the service keeps in it). */
+/** Create a folder (with the index the service keeps in it); its path is in NFC (`joinPath`). */
 export async function createNewFolder(
   client: QueryClient,
   workspaceId: string,
@@ -148,14 +148,14 @@ export async function createNewFolder(
       workspace_id: workspaceId,
       base_revision: attempt.base,
       idempotency_key: attempt.key,
-      folder: attempt.values.folder.normalize('NFC'),
+      folder: attempt.values.folder,
     },
     throwOnError: true,
   });
   return changed(client, workspaceId, data.revision, []);
 }
 
-/** Move or rename an item: its path changes, its identity does not. */
+/** Move or rename an item: its path changes, its identity does not. The destination is in NFC (`joinPath`). */
 export async function moveItemTo(
   client: QueryClient,
   workspaceId: string,
@@ -168,7 +168,7 @@ export async function moveItemTo(
       base_revision: attempt.base,
       idempotency_key: attempt.key,
       item_id: itemId,
-      destination: destination.normalize('NFC'),
+      destination,
     },
     throwOnError: true,
   });

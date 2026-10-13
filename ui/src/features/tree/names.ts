@@ -9,6 +9,11 @@
  * with or without an extension). The service also wants Unicode NFC: a name is put into NFC
  * before it is sent, not refused, because the person cannot see the difference.
  *
+ * A name is checked as it will be sent: after it is put into NFC, and its length in UTF-8 bytes,
+ * which is how the service counts (`MAX_PATH_BYTES`; the client's schema counts UTF-16 units, so a
+ * long name in another script passes it and is too long all the same). `<` followed by a
+ * combining stroke is one character in NFC, and holds no reserved character.
+ *
  * Whether a name is taken is the service's to say (it compares without case and normalization):
  * that is a `conflict` answer, shown at the form.
  */
@@ -27,6 +32,8 @@ const RESERVED_STEMS: ReadonlySet<string> = new Set([
   ...['¹', '²', '³'].flatMap((digit) => [`COM${digit}`, `LPT${digit}`]),
 ]);
 const RESERVED_CHARACTERS = /[\\:<>"|?*]/;
+/** The longest path the service accepts, in UTF-8 bytes (`identity.rs`). */
+export const MAX_PATH_BYTES = 4096;
 
 /** A control character (Unicode `Cc`): U+0000 to U+001F, and U+007F to U+009F. */
 function isControl(character: string): boolean {
@@ -38,7 +45,9 @@ function isControl(character: string): boolean {
 const asciiUpper = (text: string) => text.replace(/[a-z]/g, (letter) => letter.toUpperCase());
 
 /** What is wrong with one segment of a path (a file or folder name); null when nothing is. */
-export function segmentProblem(segment: string): string | null {
+export function segmentProblem(typed: string): string | null {
+  // Checked as it is sent.
+  const segment = typed.normalize('NFC');
   if (segment.length === 0) return 'Give it a name.';
   if (segment.includes('/')) return 'A name cannot contain “/”. Choose the folder separately.';
   if (segment === '.' || segment === '..' || asciiUpper(segment) === '.GIT') {
@@ -86,9 +95,13 @@ export function splitPath(path: string): { folder: string; name: string } {
 }
 
 /** What is wrong with a whole path by the client's own schema; null when it accepts the path. */
-export function pathProblem(path: string): string | null {
-  if (zWorkspacePath.safeParse(path).success) return null;
-  return path.length > 4096
-    ? 'The folder and the name together are longer than 4096 characters.'
+export function pathProblem(typed: string): string | null {
+  const path = typed.normalize('NFC');
+  const bytes = new TextEncoder().encode(path).length;
+  if (bytes > MAX_PATH_BYTES) {
+    return `The folder and the name together are longer than ${MAX_PATH_BYTES} bytes: they take ${bytes}. Letters outside the basic alphabet take more than one.`;
+  }
+  return zWorkspacePath.safeParse(path).success
+    ? null
     : 'This is not a path the workspace can hold.';
 }

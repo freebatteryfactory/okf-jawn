@@ -363,8 +363,32 @@ describe('the rules of a name', () => {
     expect(joinPath('notes', 'é.md')).toBe('notes/é.md');
     expect(splitPath('notes/2025/a.md')).toEqual({ folder: 'notes/2025', name: 'a.md' });
     expect(splitPath('a.md')).toEqual({ folder: '', name: 'a.md' });
-    expect(pathProblem(`${'a'.repeat(4092)}.md`)).toBeNull();
-    expect(pathProblem(`${'a'.repeat(4094)}.md`)).toMatch(/longer than 4096/);
+    // The whole path, in the bytes it is sent as: exactly the bound passes, one more does not.
+    expect(pathProblem(`${'a'.repeat(4093)}.md`)).toBeNull();
+    expect(pathProblem(`${'a'.repeat(4094)}.md`)).toBe(
+      'The folder and the name together are longer than 4096 bytes: they take 4097. Letters outside the basic alphabet take more than one.',
+    );
+    // A letter of two bytes counts as two, though the client's own schema counts it as one.
+    expect(pathProblem('é'.repeat(2048))).toBeNull();
+    expect(pathProblem('é'.repeat(2049))).toMatch(/longer than 4096 bytes: they take 4098/);
+    // Typed as a letter and a combining accent, it is sent as the one letter, and counted so.
+    expect(pathProblem('e\u0301'.repeat(2048))).toBeNull();
+    expect(pathProblem('a\u0000b')).toBe('This is not a path the workspace can hold.');
+  });
+
+  it('checks a name as it is sent: in NFC', () => {
+    // "<" and a combining stroke are, in NFC, the one character U+226E: nothing reserved is sent.
+    expect(joinPath('', 'a<\u0338b.md')).toBe('a\u226eb.md');
+    expect(segmentProblem('a<\u0338b.md')).toBeNull();
+    expect(segmentProblem('a>\u0338b.md')).toBeNull();
+    expect(folderProblem('notes/a<\u0338b')).toBeNull();
+    // What is still reserved in NFC is refused, with or without an accent beside it.
+    expect(segmentProblem('a<b.md')).toMatch(/cannot contain any of/);
+    expect(segmentProblem('e\u0301<.md')).toMatch(/cannot contain any of/);
+    // What a name is checked as is what is sent, for every name here.
+    for (const name of ['a<\u0338b.md', 'e\u0301.md', 'plain.md', 'con\u0131n$']) {
+      expect(segmentProblem(name), name).toBe(segmentProblem(joinPath('', name)));
+    }
   });
 });
 
