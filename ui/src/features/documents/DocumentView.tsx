@@ -7,7 +7,9 @@
  * continuing moves keyboard focus to the part it loaded, and a live region says what happened.
  * Warnings, partial extraction and agent-supplied text are shown, never smoothed over. A source
  * says how its conversion stands, whatever the state (`ConversionState`). Each
- * operation's failure is shown where its content would have been, and stays there while it is
+ * operation's failure is shown where its content would have been when there is none to show, and
+ * beside the content when there is: a read that fails when it is asked again never takes the
+ * properties, the form, the editor or the text off the screen. The notice stays while the read is
  * tried again (`useRetry`), so a retry never drops keyboard focus.
  *
  * Editing happens in place of the reading: one button switches the pane between the committed
