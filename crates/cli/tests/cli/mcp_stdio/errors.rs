@@ -184,12 +184,19 @@ async fn when_stdin_ends_the_requests_in_flight_finish_and_the_exit_code_is_0() 
 #[tokio::test]
 async fn a_stream_without_a_response_still_answers_the_request() -> TestResult {
     let progress = json!({"jsonrpc": "2.0", "method": "notifications/progress"});
+    // The service asks the client something under the id the client's own request has: ids
+    // are numbered by each side, so this is a request, not the answer to request 8.
+    let asked = json!({"jsonrpc": "2.0", "id": 8, "method": "roots/list"});
+    // An answer to some other request is not the answer to request 8 either.
+    let other = json!({"jsonrpc": "2.0", "id": 9, "result": {}});
     for cut_off in [false, true] {
-        let event = progress.to_string();
+        let events_sent = [progress.to_string(), asked.to_string(), other.to_string()];
         let transport = FakeTransport::new(move |_, events| {
-            let event = event.clone();
+            let events_sent = events_sent.clone();
             Box::pin(async move {
-                let _ = events.send(event).await;
+                for event in events_sent {
+                    let _ = events.send(event).await;
+                }
                 if cut_off {
                     broken("the stream was cut off").reply
                 } else {
@@ -203,9 +210,12 @@ async fn a_stream_without_a_response_still_answers_the_request() -> TestResult {
         )
         .await?;
         let answers = ran.lines()?;
-        assert_eq!(answers.len(), 2, "{}", ran.stdout);
-        assert_eq!(answers.first(), Some(&progress));
-        let last = some(answers.get(1), "the error")?;
+        assert_eq!(answers.len(), 4, "{}", ran.stdout);
+        assert_eq!(
+            answers.iter().take(3).collect::<Vec<_>>(),
+            [&progress, &asked, &other]
+        );
+        let last = some(answers.get(3), "the error")?;
         assert_eq!(
             (last.get("id"), last.pointer("/error/code")),
             (Some(&json!(8)), Some(&json!(-32603)))
