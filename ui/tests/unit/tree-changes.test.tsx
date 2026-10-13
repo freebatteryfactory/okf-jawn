@@ -14,11 +14,12 @@
  * stored one, the head as the base of a first save and of a save that names the head, and the
  * draft's own base otherwise.
  */
-import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, renderHook, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ItemSummary } from '../../src/api/generated/types.gen';
 import { resetDraftSessions } from '../../src/features/drafts/saving';
+import { useDeleted, useExplorerStore } from '../../src/features/explorer/store';
 import { fieldInWords } from '../../src/features/tree/fields';
 import {
   folderProblem,
@@ -1503,4 +1504,148 @@ describe('a draft of an item the person changes themselves', () => {
     expect(later).toMatchObject({ base_revision: HEAD });
     expect(state.refusedSaves).toBe(0);
   }, 20000);
+});
+
+describe('a press repeated while a change is in flight', () => {
+  /** A handler that answers when `release` is called. */
+  const held = () => {
+    const gate: { release: (reply: Reply) => void } = { release: () => {} };
+    const handler: Handler = () =>
+      new Promise<Reply>((resolve) => {
+        gate.release = resolve;
+      });
+    return { gate, handler };
+  };
+  const made = (revision: string) => ok({ revision, receipt_id: RECEIPT, warnings: [] });
+
+  it('sends one request for two presses of a form’s button and Enter', async () => {
+    const { gate, handler } = held();
+    const { api } = service({ [FOLDER]: handler });
+    await openTree();
+    await userEvent.click(button('New folder'));
+    await userEvent.type(field('Folder name'), 'fresh');
+    await userEvent.click(button('Create the folder'));
+    const working = screen.getByRole('button', { name: 'Creating…' });
+    expect(working.getAttribute('aria-disabled')).toBe('true');
+    await userEvent.click(working);
+    await userEvent.keyboard('{Enter}');
+    expect(api.callsTo(FOLDER)).toHaveLength(1);
+    await act(async () => {
+      gate.release(made(FIRST));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'New folder' })).toBeNull());
+    expect(api.callsTo(FOLDER)).toHaveLength(1);
+  });
+
+  it('sends neither a second status nor Archive while a status change is in flight', async () => {
+    const { gate, handler } = held();
+    const { api } = service({ [LIFE]: handler });
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    const status = screen.getByRole('combobox', { name: 'Status' });
+    await userEvent.selectOptions(status, 'deprecated');
+    await waitFor(() => expect(api.callsTo(LIFE)).toHaveLength(1));
+    expect(status.getAttribute('aria-disabled')).toBe('true');
+    // Another word chosen meanwhile, and Archive pressed: neither is sent.
+    await userEvent.selectOptions(status, 'draft');
+    const archive = within(pane()).getByRole('button', { name: 'Archive' });
+    expect(archive.getAttribute('aria-disabled')).toBe('true');
+    await userEvent.click(archive);
+    expect(api.callsTo(LIFE)).toEqual([expect.objectContaining({ status: 'deprecated' })]);
+    await act(async () => {
+      gate.release(made(FIRST));
+      await Promise.resolve();
+    });
+    await screen.findByText(/The status is now deprecated\./);
+    expect(api.callsTo(LIFE)).toHaveLength(1);
+  });
+});
+
+describe('what is asked about an item the person deleted', () => {
+  const SOURCES = '/api/reads/get-sources';
+  const aboutNoteAt = (api: ReturnType<typeof mockApi>, path: string, revision: string) =>
+    api
+      .callsTo(path)
+      .filter((body) => body.item_id === NOTE && revisionAsked(body, '') === revision);
+
+  it('asks neither its text nor its sources at the head that no longer holds it', async () => {
+    const { api } = service();
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    // The person chose to read: the reader is not waiting to learn whether there is a draft.
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Edit' }));
+    await findTextBox(/Text of Meeting notes/);
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Read the committed text' }));
+    await screen.findByText('Text of Meeting notes');
+    // Asked at the head shown before the delete, so the mock is seen to be asked at all.
+    await waitFor(() => expect(aboutNoteAt(api, SOURCES, HEAD).length).toBeGreaterThan(0));
+    expect(aboutNoteAt(api, READ, HEAD).length).toBeGreaterThan(0);
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Delete' }));
+    await userEvent.click(button('Delete it'));
+    await within(pane()).findByText(/You deleted this item/);
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc'),
+    );
+    // Time for a request that should not be made to be made.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
+    expect(aboutNoteAt(api, READ, FIRST)).toEqual([]);
+    expect(aboutNoteAt(api, SOURCES, FIRST)).toEqual([]);
+    expect(aboutNoteAt(api, ITEM, FIRST)).toEqual([]);
+  });
+
+  it('remembers a deleted item for its workspace only', () => {
+    const ELSEWHERE = '77777777-7777-4777-8777-777777777777';
+    act(() => {
+      useExplorerStore.setState({ deleted: {} });
+      useExplorerStore
+        .getState()
+        .markDeleted(WS, NOTE, { title: 'Meeting notes', at: HEAD, made: FIRST });
+    });
+    const here = renderHook(() => useDeleted(WS, NOTE));
+    const there = renderHook(() => useDeleted(ELSEWHERE, NOTE));
+    expect(here.result.current).toBe('Meeting notes');
+    expect(there.result.current).toBeUndefined();
+  });
+});
+
+describe('the item’s controls while its pane reads it again', () => {
+  it('send neither a status nor Archive for the item as it was last read', async () => {
+    const waiting: { release: () => void } = { release: () => {} };
+    let hold = false;
+    const { api, moveHead } = service({
+      [ITEM]: (body) => {
+        const reply = ok(itemDocument({ ...noteSummary, revision: revisionAsked(body, HEAD) }));
+        if (!hold || revisionAsked(body, HEAD) === HEAD) return reply;
+        return new Promise<Reply>((resolve) => {
+          waiting.release = () => resolve(reply);
+        });
+      },
+    });
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    // Someone else moved the head; after Refresh the pane reads the item again, and waits.
+    hold = true;
+    moveHead();
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc'),
+    );
+    const status = screen.getByRole('combobox', { name: 'Status' });
+    const archive = within(pane()).getByRole('button', { name: 'Archive' });
+    await waitFor(() => expect(archive.getAttribute('aria-disabled')).toBe('true'));
+    expect(status.getAttribute('aria-disabled')).toBe('true');
+    await userEvent.selectOptions(status, 'deprecated');
+    await userEvent.click(archive);
+    expect(api.callsTo(LIFE)).toEqual([]);
+    // Read again, the controls act on the item as it is.
+    await act(async () => {
+      waiting.release();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(archive.getAttribute('aria-disabled')).toBe('false'));
+    await userEvent.click(archive);
+    await waitFor(() => expect(api.callsTo(LIFE)).toHaveLength(1));
+    expect(api.callsTo(LIFE).at(0)).toMatchObject({ archived: true, base_revision: FIRST });
+  });
 });
