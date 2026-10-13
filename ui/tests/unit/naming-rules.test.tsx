@@ -2642,3 +2642,230 @@ ${textIn(box)
     expect(caretIn(now)).toBe(0);
   });
 });
+
+describe('the person’s own save of the rules, and rules someone else saves after it', () => {
+  const YAML = 'The naming rules as YAML';
+  const theirs: NamingRules = {
+    schema_version: 1,
+    rules: [{ ...rule, prefix: 'theirs-', separator: '_' }],
+  };
+  const savedNow = () =>
+    screen.queryByRole('textbox', { name: 'The rules as they are saved now (read-only)' });
+  const changedUnderneath = 'The saved rules are no longer the ones you started from.';
+  const unchanged = 'These are the saved rules, unchanged.';
+  const leavingAsks = () => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  /** The save has landed and the page shows the version it made, with its rules. */
+  async function saved(own: ReturnType<typeof service>, saves = 1) {
+    await waitFor(() => expect(own.api.callsTo(SET)).toHaveLength(saves));
+    await waitFor(() => expect(said()).toContain('The rules are saved.'));
+    await waitFor(() =>
+      expect(panel().textContent).toContain(
+        `These are the rules of the version shown, revision ${own.state.head.slice(0, 10)}.`,
+      ),
+    );
+  }
+  /** Someone else saves other rules, and the person refreshes to the version that holds them. */
+  async function othersSaveThenRefresh(own: ReturnType<typeof service>) {
+    const next = own.moveHead();
+    own.state.rules.set(next, theirs);
+    await userEvent.click(await screen.findByRole('button', { name: /^Refresh/ }));
+    await waitFor(() =>
+      expect(panel().textContent).toContain(
+        `These are the rules of the version shown, revision ${next.slice(0, 10)}.`,
+      ),
+    );
+    await turn();
+    return next;
+  }
+  /** Nothing of the person's is unsaved, so nothing is offered or asked. */
+  function nothingOffered(own: ReturnType<typeof service>, saves: number) {
+    expect(panel().textContent).not.toContain(changedUnderneath);
+    expect(savedNow()).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Replace the saved rules with mine…' })).toBeNull();
+    expect(panel().textContent).toContain(unchanged);
+    expect(button('Save the rules').getAttribute('aria-disabled')).toBe('true');
+    expect(leavingAsks()).toBe(false);
+    expect(own.api.callsTo(SET)).toHaveLength(saves);
+  }
+
+  it('leaves nothing unsaved after a save from the YAML view: the text stays as typed, and rules saved later by someone else are simply followed', async () => {
+    const own = service();
+    await openRules();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox(YAML);
+    const mine = `# my note\n${textIn(box).replace(/prefix: .*/, 'prefix: mine-')}`;
+    await typeYaml(box, mine);
+    putCaret(box, 12);
+    await userEvent.click(button('Save the rules'));
+    await saved(own);
+    // The person's own save starts nothing again: their text, their caret.
+    expect(textIn(box)).toBe(mine);
+    expect(caretIn(box)).toBe(12);
+    nothingOffered(own, 1);
+    await othersSaveThenRefresh(own);
+    // No flow and no offer: the box shows the rules as they are saved now.
+    expect(box.isConnected).toBe(true);
+    await waitFor(() => expect(textIn(box)).toContain('prefix: theirs-'));
+    expect(textIn(box)).not.toContain('mine-');
+    nothingOffered(own, 1);
+  });
+
+  it('leaves nothing unsaved after a save from the form: the YAML view opened then follows rules saved later by someone else', async () => {
+    const own = service();
+    await openRules();
+    await setPrefix('mine-');
+    await userEvent.click(button('Save the rules'));
+    await saved(own);
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox(YAML);
+    expect(textIn(box)).toContain('prefix: mine-');
+    await othersSaveThenRefresh(own);
+    await waitFor(() => expect(textIn(box)).toContain('prefix: theirs-'));
+    nothingOffered(own, 1);
+  });
+
+  it('shows rules saved later by someone else in the form after the person’s own save, and an edit then is an edit of those', async () => {
+    const own = service();
+    await openRules();
+    await setPrefix('mine-');
+    await userEvent.click(button('Save the rules'));
+    await saved(own);
+    nothingOffered(own, 1);
+    const next = await othersSaveThenRefresh(own);
+    await waitFor(() => expect(prefix()).toHaveProperty('value', 'theirs-'));
+    nothingOffered(own, 1);
+    await setPrefix('again-');
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(own.api.callsTo(SET)).toHaveLength(2));
+    expect(own.api.callsTo(SET).at(1)).toMatchObject({
+      base_revision: next,
+      rules: { schema_version: 1, rules: [{ ...rule, prefix: 'again-', separator: '_' }] },
+    });
+  });
+
+  it('counts text typed after the save as an edit again: rules saved meanwhile by someone else are shown beside it, and the text stays', async () => {
+    const own = service();
+    await openRules();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox(YAML);
+    await typeYaml(box, textIn(box).replace(/prefix: .*/, 'prefix: mine-'));
+    await userEvent.click(button('Save the rules'));
+    await saved(own);
+    const later = textIn(box).replace(/prefix: .*/, 'prefix: later-');
+    await typeYaml(box, later);
+    expect(leavingAsks()).toBe(true);
+    await othersSaveThenRefresh(own);
+    await waitFor(() => expect(savedNow()).not.toBeNull());
+    expect(panel().textContent).toContain(changedUnderneath);
+    expect(button('Replace the saved rules with mine…')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Save the rules' })).toBeNull();
+    expect(textIn(box)).toBe(later);
+    expect(own.api.callsTo(SET)).toHaveLength(1);
+  });
+
+  it('keeps text typed while the save was under way as an edit, of the rules that save made', async () => {
+    const gate: { release: () => void } = { release: () => {} };
+    const holder: { answer: (body: Json) => Reply } = { answer: () => ok({}) };
+    const own = service({
+      [SET]: (body) =>
+        new Promise<Reply>((resolve) => {
+          gate.release = () => resolve(holder.answer(body));
+        }),
+    });
+    // Each save is answered as the service answers it, when the test says so.
+    holder.answer = (body) => {
+      const revision = own.moveHead();
+      own.state.rules.set(revision, body.rules);
+      return ok({ revision, receipt_id: RECEIPT, warnings: [] });
+    };
+    await openRules();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox(YAML);
+    await typeYaml(box, textIn(box).replace(/prefix: .*/, 'prefix: first-'));
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(own.api.callsTo(SET)).toHaveLength(1));
+    // Typed, and read, before the save is answered.
+    const second = textIn(box).replace(/prefix: .*/, 'prefix: second-');
+    await typeYaml(box, second);
+    await act(async () => {
+      gate.release();
+      await Promise.resolve();
+    });
+    await saved(own);
+    const first = own.state.head;
+    // What was saved is not what the page holds: the later text is an edit, and stays.
+    expect(textIn(box)).toBe(second);
+    expect(panel().textContent).toContain('These rules differ from the saved ones.');
+    expect(leavingAsks()).toBe(true);
+    // An edit of the person's own saved rules: a plain save, with nothing of anyone else's beside it.
+    expect(panel().textContent).not.toContain(changedUnderneath);
+    expect(savedNow()).toBeNull();
+    const save = button('Save the rules');
+    expect(save.getAttribute('aria-disabled')).not.toBe('true');
+    await userEvent.click(save);
+    await waitFor(() => expect(own.api.callsTo(SET)).toHaveLength(2));
+    expect(own.api.callsTo(SET).at(1)).toMatchObject({
+      base_revision: first,
+      rules: { schema_version: 1, rules: [{ ...rule, prefix: 'second-' }] },
+    });
+  });
+
+  it('keeps text typed while the save was under way that cannot be read: its problems stay listed, and leaving asks', async () => {
+    const gate: { release: () => void } = { release: () => {} };
+    const holder: { answer: (body: Json) => Reply } = { answer: () => ok({}) };
+    const own = service({
+      [SET]: (body) =>
+        new Promise<Reply>((resolve) => {
+          gate.release = () => resolve(holder.answer(body));
+        }),
+    });
+    holder.answer = (body) => {
+      const revision = own.moveHead();
+      own.state.rules.set(revision, body.rules);
+      return ok({ revision, receipt_id: RECEIPT, warnings: [] });
+    };
+    await openRules();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox(YAML);
+    await typeYaml(box, textIn(box).replace(/prefix: .*/, 'prefix: first-'));
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(own.api.callsTo(SET)).toHaveLength(1));
+    const broken = `${textIn(box)}\n  broken: [`;
+    await typeYaml(box, broken);
+    expect(await screen.findByText(/This YAML cannot be read/)).toBeTruthy();
+    await act(async () => {
+      gate.release();
+      await Promise.resolve();
+    });
+    await saved(own);
+    // The rules are the saved ones; the text is the person's, and is still theirs to lose.
+    expect(textIn(box)).toBe(broken);
+    expect(screen.getByText(/This YAML cannot be read/)).toBeTruthy();
+    expect(leavingAsks()).toBe(true);
+    await userEvent.click(button('Close the naming rules'));
+    expect(
+      screen.queryByRole('group', { name: 'Leave the naming rules without saving?' }),
+    ).not.toBeNull();
+  });
+
+  it('keeps the edits as edits when the save failed: nothing reads as saved', async () => {
+    const own = service({ [SET]: () => refuse(503, 'unavailable', 'the store is busy') });
+    await openRules();
+    await setPrefix('mine-');
+    await userEvent.click(button('Save the rules'));
+    await screen.findByRole('alert');
+    await turn();
+    expect(prefix()).toHaveProperty('value', 'mine-');
+    expect(panel().textContent).toContain('These rules differ from the saved ones.');
+    expect(leavingAsks()).toBe(true);
+    // Someone else saves other rules meanwhile: the person's rules are still theirs to lose.
+    await othersSaveThenRefresh(own);
+    await waitFor(() => expect(savedNow()).not.toBeNull());
+    expect(prefix()).toHaveProperty('value', 'mine-');
+    expect(panel().textContent).toContain(changedUnderneath);
+  });
+});

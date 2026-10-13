@@ -45,6 +45,13 @@
  * the button is unavailable and the line beside it says why, so a save never goes over rules the
  * page has not shown.
  *
+ * A save that succeeded leaves nothing unsaved. Once the page shows the rules that save made, the
+ * form and the YAML text are what is saved, not edits: leaving asks nothing, and rules someone
+ * else saves later are simply followed, with nothing shown beside them and no offer to replace
+ * them (the person's older saved rules would go over the newer ones). Text typed after the save
+ * was sent, while it was under way too, is not what was saved: it is an edit again, of the rules
+ * that save made.
+ *
  * Edits that are not saved are not lost silently. While the rules differ from the saved ones, or
  * the YAML view holds text that cannot be read or is not read yet, leaving asks first: "Close the
  * naming rules"; the shell's own ways out (`leaveGuard`): its "Naming rules" button, opening an
@@ -223,6 +230,23 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   // again by itself when the network returns), and the person goes on typing where they were.
   const atHead = saved.data;
   const [basis, setBasis] = useState<NamingRules | undefined>(undefined);
+  // The person's own save that succeeded, until the page shows the rules it made: the version it
+  // made, or a later one that still holds them. From then on those rules are the saved ones and
+  // what the person starts from. Rules on the page that are still the ones sent are no edits any
+  // more; anything else (text typed since, text that cannot be read) stays an edit, of them.
+  const [ownSave, setOwnSave] = useState<{ rules: NamingRules; revision: Revision } | null>(null);
+  if (
+    ownSave !== null &&
+    atHead !== undefined &&
+    (head === ownSave.revision || sameRules(atHead, ownSave.rules))
+  ) {
+    setOwnSave(null);
+    setBasis(atHead);
+    if (edited !== undefined && !unreadable && sameRules(edited, ownSave.rules)) {
+      setEdited(undefined);
+      setTyped(null);
+    }
+  }
   /** Counts the times the YAML view started again from rules that changed with nothing edited. */
   const [followed, setFollowed] = useState(0);
   const heldUnread = reading.pending || unreadable;
@@ -301,12 +325,14 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
 
   const save = useChange<NamingRules, HeadChange>(
     saveRules,
-    (result) =>
+    (result, carried) => {
+      setOwnSave({ rules: carried, revision: result.revision });
       setSaid(
         result.adopted
           ? `The rules are saved. The workspace now shows revision ${short(result.revision)}, which includes them.`
           : `The rules are saved, at revision ${short(result.revision)}.`,
-      ),
+      );
+    },
     saveButton,
     // A failed save is repeated only while the rules on screen are the ones it carried.
     (carried) => rules !== null && sameRules(carried, rules),
