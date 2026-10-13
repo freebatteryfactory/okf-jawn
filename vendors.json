@@ -822,6 +822,50 @@
       "qualification": []
     },
     {
+      "name": "yaml",
+      "use_sites": [],
+      "planned_use_sites": [
+        "ui/src/features/conventions",
+        "ui/src/features/documents"
+      ],
+      "official_sources": [
+        "https://eemeli.org/yaml/",
+        "https://github.com/eemeli/yaml"
+      ],
+      "symbols": [
+        "parseDocument",
+        "parse",
+        "stringify",
+        "Document",
+        "YAMLParseError",
+        "LineCounter",
+        "isMap",
+        "ParseOptions.uniqueKeys",
+        "ParseOptions.strict",
+        "SchemaOptions.merge",
+        "SchemaOptions.compat",
+        "Document.errors",
+        "Document.warnings",
+        "ToJSOptions.maxAliasCount"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Installed package read 2026-10-12 (yaml 2.9.1, dist/index.d.ts, dist/public-api.d.ts, dist/options.d.ts, dist/errors.d.ts) and the official documentation reference; no Context7 lookup was executed",
+      "offline_notes": [
+        "The advanced YAML editors (naming rules, SPEC section 6; an item's raw properties, SPEC section 3) read and write YAML in the browser, because the wire carries both as typed JSON. The service still validates; the browser is not a second rule engine.",
+        "parseDocument returns a Document whose errors and warnings are lists (it does not throw); parse throws the first error. Show Document.errors at their place (YAMLError.linePos, or pos with a LineCounter) and never send a document that has any.",
+        "What the person typed is untrusted. Keep the defaults that refuse it early: uniqueKeys true (a repeated key is an error), strict true, merge false (no << keys), and the default maxAliasCount bound on alias expansion when a document is turned into values.",
+        "A value the wire cannot carry (a date tag, a binary tag, a non-string key, a custom tag) must be refused in plain words, not coerced. Use the core schema of YAML 1.2 (the default), where yes, no, on and off are strings.",
+        "Write with compat: 'yaml-1.1': a string that a YAML 1.1 reader would take for a boolean, a number, a date or null (yes, on, 2026-10-12, 1e3, ~) is then quoted, so the text means the same to every reader. Read with it too: an ambiguous plain scalar is then a warning (Document.warnings, code TAG_RESOLVE_FAILED) to show the person; the value stays a string. Probed on the installed 2.9.1. The service's own YAML reader is yaml_serde (crates/storage).",
+        "The version option applies only to a document without a %YAML directive: a %YAML 1.1 line in the text turns on merge keys and the 1.1 booleans. Refuse a document that carries a directive (Document.directives) rather than follow it.",
+        "stringify keeps the insertion order of an object's keys; do not sort entries, so unknown properties go back in their place.",
+        "The package's default export condition for bundlers is ./browser/index.js (ESM); the node condition is CommonJS. It has no dependencies. Licence ISC.",
+        "It was already in bun.lock as a transitive dependency of the tooling at 2.9.1; the direct dependency pins the same version."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": []
+    },
+    {
       "name": "cytoscape",
       "use_sites": [],
       "planned_use_sites": [
