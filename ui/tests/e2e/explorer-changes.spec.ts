@@ -506,7 +506,12 @@ test.describe('changing the tree and the naming rules', () => {
     await expectVisibleFocus(page);
     await expectNoAxeViolations(page, 'the naming rules as YAML, with a problem');
     await shot(page, '30-naming-rules-yaml');
-    await press(page, 'Save the rules');
+    // Read after the typing paused, the text is no rules at all: nothing became of it, so there is
+    // nothing to save, and nothing is sent.
+    await expect(page.getByRole('button', { name: 'Save the rules', exact: true })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
     expect(played.sent).toEqual([]);
     // Text that cannot be read is an edit too: leaving asks, and the person discards it.
     await press(page, 'Close the naming rules');
