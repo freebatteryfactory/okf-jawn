@@ -567,8 +567,16 @@ test.describe('changing the tree and the naming rules', () => {
     // a key or a click waited before the page handled it.
     await page.evaluate(() => {
       const seen = { gap: 0, wait: 0 };
-      Object.assign(window, { okfStall: seen });
       let last = performance.now();
+      /** What was seen since the last look, which starts the count again. */
+      const look = () => {
+        const was = { ...seen };
+        seen.gap = 0;
+        seen.wait = 0;
+        last = performance.now();
+        return was;
+      };
+      Object.assign(window, { okfStall: look });
       setInterval(() => {
         const now = performance.now();
         seen.gap = Math.max(seen.gap, now - last);
@@ -585,9 +593,15 @@ test.describe('changing the tree and the naming rules', () => {
       }
     });
     const stall = () =>
-      page.evaluate(
-        () => (window as unknown as { okfStall: { gap: number; wait: number } }).okfStall,
+      page.evaluate(() =>
+        (window as unknown as { okfStall: () => { gap: number; wait: number } }).okfStall(),
       );
+    /** Since the last look the page went on: no timer waited a second, and no key or click did. */
+    const expectNoStall = async () => {
+      const seen = await stall();
+      expect(seen.gap).toBeLessThan(1_000);
+      expect(seen.wait).toBeLessThan(1_000);
+    };
     /** Replace the whole text at once, as a paste does. */
     const paste = async (text: string) => {
       await rules.focus();
@@ -617,9 +631,13 @@ test.describe('changing the tree and the naming rules', () => {
     await press(page, 'Preview the renames');
     expect(await focusSettled(page)).toContain('This YAML cannot be read');
     expect(played.sent).toEqual([]);
+    await expectNoStall();
     await expectVisibleFocus(page);
+    // The accessibility check and the screenshot run on the page's thread themselves: they are
+    // not counted.
     await expectNoAxeViolations(page, 'a YAML text that is too complex to read');
     await shot(page, '33-yaml-too-complex');
+    await stall();
 
     // Now the reader itself, in a new worker (the one before was ended). An ordinary text is
     // read at once.
@@ -650,10 +668,7 @@ test.describe('changing the tree and the naming rules', () => {
     expect(await focusSettled(page)).toContain('This YAML cannot be read');
     expect(played.sent).toEqual([]);
 
-    // Through all of it the page went on: no timer waited a second, and no key or click did.
-    const seen = await stall();
-    expect(seen.gap).toBeLessThan(1_000);
-    expect(seen.wait).toBeLessThan(1_000);
+    await expectNoStall();
   });
 
   test('Back and Forward ask before unsaved rule edits are lost', async ({ page }) => {
