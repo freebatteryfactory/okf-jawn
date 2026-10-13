@@ -1296,6 +1296,32 @@ describe('input the form holds back', () => {
     expect(saidAbove()).toContain(HELD_BACK);
   });
 
+  describe('the question before a draft is discarded', () => {
+    const question = () => screen.getByRole('group', { name: 'Discard this draft?' });
+    const HELD = 'what you changed in the properties that is not saved';
+
+    it('names what is held back in the properties, among what it removes', async () => {
+      strict();
+      await editNote();
+      set('Owner', 'Grace');
+      fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+      expect(question().textContent).toContain(
+        `Your text here, and ${HELD}, will be removed. The committed text stays as it is.`,
+      );
+    });
+
+    it('does not mention the properties when none of their input is held back', async () => {
+      strict();
+      await editNote();
+      typeInto(textBox('Text of Meeting notes'), ' more');
+      fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+      expect(question().textContent).toContain(
+        'Your text here will be removed. The committed text stays as it is.',
+      );
+      expect(question().textContent).not.toContain(HELD);
+    });
+  });
+
   it('asks before the page is left, until the input is put back', async () => {
     strict();
     await editNote();

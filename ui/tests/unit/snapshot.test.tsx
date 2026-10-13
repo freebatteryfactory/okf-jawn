@@ -13,6 +13,7 @@ import {
   MAX_BODY_BYTES,
   resetDraftSessions,
 } from '../../src/features/drafts/saving';
+import { sessionKey, useDraftSessions } from '../../src/features/drafts/sessions';
 import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
 import {
@@ -1593,6 +1594,37 @@ describe('a Snapshot that conflicts', () => {
     expect(document.activeElement).toBe(await screen.findByRole('button', { name: 'Edit' }));
     expect(headLine()).toContain(MADE.slice(0, 10));
     expect(api.violations).toEqual([]);
+  });
+
+  describe('the question before "Take theirs" removes the draft', () => {
+    const ASKED = 'Discard your draft and take the newer version?';
+    const HELD = 'what you changed in the properties that is not saved';
+
+    it('says that what was changed in the properties and is held back goes too', async () => {
+      const { notice } = await openConflict();
+      act(() =>
+        useDraftSessions.getState().change(sessionKey(WS, NOTE), {
+          heldBack: {
+            form: { owner: 'Grace' },
+            entered: ['owner'],
+            opened: ['owner'],
+            takenOut: [],
+          },
+        }),
+      );
+      fireEvent.click(within(notice).getByRole('button', { name: 'Take theirs' }));
+      expect(within(notice).getByRole('group', { name: ASKED }).textContent).toContain(
+        `Your text here, and ${HELD}, will be removed.`,
+      );
+    });
+
+    it('does not mention the properties when none of their input is held back', async () => {
+      const { notice } = await openConflict();
+      fireEvent.click(within(notice).getByRole('button', { name: 'Take theirs' }));
+      const asked = within(notice).getByRole('group', { name: ASKED }).textContent ?? '';
+      expect(asked).toContain('Your text here will be removed.');
+      expect(asked).not.toContain(HELD);
+    });
   });
 
   it('take theirs: asks first, then discards the draft and commits nothing', async () => {

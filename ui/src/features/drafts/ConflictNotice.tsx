@@ -30,7 +30,12 @@ import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { MAX_DIFF_LINES, type PatchHunk, readPatch } from './patch';
 import { DraftNotKept, discardSession, rebaseSession } from './saving';
-import { type ConflictItem, type SnapshotConflict, useDraftSessions } from './sessions';
+import {
+  type ConflictItem,
+  type SnapshotConflict,
+  useDraftSession,
+  useDraftSessions,
+} from './sessions';
 import { draftConflictsOf, type Snapshotted, saySnapshotted, takeSnapshot } from './snapshot';
 
 export interface ConflictNoticeProps {
@@ -118,6 +123,9 @@ export function ConflictNotice({
 }: ConflictNoticeProps) {
   const client = useQueryClient();
   const heading = useId();
+  // Input of the properties form that is held back is in the session, and goes with it.
+  const session = useDraftSession(workspaceId, itemId);
+  const heldBack = session !== undefined && session.heldBack !== null;
   const item = conflict.conflict;
   // The diff on the page is bounded: so many lines over all of the item's files, the rest counted.
   const files: Array<{ change: FileChange; hunks: PatchHunk[] }> = [];
@@ -234,8 +242,10 @@ export function ConflictNotice({
         <fieldset className="confirm">
           <legend>Discard your draft and take the newer version?</legend>
           <p>
-            Your text here will be removed. The newer version is shown once the workspace is
-            refreshed.
+            {heldBack
+              ? 'Your text here, and what you changed in the properties that is not saved, will be removed.'
+              : 'Your text here will be removed.'}{' '}
+            The newer version is shown once the workspace is refreshed.
           </p>
           <button
             type="button"
