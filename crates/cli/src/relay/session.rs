@@ -81,6 +81,11 @@
 //! and how many lines the output had not taken. An output that takes nothing and does not
 //! fail is therefore no reason to stay. The last words go straight to the error stream and
 //! get two seconds, so an error stream that takes nothing does not keep the relay either.
+//! They are bounded and printable whatever the client wrote: an id or a method they quote is
+//! cut to 200 characters with a mark that says so, every control character in it (C0 and C1)
+//! is written as an escape, and the names together stay within 5 KiB, with a count of those
+//! left out, so the whole stays under 8 KiB. Redaction runs before the cut, so a credential
+//! at the cut is not left half shown, and again on the result.
 //! When the output stream fails, the relay stops at once and returns 1, whatever it was
 //! waiting for.
 //!
@@ -272,6 +277,11 @@ const DROPPED: &str = "dropped an answer of the service that is not a JSON-RPC m
 /// repeats: more than a person reads of a refusal, and little enough that the relay's own
 /// line stays far shorter than an answer.
 const MESSAGE_BYTES: usize = 8192;
+/// The most characters of an id or a method that the last words quote.
+const NAME_CHARS: usize = 200;
+/// The most bytes of names that one sentence of the last words holds: with the rest of the
+/// last words it stays under 8 KiB.
+const NAMES_BYTES: usize = 5120;
 /// What a request is told when the service's answer is no message.
 const NOT_A_MESSAGE: &str = "The okf-jawn service's answer is not a JSON-RPC message";
 /// The longest protocol version, in bytes as the service wrote it, that an `initialize`
@@ -501,11 +511,52 @@ impl Default for Limits {
     }
 }
 
-/// What a message in flight is called when the relay has to name it.
-fn called(kind: &Kind) -> String {
+/// The first [`NAME_CHARS`] characters of `text`, and how many characters come after them.
+fn head(text: &str) -> (&str, usize) {
+    let end = text
+        .char_indices()
+        .nth(NAME_CHARS)
+        .map_or(text.len(), |(at, _)| at);
+    text.split_at_checked(end)
+        .map_or((text, 0), |(head, rest)| (head, rest.chars().count()))
+}
+
+/// The mark that says how much of a name was cut off; nothing when nothing was.
+fn cut(rest: usize) -> String {
+    if rest == 0 {
+        String::new()
+    } else {
+        format!(" [cut: {rest} more characters]")
+    }
+}
+
+/// `text` with every control character (C0, DEL and C1) written as a visible escape.
+fn printable(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    for letter in text.chars() {
+        if letter.is_control() {
+            shown.extend(letter.escape_unicode());
+        } else {
+            shown.push(letter);
+        }
+    }
+    shown
+}
+
+/// What a message in flight is called when the relay has to name it. The id or the method is
+/// the client's, so it is cleaned of the credential first, then cut, then made printable.
+fn called(kind: &Kind, secret: &Credential) -> String {
     match kind {
-        Kind::Request { written, .. } => format!("request {written}"),
-        Kind::Notification { method } => format!("notification {method:?}"),
+        Kind::Request { written, .. } => {
+            let clean = secret.redact(written);
+            let (first, rest) = head(&clean);
+            format!("request {}{}", printable(first), cut(rest))
+        }
+        Kind::Notification { method } => {
+            let clean = secret.redact(method);
+            let (first, rest) = head(&clean);
+            format!("notification {first:?}{}", cut(rest))
+        }
         Kind::Response => "a response to the service".to_owned(),
     }
 }
@@ -663,7 +714,7 @@ async fn forward<T: Transport, I: AsyncRead + Unpin>(
             }
         };
         drop(bytes);
-        let name = called(&outgoing.kind);
+        let name = called(&outgoing.kind, &desk.secret);
         if outgoing.initialize {
             let alone = async {
                 flight.drain(desk).await;
@@ -710,11 +761,25 @@ async fn leave<E: AsyncWrite + Unpin>(
         .unwrap_or_default();
     names.sort();
     if !names.is_empty() {
+        let (mut quoted, mut size, mut over) = (Vec::new(), 0_usize, 0_usize);
+        for name in &names {
+            if size.saturating_add(name.len()) <= NAMES_BYTES {
+                size = size.saturating_add(name.len());
+                quoted.push(name.as_str());
+            } else {
+                over = over.saturating_add(1);
+            }
+        }
+        let more = if over > 0 {
+            format!(" and {over} more, not named here")
+        } else {
+            String::new()
+        };
         let text = format!(
             "the input ended and {} of its messages had not finished {after:?} later; the relay \
-             stops and leaves them unanswered: {}",
+             stops and leaves them unanswered: {}{more}",
             names.len(),
-            names.join(", ")
+            quoted.join(", ")
         );
         say(stderr, secret, &text).await;
     }

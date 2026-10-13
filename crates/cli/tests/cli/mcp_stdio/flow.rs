@@ -35,6 +35,12 @@ struct Counted {
 /// An input that fails every read.
 struct Failing;
 
+/// An input that hands out all of its bytes at once and then fails.
+struct Breaking {
+    bytes: Vec<u8>,
+    given: bool,
+}
+
 /// The length of every line the service's double answers with in the tests of the room.
 const LINE: usize = 200;
 
@@ -72,6 +78,22 @@ impl AsyncRead for Failing {
         _buffer: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()))
+    }
+}
+
+impl AsyncRead for Breaking {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if this.given {
+            return Poll::Ready(Err(std::io::Error::other("the input breaks")));
+        }
+        this.given = true;
+        buffer.put_slice(&std::mem::take(&mut this.bytes));
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -1069,28 +1091,6 @@ async fn the_relay_s_last_words_get_two_seconds_and_no_more() -> TestResult {
     Ok(())
 }
 
-/// An input that hands out all of its bytes at once and then fails.
-struct Breaking {
-    bytes: Vec<u8>,
-    given: bool,
-}
-
-impl AsyncRead for Breaking {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _context: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        if this.given {
-            return Poll::Ready(Err(std::io::Error::other("the input breaks")));
-        }
-        this.given = true;
-        buffer.put_slice(&std::mem::take(&mut this.bytes));
-        Poll::Ready(Ok(()))
-    }
-}
-
 /// An input that fails while the loop is busy with `initialize` and every turn is taken: the
 /// failure is read ahead and waits for a turn. The loop must still be handed it (exit code 1,
 /// said on the error stream, never 0 in silence), and when the relay gives up meanwhile the
@@ -1150,6 +1150,115 @@ async fn an_input_failure_that_is_read_ahead_is_handed_to_the_loop_and_is_no_lin
     assert!(
         said.contains("1 of its lines had not been looked at"),
         "a failure is not a line: {said}"
+    );
+    Ok(())
+}
+
+/// Run a relay whose service never answers over `input` with a closing time of 300 ms; returns
+/// what it said on the error stream.
+async fn last_words(input: String) -> Outcome<String> {
+    let transport = FakeTransport::new(|_, _| Box::pin(std::future::pending()));
+    let setup = Setup {
+        limits: Limits {
+            closing: Duration::from_millis(300),
+            ..Limits::default()
+        },
+        ..Setup::new(&transport)
+    };
+    let ran = tokio::time::timeout(PATIENCE, relay(setup, input.as_bytes())).await??;
+    assert_eq!(ran.code, 1, "{}", ran.stderr);
+    Ok(ran.stderr)
+}
+
+/// A request line whose id is the text between quotes exactly as given, raw.
+fn raw_id_request(spelled: &str) -> String {
+    format!("{{\"jsonrpc\":\"2.0\",\"id\":\"{spelled}\",\"method\":\"tools/call\"}}\n")
+}
+
+/// The last words are bounded (the re-check's answer 4): an id of 2 MiB is quoted as its first
+/// 200 characters (the opening quote among them) and a mark that says how many were left out.
+#[tokio::test]
+async fn the_relay_s_last_words_cut_an_id_of_two_megabytes() -> TestResult {
+    let long = 2 * 1024 * 1024;
+    let said = last_words(raw_id_request(&"a".repeat(long))).await?;
+    let first = format!("\"{}", "a".repeat(199));
+    let name = format!("request {first} [cut: {} more characters]", long + 2 - 200);
+    assert_eq!(said, unfinished(&[name.as_str()]));
+    assert!(said.len() < 8 * 1024);
+    // A method is cut the same way.
+    let method = "m".repeat(long);
+    let said = last_words(format!(
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"{method}\"}}\n{}",
+        request(&json!(1), "initialize", &json!({}))
+    ))
+    .await?;
+    let name = format!(
+        "notification \"{}\" [cut: {} more characters]",
+        "m".repeat(200),
+        long - 200
+    );
+    assert!(
+        said.contains(&name),
+        "{}",
+        said.chars().take(600).collect::<String>()
+    );
+    assert!(said.len() < 8 * 1024);
+    Ok(())
+}
+
+/// A control character in a quoted id reaches the error stream only as a visible escape. A raw
+/// C0 character inside a string is refused as a line, so it is never named at all; a raw C1
+/// character is valid JSON and is written as an escape.
+#[tokio::test]
+async fn the_relay_s_last_words_write_control_characters_as_escapes() -> TestResult {
+    let said = last_words(raw_id_request("id\u{9b}x\u{85}")).await?;
+    assert_eq!(said, unfinished(&["request \"id\\u{9b}x\\u{85}\""]));
+    let said = last_words(format!(
+        "{}{}",
+        raw_id_request("raw\u{1b}escape"),
+        raw_id_request("kept")
+    ))
+    .await?;
+    assert_eq!(said, unfinished(&["request \"kept\""]));
+    assert!(
+        !said
+            .chars()
+            .any(|letter| letter.is_control() && letter != '\n'),
+        "{said:?}"
+    );
+    // The cut is made first, then the characters that stay are escaped.
+    let said = last_words(raw_id_request(&format!("{}\u{9b}\u{9b}", "b".repeat(198)))).await?;
+    let name = format!(
+        "request \"{}\\u{{9b}} [cut: 2 more characters]",
+        "b".repeat(198)
+    );
+    assert_eq!(said, unfinished(&[name.as_str()]));
+    Ok(())
+}
+
+/// Sixteen long ids at once: the whole of the last words stays under 8 KiB, and the names that
+/// did not fit are counted.
+#[tokio::test]
+async fn the_relay_s_last_words_stay_under_eight_kib_for_sixteen_long_ids() -> TestResult {
+    let mut input = String::new();
+    for number in 0..16 {
+        input.push_str(&raw_id_request(&format!(
+            "{number:02}{}",
+            "\u{9b}".repeat(100_000)
+        )));
+    }
+    let said = last_words(input).await?;
+    assert!(said.len() < 8 * 1024, "{} bytes", said.len());
+    assert!(
+        said.contains("16 of its messages had not finished"),
+        "{said:?}"
+    );
+    assert!(said.contains(" more, not named here"), "{said:?}");
+    assert!(said.contains("[cut: "), "{said:?}");
+    assert!(
+        !said
+            .chars()
+            .any(|letter| letter.is_control() && letter != '\n')
     );
     Ok(())
 }
