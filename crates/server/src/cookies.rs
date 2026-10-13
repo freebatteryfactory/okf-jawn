@@ -17,6 +17,7 @@ use cookie::{Cookie, SameSite};
 use okf_jawn_contract::access::CSRF_COOKIE;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 
+use crate::hosted::{LOGIN_COOKIE, LOGIN_MAX_AGE};
 use crate::identity::{CookieReader, SESSION_COOKIE, csrf_token_of};
 
 /// Reads cookies with `cookie::Cookie::split_parse`.
@@ -95,6 +96,40 @@ pub fn cleared_cookies(secure: bool) -> Result<[HeaderValue; 2], ApiError> {
         .removal()
         .build();
     Ok([header(&session)?, header(&csrf)?])
+}
+
+/// The `Set-Cookie` value that hands a browser its sign-in in progress: `value` in
+/// `__Host-okf-login`, `HttpOnly`, `Secure`, `SameSite=Lax` (the callback is a navigation from the
+/// identity provider, which `Strict` would not carry), `Path=/`, `Max-Age=600`, no `Domain`.
+///
+/// # Errors
+/// Returns `Internal` when the value cannot be carried in a header.
+pub fn login_cookie(value: &str) -> Result<HeaderValue, ApiError> {
+    let max_age = time::Duration::try_from(LOGIN_MAX_AGE)
+        .map_err(|_| ApiError::new(ErrorCode::Internal, "The sign-in lifetime is too long"))?;
+    let cookie = Cookie::build((LOGIN_COOKIE, value.to_owned()))
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .max_age(max_age)
+        .build();
+    header(&cookie)
+}
+
+/// The `Set-Cookie` value that removes the sign-in cookie, with the attributes it was set with.
+///
+/// # Errors
+/// Returns `Internal` when the value cannot be carried in a header.
+pub fn cleared_login_cookie() -> Result<HeaderValue, ApiError> {
+    let cookie = Cookie::build((LOGIN_COOKIE, ""))
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .removal()
+        .build();
+    header(&cookie)
 }
 
 fn header(cookie: &Cookie<'_>) -> Result<HeaderValue, ApiError> {

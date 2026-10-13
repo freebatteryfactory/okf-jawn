@@ -6,9 +6,10 @@
 //! cookies are sent; a sign-in that cannot be recorded is undone and refused. Locally the session's
 //! principal is the persistent installation identity with route `LocalOwner`; hosted it is the
 //! AuthKit user in their organization with route `BrowserSession`. No other route ever gets a
-//! session. Logout revokes the request's own session at once and clears both cookies. Responses
-//! that carry a token or a session are `no-store` and `no-referrer`, and no token, code or secret
-//! is echoed or logged.
+//! session. A hosted sign-in in progress lives in its browser's cookie, never on the server
+//! (`hosted`). Logout revokes the request's own session at once and clears both cookies. Every
+//! response of these routes, a refusal included, is `no-store` and `no-referrer`, and no token,
+//! code or secret is echoed or logged.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -25,15 +26,18 @@ use okf_jawn_contract::common::Empty;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::{EventActor, EventKind};
 use okf_jawn_contract::identity::{TenantId, Timestamp};
-use okf_jawn_core::credentials::{CredentialStore, SessionRecord};
+use okf_jawn_core::credentials::{CredentialStore, SessionRecord, secret_hash};
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 use time::OffsetDateTime;
 
 use crate::SessionId;
-use crate::cookies::{CookiePolicy, cleared_cookies, session_cookies};
+use crate::cookies::{
+    CookiePolicy, CrateCookies, cleared_cookies, cleared_login_cookie, login_cookie,
+    session_cookies,
+};
 use crate::errors::error_response;
-use crate::hosted::{HostedLogin, PendingLogins};
-use crate::identity::{hex, session_id_of};
+use crate::hosted::{HostedLogin, LOGIN_COOKIE, MAX_CALLBACK_PARAMETER_CHARS, PendingLogin};
+use crate::identity::{CookieReader as _, hex, session_id_of};
 use crate::local::{LaunchTokens, SecretSource};
 
 /// Secrets from the operating system's random source: 32 bytes, lowercase hex.
@@ -68,12 +72,11 @@ pub enum SessionEntry {
         /// The outstanding launch tokens.
         tokens: Arc<LaunchTokens>,
     },
-    /// Hosted AuthKit sign-in at `/auth/login` and `/auth/callback`.
+    /// Hosted AuthKit sign-in at `/auth/login` and `/auth/callback`. A sign-in in progress lives
+    /// in its browser's cookie (`hosted`), not here.
     Hosted {
         /// The identity provider.
         login: Arc<dyn HostedLogin>,
-        /// Sign-ins waiting for their callback.
-        pending: Arc<PendingLogins>,
     },
 }
 
@@ -221,27 +224,38 @@ async fn begin_local(
     private(outcome.unwrap_or_else(error_response))
 }
 
+/// Start a hosted sign-in: redirect to the provider, and hand the browser the state and the
+/// PKCE verifier in its sign-in cookie. Nothing is kept on the server.
 async fn begin_login(State(sessions): State<Sessions>) -> Response {
-    let SessionEntry::Hosted { login, pending } = &sessions.inner.parts.entry else {
+    let SessionEntry::Hosted { login } = &sessions.inner.parts.entry else {
         return private(error_response(not_here()));
     };
     let outcome = login.begin().and_then(|start| {
-        pending.remember(&start)?;
+        let pending = login_cookie(&PendingLogin::encode(&start)?)?;
         let location = HeaderValue::from_str(&start.url)
             .map_err(|_| ApiError::new(ErrorCode::Internal, "The sign-in URL cannot be sent"))?;
         let mut headers = private_headers();
         headers.insert(LOCATION, location);
+        headers.append(SET_COOKIE, pending);
         Ok((StatusCode::FOUND, headers).into_response())
     });
     private(outcome.unwrap_or_else(error_response))
 }
 
+/// Complete a hosted sign-in for the browser that began it. Nothing reaches the provider unless
+/// the request carries the sign-in cookie, well formed, with the state of the `state` parameter;
+/// the cookie is cleared on every outcome.
 async fn complete_login(
     State(sessions): State<Sessions>,
     Query(query): Query<BTreeMap<String, String>>,
+    headers: HeaderMap,
 ) -> Response {
-    let SessionEntry::Hosted { login, pending } = &sessions.inner.parts.entry else {
+    let SessionEntry::Hosted { login } = &sessions.inner.parts.entry else {
         return private(error_response(not_here()));
+    };
+    let cleared = match cleared_login_cookie() {
+        Ok(cleared) => cleared,
+        Err(error) => return private(error_response(error)),
     };
     let outcome = async {
         let refused = || {
@@ -250,10 +264,25 @@ async fn complete_login(
                 "The sign-in is not valid or has expired; start it again",
             )
         };
-        let state = query.get("state").ok_or_else(refused)?;
-        let code = query.get("code").ok_or_else(refused)?;
-        let verifier = pending.take(state)?.ok_or_else(refused)?;
-        let user = login.complete(code, &verifier).await?;
+        let bounded = |name: &str| {
+            query
+                .get(name)
+                .filter(|value| {
+                    !value.is_empty() && value.chars().count() <= MAX_CALLBACK_PARAMETER_CHARS
+                })
+                .ok_or_else(refused)
+        };
+        let state = bounded("state")?;
+        let code = bounded("code")?;
+        let pending = CrateCookies
+            .read(&headers, LOGIN_COOKIE)
+            .and_then(|value| PendingLogin::parse(&value))
+            .ok_or_else(refused)?;
+        // Digests are compared, so the comparison's timing says nothing about the state.
+        if secret_hash(&pending.state) != secret_hash(state) {
+            return Err(refused());
+        }
+        let user = login.complete(code, &pending.verifier).await?;
         let tenant_id = TenantId::try_from(user.organization_id).map_err(|_| refused())?;
         sessions
             .open(Principal {
@@ -266,7 +295,9 @@ async fn complete_login(
             .await
     }
     .await;
-    private(outcome.unwrap_or_else(error_response))
+    let mut response = private(outcome.unwrap_or_else(error_response));
+    response.headers_mut().append(SET_COOKIE, cleared);
+    response
 }
 
 /// End the request's own browser session; CSRF was checked by the identity middleware.
@@ -275,10 +306,10 @@ async fn logout(
     session: Option<Extension<SessionId>>,
 ) -> Response {
     let Some(Extension(SessionId(session_id))) = session else {
-        return error_response(ApiError::new(
+        return private(error_response(ApiError::new(
             ErrorCode::Unauthenticated,
             "There is no browser session to end",
-        ));
+        )));
     };
     let parts = &sessions.inner.parts;
     let outcome = async {
@@ -290,7 +321,7 @@ async fn logout(
         Ok::<_, ApiError>((StatusCode::OK, headers, Json(Empty {})).into_response())
     }
     .await;
-    outcome.unwrap_or_else(error_response)
+    private(outcome.unwrap_or_else(error_response))
 }
 
 /// `no-store` and `no-referrer`.

@@ -1,30 +1,10 @@
-//! Hosted sign-in state: a started sign-in's state works once, a replayed, unknown or expired
-//! state is refused before any code is exchanged.
+//! The sign-in cookie's value: a bounded state, `:`, and a bounded PKCE verifier, each of its own
+//! characters. Nothing else is ever handed to a browser or read back from one.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use okf_jawn_contract::error::ErrorCode;
+use okf_jawn_server::hosted::{LoginStart, PendingLogin};
 
-use okf_jawn_server::grants::Clock;
-use okf_jawn_server::hosted::{LOGIN_TTL, LoginStart, PendingLogins};
-
-use check::TestResult;
-
-/// A clock that moves only when a test advances it.
-struct TestClock {
-    start: Instant,
-    elapsed_ms: AtomicU64,
-}
-
-impl Clock for TestClock {
-    fn now(&self) -> Instant {
-        self.start
-            .checked_add(Duration::from_millis(
-                self.elapsed_ms.load(Ordering::SeqCst),
-            ))
-            .unwrap_or(self.start)
-    }
-}
+use check::{TestResult, err_of, some};
 
 fn start(state: &str, verifier: &str) -> LoginStart {
     LoginStart {
@@ -34,34 +14,81 @@ fn start(state: &str, verifier: &str) -> LoginStart {
     }
 }
 
+fn of(count: usize) -> String {
+    "a".repeat(count)
+}
+
 #[test]
-fn a_state_returns_its_verifier_once() -> TestResult {
-    let clock = Arc::new(TestClock {
-        start: Instant::now(),
-        elapsed_ms: AtomicU64::new(0),
-    });
-    let pending = PendingLogins::new(clock);
-    pending.remember(&start("state-a", "verifier-a"))?;
-    pending.remember(&start("state-b", "verifier-b"))?;
-    assert_eq!(pending.take("state-a")?.as_deref(), Some("verifier-a"));
-    assert_eq!(pending.take("state-a")?, None);
-    assert_eq!(pending.take("never-started")?, None);
-    assert_eq!(pending.take("state-b")?.as_deref(), Some("verifier-b"));
+fn a_started_sign_in_round_trips_through_its_cookie_value() -> TestResult {
+    let state = "State-of_one-sign-in";
+    let verifier = "Verifier.of_one-sign~in.0123456789abcdefghij";
+    let value = PendingLogin::encode(&start(state, verifier))?;
+    assert_eq!(value, format!("{state}:{verifier}"));
+    let read = some(PendingLogin::parse(&value), "the parsed cookie")?;
+    assert_eq!(read.state, state);
+    assert_eq!(read.verifier, verifier);
     Ok(())
 }
 
 #[test]
-fn an_expired_state_is_refused() -> TestResult {
-    let clock = Arc::new(TestClock {
-        start: Instant::now(),
-        elapsed_ms: AtomicU64::new(0),
-    });
-    let pending = PendingLogins::new(clock.clone());
-    pending.remember(&start("state-a", "verifier-a"))?;
-    clock
-        .elapsed_ms
-        .store(u64::try_from(LOGIN_TTL.as_millis())?, Ordering::SeqCst);
-    assert_eq!(pending.take("state-a")?, None);
+fn the_state_is_sixteen_to_128_characters() {
+    let verifier = of(43);
+    for (length, accepted) in [(15, false), (16, true), (128, true), (129, false)] {
+        let value = format!("{}:{verifier}", of(length));
+        assert_eq!(
+            PendingLogin::parse(&value).is_some(),
+            accepted,
+            "state of {length}"
+        );
+        let encoded = PendingLogin::encode(&start(&of(length), &verifier));
+        assert_eq!(encoded.is_ok(), accepted, "encoding a state of {length}");
+    }
+}
+
+#[test]
+fn the_verifier_is_43_to_128_characters() {
+    let state = of(16);
+    for (length, accepted) in [(42, false), (43, true), (128, true), (129, false)] {
+        let value = format!("{state}:{}", of(length));
+        assert_eq!(
+            PendingLogin::parse(&value).is_some(),
+            accepted,
+            "verifier of {length}"
+        );
+        let encoded = PendingLogin::encode(&start(&state, &of(length)));
+        assert_eq!(encoded.is_ok(), accepted, "encoding a verifier of {length}");
+    }
+}
+
+#[test]
+fn each_part_has_only_its_own_characters() -> TestResult {
+    let state = of(16);
+    let verifier = of(43);
+    for bad_state in [
+        format!("{}.", of(16)),
+        format!("{}~", of(16)),
+        format!("{} ", of(16)),
+        format!("{}=", of(16)),
+        format!("{}\u{e9}", of(16)),
+    ] {
+        assert!(PendingLogin::parse(&format!("{bad_state}:{verifier}")).is_none());
+        let refused = err_of(PendingLogin::encode(&start(&bad_state, &verifier)))?;
+        assert_eq!(refused.code, ErrorCode::Internal);
+    }
+    for bad_verifier in [
+        format!("{}:", of(43)),
+        format!("{};", of(43)),
+        format!("{} ", of(43)),
+        format!("{}/", of(43)),
+        format!("{}\u{e9}", of(43)),
+    ] {
+        assert!(PendingLogin::parse(&format!("{state}:{bad_verifier}")).is_none());
+        let refused = err_of(PendingLogin::encode(&start(&state, &bad_verifier)))?;
+        assert_eq!(refused.code, ErrorCode::Internal);
+    }
+    // No separator, and nothing at all.
+    assert!(PendingLogin::parse(&format!("{state}{verifier}")).is_none());
+    assert!(PendingLogin::parse("").is_none());
     Ok(())
 }
 
