@@ -3,7 +3,8 @@
  *
  * What is shown here is the person's own draft and is marked as one; it is not the committed
  * text, which the reader shows. The save state is always on screen and is a polite live region
- * (unsaved, saving, saved as a draft with the time, not saved); the text box is described by it. A
+ * (unsaved, saving, saved as a draft with the time, not saved, and that input of the properties
+ * form is held back and in no save); the text box is described by it. A
  * failed save keeps the text in the editor and offers its retry through the failure notice, which
  * stays while the save is tried again. The next change's own save can cure it too; keyboard focus
  * that was on the retry button then moves to the text box (`useRetry`). Leaving the editor
@@ -44,6 +45,17 @@ function SaveState({ session }: { session: DraftSession }) {
   if (state === 'unsaved') return <>Unsaved changes.</>;
   if (state === 'failed') return <>Not saved. Your text is kept here.</>;
   if (state === 'too-long') return <>Not saved: the text is too long.</>;
+  if (state === 'held-back') {
+    // The text is saved or unchanged; what was entered in the properties form is in no save.
+    return session.confirmed === null ? (
+      <>Not saved: what you changed in the properties is held back.</>
+    ) : (
+      <>
+        Saved as a draft at <Instant value={session.confirmed.draft.saved_at} />, without what you
+        changed in the properties: that is held back.
+      </>
+    );
+  }
   if (state === 'unchanged' || session.confirmed === null) return <>No changes to save.</>;
   return (
     <>

@@ -22,14 +22,19 @@
  * What is judged is what a save would carry: the draft's whole property map with the person's
  * input in it, without the header, against the schema as the type gives it. That is what the
  * service judges. While it does not fit, none of the input is put into the draft, so it is never
- * sent: the form keeps what was typed, the draft keeps its last properties, and a line above the
- * form says the input is held back. A misfit at a field the form draws is shown at that field by
- * the form library; every other one (a required property with no field, a property a strict type
- * does not allow, a rule about the properties together) is listed above the form, and only
- * there: the library is not given the errors about the map as a whole, which it would draw under
- * the form in the validator's words. A map that did
- * not fit before anything was entered is listed the same way, and nothing is held back by it
- * until the person enters something.
+ * sent: the draft keeps its last properties, and a line above the form says the input is held
+ * back. What was typed is kept with the item's editing session (`heldBack`), not only in this
+ * form: a form that opens later (the editor was left and opened again, or moved to another pane)
+ * shows it again, and while it is there the item is marked unsaved and the page asks before it is
+ * left. It lasts as long as the page, like the session: a reload the person confirms ends it.
+ *
+ * A misfit at a field the form draws is shown at that field by the form library; every other one
+ * (a required property with no field, a property a strict type does not allow, a rule about the
+ * properties together) is listed above the form, and only there: the library is not given the
+ * errors about the map as a whole, which it would draw under the form in the validator's words.
+ * The library judges a form when it is changed, so a form that opens on held-back input is asked
+ * to judge it at once. A map that did not fit before anything was entered is listed the same way,
+ * and nothing is held back by it until the person enters something.
  *
  * Without a schema there is no form, and the properties are shown as they are: when the
  * workspace has no definition of the item's type, when the definition names no properties, when
@@ -41,11 +46,11 @@ import Form from '@rjsf/core';
 import { type RJSFSchema, retrieveSchema, type UiSchema } from '@rjsf/utils';
 import { customizeValidator } from '@rjsf/validator-ajv8';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Component, type ReactNode, useRef, useState } from 'react';
+import { Component, type ReactNode, useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import { listTypesOptions } from '../../api/generated/@tanstack/react-query.gen';
 import { keyed } from '../../lib/keys';
-import { editSession } from '../drafts/saving';
+import { editSession, holdProperties } from '../drafts/saving';
 import type { DraftSession } from '../drafts/sessions';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
@@ -73,6 +78,9 @@ const NO_DEFAULTS = {
 } as const;
 /** No submit button: a change is saved with the draft, not submitted. */
 const NO_SUBMIT: UiSchema<PropertyMap> = { 'ui:submitButtonOptions': { norender: true } };
+
+/** What the form library is given to call with errors that are already shown. */
+const NOTHING_MORE = () => {};
 
 /** The application's own header among an item's properties: the service's, never a type's. */
 const APP_HEADER_KEY = 'okf_jawn';
@@ -349,15 +357,26 @@ function TypedForm({
   uiSchema: PropertyMap;
 }) {
   const client = useQueryClient();
+  // Input the draft has not taken is kept with the session, so a form that opens finds what the
+  // one before it held back (the editor was left, or moved to another pane).
+  const [held] = useState(() => session.heldBack);
   // The property map as it was when the form opened: where a property emptied and entered again
   // goes back to.
-  const [opened] = useState(() => Object.keys(session.properties));
+  const [opened] = useState(() => held?.opened ?? Object.keys(session.properties));
   // The form's own data: every property but the application's header. It also holds what is typed
   // and not valid, which the draft never gets.
-  const [data, setData] = useState<PropertyMap>(() => withoutHeader(session.properties));
+  const [data, setData] = useState<PropertyMap>(
+    () => held?.form ?? withoutHeader(session.properties),
+  );
   // The properties the person has changed in a field since the form opened: these, and no other,
   // go from the form into the draft.
-  const [entered, setEntered] = useState<readonly string[]>([]);
+  const [entered, setEntered] = useState<readonly string[]>(() => held?.entered ?? []);
+  // The form library says what is wrong at a field once that form has been changed. A form that
+  // opens on input held back is asked to judge it at once, so the reason is at its field again.
+  const formRef = useRef<Form<PropertyMap> | null>(null);
+  useEffect(() => {
+    if (held !== null) formRef.current?.validateForm();
+  }, [held]);
   const rules: RJSFSchema = schema;
   const drawn = drawnProperties(schema, data);
   // What a save would carry if the form's input went into the draft now: it is this, without the
@@ -413,7 +432,11 @@ function TypedForm({
     <>
       {said}
       <Form<PropertyMap>
+        ref={formRef}
         className="properties-form"
+        // Asked to judge when it opens on held-back input (above), the library reports what it
+        // found here; it is on the page already, at the fields and above the form.
+        onError={NOTHING_MORE}
         schema={rules}
         uiSchema={{ ...uiSchema, ...NO_SUBMIT }}
         formData={data}
@@ -441,7 +464,18 @@ function TypedForm({
           setEntered(now);
           const candidate = mergeProperties(session.properties, now, next, opened);
           // Judged as the service judges it: the whole map, without the application's header.
-          if (!validator.isValid(rules, withoutHeader(candidate), rules)) return;
+          if (!validator.isValid(rules, withoutHeader(candidate), rules)) {
+            // None of it goes into the draft. It is kept with the session, not only in this
+            // form, unless the input is back to what the draft has.
+            holdProperties(
+              session.workspaceId,
+              session.itemId,
+              changedKeys(session.properties, candidate).length > 0
+                ? { form: next, entered: now, opened: [...opened] }
+                : null,
+            );
+            return;
+          }
           editSession(client, session.workspaceId, session.itemId, { properties: candidate });
         }}
       />

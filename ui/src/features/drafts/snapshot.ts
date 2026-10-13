@@ -22,6 +22,8 @@
  * it started from, its base becomes that revision, and it is saved at once. The service removes a
  * draft at a Snapshot only if it is still the content it committed, so a draft saved in between
  * is still held, on its old base; that save moves it. The status says how many items go on so.
+ * A session that holds input of the properties form that is held back goes on too, on that
+ * revision: no save carried that input, so the Snapshot does not have it, and the status says so.
  *
  * On `conflict` with the `draft_conflict` detail the service has committed nothing: it takes a
  * Snapshot of all the selected items or of none, and the detail lists every selected item that
@@ -65,6 +67,8 @@ export interface Snapshotted {
   itemIds: string[];
   /** Those of them whose text went on while the Snapshot was taken: each is still a draft. */
   stillDrafts: string[];
+  /** Those of them whose properties form holds input back: no save carried it, so it is not in. */
+  heldBack: string[];
   /** Non-fatal issues the service recorded. */
   warnings: Warning[];
 }
@@ -129,13 +133,17 @@ function draftHeld(client: QueryClient, workspaceId: string, itemId: string): st
 export function saySnapshotted(workspaceId: string, message: string, snapshotted: Snapshotted) {
   const items = snapshotted.itemIds.length;
   const still = snapshotted.stillDrafts.length;
+  const held = snapshotted.heldBack.length;
   useDraftSessions.getState().say(
     workspaceId,
     `Snapshot “${message}” taken: ${items} ${items === 1 ? 'item' : 'items'}. ` +
       `The workspace now shows revision ${short(snapshotted.revision)}, which the Snapshot made.` +
       (still === 0
         ? ''
-        : ` What you typed in ${still === 1 && items === 1 ? 'it' : `${still} of them`} while it was taken is not in it, and is still a draft.`),
+        : ` What you typed in ${still === 1 && items === 1 ? 'it' : `${still} of them`} while it was taken is not in it, and is still a draft.`) +
+      (held === 0
+        ? ''
+        : ` What you changed in ${held === 1 && items === 1 ? 'its properties' : `the properties of ${held} of them`} is held back, and is not in the Snapshot.`),
     snapshotted.warnings.map((warning) => warning.message),
   );
 }
@@ -233,6 +241,7 @@ export async function takeSnapshot(
     workspace === undefined ? workspace : { ...workspace, head: result.revision },
   );
   const stillDrafts: string[] = [];
+  const heldBack: string[] = [];
   /** Of those, the ones the service still holds a draft of: it was saved in between. */
   const stillHeld: string[] = [];
   for (const itemId of attempt.itemIds) {
@@ -247,12 +256,14 @@ export async function takeSnapshot(
     const savedSince = before?.edited
       ? session.confirmed !== committed
       : session.confirmed !== null && !sameDraft(session.confirmed.draft, before?.listed);
-    if (!session.saving && !savedSince && !needsSave(session)) {
+    const wentOn = session.saving || savedSince || needsSave(session);
+    if (!wentOn && session.heldBack === null) {
       endSession(workspaceId, itemId);
       continue;
     }
-    // The text went on while the Snapshot was taken: a draft on what was just committed. A
-    // failure stays: only a save that answers says what the service holds.
+    // The session goes on, on what was just committed: its text went on while the Snapshot was
+    // taken, or it holds input of the properties form that no save carried, so the Snapshot does
+    // not have it. A failure stays: only a save that answers says what the service holds.
     useDraftSessions.getState().change(key, {
       committed:
         committed === null
@@ -262,6 +273,9 @@ export async function takeSnapshot(
       confirmed: savedSince ? session.confirmed : null,
       baseRevision: result.revision,
     });
+    if (session.heldBack !== null) heldBack.push(itemId);
+    // With nothing but held-back input there is nothing to save.
+    if (!wentOn) continue;
     stillDrafts.push(itemId);
     if (savedSince) stillHeld.push(itemId);
     void flushSession(client, workspaceId, itemId);
@@ -277,6 +291,7 @@ export async function takeSnapshot(
     previousHead,
     itemIds: attempt.itemIds,
     stillDrafts,
+    heldBack,
     warnings: result.warnings,
   };
 }

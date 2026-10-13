@@ -42,6 +42,7 @@ import { rememberDraft } from './drafts-list';
 import {
   atRisk,
   type DraftText,
+  type HeldProperties,
   needsSave,
   type SaveAttempt,
   sameText,
@@ -112,6 +113,7 @@ export function beginSession(
     failure: null,
     attempt: null,
     tooLong: null,
+    heldBack: null,
   });
 }
 
@@ -138,7 +140,18 @@ function cancelTimer(key: string) {
   timers.delete(key);
 }
 
-/** The editor's content changed: keep it, and save it a moment after the last change. */
+/**
+ * Keep, with the session, what the person entered in the properties form and the draft has not
+ * taken; `null` once nothing is held back. Nothing is sent: no save carries it.
+ */
+export function holdProperties(workspaceId: string, itemId: string, held: HeldProperties | null) {
+  sessions().change(sessionKey(workspaceId, itemId), { heldBack: held });
+}
+
+/**
+ * The editor's content changed: keep it, and save it a moment after the last change. Properties
+ * put into the draft are all that was entered in the form: nothing of it is held back any more.
+ */
 export function editSession(
   client: QueryClient,
   workspaceId: string,
@@ -147,7 +160,7 @@ export function editSession(
 ) {
   const key = sessionKey(workspaceId, itemId);
   if (sessions().sessions[key] === undefined) return;
-  sessions().change(key, change);
+  sessions().change(key, change.properties === undefined ? change : { ...change, heldBack: null });
   cancelTimer(key);
   // A moment after this change, and at the latest so long after the first one not yet sent.
   const now = Date.now();

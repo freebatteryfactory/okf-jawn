@@ -13,7 +13,9 @@
  *
  * The Snapshot: every listed draft is included unless its box is unticked. A draft whose last
  * Snapshot conflicted is left out until the person resolves it in its own pane, so the others are
- * one press away. A Snapshot has a name; an empty one is not sent and the field says so. While it
+ * one press away. An item whose properties form holds input back says so in its row, before a
+ * Snapshot is taken: the Snapshot takes its saved draft, without that input; when nothing of the
+ * item is saved, its box cannot be ticked. A Snapshot has a name; an empty one is not sent and the field says so. While it
  * is taken the button keeps keyboard focus (`aria-disabled`); it is always there, so it never
  * leaves with focus on it. A polite status says what happened, here and after a conflict is
  * resolved in a pane: the name, how many items, and the revision the workspace now shows. When
@@ -66,6 +68,19 @@ interface Row {
 }
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/** The draft of a row as the service last confirmed or listed it; null when it holds none. */
+const savedDraft = (row: Row) => row.session?.confirmed?.draft ?? row.draft;
+
+/**
+ * Nothing of this item is saved, and nothing of it will be by a Snapshot's own save: all it has
+ * is input of its properties form that is held back. There is nothing to snapshot.
+ */
+const nothingSaved = (row: Row) =>
+  row.session !== null && saveStateOf(row.session) === 'held-back' && savedDraft(row) === null;
+
+/** The draft is offered for a Snapshot: it has no open conflict, and something of it is saved. */
+const offered = (row: Row) => row.conflict === null && !nothingSaved(row);
 
 export function DraftsPanel({
   workspaceId,
@@ -149,7 +164,7 @@ export function DraftsPanel({
   const [name, setName] = useState('');
   const [nameMissing, setNameMissing] = useState(false);
   const selected = rows
-    .filter((row) => row.conflict === null && !left.has(row.itemId))
+    .filter((row) => offered(row) && !left.has(row.itemId))
     .map((row) => row.itemId);
   // Which request it is, and so its key, is `takeSnapshot`'s to say: here is only what was asked.
   const snapshot = useMutation({
@@ -216,7 +231,7 @@ export function DraftsPanel({
               head={head}
               row={row}
               selectable={canWrite}
-              selected={row.conflict === null && !left.has(row.itemId)}
+              selected={offered(row) && !left.has(row.itemId)}
               onSelect={(include) =>
                 setLeft((current) => {
                   const next = new Set(current);
@@ -332,7 +347,19 @@ function Standing({ row }: { row: Row }) {
   if (state === 'saving') return <>saving…</>;
   if (state === 'unsaved') return <>unsaved changes</>;
   if (state === 'failed' || state === 'too-long') return <>not saved</>;
-  const saved = row.session?.confirmed?.draft ?? row.draft;
+  const saved = savedDraft(row);
+  if (state === 'held-back') {
+    // A Snapshot takes the saved draft, and the held-back input is not in it: said before it is
+    // taken, where the draft is ticked.
+    return saved === null ? (
+      <>unsaved: what you changed in its properties is held back, so there is nothing to snapshot</>
+    ) : (
+      <>
+        saved <Instant value={saved.saved_at} />; unsaved: what you changed in its properties is
+        held back, and a Snapshot will not have it
+      </>
+    );
+  }
   if (saved === null) return <>not saved</>;
   return (
     <>
@@ -366,17 +393,17 @@ function DraftRow({
   const item = useQuery(itemOptions(workspaceId, row.itemId, head));
   const summary = item.data?.summary;
   const name = summary ? summary.title || summary.path : `Item ${row.itemId.slice(0, 8)}`;
-  const conflicting = row.conflict !== null;
   const [, rowRef] = useWatchedPart<HTMLLIElement>(held);
   return (
     <li ref={rowRef} data-row={index}>
       {selectable && (
-        // aria-disabled rather than disabled: a conflict can arrive while the box has focus. A
-        // conflicting draft's box shows unticked whatever is pressed, until it is resolved.
+        // aria-disabled rather than disabled: a conflict can arrive while the box has focus. The
+        // box of a draft that is not offered (a conflict, or nothing of it saved) shows unticked
+        // whatever is pressed, until that is over.
         <input
           type="checkbox"
           checked={selected}
-          aria-disabled={conflicting}
+          aria-disabled={!offered(row)}
           aria-label={`Include ${name} in the Snapshot`}
           onChange={(event) => onSelect(event.target.checked)}
         />

@@ -92,6 +92,7 @@ const DRAFT_STANDS = {
   saved: 'You have a draft of this item.',
   failed: 'You have changes to this item that are not saved.',
   'too-long': 'You have changes to this item that are not saved.',
+  'held-back': 'You changed this item’s properties, and that is held back and not saved.',
 } as const;
 
 const ROLE = { note: 'Note', source: 'Source', view: 'View' } as const;
