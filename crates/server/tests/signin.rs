@@ -338,6 +338,41 @@ async fn a_callback_with_another_sign_ins_cookie_or_another_state_reaches_no_pro
 }
 
 #[tokio::test]
+async fn a_state_that_differs_in_case_or_is_a_prefix_or_an_extension_reaches_no_provider()
+-> TestResult {
+    let hosted = Hosted::new()?;
+    let upper = STATE.to_ascii_uppercase();
+    let one_letter_raised = format!("S{}", STATE.chars().skip(1).collect::<String>());
+    let prefix: String = STATE.chars().take(16).collect();
+    let first: String = STATE.chars().take(1).collect();
+    let extension = format!("{STATE}0");
+    // The browser's own cookie, and a `state` that is nearly its state.
+    for state in [&upper, &one_letter_raised, &prefix, &first, &extension] {
+        assert_ne!(state, STATE);
+        let response = hosted
+            .callback(state, CODE, Some(&pending(STATE, VERIFIER)))
+            .await?;
+        assert_refused(&hosted, &response).await?;
+        assert_eq!(hosted.exchanges(), 0, "state {state}");
+    }
+    // The same the other way round: the cookie's state is the near one.
+    for state in [&upper, &prefix, &extension] {
+        let response = hosted
+            .callback(STATE, CODE, Some(&pending(state, VERIFIER)))
+            .await?;
+        assert_refused(&hosted, &response).await?;
+        assert_eq!(hosted.exchanges(), 0, "cookie state {state}");
+    }
+    // The state itself, whole, completes: the refusals above are the comparison's alone.
+    let response = hosted
+        .callback(STATE, CODE, Some(&pending(STATE, VERIFIER)))
+        .await?;
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(hosted.exchanges(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_malformed_or_oversized_sign_in_cookie_reaches_no_provider() -> TestResult {
     let hosted = Hosted::new()?;
     let long_verifier = "v".repeat(129);
