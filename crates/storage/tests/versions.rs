@@ -11,15 +11,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use okf_jawn_contract::access::AccessRoute;
+use okf_jawn_contract::common::Warning;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::identity::{ItemId, MutationId, Revision, TenantId, WorkspacePath};
 use okf_jawn_contract::item::{ItemKind, ItemStatus};
 use okf_jawn_core::drafts::{DraftStore, DraftWrite};
 use okf_jawn_core::mutations::{BeginOutcome, MutationKey, MutationStore};
 use okf_jawn_core::storage::{
-    BlobStore, CandidateChanges, CandidateCheck, CommitChanges, LogQuery, NewWorkspace, Page,
-    Promotion, Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
-    WorkspaceCatalog, WorkspaceUpdate,
+    BlobStore, CandidateChanges, CandidateCheck, CommitChanges, Committed, LogQuery, NewWorkspace,
+    Page, Promotion, Provenance, REPLAY_WARNINGS_UNAVAILABLE, StorageScope, TreeEdit, VersionStore,
+    WorkspaceArchive, WorkspaceCatalog, WorkspaceUpdate,
 };
 use okf_jawn_storage::Storage;
 use serde_json::json;
@@ -57,6 +58,19 @@ struct NamingStagedFile;
 struct Interloper {
     repository: std::path::PathBuf,
     moved_to: std::sync::Mutex<Option<git2::Oid>>,
+}
+
+/// A check that accepts every candidate with the warnings it was made with, and counts its runs.
+struct Warns {
+    warnings: Vec<Warning>,
+    runs: AtomicUsize,
+}
+
+/// A check that moves the head as `Interloper` does and then accepts with its warnings: the
+/// staged commit passes its check and cannot land.
+struct WarnsAsTheHeadMoves {
+    interloper: Interloper,
+    warnings: Vec<Warning>,
 }
 
 /// The closing `---` of a stored file's frontmatter, followed by `\n`.
@@ -107,6 +121,29 @@ impl CandidateCheck for Interloper {
             *slot = Some(moved);
         }
         Ok(Vec::new())
+    }
+}
+
+impl Warns {
+    fn of(warnings: Vec<Warning>) -> Self {
+        Self {
+            warnings,
+            runs: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl CandidateCheck for Warns {
+    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(self.warnings.clone())
+    }
+}
+
+impl CandidateCheck for WarnsAsTheHeadMoves {
+    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
+        self.interloper.check(root)?;
+        Ok(self.warnings.clone())
     }
 }
 
@@ -323,7 +360,8 @@ async fn mutation_crash_reconcile_retry_returns_the_first_commit_and_writes_no_s
     );
     let found = versions
         .find_commit(&scope, lease.mutation_id, Some(&initial))
-        .await?;
+        .await?
+        .map(|found| found.revision);
     assert_eq!(found, Some(first.revision));
     Ok(())
 }
@@ -1011,11 +1049,22 @@ async fn a_candidate_is_retained_off_the_head_and_promoted_exactly() -> TestResu
         .promote_candidate(&scope, promotion.clone())
         .await?;
     assert!(!accepted.replayed);
+    assert!(accepted.warnings.is_empty(), "no check runs at a promotion");
     let replay = versions
         .promote_candidate(&scope, promotion.clone())
         .await?;
     assert!(replay.replayed);
     assert_eq!(replay.revision, accepted.revision);
+    // R-I10: a replayed promotion answers what its first call did, no warning, and not the
+    // warning that none were kept; so does the promotion found by its mutation.
+    assert!(replay.warnings.is_empty(), "{:?}", replay.warnings);
+    let by_mutation = versions.find_commit(&scope, uuid!(52)?, None).await?;
+    let by_mutation = some(by_mutation, "the promotion by its mutation")?;
+    assert!(
+        by_mutation.warnings.is_empty(),
+        "{:?}",
+        by_mutation.warnings
+    );
     let shown = versions
         .show(&scope, &accepted.revision, uuid!(10)?)
         .await?;
@@ -1137,7 +1186,8 @@ async fn a_quoted_trailer_line_in_a_message_body_replays_nothing() -> TestResult
     assert_eq!(
         versions
             .find_commit(&scope, uuid!(31)?, Some(&initial))
-            .await?,
+            .await?
+            .map(|found| found.revision),
         None,
         "a quoted line is not the trailer of mutation 31"
     );
@@ -1159,7 +1209,8 @@ async fn a_quoted_trailer_line_in_a_message_body_replays_nothing() -> TestResult
     assert_eq!(
         versions
             .find_commit(&scope, uuid!(30)?, Some(&initial))
-            .await?,
+            .await?
+            .map(|found| found.revision),
         Some(quoting.clone()),
         "the real trailer is still found"
     );
@@ -1540,22 +1591,23 @@ async fn find_commit_with_no_base_searches_the_accepted_line_back_from_the_head(
     assert_eq!(
         versions
             .find_commit(&scope, uuid!(30)?, Some(&base))
-            .await?,
+            .await?
+            .map(|found| found.revision),
         None,
         "searching after a later base cannot see it"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(30)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(30)?, None).await?),
         Some(first),
         "with no base, a commit older than the draft's base is found"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(32)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(32)?, None).await?),
         Some(head),
         "the head itself is examined"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(33)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(33)?, None).await?),
         None,
         "a mutation no commit carries"
     );
@@ -1583,7 +1635,7 @@ async fn find_commit_with_no_base_never_reads_a_proposal_candidate() -> TestResu
         )
         .await?;
     assert_eq!(
-        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(51)?, None).await?),
         None,
         "the candidate carries the trailer but is not on the accepted line"
     );
@@ -1601,12 +1653,12 @@ async fn find_commit_with_no_base_never_reads_a_proposal_candidate() -> TestResu
         )
         .await?;
     assert_eq!(
-        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(51)?, None).await?),
         None,
         "promotion writes a new commit; the candidate's own stays off the line"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(52)?, None).await?),
         Some(accepted.revision)
     );
     Ok(())
@@ -1632,25 +1684,25 @@ async fn find_commit_with_no_base_finds_a_commit_of_any_age_back_to_the_root() -
         .await?
         .revision;
     assert_eq!(
-        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(51)?, None).await?),
         Some(head)
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(52)?, None).await?),
         Some(recent)
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(53)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(53)?, None).await?),
         Some(expired),
         "eight days old is found: nothing bounds the walk by time"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(50)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(50)?, None).await?),
         Some(ancient),
         "four hundred days old is found"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(1)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(1)?, None).await?),
         Some(initial),
         "the walk reaches the root: the workspace's creation commit"
     );
@@ -1701,16 +1753,16 @@ async fn find_commit_with_no_base_never_follows_a_merge_into_a_candidate() -> Te
         &[&first, &second],
     )?;
     assert_eq!(
-        versions.find_commit(&scope, uuid!(51)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(51)?, None).await?),
         None,
         "the first-parent walk never reaches the candidate"
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(52)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(52)?, None).await?),
         Some(Revision::try_from(merge.to_string())?)
     );
     assert_eq!(
-        versions.find_commit(&scope, uuid!(30)?, None).await?,
+        found(versions.find_commit(&scope, uuid!(30)?, None).await?),
         Some(head)
     );
     Ok(())
@@ -2093,6 +2145,302 @@ async fn body_start_of_a_stored_file_with_an_empty_body_is_the_line_after_its_fr
             .await,
     )?;
     assert_eq!(error.code, ErrorCode::InvalidInput, "{}", error.message);
+    Ok(())
+}
+
+/// The revision of the commit `find_commit` answered, when it found one.
+fn found(answer: Option<Committed>) -> Option<Revision> {
+    answer.map(|found| found.revision)
+}
+
+/// A warning as a check would give it, about the file at `at`.
+fn finding(code: &str, at: &str) -> Warning {
+    Warning {
+        code: code.to_owned(),
+        message: format!("{at} could say more"),
+        location: Some(at.to_owned()),
+    }
+}
+
+/// `warnings` as the wire carries them: `Warning` has no equality.
+fn wire(warnings: &[Warning]) -> Fallible<serde_json::Value> {
+    Ok(serde_json::to_value(warnings)?)
+}
+
+/// The warnings in the row storage keeps for `mutation`'s commit in `scope`, when it keeps one.
+fn kept_row(
+    storage: &Storage,
+    scope: &StorageScope,
+    mutation: u32,
+) -> Fallible<Option<serde_json::Value>> {
+    let connection = rusqlite::Connection::open(storage.data().records_path())?;
+    let mut statement = connection.prepare(
+        "SELECT warnings FROM commit_warnings
+         WHERE tenant_id = ?1 AND workspace_id = ?2 AND mutation_id = ?3",
+    )?;
+    let mut rows = statement.query_map(
+        [
+            scope.tenant_id.as_str().to_owned(),
+            scope.workspace_id.0.to_string(),
+            uuid_text(mutation),
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    let text = rows.next().transpose()?;
+    Ok(text.map(|text| serde_json::from_str(&text)).transpose()?)
+}
+
+/// A second workspace of `scope`'s tenant, created under mutation 2, and its head.
+async fn second_workspace(
+    storage: &Storage,
+    scope: &StorageScope,
+) -> Fallible<(StorageScope, Revision)> {
+    let created = storage
+        .catalog()
+        .create(
+            &scope.tenant_id,
+            uuid!(2)?,
+            NewWorkspace {
+                name: "Other".to_owned(),
+                description: String::new(),
+                creator: person("ana"),
+            },
+        )
+        .await?;
+    Ok((
+        StorageScope {
+            tenant_id: scope.tenant_id.clone(),
+            workspace_id: created.id,
+        },
+        created.head,
+    ))
+}
+
+/// R-I10: a replay answers the warnings the first attempt's check gave, whichever call replays
+/// it, and runs no check; and a commit whose check warned of nothing replays with no warning,
+/// not with the unavailable one.
+#[tokio::test]
+async fn a_replayed_commit_answers_the_warnings_its_first_attempt_was_given() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let given = vec![finding("lint_a", "a.md"), finding("lint_b", "a.md")];
+    let edits = || -> Fallible<_> { Ok(vec![note(uuid!(10)?, "a.md", "A")?]) };
+    let first = versions
+        .commit(
+            &scope,
+            changes(20, &initial, edits()?)?,
+            Arc::new(Warns::of(given.clone())),
+        )
+        .await?;
+    assert!(!first.replayed);
+    assert_eq!(wire(&first.warnings)?, wire(&given)?);
+    // The retry's own check would warn of something else, and never runs.
+    let retry = Arc::new(Warns::of(vec![finding("other", "a.md")]));
+    let again = versions
+        .commit(&scope, changes(20, &initial, edits()?)?, retry.clone())
+        .await?;
+    assert!(again.replayed);
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(
+        retry.runs.load(Ordering::SeqCst),
+        0,
+        "a replay runs no check"
+    );
+    assert_eq!(wire(&again.warnings)?, wire(&given)?);
+    for since in [Some(&initial), None] {
+        let answer = versions.find_commit(&scope, uuid!(20)?, since).await?;
+        let answer = some(answer, "the commit by its mutation")?;
+        assert!(answer.replayed, "a found commit is answered as a replay");
+        assert_eq!(answer.revision, first.revision);
+        assert_eq!(wire(&answer.warnings)?, wire(&given)?);
+    }
+    // No warning is an answer too: it replays as no warning.
+    let quiet =
+        || -> Fallible<_> { changes(21, &first.revision, vec![note(uuid!(11)?, "b.md", "B")?]) };
+    let silent = versions
+        .commit(&scope, quiet()?, Arc::new(Counting::default()))
+        .await?;
+    assert!(silent.warnings.is_empty());
+    let silent_again = versions
+        .commit(&scope, quiet()?, Arc::new(Counting::default()))
+        .await?;
+    assert!(silent_again.replayed);
+    assert_eq!(wire(&silent_again.warnings)?, wire(&[])?);
+    Ok(())
+}
+
+/// R-I10: the warnings are kept by workspace as well as by mutation. Two workspaces each hold a
+/// commit under the same mutation identity, and each replays with its own.
+#[tokio::test]
+async fn kept_warnings_belong_to_the_workspace_of_their_commit() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let (other, other_head) = second_workspace(&storage, &scope).await?;
+    let versions = storage.versions();
+    let ours = vec![finding("lint_a", "a.md")];
+    let theirs = vec![finding("lint_c", "a.md")];
+    for (workspace, head, given) in [(&scope, &initial, &ours), (&other, &other_head, &theirs)] {
+        versions
+            .commit(
+                workspace,
+                changes(20, head, vec![note(uuid!(10)?, "a.md", "A")?])?,
+                Arc::new(Warns::of(given.clone())),
+            )
+            .await?;
+    }
+    for (workspace, expected) in [(&scope, &ours), (&other, &theirs)] {
+        let answer = versions.find_commit(workspace, uuid!(20)?, None).await?;
+        let answer = some(answer, "the commit of each workspace")?;
+        assert_eq!(wire(&answer.warnings)?, wire(expected)?);
+    }
+    Ok(())
+}
+
+/// R-I10, a stop after the warnings were kept and before the commit landed: the row stands
+/// without a commit, and the next attempt replaces it and commits. The check moves the head as a
+/// concurrent writer would, so the staged commit is checked, its warnings are kept, and its
+/// landing is refused.
+#[tokio::test]
+async fn warnings_kept_for_a_commit_that_did_not_land_are_replaced_by_the_next_attempt()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let versions = storage.versions();
+    let stale = vec![finding("stale", "a.md")];
+    let stranding = Arc::new(WarnsAsTheHeadMoves {
+        interloper: Interloper {
+            repository: repository_path(directory.path(), &scope),
+            moved_to: std::sync::Mutex::new(None),
+        },
+        warnings: stale.clone(),
+    });
+    let edits = || -> Fallible<_> { Ok(vec![note(uuid!(10)?, "a.md", "A")?]) };
+    let refused = err_of(
+        versions
+            .commit(&scope, changes(20, &initial, edits()?)?, stranding)
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict, "{}", refused.message);
+    let moved = versions.head(&scope).await?;
+    assert_ne!(moved, initial, "the head moved under the commit");
+    // Kept before the landing was tried: the row is there, and no commit carries the mutation.
+    assert_eq!(
+        kept_row(&storage, &scope, 20)?,
+        Some(wire(&stale)?),
+        "the warnings were kept before the commit could land"
+    );
+    assert_eq!(
+        found(versions.find_commit(&scope, uuid!(20)?, None).await?),
+        None,
+        "no commit landed"
+    );
+    // The next attempt checks again, on the head as it is now, and its warnings replace the row.
+    let fresh = vec![finding("fresh", "a.md")];
+    let landed = versions
+        .commit(
+            &scope,
+            changes(20, &moved, edits()?)?,
+            Arc::new(Warns::of(fresh.clone())),
+        )
+        .await?;
+    assert!(!landed.replayed);
+    assert_eq!(wire(&landed.warnings)?, wire(&fresh)?);
+    assert_eq!(kept_row(&storage, &scope, 20)?, Some(wire(&fresh)?));
+    let again = versions
+        .commit(
+            &scope,
+            changes(20, &moved, edits()?)?,
+            Arc::new(Counting::default()),
+        )
+        .await?;
+    assert!(again.replayed);
+    assert_eq!(again.revision, landed.revision);
+    assert_eq!(wire(&again.warnings)?, wire(&fresh)?);
+    Ok(())
+}
+
+/// Assert that `replay` is a replay answered with the one warning that the commit's warnings
+/// are not available, whose message holds `why`.
+fn assert_unavailable(replay: &Committed, why: &str) -> TestResult {
+    assert!(replay.replayed);
+    let [only] = replay.warnings.as_slice() else {
+        return Err(format!("not one warning: {:?}", replay.warnings).into());
+    };
+    assert_eq!(only.code, REPLAY_WARNINGS_UNAVAILABLE);
+    assert_eq!(only.code, "replay_warnings_unavailable");
+    assert_eq!(only.location, None);
+    assert!(only.message.contains(why), "{}", only.message);
+    Ok(())
+}
+
+/// R-I10, a commit written before storage kept warnings: the data directory is put back as
+/// records schema 2 left it and opened again, which migrates it. The commit is still there and
+/// has no row, so a replay of it, by `commit` or by `find_commit`, answers the one warning
+/// `replay_warnings_unavailable` and succeeds. So does a commit no check ran for (the
+/// workspace's first), and a row that does not read as warnings.
+#[tokio::test]
+async fn a_replay_of_a_commit_without_kept_warnings_answers_the_one_unavailable_warning()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let (storage, scope, initial) = workspace(directory.path()).await?;
+    let edits = || -> Fallible<_> { Ok(vec![note(uuid!(10)?, "a.md", "A")?]) };
+    let first = storage
+        .versions()
+        .commit(
+            &scope,
+            changes(20, &initial, edits()?)?,
+            Arc::new(Warns::of(vec![finding("lint_a", "a.md")])),
+        )
+        .await?;
+    let records = storage.data().records_path();
+    drop(storage);
+    rusqlite::Connection::open(&records)?
+        .execute_batch("DROP TABLE commit_warnings; PRAGMA user_version = 2;")?;
+    let storage = Storage::open(directory.path())?;
+    let versions = storage.versions();
+    assert_eq!(
+        kept_row(&storage, &scope, 20)?,
+        None,
+        "migrated, and no row"
+    );
+    let retry = Arc::new(Counting::default());
+    let again = versions
+        .commit(&scope, changes(20, &initial, edits()?)?, retry.clone())
+        .await?;
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(
+        retry.runs.load(Ordering::SeqCst),
+        0,
+        "a replay runs no check"
+    );
+    assert_unavailable(&again, "kept none")?;
+    let answer = versions.find_commit(&scope, uuid!(20)?, None).await?;
+    assert_unavailable(&some(answer, "the commit")?, "kept none")?;
+    // The workspace's first commit (its creation, mutation 1): no check ever ran for it.
+    let created = versions.find_commit(&scope, uuid!(1)?, None).await?;
+    let created = some(created, "the creation commit")?;
+    assert_eq!(created.revision, initial);
+    assert_unavailable(&created, "kept none")?;
+    // A row that is not a list of warnings is no reason to fail a commit that landed.
+    rusqlite::Connection::open(&records)?.execute(
+        "INSERT INTO commit_warnings (tenant_id, workspace_id, mutation_id, warnings)
+         VALUES (?1, ?2, ?3, '{\"not\": \"a list\"}')",
+        [
+            scope.tenant_id.as_str().to_owned(),
+            scope.workspace_id.0.to_string(),
+            uuid_text(20),
+        ],
+    )?;
+    let unread = versions
+        .commit(
+            &scope,
+            changes(20, &initial, edits()?)?,
+            Arc::new(Counting::default()),
+        )
+        .await?;
+    assert_eq!(unread.revision, first.revision);
+    assert_unavailable(&unread, "could not be read")?;
     Ok(())
 }
 

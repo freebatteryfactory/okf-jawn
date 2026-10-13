@@ -22,8 +22,9 @@
 //! it writes, an import commit asks `VersionStore::find_commit` whether an earlier attempt
 //! already wrote it after the job's base revision; if so it is replayed and nothing is written
 //! again, whatever order the store searches in. A replayed commit keeps the warnings its check
-//! returned: storage gives none back on a replay, so the same check runs again over the
-//! replayed commit's tree, and the completion does not depend on where an attempt died.
+//! returned: the store kept them when the commit was written and gives them back with the
+//! commit it finds (R-I10), so the completion does not depend on where an attempt died, and a
+//! replay runs no check.
 //!
 //! An import does not conflict with unrelated edits (SPEC: "Create, move, delete, import ...
 //! remain immediate commits"; integration-owner ruling R-I8). Each commit is written on the
@@ -184,12 +185,6 @@ pub const CARD_NOT_WRITTEN: &str = "import_card_not_written";
 /// How many entries one folder listing asks for.
 const LIST_PAGE: u16 = 500;
 
-/// The file name of a folder's maintained index, a Markdown file of the bundle.
-const MAINTAINED_INDEX: &str = "index.md";
-
-/// The workspace's change log at the root, a Markdown file of the bundle.
-const CHANGE_LOG: &str = "log.md";
-
 /// How many times one import commit reads the head again after it moved under the write,
 /// before the attempt gives up as retryable.
 const HEAD_RACES: u32 = 8;
@@ -251,7 +246,7 @@ pub(crate) async fn import(
         // A card an earlier attempt already committed is not converted again: the completion
         // takes its commit and the outputs its committed extraction references.
         let item = Some(card.item_id);
-        let replay = replayed(ports, attempt, scope, (base, ordinal), item, &check);
+        let replay = replayed(ports, attempt, scope, (base, ordinal), item);
         if let Some(committed) = replay.await? {
             let resumed = (card.item_id, committed, Vec::new());
             take_committed(ports, attempt, scope, resumed, &mut done).await?;
@@ -490,15 +485,8 @@ pub(crate) async fn redigest(
         ));
     }
     // A redigest an earlier attempt already committed is not converted again.
-    if let Some(committed) = replayed(
-        ports,
-        attempt,
-        scope,
-        (base_revision, 0),
-        Some(item_id),
-        &ports.check,
-    )
-    .await?
+    if let Some(committed) =
+        replayed(ports, attempt, scope, (base_revision, 0), Some(item_id)).await?
     {
         return Ok(Done {
             outputs: committed_outputs(ports, attempt, scope, &committed.revision, item_id).await?,
@@ -864,7 +852,7 @@ async fn commit(
 ) -> Result<Landed, ApiError> {
     let claimed = attempt.claimed;
     let item = written_item(&writes);
-    if let Some(committed) = replayed(ports, attempt, scope, (base, ordinal), item, &check).await? {
+    if let Some(committed) = replayed(ports, attempt, scope, (base, ordinal), item).await? {
         return Ok(Landed::Committed(committed));
     }
     for _race in 0..HEAD_RACES {
@@ -917,126 +905,28 @@ async fn commit(
 }
 
 /// The `ordinal`-th commit of the job when an earlier attempt already wrote it after `base`,
-/// with the warnings its check returned then. Storage returns no warnings on a replay, so the
-/// same check is run again over the replayed commit's tree (`checked_again`): the completion's
-/// warnings do not depend on where an attempt died. A replayed commit is indexed and announced
-/// again, naming `item`, which has no second effect.
+/// answered as the store answers a replay: with the warnings it kept when that attempt committed
+/// (`VersionStore::find_commit`), so the completion's warnings do not depend on where an attempt
+/// died. No check runs here. A replayed commit is indexed and announced again, naming `item`,
+/// which has no second effect.
 async fn replayed(
     ports: &HandlerPorts,
     attempt: &Attempt<'_>,
     scope: &StorageScope,
     (base, ordinal): (&Revision, u32),
     item: Option<ItemId>,
-    check: &Arc<dyn CandidateCheck>,
 ) -> Result<Option<Committed>, ApiError> {
     let claimed = attempt.claimed;
     let mutation_id = derive_commit_mutation_id(claimed.mutation_id, ordinal);
-    let Some(revision) = ports
+    let Some(found) = ports
         .versions
         .find_commit(scope, mutation_id, Some(base))
         .await?
     else {
         return Ok(None);
     };
-    announce_commit(ports, claimed, scope, &revision, mutation_id, item).await?;
-    let again = checked_again(ports, scope, &revision, Arc::clone(check));
-    let warnings = renewed(ports, attempt, again).await?;
-    Ok(Some(Committed {
-        revision,
-        replayed: true,
-        warnings,
-    }))
-}
-
-/// Run `check` over the tree of `revision`, materialized from the store in a temporary
-/// directory: every item file, each folder's maintained `index.md` and the root `log.md`,
-/// which are the Markdown files of the bundle the check reads (storage's side records under
-/// `.okf/` are not Markdown and no OKF check reads them). This is the candidate tree the
-/// check saw when storage wrote that commit. It reads the whole tree, so its caller runs it
-/// under the heartbeat.
-async fn checked_again(
-    ports: &HandlerPorts,
-    scope: &StorageScope,
-    revision: &Revision,
-    check: Arc<dyn CandidateCheck>,
-) -> Result<Vec<Warning>, ApiError> {
-    let staging = tempfile::tempdir()
-        .map_err(|error| fault(&format!("a staging directory was refused: {error}")))?;
-    let mut folders: Vec<Option<WorkspacePath>> = vec![None];
-    while let Some(folder) = folders.pop() {
-        let mut cursor = None;
-        loop {
-            let listing = ports
-                .versions
-                .list(
-                    scope,
-                    revision,
-                    folder.as_ref(),
-                    Page {
-                        cursor: cursor.take(),
-                        limit: LIST_PAGE,
-                    },
-                )
-                .await?;
-            for item in &listing.items {
-                let bytes = ports
-                    .versions
-                    .read_file(scope, revision, &item.path)
-                    .await?;
-                stage(staging.path(), &item.path, &bytes)?;
-            }
-            folders.extend(listing.folders.into_iter().map(Some));
-            match listing.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
-        let index = match &folder {
-            Some(folder) => format!("{}/{MAINTAINED_INDEX}", folder.as_str()),
-            None => MAINTAINED_INDEX.to_owned(),
-        };
-        stage_if_present(ports, scope, revision, staging.path(), index).await?;
-    }
-    stage_if_present(
-        ports,
-        scope,
-        revision,
-        staging.path(),
-        CHANGE_LOG.to_owned(),
-    )
-    .await?;
-    tokio::task::spawn_blocking(move || check.check(staging.path()))
-        .await
-        .map_err(|error| fault(&format!("the replayed commit's check stopped: {error}")))?
-}
-
-/// Stage the versioned file at `path` of `revision`, when the tree holds one.
-async fn stage_if_present(
-    ports: &HandlerPorts,
-    scope: &StorageScope,
-    revision: &Revision,
-    root: &Path,
-    path: String,
-) -> Result<(), ApiError> {
-    let path = WorkspacePath::try_from(path)
-        .map_err(|error| fault(&format!("a maintained file has no workspace path: {error}")))?;
-    match ports.versions.read_file(scope, revision, &path).await {
-        Ok(bytes) => stage(root, &path, &bytes),
-        Err(error) if error.code == ErrorCode::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-/// Write one file of a staged tree; small files, written in place (the workspace tokio has no
-/// `fs` feature).
-fn stage(root: &Path, path: &WorkspacePath, bytes: &[u8]) -> Result<(), ApiError> {
-    let file = root.join(path.as_str());
-    let unwritable =
-        |error: std::io::Error| fault(&format!("{} could not be staged: {error}", path.as_str()));
-    if let Some(folder) = file.parent() {
-        std::fs::create_dir_all(folder).map_err(unwritable)?;
-    }
-    std::fs::write(&file, bytes).map_err(unwritable)
+    announce_commit(ports, claimed, scope, &found.revision, mutation_id, item).await?;
+    Ok(Some(found))
 }
 
 /// `card` written onto the head's version of its item, or why it must not be written: the item

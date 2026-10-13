@@ -35,6 +35,7 @@ use okf_jawn_core::storage::{
     Backups, BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges,
     Committed, DiffQuery, FolderListing, LocalSource, LogQuery, ObjectInfo, ObjectRead, Page,
     Promotion, Purger, SourceCard, StorageScope, TreeEdit, VersionStore,
+    replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 
@@ -48,7 +49,10 @@ use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 /// head is refused with `Conflict`, as storage refuses a path collision. A commit that is
 /// written first runs the caller's check once over a staged directory holding every item of
 /// the candidate tree (the items at the expected head with the edits applied), each rendered
-/// as `read_file` returns it; its error refuses the commit and its warnings are returned.
+/// as a Markdown file of its type, title and body; its error refuses the commit and its warnings are returned, and
+/// kept: a replay, by `commit` or by `find_commit`, answers the warnings kept for that commit,
+/// or the one `replay_warnings_unavailable` warning for a commit none were kept for (a
+/// restore's, someone else's, or any commit once a test called `forget_warnings`).
 ///
 /// Someone else's edit is modelled as a foreign commit (`edit_elsewhere`), which may take a
 /// path, or carry tree edits (`edit_elsewhere_with`: an edit, move or deletion of an item);
@@ -56,8 +60,8 @@ use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 /// another writer racing the handler would.
 ///
 /// `list` lists the items and child folders directly in a folder at a revision, in one page;
-/// `read_file` returns an item's rendered file and answers `NotFound` for any other path (the
-/// fake keeps no folder index or change log).
+/// the handler reads no file of a committed tree (it rebuilt a replayed commit's warnings that
+/// way before the store kept them), so `read_file` answers `NotImplemented`.
 ///
 /// `show` and `item_at_path` read an item at a revision by replaying, over the items present at the base
 /// (`at_base`), the edits of every commit up to that revision: `WriteSourceCard` writes the
@@ -81,8 +85,8 @@ pub struct FakeVersions {
     pub on_commit: Mutex<Option<CommitHook>>,
     /// Items present at the base revision, before any commit.
     pub at_base: Mutex<Vec<SourceCard>>,
-    /// Awaited once, by the next `read_file`, before it answers (a long tree read).
-    pub read_hold: Mutex<Option<Hold>>,
+    /// The warnings the check gave for each commit this store wrote, by its mutation.
+    pub warnings: Mutex<Vec<(MutationId, Vec<Warning>)>>,
 }
 
 /// An `UploadStore` holding uploads and recording which job consumed each.
@@ -254,8 +258,40 @@ impl FakeVersions {
             calls: Mutex::new((0, Vec::new())),
             on_commit: Mutex::new(None),
             at_base: Mutex::new(Vec::new()),
-            read_hold: Mutex::new(None),
+            warnings: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Forget the warnings kept for every commit so far, as a store that wrote those commits
+    /// before it kept warnings would hold them.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn forget_warnings(&self) -> Result<(), ApiError> {
+        self.warnings.lock().map_err(|_| poisoned())?.clear();
+        Ok(())
+    }
+
+    /// A commit that already exists, answered as the port documents a replay: "A replay
+    /// answers the warnings the store kept with that commit, so a retry answers what its first
+    /// attempt did; for a commit the store kept no warnings for it answers the one warning
+    /// `replay_warnings_unavailable` instead."
+    fn replay_of(&self, mutation: MutationId, revision: Revision) -> Result<Committed, ApiError> {
+        let warnings = self
+            .warnings
+            .lock()
+            .map_err(|_| poisoned())?
+            .iter()
+            .find(|(kept, _)| *kept == mutation)
+            .map_or_else(
+                || vec![replay_warnings_unavailable("the fake store kept none")],
+                |(_, warnings)| warnings.clone(),
+            );
+        Ok(Committed {
+            revision,
+            replayed: true,
+            warnings,
+        })
     }
 
     /// Someone else commits now; when `path` is given, an item of theirs takes it.
@@ -527,11 +563,7 @@ impl FakeVersions {
             other => other?,
         };
         if let Some(revision) = replay {
-            return Ok(Committed {
-                revision,
-                replayed: true,
-                warnings: Vec::new(),
-            });
+            return self.replay_of(changes.mutation_id, revision);
         }
         // The candidate tree: the items at the expected head with the edits applied.
         let mut candidate = self.items_at(&changes.expected_head).unwrap_or_default();
@@ -565,6 +597,14 @@ impl FakeVersions {
             }
         }
         let warnings = staged_check(&candidate, check)?;
+        // "The store keeps those warnings, an empty list included, in a record of its own
+        // keyed by the workspace and the mutation, written before the commit lands": so they
+        // are kept here, before the commit is pushed and before the store can die after it.
+        {
+            let mut kept = self.warnings.lock().map_err(|_| poisoned())?;
+            kept.retain(|(mutation, _)| *mutation != changes.mutation_id);
+            kept.push((changes.mutation_id, warnings.clone()));
+        }
         let revision = Revision::try_from(format!("{:040x}", commits.len().saturating_add(1)))
             .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
         commits.push((changes, revision.clone()));
@@ -773,26 +813,10 @@ impl VersionStore for FakeVersions {
     fn read_file<'a>(
         &'a self,
         _scope: &'a StorageScope,
-        revision: &'a Revision,
-        path: &'a WorkspacePath,
+        _revision: &'a Revision,
+        _path: &'a WorkspacePath,
     ) -> PortFuture<'a, Vec<u8>> {
-        // Only item files are kept; a folder index or the change log is absent (`NotFound`).
-        let read = self.items_at(revision).and_then(|items| {
-            items
-                .iter()
-                .find(|card| card.path == *path)
-                .map(|card| rendered(card).into_bytes())
-                .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such file"))
-        });
-        let hold = self
-            .read_hold
-            .lock()
-            .map(|mut hold| hold.take())
-            .map_err(|_| poisoned());
-        Box::pin(async move {
-            held(hold).await?;
-            read
-        })
+        unused("read_file")
     }
     fn rules<'a>(
         &'a self,
@@ -831,8 +855,12 @@ impl VersionStore for FakeVersions {
         _scope: &'a StorageScope,
         mutation_id: MutationId,
         since: Option<&'a Revision>,
-    ) -> PortFuture<'a, Option<Revision>> {
-        let found = self.found(mutation_id, since);
+    ) -> PortFuture<'a, Option<Committed>> {
+        let found = self.found(mutation_id, since).and_then(|found| {
+            found
+                .map(|revision| self.replay_of(mutation_id, revision))
+                .transpose()
+        });
         Box::pin(async move { found })
     }
     fn create_candidate<'a>(

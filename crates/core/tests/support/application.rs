@@ -3,7 +3,9 @@
 //!
 //! Each fake answers what its port documents and nothing more: the version store commits only
 //! on its expected head, replays a repeated mutation, and runs the check it is handed on a
-//! staged directory; the draft store keeps one draft per (item, editor); the record store
+//! staged directory, keeping the warnings that check gave so a replay (by `commit` or by
+//! `find_commit`) answers them, or the one `replay_warnings_unavailable` warning once a test
+//! made it forget them (`forget_warnings`); the draft store keeps one draft per (item, editor); the record store
 //! answers revision maps and derived objects for exactly the (item, revision, digest) recorded.
 //! Content is scripted by the test (`put_document`, `put_listing`). Three edits are applied, in
 //! order, to the items the commit's base holds, so what `show` reads at the revision a commit
@@ -62,7 +64,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use okf_jawn_contract::access::{AccessRoute, Connector, IssuedConnector, Principal};
-use okf_jawn_contract::common::{PageRange, TextRange};
+use okf_jawn_contract::common::{PageRange, TextRange, Warning};
 use okf_jawn_contract::conventions::NamingRules;
 use okf_jawn_contract::error::{ApiError, ErrorCode};
 use okf_jawn_contract::events::{Event, ListEventsResponse, Receipt};
@@ -117,7 +119,7 @@ use okf_jawn_core::storage::{
     BlameQuery, BlobStore, ByteReader, CandidateChanges, CandidateCheck, CommitChanges, Committed,
     DiffQuery, FolderListing, LocalSource, LogQuery, NewWorkspace, ObjectInfo, ObjectRead, Page,
     Promotion, Provenance, StorageScope, TreeEdit, VersionStore, WorkspaceArchive,
-    WorkspaceCatalog, WorkspaceUpdate,
+    WorkspaceCatalog, WorkspaceUpdate, replay_warnings_unavailable,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadRecord, UploadStore};
 use serde_json::Value;
@@ -179,6 +181,8 @@ struct VersionState {
     types: Vec<TypeDefinition>,
     queued: Vec<Revision>,
     commits: Vec<(CommitChanges, Revision)>,
+    /// The warnings the check gave for each commit, by its mutation, kept before it landed.
+    warnings: Vec<(MutationId, Vec<Warning>)>,
     landed: Vec<(Revision, Revision)>,
     landing: Vec<Revision>,
     log_page: Option<usize>,
@@ -373,6 +377,17 @@ impl FakeVersions {
             fail_next_log: Mutex::new(None),
             fail_next_list: Mutex::new(None),
         })
+    }
+
+    /// Forget the warnings kept for every commit so far, as a store that wrote those commits
+    /// before it kept warnings would hold them: a replay of one then answers the one warning
+    /// that they are not available.
+    ///
+    /// # Errors
+    /// Returns an error when the state lock is poisoned.
+    pub fn forget_warnings(&self) -> Built<()> {
+        lock(&self.state)?.warnings.clear();
+        Ok(())
     }
 
     /// The staged tree every commit's check runs on.
@@ -625,6 +640,26 @@ impl FakeVersions {
 }
 
 impl VersionState {
+    /// A commit that already exists, answered as the port documents a replay: "A replay
+    /// answers the warnings the store kept with that commit, so a retry answers what its first
+    /// attempt did; for a commit the store kept no warnings for it answers the one warning
+    /// `replay_warnings_unavailable` instead."
+    fn replay_of(&self, mutation: MutationId, revision: Revision) -> Committed {
+        let warnings = self
+            .warnings
+            .iter()
+            .find(|(kept, _)| *kept == mutation)
+            .map_or_else(
+                || vec![replay_warnings_unavailable("the fake store kept none")],
+                |(_, warnings)| warnings.clone(),
+            );
+        Committed {
+            revision,
+            replayed: true,
+            warnings,
+        }
+    }
+
     /// The commit `mutation` wrote, when it lies after `revision` on the fake's one line of
     /// history: `revision` is the head that commit was written on, or a head before that one.
     fn written_after(&self, mutation: MutationId, revision: &Revision) -> Option<Revision> {
@@ -1227,17 +1262,19 @@ impl VersionStore for FakeVersions {
             }
             if let Some(revision) = state.written_after(changes.mutation_id, &changes.expected_head)
             {
-                return Ok(Committed {
-                    revision,
-                    replayed: true,
-                    warnings: Vec::new(),
-                });
+                return Ok(state.replay_of(changes.mutation_id, revision));
             }
             if state.head.as_ref() != Some(&changes.expected_head) {
                 return Err(ApiError::new(ErrorCode::Conflict, "the head moved"));
             }
             let written = state.applied(&changes)?;
             let warnings = check.check(&self.stage.0)?;
+            // "The store keeps those warnings, an empty list included, in a record of its own
+            // keyed by the workspace and the mutation, written before the commit lands"; a
+            // record an attempt left without a commit is replaced.
+            let mutation_id = changes.mutation_id;
+            state.warnings.retain(|(kept, _)| *kept != mutation_id);
+            state.warnings.push((mutation_id, warnings.clone()));
             if state.queued.is_empty() {
                 return Err(ApiError::new(ErrorCode::Internal, "no revision queued"));
             }
@@ -1268,16 +1305,17 @@ impl VersionStore for FakeVersions {
         _scope: &'a StorageScope,
         mutation_id: MutationId,
         since: Option<&'a Revision>,
-    ) -> PortFuture<'a, Option<Revision>> {
+    ) -> PortFuture<'a, Option<Committed>> {
         Box::pin(async move {
             let state = lock_api(&self.state)?;
-            match since {
+            let found = match since {
                 Some(since) => {
                     state.require_known(since)?;
-                    Ok(state.written_after(mutation_id, since))
+                    state.written_after(mutation_id, since)
                 }
-                None => Ok(state.on_the_line(mutation_id)),
-            }
+                None => state.on_the_line(mutation_id),
+            };
+            Ok(found.map(|revision| state.replay_of(mutation_id, revision)))
         })
     }
     fn create_candidate<'a>(

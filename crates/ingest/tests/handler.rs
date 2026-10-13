@@ -1157,25 +1157,6 @@ mod job_handler {
     }
 
     #[tokio::test]
-    async fn a_replayed_commits_check_that_outlasts_several_lease_intervals_keeps_its_lease()
-    -> TestResult {
-        let (world, id) = resumed_import(175).await?;
-        // The first tree read of the replayed pending commit's check is long.
-        *world.versions.read_hold.lock().map_err(|_| "poisoned")? = Some(lapsing(&world.records));
-        assert!(run(&world, id).await?);
-        assert_completed_under(&world, id, 1)?;
-        assert!(
-            world
-                .versions
-                .read_hold
-                .lock()
-                .map_err(|_| "poisoned")?
-                .is_none()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn a_replayed_cards_outputs_read_that_outlasts_several_lease_intervals_keeps_its_lease()
     -> TestResult {
         let (world, id) = resumed_import(177).await?;
@@ -1701,6 +1682,45 @@ mod job_handler {
         // Died after the pending commit, and after the first card's commit: the same warnings.
         assert_eq!(completed_warnings(Some(1), 132).await?, whole);
         assert_eq!(completed_warnings(Some(2), 134).await?, whole);
+        Ok(())
+    }
+
+    /// R-I10, the commit with no kept warnings: an import resumes over two commits the store
+    /// holds no warnings for (as for commits written before it kept them). It completes, and
+    /// each replayed commit contributes the store's one warning in place of its own.
+    #[tokio::test]
+    async fn a_resumed_import_over_commits_without_kept_warnings_says_so_and_completes()
+    -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let first = upload(&world, 136, "first.pdf", b"%PDF first")?;
+        let second = upload(&world, 137, "second.pdf", b"%PDF second")?;
+        let id = job(
+            &world,
+            136,
+            workspace_scope()?,
+            import_spec(vec![first, second], false)?,
+        )?;
+        world.versions.die_after(2)?;
+        assert!(run(&world, id).await?);
+        let died = world.records.entry(id)?;
+        assert_eq!(died.job.state, JobState::Failed);
+        world.versions.forget_warnings()?;
+        world.records.insert(id, died.scope, died.created)?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        assert_eq!(
+            world.versions.written()?.len(),
+            3,
+            "no commit written twice"
+        );
+        let completion = some(entry.completions.first(), "the completion")?;
+        let unavailable = completion
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == "replay_warnings_unavailable")
+            .count();
+        assert_eq!(unavailable, 2, "{:?}", completion.warnings);
         Ok(())
     }
 

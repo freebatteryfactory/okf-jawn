@@ -160,7 +160,7 @@ impl VersionStore for FakeVersions {
         _scope: &'a StorageScope,
         _mutation_id: MutationId,
         _since: Option<&'a Revision>,
-    ) -> PortFuture<'a, Option<Revision>> {
+    ) -> PortFuture<'a, Option<Committed>> {
         unused()
     }
     fn create_candidate<'a>(

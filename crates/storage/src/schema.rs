@@ -15,6 +15,7 @@ pub const INDEX: Migrations<'static> = Migrations::from_slice(INDEX_STEPS);
 const RECORDS_STEPS: &[M<'static>] = &[
     M::up(RECORDS_V1).foreign_key_check(),
     M::up(RECORDS_V2).foreign_key_check(),
+    M::up(RECORDS_V3).foreign_key_check(),
 ];
 
 const INDEX_STEPS: &[M<'static>] = &[M::up(INDEX_V1)];
@@ -381,6 +382,28 @@ CREATE TABLE pending_puts (
     created_at TEXT NOT NULL
 ) STRICT;
 CREATE INDEX pending_puts_by_object ON pending_puts (tenant_id, workspace_id, digest);
+";
+
+/// Records schema, version 3: the warnings the candidate check gave for each commit, kept so a
+/// replay of the commit answers them (`git::warnings`, `VersionStore::commit`).
+///
+/// One row for each commit `commit` or `promote_candidate` wrote, keyed by the workspace and the
+/// commit's mutation; `warnings` is the JSON list the check returned, `[]` when it returned
+/// none. The row is written before the commit lands, so it can stand without a commit (a crash
+/// in between), and the next attempt replaces it. A warning can quote a path or a title, so the
+/// rows are content: a workspace purge removes them with the workspace's other rows
+/// (`purge::rows`, which finds the table by its two scope columns), from the live database and
+/// from every pre-migration copy. A workspace archive leaves the table empty
+/// (`backup::snapshot::NOT_IN_WORKSPACE_ARCHIVE`): a row answers a retry of this installation's
+/// own write and means nothing elsewhere.
+const RECORDS_V3: &str = r"
+CREATE TABLE commit_warnings (
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    mutation_id TEXT NOT NULL,
+    warnings TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, workspace_id, mutation_id)
+) STRICT;
 ";
 
 /// Index schema, version 1: one copy of each indexed revision's searchable projection.

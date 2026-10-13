@@ -16,9 +16,9 @@
 //! the snapshotted drafts are removed. A Snapshot reads the current head, so its expected head is
 //! not stable across attempts: a resumed attempt first asks the store for the commit its earlier
 //! attempt may have written anywhere on the accepted line (`VersionStore::find_commit` with no
-//! `since`), and completes it instead of committing again, answering the warnings the same
-//! check gives over that commit's tree (`shared::replay_warnings`); a refusal there never fails
-//! the landed write.
+//! `since`), and completes it instead of committing again, answering the warnings the store
+//! kept when that commit was written (or the store's one warning that it kept none), which the
+//! store gives with the commit it finds.
 //!
 //! A draft is removed only when it is still the content that was committed
 //! (`DraftStore::discard` with the expected digest): on a first attempt the digest of the draft
@@ -51,7 +51,6 @@
 //! back as warnings.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use okf_jawn_contract::common::{MutationResult, TextRange};
 use okf_jawn_contract::error::{ApiError, DraftConflictItem, ErrorCode, ErrorDetail};
@@ -68,10 +67,9 @@ use super::ApplicationService;
 use super::drafts::refuse_unsupported_draft;
 use super::shared::{
     Touched, Write, announce, check_named, commit_with_receipt, invalid, mutation_id, next_page,
-    record_receipt, replay_warnings, resolve, resolve_page, store_commit, workspace_scope,
+    record_receipt, resolve, resolve_page, store_commit, workspace_scope,
 };
 use super::sources::{citation, record_of};
-use crate::conformance::EditCheck;
 use crate::context::{Attempt, OperationContext};
 use crate::portable::item_content_digest;
 use crate::storage::{BlameQuery, Committed, DiffQuery, LogQuery, Page, StorageScope, TreeEdit};
@@ -258,25 +256,25 @@ pub(super) async fn commit_items(
     };
     let ports = service.ports();
     if context.attempt == Attempt::Resumed
-        && let Some(revision) = ports.versions.find_commit(&scope, mutation, None).await?
+        && let Some(found) = ports.versions.find_commit(&scope, mutation, None).await?
     {
+        let revision = found.revision;
         announce(service, scope.clone(), mutation, &revision, item).await?;
         // Each draft is removed only if it is still what the found commit holds.
         let mut committed = Vec::with_capacity(request.item_ids.len());
-        let mut touched = Vec::with_capacity(request.item_ids.len());
         for selected in &request.item_ids {
             let document = ports.versions.show(&scope, &revision, *selected).await?;
             committed.push((*selected, item_content_digest(&document)?));
-            // A Snapshot moves nothing, so each item's path here is its path at the base.
-            touched.push(document.summary.path);
         }
-        // The first attempt's warnings went with it: the same check runs again over the
-        // commit's tree (`shared::replay_warnings`); a refusal there never fails the landed
-        // write.
-        let check = Arc::new(EditCheck::new(&touched, None));
-        let warnings = replay_warnings(service, &scope, &revision, check).await;
+        // The warnings are the ones the store kept when the first attempt committed.
         return finish(
-            service, context, &scope, mutation, committed, revision, warnings,
+            service,
+            context,
+            &scope,
+            mutation,
+            committed,
+            revision,
+            found.warnings,
         )
         .await;
     }

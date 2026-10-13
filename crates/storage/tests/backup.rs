@@ -25,7 +25,8 @@ use okf_jawn_core::jobs::{
 };
 use okf_jawn_core::storage::{
     Backups, BlobStore, CandidateChanges, CandidateCheck, CommitChanges, NewWorkspace, ObjectInfo,
-    Provenance, Purger, SourceCard, StorageScope, TreeEdit, VersionStore, WorkspaceCatalog,
+    Provenance, Purger, REPLAY_WARNINGS_UNAVAILABLE, SourceCard, StorageScope, TreeEdit,
+    VersionStore, WorkspaceCatalog,
 };
 use okf_jawn_core::uploads::{NewUpload, UploadStore};
 use okf_jawn_storage::Storage;
@@ -88,6 +89,14 @@ impl CandidateCheck for Accept {
     fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
         Ok(Vec::new())
     }
+}
+
+/// The codes of `warnings`, in order.
+fn codes(warnings: &[Warning]) -> Vec<&str> {
+    warnings
+        .iter()
+        .map(|warning| warning.code.as_str())
+        .collect()
 }
 
 fn uuid_text(n: u32) -> String {
@@ -542,6 +551,19 @@ async fn backup_a_workspace_archive_holds_its_history_drafts_and_objects_only() 
         "no workspace archive record"
     );
     assert_eq!(count(&records, "SELECT count(*) FROM connectors")?, 0);
+    // R-I10: the warnings kept for a commit's replay are this installation's retry records.
+    assert!(
+        count(
+            &fixture.storage.data().records_path(),
+            "SELECT count(*) FROM commit_warnings"
+        )? > 0,
+        "the live records keep a row for the workspace's commit"
+    );
+    assert_eq!(
+        count(&records, "SELECT count(*) FROM commit_warnings")?,
+        0,
+        "an archive carries none of them"
+    );
     let manifest = entry(
         &path,
         "manifest.json",
@@ -2233,15 +2255,31 @@ async fn backup_an_import_leaves_a_commit_carrying_its_mutation() -> TestResult 
         )
         .await?;
     let head = storage.versions().head(&target).await?;
-    let found = storage
-        .versions()
-        .find_commit(&target, uuid!(84)?, None)
-        .await?;
+    let found = some(
+        storage
+            .versions()
+            .find_commit(&target, uuid!(84)?, None)
+            .await?,
+        "the restore's commit",
+    )?;
     assert_eq!(
-        found,
-        Some(head.clone()),
+        found.revision, head,
         "the restore's revision is found by its mutation"
     );
+    // R-I10: no check ran for the restore's commit, and the archive brought no kept warnings.
+    // So the restore's commit, and a commit of the archived history (the fixture's, mutation
+    // 3), answer the one warning that says so, where the source workspace still answers what
+    // it kept: no warning.
+    assert_eq!(codes(&found.warnings), [REPLAY_WARNINGS_UNAVAILABLE]);
+    let versions = storage.versions();
+    let archived = versions.find_commit(&target, uuid!(3)?, None).await?;
+    let archived = some(archived, "the archived commit, restored")?;
+    assert_eq!(codes(&archived.warnings), [REPLAY_WARNINGS_UNAVAILABLE]);
+    let source = versions
+        .find_commit(&fixture.workspace, uuid!(3)?, None)
+        .await?;
+    let source = some(source, "the commit where it was written")?;
+    assert_eq!(codes(&source.warnings), Vec::<&str>::new());
     assert_one_restore_commit(storage, &target, &fixture.head)?;
     let repeated = backups
         .restore_import(&target, uploaded, uuid!(84)?, vec!["ana".to_owned()])
@@ -2542,18 +2580,19 @@ async fn migrations_take_a_pre_migration_backup_set_before_an_upgrade() -> TestR
             &directory.path().join("records.sqlite"),
             "PRAGMA user_version"
         )?,
-        2,
+        3,
         "then the records are upgraded"
     );
     Ok(())
 }
 
-/// Put a records database back as records schema 1 left it: without the tables schema 2 adds,
+/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3 add,
 /// without the ledger's workspace column, and with the events table as it was before event keys.
 fn as_records_schema_1(records: &Path) -> TestResult {
     let connection = rusqlite::Connection::open(records)?;
     connection.execute_batch(
-        "DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
+        "DROP TABLE commit_warnings;
+         DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
          DROP TABLE pending_puts; DROP TABLE replacement_restores;
          DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
          CREATE TABLE unkeyed_events (
@@ -8604,7 +8643,7 @@ async fn rr10_refused_import_leaves_the_backups_working(
     assert_eq!(sets, 1, "the pre-migration backup set was written");
     assert_eq!(
         count(&records, "PRAGMA user_version")?,
-        2,
+        3,
         "then the records are upgraded"
     );
     Ok(())

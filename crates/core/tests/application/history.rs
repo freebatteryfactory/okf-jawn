@@ -1615,6 +1615,12 @@ async fn a_resumed_snapshot_answers_the_warnings_its_first_attempt_produced() ->
             .commit_items(&caller, snapshot(&[NOTE])?)
             .await,
     )?;
+    // The tree a check would read now has its heading: a check run again would find no lint,
+    // so only the warnings the store kept with the found commit can answer.
+    world.versions.stage().write(
+        "notes/plan.md",
+        "---\ntype: Note\n---\n\n# Plan\n\nA heading now.\n",
+    )?;
     caller.attempt = Attempt::Resumed;
     let resumed = world
         .service
@@ -1631,7 +1637,7 @@ async fn a_resumed_snapshot_answers_the_warnings_its_first_attempt_produced() ->
 }
 
 #[tokio::test]
-async fn a_resumed_snapshot_whose_warnings_cannot_be_rebuilt_still_completes() -> TestResult {
+async fn a_resumed_snapshot_the_store_kept_no_warnings_for_still_completes() -> TestResult {
     let world = snapshot_with_lint()?;
     world.search.fail_next();
     let mut caller = alice(OperationName::CommitItems, Some(mutation(1)))?;
@@ -1641,16 +1647,9 @@ async fn a_resumed_snapshot_whose_warnings_cannot_be_rebuilt_still_completes() -
             .commit_items(&caller, snapshot(&[NOTE])?)
             .await,
     )?;
-    // The found commit's file reads back with no type, so the check refuses it on its second
-    // run; the staged tree it passed on its first run is conformant.
-    let typeless = note(
-        NOTE,
-        &revision('b')?,
-        "notes/plan.md",
-        "No heading.\n",
-        json!({}),
-    )?;
-    world.versions.replace_document(&revision('b')?, typeless)?;
+    // The store holds the commit and no warnings for it, as for a commit it wrote before it
+    // kept them.
+    world.versions.forget_warnings()?;
     caller.attempt = Attempt::Resumed;
     let resumed = world
         .service
@@ -1658,15 +1657,12 @@ async fn a_resumed_snapshot_whose_warnings_cannot_be_rebuilt_still_completes() -
         .await?;
     assert_eq!(resumed.revision, revision('b')?);
     assert_eq!(world.versions.commits()?.len(), 1, "no second commit");
+    // The store's one warning, passed on as it is.
     let [only] = resumed.warnings.as_slice() else {
         return Err(format!("not one warning: {:?}", resumed.warnings).into());
     };
     assert_eq!(only.code, "replay_warnings_unavailable");
-    assert!(
-        only.message.contains("could not be rebuilt") && only.message.contains("type"),
-        "says why: {}",
-        only.message
-    );
+    assert_eq!(only.location, None);
     Ok(())
 }
 

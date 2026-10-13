@@ -190,11 +190,8 @@ async fn version_writes(
         .find_commit(scope, mutation_id, Some(&base))
         .await?
     {
-        return Ok(Committed {
-            revision: found,
-            replayed: true,
-            warnings: Vec::new(),
-        });
+        // Found as a replay of it is answered: with the warnings the store kept.
+        return Ok(found);
     }
     let committed = versions.commit(scope, changes, Arc::clone(&check)).await?;
     let candidate = versions

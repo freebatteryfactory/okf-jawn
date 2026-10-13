@@ -6,6 +6,8 @@
 //! path collisions, maintain the folder indexes and the change log, run the caller's
 //! `CandidateCheck` on that directory, write the tree and the commit, and only then move the
 //! reference with a compare-and-set. The staging directory is removed when the call returns.
+//! The check's warnings are kept in the records database just before the reference moves, and a
+//! replay answers them (`warnings`).
 //!
 //! `write_history` writes the accepted line up to a revision as a Git bundle into the blob
 //! store (`export`).
@@ -291,26 +293,31 @@ impl VersionStore for GitVersions {
                 if let Some(found) =
                     find_trailer(&repository, current, expected, changes.mutation_id)?
                 {
-                    return Ok((replayed(found)?, named_by(&repository, found, named)?));
+                    let replay = warnings::replayed(&records, scope, changes.mutation_id, found)?;
+                    return Ok((replay, named_by(&repository, found, named)?));
                 }
                 if current != expected {
                     return Err(moved_head());
                 }
+                let mutation_id = changes.mutation_id;
                 let write = Write {
-                    mutation_id: changes.mutation_id,
+                    mutation_id,
                     base: current,
                     author: changes.author.clone(),
                     committer: changes.author,
                     message: changes.message,
                     edits: changes.edits,
                 };
-                let (commit, warnings) =
+                let (commit, given) =
                     stage_and_commit(repositories, scope, &repository, write, &*check)?;
+                // Kept before the commit lands, so a replay of it answers them; a row a
+                // failed landing leaves is replaced by the next attempt.
+                warnings::keep(&records, scope, mutation_id, &given)?;
                 move_reference(&repository, HEAD_REF, commit, Some(current))?;
                 let committed = Committed {
                     revision: revision_of(commit)?,
                     replayed: false,
-                    warnings,
+                    warnings: given,
                 };
                 Ok((committed, named))
             })
@@ -331,8 +338,9 @@ impl VersionStore for GitVersions {
         scope: &'a StorageScope,
         mutation_id: MutationId,
         since: Option<&'a Revision>,
-    ) -> PortFuture<'a, Option<Revision>> {
+    ) -> PortFuture<'a, Option<Committed>> {
         let since = since.cloned();
+        let records = self.records.clone();
         Box::pin(self.blocking(scope, move |repositories, scope| {
             let repository = repositories.open(scope)?;
             let tip = head(&repository)?;
@@ -343,7 +351,9 @@ impl VersionStore for GitVersions {
             } else {
                 find_on_line(&repository, tip, mutation_id)?
             };
-            found.map(revision_of).transpose()
+            found
+                .map(|found| warnings::replayed(&records, scope, mutation_id, found))
+                .transpose()
         }))
     }
 
@@ -411,7 +421,12 @@ impl VersionStore for GitVersions {
                 // A promotion stores the candidate's tree, whose objects landed with the
                 // candidate.
                 Ok((
-                    promote(&repositories.open_durable(scope)?, &promotion)?,
+                    promote(
+                        &repositories.open_durable(scope)?,
+                        &records,
+                        scope,
+                        &promotion,
+                    )?,
                     Vec::new(),
                 ))
             })
@@ -552,11 +567,16 @@ fn without_staging(mut error: ApiError, staging: &std::path::Path) -> ApiError {
 }
 
 /// Accept a candidate: its exact tree on top of the unchanged head, the approver committing.
-fn promote(repository: &Repository, promotion: &Promotion) -> Result<Committed, ApiError> {
+fn promote(
+    repository: &Repository,
+    records: &Db,
+    scope: &StorageScope,
+    promotion: &Promotion,
+) -> Result<Committed, ApiError> {
     let expected = held_head(repository, &promotion.expected_head)?;
     let current = head(repository)?;
     if let Some(found) = find_trailer(repository, current, expected, promotion.mutation_id)? {
-        return replayed(found);
+        return warnings::replayed(records, scope, promotion.mutation_id, found);
     }
     if current != expected {
         return Err(moved_head());
@@ -593,6 +613,8 @@ fn promote(repository: &Repository, promotion: &Promotion) -> Result<Committed, 
         )
         .map_err(|error| git(&error))?;
     sync_directories(repository, &["objects"])?;
+    // No check ran, so the answer kept for a replay is the empty one this call gives.
+    warnings::keep(records, scope, promotion.mutation_id, &[])?;
     move_reference(repository, HEAD_REF, commit, Some(current))?;
     Ok(Committed {
         revision: revision_of(commit)?,
@@ -623,14 +645,6 @@ fn move_reference(
         } else {
             git(&error)
         }
-    })
-}
-
-fn replayed(found: Oid) -> Result<Committed, ApiError> {
-    Ok(Committed {
-        revision: revision_of(found)?,
-        replayed: true,
-        warnings: Vec::new(),
     })
 }
 
@@ -691,6 +705,7 @@ mod history;
 mod item;
 mod read;
 pub(crate) mod repo;
+mod warnings;
 
 /// Unit tests here, not in `tests/`: they hold a workspace's write lock, which is private.
 /// They return `ApiError` like core's unit tests.

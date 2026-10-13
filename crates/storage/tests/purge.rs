@@ -2,7 +2,9 @@
 //! `storage-purge-workspace` (`cargo test -p okf-jawn-storage --features runtime -- purge`).
 //!
 //! The target workspace's content carries the marker `zanzibar` (in a note's path and body, a
-//! draft, original bytes, a conversion record's asset, retained archives and exports, an
+//! draft, original bytes, a conversion record's asset, retained archives and exports, the
+//! warnings kept for a commit's replay (the fixture's check warns about each staged path that
+//! carries the marker, as a lint finding quotes a path), an
 //! upload's part file); nothing that survives carries it. After the purge no file anywhere
 //! under the data directory may contain the marker, which reaches the SQLite files' free pages
 //! and write-ahead logs, the index, the object store and the pre-migration backups.
@@ -61,7 +63,9 @@ type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 /// A ledger row as the table holds it: state, token, lease expiry, response and finish time.
 type RowState = (String, i64, i64, Option<String>, Option<i64>);
 
-/// Accepts every candidate.
+/// Accepts every candidate, with one warning for each staged file whose path carries the marker,
+/// quoting that path as a lint finding would. Storage keeps a commit's warnings for its replay
+/// (`commit_warnings`), so every commit of the target's marked note leaves the marker there.
 struct Accept;
 
 /// Two workspaces of one tenant: the purge target and a survivor.
@@ -90,9 +94,39 @@ struct Seeded {
 const MARKER: &[u8] = b"zanzibar";
 
 impl CandidateCheck for Accept {
-    fn check(&self, _root: &Path) -> Result<Vec<Warning>, ApiError> {
-        Ok(Vec::new())
+    fn check(&self, root: &Path) -> Result<Vec<Warning>, ApiError> {
+        let mut marked = Vec::new();
+        marked_paths(root, "", &mut marked)
+            .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+        Ok(marked
+            .into_iter()
+            .map(|path| Warning {
+                code: "test_marked_path".to_owned(),
+                message: format!("{path} is named for a trip"),
+                location: Some(path),
+            })
+            .collect())
     }
+}
+
+/// The files under `root`, as `/`-separated paths relative to it, whose path holds the marker.
+fn marked_paths(root: &Path, prefix: &str, found: &mut Vec<String>) -> std::io::Result<()> {
+    let marker = String::from_utf8_lossy(MARKER);
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if entry.file_type()?.is_dir() {
+            marked_paths(&entry.path(), &path, found)?;
+        } else if path.contains(marker.as_ref()) {
+            found.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// A fixed UUID spelling numbered `n`.
@@ -747,6 +781,72 @@ async fn purge_target(fixture: &Fixture) -> Fallible<PurgeReport> {
         .await?)
 }
 
+/// The warnings kept for the commits of `workspace` in the records database at `records`: the
+/// stored text of each row.
+fn kept_warnings(records: &Path, workspace: &StorageScope) -> Fallible<Vec<String>> {
+    let connection = rusqlite::Connection::open(records)?;
+    let mut statement = connection.prepare(
+        "SELECT warnings FROM commit_warnings WHERE tenant_id = ?1 AND workspace_id = ?2
+         ORDER BY mutation_id",
+    )?;
+    let rows = statement
+        .query_map(
+            [
+                workspace.tenant_id.as_str().to_owned(),
+                workspace.workspace_id.0.to_string(),
+            ],
+            |row| row.get(0),
+        )?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(rows)
+}
+
+/// R-I10: the warnings storage keeps for a commit's replay are rows of the workspace, and its
+/// purge removes them from the live records and from a pre-migration copy; the survivor's stay,
+/// and the survivor's commit still replays with its own. The target's row quotes the marked
+/// path, so a table the purge skipped would leave the marker in both files.
+#[tokio::test]
+async fn purge_removes_the_warnings_kept_for_its_workspaces_commits() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let fixture = fixture(directory.path()).await?;
+    let (target, survivor) = (&fixture.target, &fixture.survivor);
+    pre_migration_copy(directory.path(), "records.sqlite", "records-v1-1.sqlite")?;
+    let live = directory.path().join("records.sqlite");
+    let copy = directory
+        .path()
+        .join("backups/pre-migration/records-v1-1.sqlite");
+    let marker = String::from_utf8_lossy(MARKER).into_owned();
+    for records in [&live, &copy] {
+        let kept = kept_warnings(records, target)?;
+        assert!(
+            kept.iter().any(|row| row.contains(&marker)),
+            "the fixture keeps a warning that quotes the marked path: {kept:?}"
+        );
+        assert_eq!(
+            kept_warnings(records, survivor)?,
+            ["[]"],
+            "the survivor's one commit, which warned of nothing"
+        );
+    }
+    purge_target(&fixture).await?;
+    assert_eq!(marked_files(directory.path())?, Vec::<String>::new());
+    for records in [&live, &copy] {
+        assert_eq!(kept_warnings(records, target)?, Vec::<String>::new());
+        assert_eq!(kept_warnings(records, survivor)?, ["[]"]);
+    }
+    // The survivor's commit (mutation 5 of the fixture) still replays, with what was kept.
+    let head = fixture.storage.versions().head(survivor).await?;
+    let replay = fixture
+        .storage
+        .versions()
+        .find_commit(survivor, uuid!(5)?, None)
+        .await?;
+    let replay = some(replay, "the survivor's commit")?;
+    assert_eq!(replay.revision, head);
+    assert!(replay.warnings.is_empty(), "{:?}", replay.warnings);
+    Ok(())
+}
+
 /// Review probe R1: the backup handler failed (or its job was abandoned) after the archive was
 /// written, so only `backup_archives` knows it.
 #[tokio::test]
@@ -926,12 +1026,13 @@ async fn completed_row(
     Ok(())
 }
 
-/// Put a records database back as records schema 1 left it: without the tables schema 2 adds,
+/// Put a records database back as records schema 1 left it: without the tables schemas 2 and 3 add,
 /// without the ledger's workspace column, and with the events table as it was before event keys.
 fn as_records_schema_1(records: &Path) -> TestResult {
     let connection = rusqlite::Connection::open(records)?;
     connection.execute_batch(
-        "DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
+        "DROP TABLE commit_warnings;
+         DROP TABLE purge_progress; DROP TABLE backup_archives; DROP TABLE restores;
          DROP TABLE pending_puts; DROP TABLE replacement_restores;
          DROP INDEX mutations_by_workspace; ALTER TABLE mutations DROP COLUMN workspace_id;
          CREATE TABLE unkeyed_events (

@@ -31,8 +31,8 @@
 //!    rewritten with them scrubbed (`copies`). The pre-migration backups are read again on
 //!    every attempt, and this step runs once more before the purge completes, so a backup
 //!    written after the plan is reached too.
-//! 3. **Records**: its rows are removed and what cites it is scrubbed (`rows`); its upload files
-//!    are deleted. Its retained exports and archives stop being downloadable here.
+//! 3. **Records**: its rows are removed, the warnings kept for its commits' replays among them
+//!    (`commit_warnings`), and what cites it is scrubbed (`rows`); its upload files are deleted. Its retained exports and archives stop being downloadable here.
 //! 4. **Index**: its index entries are removed and the full-text index is merged, so no removed
 //!    term stays in an index segment.
 //! 5. **Repository**: its repository is deleted under the workspace's write lock; then the rows
