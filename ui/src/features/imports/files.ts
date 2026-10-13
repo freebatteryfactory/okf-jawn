@@ -58,6 +58,15 @@ export interface Dropped {
   unreadable: number;
 }
 
+/**
+ * A drag that carries files from the computer: a browser lists "Files" among its types, during the
+ * drag as at the drop. A drag of something of the page itself (a row of the tree, a selection) does
+ * not.
+ */
+export function carriesFiles(transfer: DataTransfer | null): boolean {
+  return transfer !== null && Array.from(transfer.types).includes('Files');
+}
+
 /** The files of a drop, every dropped folder walked to its end. */
 export async function chosenFromDrop(transfer: DataTransfer): Promise<Dropped> {
   let unreadable = 0;

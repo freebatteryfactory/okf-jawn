@@ -3,8 +3,11 @@
  * start the import of the uploaded ones.
  *
  * Choosing. Two buttons open the browser's own pickers (several files; a whole folder), and the
- * same area takes a drop of files and folders. The buttons are the keyboard's way; the drop is the
- * pointer's. Each file is listed with the path it came in and its size before anything is sent,
+ * same area takes a drop of files and folders, and of nothing else: a drag that carries no file (a
+ * row of the folder tree) is not marked or taken. Every drag of files is cancelled once, by the
+ * application's root (`drop-guard.ts`): over this box that is what lets a browser deliver the
+ * drop, and anywhere else it keeps the file from opening in place of the app. The buttons are the
+ * keyboard's way; the drop is the pointer's. Each file is listed with the path it came in and its size before anything is sent,
  * and can be removed. A file larger than this page uploads is listed as too large and never sent.
  * A polite status says how many were listed.
  *
@@ -26,7 +29,14 @@ import type { Revision } from '../../api/generated/types.gen';
 import { type HeldFocus, takeHeld, useWatchedPart } from '../../lib/focus';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
-import { type ChosenFile, chosenFromDrop, chosenFromPicker, describeSize, pathOf } from './files';
+import {
+  type ChosenFile,
+  carriesFiles,
+  chosenFromDrop,
+  chosenFromPicker,
+  describeSize,
+  pathOf,
+} from './files';
 import { ImportStart, StartedJobs } from './ImportStart';
 import {
   MAX_FILE_BYTES,
@@ -109,7 +119,9 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
     input.value = '';
   };
   const dropped = (event: DragEvent<HTMLFieldSetElement>) => {
-    event.preventDefault();
+    // A drag that carries no file (a row of the folder tree) is not this box's: nothing is taken.
+    // The application's root cancels the drop itself (`drop-guard.ts`); this box reads it.
+    if (!carriesFiles(event.dataTransfer)) return;
     setOver(false);
     void chosenFromDrop(event.dataTransfer).then(({ files, unreadable }) =>
       list(files, unreadable),
@@ -154,7 +166,10 @@ export function ImportPage({ workspaceId, head, canWrite }: ImportPageProps) {
       <fieldset
         className={over ? 'drop-target drop-target-over' : 'drop-target'}
         onDragOver={(event) => {
-          event.preventDefault();
+          if (!carriesFiles(event.dataTransfer)) return;
+          // The application's root cancels the move (`drop-guard.ts`), which is what makes a
+          // browser deliver the drop; here the pointer is made to say that files are taken.
+          event.dataTransfer.dropEffect = 'copy';
           setOver(true);
         }}
         onDragLeave={() => setOver(false)}
