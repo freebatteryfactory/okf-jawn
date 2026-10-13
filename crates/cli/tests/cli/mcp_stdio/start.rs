@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use okf_jawn_cli::Endpoint;
 use okf_jawn_cli::relay::{
-    Arrival, ChildState, Launcher, Probe, ProcessLauncher, StartPolicy, server_beside,
+    Arrival, ChildState, Detachment, Launcher, Probe, ProcessLauncher, StartPolicy, server_beside,
     start_or_connect,
 };
 use serde_json::json;
@@ -240,7 +240,21 @@ fn mcp_stdio_server_beside_the_cli_is_started_on_the_server_address() -> TestRes
         );
     }
     let launcher = ProcessLauncher::new(Some(beside.clone()), Some("127.0.0.1:7711".to_owned()));
-    let command = some(launcher.command(), "a command")?;
+    let (command, detachment) = some(launcher.command(), "a command")?;
+    // The started process is cut loose from the terminal the relay runs in: on Windows a
+    // console of its own without a window and its own process group, on Unix its own
+    // process group, which is also what the platform's `Command` shows it was told.
+    #[cfg(windows)]
+    assert_eq!(
+        detachment,
+        Detachment::CreationFlags(0x0800_0000 | 0x0000_0200)
+    );
+    #[cfg(unix)]
+    {
+        assert_eq!(detachment, Detachment::ProcessGroup(0));
+        let told: String = format!("{command:#?}").split_whitespace().collect();
+        assert!(told.contains("pgroup:Some(0"), "{told}");
+    }
     assert_eq!(command.get_program(), beside.as_os_str());
     assert_eq!(command.get_args().count(), 0);
     let bind: Vec<_> = command

@@ -125,6 +125,15 @@ fn mcp_stdio_what_a_started_server_prints_reaches_no_stream_of_the_relay() -> Te
         (Some(format!("127.0.0.1:{port}")), Some(String::new())),
         "{recorded}"
     );
+    if cfg!(unix) {
+        // An interrupt typed in the client's terminal goes to the client's process group;
+        // the started process leads a group of its own.
+        let (pid, group) = (
+            StandIn::value(&recorded, "pid"),
+            StandIn::value(&recorded, "group"),
+        );
+        assert!(pid.is_some() && pid == group, "{recorded}");
+    }
     assert_eq!(out, "", "the relay's stdout");
     assert!(!err.contains(STAND_IN_SAYS), "{err}");
     assert!(
@@ -350,5 +359,40 @@ fn mcp_stdio_executable_exits_1_when_no_service_can_be_reached() -> TestResult {
     let said = String::from_utf8(output.stderr)?;
     assert!(said.starts_with("okf-jawn mcp: "), "{said}");
     assert!(!said.contains(TOKEN), "{said}");
+    Ok(())
+}
+
+/// B2, on Unix: a client that waits for the end of the relay's stdout sees it when the relay
+/// ends, although the server the relay started lives on: the started process holds no end of
+/// the relay's own streams. The measure is the review's: the end of the stream within two
+/// seconds of the relay's end, while the stand-in is still running.
+///
+/// On Windows this does not hold and the test is not built there: the started process
+/// inherits every inheritable handle of the relay, its three standard streams among them
+/// (`relay/launch.rs` says so). The same test, run on Windows, fails after about 30 seconds.
+#[cfg(unix)]
+#[test]
+fn mcp_stdio_the_started_server_does_not_hold_the_relay_s_stdout_open() -> TestResult {
+    let stand_in = StandIn::new()?;
+    let mut child = relay_process(
+        &format!("http://127.0.0.1:{}", closed_port()?),
+        Some(&stand_in.program),
+    )?;
+    let recorded = stand_in.recorded(PATIENCE);
+    // The process may have ended already; then there is nothing to stop.
+    let _ = child.kill();
+    child.wait()?;
+    let ended = Instant::now();
+    let mut out = String::new();
+    // This read returns only when every holder of the stream's other end has let go of it.
+    let read = some(child.stdout.take(), "stdout")?.read_to_string(&mut out);
+    let waited = ended.elapsed();
+    stand_in.stop();
+    recorded?;
+    read?;
+    assert!(
+        waited < Duration::from_secs(2),
+        "the end of the relay's stdout came {waited:?} after the relay ended"
+    );
     Ok(())
 }

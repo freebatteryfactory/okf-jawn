@@ -39,13 +39,35 @@ pub enum ChildState {
     Unknown(String),
 }
 
-/// The production launcher: the server executable as a detached child process.
+/// How the started server is cut loose from the terminal the relay runs in: what this
+/// platform's `Command` was told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detachment {
+    /// Windows process creation flags.
+    CreationFlags(u32),
+    /// Unix: the process group the child joins; 0 is a new group of its own.
+    ProcessGroup(i32),
+    /// A platform on which the relay knows no way to do it.
+    Unsupported,
+}
+
+/// The production launcher: the server executable as a child process the relay does not stop.
 ///
-/// The child's standard streams are closed to it, so nothing it prints, its single-use launch
-/// URL included, reaches the MCP client. It is given `OKF_BIND`, the service's bind setting,
-/// so that it listens where the relay will connect, and `OKF_JAWN_TOKEN` is removed from its
-/// environment: the connector credential is the relay's own. Dropping the launcher does not
-/// stop it.
+/// The child's three standard streams are closed to it, so nothing it prints, its single-use
+/// launch URL included, reaches the MCP client. It is given `OKF_BIND`, the service's bind
+/// setting, so that it listens where the relay will connect, and `OKF_JAWN_TOKEN` is removed
+/// from its environment: the connector credential is the relay's own. It is cut loose from
+/// the relay's terminal ([`Detachment`]), so an interrupt typed there does not reach it.
+/// Dropping the launcher does not stop it.
+///
+/// Known limit, Windows only: the child is not cut loose from the relay's own streams. Windows
+/// hands a child every inheritable handle of its parent, and the pipes the MCP client gave
+/// the relay as standard input, output and error are inheritable. So the started server
+/// holds an end of each beside its own three closed streams, and a client that waits for the
+/// end of the relay's output does not see it while that server runs. Nothing the server
+/// prints goes there. Keeping the handles back takes `SetHandleInformation`, which is not
+/// safe Rust, or `CommandExt::inherit_handles`, which is not stable; on Unix the child holds
+/// none of them.
 #[derive(Debug)]
 pub struct ProcessLauncher {
     program: Option<PathBuf>,
@@ -77,6 +99,18 @@ pub trait Launcher {
 /// The service's bind setting, as `deploy/.env.example` names it.
 const BIND_VARIABLE: &str = "OKF_BIND";
 
+/// Windows: the new process leads a process group of its own, and Ctrl-C is disabled for it.
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+/// Windows: the new process gets a console of its own that has no window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Unix: the process group argument that makes the child the leader of a new group.
+#[cfg(unix)]
+const OWN_GROUP: i32 = 0;
+
 /// The server executable's file name, without the platform's suffix.
 const SERVER_PROGRAM: &str = "okf-jawn-server";
 
@@ -93,9 +127,10 @@ impl Default for StartPolicy {
 }
 
 impl ProcessLauncher {
-    /// The command that starts the server, or `None` when no executable is known.
+    /// The command that starts the server and how it is cut loose from the relay's terminal,
+    /// or `None` when no executable is known.
     #[must_use]
-    pub fn command(&self) -> Option<Command> {
+    pub fn command(&self) -> Option<(Command, Detachment)> {
         let mut command = Command::new(self.program.as_ref()?);
         command
             .stdin(Stdio::null())
@@ -106,7 +141,8 @@ impl ProcessLauncher {
         if let Some(bind) = &self.bind {
             command.env(BIND_VARIABLE, bind);
         }
-        Some(command)
+        let detachment = detach(&mut command);
+        Some((command, detachment))
     }
 
     /// A launcher for the executable at `program`, binding `bind` when one is given.
@@ -122,7 +158,8 @@ impl ProcessLauncher {
 
 impl Launcher for ProcessLauncher {
     fn launch(&mut self) -> Result<(), String> {
-        let (Some(program), Some(mut command)) = (self.program.as_ref(), self.command()) else {
+        let (Some(program), Some((mut command, _))) = (self.program.as_ref(), self.command())
+        else {
             return Err("the server executable's location is not known".to_owned());
         };
         let child = command
@@ -140,6 +177,35 @@ impl Launcher for ProcessLauncher {
             Some(Err(error)) => ChildState::Unknown(error.to_string()),
         }
     }
+}
+
+/// Cut the process `command` starts loose from the relay's terminal, and say what was asked.
+///
+/// On Windows it gets a console of its own without a window, and its own process group: a
+/// Ctrl-C or a Ctrl-Break in the client's console is not delivered to it, and no console
+/// window appears when the client has none.
+#[cfg(windows)]
+fn detach(command: &mut Command) -> Detachment {
+    use std::os::windows::process::CommandExt as _;
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    Detachment::CreationFlags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
+}
+
+/// Cut the process `command` starts loose from the relay's terminal, and say what was asked.
+///
+/// On Unix it leads a process group of its own, so the interrupt a terminal sends to the
+/// client's foreground group does not reach it.
+#[cfg(unix)]
+fn detach(command: &mut Command) -> Detachment {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(OWN_GROUP);
+    Detachment::ProcessGroup(OWN_GROUP)
+}
+
+/// No way is known on this platform to cut the process loose; it is started as it is.
+#[cfg(not(any(windows, unix)))]
+fn detach(_command: &mut Command) -> Detachment {
+    Detachment::Unsupported
 }
 
 /// The server executable shipped beside the CLI executable `cli`: the same directory, and the
