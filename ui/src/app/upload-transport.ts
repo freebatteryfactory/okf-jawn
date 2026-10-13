@@ -19,9 +19,21 @@
  * wait for the answer starts there. The answer is complete when the request settles, so the wait
  * covers the answer's body too.
  *
- * The bytes are handed to the browser as the Blob itself, which reads them as it sends them; they
- * are not copied into memory here. The Request the generated client built names the same Blob as
- * its body and is used for its route, method and headers only.
+ * The bytes are handed to the browser as the Blob itself; they are not copied into memory here
+ * (the caller decides what the Blob holds: `features/imports/hash.ts` gives one reading of a file,
+ * held in memory). The Request the generated client built names the same Blob as its body and is
+ * used for its route, method and headers only.
+ *
+ * Limits, neither of them probed in a browser:
+ * - A page that is hidden, frozen by the browser and resumed. An upload on a hidden page that is
+ *   not frozen goes on: network events are not throttled. A page the browser froze runs nothing,
+ *   and when it resumes, the stall timer may fire before the progress events that were queued
+ *   meanwhile. The upload then ends as a timeout although bytes were moving. It can be tried
+ *   again, and the retry goes on from what the service holds.
+ * - A service that refuses before it has read the body (an early `413` or `401`, then it closes
+ *   the connection). A browser can report that as a failed request with no answer (Chromium's
+ *   `error` event) instead of the refusal, so it reads "could not be reached", not as what the
+ *   service said. The page has no way to tell the two apart.
  */
 import { CSRF_HEADER, csrfHeaderFor, REQUEST_TIMEOUT_MS, RequestTimedOut } from './api-client';
 
