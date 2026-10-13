@@ -891,6 +891,15 @@ Findings that were judged not load-bearing at merge, each with its home. They ar
   The design to weigh: a terminal "purged" row state that keeps no digest and is refused by `begin` itself, and a purge check inside `complete`'s own transaction.
 - **An installation archive is tracked before it is kept (carry-over sweep, part 2; PR #20 last bot pass).** `backup_installation` publishes the archive to the object store and then records it. A process that stops in between leaves a blob that no `backup_archives`, artifact or pending-put row names, and a retry publishes another. The workspace path records a pending put first; the tenant path must do the same, or reconcile the staged digest on retry. Its test: stop after the publish, retry, and find one archive and no unnamed blob.
 - **A resumed purge reports what it removed (carry-over sweep, part 2; PR #20 last bot pass).** If a purge stops after deleting objects and before it records the objects step, the retry finds them absent and counts each as kept because another workspace shares it. The durable purge record can then claim no removals. Keep the counts with the step's progress, or tell "already removed by this purge" from "kept because shared". Its test: stop mid-step, resume, and compare the record with what was removed.
+- **The command line and the stdio relay (a CLI follow-up before the Wave 3 harness; core-cli M1.7 review loop).** Each is stated in the relay's headers. None loses or misdirects a message that was answered.
+  - **Windows: a server the relay starts keeps the relay's standard streams open.** Rust's `Command` starts a child with handle inheritance on, so a client that waits for the end of the relay's output waits for the server too. The two clean cures are a `SetHandleInformation` call on each handle, which is authored `unsafe` (AGENTS.md forbids it), or the standard library's `inherit_handles(false)`, which is unstable. This is an owner decision.
+  - **A request line is read into a value tree.** One line of the 16 MiB limit can cost about 400 MiB while it is parsed. Answers are read in one pass within a 128 MiB budget; request lines are not yet.
+  - **The relay does not give up on an output that takes nothing while its input is still open.** It gives up once the input has ended.
+  - **A request whose exchange ends abnormally is never answered.** The relay says so on the error stream and goes on; the client waits for that id.
+  - **An input that ends inside a line already longer than the limit is reported as ended, not as too long.**
+  - **The "notification was not delivered" diagnostic quotes a method whole**, and the last words escape control characters but pass through characters that are invisible or change the direction of text.
+  - **A credential that contains `[` or `]`** is accepted; whether to refuse it is not ruled.
+  - **Nothing here ran against a real `okf-jawn-server`.** The launcher and the transport are injected (I5); the real start is the Wave 3 harness. On Windows a refused loopback connection takes about two seconds to report, so the wait after a launch can reach about two minutes.
 
 ## 7. Risks by wave
 
