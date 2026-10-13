@@ -11,6 +11,8 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use okf_jawn_contract::access::{AccessRoute, Principal};
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::identity::TenantId;
+use okf_jawn_core::events::EventScope;
+use okf_jawn_core::storage::StorageScope;
 use okf_jawn_mcp::{
     DEFAULT_MAX_REQUEST_BODY_BYTES, McpConfig, McpHttpService, streamable_http_service,
 };
@@ -71,6 +73,17 @@ pub fn principal(subject: &str, route: AccessRoute) -> Outcome<Principal> {
 /// Returns an error when the test tenant id is refused.
 pub fn agent(subject: &str) -> Outcome<Principal> {
     principal(subject, AccessRoute::McpDelegation)
+}
+
+/// The event log of `workspace` in `principal`'s tenant.
+///
+/// # Errors
+/// Returns an error when `workspace` is no workspace identity.
+pub fn workspace_log(principal: &Principal, workspace: &str) -> Outcome<EventScope> {
+    Ok(EventScope::Workspace(StorageScope {
+        tenant_id: principal.tenant_id.clone(),
+        workspace_id: serde_json::from_value(json!(workspace))?,
+    }))
 }
 
 /// A resolved revision.

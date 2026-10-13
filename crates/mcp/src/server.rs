@@ -7,8 +7,11 @@
 //! `tools/list`, `tools/call`, `resources/list`, `resources/read`) passes one check, `admit`,
 //! before anything else is looked at: no `Principal` is `Unauthenticated`, and a route
 //! other than `AccessRoute::McpDelegation` is `Forbidden`. The browser session, `LocalOwner` and
-//! `Service` use the HTTP API; their refusal here is recorded as `permission_denied` in the
-//! tenant's log before anything is decoded.
+//! `Service` use the HTTP API; their refusal here is recorded as `permission_denied` before the
+//! request is validated or run. A refused tool call is recorded by core's rule for a refusal a
+//! binding makes itself (`core::dispatch::record_refusal`), so it lands in the log dispatch's
+//! own route refusal of the same request lands in; a refused request that is no operation is
+//! recorded in the tenant's log.
 //!
 //! Validation, authorization and the mutation ledger are dispatch's (`core::dispatch`). Nothing
 //! here reads a tool's visibility or annotations to decide access: an app-only tool is
@@ -35,7 +38,7 @@ use okf_jawn_contract::metadata::OperationName;
 use okf_jawn_contract::read::{MediaReference, ReadItemResponse, Selection};
 use okf_jawn_contract::source::{GetObjectRequest, GetObjectResponse, SourceReference};
 use okf_jawn_core::access::AccessControl;
-use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch};
+use okf_jawn_core::dispatch::{Caller, DispatchPorts, dispatch, record_refusal};
 use okf_jawn_core::events::{EventLog, EventScope, NewEvent};
 use okf_jawn_core::mutations::MutationStore;
 use okf_jawn_core::ports::Application;
@@ -122,9 +125,10 @@ impl McpServer {
     /// Call the tool named `tool` as `principal`, the way `tools/call` does.
     ///
     /// Identity is checked before the name is looked up, so an unidentified caller learns
-    /// nothing about tool names and a refused route is recorded whatever it asked for. A name
-    /// that is no operation's alias is then refused as `NotFound`, also when it is a canonical
-    /// operation id: only aliased operations are tools.
+    /// nothing about tool names and a refused route is recorded whatever it asked for: with
+    /// the operation and its arguments when the name is a tool, as a request that is no
+    /// operation otherwise. A name that is no operation's alias is then refused as `NotFound`,
+    /// also when it is a canonical operation id: only aliased operations are tools.
     ///
     /// # Errors
     /// Returns an rmcp error only when an `ApiError` cannot be serialized into its result.
@@ -135,7 +139,9 @@ impl McpServer {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ErrorData> {
         let named = operation_of_tool(tool);
-        if let Err(refusal) = self.admit(principal, named).await {
+        let input = Value::Object(arguments.unwrap_or_default());
+        let asked = named.map(|operation| (operation, &input));
+        if let Err(refusal) = self.admit(principal, asked).await {
             return failure(&refusal);
         }
         let Some(operation) = named else {
@@ -144,7 +150,6 @@ impl McpServer {
                 format!("No tool is named `{tool}`"),
             ));
         };
-        let input = Value::Object(arguments.unwrap_or_default());
         self.call_operation(principal, operation, input).await
     }
 
@@ -158,7 +163,7 @@ impl McpServer {
         operation: OperationName,
         input: Value,
     ) -> Result<CallToolResult, ErrorData> {
-        let principal = match self.admit(principal, Some(operation)).await {
+        let principal = match self.admit(principal, Some((operation, &input))).await {
             Ok(principal) => principal,
             Err(refusal) => return failure(&refusal),
         };
@@ -396,8 +401,10 @@ impl McpServer {
 
     /// The check every MCP request passes: an authenticated principal on the agent route.
     ///
-    /// `operation` is the operation a tool call names; `None` for the requests that are no
-    /// operation (`initialize`, the two listings and the App read).
+    /// `asked` is the operation a tool call names, with its arguments as they arrived; `None`
+    /// for the requests that are no operation (`initialize`, `server/discover`, the two
+    /// listings, the App read, and a tool call whose name is no tool). The arguments are read
+    /// only to find the log a refusal is recorded in (`refuse_route`).
     ///
     /// # Errors
     /// Returns `Unauthenticated` without a principal, and `Forbidden` for any route other than
@@ -405,7 +412,7 @@ impl McpServer {
     async fn admit<'caller>(
         &self,
         principal: Option<&'caller Principal>,
-        operation: Option<OperationName>,
+        asked: Option<(OperationName, &Value)>,
     ) -> Result<&'caller Principal, ApiError> {
         let Some(principal) = principal else {
             return Err(ApiError::new(
@@ -414,34 +421,38 @@ impl McpServer {
             ));
         };
         if principal.route != AccessRoute::McpDelegation {
-            return Err(self.refuse_route(principal, operation).await);
+            return Err(self.refuse_route(principal, asked).await);
         }
         Ok(principal)
     }
 
     /// Record a non-agent route's request as `permission_denied` and return its refusal.
     ///
-    /// The refusal comes before any request is decoded, so it is recorded in the tenant's log.
-    /// Core's `denial_scope`, which records a refusal of a request about exactly one workspace
-    /// in that workspace's log, is private to `core::dispatch`; this crate cannot apply it
-    /// without changing core, so a refusal here always goes to the tenant log, which
-    /// `list_tenant_events` reads. A failed append does not change the answer.
+    /// A refused tool call is recorded by `core::dispatch::record_refusal`, which applies
+    /// dispatch's own rule for a refusal made before any target is evaluated to the request
+    /// the arguments decode to. Which log that is, that only a `Forbidden` is recorded and
+    /// that a failed append does not change the answer are that function's rules, not this
+    /// one's. A request that is no operation has nothing to decode and names no workspace, so
+    /// its refusal goes to the tenant's log, which `list_tenant_events` reads, naming no
+    /// operation; a failed append does not change that answer either.
     async fn refuse_route(
         &self,
         principal: &Principal,
-        operation: Option<OperationName>,
+        asked: Option<(OperationName, &Value)>,
     ) -> ApiError {
-        let scope = EventScope::Tenant(principal.tenant_id.clone());
-        let _recorded = self
-            .shared
-            .ports
-            .events
-            .append(&scope, None, refusal_event(principal, operation))
-            .await;
-        ApiError::new(
+        let events = self.shared.ports.events.as_ref();
+        let refusal = ApiError::new(
             ErrorCode::Forbidden,
             "Only an MCP delegation reaches this server; this route uses the HTTP API",
-        )
+        );
+        if let Some((operation, input)) = asked {
+            return record_refusal(events, principal, operation, input, refusal).await;
+        }
+        let scope = EventScope::Tenant(principal.tenant_id.clone());
+        let _recorded = events
+            .append(&scope, None, unnamed_refusal_event(principal))
+            .await;
+        refusal
     }
 }
 
@@ -596,24 +607,22 @@ fn request_error(error: &ApiError) -> ErrorData {
     }
 }
 
-/// The `permission_denied` event of a route refusal, naming the operation when there is one.
-fn refusal_event(principal: &Principal, operation: Option<OperationName>) -> NewEvent {
-    operation.map_or_else(
-        || NewEvent {
-            kind: EventKind::PermissionDenied,
-            revision: None,
-            item_id: None,
-            job_id: None,
-            connector_id: None,
-            actor: Some(EventActor {
-                subject: principal.subject.clone(),
-                route: principal.route.clone(),
-                client_id: principal.client_id.clone(),
-            }),
-            operation: None,
-        },
-        |operation| NewEvent::permission_denied(principal, operation),
-    )
+/// The `permission_denied` event of a route refusal of a request that is no operation: it
+/// names the caller and no operation.
+fn unnamed_refusal_event(principal: &Principal) -> NewEvent {
+    NewEvent {
+        kind: EventKind::PermissionDenied,
+        revision: None,
+        item_id: None,
+        job_id: None,
+        connector_id: None,
+        actor: Some(EventActor {
+            subject: principal.subject.clone(),
+            route: principal.route.clone(),
+            client_id: principal.client_id.clone(),
+        }),
+        operation: None,
+    }
 }
 
 /// The App bundle's HTML, read off the async runtime.
@@ -694,6 +703,9 @@ mod tests {
 
     /// Dispatch's refusal of a draft-bearing operation on a route that is no human session.
     const DRAFT_REFUSAL: &str = "Drafts are visible only in a human browser session";
+
+    /// The workspace `list_drafts` names.
+    const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
 
     okf_jawn_contract::for_each_operation!(refusing_operations);
 
@@ -822,7 +834,15 @@ mod tests {
     }
 
     fn list_drafts() -> Value {
-        json!({"workspace_id": "11111111-1111-4111-8111-111111111111", "page": {"limit": 10}})
+        json!({"workspace_id": WORKSPACE, "page": {"limit": 10}})
+    }
+
+    /// The log of the workspace `list_drafts` names, in the test principal's tenant.
+    fn workspace_log() -> Result<EventScope, Box<dyn Error>> {
+        Ok(EventScope::Workspace(StorageScope {
+            tenant_id: TenantId::try_from("tenant-test".to_owned()).map_err(|error| error.0)?,
+            workspace_id: serde_json::from_value(json!(WORKSPACE))?,
+        }))
     }
 
     /// The `ApiError` of a failed tool result shaped as `error_result` shapes it.
@@ -869,11 +889,80 @@ mod tests {
             assert_eq!(refused.code, ErrorCode::Forbidden, "{route:?}");
             assert_eq!(refused.message, ROUTE_REFUSAL, "{route:?}");
         }
+        // The request names one workspace, so each refusal is recorded in that workspace's log.
         let appended = events.appended()?;
         assert_eq!(appended.len(), 3);
         for (scope, event) in &appended {
-            assert!(matches!(scope, EventScope::Tenant(_)), "{scope:?}");
+            assert_eq!(scope, &workspace_log()?);
             assert_eq!(event.operation, Some(OperationName::ListDrafts));
+        }
+        Ok(())
+    }
+
+    /// Dispatch refuses an agent a draft-bearing operation by route, before any target; this
+    /// server refuses a browser session the same request by route, before dispatch. Both are
+    /// recorded in the same log, each naming its own caller.
+    #[tokio::test]
+    async fn a_route_refusal_lands_where_dispatchs_own_route_refusal_lands() -> Checked {
+        let events = Arc::new(Recording::default());
+        let server = server(events.clone())?;
+        let callers = [
+            (AccessRoute::McpDelegation, DRAFT_REFUSAL),
+            (AccessRoute::BrowserSession, ROUTE_REFUSAL),
+        ];
+        for (route, message) in callers {
+            let caller = principal(route.clone())?;
+            let result = server
+                .call_operation(Some(&caller), OperationName::ListDrafts, list_drafts())
+                .await?;
+            assert_eq!(refusal(&result)?.message, message, "{route:?}");
+        }
+        let appended = events.appended()?;
+        let [(dispatched, by_dispatch), (refused, by_server)] = appended.as_slice() else {
+            return Err(format!("expected two recorded refusals, got {appended:?}").into());
+        };
+        assert_eq!(dispatched, &workspace_log()?);
+        assert_eq!(refused, dispatched);
+        assert_eq!(by_dispatch.operation, by_server.operation);
+        let routes: Vec<_> = [by_dispatch, by_server]
+            .iter()
+            .filter_map(|event| event.actor.as_ref())
+            .map(|actor| actor.route.clone())
+            .collect();
+        assert_eq!(
+            routes,
+            vec![AccessRoute::McpDelegation, AccessRoute::BrowserSession]
+        );
+        Ok(())
+    }
+
+    /// A request that is no operation is refused by route whether or not its refusal can be
+    /// recorded: the log here fails every append, and the answer is still the route refusal.
+    #[tokio::test]
+    async fn a_refused_request_that_is_no_operation_is_answered_though_the_log_fails() -> Checked {
+        let events = Arc::new(Recording::default());
+        let server = server(events.clone())?;
+        let browser = principal(AccessRoute::BrowserSession)?;
+        let Err(read) = server.read_resource_as(Some(&browser), "ui://none").await else {
+            return Err("a browser session read a resource".into());
+        };
+        assert_eq!(
+            (read.code, read.message.as_str()),
+            (ErrorCode::Forbidden, ROUTE_REFUSAL)
+        );
+        let result = server
+            .call_tool_as(Some(&browser), "no_such_tool", None)
+            .await?;
+        let called = refusal(&result)?;
+        assert_eq!(
+            (called.code, called.message.as_str()),
+            (ErrorCode::Forbidden, ROUTE_REFUSAL)
+        );
+        let appended = events.appended()?;
+        assert_eq!(appended.len(), 2);
+        for (scope, event) in &appended {
+            assert_eq!(scope, &EventScope::Tenant(browser.tenant_id.clone()));
+            assert_eq!(event.operation, None);
         }
         Ok(())
     }
