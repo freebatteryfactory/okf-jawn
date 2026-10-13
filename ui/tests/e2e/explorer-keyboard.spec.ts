@@ -552,6 +552,11 @@ test.describe('a newer head moves nothing until Refresh', () => {
     await expect(row(page, /Item number 40,/)).toBeFocused();
     const scrolled = await treeScrollTop(page);
     expect(scrolled).toBeGreaterThan(0);
+    // The page lists two folders as it opens: the root, and then the open item's own folder
+    // once the item has been read at the head. The second is asked about a tenth of a second
+    // after the first, while the keys above are being pressed, so the count is taken only once
+    // both are in: otherwise a listing that belongs to the opening is counted as a reload.
+    await expect.poll(() => listed.length).toBe(2);
     const listedBefore = listed.length;
 
     await windowRefocus(page);

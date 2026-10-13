@@ -6,22 +6,32 @@
  * answer must parse with its generated response schema, so no test is driven by an answer the
  * server could not give. An operation without a handler answers `not_implemented`, as the real
  * service does for unbuilt operations. A handler may answer later (a promise), so a test can look
- * at the page while a request is in flight.
+ * at the page while a request is in flight. A request aborted meanwhile rejects, as `fetch` does:
+ * a cancelled query's request, or one that outlived the client's bounded wait, does not go on.
  */
 import { vi } from 'vitest';
 import type { ZodType } from 'zod';
 import {
+  zCommitRequest,
+  zDiscardDraftRequest,
+  zDraft,
   zGetItemRequest,
   zGetSourcesRequest,
   zGetSourcesResponse,
   zItemDocument,
+  zListDraftsRequest,
+  zListDraftsResponse,
   zListItemsRequest,
   zListItemsResponse,
+  zListTypesRequest,
+  zListTypesResponse,
   zListWorkspacesRequest,
   zListWorkspacesResponse,
+  zMutationResult,
   zOpenWorkspaceRequest,
   zReadItemRequest,
   zReadItemResponse,
+  zSaveDraftRequest,
   zSearchRequest,
   zSearchResponse,
   zWorkspace,
@@ -36,6 +46,8 @@ export type Handler = (body: Json) => Reply | Promise<Reply>;
 export interface Call {
   path: string;
   body: Json;
+  /** The request's headers, names in lower case. */
+  headers: Record<string, string>;
 }
 
 const CONTRACT: Record<string, { request: ZodType; response: ZodType }> = {
@@ -46,6 +58,11 @@ const CONTRACT: Record<string, { request: ZodType; response: ZodType }> = {
   '/api/workspaces/open-workspace': { request: zOpenWorkspaceRequest, response: zWorkspace },
   '/api/items/list-items': { request: zListItemsRequest, response: zListItemsResponse },
   '/api/items/get-item': { request: zGetItemRequest, response: zItemDocument },
+  '/api/items/save-draft': { request: zSaveDraftRequest, response: zDraft },
+  '/api/items/list-drafts': { request: zListDraftsRequest, response: zListDraftsResponse },
+  '/api/items/discard-draft': { request: zDiscardDraftRequest, response: zDraft },
+  '/api/history/commit-items': { request: zCommitRequest, response: zMutationResult },
+  '/api/types/list-types': { request: zListTypesRequest, response: zListTypesResponse },
   '/api/reads/read-item': { request: zReadItemRequest, response: zReadItemResponse },
   '/api/reads/get-sources': { request: zGetSourcesRequest, response: zGetSourcesResponse },
   '/api/search/search-items': { request: zSearchRequest, response: zSearchResponse },
@@ -90,7 +107,11 @@ export function mockApi(handlers: Record<string, Handler>): MockedApi {
       parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
         ? Object.fromEntries(Object.entries(parsed))
         : {};
-    calls.push({ path, body });
+    const headers: Record<string, string> = {};
+    request.headers.forEach((value, name) => {
+      headers[name.toLowerCase()] = value;
+    });
+    calls.push({ path, body, headers });
     const contract = CONTRACT[path];
     if (contract !== undefined) {
       const checked = contract.request.safeParse(body);
@@ -100,7 +121,15 @@ export function mockApi(handlers: Record<string, Handler>): MockedApi {
       }
     }
     const handler = handlers[path];
-    const reply = handler === undefined ? notImplemented(path) : await handler(body);
+    // Like `fetch`, a request that is aborted while it waits for its answer rejects.
+    const signal = init?.signal ?? request.signal;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const abort = () => reject(new DOMException('The request was aborted', 'AbortError'));
+      if (signal.aborted) abort();
+      else signal.addEventListener('abort', abort, { once: true });
+    });
+    const reply =
+      handler === undefined ? notImplemented(path) : await Promise.race([handler(body), aborted]);
     if (reply.status === 200 && contract !== undefined) {
       const checked = contract.response.safeParse(reply.body);
       if (!checked.success) violations.push(`${path} response: ${checked.error.message}`);

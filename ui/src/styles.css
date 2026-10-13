@@ -477,3 +477,115 @@ main.app-main:has(.explorer) {
 .hit-title {
   text-decoration: underline;
 }
+/* Editing. Plain and system-colored, like the rest; the owner decides any further look. */
+.document-actions,
+.draft-actions {
+  margin: 0.5rem 0;
+}
+.draft-editor {
+  display: grid;
+  gap: 0.5rem;
+}
+.draft-editor > * {
+  margin: 0;
+}
+.confirm {
+  border: 1px solid GrayText;
+  border-radius: 0.25rem;
+  padding: 0.5rem 0.75rem;
+}
+.confirm legend {
+  font-weight: 700;
+  padding: 0 0.25rem;
+}
+.confirm p {
+  margin: 0 0 0.5rem;
+}
+.tab-mark {
+  font-weight: 400;
+  color: var(--secondary-text);
+}
+.drafts-panel {
+  flex: none;
+  max-height: 60%;
+  overflow: auto;
+  border-top: 1px solid GrayText;
+  padding-top: 0.25rem;
+}
+.draft-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.25rem 0;
+  display: grid;
+  gap: 0.35rem;
+}
+.snapshot-form {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.5rem 0;
+}
+.snapshot-form label {
+  font-size: 0.85rem;
+}
+.app-main input[type="text"],
+.app-main input[type="number"] {
+  font: inherit;
+  padding: 0.4rem;
+  border: 1px solid GrayText;
+  border-radius: 0.25rem;
+  background: Field;
+  color: FieldText;
+}
+.app-main input[type="checkbox"] {
+  appearance: auto;
+}
+.field-error {
+  margin: 0;
+  border-left: 3px solid currentColor;
+  padding-left: 0.5rem;
+}
+.snapshot-said {
+  margin: 0.25rem 0;
+}
+/* What changed underneath a draft. A changed line carries its own sign and a rule at its edge,
+   so the difference does not rest on color. */
+.conflict h3,
+.conflict h4 {
+  font-weight: 700;
+  margin: 0.25rem 0;
+}
+.conflict h3 {
+  font-size: 1.1rem;
+}
+.patch-lines {
+  margin: 0.25rem 0;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+}
+.patch-lines ins,
+.patch-lines del {
+  display: block;
+  text-decoration: none;
+  font-weight: 700;
+  border-left: 3px solid currentColor;
+  padding-left: 0.25rem;
+}
+.patch-lines del {
+  border-left-style: dashed;
+}
+.patch-lines > span {
+  padding-left: calc(0.25rem + 3px);
+}
+.kept-text {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0.25rem 0;
+  padding: 0.5rem;
+  border: 1px solid currentColor;
+}
+.kept-properties {
+  margin: 0.5rem 0;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid GrayText;
+}

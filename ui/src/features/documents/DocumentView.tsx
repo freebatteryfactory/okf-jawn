@@ -6,18 +6,32 @@
  * A partial read says so and offers its continuation, which resumes the same resolved read;
  * continuing moves keyboard focus to the part it loaded, and a live region says what happened.
  * Warnings, partial extraction and agent-supplied text are shown, never smoothed over. Each
- * operation's failure is shown where its content would have been, and stays there while it is
+ * operation's failure is shown where its content would have been when there is none to show, and
+ * beside the content when there is: a read that fails when it is asked again never takes the
+ * properties, the form, the editor or the text off the screen. The notice stays while the read is
  * tried again (`useRetry`), so a retry never drops keyboard focus.
+ *
+ * Editing happens in place of the reading: one button switches the pane between the committed
+ * text (rendered, read through `read_item`) and the person's draft (`DraftEditor`, its text from
+ * `get_item`). There is one editor per item on a page: while one pane edits an item, another pane
+ * of the same item shows the committed text, says the item is being edited in the other pane, and
+ * offers "Edit here", which moves the editor, its text and keyboard focus to this pane. So the
+ * two can stand side by side, and two editors never write over one draft. An item that
+ * has a draft opens on the draft, marked as one. Editing is for Notes: a Source or a View is shown
+ * by the reader alone, with no "Edit"; the kind is the one the last read of the item answered.
+ * A draft is started only where the pane reads the version
+ * the workspace shows and the person may write; a pane of a Note that reads another revision says
+ * so and offers that version. The switch is one element whatever it says, so it keeps keyboard
+ * focus; "Edit" moves focus into the text box, and after a discard focus is on the switch.
  */
 import {
-  type UseMutationResult,
   type UseQueryResult,
   useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { useEffect, useId, useRef } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import {
   getItemOptions,
   openWorkspaceQueryKey,
@@ -25,18 +39,27 @@ import {
 } from '../../api/generated/@tanstack/react-query.gen';
 import { openWorkspace, readItem } from '../../api/generated/sdk.gen';
 import type {
+  ItemSummary,
   ReadItemRequest,
   ReadItemResponse,
   Revision,
   Workspace,
 } from '../../api/generated/types.gen';
+import { pageHeading, takeHeld, useWatchedPart } from '../../lib/focus';
 import { Instant } from '../../lib/instant';
 import { keyed } from '../../lib/keys';
+import { ConflictNotice } from '../drafts/ConflictNotice';
+import { DraftEditor } from '../drafts/DraftEditor';
+import { KeptText } from '../drafts/KeptText';
+import { beginSession, claimEditor, refuseSaving, releaseEditor } from '../drafts/saving';
+import { saveStateOf, useConflict, useDraftSession } from '../drafts/sessions';
+import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
 import { type FailureRetry, useRetry } from '../errors/retry';
 import type { ItemSelection } from '../explorer/search-params';
 import { describeSelection, extractionLabels, short } from './describe';
 import { Properties } from './Properties';
+import { PropertiesForm } from './PropertiesForm';
 import { SafeMarkdown } from './SafeMarkdown';
 
 /** Text budget per read; a longer item is read in parts through the continuation. */
@@ -54,7 +77,26 @@ export interface DocumentViewProps {
   onSelect: (selection: ItemSelection | undefined) => void;
   /** The latest version was read; `resolved` is the revision the server resolved for it. */
   onReadLatest: (resolved: Revision) => void;
+  /** The revision the workspace shows: a draft is started only from a pane that reads it. */
+  head: Revision;
+  /** The person may write in this workspace. */
+  canWrite: boolean;
+  /** Open this item as the workspace shows it, without a cited revision. */
+  onOpenCurrent: () => void;
+  /** A Snapshot of this item was taken here ("keep mine"). */
+  onSnapshotted: (snapshotted: Snapshotted) => void;
 }
+
+/** The words for a draft that is not on screen: the reader shows the committed text. */
+const DRAFT_STANDS = {
+  unchanged: 'You started editing this item.',
+  unsaved: 'You have unsaved changes to this item.',
+  saving: 'Your changes to this item are being saved.',
+  saved: 'You have a draft of this item.',
+  failed: 'You have changes to this item that are not saved.',
+  'too-long': 'You have changes to this item that are not saved.',
+  'held-back': 'You changed this item’s properties, and that is held back and not saved.',
+} as const;
 
 const ROLE = { note: 'Note', source: 'Source', view: 'View' } as const;
 
@@ -90,6 +132,10 @@ export function itemOptions(workspaceId: string, itemId: string, revision: Revis
  * the way to the latest version: a read with `at: latest`, which the server resolves once. Its
  * answer is kept as the first part of a read pinned to the revision it resolved, so the pane,
  * the URL and the continuation all follow that one read.
+ *
+ * The answer moves the pane only while this reader is the one on screen. A reader is keyed by its
+ * tab, so when the person goes to another tab before the answer, this one is gone: its request is
+ * aborted, and an answer that arrives all the same moves nothing and takes no focus.
  */
 function PinnedRevision({
   workspaceId,
@@ -114,14 +160,29 @@ function PinnedRevision({
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
+  // Whether this reader is on screen, and the request it has in flight.
+  const onScreen = useRef(false);
+  const asked = useRef<AbortController | null>(null);
+  useEffect(() => {
+    onScreen.current = true;
+    return () => {
+      onScreen.current = false;
+      asked.current?.abort();
+    };
+  }, []);
   const readLatest = useMutation({
     mutationFn: async () => {
+      const controller = new AbortController();
+      asked.current = controller;
       const { data } = await readItem({
         body: { ...request, at: { kind: 'latest' }, cursor: null },
+        signal: controller.signal,
         throwOnError: true,
       });
       return data;
     },
+    // Whatever the page shows by now, the answer is the first part of that read: only the cache
+    // is told here. (The library runs this after the component is gone, too.)
     onSuccess: (response) => {
       const resolved = response.source.revision;
       const pinned: ReadItemRequest = { ...request, at: { kind: 'revision', revision: resolved } };
@@ -129,13 +190,17 @@ function PinnedRevision({
         pages: [response],
         pageParams: [{ body: pinned }],
       });
-      // The button goes once the pane reads that revision; keyboard focus stays at this notice,
-      // which then says which revision is read, instead of dropping to the page.
-      const notice = noticeRef.current;
-      if (notice?.contains(document.activeElement)) notice.focus();
-      onReadLatest(resolved);
     },
   });
+  /** The answer is here: the pane goes to the revision it resolved, if this reader is still shown. */
+  const arrive = (response: ReadItemResponse) => {
+    if (!onScreen.current) return;
+    // The button goes once the pane reads that revision; keyboard focus stays at this notice,
+    // which then says which revision is read, instead of dropping to the page.
+    const notice = noticeRef.current;
+    if (notice?.contains(document.activeElement)) notice.focus();
+    onReadLatest(response.source.revision);
+  };
   // Either failure keeps its notice through a retry, which ends with keyboard focus at this
   // notice: it then says what the check found, or which revision was read.
   const checkFailure = useRetry({
@@ -149,7 +214,7 @@ function PinnedRevision({
     request: revision,
     failed: readLatest.isError,
     error: readLatest.error,
-    run: () => readLatest.mutateAsync(),
+    run: () => readLatest.mutateAsync().then(arrive),
     loaded: () => noticeRef.current,
   });
 
@@ -159,7 +224,8 @@ function PinnedRevision({
         workspaceId={workspaceId}
         revision={revision}
         latestHead={latestHead}
-        readLatest={readLatest}
+        reading={readLatest.isPending}
+        onRead={() => readLatest.mutate(undefined, { onSuccess: arrive })}
         checkFailure={checkFailure}
         latestFailure={latestFailure}
       />
@@ -171,14 +237,18 @@ function PinnedRevisionState({
   workspaceId,
   revision,
   latestHead,
-  readLatest,
+  reading: readingLatest,
+  onRead,
   checkFailure,
   latestFailure,
 }: {
   workspaceId: string;
   revision: Revision;
   latestHead: UseQueryResult<Workspace>;
-  readLatest: UseMutationResult<ReadItemResponse, Error, void>;
+  /** The latest version is being read. */
+  reading: boolean;
+  /** Read the latest version. */
+  onRead: () => void;
   checkFailure: FailureRetry;
   latestFailure: FailureRetry;
 }) {
@@ -215,12 +285,12 @@ function PinnedRevisionState({
         You are reading revision {reading}; it is not the latest version (checked at {checked}).{' '}
         <button
           type="button"
-          aria-disabled={readLatest.isPending}
+          aria-disabled={readingLatest}
           onClick={() => {
-            if (!readLatest.isPending) readLatest.mutate();
+            if (!readingLatest) onRead();
           }}
         >
-          {readLatest.isPending ? 'Reading the latest version…' : 'Read the latest version'}
+          {readingLatest ? 'Reading the latest version…' : 'Read the latest version'}
         </button>
       </p>
       {latestFailure.shown && (
@@ -243,9 +313,77 @@ export function DocumentView({
   selection,
   onSelect,
   onReadLatest,
+  head,
+  canWrite,
+  onOpenCurrent,
+  onSnapshotted,
 }: DocumentViewProps) {
   const titleId = useId();
   const item = useQuery(itemOptions(workspaceId, itemId, revision));
+  const document = item.data;
+  const conflict = useConflict(workspaceId, itemId);
+
+  // Reading or editing. Until the person chooses, an item with a draft opens on the draft.
+  const session = useDraftSession(workspaceId, itemId);
+  // Editing is for Notes: a Source's text is changed through corrections and a View has its own
+  // editor, so neither is offered "Edit". What kind the item is, is what the last `get_item` that
+  // answered said. It is read with every read, not kept from the first: no sentence of SPEC or of
+  // the contract says an item's kind stays what it was (`ItemKind` is its "built-in rendering
+  // role", a field of each answer). While the item is read again at another revision the last
+  // answer stands, so the switch does not leave under keyboard focus for the time of a read. A
+  // session is begun only for a Note, and while there is one its editor stays, with its text.
+  const atShown = canWrite && revision === head;
+  const [kind, setKind] = useState<ItemSummary['kind'] | null>(null);
+  if (document !== undefined && kind !== document.summary.kind) setKind(document.summary.kind);
+  // The item's type, kept the same way: the form is drawn from it while the item is read again.
+  const [typeName, setTypeName] = useState<string | null>(null);
+  if (document !== undefined && typeName !== document.summary.type_name) {
+    setTypeName(document.summary.type_name);
+  }
+  const isNote = session !== undefined || kind === 'note';
+  // The session is told what each read says the item is: one that is not a Note refuses it, and a
+  // Note lifts that (`saving.ts` says what a refused session is). What this pane draws follows the
+  // session, not the read: the editor leaves only once the session is refused, so the save the
+  // editor sends on its way out finds it refused, in whatever order the effects run.
+  const sessionHere = session !== undefined;
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (sessionHere && kind !== null) refuseSaving(queryClient, workspaceId, itemId, kind);
+  }, [queryClient, sessionHere, kind, workspaceId, itemId]);
+  const notANote = session?.refused ?? null;
+  const editable = atShown && isNote;
+  const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
+  const [chosen, setChosen] = useState<'read' | 'edit' | null>(null);
+  // Editing is wanted only of a draft: a pane that chose to edit and whose session then ended by
+  // another hand (a Snapshot elsewhere, or a read that says the item is not a Note while nothing
+  // was typed) reads the committed text again, and "Edit" starts a new session.
+  const wantsEdit = editable && hasDraft && (chosen ?? 'edit') === 'edit';
+  // A draft the service holds is opened as it arrives. Without one, a session starts only when
+  // the person presses "Edit": a discarded draft is not started again behind their back.
+  const heldDraft = document?.draft ?? null;
+  // One editor per item on a page: this pane's own name, and whether another pane has the editor.
+  const pane = useId();
+  const editor = session?.editor ?? null;
+  const elsewhere = session !== undefined && editor !== null && editor !== pane;
+  useEffect(() => {
+    if (editable && session === undefined && document && heldDraft !== null) {
+      beginSession(workspaceId, revision, document, pane);
+    }
+  }, [editable, session, document, heldDraft, workspaceId, revision, pane]);
+  // A pane that wants the editor takes it when no pane has it (the one that had it was closed or
+  // went back to reading), and gives it up when it stops wanting it or goes.
+  const sessionOpen = session !== undefined;
+  useEffect(() => {
+    if (!sessionOpen) return;
+    if (wantsEdit && editor === null) claimEditor(workspaceId, itemId, pane);
+    else if (!wantsEdit && editor === pane) releaseEditor(workspaceId, itemId, pane);
+  }, [sessionOpen, wantsEdit, editor, workspaceId, itemId, pane]);
+  useEffect(() => () => releaseEditor(workspaceId, itemId, pane), [workspaceId, itemId, pane]);
+  const editing = wantsEdit && session !== undefined && editor === pane;
+  // Whether this pane opens on a draft is known once `get_item` has answered. Until then the
+  // committed text is neither read nor shown, so it never stands where the draft will.
+  const undecided =
+    atShown && chosen === null && session === undefined && document === undefined && !item.isError;
   const request: ReadItemRequest = {
     workspace_id: workspaceId,
     item_id: itemId,
@@ -260,12 +398,14 @@ export function DocumentView({
     ...readItemInfiniteOptions({ body: request }),
     initialPageParam: { body: request },
     getNextPageParam: (last) => last.next_cursor ?? undefined,
+    // The editor shows the draft's own text; the committed text is read when it is shown.
+    enabled: !(wantsEdit && !elsewhere) && !undecided,
   });
 
   const pages = read.data?.pages ?? [];
   const first = pages[0];
   const last = pages.at(-1);
-  const summary = item.data?.summary;
+  const summary = document?.summary;
   const path = summary?.path ?? first?.source.path;
   const title = summary?.title || path || 'Item';
   const warnings = pages.flatMap((page) => page.warnings);
@@ -303,6 +443,62 @@ export function DocumentView({
   // A retry belongs to what this view reads: once the revision or the selection changes, a retry
   // still in flight is no longer shown.
   const articleRef = useRef<HTMLElement | null>(null);
+  // Where keyboard focus goes once the pane has switched: into the text box after "Edit", onto
+  // the switch after a discard (the editor and its buttons are gone then). A request is made only
+  // for a drawing that has its target: one that found none would wait for a later drawing that
+  // has it, and take focus from where the person had put it by then.
+  const switchRef = useRef<HTMLButtonElement | null>(null);
+  const focusNext = useRef<'text' | 'switch' | null>(null);
+  useEffect(() => {
+    const wanted = focusNext.current;
+    if (wanted === null) return;
+    const target =
+      wanted === 'switch'
+        ? switchRef.current
+        : articleRef.current?.querySelector<HTMLElement>('.draft-editor [role="textbox"]');
+    if (target instanceof HTMLElement) {
+      focusNext.current = null;
+      target.focus();
+    }
+  });
+  // The editor and the form leave when the session ends by another hand than this pane's own
+  // buttons (a Snapshot taken in the Drafts panel). Keyboard focus that was in them goes to the
+  // pane's switch, as after the other ways out of the editor; with no switch, to the page's heading.
+  // The kept text of a refused session leaves the same way when its draft is discarded: the item
+  // is not a Note, so there is no switch, and focus goes to the page's heading.
+  const heldFocus = useRef<HTMLElement | null>(null);
+  const [, editingRef] = useWatchedPart<HTMLDivElement>(heldFocus);
+  // The editor gives way to the kept text when the item is read as not a Note: focus that was in
+  // the editor goes to the text, which is read-only and selectable.
+  const heldEditor = useRef<HTMLElement | null>(null);
+  const [, liveRef] = useWatchedPart<HTMLDivElement>(heldEditor);
+  const keptRef = useRef<HTMLTextAreaElement | null>(null);
+  // And back: the kept text gives way to the editor when the refusal is lifted. Focus that was in
+  // it goes to the switch at once (the text box is not there yet) and from there into the text box.
+  const heldKept = useRef<HTMLElement | null>(null);
+  const [, keptPartRef] = useWatchedPart<HTMLDivElement>(heldKept);
+  // The conflict notice leaves when the session is refused (nothing of it may be saved, so "Keep
+  // mine" is not offered), and when the conflict is resolved. Focus that was in it goes to the
+  // kept text when that is what took its place, else to the switch, which is there whenever the
+  // kept text is not: both need the pane to be editable, and a conflict is of a draft the service
+  // holds, so its session is never ended at the refusal.
+  const heldNotice = useRef<HTMLElement | null>(null);
+  const [, noticePartRef] = useWatchedPart<HTMLDivElement>(heldNotice);
+  // The switch itself leaves when the pane stops being editable (a read says the item is not a
+  // Note any more, or the pane no longer reads the version shown). Focus on it goes to the page's
+  // heading.
+  const heldSwitch = useRef<HTMLElement | null>(null);
+  const [, actionsRef] = useWatchedPart<HTMLParagraphElement>(heldSwitch);
+  useLayoutEffect(() => {
+    if (takeHeld(heldFocus)) (switchRef.current ?? pageHeading())?.focus();
+    if (takeHeld(heldSwitch)) pageHeading()?.focus();
+    if (takeHeld(heldEditor)) keptRef.current?.focus();
+    if (takeHeld(heldNotice)) (keptRef.current ?? switchRef.current)?.focus();
+    if (takeHeld(heldKept) && editing && notANote === null) {
+      switchRef.current?.focus();
+      focusNext.current = 'text';
+    }
+  });
   const reading = JSON.stringify(request);
   const itemFailure = useRetry({
     request: reading,
@@ -357,7 +553,78 @@ export function DocumentView({
           onReadLatest={onReadLatest}
         />
       )}
-      {selection && (
+      {canWrite && !atShown && isNote && (
+        <p role="note" className="notice">
+          {hasDraft ? 'You have a draft of this item. ' : ''}
+          Editing starts from the version this workspace shows, and this tab reads another revision.{' '}
+          <button type="button" onClick={onOpenCurrent}>
+            Open the version this workspace shows
+          </button>
+        </p>
+      )}
+      {editable && (
+        <p ref={actionsRef} className="document-actions">
+          {/* aria-disabled, not disabled, while the item is read again: it may hold focus. */}
+          <button
+            type="button"
+            ref={switchRef}
+            aria-disabled={session === undefined && document === undefined}
+            onClick={() => {
+              if (editing) setChosen('read');
+              else if (session !== undefined || document !== undefined) {
+                if (session === undefined && document !== undefined) {
+                  beginSession(workspaceId, revision, document, pane);
+                }
+                // "Edit here" moves the editor from the pane that has it to this one.
+                claimEditor(workspaceId, itemId, pane, true);
+                // Into the text box, which the next drawing has unless the session is refused:
+                // that drawing shows the kept text ("Show your draft"), and focus stays here.
+                if (notANote === null) focusNext.current = 'text';
+                setChosen('edit');
+              }
+            }}
+          >
+            {editing
+              ? 'Read the committed text'
+              : notANote !== null
+                ? 'Show your draft'
+                : elsewhere
+                  ? 'Edit here'
+                  : hasDraft
+                    ? 'Edit your draft'
+                    : 'Edit'}
+          </button>
+        </p>
+      )}
+      {/* Not for a refused session: "Keep mine" would save, and nothing of it is saved. The
+          conflict stays with the item, and its notice is back when the refusal is lifted. */}
+      {editable && conflict !== undefined && notANote === null && (
+        <div ref={noticePartRef}>
+          <ConflictNotice
+            workspaceId={workspaceId}
+            itemId={itemId}
+            title={title}
+            conflict={conflict}
+            onSnapshotted={onSnapshotted}
+            onResolved={() => {
+              focusNext.current = 'switch';
+              setChosen('read');
+            }}
+          />
+        </div>
+      )}
+      {editable && !editing && session !== undefined && (
+        <p role="note" className="notice">
+          {elsewhere
+            ? 'This item is being edited in another pane.'
+            : DRAFT_STANDS[saveStateOf(session)]}{' '}
+          Below is the committed text.
+          {notANote === null
+            ? ''
+            : ` This item is now a ${ROLE[notANote]}, so your draft of it is no longer saved.`}
+        </p>
+      )}
+      {selection && !editing && (
         <p role="note" className="notice">
           Showing {describeSelection(selection)}.{' '}
           <button type="button" onClick={() => onSelect(undefined)}>
@@ -366,117 +633,146 @@ export function DocumentView({
         </p>
       )}
 
-      {itemFailure.shown ? (
+      {/* A read that fails when asked again never takes away what is on screen: the notice
+          stands beside the properties, the form and the text, and replaces them only when there
+          is nothing to show. */}
+      {itemFailure.shown && (
         <FailureNotice
           context="Reading this item’s properties"
           error={itemFailure.error}
           retry={itemFailure}
           workspaceId={workspaceId}
         />
-      ) : item.data ? (
-        <Properties properties={item.data.properties} />
-      ) : (
-        <p role="status">Loading properties…</p>
       )}
-
-      {first && first.outline.length > 0 && (
-        <details className="outline">
-          <summary>Outline ({first.outline.length})</summary>
-          <nav aria-label="Outline">
-            <ol>
-              {keyed(first.outline, (entry) => JSON.stringify(entry)).map(
-                ({ key, value: entry }) => (
-                  <li key={key} style={{ marginInlineStart: `${entry.level}rem` }}>
-                    <button
-                      type="button"
-                      className="link-button"
-                      onClick={() => onSelect(entry.selection)}
-                    >
-                      {entry.label}
-                    </button>
-                  </li>
-                ),
-              )}
-            </ol>
-          </nav>
-        </details>
-      )}
-
-      {extractionLabels(extraction).map((label) => (
-        <p key={label} role="note" className="notice">
-          {label}
-        </p>
-      ))}
-
-      {read.isPending && !readFailure.retrying && <p role="status">Reading…</p>}
-      {readFailure.shown && (
-        <FailureNotice
-          context="Reading this item"
-          error={readFailure.error}
-          retry={readFailure}
-          workspaceId={workspaceId}
-        />
-      )}
-      {pages.length > 0 && (
-        <div className="document-body" ref={bodyRef}>
-          {keyed(pages, (page) => page.receipt_id).map(({ key, value: page }, index) => (
-            <div
-              key={key}
-              data-part
-              tabIndex={-1}
-              {...(pages.length > 1
-                ? { role: 'group', 'aria-label': `Part ${index + 1} of this reading` }
-                : {})}
-            >
-              <SafeMarkdown markdown={page.markdown} />
+      {editing ? (
+        <div ref={editingRef} className="editing">
+          {/* Each part has its own key: it is another element, removed whole, so its ref is
+              cleared while keyboard focus is still in it (`useWatchedPart`). */}
+          {notANote !== null ? (
+            <div key="kept" ref={keptPartRef}>
+              <KeptText session={session} title={title} kind={ROLE[notANote]} boxRef={keptRef} />
             </div>
-          ))}
-        </div>
-      )}
-      <p role="status" className="sr-only">
-        {readingStatus(read, pages.length, moreFailure.retrying)}
-      </p>
-      {keyed(warnings, (warning) => JSON.stringify(warning)).map(({ key, value: warning }) => (
-        <p key={key} role="note" className="notice">
-          {warning.message}
-          {warning.location ? ` (${warning.location})` : ''}
-        </p>
-      ))}
-      {last?.truncated && (
-        <div role="note" className="notice">
-          <p>
-            Partial reading: this is not all of {describeSelection(request.selection)}.
-            {last.next_cursor ? '' : ' The rest cannot be continued from here.'}
-          </p>
-          {read.hasNextPage && (
-            // aria-disabled rather than disabled while reading: the button stays focusable and
-            // announced. A disabled one would lose focus: Chromium and WebKit move focus to the
-            // body within a frame of a focused button becoming disabled (HTML's focus fixup).
-            <button
-              type="button"
-              ref={continueRef}
-              aria-disabled={continuing}
-              onClick={continueReading}
-            >
-              {continuing ? 'Reading more…' : 'Continue reading'}
-            </button>
+          ) : (
+            <div key="live" ref={liveRef}>
+              {typeName === null ? null : <PropertiesForm session={session} typeName={typeName} />}
+              <DraftEditor
+                session={session}
+                title={title}
+                onDiscarded={() => {
+                  focusNext.current = 'switch';
+                  setChosen('read');
+                }}
+              />
+            </div>
           )}
         </div>
-      )}
-      {moreFailure.shown && (
-        <FailureNotice
-          context="Continuing this reading"
-          error={moreFailure.error}
-          retry={moreFailure}
-          workspaceId={workspaceId}
-        />
-      )}
-      {first && (
-        <p className="citation">
-          Read from {first.source.path} at{' '}
-          <code title={first.source.revision}>{short(first.source.revision)}</code>,{' '}
-          {describeSelection(first.source.selection)}.
-        </p>
+      ) : (
+        <>
+          {document ? (
+            <Properties properties={document.properties} />
+          ) : itemFailure.shown ? null : (
+            <p role="status">Loading properties…</p>
+          )}
+          {first && first.outline.length > 0 && (
+            <details className="outline">
+              <summary>Outline ({first.outline.length})</summary>
+              <nav aria-label="Outline">
+                <ol>
+                  {keyed(first.outline, (entry) => JSON.stringify(entry)).map(
+                    ({ key, value: entry }) => (
+                      <li key={key} style={{ marginInlineStart: `${entry.level}rem` }}>
+                        <button
+                          type="button"
+                          className="link-button"
+                          onClick={() => onSelect(entry.selection)}
+                        >
+                          {entry.label}
+                        </button>
+                      </li>
+                    ),
+                  )}
+                </ol>
+              </nav>
+            </details>
+          )}
+
+          {extractionLabels(extraction).map((label) => (
+            <p key={label} role="note" className="notice">
+              {label}
+            </p>
+          ))}
+
+          {read.isPending && !readFailure.retrying && <p role="status">Reading…</p>}
+          {readFailure.shown && (
+            <FailureNotice
+              context="Reading this item"
+              error={readFailure.error}
+              retry={readFailure}
+              workspaceId={workspaceId}
+            />
+          )}
+          {pages.length > 0 && (
+            <div className="document-body" ref={bodyRef}>
+              {keyed(pages, (page) => page.receipt_id).map(({ key, value: page }, index) => (
+                <div
+                  key={key}
+                  data-part
+                  tabIndex={-1}
+                  {...(pages.length > 1
+                    ? { role: 'group', 'aria-label': `Part ${index + 1} of this reading` }
+                    : {})}
+                >
+                  <SafeMarkdown markdown={page.markdown} />
+                </div>
+              ))}
+            </div>
+          )}
+          <p role="status" className="sr-only">
+            {readingStatus(read, pages.length, moreFailure.retrying)}
+          </p>
+          {keyed(warnings, (warning) => JSON.stringify(warning)).map(({ key, value: warning }) => (
+            <p key={key} role="note" className="notice">
+              {warning.message}
+              {warning.location ? ` (${warning.location})` : ''}
+            </p>
+          ))}
+          {last?.truncated && (
+            <div role="note" className="notice">
+              <p>
+                Partial reading: this is not all of {describeSelection(request.selection)}.
+                {last.next_cursor ? '' : ' The rest cannot be continued from here.'}
+              </p>
+              {read.hasNextPage && (
+                // aria-disabled rather than disabled while reading: the button stays focusable and
+                // announced. A disabled one would lose focus: Chromium and WebKit move focus to the
+                // body within a frame of a focused button becoming disabled (HTML's focus fixup).
+                <button
+                  type="button"
+                  ref={continueRef}
+                  aria-disabled={continuing}
+                  onClick={continueReading}
+                >
+                  {continuing ? 'Reading more…' : 'Continue reading'}
+                </button>
+              )}
+            </div>
+          )}
+          {moreFailure.shown && (
+            <FailureNotice
+              context="Continuing this reading"
+              error={moreFailure.error}
+              retry={moreFailure}
+              workspaceId={workspaceId}
+            />
+          )}
+          {first && (
+            <p className="citation">
+              Read from {first.source.path} at{' '}
+              <code title={first.source.revision}>{short(first.source.revision)}</code>,{' '}
+              {describeSelection(first.source.selection)}.
+            </p>
+          )}
+        </>
       )}
     </article>
   );
