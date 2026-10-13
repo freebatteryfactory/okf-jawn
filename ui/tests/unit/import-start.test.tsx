@@ -323,31 +323,33 @@ describe('starting the import', () => {
     await eventually(() => jobRow());
     expect(jobRow().textContent).toContain('Running.');
     expect(within(jobRow()).getByRole('progressbar').getAttribute('value')).toBe('20');
-    // The job was shown from the answer itself: it has not been asked for yet.
-    expect(api.callsTo(JOB)).toEqual([]);
+    // The job was shown from the answer itself, and asked for once after it.
+    await later(() => expect(api.callsTo(JOB)).toHaveLength(1));
     job = jobOf('succeeded', { item_ids: [NOTE], revision: IMPORTED });
     await pass(JOBS_POLL_MS);
     await later(() => expect(jobRow().textContent).toContain('Finished.'));
-    expect(api.callsTo(JOB)).toEqual([{ workspace_id: WS, job_id: JOB_ID }]);
+    expect(api.callsTo(JOB)).toHaveLength(2);
     await later(() => within(jobRow()).getByRole('link', { name: 'Meeting notes' }));
     expect(within(jobRow()).getByRole('link', { name: 'Meeting notes' }).getAttribute('href')).toBe(
       `/w/${WS}/i/${NOTE}?rev=${IMPORTED}`,
     );
     // It has ended: it is not asked for again.
     await pass(JOBS_POLL_MS * 10);
-    expect(api.callsTo(JOB)).toHaveLength(1);
+    expect(api.callsTo(JOB)).toHaveLength(2);
   });
 
   it('asks for the job once the event stream is open: one that ended before then is not left waiting', async () => {
     // The service answers the job as waiting; its in-process runner then finishes it at once.
     let job: Job = jobOf('queued');
+    // The service answers a read as waiting until the stream is open (the test's own clock).
+    let streamOpen = false;
     const { api } = await uploadedFiles([fileOf('a.txt', 'abc')], {
       [START]: () => {
         const answered = job;
         job = jobOf('succeeded', { item_ids: [NOTE], revision: IMPORTED });
         return accepted(answered);
       },
-      [JOB]: () => ok(job),
+      [JOB]: () => ok(streamOpen ? job : jobOf('queued')),
     });
     const events = mockEvents();
     let open: () => void = () => undefined;
@@ -358,14 +360,15 @@ describe('starting the import', () => {
     await eventually(() => jobRow());
     // The stream is asked for only now, after the answer, and is not open yet.
     await eventually(() => expect(events.state.requests).toBe(1));
+    await later(() => expect(api.callsTo(JOB)).toHaveLength(1));
     expect(jobRow().textContent).toContain('Waiting to start.');
-    expect(api.callsTo(JOB)).toEqual([]);
     // It opens. No event follows: every change of the job was before it.
+    streamOpen = true;
     open();
     await eventually(() => expect(events.streams).toHaveLength(1));
     await later(() => expect(jobRow().textContent).toContain('Finished.'));
-    // Asked once, by the stream's opening: the quick clock has not come round.
-    expect(api.callsTo(JOB)).toEqual([{ workspace_id: WS, job_id: JOB_ID }]);
+    // Asked once after the answer and once by the stream's opening: the quick clock has not come round.
+    expect(api.callsTo(JOB)).toHaveLength(2);
     expect(events.streams.at(0)?.closed).toBe(false);
   });
 
@@ -379,28 +382,29 @@ describe('starting the import', () => {
     fireEvent.click(importButton());
     await eventually(() => jobRow());
     await eventually(() => expect(events.streams).toHaveLength(1));
-    // Asked once when the stream opened.
-    await later(() => expect(api.callsTo(JOB)).toHaveLength(1));
+    // Asked after the answer and when the stream opened (the two may share one request).
+    await later(() => expect(api.callsTo(JOB).length).toBeGreaterThanOrEqual(1));
     await pass(50);
+    const base = api.callsTo(JOB).length;
     // Not on the quick clock while the stream is open.
     await pass(JOBS_POLL_MS * 4);
-    expect(api.callsTo(JOB)).toHaveLength(1);
+    expect(api.callsTo(JOB)).toHaveLength(base);
     // An event asks for the single job, not only for the list.
     job = jobOf('running', { progress: 60 });
     act(() => events.streams.at(0)?.send('3', eventOf('job_updated', '3', { job_id: JOB_ID })));
     await later(() =>
       expect(within(jobRow()).getByRole('progressbar').getAttribute('value')).toBe('60'),
     );
-    expect(api.callsTo(JOB)).toHaveLength(2);
+    expect(api.callsTo(JOB)).toHaveLength(base + 1);
     // No event tells of its end: the slow clock finds it, and then stops.
     job = jobOf('succeeded', { item_ids: [], revision: IMPORTED });
     await pass(JOBS_SAFETY_POLL_MS - 1_000);
-    expect(api.callsTo(JOB)).toHaveLength(2);
+    expect(api.callsTo(JOB)).toHaveLength(base + 1);
     await pass(1_000);
     await later(() => expect(jobRow().textContent).toContain('Finished.'));
-    expect(api.callsTo(JOB)).toHaveLength(3);
+    expect(api.callsTo(JOB)).toHaveLength(base + 2);
     await pass(JOBS_SAFETY_POLL_MS * 5);
-    expect(api.callsTo(JOB)).toHaveLength(3);
+    expect(api.callsTo(JOB)).toHaveLength(base + 2);
   });
 
   it('stops asking for a started job once the service says the person is not signed in, and starts again at the retry', async () => {
@@ -411,19 +415,21 @@ describe('starting the import', () => {
     });
     fireEvent.click(importButton());
     await eventually(() => jobRow());
+    // The answer's own question.
+    await later(() => expect(api.callsTo(JOB)).toHaveLength(1));
     signedIn = false;
     await pass(JOBS_POLL_MS);
     await later(() => screen.getByText('Reading this job: You are not signed in.'));
-    expect(api.callsTo(JOB)).toHaveLength(1);
+    expect(api.callsTo(JOB)).toHaveLength(2);
     await pass(600_000);
-    expect(api.callsTo(JOB)).toHaveLength(1);
+    expect(api.callsTo(JOB)).toHaveLength(2);
     // The row stays as last answered.
     expect(jobRow().textContent).toContain('Running.');
     signedIn = true;
     fireEvent.click(screen.getByRole('button', { name: 'Try again after signing in' }));
-    await later(() => expect(api.callsTo(JOB)).toHaveLength(2));
-    await pass(JOBS_POLL_MS);
     await later(() => expect(api.callsTo(JOB)).toHaveLength(3));
+    await pass(JOBS_POLL_MS);
+    await later(() => expect(api.callsTo(JOB)).toHaveLength(4));
   });
 
   it('asks for the stream again, on the import page, once a job is answered after the session had ended', async () => {
@@ -464,15 +470,15 @@ describe('starting the import', () => {
     });
     fireEvent.click(importButton());
     await eventually(() => jobRow());
-    expect(api.callsTo(JOB)).toEqual([]);
+    await later(() => expect(api.callsTo(JOB)).toHaveLength(1));
     fireEvent.click(within(jobRow()).getByRole('button', { name: 'Cancel' }));
     fireEvent.click(within(jobRow()).getByRole('button', { name: 'Cancel the job' }));
     await eventually(() =>
       screen.getByText('Cancelling this job: The service is temporarily unavailable.'),
     );
-    // The single job was asked for, with no clock moved, and the row shows what was answered.
+    // The single job was asked for again, with no clock moved, and the row shows what was answered.
     await later(() => expect(jobRow().textContent).toContain('Cancelled.'));
-    expect(api.callsTo(JOB)).toEqual([{ workspace_id: WS, job_id: JOB_ID }]);
+    expect(api.callsTo(JOB)).toHaveLength(2);
   });
 
   it('repeats the same request on "Try again", and sends another folder as a new request', async () => {

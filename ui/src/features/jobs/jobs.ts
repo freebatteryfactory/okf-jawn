@@ -151,13 +151,14 @@ function readsJob(queryKey: readonly unknown[], workspaceId: string): boolean {
 /**
  * Tell the cache what the service just answered about a job (`start_import`, `cancel_job`,
  * `retry_job`): its own entry, and its row of the list when it is listed. A job the list does not
- * hold yet makes the list be asked again.
+ * hold yet makes the list be asked again. The job is asked for once after its answer: events that
+ * went out on an open stream before the answer was read asked for a job the page did not know, and
+ * the answer may already be out of date.
  */
 export function rememberJob(client: QueryClient, workspaceId: string, job: Job) {
-  client.setQueryData(
-    getJobOptions({ body: { workspace_id: workspaceId, job_id: job.id } }).queryKey,
-    job,
-  );
+  const jobKey = getJobOptions({ body: { workspace_id: workspaceId, job_id: job.id } }).queryKey;
+  client.setQueryData(jobKey, job);
+  void client.invalidateQueries({ queryKey: jobKey });
   const key = jobsQueryKey(workspaceId);
   const listed = client.getQueryData<JobPages>(key);
   if (listed === undefined) return;
