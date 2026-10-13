@@ -230,19 +230,17 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   // again by itself when the network returns), and the person goes on typing where they were.
   const atHead = saved.data;
   const [basis, setBasis] = useState<NamingRules | undefined>(undefined);
-  // The person's own save that succeeded, until the page shows the rules it made: the version it
-  // made, or a later one that still holds them. From then on those rules are the saved ones and
-  // what the person starts from. Rules on the page that are still the ones sent are no edits any
-  // more; anything else (text typed since, text that cannot be read) stays an edit, of them.
-  const [ownSave, setOwnSave] = useState<{ rules: NamingRules; revision: Revision } | null>(null);
-  if (
-    ownSave !== null &&
-    atHead !== undefined &&
-    (head === ownSave.revision || sameRules(atHead, ownSave.rules))
-  ) {
+  // The rules of the person's own save that succeeded, until the page shows them as the saved
+  // rules of the version shown (the version that save made, or a later one that still holds
+  // them). From then on they are what the person starts from. Rules on the page that are still
+  // the ones sent are no edits any more; anything else (text typed since, text that cannot be
+  // read) stays an edit, of them. Nothing on the page changes by this: what stops being an edit
+  // says the same as the saved rules now drawn.
+  const [ownSave, setOwnSave] = useState<NamingRules | null>(null);
+  if (ownSave !== null && atHead !== undefined && sameRules(atHead, ownSave)) {
     setOwnSave(null);
     setBasis(atHead);
-    if (edited !== undefined && !unreadable && sameRules(edited, ownSave.rules)) {
+    if (edited !== undefined && !unreadable && sameRules(edited, ownSave)) {
       setEdited(undefined);
       setTyped(null);
     }
@@ -326,7 +324,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   const save = useChange<NamingRules, HeadChange>(
     saveRules,
     (result, carried) => {
-      setOwnSave({ rules: carried, revision: result.revision });
+      setOwnSave(carried);
       setSaid(
         result.adopted
           ? `The rules are saved. The workspace now shows revision ${short(result.revision)}, which includes them.`
