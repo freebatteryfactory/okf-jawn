@@ -1260,24 +1260,150 @@ describe('discarding a draft', () => {
     expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
   });
 
-  it('asks nothing of the service for text that was never saved', async () => {
-    const api = writable({ [SAVE]: () => fail(503, 'unavailable', 'busy') });
+  it('asks nothing of the service for text no save of which was ever sent', async () => {
+    const api = writable();
     const { box } = await startEditing();
     expect(
       screen.getByRole('button', { name: 'Discard draft' }).getAttribute('aria-disabled'),
     ).toBe('true');
     typeInto(box, ' unwanted');
-    await pass(AUTOSAVE_DELAY_MS);
-    await screenButton('Try again');
+    // Discarded before the autosave: the service was never asked to hold any of it.
     fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
     fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
     await eventually(() => expect(screen.getByText('Text of Meeting notes')).toBeDefined());
+    await pass(AUTOSAVE_DELAY_MS * 3);
     expect(api.callsTo(DISCARD)).toHaveLength(0);
+    expect(api.callsTo(SAVE)).toHaveLength(0);
     expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
     // Editing again starts from the committed text, not from what was discarded.
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     await eventually(() => textBox('Text of Meeting notes'));
     expect(textIn(textBox('Text of Meeting notes'))).toBe(COMMITTED);
+  });
+
+  // A first save that failed or timed out may have been applied: the service may hold the draft.
+  describe('after a first save whose outcome is unknown', () => {
+    const COMMIT = '/api/history/commit-items';
+
+    /** A service that holds what it is sent, and whose first save answers as `first` says. */
+    function service(first: 'never answers' | 'refuses and holds nothing') {
+      const state: { draft: string | null; committed: string } = {
+        draft: null,
+        committed: COMMITTED,
+      };
+      const held = () => (state.draft === null ? null : draftOf(NOTE, HEAD, LATER));
+      const api = writable({
+        [ITEM]: (body) => {
+          if (body.item_id !== NOTE) return ok(itemDocument(otherSummary));
+          const document = { ...itemDocument(noteSummary), body: state.committed };
+          const draft = held();
+          return ok(
+            state.draft === null || draft === null
+              ? document
+              : {
+                  ...document,
+                  draft: { body: state.draft, properties: document.properties, draft },
+                },
+          );
+        },
+        [DRAFTS]: () => {
+          const draft = held();
+          return ok({ items: draft === null ? [] : [draft], next_cursor: null });
+        },
+        [SAVE]: (body) => {
+          if (first === 'refuses and holds nothing') return fail(503, 'unavailable', 'busy');
+          // Applied, and its answer never arrives.
+          state.draft = String(body.body);
+          return new Promise<never>(() => {});
+        },
+        [DISCARD]: () => {
+          const was = held();
+          state.draft = null;
+          return was === null ? fail(404, 'not_found', 'you hold no draft of this item') : ok(was);
+        },
+        [COMMIT]: () => {
+          state.committed = state.draft ?? state.committed;
+          state.draft = null;
+          return ok({ revision: 'c'.repeat(40), receipt_id: NOTE, warnings: [] });
+        },
+      });
+      return { api, state };
+    }
+
+    async function discardAfterTheSave() {
+      const { box } = await startEditing();
+      typeInto(box, ' secret words');
+      await pass(AUTOSAVE_DELAY_MS);
+      await pass(REQUEST_TIMEOUT_MS);
+      await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+      const discard = screen.getByRole('button', { name: 'Discard draft' });
+      act(() => discard.focus());
+      fireEvent.click(discard);
+      fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+      await eventually(() =>
+        expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull(),
+      );
+    }
+
+    it('asks the service to discard, so the draft is not listed and no Snapshot commits it', async () => {
+      const { api, state } = service('never answers');
+      await discardAfterTheSave();
+      expect(api.callsTo(DISCARD)).toHaveLength(1);
+      expect(api.callsTo(DISCARD).at(0)).toMatchObject({ workspace_id: WS, item_id: NOTE });
+      expect(state.draft).toBeNull();
+      // The pane and the panel agree: no draft, anywhere.
+      const drafts = await eventuallyGet(() => screen.getByRole('region', { name: 'Drafts (0)' }));
+      expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Edit' }));
+      // A Snapshot has nothing to take, and takes nothing.
+      fireEvent.change(within(drafts).getByRole('textbox', { name: 'Snapshot name' }), {
+        target: { value: 'Tidy' },
+      });
+      fireEvent.click(within(drafts).getByRole('button', { name: 'Snapshot 0 drafts' }));
+      await pass(AUTOSAVE_DELAY_MS * 3);
+      expect(api.callsTo(COMMIT)).toHaveLength(0);
+      expect(state.committed).toBe(COMMITTED);
+      expect(api.violations).toEqual([]);
+    });
+
+    it('takes the answer that the service holds no such draft as the discard done', async () => {
+      const { api } = service('refuses and holds nothing');
+      await discardAfterTheSave();
+      expect(api.callsTo(DISCARD)).toHaveLength(1);
+      // "Not found" here is what was asked for: nothing is shown as a failure.
+      expect(screen.queryByText(/^Discarding this draft:/)).toBeNull();
+      expect(screen.queryByText(/could not be found/)).toBeNull();
+      await eventually(() => expect(screen.getByText('Text of Meeting notes')).toBeDefined());
+      expect(screen.getByRole('tab', { name: 'Meeting notes' })).toBeDefined();
+      expect(screen.getByRole('region', { name: 'Drafts (0)' })).toBeDefined();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Edit' }));
+      // Editing again starts from the committed text.
+      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      await eventually(() => textBox('Text of Meeting notes'));
+      expect(textIn(textBox('Text of Meeting notes'))).toBe(COMMITTED);
+    });
+
+    it('keeps the text when the discard itself fails, and says so', async () => {
+      const { api } = service('refuses and holds nothing');
+      const { box } = await startEditing();
+      typeInto(box, ' secret words');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+      // The service is not there for the discard either.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => Promise.reject(new TypeError('Failed to fetch'))),
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Discard the draft' }));
+      await eventually(() =>
+        expect(
+          screen.getByText('Discarding this draft: The workspace service could not be reached.'),
+        ).toBeDefined(),
+      );
+      expect(textIn(textBox('Text of Meeting notes'))).toBe(`${COMMITTED} secret words`);
+      expect(api.callsTo(DISCARD)).toHaveLength(0);
+    });
   });
 });
 

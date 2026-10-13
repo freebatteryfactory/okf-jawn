@@ -24,7 +24,10 @@
  * Snapshot of the item that answered while its text had gone on names the revision it made
  * (`snapshot.ts`): the text was typed over what that revision holds.
  *
- * A discard is repeated under one key until it answers, wherever it is pressed from: the key is
+ * A discard asks the service unless the page knows it holds no draft, which it does only of text
+ * no save of which is in doubt: after a save that failed or timed out it asks, and takes the
+ * answer that there is no draft as the discard done. A discard is repeated under one key until it
+ * answers, wherever it is pressed from: the key is
  * kept here, by item, not in the component that asked. A save sent after a discard that did not
  * answer makes the next discard another request (it would remove another draft), with a new key.
  *
@@ -34,6 +37,7 @@ import type { QueryClient } from '@tanstack/react-query';
 import { discardDraft, saveDraft } from '../../api/generated/sdk.gen';
 import type { ItemDocument, Revision } from '../../api/generated/types.gen';
 import { zSaveDraftRequest } from '../../api/generated/zod.gen';
+import { classifyFailure } from '../errors/failure';
 import { rememberDraft } from './drafts-list';
 import {
   atRisk,
@@ -283,10 +287,21 @@ export async function rebaseSession(
   assertSaved(workspaceId, itemId);
 }
 
+/** The service answered that it holds no such thing: of a discard, that there is no draft. */
+function answeredNotFound(thrown: unknown): boolean {
+  const failure = classifyFailure(thrown);
+  return failure.kind === 'api' && failure.error.code === 'not_found';
+}
+
 /**
- * Discard the person's draft of an item: `discard_draft` when the service holds one, and the
- * session with its text either way. Rejects with what `discard_draft` threw, leaving the session
- * as it was. Every attempt of one discard carries the same key, whoever asks.
+ * Discard the person's draft of an item: the session with its text, and the draft the service
+ * holds. The service is asked (`discard_draft`) unless this page knows it holds none, and it knows
+ * that of one case: a session no save of which was confirmed and none failed, so nothing of it
+ * was sent, or what was sent has been snapshotted. After a save that failed or timed out the
+ * service may hold a draft, and so it may when this page has no session of the item: it is asked.
+ * Its answer that it holds no draft of the item (`not_found`) is the discard done. Rejects with
+ * anything else `discard_draft` threw, leaving the session as it was. Every attempt of one
+ * discard carries the same key, whoever asks.
  */
 export async function discardSession(
   client: QueryClient,
@@ -299,13 +314,18 @@ export async function discardSession(
   // A save in flight may be creating the draft: what the service holds is known once it settles.
   await inFlight.get(key);
   const session = sessions().sessions[key];
-  if (session === undefined || session.confirmed !== null) {
+  const holdsNone = session !== undefined && session.confirmed === null && session.failure === null;
+  if (!holdsNone) {
     const idempotencyKey = discardKeys.get(key) ?? crypto.randomUUID();
     discardKeys.set(key, idempotencyKey);
-    await discardDraft({
-      body: { workspace_id: workspaceId, item_id: itemId, idempotency_key: idempotencyKey },
-      throwOnError: true,
-    });
+    try {
+      await discardDraft({
+        body: { workspace_id: workspaceId, item_id: itemId, idempotency_key: idempotencyKey },
+        throwOnError: true,
+      });
+    } catch (error) {
+      if (!answeredNotFound(error)) throw error;
+    }
     discardKeys.delete(key);
   }
   cancelTimer(key);
