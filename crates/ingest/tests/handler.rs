@@ -12,13 +12,14 @@ mod ports;
 mod records;
 
 mod job_handler {
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use okf_jawn_contract::access::AccessRoute;
-    use okf_jawn_contract::common::PageRange;
-    use okf_jawn_contract::error::ErrorCode;
+    use okf_jawn_contract::common::{PageRange, Warning};
+    use okf_jawn_contract::error::{ApiError, ErrorCode};
     use okf_jawn_contract::events::EventKind;
     use okf_jawn_contract::extraction::{
         ConversionOutcome, ConversionSettings, FailureReason, TextOrigin,
@@ -81,9 +82,59 @@ mod job_handler {
         handler: IngestHandler,
     }
 
+    /// A conformance check that answers for the whole candidate whatever the commit wrote, as
+    /// the production `conformance::OkfConformance` does with the validator's findings: one
+    /// warning for each file under the staged root, located at the file's workspace path, in
+    /// path order.
+    struct WholeCandidate;
+
     const PURGE: &str = "00000000-0000-0000-0000-0000000000cc";
     const WORKSPACE: &str = "00000000-0000-0000-0000-0000000000aa";
     const SOURCE_ITEM: &str = "00000000-0000-0000-0000-0000000000ac";
+    /// The code of the warnings `WholeCandidate` gives.
+    const WHOLE_CANDIDATE: &str = "whole_candidate";
+    /// How many sources the many-card import of review N2 takes.
+    const MANY_CARDS: u32 = 12;
+
+    impl CandidateCheck for WholeCandidate {
+        fn check(
+            &self,
+            root: &Path,
+            _rewritten: &[WorkspacePath],
+        ) -> Result<Vec<Warning>, ApiError> {
+            let mut files = Vec::new();
+            files_under(root, "", &mut files)
+                .map_err(|error| ApiError::new(ErrorCode::Internal, error.to_string()))?;
+            files.sort_unstable();
+            Ok(files
+                .into_iter()
+                .map(|path| Warning {
+                    code: WHOLE_CANDIDATE.to_owned(),
+                    message: "a finding of the whole candidate".to_owned(),
+                    location: Some(path),
+                })
+                .collect())
+        }
+    }
+
+    /// Every file under `directory`, as a `/`-separated path below it, after `prefix`.
+    fn files_under(directory: &Path, prefix: &str, found: &mut Vec<String>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if entry.file_type()?.is_dir() {
+                files_under(&entry.path(), &path, found)?;
+            } else {
+                found.push(path);
+            }
+        }
+        Ok(())
+    }
 
     fn tenant() -> Built<TenantId> {
         Ok(TenantId::try_from("tenant-a".to_owned())?)
@@ -1730,6 +1781,154 @@ mod job_handler {
         // Died after the pending commit, and after the first card's commit: the same warnings.
         assert_eq!(completed_warnings(Some(1), 132).await?, whole);
         assert_eq!(completed_warnings(Some(2), 134).await?, whole);
+        Ok(())
+    }
+
+    /// A world whose conformance check answers for the whole candidate (`WholeCandidate`), with
+    /// an import of `MANY_CARDS` sources (`doc-00.pdf` onward) as job 300.
+    fn many_cards_import() -> Built<(World, okf_jawn_contract::identity::JobId)> {
+        let world = world_full(
+            Some(3),
+            Vec::new(),
+            Arc::new(WholeCandidate),
+            Duration::from_secs(60),
+        )?;
+        let mut uploads = Vec::new();
+        for card in 0..MANY_CARDS {
+            uploads.push(upload(
+                &world,
+                300_u128.saturating_add(u128::from(card)),
+                &format!("doc-{card:02}.pdf"),
+                format!("%PDF {card}").as_bytes(),
+            )?);
+        }
+        let id = job(
+            &world,
+            300,
+            workspace_scope()?,
+            import_spec(uploads, false)?,
+        )?;
+        Ok((world, id))
+    }
+
+    /// The locations of the warnings of `warnings` whose code starts with `code`, in order.
+    fn located(warnings: &[Warning], code: &str) -> Vec<String> {
+        warnings
+            .iter()
+            .filter(|warning| warning.code.starts_with(code))
+            .filter_map(|warning| warning.location.clone())
+            .collect()
+    }
+
+    /// `warnings` as a test compares them: code, message and location.
+    fn compared(warnings: &[Warning]) -> Vec<(String, String, Option<String>)> {
+        warnings
+            .iter()
+            .map(|warning| {
+                (
+                    warning.code.clone(),
+                    warning.message.clone(),
+                    warning.location.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Review N2: a commit's check reports what that commit wrote. An import of twelve cards
+    /// runs thirteen commits over a candidate that holds all twelve, each with a conformance
+    /// finding (`WholeCandidate`) and OKF lint findings. The pending commit, which writes all
+    /// twelve, keeps and reports all twelve cards' findings; each card's own commit keeps and
+    /// reports that card's only. So the completion holds each commit's findings once (two
+    /// conformance findings a card, not thirteen), and no commit keeps more than the pending
+    /// commit. A replayed attempt completes with the same warnings wherever it died.
+    #[tokio::test]
+    async fn an_import_keeps_and_reports_each_commits_own_warnings_not_every_cards_on_every_commit()
+    -> TestResult {
+        let (world, id) = many_cards_import()?;
+        assert!(run(&world, id).await?);
+        let entry = world.records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Succeeded, "{:?}", entry.failures);
+        let mutation = entry.created.mutation_id;
+        let cards = usize::try_from(MANY_CARDS)?;
+        assert_eq!(world.versions.written()?.len(), cards.saturating_add(1));
+        let paths: Vec<String> = (0..MANY_CARDS)
+            .map(|card| format!("inbox/doc-{card:02}-pdf.md"))
+            .collect();
+        // What the store kept for each commit is what that commit's check answered.
+        let kept = world
+            .versions
+            .warnings
+            .lock()
+            .map_err(|_| "poisoned")?
+            .clone();
+        let kept_for = |ordinal: u32| -> Built<Vec<Warning>> {
+            let commit = derive_commit_mutation_id(mutation, ordinal);
+            let found = kept.iter().find(|(of, _)| *of == commit);
+            Ok(some(found, "the warnings kept for a commit")?.1.clone())
+        };
+        // The pending commit writes every card: every card's findings, each once.
+        let pending = kept_for(0)?;
+        assert_eq!(located(&pending, WHOLE_CANDIDATE), paths);
+        let pending_lint = located(&pending, "okf_lint");
+        for path in &paths {
+            assert!(pending_lint.contains(path), "{path}: {pending:?}");
+        }
+        assert_eq!(pending.len(), 36, "no commit keeps more than this one");
+        // Each card's own commit writes that card: that card's findings and no other card's,
+        // though the candidate it checks holds all twelve.
+        let mut card_lint = 0_usize;
+        for (ordinal, path) in (1_u32..).zip(&paths) {
+            let own = kept_for(ordinal)?;
+            assert_eq!(located(&own, WHOLE_CANDIDATE), [path.clone()], "{own:?}");
+            assert!(
+                own.iter()
+                    .all(|warning| warning.location.as_deref() == Some(path.as_str())),
+                "the commit of {path} keeps a warning about another file: {own:?}"
+            );
+            let lint = located(&own, "okf_lint").len();
+            assert_eq!(lint, 2, "{path} has two lint findings of its own: {own:?}");
+            assert_eq!(own.len(), 3, "kept for the commit of {path}: {own:?}");
+            card_lint = card_lint.saturating_add(lint);
+        }
+        // The completion is the sum: each commit's findings once.
+        let completion = some(entry.completions.first(), "the completion")?;
+        assert_eq!(
+            located(&completion.warnings, WHOLE_CANDIDATE).len(),
+            cards.saturating_mul(2),
+            "twelve from the pending commit and one from each card's commit"
+        );
+        assert_eq!(
+            located(&completion.warnings, "okf_lint").len(),
+            pending_lint.len().saturating_add(card_lint)
+        );
+        // In numbers, for twelve cards with two lint findings each as pending and as converted:
+        // the pending commit's 24 lint findings, the card commits' 24, and with the 24
+        // conformance findings 72 warnings in all. A check over every card on every commit
+        // would complete with 468 (36 for each of thirteen commits).
+        assert_eq!(
+            (pending_lint.len(), card_lint, completion.warnings.len()),
+            (24, 24, 72)
+        );
+
+        // A resumed attempt replays the commits its first attempt wrote and completes with the
+        // same warnings: died after the pending commit, after six cards, and after the last.
+        for died in [1, 7, cards.saturating_add(1)] {
+            let (resumed, id) = many_cards_import()?;
+            resumed.versions.die_after(died)?;
+            assert!(run(&resumed, id).await?);
+            let stopped = resumed.records.entry(id)?;
+            assert_eq!(stopped.job.state, JobState::Failed, "died after {died}");
+            resumed.records.insert(id, stopped.scope, stopped.created)?;
+            assert!(run(&resumed, id).await?);
+            let again = resumed.records.entry(id)?;
+            assert_eq!(again.job.state, JobState::Succeeded, "{:?}", again.failures);
+            assert_eq!(resumed.versions.written()?.len(), cards.saturating_add(1));
+            assert_eq!(
+                compared(&some(again.completions.first(), "the completion")?.warnings),
+                compared(&completion.warnings),
+                "died after {died}"
+            );
+        }
         Ok(())
     }
 

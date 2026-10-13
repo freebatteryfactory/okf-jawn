@@ -432,16 +432,17 @@ fn lint_at_import_reports_the_imported_files_findings_as_warnings() -> TestResul
     candidate.write("notes/imported.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
     candidate.write("notes/other.md", "---\ntype: Note\n---\n\nNo heading.\n")?;
     let imported = vec![WorkspacePath::try_from("notes/imported.md".to_owned())?];
+    // A conformance warning about the imported file is the import's to report.
     let conformant = Warning {
         code: "conformance".to_owned(),
         message: "kept".to_owned(),
-        location: None,
+        location: Some("notes/imported.md".to_owned()),
     };
     let check = ImportCheck::new(
         Arc::new(ScriptedConformance(Ok(vec![Warning {
             code: conformant.code.clone(),
             message: conformant.message.clone(),
-            location: None,
+            location: conformant.location.clone(),
         }]))),
         imported.clone(),
     );
@@ -522,6 +523,52 @@ No heading.
     assert!(
         none.iter().all(|warning| warning.code != "handed"),
         "{none:?}"
+    );
+    Ok(())
+}
+
+/// Review N2: an import commit's check reports what that commit wrote. The conformance check
+/// answers for the whole candidate (as `OkfConformance` does: every file's findings, and
+/// findings that name no file); of those, only the ones located at a file this commit writes,
+/// or at a file the store rewrote, are passed on, each once and in the order given.
+#[test]
+fn an_import_check_passes_on_the_conformance_warnings_of_the_files_its_commit_wrote_only()
+-> TestResult {
+    let candidate = Candidate::new()?;
+    candidate.write("notes/imported.md", "---\ntype: Note\n---\n\n# Imported\n")?;
+    let about = |code: &str, location: Option<&str>| Warning {
+        code: code.to_owned(),
+        message: "a validator finding".to_owned(),
+        location: location.map(str::to_owned),
+    };
+    let whole_candidate = vec![
+        about("at_another_card", Some("notes/other.md")),
+        about("at_the_imported", Some("notes/imported.md")),
+        about("names_no_file", None),
+        about("at_a_rewritten", Some("notes/referrer.md")),
+        about("at_a_bystander", Some("notes/bystander.md")),
+        // A path that only starts like the imported one is another file.
+        about("at_a_longer_path", Some("notes/imported.md.bak")),
+    ];
+    let check = ImportCheck::new(
+        Arc::new(ScriptedConformance(Ok(whole_candidate))),
+        vec![WorkspacePath::try_from("notes/imported.md".to_owned())?],
+    );
+    let passed_on = |warnings: &[Warning]| -> Vec<String> {
+        warnings
+            .iter()
+            .filter(|warning| !warning.code.starts_with("okf_lint"))
+            .map(|warning| warning.code.clone())
+            .collect()
+    };
+    assert_eq!(
+        passed_on(&check.check(&candidate.0, &[])?),
+        ["at_the_imported"]
+    );
+    let rewritten = [WorkspacePath::try_from("notes/referrer.md".to_owned())?];
+    assert_eq!(
+        passed_on(&check.check(&candidate.0, &rewritten)?),
+        ["at_the_imported", "at_a_rewritten"]
     );
     Ok(())
 }

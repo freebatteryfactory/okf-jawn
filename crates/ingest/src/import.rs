@@ -10,7 +10,12 @@
 //!    numbered-suffix rule (`report-pdf-2.md`) against the destination folder at the base
 //!    revision and against the other cards of the job.
 //! 3. All cards are committed first with outcome `pending`, through `portable::ImportCheck`
-//!    (the injected `CandidateCheck`, then OKF lint of the imported files).
+//!    (the injected `CandidateCheck`, then OKF lint of the imported files) over every card's
+//!    path. A commit's check reports what that commit wrote: each card's own commit (step 4)
+//!    is checked over that card's path only, so an import of N cards completes with each
+//!    commit's findings once (at most N from the pending commit and one card's from each card
+//!    commit, for one finding a card), and no commit's kept warnings hold more than the
+//!    pending commit's.
 //! 4. Each source is converted window by window (`windows_of(page_count, window_pages)`); each
 //!    window's export and assets are retained, the windows are assembled
 //!    (`record::assemble`), the record is retained, and the card is replaced with the
@@ -209,6 +214,9 @@ pub(crate) async fn import(
         Err(error) if error.code == ErrorCode::Conflict => return Ok(refused_as(error)),
         Err(error) => return Err(error),
     };
+    // A commit's check reports what that commit wrote (review N2): the pending commit writes
+    // every card, so its check is over every card's path; each card's own commit is checked
+    // over that card's path only (`card_check`).
     let check: Arc<dyn CandidateCheck> = Arc::new(ImportCheck::new(
         Arc::clone(&ports.check),
         cards.iter().map(|(card, _)| card.path.clone()).collect(),
@@ -226,7 +234,7 @@ pub(crate) async fn import(
                 .map(|(card, _)| TreeEdit::WriteSourceCard(Box::new(card.clone())))
                 .collect(),
         ),
-        Arc::clone(&check),
+        check,
     )
     .await?
     {
@@ -266,6 +274,7 @@ pub(crate) async fn import(
                 since: &pending_revision,
                 rule: Blocked::AnyChange,
             };
+            let check = card_check(ports, &card);
             match commit(
                 ports,
                 attempt,
@@ -273,7 +282,7 @@ pub(crate) async fn import(
                 (base, ordinal),
                 message,
                 writes,
-                Arc::clone(&check),
+                check,
             )
             .await?
             {
@@ -299,6 +308,20 @@ pub(crate) async fn import(
     }
     announce_imported(ports, attempt.claimed, scope, &done).await?;
     Ok(done)
+}
+
+/// The check of the commit that writes `card` alone: the injected conformance check and OKF
+/// lint, reported for that card's file only (`portable::ImportCheck`). The other cards of the
+/// import are files of the candidate too, but this commit does not write them: their findings
+/// were reported by the pending commit and are reported again by their own commits, so an
+/// import of N cards completes with each commit's findings once, not with all N cards' on
+/// each of its N + 1 commits. The card is written at the path the pending commit gave it (a
+/// card a person moved meanwhile is not written at all, `Blocked::AnyChange`).
+fn card_check(ports: &HandlerPorts, card: &SourceCard) -> Arc<dyn CandidateCheck> {
+    Arc::new(ImportCheck::new(
+        Arc::clone(&ports.check),
+        vec![card.path.clone()],
+    ))
 }
 
 /// Append `imported` once, under the job's own mutation, with the last revision, when the
