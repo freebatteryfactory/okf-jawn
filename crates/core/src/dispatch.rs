@@ -861,6 +861,22 @@ mod tests {
         Ok(())
     }
 
+    /// A pointer and a response type that disagree are our fault: the mutation completes
+    /// nothing, the lease is released, and the caller receives `Internal`, not a success whose
+    /// ledger row records no workspace for a purge to find.
+    #[tokio::test]
+    async fn a_pointer_that_names_the_wrong_type_completes_nothing_and_releases_the_lease()
+    -> Result<(), ApiError> {
+        let ledger = RecordingLedger::default();
+        let held = lease();
+        let outcome: Result<Value, ApiError> = Ok(json!({ "id": "not an identity" }));
+        let refused = finish(&ledger, Some(held), CREATED, outcome).await;
+        assert!(matches!(refused, Err(error) if error.code == ErrorCode::Internal));
+        assert_eq!(ledger.completed()?, Vec::new());
+        assert_eq!(ledger.released()?, vec![held]);
+        Ok(())
+    }
+
     #[test]
     fn a_response_names_a_workspace_only_at_its_pointer() -> Result<(), ApiError> {
         let body = json!({ "id": WORKSPACE, "job": { "workspace_id": null } });
