@@ -822,6 +822,51 @@
       "qualification": []
     },
     {
+      "name": "yaml",
+      "use_sites": [],
+      "planned_use_sites": [
+        "ui/src/features/conventions",
+        "ui/src/features/documents"
+      ],
+      "official_sources": [
+        "https://eemeli.org/yaml/",
+        "https://github.com/eemeli/yaml"
+      ],
+      "symbols": [
+        "parseDocument",
+        "parse",
+        "stringify",
+        "Document",
+        "YAMLParseError",
+        "LineCounter",
+        "isMap",
+        "ParseOptions.uniqueKeys",
+        "ParseOptions.strict",
+        "SchemaOptions.merge",
+        "SchemaOptions.compat",
+        "Document.errors",
+        "Document.warnings",
+        "ToJSOptions.maxAliasCount"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "Installed package read 2026-10-12 (yaml 2.9.1, dist/index.d.ts, dist/public-api.d.ts, dist/options.d.ts, dist/errors.d.ts) and the official documentation reference; no Context7 lookup was executed",
+      "offline_notes": [
+        "The advanced YAML editors (naming rules, SPEC section 6; an item's raw properties, SPEC section 3) read and write YAML in the browser, because the wire carries both as typed JSON. The service still validates; the browser is not a second rule engine.",
+        "parseDocument records YAML errors and warnings as lists on the Document it returns; parse throws the first recorded error. Show Document.errors at their place (YAMLError.linePos, or pos with a LineCounter) and never send a document that has any.",
+        "parseDocument is not promised never to throw: extreme input (very deep nesting) can still end in a RangeError from the call stack, and Document.toJS can throw too. The editor's text is untrusted, so bound its length before parsing, catch whatever is thrown, and show it as one more error; a thrown failure is never read as an empty or valid document. Probed on the installed 2.9.1: 20,000 nested flow sequences were recorded as errors without a throw, which shows the common case, not a guarantee.",
+        "What the person typed is untrusted. Keep the defaults that refuse it early: uniqueKeys true (a repeated key is an error), strict true, merge false (no << keys), and the default maxAliasCount bound on alias expansion when a document is turned into values.",
+        "A value the wire cannot carry (a date tag, a binary tag, a non-string key, a custom tag) must be refused in plain words, not coerced. Use the core schema of YAML 1.2 (the default), where yes, no, on and off are strings.",
+        "Write with compat: 'yaml-1.1': a string that a YAML 1.1 reader would take for a boolean, a number, a date or null (yes, on, 2026-10-12, 1e3, ~) is then quoted, so the text means the same to every reader. Read with it too: an ambiguous plain scalar is then a warning (Document.warnings, code TAG_RESOLVE_FAILED) to show the person; the value stays a string. Probed on the installed 2.9.1. The service's own YAML reader is yaml_serde (crates/storage).",
+        "The version option applies only to a document without a %YAML directive: a %YAML 1.1 line in the text turns on merge keys and the 1.1 booleans. Refuse a document that carries a directive (Document.directives) rather than follow it.",
+        "stringify keeps the insertion order of an object's keys; do not sort entries, so unknown properties go back in their place.",
+        "The package's default export condition for bundlers is ./browser/index.js (ESM); the node condition is CommonJS. It has no dependencies. Licence ISC.",
+        "It was already in bun.lock as a transitive dependency of the tooling at 2.9.1; the direct dependency pins the same version."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": []
+    },
+    {
       "name": "cytoscape",
       "use_sites": [],
       "planned_use_sites": [
@@ -1072,10 +1117,12 @@
     {
       "name": "getrandom",
       "use_sites": [
-        "crates/storage/Cargo.toml"
+        "crates/storage/Cargo.toml",
+        "crates/server/Cargo.toml"
       ],
       "planned_use_sites": [
-        "crates/storage/src/"
+        "crates/storage/src/",
+        "crates/server/src/"
       ],
       "official_sources": [
         "https://docs.rs/getrandom/0.4.3/getrandom/"
@@ -1087,7 +1134,8 @@
       "context7_query": null,
       "knowledge_source": "Official documentation reference; qualify installed version before use",
       "offline_notes": [
-        "Connector secrets are at least 32 bytes from the operating system random source (crates/core/src/credentials.rs CredentialStore::create_connector); getrandom::fill(&mut [u8; 32]). Already locked through uuid."
+        "Connector secrets are at least 32 bytes from the operating system random source (crates/core/src/credentials.rs CredentialStore::create_connector); getrandom::fill(&mut [u8; 32]). Already locked through uuid.",
+        "Batch C (server lane R4): the server takes it too, behind its runtime feature, for the local launch token, the session-cookie secret and the OAuth state (getrandom::fill)."
       ],
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
       "qualification": [
@@ -1120,6 +1168,418 @@
       "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
       "qualification": [
         "storage-purge-workspace"
+      ]
+    },
+    {
+      "name": "cookie",
+      "use_sites": [
+        "crates/server/Cargo.toml"
+      ],
+      "planned_use_sites": [
+        "crates/server/src/"
+      ],
+      "official_sources": [
+        "https://docs.rs/cookie/0.18.2/cookie/"
+      ],
+      "symbols": [
+        "Cookie::split_parse",
+        "Cookie::build",
+        "CookieBuilder::http_only",
+        "CookieBuilder::same_site",
+        "CookieBuilder::secure",
+        "CookieBuilder::path",
+        "CookieBuilder::max_age",
+        "SameSite::Strict",
+        "Cookie::make_removal"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "docs.rs cookie 0.18.2 and the installed 0.18.2 source (src/lib.rs, src/builder.rs); no Context7 lookup was run",
+      "offline_notes": [
+        "Batch C (server lane R1), behind the server's runtime feature, default features off: no percent-encode, signed or private. The session cookie okf-session and the CSRF cookie okf-csrf (contract access::CSRF_COOKIE) hold lowercase hex the server generates, and the session secret is looked up server-side through CredentialStore::get_session (only its SHA-256 is stored), so neither cookie needs encoding or signing.",
+        "okf-session is HttpOnly, SameSite=Strict, Path=/ and Secure when the public origin is https. okf-csrf has the same attributes except HttpOnly, so the workspace UI can read it and send it back in the x-okf-csrf header (access::CSRF_HEADER). Logout writes removals (Cookie::make_removal).",
+        "Cookie::split_parse reads a Cookie header without percent-decoding; the Display of a built Cookie is the whole Set-Cookie value. CookieBuilder::max_age takes a time::Duration.",
+        "Rejected: axum-extra CookieJar (one more crate whose version tracks axum), tower-cookies (middleware over this crate), tower-sessions (its own session store would duplicate core's CredentialStore port), and hand-parsing, which AGENTS.md forbids."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": [
+        "server-binary-and-startup"
+      ]
+    },
+    {
+      "name": "jsonwebtoken",
+      "use_sites": [
+        "crates/server/Cargo.toml"
+      ],
+      "planned_use_sites": [
+        "crates/server/src/"
+      ],
+      "official_sources": [
+        "https://docs.rs/jsonwebtoken/11.1.0/jsonwebtoken/",
+        "https://rustsec.org/advisories/RUSTSEC-2023-0071"
+      ],
+      "symbols": [
+        "decode",
+        "decode_header",
+        "DecodingKey::from_jwk",
+        "jwk::JwkSet",
+        "jwk::Jwk",
+        "Validation",
+        "Algorithm::RS256",
+        "crypto::CryptoProvider::install_default",
+        "crypto::rust_crypto::DEFAULT_PROVIDER",
+        "EncodingKey::from_rsa_pem"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "docs.rs jsonwebtoken 11.1.0 and the installed 11.1.0 source (src/crypto/mod.rs, src/decoding.rs); no Context7 lookup was run",
+      "offline_notes": [
+        "Batch C (server lane R2), behind the server's runtime feature. SPEC section 11 hosted mode validates WorkOS Connect tokens: signature, issuer, audience and expiry. workos 3.3.0 only fetches and caches the JWK set (src/helpers/jwks.rs) and parses session claims without verifying them, so jsonwebtoken does the verification; hand-rolled verification is forbidden. Each workos::Jwk is read again as jsonwebtoken::jwk::Jwk through serde, and the accepted algorithms are pinned to RS256.",
+        "Features: default off, rust_crypto (ed25519-dalek, hmac, p256, p384, rand, rsa, sha2). The dev-dependency adds use_pem so that tests can sign Connect-shaped tokens with a test-only RSA key (EncodingKey::from_rsa_pem). aws_lc_rs was rejected: aws-lc-sys is a C build that needs NASM, or aws-lc-rs's prebuilt-nasm feature, on Windows x86-64.",
+        "The 11.x crypto provider: with exactly one of rust_crypto and aws_lc_rs enabled, the process default is chosen from the features (CryptoProvider::from_crate_features); with both or neither, signing and verifying panic unless CryptoProvider::install_default ran first. Installing crypto::rust_crypto::DEFAULT_PROVIDER at startup keeps verification working if another crate ever enables aws_lc_rs.",
+        "rust_crypto pulls rsa 0.9.10, which carries RUSTSEC-2023-0071 (Marvin: a timing leak in RSA private-key decryption; no patched release). okf-jawn only verifies signatures with public JWKS keys, so deny.toml and .cargo/audit.toml ignore that one id. Every rsa use stays verify-only, with a comment at the verify site. Remove the ignore when rsa ships a constant-time release or jsonwebtoken moves off it."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": [
+        "server-binary-and-startup",
+        "workos-end-to-end"
+      ]
+    },
+    {
+      "name": "tower-http",
+      "use_sites": [
+        "crates/server/Cargo.toml",
+        "qualification/mcp-apps/Cargo.toml"
+      ],
+      "planned_use_sites": [
+        "crates/server/src/"
+      ],
+      "official_sources": [
+        "https://docs.rs/tower-http/0.7.1/tower_http/"
+      ],
+      "symbols": [
+        "services::ServeDir",
+        "services::ServeFile",
+        "cors::CorsLayer",
+        "csrf::CsrfLayer",
+        "csrf::CsrfLayer::add_trusted_origin",
+        "csrf::CsrfLayer::with_rejection_response"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "The installed tower-http 0.7.1 source (src/csrf, src/cors, src/services/fs) and docs.rs; no Context7 lookup was run",
+      "offline_notes": [
+        "Batch C (server lane R3) enables fs, cors and csrf for crates/server, behind its runtime feature; qualification/mcp-apps uses cors alone.",
+        "fs: ServeDir serves the UI build output, and ServeFile its index fallback.",
+        "cors: CorsLayer with an explicit origin list (SPEC section 11, constrained CORS).",
+        "csrf: CsrfLayer is the Go 1.25 CrossOriginProtection scheme on Sec-Fetch-Site and Origin (src/csrf/mod.rs). A request passes when its method is GET, HEAD or OPTIONS, when its Origin is a trusted origin (add_trusted_origin), when Sec-Fetch-Site is same-origin or none, when neither header is present, or when the Origin authority equals the request's host; otherwise it is refused with 403. with_rejection_response makes the refusal an ApiError JSON body. It is layered with the double-submit token (contract access::CSRF_COOKIE and CSRF_HEADER), not used instead of it. A proxy that rewrites Host or strips Origin weakens it; forward both unchanged.",
+        "tower-http 0.6.11 is also locked, through reqwest; cargo deny warns about the duplicate."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": [
+        "server-binary-and-startup"
+      ]
+    },
+    {
+      "name": "futures-util",
+      "use_sites": [
+        "crates/server/Cargo.toml"
+      ],
+      "planned_use_sites": [
+        "crates/server/src/"
+      ],
+      "official_sources": [
+        "https://docs.rs/futures-util/0.3.34/futures_util/"
+      ],
+      "symbols": [
+        "stream::unfold",
+        "stream::Stream",
+        "StreamExt"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "The installed futures-util 0.3.34 source (src/stream/unfold.rs) and docs.rs; no Context7 lookup was run",
+      "offline_notes": [
+        "Batch C (server lane R5), behind the server's runtime feature, default features off, std only. stream_events (api/transports.json) is axum::response::sse::Sse::new(stream), which takes a futures_core::Stream; futures_util::stream::unfold turns the EventLog::list(after cursor) poll into that stream. Already locked through axum, rmcp and workos.",
+        "Rejected: tokio-stream (no unfold; it would need an mpsc task per stream) and a hand-written Stream impl."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": []
+    },
+    {
+      "name": "tokio-util",
+      "use_sites": [
+        "crates/server/Cargo.toml",
+        "crates/ingest/Cargo.toml",
+        "qualification/mcp-apps/Cargo.toml"
+      ],
+      "planned_use_sites": [
+        "crates/server/src/"
+      ],
+      "official_sources": [
+        "https://docs.rs/tokio-util/0.7.19/tokio_util/io/"
+      ],
+      "symbols": [
+        "io::StreamReader",
+        "io::ReaderStream"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "The installed tokio-util 0.7.19 source (src/io/stream_reader.rs, src/io/reader_stream.rs) and docs.rs; no Context7 lookup was run",
+      "offline_notes": [
+        "Batch C (server lane R6) enables the io feature for crates/server, behind its runtime feature. The byte transports bind through core's ByteReader (Pin<Box<dyn AsyncRead>>): upload_content turns the axum body stream into an AsyncRead with StreamReader, and download_object and download_artifact turn an AsyncRead into a Stream for axum's Body::from_stream with ReaderStream.",
+        "StreamReader reads a stream of Result<B, E> with B: Buf and E: Into<std::io::Error>, so the body stream's error is mapped into std::io::Error before it is wrapped."
+      ],
+      "version_authority": "Cargo.toml or ui/package.json; resolved lockfiles once generated",
+      "qualification": []
+    },
+    {
+      "name": "react-arborist",
+      "use_sites": [
+        "ui/package.json"
+      ],
+      "planned_use_sites": [
+        "ui/src/features/explorer/FolderTree.tsx"
+      ],
+      "official_sources": [
+        "https://www.npmjs.com/package/react-arborist",
+        "https://github.com/brimdata/react-arborist"
+      ],
+      "symbols": [
+        "Tree",
+        "TreeApi",
+        "NodeApi",
+        "NodeRendererProps",
+        "RowRendererProps",
+        "ListOuterElement"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "npm and the installed react-arborist 3.16.0 package (README, type declarations); no Context7 lookup was run",
+      "offline_notes": [
+        "The Explorer's folder tree (workspace-ui): a virtualized tree view in the manner of a file-manager sidebar. The installed 3.16.0 declarations export Tree, TreeApi, NodeApi and ListOuterElement, and the NodeRendererProps and RowRendererProps types for custom node and row rendering. MIT."
+      ],
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": [
+        "explorer-playwright-journeys"
+      ]
+    },
+    {
+      "name": "react-resizable-panels",
+      "use_sites": [
+        "ui/package.json"
+      ],
+      "planned_use_sites": [
+        "ui/src/features/explorer/ExplorerShell.tsx",
+        "ui/src/features/explorer/DocumentPanes.tsx"
+      ],
+      "official_sources": [
+        "https://www.npmjs.com/package/react-resizable-panels",
+        "https://github.com/bvaughn/react-resizable-panels"
+      ],
+      "symbols": [
+        "Group",
+        "Panel",
+        "Separator"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "npm and the installed react-resizable-panels 4.14.2 package (README, type declarations); no Context7 lookup was run",
+      "offline_notes": [
+        "The Explorer's resizable layout and document panes (workspace-ui). The installed 4.x declarations export Group, Panel and Separator; the 3.x names PanelGroup and PanelResizeHandle are not exported, so examples written for 3.x do not apply. MIT."
+      ],
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": [
+        "explorer-playwright-journeys"
+      ]
+    },
+    {
+      "name": "base-ui",
+      "use_sites": [
+        "ui/package.json"
+      ],
+      "planned_use_sites": [
+        "ui/src/features/explorer/DocumentPanes.tsx"
+      ],
+      "official_sources": [
+        "https://www.npmjs.com/package/@base-ui/react",
+        "https://base-ui.com"
+      ],
+      "symbols": [
+        "@base-ui/react/tabs",
+        "Tabs.Root",
+        "Tabs.List",
+        "Tabs.Tab",
+        "Tabs.Panel",
+        "Tabs.Indicator"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "npm and the installed @base-ui/react 1.8.0 package (README, tabs declarations); no Context7 lookup was run",
+      "offline_notes": [
+        "@base-ui/react: unstyled, accessible React components; styling stays in the application's CSS. Components are imported by subpath, such as @base-ui/react/tabs, whose parts are Tabs.Root, Tabs.List, Tabs.Tab, Tabs.Panel and Tabs.Indicator (the document panes in workspace-ui). MIT."
+      ],
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": [
+        "explorer-playwright-journeys"
+      ]
+    },
+    {
+      "name": "react-markdown",
+      "use_sites": [
+        "ui/src/features/documents/SourceExcerpt.tsx",
+        "ui/package.json"
+      ],
+      "official_sources": [
+        "https://www.npmjs.com/package/react-markdown",
+        "https://github.com/remarkjs/react-markdown"
+      ],
+      "symbols": [
+        "Markdown",
+        "remarkPlugins",
+        "rehypePlugins",
+        "skipHtml",
+        "components"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "npm and the installed react-markdown 10.1.0 package; no Context7 lookup was run",
+      "offline_notes": [
+        "Renders an application read result's Markdown as React elements, never through dangerouslySetInnerHTML. SourceExcerpt passes remarkPlugins [remarkGfm], rehypePlugins [rehypeSanitize] and skipHtml, and replaces links and images with inert text through components, so source text cannot navigate or load anything. MIT."
+      ],
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": [
+        "explorer-playwright-journeys"
+      ]
+    },
+    {
+      "name": "rehype-sanitize",
+      "use_sites": [
+        "ui/src/features/documents/SourceExcerpt.tsx",
+        "ui/package.json"
+      ],
+      "official_sources": [
+        "https://www.npmjs.com/package/rehype-sanitize",
+        "https://github.com/rehypejs/rehype-sanitize"
+      ],
+      "symbols": [
+        "rehypeSanitize",
+        "defaultSchema"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "npm and the installed rehype-sanitize 6.0.0 package (type declarations); no Context7 lookup was run",
+      "offline_notes": [
+        "The default export is the plugin and defaultSchema the GitHub-style allow-list it applies when given no schema. SourceExcerpt runs it after react-markdown parses source text, as a second defence beside skipHtml. MIT."
+      ],
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": [
+        "explorer-playwright-journeys"
+      ]
+    },
+    {
+      "name": "remark-gfm",
+      "use_sites": [
+        "ui/src/features/documents/SourceExcerpt.tsx",
+        "ui/package.json"
+      ],
+      "official_sources": [
+        "https://www.npmjs.com/package/remark-gfm",
+        "https://github.com/remarkjs/remark-gfm"
+      ],
+      "symbols": [
+        "remarkGfm"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "npm and the installed remark-gfm 4.0.1 package; no Context7 lookup was run",
+      "offline_notes": [
+        "GitHub Flavored Markdown (tables, task lists, strikethrough, autolink literals, footnotes) for react-markdown, so pipe tables in source text render as tables. MIT."
+      ],
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": [
+        "explorer-playwright-journeys"
+      ]
+    },
+    {
+      "name": "lucide-react",
+      "use_sites": [
+        "ui/package.json"
+      ],
+      "planned_use_sites": [
+        "ui/src/features/explorer/FolderTree.tsx"
+      ],
+      "official_sources": [
+        "https://www.npmjs.com/package/lucide-react",
+        "https://lucide.dev"
+      ],
+      "symbols": [
+        "Folder",
+        "FolderOpen",
+        "FileText",
+        "FileBox",
+        "ChartColumn"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "npm and the installed lucide-react 1.50.0 package; no Context7 lookup was run",
+      "offline_notes": [
+        "Icons as tree-shakeable named React components (one import per icon); the folder tree marks folders, notes, sources and Views with them. ISC."
+      ],
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": [
+        "explorer-playwright-journeys"
+      ]
+    },
+    {
+      "name": "axe-core-playwright",
+      "use_sites": [
+        "ui/tests/e2e/mcp-apps-static-bundle-smoke.spec.ts",
+        "ui/package.json"
+      ],
+      "official_sources": [
+        "https://www.npmjs.com/package/@axe-core/playwright",
+        "https://github.com/dequelabs/axe-core-npm"
+      ],
+      "symbols": [
+        "AxeBuilder",
+        "AxeBuilder.analyze"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "npm and the installed @axe-core/playwright 4.13.0 package (type declarations); no Context7 lookup was run",
+      "offline_notes": [
+        "@axe-core/playwright, a dev dependency: new AxeBuilder({ page }).analyze() runs axe-core in a Playwright page and returns its violations; the MCP Apps static-bundle smoke test fails on serious and critical ones, and the Explorer journeys (explorer-playwright-journeys) include axe. MPL-2.0."
+      ],
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": [
+        "explorer-playwright-journeys"
+      ]
+    },
+    {
+      "name": "zustand",
+      "use_sites": [
+        "ui/package.json"
+      ],
+      "planned_use_sites": [
+        "ui/src/features/explorer/store.ts"
+      ],
+      "official_sources": [
+        "https://www.npmjs.com/package/zustand",
+        "https://github.com/pmndrs/zustand"
+      ],
+      "symbols": [
+        "create"
+      ],
+      "context7_library_id": null,
+      "context7_query": null,
+      "knowledge_source": "npm and the installed zustand 5.0.15 package (type declarations); no Context7 lookup was run",
+      "offline_notes": [
+        "Ephemeral UI state only (the Explorer store in workspace-ui): TanStack Router owns URL state and TanStack Query owns the server cache (see the tanstack entry). create builds a hook-based store. MIT."
+      ],
+      "version_authority": "ui/package.json and bun.lock",
+      "qualification": [
+        "explorer-playwright-journeys"
       ]
     }
   ]
