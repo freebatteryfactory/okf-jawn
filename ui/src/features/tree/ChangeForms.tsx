@@ -36,7 +36,7 @@ import { listTypesOptions } from '../../api/generated/@tanstack/react-query.gen'
 import type { ItemSummary } from '../../api/generated/types.gen';
 import type { DraftMark } from '../drafts/marks';
 import { FailureNotice } from '../errors/FailureNotice';
-import { classifyFailure } from '../errors/failure';
+import { classifyFailure, messageFor } from '../errors/failure';
 import { type FailureRetry, useRetry } from '../errors/retry';
 import { checkHeadsAgain, type HeadChange, headMoved } from '../explorer/head';
 import {
@@ -70,12 +70,23 @@ export interface Change<T> {
   refreshing: boolean;
   /** Forget the last failure: the person changed what they typed. */
   edited: () => void;
+  /**
+   * The failed request is no longer one the page would send (`current`), so its notice offers no
+   * retry and says what to do instead.
+   */
+  withdrawn: boolean;
 }
 
 /**
  * One kind of change, asked through `run`: its request (the same one again while it says the
  * same), its failure and what the failure allows. `submit` names the form's submit button, where
  * keyboard focus goes when a notice leaves.
+ *
+ * `current` says whether a request of these values is still one the page would send. A failed
+ * request is repeated by its notice's retry only while it is: a retry never sends what the page
+ * itself would no longer send (a preview that is out of date or no longer on screen, rules that
+ * were edited since). Without `current` a failed request can always be repeated; the forms whose
+ * values are typed forget the failure when a value changes (`edited`).
  */
 export function useChange<T, R extends HeadChange>(
   run: (
@@ -85,6 +96,7 @@ export function useChange<T, R extends HeadChange>(
   ) => Promise<R>,
   onDone: (result: R, values: T) => void,
   submit: RefObject<HTMLElement | null>,
+  current?: (values: T) => boolean,
 ): Change<T> {
   const { workspaceId, head, refresh, onChanged } = useWorkspaceChanges();
   const client = useQueryClient();
@@ -115,13 +127,16 @@ export function useChange<T, R extends HeadChange>(
       ? { field: api.field, message: api.message }
       : null;
   const conflict = api?.code === 'conflict';
+  // The request that failed, while its failure is the one shown.
+  const failed = mutation.isError ? mutation.variables : undefined;
+  const withdrawn = failed !== undefined && current !== undefined && !current(failed.values);
   const retry = useRetry({
     request: workspaceId,
     failed: mutation.isError,
     error: mutation.error,
-    // A refusal at a field is not repeated as it is: the person changes the value first. (A
-    // conflict's notice offers no retry button whatever is given here.)
-    ...(refused !== null
+    // No way to repeat a request the page would no longer send. (The notices of a conflict and of
+    // a refusal at a field offer no retry button whatever is given here.)
+    ...(withdrawn
       ? {}
       : {
           run: () =>
@@ -165,6 +180,7 @@ export function useChange<T, R extends HeadChange>(
     edited: () => {
       if (mutation.isError) mutation.reset();
     },
+    withdrawn,
   };
 }
 
@@ -190,6 +206,7 @@ export function ChangeFailure<T>({
   change,
   sameWords,
   drawn = NO_FIELDS,
+  withdrawnWords = 'What this page holds has changed since, so the same request is not sent again. Check it, then press the button again.',
 }: {
   context: string;
   change: Change<T>;
@@ -197,6 +214,8 @@ export function ChangeFailure<T>({
   sameWords?: string;
   /** The fields, as the service names them, whose refusal the form shows at the field itself. */
   drawn?: ReadonlySet<string>;
+  /** What to do in place of a retry that was withdrawn (`Change.withdrawn`). */
+  withdrawnWords?: string;
 }) {
   const { workspaceId } = useWorkspaceChanges();
   const { failure, conflict } = change;
@@ -222,6 +241,31 @@ export function ChangeFailure<T>({
             {refused.message.length > 0 && (
               <p>
                 The service said: <q>{refused.message}</q>
+              </p>
+            )}
+          </div>
+        </div>
+        {status}
+      </>
+    );
+  }
+  if (conflict === null && change.withdrawn) {
+    const failed = classifyFailure(failure.error);
+    const words = failed.kind === 'api' ? failed.error.message : '';
+    return (
+      <>
+        {/* The failure, without its retry: followed by the retry hook like any failure notice. */}
+        <div ref={failure.noticeRef} tabIndex={-1} className="failure-notice">
+          <div role="alert">
+            <p>
+              <strong>
+                {context}: {messageFor(failed).title}
+              </strong>
+            </p>
+            <p>{withdrawnWords}</p>
+            {words.length > 0 && (
+              <p>
+                The service said: <q>{words}</q>
               </p>
             )}
           </div>

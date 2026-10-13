@@ -818,3 +818,102 @@ describe('a refusal that names a field of the rules or of a preview', () => {
     expect(api.callsTo(APPLY)).toHaveLength(1);
   });
 });
+
+describe('the retry of a renaming or a save that failed', () => {
+  const busy = () => refuse(503, 'unavailable', 'the service is busy');
+  const renamed2 = () => ok({ revision: FIRST, receipt_id: RECEIPT, warnings: [] });
+  /** Preview with the prefix "2025-", confirm, and wait for the failure with its retry. */
+  async function failedApply() {
+    await openRules();
+    await setPrefix('2025-');
+    await previewNow();
+    await userEvent.click(button('Apply this preview…'));
+    await userEvent.click(button('Rename 2 items'));
+    return screen.findByRole('button', { name: 'Try again' });
+  }
+  const renamingNotice = () =>
+    screen.getAllByRole('alert').find((alert) => alert.textContent?.includes('Renaming: '))
+      ?.textContent ?? '';
+
+  it('repeats the renaming under the same key while its preview is the one on screen', async () => {
+    let failing = true;
+    const { api } = service({ [APPLY]: () => (failing ? busy() : renamed2()) });
+    const retry = await failedApply();
+    expect(renamingNotice()).toContain('Renaming: The service is temporarily unavailable.');
+    failing = false;
+    await userEvent.click(retry);
+    await waitFor(() => expect(said()).toContain('2 items were renamed.'));
+    const [first, second] = api.callsTo(APPLY);
+    expect(second).toEqual(first);
+    expect(api.callsTo(APPLY)).toHaveLength(2);
+  });
+
+  it('withdraws the retry when the rules are edited: a preview that is out of date is not applied', async () => {
+    let failing = true;
+    const { api } = service({ [APPLY]: () => (failing ? busy() : renamed2()) });
+    await failedApply();
+    failing = false;
+    // The person changes the rules: the preview on screen is out of date.
+    await setPrefix('2026-');
+    await within(panel()).findByText(/This preview is out of date and cannot be applied/);
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    // The failure is still said, with what to do in place of the retry.
+    expect(renamingNotice()).toContain('Renaming: The service is temporarily unavailable.');
+    expect(renamingNotice()).toContain('so it is not tried again. Preview again');
+    expect(renamingNotice()).toContain('the service is busy');
+    expect(api.callsTo(APPLY)).toHaveLength(1);
+    expect(said()).not.toMatch(/(was|were) renamed/);
+    // Put back, the preview is the preview of what the page shows again, and so is its retry.
+    await setPrefix('2025-');
+    await userEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(said()).toContain('2 items were renamed.'));
+    expect(api.callsTo(APPLY).at(1)).toEqual(api.callsTo(APPLY).at(0));
+  });
+
+  it('withdraws the retry when another preview is on screen: the older plan is never applied', async () => {
+    let failing = true;
+    const { api } = service({ [APPLY]: () => (failing ? busy() : renamed2()) });
+    await failedApply();
+    failing = false;
+    await setPrefix('2026-');
+    await userEvent.click(button('Preview the renames'));
+    await waitFor(() => expect(panel().textContent).toContain('notes/2026-meeting.md'));
+    // The new preview is not out of date, and the failed renaming was not for it.
+    expect(panel().textContent).not.toContain('out of date');
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(renamingNotice()).toContain('so it is not tried again. Preview again');
+    expect(api.callsTo(APPLY)).toHaveLength(1);
+    // Applying the preview on screen sends its own plan, as a new request.
+    await userEvent.click(button('Apply this preview…'));
+    await userEvent.click(button('Rename 2 items'));
+    await waitFor(() => expect(said()).toContain('2 items were renamed.'));
+    const [older, newer] = api.callsTo(APPLY);
+    const firstTo = (call: Json | undefined) =>
+      (call?.plan as { entries: { to: string }[] } | undefined)?.entries.at(0)?.to;
+    expect(firstTo(older)).toBe('notes/2025-meeting.md');
+    expect(firstTo(newer)).toBe('notes/2026-meeting.md');
+    expect(newer?.idempotency_key).not.toBe(older?.idempotency_key);
+  });
+
+  it('withdraws the retry of a save when the rules are edited: the rules sent are the ones on screen', async () => {
+    let failing = true;
+    const { api } = service({
+      [SET]: () => (failing ? busy() : ok({ revision: FIRST, receipt_id: RECEIPT, warnings: [] })),
+    });
+    await openRules();
+    await setPrefix('2025-');
+    await userEvent.click(button('Save the rules'));
+    await screen.findByRole('button', { name: 'Try again' });
+    failing = false;
+    await setPrefix('2026-');
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    const notice = screen.getByRole('alert').textContent ?? '';
+    expect(notice).toContain('Saving the rules: The service is temporarily unavailable.');
+    expect(notice).toContain('are not sent again by themselves');
+    expect(api.callsTo(SET)).toHaveLength(1);
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(said()).toContain('The rules are saved.'));
+    const sent = api.callsTo(SET).at(1)?.rules as NamingRules | undefined;
+    expect(sent?.rules.at(0)?.prefix).toBe('2026-');
+  });
+});

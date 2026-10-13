@@ -18,7 +18,11 @@
  * When either is no longer what the page shows (the person saved the rules, made another change
  * or refreshed; the rules were edited; the service refused the preview as out of date), it is
  * marked out of date and cannot be applied: the person previews again. Applying asks first, and
- * sends back exactly the plan and the rules of the preview on screen.
+ * sends back exactly the plan and the rules of the preview on screen. A renaming that failed is
+ * tried again by its notice only while its preview is still the one on screen and can still be
+ * applied; otherwise the notice offers no retry and says to preview again (SPEC section 6: "A
+ * stale preview must not silently apply to changed source state"). A save that failed is tried
+ * again only while the rules on screen are the ones it carried.
  *
  * Focus: the panel opens on its heading; a preview puts focus on the preview's heading; the
  * question before renaming opens on the choice that keeps the names, and gives focus back to the
@@ -168,6 +172,8 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
         `The rules are saved. The workspace now shows revision ${short(result.revision)}, which includes them.`,
       ),
     saveButton,
+    // A failed save is repeated only while the rules on screen are the ones it carried.
+    (carried) => rules !== null && sameRules(carried, rules),
   );
   const previewing = useMutation({
     mutationFn: (asked: { rules: NamingRules; folder: string; head: Revision }) =>
@@ -190,6 +196,8 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
         : previewing.mutateAsync(previewing.variables),
     loaded: () => previewButton.current,
   });
+  // Why the preview on screen can no longer be applied; null while it can.
+  const stale = preview === null ? null : staleReason(preview, head, value, refused);
   const apply = useChange<Preview, HeadChange>(
     applyPreview,
     (result, applied) => {
@@ -202,6 +210,9 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
       focusNext.current = 'heading';
     },
     previewButton,
+    // A failed renaming is repeated only while its preview is the one on screen and can still be
+    // applied: a retry never applies a preview the page itself would not apply.
+    (carried) => carried === preview && stale === null,
   );
   // The plan last sent. When the service refuses it as a conflict it is out of date, and is
   // never sent again; a later preview is another plan, with its own answer to come.
@@ -212,7 +223,6 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
     focusNext.current = 'apply';
   }
 
-  const stale = preview === null ? null : staleReason(preview, head, value, refused);
   const renames = preview === null ? [] : preview.plan.entries.filter((e) => e.from !== e.to);
   const kept = preview === null ? 0 : preview.plan.entries.length - renames.length;
 
@@ -413,7 +423,12 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
           </p>
         </>
       )}
-      <ChangeFailure context="Saving the rules" change={save} sameWords={RULES_REFUSED} />
+      <ChangeFailure
+        context="Saving the rules"
+        change={save}
+        sameWords={RULES_REFUSED}
+        withdrawnWords="The rules on this page are no longer the ones that were sent, so they are not sent again by themselves. Check them, then press “Save the rules” to save them as they are now."
+      />
       {nothing && (
         <div role="alert" className="failure-notice">
           <p>
@@ -559,7 +574,12 @@ export function NamingRulesPanel({ onClose }: NamingRulesProps) {
             ))}
         </section>
       )}
-      <ChangeFailure context="Renaming" change={apply} sameWords={RULES_REFUSED} />
+      <ChangeFailure
+        context="Renaming"
+        change={apply}
+        sameWords={RULES_REFUSED}
+        withdrawnWords="That was for a preview that is no longer the one on this page, or that can no longer be applied, so it is not tried again. Preview again, then apply the preview you see."
+      />
     </section>
   );
 }
