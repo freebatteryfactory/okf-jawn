@@ -267,5 +267,5 @@ export function resetDraftSessions() {
   unsavedSince.clear();
   changedMeanwhile.clear();
   inFlight.clear();
-  useDraftSessions.setState({ sessions: {}, conflicts: {}, said: {} });
+  useDraftSessions.setState({ sessions: {}, conflicts: {}, said: {}, asked: {} });
 }

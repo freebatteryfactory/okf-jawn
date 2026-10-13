@@ -13,7 +13,9 @@
  * save, whatever its text, until one has answered.
  *
  * Beside the sessions: the items of a Snapshot that conflicted, each until the person resolves it
- * (the answer of `commit_items`, kept only to show it), and what the last Snapshot did, as words.
+ * (the answer of `commit_items`, kept only to show it), what the last Snapshot did, as words, and
+ * the last Snapshot asked of each workspace that has not been answered as taken (`snapshot.ts`
+ * repeats it under its key while it is the same request).
  */
 
 import type { z } from 'zod';
@@ -75,6 +77,19 @@ export interface SnapshotConflict {
   message: string;
 }
 
+/**
+ * One `commit_items` request: the items and the name it carries, and the drafts it was made for.
+ * The service commits the drafts it holds, so a request made after one of them was saved again is
+ * another request, though it carries the same items and name.
+ */
+export interface SnapshotAttempt {
+  key: string;
+  itemIds: string[];
+  message: string;
+  /** For each item, the draft the service held when this was asked: its digest and its base. */
+  drafts: string[];
+}
+
 /** What the last Snapshot or resolution did, said politely where the drafts are listed. */
 export interface Said {
   text: string;
@@ -88,12 +103,16 @@ interface SessionsState {
   conflicts: Record<string, SnapshotConflict>;
   /** By workspace. */
   said: Record<string, Said>;
+  /** By workspace: the last Snapshot asked that no answer has said was taken. */
+  asked: Record<string, SnapshotAttempt>;
   put: (session: DraftSession) => void;
   change: (key: string, change: Partial<DraftSession>) => void;
   remove: (key: string) => void;
   setConflicts: (workspaceId: string, message: string, items: ConflictItem[]) => void;
   clearConflict: (key: string) => void;
   say: (workspaceId: string, text: string, warnings?: string[]) => void;
+  /** Keep the Snapshot asked of a workspace, or forget it (`null`) once it was taken. */
+  ask: (workspaceId: string, attempt: SnapshotAttempt | null) => void;
 }
 
 export const sessionKey = (workspaceId: string, itemId: string) => `${workspaceId}/${itemId}`;
@@ -102,6 +121,12 @@ export const useDraftSessions = create<SessionsState>()((set) => ({
   sessions: {},
   conflicts: {},
   said: {},
+  asked: {},
+  ask: (workspaceId, attempt) =>
+    set((state) => {
+      const { [workspaceId]: _last, ...asked } = state.asked;
+      return { asked: attempt === null ? asked : { ...asked, [workspaceId]: attempt } };
+    }),
   setConflicts: (workspaceId, message, items) =>
     set((state) => ({
       conflicts: {

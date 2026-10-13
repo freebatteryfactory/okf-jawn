@@ -318,7 +318,7 @@ test.describe('editing a document', () => {
     await shot(page, '12-snapshot-form');
     await press(page, 'Snapshot 2 drafts');
     await expect(said(page)).toHaveText(
-      `Snapshot “Tidy the notes” taken: 2 items. The workspace now shows revision ${MADE.slice(0, 10)}, which includes your change.`,
+      `Snapshot “Tidy the notes” taken: 2 items. The workspace now shows revision ${MADE.slice(0, 10)}, which the Snapshot made.`,
     );
     expect(played.sent.at(-1)).toMatchObject({
       path: 'commit_items',

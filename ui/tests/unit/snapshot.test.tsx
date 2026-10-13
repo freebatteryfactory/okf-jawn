@@ -328,7 +328,7 @@ describe('taking a Snapshot', () => {
     act(() => answer());
     await screen.findByRole('region', { name: 'Drafts (0)' });
     expect(said()).toBe(
-      `Snapshot “Tidy the notes” taken: 2 items. The workspace now shows revision ${MADE.slice(0, 10)}, which includes your change.`,
+      `Snapshot “Tidy the notes” taken: 2 items. The workspace now shows revision ${MADE.slice(0, 10)}, which the Snapshot made.`,
     );
     // The shell shows the revision the commit made; the tree and the pane read it.
     expect(headLine()).toContain(MADE.slice(0, 10));
@@ -622,6 +622,76 @@ describe('taking a Snapshot', () => {
     expect(new Set(keys).size).toBe(3);
   });
 
+  // The service commits the drafts it holds: which they are is part of what the request says.
+  describe('the key of a Snapshot', () => {
+    /** A digest that differs with the text, as the service's does. */
+    const digestOf = (text: string) => text.length.toString(16).padStart(64, '0');
+    const keys = (api: ReturnType<typeof service>['api']) =>
+      api.callsTo(COMMIT).map((sent) => String(sent.idempotency_key));
+
+    it('is a new one when text was saved since a Snapshot that had no answer', async () => {
+      let lost = true;
+      const { api, state } = service(
+        {
+          [SAVE]: (body) =>
+            ok({ ...draftOf(NOTE, HEAD, LATER), content_digest: digestOf(String(body.body)) }),
+          [COMMIT]: () => {
+            if (lost) return new Promise<never>(() => {});
+            state.drafts.clear();
+            state.head = MADE;
+            return committed();
+          },
+        },
+        [NOTE],
+      );
+      renderAt(`/w/${WS}/i/${NOTE}`);
+      const box = await findTextBox('Text of Meeting notes');
+      await screen.findByRole('region', { name: 'Drafts (1)' });
+      vi.useFakeTimers();
+      await pressSnapshot('Tidy');
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(1));
+      await pass(REQUEST_TIMEOUT_MS + 50);
+      await eventually(() => within(panel()).getByRole('button', { name: 'Try again' }));
+      // Tried again with nothing saved since: the same request under the same key.
+      fireEvent.click(within(panel()).getByRole('button', { name: 'Try again' }));
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(2));
+      await pass(REQUEST_TIMEOUT_MS + 50);
+      await eventually(() => within(panel()).getByRole('button', { name: 'Try again' }));
+      expect(api.callsTo(COMMIT).at(1)).toEqual(api.callsTo(COMMIT).at(0));
+      // The person goes on typing; the text is saved. What a Snapshot commits is now another text.
+      typeInto(box, ' and one more thought');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      lost = false;
+      fireEvent.click(within(panel()).getByRole('button', { name: 'Try again' }));
+      await eventually(() => expect(api.callsTo(COMMIT)).toHaveLength(3));
+      const [first, second, third] = keys(api);
+      expect(second).toBe(first);
+      expect(third).not.toBe(first);
+      expect(api.callsTo(COMMIT).at(2)).toMatchObject({ item_ids: [NOTE], message: 'Tidy' });
+    });
+
+    it('is a new one for the same drafts under the same name after a Snapshot that was taken', async () => {
+      // The drafts are still listed afterwards: the person saved the same text again elsewhere.
+      const { api, state } = service({
+        [COMMIT]: () => {
+          state.head = MADE;
+          return committed();
+        },
+      });
+      renderAt(`/w/${WS}`);
+      await screen.findByRole('region', { name: 'Drafts (2)' });
+      await pressSnapshot('Tidy');
+      await eventuallyReal(() => expect(said()).toMatch(/^Snapshot “Tidy” taken: 2 items\./));
+      await eventuallyReal(() => expect(snapshotButton().textContent).toBe('Snapshot 2 drafts'));
+      await pressSnapshot('Tidy');
+      await eventuallyReal(() => expect(api.callsTo(COMMIT)).toHaveLength(2));
+      const [first, second] = api.callsTo(COMMIT);
+      expect({ ...second, idempotency_key: null }).toEqual({ ...first, idempotency_key: null });
+      expect(second?.idempotency_key).not.toBe(first?.idempotency_key);
+    });
+  });
+
   it('reads "not available in this build" where Snapshot is not built, and adopts nothing', async () => {
     const { [COMMIT]: _unbuilt, ...handlers } = explorerHandlers({
       [OPEN]: () => ok(writableWorkspace),
@@ -867,6 +937,9 @@ describe('a Snapshot that conflicts', () => {
       properties: { type: 'meeting-note', okf_jawn: { id: NOTE } },
     });
     expect(after.at(1)?.body).toMatchObject({ item_ids: [NOTE], message: 'Tidy' });
+    // The draft is on another revision now: its Snapshot is another request than any before it.
+    const commitKeys = api.callsTo(COMMIT).map((sent) => sent.idempotency_key);
+    expect(new Set(commitKeys).size).toBe(commitKeys.length);
     // The conflict is over: the pane reads what was committed, and focus is on its switch.
     expect(
       screen.queryByRole('region', { name: 'Meeting notes changed since your draft was started' }),
@@ -913,10 +986,11 @@ describe('a Snapshot that conflicts', () => {
     expect(await screen.findByRole('tab', { name: 'Meeting notes' })).toBeDefined();
   });
 
-  it('shows a new conflict when the item changed again while the draft was being kept', async () => {
+  /** "Keep mine" pressed once, and the item had changed again: the new conflict is on screen. */
+  async function changedAgain() {
     const AGAIN = 'f'.repeat(40);
     let conflicts = 0;
-    const { notice } = await openConflict(
+    const { api, notice } = await openConflict(
       {},
       {
         [COMMIT]: () => {
@@ -940,6 +1014,23 @@ describe('a Snapshot that conflicts', () => {
     expect(within(notice).getByRole('status').textContent).toContain('changed again');
     expect(within(notice).queryByRole('alert')).toBeNull();
     expect(within(notice).getByRole('button', { name: 'Keep mine' })).toBeDefined();
+    return { api, notice, AGAIN };
+  }
+
+  it('shows a new conflict when the item changed again while the draft was being kept', async () => {
+    await changedAgain();
+  });
+
+  it('asks each Snapshot of a draft kept on another revision under a key of its own', async () => {
+    const { api, notice, AGAIN } = await changedAgain();
+    // The first Snapshot of this one item (the plan was left out), then one after each "Keep mine".
+    fireEvent.click(within(notice).getByRole('button', { name: 'Keep mine' }));
+    await eventuallyReal(() => expect(api.callsTo(COMMIT)).toHaveLength(3));
+    const commits = api.callsTo(COMMIT);
+    expect(commits.map((sent) => sent.item_ids)).toEqual([[NOTE], [NOTE], [NOTE]]);
+    expect(new Set(commits.map((sent) => sent.idempotency_key)).size).toBe(3);
+    // Each "Keep mine" saved the draft on the revision the item was at then.
+    expect(api.callsTo(SAVE).map((sent) => sent.base_revision)).toEqual([THEIRS, AGAIN]);
   });
 
   it('offers only "take theirs" for an item that was deleted', async () => {

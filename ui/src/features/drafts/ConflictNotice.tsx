@@ -145,26 +145,18 @@ export function ConflictNotice({
   const theirsRef = useRef<HTMLButtonElement | null>(null);
   const keepDraftRef = useRef<HTMLButtonElement | null>(null);
 
-  // One pair of keys for every attempt to keep this draft on this revision.
-  const keys = useRef<{ revision: string; rebase: string; commit: string } | null>(null);
+  // One key for every attempt to keep this draft on this revision.
+  const keys = useRef<{ revision: string; rebase: string } | null>(null);
   const keep = useMutation({
     mutationFn: async () => {
       if (text === null) throw new UnsavedSelection([itemId]);
       const held =
         keys.current !== null && keys.current.revision === item.current_revision
           ? keys.current
-          : {
-              revision: item.current_revision,
-              rebase: crypto.randomUUID(),
-              commit: crypto.randomUUID(),
-            };
+          : { revision: item.current_revision, rebase: crypto.randomUUID() };
       keys.current = held;
       await rebaseDraft(client, workspaceId, itemId, item.current_revision, text, held.rebase);
-      return takeSnapshot(client, workspaceId, {
-        key: held.commit,
-        itemIds: [itemId],
-        message: conflict.message,
-      });
+      return takeSnapshot(client, workspaceId, [itemId], conflict.message);
     },
     onSuccess: (snapshotted) => {
       keys.current = null;

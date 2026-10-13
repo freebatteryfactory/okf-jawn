@@ -24,8 +24,13 @@
  * `current_revision`, then `commit_items` again; take theirs is `discard_draft`. A conflict means
  * a newer head exists, so the shell's own check for one runs again and announces it.
  *
- * Idempotency: a Snapshot is repeated under the key it had while it names the same items and the
- * same message, so one whose answer was lost is completed, not committed twice.
+ * Idempotency: a Snapshot is repeated under the key it had while it is the same request: the same
+ * items, the same name, and the same drafts (for each item, the digest and the base the service
+ * answered when it was last saved, or listed). So one whose answer was lost is completed, not
+ * committed twice; and text saved since, or a draft kept on a newer revision, is a new request
+ * with a new key, which the service cannot answer with what it said before. Once an answer says
+ * the Snapshot was taken, the request is forgotten: the same drafts under the same name again are
+ * a new Snapshot.
  */
 import type { QueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
@@ -34,22 +39,16 @@ import { commitItems, saveDraft } from '../../api/generated/sdk.gen';
 import type { Revision, Warning, Workspace } from '../../api/generated/types.gen';
 import { short } from '../documents/describe';
 import { classifyFailure } from '../errors/failure';
-import { forgetDrafts, rememberDraft } from './drafts-list';
+import { forgetDrafts, listedDraft, rememberDraft } from './drafts-list';
 import { endSession, flushSession } from './saving';
 import {
   type ConflictItem,
   type DraftText,
   needsSave,
+  type SnapshotAttempt,
   sessionKey,
   useDraftSessions,
 } from './sessions';
-
-/** One `commit_items` request. */
-export interface SnapshotAttempt {
-  key: string;
-  itemIds: string[];
-  message: string;
-}
 
 /** What a Snapshot did. */
 export interface Snapshotted {
@@ -73,27 +72,48 @@ export class UnsavedSelection extends Error {
   }
 }
 
-/** The request for these items and this message: the last one again while it says the same. */
+const sameList = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((entry, index) => entry === b[index]);
+
+/**
+ * The request for these items, this name and these drafts: the last one again while it is the
+ * same in all three.
+ */
 export function snapshotAttempt(
   last: SnapshotAttempt | null,
   itemIds: string[],
   message: string,
+  drafts: string[],
 ): SnapshotAttempt {
   const same =
     last !== null &&
     last.message === message &&
-    last.itemIds.length === itemIds.length &&
-    last.itemIds.every((id, index) => id === itemIds[index]);
-  return same ? last : { key: crypto.randomUUID(), itemIds, message };
+    sameList(last.itemIds, itemIds) &&
+    sameList(last.drafts, drafts);
+  return same ? last : { key: crypto.randomUUID(), itemIds, message, drafts };
 }
 
-/** Say, where the drafts are listed, what a Snapshot did: it is the person's own change. */
+/**
+ * The draft of an item the service holds, as far as this page knows: what its last save answered,
+ * else what the list of drafts says. Named by its digest and its base; empty when it is not known.
+ */
+function draftHeld(client: QueryClient, workspaceId: string, itemId: string): string {
+  const session = useDraftSessions.getState().sessions[sessionKey(workspaceId, itemId)];
+  const draft = session?.confirmed?.draft ?? listedDraft(client, workspaceId, itemId);
+  return draft === undefined ? '' : `${draft.content_digest} on ${draft.base_revision}`;
+}
+
+/**
+ * Say, where the drafts are listed, what a Snapshot did. It says what the answer shows: that the
+ * Snapshot was taken, of how many items (the service takes all that were asked or none), and the
+ * revision it made. Each item was committed as it was last saved before the Snapshot was asked.
+ */
 export function saySnapshotted(workspaceId: string, message: string, snapshotted: Snapshotted) {
   const items = snapshotted.itemIds.length;
   useDraftSessions.getState().say(
     workspaceId,
     `Snapshot “${message}” taken: ${items} ${items === 1 ? 'item' : 'items'}. ` +
-      `The workspace now shows revision ${short(snapshotted.revision)}, which includes your change.`,
+      `The workspace now shows revision ${short(snapshotted.revision)}, which the Snapshot made.`,
     snapshotted.warnings.map((warning) => warning.message),
   );
 }
@@ -130,15 +150,24 @@ function checkHeadsAgain(client: QueryClient, workspaceId: string) {
 export async function takeSnapshot(
   client: QueryClient,
   workspaceId: string,
-  attempt: SnapshotAttempt,
+  itemIds: string[],
+  message: string,
 ): Promise<Snapshotted> {
-  await Promise.all(attempt.itemIds.map((itemId) => flushSession(client, workspaceId, itemId)));
+  await Promise.all(itemIds.map((itemId) => flushSession(client, workspaceId, itemId)));
   const held = useDraftSessions.getState().sessions;
-  const unsaved = attempt.itemIds.filter((itemId) => {
+  const unsaved = itemIds.filter((itemId) => {
     const session = held[sessionKey(workspaceId, itemId)];
     return session !== undefined && needsSave(session);
   });
   if (unsaved.length > 0) throw new UnsavedSelection(unsaved);
+  // The request is named once the saves have answered: what it commits is known only then.
+  const attempt = snapshotAttempt(
+    useDraftSessions.getState().asked[workspaceId] ?? null,
+    itemIds,
+    message,
+    itemIds.map((itemId) => draftHeld(client, workspaceId, itemId)),
+  );
+  useDraftSessions.getState().ask(workspaceId, attempt);
 
   let result: { revision: Revision; warnings: Warning[] };
   try {
@@ -160,6 +189,8 @@ export async function takeSnapshot(
     }
     throw error;
   }
+  // Taken: the same drafts under the same name again would be a new Snapshot.
+  useDraftSessions.getState().ask(workspaceId, null);
 
   const headKey = openWorkspaceQueryKey({ body: { workspace_id: workspaceId } });
   const previousHead = client.getQueryData<Workspace>(headKey)?.head ?? null;
