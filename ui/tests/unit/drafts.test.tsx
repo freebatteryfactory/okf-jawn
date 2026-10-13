@@ -203,6 +203,7 @@ describe('who may edit, and where', () => {
   describe('an item whose kind is another at the next revision', () => {
     const NEWER = 'd'.repeat(40);
     const asSource = summary(NOTE, 'notes/meeting.md', 'Meeting notes', 'meeting-note', 'source');
+    const asView = summary(NOTE, 'notes/meeting.md', 'Meeting notes', 'meeting-note', 'view');
 
     /**
      * The note at the head shown; at the newer head the same item is `as` (a Source, unless the
@@ -322,24 +323,43 @@ describe('who may edit, and where', () => {
       expect(document.activeElement).toBe(edit);
     });
 
-    it('an open editor stops saving, says why in a line, and keeps the typed text read-only on screen', async () => {
-      // A change still waiting for its autosave when the read says the item is a Source.
-      const { api, kept } = await refused();
-      expect(kept).toHaveProperty('value', `${COMMITTED} and more`);
-      expect(kept).toHaveProperty('readOnly', true);
-      expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
-      expect(
-        screen.getByText(
-          'This item is now a Source, which is not edited as a draft, so your text is no longer saved. It is kept here: copy what you need.',
-        ),
-      ).toBeDefined();
-      // Focus that was in the editor goes to the kept text, not to the page body.
-      expect(document.activeElement).toBe(kept);
-      // Nothing is sent, not by the waiting autosave and not later.
-      await pass(AUTOSAVE_DELAY_MS * 15);
-      expect(api.callsTo(SAVE)).toHaveLength(0);
-      expect(screen.getByRole('tab', { name: 'Meeting notes (unsaved)' })).toBeDefined();
-    });
+    // Whatever is not a Note is refused: a Source and a View alike.
+    it.each([
+      ['a Source', asSource, 'Source'],
+      ['a View', asView, 'View'],
+    ] as const)(
+      'an open editor of what is now %s stops saving, says why in a line, and keeps the typed text read-only on screen',
+      async (_what, as, word) => {
+        // A change still waiting for its autosave when the read says what the item is now.
+        const { api, kept } = await refused(as);
+        expect(kept).toHaveProperty('value', `${COMMITTED} and more`);
+        expect(kept).toHaveProperty('readOnly', true);
+        expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+        expect(
+          screen.getByText(
+            `This item is now a ${word}, which is not edited as a draft, so your text is no longer saved. It is kept here: copy what you need.`,
+          ),
+        ).toBeDefined();
+        // Focus that was in the editor goes to the kept text, not to the page body.
+        expect(document.activeElement).toBe(kept);
+        // Nothing is sent, not by the waiting autosave and not later.
+        await pass(AUTOSAVE_DELAY_MS * 15);
+        expect(api.callsTo(SAVE)).toHaveLength(0);
+        expect(screen.getByRole('tab', { name: 'Meeting notes (unsaved)' })).toBeDefined();
+        // Nor when the kept text is left for the committed text, where the pane says it too.
+        fireEvent.click(screen.getByRole('button', { name: 'Read the committed text' }));
+        await eventually(() =>
+          expect(
+            screen.getByText(
+              `You have unsaved changes to this item. Below is the committed text. This item is now a ${word}, so your draft of it is no longer saved.`,
+            ),
+          ).toBeDefined(),
+        );
+        await pass(AUTOSAVE_DELAY_MS * 15);
+        expect(api.callsTo(SAVE)).toHaveLength(0);
+      },
+      20_000,
+    );
 
     // The third re-check's probe: a Snapshot's conflict open on an item that is then refused.
     // "Keep mine" saves until the text is saved, and nothing of a refused session is saved.
