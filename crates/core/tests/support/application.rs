@@ -5,12 +5,21 @@
 //! on its expected head, replays a repeated mutation, and runs the check it is handed on a
 //! staged directory; the draft store keeps one draft per (item, editor); the record store
 //! answers revision maps and derived objects for exactly the (item, revision, digest) recorded.
-//! Content is scripted by the test (`put_document`, `put_listing`). Two edits are applied as a
-//! store would, so what `show` reads at the revision a commit produced follows them: an
-//! `EditItem` (the item's document at the commit's base, with the edit's body and properties)
-//! and a `RestoreItem` (the item as `from` holds it, its source appearance included, with the
-//! port's `NotFound` and `Conflict`). A test may make the next `show` fail with a code it
-//! names (`fail_next_show`), as a store fault would. `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
+//! Content is scripted by the test (`put_document`, `put_listing`). Three edits are applied, in
+//! order, to the items the commit's base holds, so what `show` reads at the revision a commit
+//! produced follows them (`VersionState::applied`): an `EditItem` (the edit's body and
+//! properties), a `MoveItem` (the item is at its destination, or the port's `NotFound` and
+//! `Conflict` for a destination whose collision key is taken) and a `RestoreItem` (the item as
+//! `from` holds it, its source appearance included, with the port's `NotFound` and
+//! `Conflict`). The fake does NOT rewrite links: a move or a restore changes no other item, so
+//! a rule about what links say after a write is proven only against real storage. Its `MoveItem`
+//! and restore are also kinder than storage's about a destination: they do not refuse a folder
+//! at the destination (a file under `destination/`), a file standing where a folder of the
+//! destination is needed, or a reserved or non-Markdown destination (`check_item_path`'s
+//! `InvalidInput`), so a rule about those is proven only against real storage. It applies no
+//! other edit (a delete, a status change, a folder), and only the items an applied edit wrote
+//! are readable at the new revision. A test may make the next `show` fail with a code it
+//! names (`fail_next_show`, `fail_show_number`), as a store fault would, and so may the next `log` and the next `list` (`fail_next_log`, `fail_next_list`). `item_at_path` answers from the scripted documents as its port documents it: `None` when no item is at the path at
 //! a known revision, `NotFound` only for an unknown revision. A port the operations
 //! under test do not call answers `Internal` ("not used by this test").
 //!
@@ -39,6 +48,11 @@
 //! answers `Unavailable` for a revision it has not indexed, as its port documents, and applies
 //! the query's filters to the entries a test scripted (`put_entry`, `put_link`): the archived
 //! flag unless archived items are included, the extraction filter, the folder and the text.
+//! Search hits and links are paged as storage pages them: from the offset the decimal cursor
+//! names, with the next offset as the cursor while entries remain. `list` records the page each
+//! call asked for (`list_queries`). It answers a listing whole, whatever the page, unless a test
+//! asks for pages (`page_listings`): then a listing, scripted or derived, is paged as storage
+//! pages a folder, its child folders first.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -152,7 +166,9 @@ pub struct FakeVersions {
     stage: Staged,
     shows: AtomicUsize,
     fail_next_lookup: AtomicBool,
-    fail_next_show: Mutex<Option<ErrorCode>>,
+    fail_show: Mutex<Option<(usize, ErrorCode)>>,
+    fail_next_log: Mutex<Option<ErrorCode>>,
+    fail_next_list: Mutex<Option<ErrorCode>>,
 }
 
 #[derive(Default)]
@@ -166,12 +182,14 @@ struct VersionState {
     landed: Vec<(Revision, Revision)>,
     landing: Vec<Revision>,
     log_page: Option<usize>,
+    list_page: Option<usize>,
     logs: Vec<(Revision, Option<ItemId>, LogResponse)>,
     diffs: Vec<(Revision, Revision, Option<ItemId>, Vec<FileChange>)>,
     blames: Vec<(Revision, ItemId, Vec<BlameLine>)>,
     log_queries: Vec<LogQuery>,
     diff_queries: Vec<DiffQuery>,
     blame_queries: Vec<BlameQuery>,
+    list_queries: Vec<(Revision, Option<WorkspacePath>, Page)>,
 }
 
 /// `BlobStore` over a map of digests to bytes.
@@ -351,7 +369,9 @@ impl FakeVersions {
             stage: Staged::conformant()?,
             shows: AtomicUsize::new(0),
             fail_next_lookup: AtomicBool::new(false),
-            fail_next_show: Mutex::new(None),
+            fail_show: Mutex::new(None),
+            fail_next_log: Mutex::new(None),
+            fail_next_list: Mutex::new(None),
         })
     }
 
@@ -465,7 +485,34 @@ impl FakeVersions {
     /// # Errors
     /// Returns when the lock is poisoned.
     pub fn fail_next_show(&self, code: ErrorCode) -> Built<()> {
-        *lock(&self.fail_next_show)? = Some(code);
+        self.fail_show_number(1, code)
+    }
+
+    /// Make the `number`-th `show` from now (1 is the next) fail with `code`, as a store
+    /// fault in the middle of a handler's reads would; the shows before it answer.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_show_number(&self, number: usize, code: ErrorCode) -> Built<()> {
+        *lock(&self.fail_show)? = Some((number, code));
+        Ok(())
+    }
+
+    /// Make the next `log` fail with `code`, as a store fault would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_next_log(&self, code: ErrorCode) -> Built<()> {
+        *lock(&self.fail_next_log)? = Some(code);
+        Ok(())
+    }
+
+    /// Make the next `list` fail with `code`, as a store fault would.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn fail_next_list(&self, code: ErrorCode) -> Built<()> {
+        *lock(&self.fail_next_list)? = Some(code);
         Ok(())
     }
 
@@ -535,6 +582,24 @@ impl FakeVersions {
         Ok(lock(&self.state)?.log_queries.clone())
     }
 
+    /// Page `list` as storage does (`paged_listing`): a listing, scripted or derived, is
+    /// answered `size` entries at a time. Without it, `list` answers the listing whole.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn page_listings(&self, size: usize) -> Built<()> {
+        lock(&self.state)?.list_page = Some(size);
+        Ok(())
+    }
+
+    /// Every `list` call, in order: the revision, the folder and the page asked for.
+    ///
+    /// # Errors
+    /// Returns when the lock is poisoned.
+    pub fn list_queries(&self) -> Built<Vec<(Revision, Option<WorkspacePath>, Page)>> {
+        Ok(lock(&self.state)?.list_queries.clone())
+    }
+
     /// Every `diff` query, in order.
     ///
     /// # Errors
@@ -597,59 +662,105 @@ impl VersionState {
         None
     }
 
-    /// The documents each `TreeEdit::RestoreItem` of `changes` restores, as its port documents
-    /// it: the item as `from` holds it, its source appearance (the companion files) included;
-    /// nothing for an item absent at `from`, which is removed. Consecutive `RestoreItem` edits
-    /// are one group: every item of the group is looked up first (`NotFound` for one absent both
-    /// at `from` and at the expected head), and the group's items have left their current paths
-    /// before any is written back, so only an item outside the group holding a restored path at
-    /// the expected head is a `Conflict`. A later listing of an item wins (`show` reads the
-    /// newest document first).
-    fn restored_items(&self, changes: &CommitChanges) -> Result<Vec<ItemDocument>, ApiError> {
+    /// What `show` reads, at the revision a commit of `changes` produces, of each item an edit
+    /// wrote, with whether it replaces a document a test scripted there. The edits apply in
+    /// order to the items the expected head holds, as the port documents each:
+    ///
+    /// - `EditItem`: the item's document with the edit's body and properties.
+    /// - `MoveItem` ("Move an item"): the item is at its destination afterwards; `NotFound`
+    ///   for an item the tree does not hold, and `Conflict` when a path of the tree has the
+    ///   destination's collision key (the item's own path included, so a move that changes
+    ///   only letter case is refused, as storage refuses it). A move to the path the item
+    ///   holds changes nothing.
+    /// - `RestoreItem`: the item as `from` holds it, its source appearance (the companion
+    ///   files) included; an item absent at `from` is removed. Consecutive `RestoreItem`
+    ///   edits are one group: every item of the group is looked up first (`NotFound` for one
+    ///   absent both at `from` and in the tree), and the group's items have left their paths
+    ///   before any is written back, so only another item holding a restored path (by
+    ///   collision key) is a `Conflict`. A later listing of an item wins.
+    ///
+    /// Every other edit is not applied.
+    fn applied(&self, changes: &CommitChanges) -> Result<Vec<(ItemDocument, bool)>, ApiError> {
         let at = |revision: &Revision, item: ItemId| {
             self.documents
                 .iter()
                 .find(|(held, document)| held == revision && document.summary.id == item)
                 .map(|(_, document)| document.clone())
         };
-        let mut restored = Vec::new();
-        for group in changes
-            .edits
-            .split(|edit| !matches!(edit, TreeEdit::RestoreItem { .. }))
-        {
-            let listed: Vec<(ItemId, &Revision)> = group
+        let mut tree: Vec<ItemDocument> = Vec::new();
+        for (held, document) in &self.documents {
+            let listed = tree
                 .iter()
-                .filter_map(|edit| match edit {
-                    TreeEdit::RestoreItem { item_id, from } => Some((*item_id, from)),
-                    _ => None,
-                })
-                .collect();
-            for (item_id, from) in &listed {
-                if at(from, *item_id).is_none() && at(&changes.expected_head, *item_id).is_none() {
-                    return Err(ApiError::new(ErrorCode::NotFound, "no such item"));
-                }
-            }
-            for (item_id, from) in &listed {
-                let Some(document) = at(from, *item_id) else {
-                    continue;
-                };
-                if self.documents.iter().any(|(held, other)| {
-                    *held == changes.expected_head
-                        && other.summary.path == document.summary.path
-                        && listed
-                            .iter()
-                            .all(|(grouped, _)| *grouped != other.summary.id)
-                }) {
-                    return Err(ApiError::new(
-                        ErrorCode::Conflict,
-                        "another item holds the restored path",
-                    ));
-                }
-                restored.push(document);
+                .any(|kept| kept.summary.id == document.summary.id);
+            if *held == changes.expected_head && !listed {
+                tree.push(document.clone());
             }
         }
-        Ok(restored)
+        let mut written: Vec<(ItemId, bool)> = Vec::new();
+        let mut wrote = |item: ItemId, replaces: bool| {
+            let before = written
+                .iter()
+                .any(|(id, replaced)| *id == item && *replaced);
+            written.retain(|(id, _)| *id != item);
+            written.push((item, replaces || before));
+        };
+        let restores = |edit: &TreeEdit| matches!(edit, TreeEdit::RestoreItem { .. });
+        for group in changes
+            .edits
+            .chunk_by(|first, second| restores(first) && restores(second))
+        {
+            match group {
+                [
+                    TreeEdit::EditItem {
+                        item_id,
+                        body,
+                        properties,
+                    },
+                ] => {
+                    if let Some(edited) = tree.iter_mut().find(|held| held.summary.id == *item_id) {
+                        edited.body.clone_from(body);
+                        edited.properties.clone_from(properties);
+                        wrote(*item_id, true);
+                    }
+                }
+                [
+                    TreeEdit::MoveItem {
+                        item_id,
+                        destination,
+                    },
+                ] => {
+                    if move_in(&mut tree, *item_id, destination)? {
+                        wrote(*item_id, false);
+                    }
+                }
+                _ => {
+                    // The group's items, each with the document its `from` holds.
+                    let listed: Vec<(ItemId, Option<ItemDocument>)> = group
+                        .iter()
+                        .filter_map(|edit| match edit {
+                            TreeEdit::RestoreItem { item_id, from } => {
+                                Some((*item_id, at(from, *item_id)))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    restore_in(&mut tree, &listed)?;
+                    for (item_id, _) in &listed {
+                        wrote(*item_id, true);
+                    }
+                }
+            }
+        }
+        Ok(written
+            .into_iter()
+            .filter_map(|(item, replaces)| {
+                tree.iter()
+                    .find(|held| held.summary.id == item)
+                    .map(|held| (held.clone(), replaces))
+            })
+            .collect())
     }
+
     /// The commit before `revision` on the line: the head a written commit was based on, or the
     /// head a test moved away from.
     fn parent_of(&self, revision: &Revision) -> Option<&Revision> {
@@ -673,7 +784,8 @@ impl VersionState {
     /// commit produced it, or the test scripted content at it.
     /// The listing of `folder` at `revision` from the documents there, when no test scripted
     /// one: the items directly inside it and its child folders. A folder no document lies
-    /// under is `NotFound`, as is an unknown revision.
+    /// under has an empty listing, as real storage answers it; only an unknown revision is
+    /// `NotFound`.
     fn derived_listing(
         &self,
         revision: &Revision,
@@ -702,9 +814,6 @@ impl VersionState {
                     folders.insert(child);
                 }
             }
-        }
-        if folder.is_some() && items.is_empty() && folders.is_empty() {
-            return Err(ApiError::new(ErrorCode::NotFound, "no such folder"));
         }
         Ok(FolderListing {
             items,
@@ -993,18 +1102,28 @@ impl VersionStore for FakeVersions {
         _scope: &'a StorageScope,
         revision: &'a Revision,
         folder: Option<&'a WorkspacePath>,
-        _page: Page,
+        page: Page,
     ) -> PortFuture<'a, FolderListing> {
         Box::pin(async move {
-            let state = lock_api(&self.state)?;
-            if let Some((_, _, listing)) = state
+            let mut state = lock_api(&self.state)?;
+            state
+                .list_queries
+                .push((revision.clone(), folder.cloned(), page.clone()));
+            if let Some(code) = lock_api(&self.fail_next_list)?.take() {
+                return Err(ApiError::new(code, "the store failed"));
+            }
+            let whole = match state
                 .listings
                 .iter()
                 .find(|(at, listed, _)| at == revision && listed.as_ref() == folder)
             {
-                return Ok(listing.clone());
+                Some((_, _, listing)) => listing.clone(),
+                None => state.derived_listing(revision, folder)?,
+            };
+            match state.list_page {
+                Some(size) => paged_listing(whole, &page, size),
+                None => Ok(whole),
             }
-            state.derived_listing(revision, folder)
         })
     }
     fn item_at_path<'a>(
@@ -1034,8 +1153,15 @@ impl VersionStore for FakeVersions {
     ) -> PortFuture<'a, ItemDocument> {
         self.shows.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
-            if let Some(code) = lock_api(&self.fail_next_show)?.take() {
-                return Err(ApiError::new(code, "the store failed"));
+            {
+                let mut failing = lock_api(&self.fail_show)?;
+                match failing.take() {
+                    Some((number, code)) if number <= 1 => {
+                        return Err(ApiError::new(code, "the store failed"));
+                    }
+                    Some((number, code)) => *failing = Some((number.saturating_sub(1), code)),
+                    None => {}
+                }
             }
             lock_api(&self.state)?
                 .documents
@@ -1110,36 +1236,23 @@ impl VersionStore for FakeVersions {
             if state.head.as_ref() != Some(&changes.expected_head) {
                 return Err(ApiError::new(ErrorCode::Conflict, "the head moved"));
             }
-            let restored = state.restored_items(&changes)?;
+            let written = state.applied(&changes)?;
             let warnings = check.check(&self.stage.0)?;
             if state.queued.is_empty() {
                 return Err(ApiError::new(ErrorCode::Internal, "no revision queued"));
             }
             let revision = state.queued.remove(0);
-            // What `show` reads of each edited item at the new revision.
-            for edit in &changes.edits {
-                if let TreeEdit::EditItem {
-                    item_id,
-                    body,
-                    properties,
-                } = edit
-                    && let Some(mut edited) = state
-                        .documents
-                        .iter()
-                        .find(|(at, document)| {
-                            *at == changes.expected_head && document.summary.id == *item_id
-                        })
-                        .map(|(_, document)| document.clone())
-                {
-                    edited.summary.revision = revision.clone();
-                    edited.body.clone_from(body);
-                    edited.properties.clone_from(properties);
-                    state.documents.insert(0, (revision.clone(), edited));
+            // What `show` reads of each written item at the new revision. A document a test
+            // scripted there stands against a move, which the fake applies to the path only.
+            for (mut document, replaces) in written {
+                let scripted = state
+                    .documents
+                    .iter()
+                    .any(|(at, held)| *at == revision && held.summary.id == document.summary.id);
+                if replaces || !scripted {
+                    document.summary.revision = revision.clone();
+                    state.documents.insert(0, (revision.clone(), document));
                 }
-            }
-            for mut document in restored {
-                document.summary.revision = revision.clone();
-                state.documents.insert(0, (revision.clone(), document));
             }
             state.head = Some(revision.clone());
             state.commits.push((changes, revision.clone()));
@@ -1187,6 +1300,9 @@ impl VersionStore for FakeVersions {
         Box::pin(async move {
             let mut state = lock_api(&self.state)?;
             state.log_queries.push(query.clone());
+            if let Some(code) = lock_api(&self.fail_next_log)?.take() {
+                return Err(ApiError::new(code, "the store failed"));
+            }
             state.require_known(&query.tip)?;
             let scripted = state
                 .logs
@@ -1609,7 +1725,7 @@ impl SearchIndex for FakeSearch {
         Box::pin(async move {
             lock_api(&self.link_queries)?.push(query.clone());
             self.require_indexed(&query.revision)?;
-            let links = lock_api(&self.links)?
+            let matching: Vec<Link> = lock_api(&self.links)?
                 .iter()
                 .filter(|(at, _)| *at == query.revision)
                 .map(|(_, link)| link)
@@ -1622,13 +1738,20 @@ impl SearchIndex for FakeSearch {
                         LinkDirection::Both => outgoing || incoming,
                     }
                 })
-                .take(usize::from(query.page.limit.max(1)))
                 .cloned()
                 .collect();
+            let start = query
+                .page
+                .cursor
+                .as_deref()
+                .map_or(Ok(0), str::parse::<usize>)
+                .map_err(internal)?;
+            let limit = usize::from(query.page.limit.max(1));
+            let end = start.saturating_add(limit);
             Ok(GetLinksResponse {
                 revision: query.revision,
-                links,
-                next_cursor: None,
+                next_cursor: (end < matching.len()).then(|| end.to_string()),
+                links: matching.into_iter().skip(start).take(limit).collect(),
             })
         })
     }
@@ -1872,10 +1995,16 @@ impl MutationStore for Unused {
         &'a self,
         _key: &'a MutationKey,
         _digest: &'a Digest,
+        _workspace: Option<WorkspaceId>,
     ) -> PortFuture<'a, BeginOutcome> {
         unused()
     }
-    fn complete(&self, _lease: MutationLease, _response: Value) -> PortFuture<'_, ()> {
+    fn complete(
+        &self,
+        _lease: MutationLease,
+        _response: Value,
+        _workspace: Option<WorkspaceId>,
+    ) -> PortFuture<'_, ()> {
         unused()
     }
     fn release(&self, _lease: MutationLease) -> PortFuture<'_, ()> {
@@ -2584,6 +2713,110 @@ fn metadata(write: &DraftWrite) -> Result<Draft, okf_jawn_contract::identity::Id
         content_digest: write.content_digest.clone(),
         saved_at: instant()?,
     })
+}
+
+/// One page of `whole` as storage pages a folder: its child folders, then its items, from the
+/// offset the decimal cursor names, at most `size` entries (or fewer when the page asks for
+/// fewer), with the next offset as the cursor while entries remain. A cursor that is no offset
+/// is `InvalidInput` on `/page/cursor`, as storage answers it.
+fn paged_listing(
+    whole: FolderListing,
+    page: &Page,
+    size: usize,
+) -> Result<FolderListing, ApiError> {
+    let start = match page.cursor.as_deref() {
+        None => 0,
+        Some(cursor) => cursor.parse::<usize>().map_err(|_| {
+            ApiError::new(ErrorCode::InvalidInput, "not a listing cursor")
+                .with_field("/page/cursor")
+        })?,
+    };
+    let limit = size.min(usize::from(page.limit)).max(1);
+    let folders = whole.folders.len();
+    let total = folders.saturating_add(whole.items.len());
+    let end = start.saturating_add(limit).min(total);
+    Ok(FolderListing {
+        folders: whole
+            .folders
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| (start..end).contains(index))
+            .map(|(_, folder)| folder)
+            .collect(),
+        items: whole
+            .items
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| (start..end).contains(&index.saturating_add(folders)))
+            .map(|(_, item)| item)
+            .collect(),
+        next_cursor: (end < total).then(|| end.to_string()),
+    })
+}
+
+/// Apply one `MoveItem` to the fake's tree, and say whether the item changed path: `NotFound`
+/// for an item the tree does not hold, `Conflict` when a path of the tree (the item's own
+/// included) has the destination's collision key and the item is not already there.
+fn move_in(
+    tree: &mut [ItemDocument],
+    item: ItemId,
+    destination: &WorkspacePath,
+) -> Result<bool, ApiError> {
+    let taken = tree
+        .iter()
+        .any(|held| held.summary.path.collision_key() == destination.collision_key());
+    let moved = tree
+        .iter_mut()
+        .find(|held| held.summary.id == item)
+        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such item to move"))?;
+    if moved.summary.path == *destination {
+        return Ok(false);
+    }
+    if taken {
+        return Err(ApiError::new(
+            ErrorCode::Conflict,
+            format!("{} is already taken", destination.as_str()),
+        ));
+    }
+    moved.summary.path = destination.clone();
+    Ok(true)
+}
+
+/// Apply one group of consecutive `RestoreItem` edits to the fake's tree: `listed` holds each
+/// item with the document its `from` holds. Every item is looked up first, the group's items
+/// leave their paths, and each is then written back in order (a later listing wins); an item
+/// its `from` does not hold stays removed.
+fn restore_in(
+    tree: &mut Vec<ItemDocument>,
+    listed: &[(ItemId, Option<ItemDocument>)],
+) -> Result<(), ApiError> {
+    for (item, earlier) in listed {
+        if earlier.is_none() && tree.iter().all(|held| held.summary.id != *item) {
+            return Err(ApiError::new(
+                ErrorCode::NotFound,
+                "no such item at either revision",
+            ));
+        }
+    }
+    tree.retain(|held| listed.iter().all(|(id, _)| *id != held.summary.id));
+    for (item, earlier) in listed {
+        tree.retain(|held| held.summary.id != *item);
+        let Some(document) = earlier else {
+            continue;
+        };
+        let key = document.summary.path.collision_key();
+        if tree
+            .iter()
+            .any(|held| held.summary.path.collision_key() == key)
+        {
+            return Err(ApiError::new(
+                ErrorCode::Conflict,
+                "another item holds the restored path",
+            ));
+        }
+        tree.push(document.clone());
+    }
+    Ok(())
 }
 
 /// Whether an item lies in `folder` or a folder beneath it; every item lies in no folder.

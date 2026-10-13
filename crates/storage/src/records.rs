@@ -27,6 +27,8 @@ use crate::db::{
     Db, conflict, cursor, internal, job_scope_key, json, not_found, page_limit, paged, scope_key,
     sql, to_i64, to_u64,
 };
+use crate::purge::guard;
+use crate::puts;
 use crate::seam;
 
 /// `RecordStore` over the records database.
@@ -90,10 +92,16 @@ impl SqliteRecords {
 impl RecordStore for SqliteRecords {
     fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job> {
         let scope = scope.clone();
-        Box::pin(
-            self.db
-                .transaction(move |transaction| insert_job(transaction, &scope, &job)),
-        )
+        // A job of a workspace a purge names is refused inside the transaction that would
+        // record it (`purge::guard`), as are its retries and claims: core cancels and drains
+        // the jobs that already run.
+        Box::pin(self.db.transaction(move |transaction| {
+            let (tenant, workspace) = job_scope_key(&scope);
+            if let Some(workspace) = &workspace {
+                guard::refuse(transaction, &tenant, workspace)?;
+            }
+            insert_job(transaction, &scope, &job)
+        }))
     }
 
     fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job> {
@@ -251,6 +259,9 @@ impl RecordStore for SqliteRecords {
                 ));
             }
             let (tenant, workspace) = job_scope_key(&scope);
+            if let Some(workspace) = &workspace {
+                guard::refuse(transaction, &tenant, workspace)?;
+            }
             let artifact_id: ArtifactId = new_id!()?;
             transaction
                 .execute(
@@ -271,8 +282,14 @@ impl RecordStore for SqliteRecords {
                     ],
                 )
                 .map_err(|error| sql(&error))?;
-            read_artifact(transaction, "mutation_id", &mutation_id.0.to_string())?
-                .ok_or_else(|| internal("an artifact row vanished after its insert"))
+            let stored = read_artifact(transaction, "mutation_id", &mutation_id.0.to_string())?
+                .ok_or_else(|| internal("an artifact row vanished after its insert"))?;
+            // The stored record lands its object: a repeated mutation is answered by the first
+            // record, so a retry that put other bytes keeps their pending put.
+            if let Some(workspace) = &workspace {
+                puts::land(transaction, &tenant, workspace, [&stored.object.digest])?;
+            }
+            Ok(stored)
         }))
     }
 
@@ -438,6 +455,7 @@ impl RecordStore for SqliteRecords {
     ) -> PortFuture<'a, DerivedObject> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             transaction
                 .execute(
                     "INSERT INTO derived_objects (tenant_id, workspace_id, item_id, revision,
@@ -453,7 +471,7 @@ impl RecordStore for SqliteRecords {
                     ],
                 )
                 .map_err(|error| sql(&error))?;
-            read_derived(
+            let stored = read_derived(
                 transaction,
                 &tenant,
                 &workspace,
@@ -461,7 +479,11 @@ impl RecordStore for SqliteRecords {
                 &object.revision,
                 &object.digest,
             )?
-            .ok_or_else(|| internal("a derived object row vanished after its insert"))
+            .ok_or_else(|| internal("a derived object row vanished after its insert"))?;
+            // The digest is part of the row's key, so the stored row names this object even
+            // when it was recorded before.
+            puts::land(transaction, &tenant, &workspace, [&stored.digest])?;
+            Ok(stored)
         }))
     }
 
@@ -489,6 +511,7 @@ impl RecordStore for SqliteRecords {
     ) -> PortFuture<'a, Review> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let record = serde_json::to_string(&review).map_err(|error| json(&error))?;
             transaction
                 .execute(
@@ -551,6 +574,7 @@ impl RecordStore for SqliteRecords {
     ) -> PortFuture<'a, Receipt> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let record = serde_json::to_string(&receipt).map_err(|error| json(&error))?;
             let mutation = mutation_id.map(|id| id.0.to_string());
             transaction
@@ -674,6 +698,11 @@ fn claim(transaction: &Transaction<'_>, job_id: JobId) -> Result<Option<ClaimedJ
     let Some((tenant, workspace, record, mutation, initiator, spec, expires_ms)) = found else {
         return Ok(None);
     };
+    // A job of a workspace a purge names is not started: the claim is refused and the job is
+    // left as it is, for core to cancel (`purge::guard`).
+    if let Some(workspace) = &workspace {
+        guard::refuse(transaction, &tenant, workspace)?;
+    }
     let mut job = decode_job(&record)?;
     let now = seam::now_ms()?;
     if job.state == JobState::Running && expires_ms.is_some_and(|expiry| expiry > now) {
@@ -718,6 +747,9 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
     {
         return Err(lost_claim());
     }
+    if let Some(workspace) = &row.workspace_id {
+        guard::refuse(transaction, &row.tenant_id, workspace)?;
+    }
     let scope = job_scope(&row.tenant_id, row.workspace_id.as_deref())?;
     let mut job = decode_job(&row.record)?;
     job.artifact = completion
@@ -747,6 +779,12 @@ fn complete(transaction: &Transaction<'_>, completion: &JobCompletion) -> Result
             )
             .map_err(|error| sql(&error))?;
     }
+    // Every output is stored above (or already was, for this job), so the stored completion
+    // names each one. A completion is never replayed: a repeated one finds the job no longer
+    // running under its claim and is refused before this point.
+    if let Some(workspace) = &row.workspace_id {
+        puts::land(transaction, &row.tenant_id, workspace, &completion.outputs)?;
+    }
     Ok(job)
 }
 
@@ -759,6 +797,13 @@ fn control(
     action: &str,
 ) -> Result<Job, ApiError> {
     let (tenant, workspace) = job_scope_key(scope);
+    // A retry queues job work again, so a workspace a purge names refuses it like a new job;
+    // a cancellation is what core does to that workspace's jobs, and is never refused.
+    if action == "retry"
+        && let Some(workspace) = &workspace
+    {
+        guard::refuse(transaction, &tenant, workspace)?;
+    }
     let record: String = transaction
         .query_row(
             "SELECT record FROM jobs WHERE job_id = ?1 AND tenant_id = ?2 AND workspace_id IS ?3",

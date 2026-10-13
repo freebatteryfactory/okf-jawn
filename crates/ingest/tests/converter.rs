@@ -824,6 +824,7 @@ mod retains_images {
     use okf_jawn_core::conversion::{ConversionStatus, ConvertedAsset, PixelSize};
     use okf_jawn_ingest::child::write_assets;
     use okf_jawn_ingest::converter::read_window;
+    use okf_jawn_ingest::export::picture_image_bytes;
     use okf_jawn_ingest::protocol::{AssetFile, EXPORT_FILE, MARKDOWN_FILE, Reply};
     use okf_jawn_ingest::record::sha256_digest;
 
@@ -1226,6 +1227,54 @@ mod retains_images {
     }
 
     #[test]
+    fn an_unmatched_picture_in_a_format_without_pages_has_no_locator_to_take() -> TestResult {
+        let no_locator = SourceLocation::Unresolved {
+            reason: UnresolvedReason::FormatHasNoLocator,
+        };
+        // A document with no page (a DOCX): a picture in a rich table cell, which the export
+        // does not list, and a body picture, which it does.
+        let rich_cell = || Table {
+            rows: vec![vec!["a".to_owned()]],
+            cell_blocks: Some(vec![vec![vec![picture(
+                Some("An icon"),
+                Some(image(4, 4, b"icon")),
+            )]]]),
+            ..Table::default()
+        };
+        let mut pageless = DoclingDocument::new("letter");
+        pageless.push(Node::Table(rich_cell()));
+        pageless.push(picture(Some("A logo"), Some(image(8, 8, b"logo"))));
+        let directory = tempfile::tempdir()?;
+        let reply = child_outputs(directory.path(), &pageless, false)?;
+        // The icon is the unmatched picture: the child paired it with no export item.
+        let paired: Vec<Option<usize>> = reply.assets.iter().map(|asset| asset.picture).collect();
+        assert_eq!(paired, [None, Some(0)]);
+        let (converted, _coverage) = read_window(directory.path(), None, &reply)?;
+        let located: Vec<(Option<&str>, &SourceLocation)> = converted
+            .assets
+            .iter()
+            .map(|asset| (asset.caption.as_deref(), &asset.location))
+            .collect();
+        assert_eq!(
+            located,
+            [
+                (Some("An icon"), &no_locator),
+                (Some("A logo"), &no_locator)
+            ]
+        );
+
+        // The same unmatched picture on a page: the format has a locator, and the converter
+        // gave this picture none.
+        let mut paged = one_page();
+        paged.push(Node::Table(rich_cell()));
+        let pictures = pictures_of(&paged)?;
+        let (icon, _bytes) = some(pictures.first(), "the icon")?;
+        assert_eq!(pictures.len(), 1);
+        assert_eq!(icon.location, not_located());
+        Ok(())
+    }
+
+    #[test]
     fn page_images_on_keep_one_render_per_converted_page_and_off_keep_none() -> TestResult {
         let directory = tempfile::tempdir()?;
         let reply = child_outputs(directory.path(), &figure_document(), true)?;
@@ -1350,6 +1399,145 @@ mod retains_images {
         Ok(())
     }
 
+    /// The window `export` and `assets` describe, read back: its export and Markdown are
+    /// written first, as the child writes them.
+    fn read_back(
+        directory: &Path,
+        export: &serde_json::Value,
+        assets: Vec<AssetFile>,
+    ) -> Built<Vec<ConvertedAsset>> {
+        std::fs::write(directory.join(MARKDOWN_FILE), "<!-- image -->\n")?;
+        std::fs::write(directory.join(EXPORT_FILE), export.to_string())?;
+        let reply = Reply {
+            status: ConversionStatus::Success,
+            page_count: None,
+            issues: Vec::new(),
+            blocks: Vec::new(),
+            text_layer: false,
+            assets,
+        };
+        let (document, _coverage) = read_window(directory, Some(&page_one()), &reply)?;
+        Ok(document.assets)
+    }
+
+    #[test]
+    fn an_export_picture_no_picture_of_the_document_owns_is_written_from_the_export() -> TestResult
+    {
+        // The walk reaches no picture, and the export holds one, with a caption and a box: the
+        // export-only fallback. Its item is certain, so the asset names it.
+        let uri = "data:image/png;base64,ZXhwb3J0ZWQ=";
+        let export = serde_json::json!({
+            "texts": [{
+                "self_ref": "#/texts/0", "parent": { "$ref": "#/pictures/0" }, "children": [],
+                "label": "caption", "prov": [],
+                "orig": "Only in the export", "text": "Only in the export",
+            }],
+            "tables": [],
+            "pictures": [{
+                "self_ref": "#/pictures/0", "parent": { "$ref": "#/body" }, "children": [],
+                "label": "picture", "captions": [{ "$ref": "#/texts/0" }],
+                "prov": [{
+                    "page_no": 1,
+                    "bbox": { "l": 100.0, "t": 100.0, "r": 200.0, "b": 200.0, "coord_origin": "TOPLEFT" },
+                    "charspan": [0, 0],
+                }],
+                "image": { "mimetype": "image/png", "dpi": 144, "size": { "width": 8.0, "height": 6.0 }, "uri": uri },
+            }],
+            "pages": { "1": { "page_no": 1, "size": { "width": 600.0, "height": 800.0 } } },
+        });
+        let directory = tempfile::tempdir()?;
+        let assets = write_assets(&one_page(), &export, directory.path(), false)?;
+        // One asset: the export's own bytes and media type, its item and that item's encoding.
+        assert_eq!(
+            assets,
+            [AssetFile {
+                file: "picture-export-0.png".to_owned(),
+                role: AssetRole::Picture,
+                media_type: "image/png".to_owned(),
+                width: 8,
+                height: 6,
+                page: None,
+                picture: Some(0),
+                encoding: Some(sha256_digest(uri.as_bytes())?.as_str().to_owned()),
+                caption: Some("Only in the export".to_owned()),
+            }]
+        );
+        let kept = read_back(directory.path(), &export, assets)?;
+        let [picture] = kept.as_slice() else {
+            return Err(format!("not one asset: {kept:?}").into());
+        };
+        assert_eq!(std::fs::read(&picture.path)?, b"exported");
+        assert_eq!(picture.media_type, "image/png");
+        assert_eq!(picture.caption.as_deref(), Some("Only in the export"));
+        // The item it names gives it that item's own box.
+        assert_eq!(picture.location, region_of(LEFT));
+        Ok(())
+    }
+
+    #[test]
+    fn an_export_picture_beyond_pictures_that_cannot_be_told_apart_names_no_item() -> TestResult {
+        // Two pictures whose originals differ share one docling encoding (the same JPEG, one
+        // copy with a comment segment), so neither is paired. The export holds a third item of
+        // that encoding, which no picture of the walk owns. Which of the three items is whose
+        // cannot be told, so the third is kept from the export and names no item.
+        let original = jpeg()?;
+        let mut commented = original.clone();
+        let tail = commented.split_off(2);
+        commented.extend_from_slice(&[0xFF, 0xFE, 0x00, 0x04, b'h', b'i']);
+        commented.extend(tail);
+        let mut document = one_page();
+        for (bbox, data) in [(LEFT, &original), (RIGHT, &commented)] {
+            document.push(at(bbox, None, picture(None, Some(jpeg_image(data)))));
+        }
+        let mut export = document.export_to_json_value();
+        let items = some(
+            export
+                .get_mut("pictures")
+                .and_then(serde_json::Value::as_array_mut),
+            "the export's pictures",
+        )?;
+        let mut third = some(items.first(), "the first export item")?.clone();
+        let _replaced = some(third.as_object_mut(), "an export item")?
+            .insert("self_ref".to_owned(), serde_json::json!("#/pictures/2"));
+        // What the export holds of the picture: docling's PNG of the JPEG, not the JPEG.
+        let exported = some(picture_image_bytes(&third), "the item's image bytes")?;
+        assert!(exported.starts_with(b"\x89PNG"), "docling's own encoding");
+        items.push(third);
+        let directory = tempfile::tempdir()?;
+        let assets = write_assets(&document, &export, directory.path(), false)?;
+        let named: Vec<(&str, &str, Option<usize>, Option<&str>)> = assets
+            .iter()
+            .map(|asset| {
+                (
+                    asset.file.as_str(),
+                    asset.media_type.as_str(),
+                    asset.picture,
+                    asset.encoding.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("picture-0.jpg", "image/jpeg", None, None),
+                ("picture-1.jpg", "image/jpeg", None, None),
+                ("picture-export-2.png", "image/png", None, None),
+            ]
+        );
+        let kept = read_back(directory.path(), &export, assets)?;
+        let bytes: Vec<Vec<u8>> = kept
+            .iter()
+            .map(|asset| std::fs::read(&asset.path))
+            .collect::<Result<_, _>>()?;
+        // Each picture of the document keeps its own original; the third is the export's bytes.
+        assert_eq!(bytes, [original, commented, exported]);
+        // None of the three takes a box: no item is known to be its own.
+        for asset in &kept {
+            assert_eq!(asset.location, not_located(), "{asset:?}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn a_picture_with_several_provenance_entries_takes_its_first() -> TestResult {
         let directory = tempfile::tempdir()?;
@@ -1461,7 +1649,7 @@ mod conversion_child {
     use okf_jawn_ingest::converter::{
         CHILD_INHERITED_DOCLING_ENV, ConverterConfig, DoclingConverter, child_command,
     };
-    use okf_jawn_ingest::protocol::{REQUEST_FILE, RESULT_FILE, Request, Task};
+    use okf_jawn_ingest::protocol::{REQUEST_FILE, RESULT_FILE, Reply, Request, Task};
     use okf_jawn_ingest::record::sha256_digest;
 
     use crate::check::{TestResult, some};
@@ -1697,14 +1885,23 @@ mod conversion_child {
         assert_eq!(picture.media_type, "image/jpeg");
         assert_eq!(std::fs::read(&picture.path)?, jpeg);
         assert!(picture.pixel_size.is_some(), "{picture:?}");
-        // Paired with its export item, whose format has no pages (an unpaired picture would be
-        // `NotLocatedByConverter`).
+        // A DOCX has no pages, so the picture has no locator to take, paired or not.
         assert_eq!(
             picture.location,
             SourceLocation::Unresolved {
                 reason: UnresolvedReason::FormatHasNoLocator
             }
         );
+        // The location no longer tells a paired picture from an unpaired one in such a format;
+        // the child's own reply does: it paired the picture with the export's one item.
+        let reply = Reply::decode(&std::fs::read(output.path().join(RESULT_FILE))?)?;
+        let paired: Vec<Option<usize>> = reply
+            .assets
+            .iter()
+            .filter(|asset| asset.role == AssetRole::Picture)
+            .map(|asset| asset.picture)
+            .collect();
+        assert_eq!(paired, [Some(0)]);
         Ok(())
     }
 

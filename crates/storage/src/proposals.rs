@@ -2,6 +2,8 @@
 //!
 //! A proposal and a comment are each unique on their `MutationId`; listings page by row order
 //! with an opaque cursor (the row sequence), proposals newest first, comments oldest first.
+//! Every write is refused inside its transaction while a purge names the workspace
+//! (`purge::guard`).
 
 use okf_jawn_contract::error::ApiError;
 use okf_jawn_contract::identity::{MutationId, ProposalId};
@@ -12,6 +14,7 @@ use okf_jawn_core::storage::{Page, StorageScope};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::{Db, cursor, json, not_found, page_limit, paged, scope_key, sql};
+use crate::purge::guard;
 
 /// `ProposalStore` over the records database.
 #[derive(Debug, Clone)]
@@ -34,6 +37,7 @@ impl ProposalStore for SqliteProposals {
     ) -> PortFuture<'a, Proposal> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             transaction
                 .execute(
                     "INSERT INTO proposals (proposal_id, tenant_id, workspace_id, mutation_id,
@@ -119,6 +123,7 @@ impl ProposalStore for SqliteProposals {
     ) -> PortFuture<'a, Proposal> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             let changed = transaction
                 .execute(
                     "UPDATE proposals SET status = ?1, record = ?2
@@ -148,6 +153,7 @@ impl ProposalStore for SqliteProposals {
     ) -> PortFuture<'a, Comment> {
         let (tenant, workspace) = scope_key(scope);
         Box::pin(self.db.transaction(move |transaction| {
+            guard::refuse(transaction, &tenant, &workspace)?;
             read(transaction, &tenant, &workspace, proposal)?
                 .ok_or_else(|| not_found("proposal"))?;
             transaction
