@@ -743,3 +743,65 @@ async fn draft_visibility_discard_draft_removes_only_the_callers_own() -> TestRe
     assert_eq!(removed.editor, "bob");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_later_save_that_names_another_revision_keeps_the_drafts_base() -> TestResult {
+    // The draft is based at `a`. Another editor changes the note at `b`, and an unrelated commit
+    // makes `c` the head. A client that has refreshed to `b` saves again naming `b`, which is
+    // neither the head nor the draft's base: the base stays `a`, so the Snapshot still conflicts
+    // with the other editor's change instead of overwriting it.
+    let world = World::new()?;
+    for fill in ['a', 'b', 'c'] {
+        stored_at(&world, fill)?;
+    }
+    world.versions.set_head(revision('c')?)?;
+    world.versions.put_diff(
+        &revision('a')?,
+        &revision('c')?,
+        Some(ItemId(Uuid::from_u128(NOTE))),
+        vec![FileChange {
+            old_path: Some("notes/plan.md".to_owned()),
+            new_path: Some("notes/plan.md".to_owned()),
+            patch: "@@ -1 +1 @@\n-before\n+after\n".to_owned(),
+            binary: false,
+            kind: FileChangeKind::Modified,
+        }],
+    )?;
+    world.versions.queue_revision(revision('d')?)?;
+    let first = world
+        .service
+        .save_draft(
+            &alice(OperationName::SaveDraft, Some(mutation(1)))?,
+            save(revision('a')?, json!({ "type": "Note" }))?,
+        )
+        .await?;
+    assert_eq!(first.base_revision, revision('a')?);
+    let later = world
+        .service
+        .save_draft(
+            &alice(OperationName::SaveDraft, Some(mutation(2)))?,
+            save(revision('b')?, json!({ "type": "Note" }))?,
+        )
+        .await?;
+    assert_eq!(later.base_revision, revision('a')?, "a later save keeps the base");
+    let refused = err_of(
+        world
+            .service
+            .commit_items(
+                &alice(OperationName::CommitItems, Some(mutation(3)))?,
+                snapshot_of_the_note()?,
+            )
+            .await,
+    )?;
+    assert_eq!(refused.code, ErrorCode::Conflict);
+    let Some(ErrorDetail::DraftConflict { items }) = refused.detail.as_deref() else {
+        return Err(format!("not a draft conflict: {refused:?}").into());
+    };
+    let listed: Vec<_> = items
+        .iter()
+        .map(|item| (&item.draft_base, &item.current_revision))
+        .collect();
+    assert_eq!(listed, vec![(&revision('a')?, &revision('c')?)]);
+    assert!(world.versions.commits()?.is_empty(), "nothing overwritten");
+    Ok(())
+}
