@@ -13,6 +13,7 @@ import { draftsOptions, rememberDraft } from '../../src/features/drafts/drafts-l
 import {
   AUTOSAVE_DELAY_MS,
   DraftNotKept,
+  editSession,
   MAX_BODY_BYTES,
   rebaseSession,
   resetDraftSessions,
@@ -974,12 +975,19 @@ describe('a save with no answer is not forgotten', () => {
 describe('a text too long to save', () => {
   it('sends a body of exactly the bound, and never one byte more', async () => {
     const api = writable();
-    const { box } = await startEditing();
-    replaceText(box, 'x'.repeat(MAX_BODY_BYTES));
+    const { queryClient } = await startEditing();
+    // The two texts are put into the open editor's session by the call the editor itself makes
+    // at each change (`editSession`), not typed into the text box. Under happy-dom the text box
+    // takes most of a second to take in 8 MiB, twice here, and that cost alone put this test
+    // past the runner's default limit on a loaded machine. The bound is the save's rule, not the
+    // text box's: what is sent, and what is not, is decided from the session.
+    const atTheBound = 'x'.repeat(MAX_BODY_BYTES);
+    act(() => editSession(queryClient, WS, NOTE, { body: atTheBound }));
     await pass(AUTOSAVE_DELAY_MS);
     await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
     expect(api.callsTo(SAVE)).toHaveLength(1);
-    typeInto(box, 'x');
+    expect(String(api.callsTo(SAVE).at(0)?.body).length).toBe(MAX_BODY_BYTES);
+    act(() => editSession(queryClient, WS, NOTE, { body: `${atTheBound}x` }));
     await pass(AUTOSAVE_DELAY_MS);
     await eventually(() => expect(saveState()).toBe('Not saved: the text is too long.'));
     expect(api.callsTo(SAVE)).toHaveLength(1);
@@ -987,7 +995,9 @@ describe('a text too long to save', () => {
     expect(screen.getByRole('alert').textContent).toContain('Nothing was sent.');
     expect(screen.getByRole('tab', { name: 'Meeting notes (not saved)' })).toBeDefined();
     expect(api.violations).toEqual([]);
-  });
+    // Its own limit, not the runner's default: 8 MiB still goes through one request and the
+    // checks of the mocked service, and a loaded machine multiplies that.
+  }, 20_000);
 
   it('is no longer called too long once the text is back to what is saved', async () => {
     const api = writable();
