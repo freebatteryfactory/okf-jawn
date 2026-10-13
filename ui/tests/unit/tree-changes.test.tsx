@@ -11,6 +11,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ItemSummary } from '../../src/api/generated/types.gen';
 import { resetDraftSessions } from '../../src/features/drafts/saving';
+import { fieldInWords } from '../../src/features/tree/fields';
 import {
   folderProblem,
   joinPath,
@@ -939,5 +940,132 @@ describe('the status word and Archive', () => {
     expect(said.textContent).toContain(
       'its next Snapshot will first ask whether to keep your text',
     );
+  });
+});
+
+describe('a refusal that names a field', () => {
+  it('puts each step of the field into words, the innermost first', () => {
+    expect(fieldInWords('/status')).toBe('the status word');
+    expect(fieldInWords('/item_id')).toBe('the item');
+    expect(fieldInWords('/properties/owner')).toBe('“owner” of the properties');
+    expect(fieldInWords('/rules/0/glob')).toBe('“glob” of rule 1');
+    expect(fieldInWords('/rules/rules/2/date_format')).toBe('“date_format” of rule 3 of the rules');
+    expect(fieldInWords('/plan/entries/0/to')).toBe('the name after of rename 1 of the preview');
+    // A list this table has no word for, and a name it does not know (one of an object's own too).
+    expect(fieldInWords('/tags/4')).toBe('entry 5 of “tags”');
+    expect(fieldInWords('/constructor')).toBe('“constructor”');
+    expect(fieldInWords('')).toBe('the request');
+  });
+
+  /** The one alert on the page, once it holds the service's words. */
+  const refusalWith = async (words: string) => {
+    const alert = await screen.findByRole('alert');
+    await waitFor(() => expect(alert.textContent).toContain(words));
+    return alert.textContent ?? '';
+  };
+  const describedBy = (element: HTMLElement) =>
+    document.getElementById(element.getAttribute('aria-describedby') ?? '')?.textContent;
+
+  it('create_item: a field the form does not draw is named in the form’s notice', async () => {
+    const { api } = service({
+      [CREATE]: () =>
+        refuse(400, 'invalid_input', 'a note of this type needs an owner', '/properties'),
+    });
+    await openTree();
+    await userEvent.click(button('New note'));
+    await userEvent.type(field('Title'), 'Fresh');
+    await userEvent.click(button('Create the note'));
+    const said = await refusalWith('a note of this type needs an owner');
+    expect(said).toContain('Creating the note: nothing was changed.');
+    expect(said).toContain('The service did not accept the properties.');
+    // Not a failure that a repeat cures: the person changes something first.
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    for (const name of ['Title', 'In folder', 'File name', 'Type']) {
+      expect(field(name).getAttribute('aria-invalid'), name).toBe('false');
+    }
+    expect(screen.queryByText(/Created the note/)).toBeNull();
+    expect(api.callsTo(CREATE)).toHaveLength(1);
+  });
+
+  it('create_folder: shown at the name for the folder, and in the notice for any other field', async () => {
+    let refusedField = '/folder';
+    const { api } = service({
+      [FOLDER]: () => refuse(400, 'invalid_input', 'this folder cannot be made', refusedField),
+    });
+    renderAt(`/w/${WS}`);
+    await row('notes');
+    await userEvent.click(button('New folder'));
+    await userEvent.type(field('Folder name'), 'archive');
+    await userEvent.keyboard('{Enter}');
+    const name = field('Folder name');
+    await waitFor(() => expect(name.getAttribute('aria-invalid')).toBe('true'));
+    expect(describedBy(name)).toBe('The service refused this: this folder cannot be made');
+    expect(screen.queryByRole('alert')).toBeNull();
+    // A folder has no title: a refusal about one is not at any field of this form.
+    refusedField = '/title';
+    await userEvent.type(name, '2');
+    await userEvent.keyboard('{Enter}');
+    const said = await refusalWith('this folder cannot be made');
+    expect(said).toContain('Creating the folder: nothing was changed.');
+    expect(said).toContain('The service did not accept the title.');
+    expect(name.getAttribute('aria-invalid')).toBe('false');
+    expect(api.callsTo(FOLDER)).toHaveLength(2);
+  });
+
+  it('move_item: shown at the name for the destination, and in the notice for any other field', async () => {
+    let refusedField = '/destination';
+    service({
+      [MOVE]: () => refuse(400, 'invalid_input', 'an index file keeps its name', refusedField),
+    });
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Rename or move' }));
+    await type('File name', 'minutes.md');
+    await userEvent.keyboard('{Enter}');
+    const name = field('File name');
+    await waitFor(() => expect(name.getAttribute('aria-invalid')).toBe('true'));
+    expect(describedBy(name)).toBe('The service refused this: an index file keeps its name');
+    expect(screen.queryByRole('alert')).toBeNull();
+    refusedField = '/item_id';
+    await userEvent.type(name, 'x');
+    await userEvent.keyboard('{Enter}');
+    const said = await refusalWith('an index file keeps its name');
+    expect(said).toContain('Renaming or moving this item: nothing was changed.');
+    expect(said).toContain('The service did not accept the item.');
+    expect(screen.queryByText(/is now at/)).toBeNull();
+  });
+
+  it('delete_item: the refusal is said in the question, and the item stays', async () => {
+    const { api } = service({
+      [DELETE]: () =>
+        refuse(400, 'invalid_input', 'the folder index cannot be deleted', '/item_id'),
+    });
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.click(within(pane()).getByRole('button', { name: 'Delete' }));
+    await userEvent.click(button('Delete it'));
+    const said = await refusalWith('the folder index cannot be deleted');
+    expect(said).toContain('Deleting this item: nothing was changed.');
+    expect(said).toContain('The service did not accept the item.');
+    expect(screen.getByRole('group', { name: 'Delete “Meeting notes”?' })).toBeTruthy();
+    expect(screen.queryByText(/You deleted this item/)).toBeNull();
+    expect(screen.getByText('Text of Meeting notes')).toBeTruthy();
+    expect(api.callsTo(DELETE)).toHaveLength(1);
+  });
+
+  it('set_lifecycle: the refusal is said under the status choice, and the word stays', async () => {
+    const { api } = service({
+      [LIFE]: () =>
+        refuse(400, 'invalid_input', 'this item cannot be given that status word', '/status'),
+    });
+    await openTree(`/w/${WS}/i/${NOTE}`);
+    await screen.findByText('Text of Meeting notes');
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'draft');
+    const said = await refusalWith('this item cannot be given that status word');
+    expect(said).toContain('Changing “Meeting notes”: nothing was changed.');
+    expect(said).toContain('The service did not accept the status word.');
+    expect(screen.getByRole('combobox', { name: 'Status' })).toHaveProperty('value', 'stable');
+    expect(screen.queryByText(/The status is now/)).toBeNull();
+    expect(api.callsTo(LIFE)).toHaveLength(1);
   });
 });

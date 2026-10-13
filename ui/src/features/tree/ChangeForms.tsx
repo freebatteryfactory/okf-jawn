@@ -3,9 +3,12 @@
  * a new folder, a move or rename, and the question before a delete. The folder tree and an open
  * tab show the same forms.
  *
- * A name is checked before anything is sent (`names.ts`); a value the service refuses as
- * `invalid_input` is shown at the field it names, in the service's words. Any other failure is a
- * notice in the form, which stays open with what was typed:
+ * A name is checked before anything is sent (`names.ts`). A value the service refuses as
+ * `invalid_input` is shown at the field it names, in the service's words, when the form draws that
+ * field (`drawn`); a refusal at a field the form does not draw is a notice in the form that names
+ * the field in plain words (`fields.ts`). So a refused change is always said, by every form here
+ * and by every caller of `ChangeFailure`. Any other failure is a notice in the form, which stays
+ * open with what was typed:
  * - a `conflict` says that nothing was changed, and why. The head is asked for once: when the
  *   workspace has a newer version than the one shown, the notice offers Refresh (a change is made
  *   on the version the person sees, never on one they have not seen); when it has not, the name is
@@ -46,6 +49,7 @@ import {
   type NewNote,
 } from './changes';
 import { useWorkspaceChanges } from './context';
+import { fieldInWords } from './fields';
 import { folderProblem, joinPath, pathProblem, segmentProblem, splitPath } from './names';
 
 /** Whether the workspace has a newer head than the one shown; `unknown` when it could not be asked. */
@@ -174,16 +178,25 @@ const CONFLICT_WORDS: Record<Moved, string> = {
     'The service refused it as a conflict, and it could not be checked whether the workspace has a newer version. Refresh the workspace, or choose another name, then press the button again.',
 };
 
-/** A change's failure as a notice in its form; a refusal at a field is shown at the field. */
+const NO_FIELDS: ReadonlySet<string> = new Set();
+
+/**
+ * A change's failure as a notice in its form. A refusal at a field the form draws (`drawn`) is
+ * shown at that field by the form, so nothing is shown here; a refusal at any other field is shown
+ * here, with the field named in words.
+ */
 export function ChangeFailure<T>({
   context,
   change,
   sameWords,
+  drawn = NO_FIELDS,
 }: {
   context: string;
   change: Change<T>;
   /** What a conflict means for this change when the head has not moved (not a taken name). */
   sameWords?: string;
+  /** The fields, as the service names them, whose refusal the form shows at the field itself. */
+  drawn?: ReadonlySet<string>;
 }) {
   const { workspaceId } = useWorkspaceChanges();
   const { failure, conflict } = change;
@@ -193,7 +206,30 @@ export function ChangeFailure<T>({
       {change.said}
     </p>
   );
-  if (!failure.shown || change.refused !== null) return status;
+  const { refused } = change;
+  if (!failure.shown || (refused !== null && drawn.has(refused.field))) return status;
+  if (refused !== null) {
+    return (
+      <>
+        {/* Followed by the retry hook like any failure notice, though it offers no retry: the
+            person changes the value first. */}
+        <div ref={failure.noticeRef} tabIndex={-1} className="failure-notice">
+          <div role="alert">
+            <p>
+              <strong>{context}: nothing was changed.</strong>
+            </p>
+            <p>The service did not accept {fieldInWords(refused.field)}.</p>
+            {refused.message.length > 0 && (
+              <p>
+                The service said: <q>{refused.message}</q>
+              </p>
+            )}
+          </div>
+        </div>
+        {status}
+      </>
+    );
+  }
   if (conflict === null) {
     return (
       <>
@@ -343,6 +379,10 @@ function useOpeningFocus(target: RefObject<HTMLElement | null>) {
 
 const FOLDER_HINT = 'Leave empty for the top level. Separate folders with “/”.';
 const PATH_FIELDS: ReadonlySet<string> = new Set(['/path', '/folder', '/destination']);
+const TITLE_FIELDS: ReadonlySet<string> = new Set(['/title']);
+const TYPE_FIELDS: ReadonlySet<string> = new Set(['/type_name']);
+/** The fields each form draws: a refusal at one of them is shown there, not in the notice. */
+const NOTE_FIELDS: ReadonlySet<string> = new Set([...PATH_FIELDS, ...TITLE_FIELDS, ...TYPE_FIELDS]);
 
 /** The words of a refusal the service made about `fields`; null when it made none about them. */
 function refusedAt<T>(change: Change<T>, fields: ReadonlySet<string>): string | null {
@@ -445,7 +485,7 @@ export function NewEntryForm({ kind, folder: startFolder, onDone, onCancel }: Ne
             label="Title"
             value={title}
             inputRef={firstRef}
-            error={shown(problems.title) ?? refusedAt(note, new Set(['/title']))}
+            error={shown(problems.title) ?? refusedAt(note, TITLE_FIELDS)}
             onChange={(next) => {
               setTitle(next);
               edited();
@@ -484,7 +524,7 @@ export function NewEntryForm({ kind, folder: startFolder, onDone, onCancel }: Ne
                 : 'A word of your own, or one of the types this workspace defines.'
             }
             suggestions={types.data?.items.map((type) => type.name) ?? []}
-            error={shown(problems.type) ?? refusedAt(note, new Set(['/type_name']))}
+            error={shown(problems.type) ?? refusedAt(note, TYPE_FIELDS)}
             onChange={(next) => {
               setTypeName(next);
               edited();
@@ -501,6 +541,7 @@ export function NewEntryForm({ kind, folder: startFolder, onDone, onCancel }: Ne
         <ChangeFailure
           context={kind === 'note' ? 'Creating the note' : 'Creating the folder'}
           change={change}
+          drawn={kind === 'note' ? NOTE_FIELDS : PATH_FIELDS}
         />
       </fieldset>
     </form>
@@ -602,7 +643,7 @@ export function MoveForm({ item, mark, onDone, onCancel }: MoveFormProps) {
           working="Moving…"
           onCancel={onCancel}
         />
-        <ChangeFailure context="Renaming or moving this item" change={change} />
+        <ChangeFailure context="Renaming or moving this item" change={change} drawn={PATH_FIELDS} />
       </fieldset>
     </form>
   );

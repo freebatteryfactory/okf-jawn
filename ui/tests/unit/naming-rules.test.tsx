@@ -66,9 +66,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const refuse = (status: number, code: string, message: string): Reply => ({
+const refuse = (status: number, code: string, message: string, field?: string): Reply => ({
   status,
-  body: { code, message },
+  body: { code, message, ...(field === undefined ? {} : { field }) },
 });
 const text = (body: Json, key: string): string => {
   const value = body[key];
@@ -760,5 +760,61 @@ describe('the naming rules', () => {
     await previewNow();
     expect(api.callsTo(PREVIEW)).toHaveLength(1);
     expect(screen.queryByRole('button', { name: /Apply this preview/ })).toBeNull();
+  });
+});
+
+describe('a refusal that names a field of the rules or of a preview', () => {
+  /** The alert that holds `words`, once it is on the page. */
+  const refusalWith = async (words: string) => {
+    await waitFor(() =>
+      expect(
+        screen.queryAllByRole('alert').some((alert) => alert.textContent?.includes(words)),
+      ).toBe(true),
+    );
+    const alert = screen.getAllByRole('alert').find((each) => each.textContent?.includes(words));
+    return alert?.textContent ?? '';
+  };
+
+  it('set_rules: the field is named in the notice, and nothing reads as saved', async () => {
+    const { api } = service({
+      [SET]: () =>
+        refuse(400, 'invalid_input', 'the glob does not parse: unclosed [', '/rules/0/glob'),
+    });
+    await openRules();
+    await setPrefix('2025-');
+    await userEvent.click(button('Save the rules'));
+    const words = await refusalWith('the glob does not parse: unclosed [');
+    expect(words).toContain('Saving the rules: nothing was changed.');
+    expect(words).toContain('The service did not accept “glob” of rule 1.');
+    expect(said()).not.toContain('The rules are saved');
+    expect(panel().textContent).toContain('These rules differ from the saved ones.');
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('aaaaaaaaaa');
+    expect(api.callsTo(SET)).toHaveLength(1);
+  });
+
+  it('apply_names: the field is named in the notice, and nothing reads as renamed', async () => {
+    const { api } = service({
+      [APPLY]: () =>
+        refuse(
+          400,
+          'invalid_input',
+          'the plan names a path that is not a workspace path',
+          '/plan/entries/0/to',
+        ),
+    });
+    await openRules();
+    await setPrefix('2025-');
+    await previewNow();
+    await userEvent.click(button('Apply this preview…'));
+    await userEvent.click(button('Rename 2 items'));
+    const words = await refusalWith('the plan names a path that is not a workspace path');
+    expect(words).toContain('Renaming: nothing was changed.');
+    expect(words).toContain(
+      'The service did not accept the name after of rename 1 of the preview.',
+    );
+    expect(said()).not.toMatch(/(was|were) renamed/);
+    expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('aaaaaaaaaa');
+    expect(api.callsTo(APPLY)).toHaveLength(1);
   });
 });
