@@ -37,9 +37,8 @@ pub struct StandIn {
 /// A standard input that records whether anything tried to read it, and is otherwise empty.
 pub struct Untouched(pub Arc<AtomicBool>);
 
-/// The built command-line executable. Cargo names it after the package; the command it
-/// implements is `okf-jawn`.
-pub const EXECUTABLE: &str = env!("CARGO_BIN_EXE_okf-jawn-cli");
+/// The built command-line executable: the `okf-jawn` bin target of `crates/cli/Cargo.toml`.
+pub const EXECUTABLE: &str = env!("CARGO_BIN_EXE_okf-jawn");
 
 /// What a [`StandIn`] writes to its standard output and to its standard error.
 pub const STAND_IN_SAYS: &str = "stand-in-output";
