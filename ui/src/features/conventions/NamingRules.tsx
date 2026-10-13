@@ -40,7 +40,10 @@
  * refreshed), the page shows the rules as they are saved now, read-only, beside the person's own;
  * the save button then reads "Replace the saved rules with mine…", and asks before it sends: the
  * rules are sent whole, and nothing of the others is merged in. The other way out takes the
- * saved rules and drops the edits.
+ * saved rules and drops the edits. Until the rules of the version shown are on the page (they are
+ * being read at a new head, or that read failed and shows its retry), nothing is saved at all:
+ * the button is unavailable and the line beside it says why, so a save never goes over rules the
+ * page has not shown.
  *
  * Edits that are not saved are not lost silently. While the rules differ from the saved ones, or
  * the YAML view holds text that cannot be read, leaving asks first: "Close the naming rules",
@@ -209,6 +212,10 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
   }
   const replaced =
     changed && atHead !== undefined && basis !== undefined && !sameRules(basis, atHead);
+  // The rules drawn are those read before, and the rules of the version shown are not on the
+  // page (being read, or not readable): saving now would go over rules the page has not shown.
+  const notShown = atHead === undefined;
+  const notShownId = useId();
   const [replacing, setReplacing] = useState(false);
   const theirsId = useId();
   const keepSavedButton = useRef<HTMLButtonElement | null>(null);
@@ -409,8 +416,10 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
     previewing.mutate({ rules: asked, folder, head });
   };
   const startSave = () => {
+    // Nothing is saved over rules the page has not shown.
+    if (atHead === undefined) return;
     const asked = sendable();
-    if (asked === null || savedRules === undefined || sameRules(asked, savedRules)) return;
+    if (asked === null || sameRules(asked, atHead)) return;
     setSaid('');
     save.start(asked);
   };
@@ -688,6 +697,17 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
               </p>
             </fieldset>
           )}
+          {canWrite && changed && notShown && (
+            <p id={notShownId} className="meta">
+              Saving is not available now: the rules of the version shown, revision{' '}
+              <code title={head}>{short(head)}</code>,{' '}
+              {saved.isError
+                ? 'could not be read. The notice above has the way to read them again.'
+                : 'are still being read.'}{' '}
+              Your changes stay on this page. Once those rules are shown here you can save, or
+              choose to replace them if they are not the ones you started from.
+            </p>
+          )}
           <p className="change-buttons">
             {/* aria-disabled rather than disabled: each keeps focus while it works. */}
             <button
@@ -702,7 +722,8 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
               <button
                 type="button"
                 ref={saveButton}
-                aria-disabled={save.pending || !changed}
+                aria-disabled={save.pending || !changed || notShown}
+                {...(changed && notShown ? { 'aria-describedby': notShownId } : {})}
                 onClick={replaced ? askReplace : startSave}
               >
                 {save.pending

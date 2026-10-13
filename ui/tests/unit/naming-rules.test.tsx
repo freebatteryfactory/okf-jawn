@@ -1520,6 +1520,89 @@ describe('saving over rules someone else saved meanwhile', () => {
     expect(api.callsTo(SET)).toHaveLength(1);
   });
 
+  /**
+   * The same journey, with the rules of the new head answered by `atNewHead`: edit, be refused
+   * because someone else moved the head, refresh. (The re-review's probes R10b and R10c.)
+   */
+  async function refreshedWith(atNewHead: () => Reply | Promise<Reply>) {
+    const holder: { next: string } = { next: '' };
+    const own = service({
+      [RULES]: (body) =>
+        holder.next !== '' && revisionAsked(body, HEAD) === holder.next
+          ? atNewHead()
+          : ok(savedRules),
+    });
+    await openRules();
+    await setPrefix('mine-');
+    holder.next = own.moveHead();
+    own.state.rules.set(holder.next, theirs);
+    await userEvent.click(button('Save the rules'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Refresh the workspace' }));
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc'),
+    );
+    return own;
+  }
+  /** The words beside the save button that say why it is unavailable. */
+  const whyNot = (save: HTMLElement) =>
+    document.getElementById(save.getAttribute('aria-describedby') ?? '')?.textContent ?? '';
+
+  it('offers no save while the rules of the version shown are still being read, and then the replacing one', async () => {
+    const gate: { release: () => void } = { release: () => {} };
+    const own = await refreshedWith(
+      () =>
+        new Promise<Reply>((resolve) => {
+          gate.release = () => resolve(ok(theirs));
+        }),
+    );
+    // The rules on screen are the ones read before: saving over rules never shown is not offered.
+    const save = button('Save the rules');
+    expect(save.getAttribute('aria-disabled')).toBe('true');
+    expect(whyNot(save)).toContain(
+      'Saving is not available now: the rules of the version shown, revision cccccccccc, are still being read.',
+    );
+    await userEvent.click(save);
+    await turn();
+    expect(own.api.callsTo(SET)).toHaveLength(1);
+    expect(replaceQuestion()).toBeNull();
+    // Read, they are shown beside the person's own, and the button is the replacing one.
+    await act(async () => {
+      gate.release();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(savedNow()).not.toBeNull());
+    expect(screen.queryByRole('button', { name: 'Save the rules' })).toBeNull();
+    const replace = button('Replace the saved rules with mine…');
+    expect(replace.getAttribute('aria-disabled')).not.toBe('true');
+    expect(replace.getAttribute('aria-describedby')).toBeNull();
+    expect(own.api.callsTo(SET)).toHaveLength(1);
+  });
+
+  it('offers no save when the rules of the version shown cannot be read: the failure has its retry', async () => {
+    let failing = true;
+    const own = await refreshedWith(() =>
+      failing ? refuse(500, 'internal', 'the rules file broke') : ok(theirs),
+    );
+    const alert = await screen.findByRole('alert', {}, { timeout: 4_000 });
+    expect(alert.textContent).toContain('Reading the naming rules');
+    const save = button('Save the rules');
+    expect(save.getAttribute('aria-disabled')).toBe('true');
+    expect(whyNot(save)).toContain(
+      'Saving is not available now: the rules of the version shown, revision cccccccccc, could not be read.',
+    );
+    await userEvent.click(save);
+    await turn();
+    expect(own.api.callsTo(SET)).toHaveLength(1);
+    // The person's rules are still on the page.
+    expect(prefix()).toHaveProperty('value', 'mine-');
+    // Read again, the rules of that version are shown, and the save is the replacing one.
+    failing = false;
+    await userEvent.click(button('Try again'));
+    await waitFor(() => expect(savedNow()).not.toBeNull());
+    expect(button('Replace the saved rules with mine…')).toBeTruthy();
+    expect(own.api.callsTo(SET)).toHaveLength(1);
+  });
+
   it('is an ordinary save when the version shown moved and the saved rules did not', async () => {
     const own = service();
     await openRules();
