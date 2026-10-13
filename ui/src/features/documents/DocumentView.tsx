@@ -372,15 +372,16 @@ export function DocumentView({
     setTypeName(document.summary.type_name);
   }
   const isNote = session !== undefined || kind === 'note';
-  // A session whose item a later read says is not a Note: nothing of it is saved from then on
-  // (the service would refuse it), and its text stays on screen, read-only. Set in a layout
-  // effect, so it holds before the editor's own cleanup saves what it holds on its way out.
-  const notANote = session !== undefined && kind !== null && kind !== 'note' ? kind : null;
+  // The session is told what each read says the item is: one that is not a Note refuses it, and a
+  // Note lifts that (`saving.ts` says what a refused session is). What this pane draws follows the
+  // session, not the read: the editor leaves only once the session is refused, so the save the
+  // editor sends on its way out finds it refused, in whatever order the effects run.
   const sessionHere = session !== undefined;
-  useLayoutEffect(() => {
-    if (!sessionHere) return;
-    refuseSaving(workspaceId, itemId, notANote !== null);
-  }, [sessionHere, notANote, workspaceId, itemId]);
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (sessionHere && kind !== null) refuseSaving(queryClient, workspaceId, itemId, kind);
+  }, [queryClient, sessionHere, kind, workspaceId, itemId]);
+  const notANote = session?.refused ?? null;
   const editable = atShown && isNote;
   const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
   const [chosen, setChosen] = useState<'read' | 'edit' | null>(null);
@@ -548,6 +549,10 @@ export function DocumentView({
   const heldEditor = useRef<HTMLElement | null>(null);
   const [, liveRef] = useWatchedPart<HTMLDivElement>(heldEditor);
   const keptRef = useRef<HTMLTextAreaElement | null>(null);
+  // And back: the kept text gives way to the editor when the refusal is lifted. Focus that was in
+  // it goes to the switch at once (the text box is not there yet) and from there into the text box.
+  const heldKept = useRef<HTMLElement | null>(null);
+  const [, keptPartRef] = useWatchedPart<HTMLDivElement>(heldKept);
   // The switch itself leaves when the pane stops being editable (a read says the item is not a
   // Note any more, the pane no longer reads the version shown, or the person deleted the item).
   // Focus on it goes to "Close this tab" of a deleted item, else to the page's heading.
@@ -557,6 +562,10 @@ export function DocumentView({
     if (takeHeld(heldFocus)) (switchRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldSwitch)) (closeRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldEditor)) keptRef.current?.focus();
+    if (takeHeld(heldKept) && editing && notANote === null) {
+      switchRef.current?.focus();
+      focusNext.current = 'text';
+    }
   });
   const reading = JSON.stringify(request);
   const itemFailure = useRetry({
@@ -698,7 +707,9 @@ export function DocumentView({
           </button>
         </p>
       )}
-      {editable && conflict !== undefined && (
+      {/* Not for a refused session: "Keep mine" would save, and nothing of it is saved. The
+          conflict stays with the item, and its notice is back when the refusal is lifted. */}
+      {editable && conflict !== undefined && notANote === null && (
         <ConflictNotice
           workspaceId={workspaceId}
           itemId={itemId}
@@ -744,10 +755,14 @@ export function DocumentView({
       )}
       {gone ? null : editing ? (
         <div ref={editingRef} className="editing">
+          {/* Each part has its own key: it is another element, removed whole, so its ref is
+              cleared while keyboard focus is still in it (`useWatchedPart`). */}
           {notANote !== null ? (
-            <KeptText session={session} title={title} kind={ROLE[notANote]} boxRef={keptRef} />
+            <div key="kept" ref={keptPartRef}>
+              <KeptText session={session} title={title} kind={ROLE[notANote]} boxRef={keptRef} />
+            </div>
           ) : (
-            <div ref={liveRef}>
+            <div key="live" ref={liveRef}>
               {typeName === null ? null : <PropertiesViews session={session} typeName={typeName} />}
               <DraftEditor
                 session={session}

@@ -9,6 +9,9 @@
  *
  * Inside the workspace nothing asks: leaving an editor saves at once and its session keeps the
  * text (`DraftEditor`, `sessions.ts`).
+ *
+ * A session whose last save the person stopped is not sent by any of these (`leaveSession` in
+ * `saving.ts`); it is at risk, so the browser still asks before the page leaves.
  */
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';

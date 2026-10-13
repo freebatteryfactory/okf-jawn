@@ -22,7 +22,7 @@
 
 import type { z } from 'zod';
 import { create } from 'zustand';
-import type { Draft, Revision } from '../../api/generated/types.gen';
+import type { Draft, ItemSummary, Revision } from '../../api/generated/types.gen';
 import type { zDraftConflictItem } from '../../api/generated/zod.gen';
 
 /** An item's editable content: its Markdown body and its complete property map. */
@@ -83,6 +83,11 @@ export interface DraftSession extends DraftText {
    * holds is unknown.
    */
   failure: unknown;
+  /**
+   * The person stopped this session's last save and has not acted since: until they do, nothing
+   * of it is sent (`saving.ts` says what the person acting is).
+   */
+  stopped: boolean;
   /** The request in flight or failed. */
   attempt: SaveAttempt | null;
   /** The text is larger than the service accepts, in bytes; nothing is sent while it is. */
@@ -92,7 +97,15 @@ export interface DraftSession extends DraftText {
    * No save carries it, so while it is there the item is unsaved, whatever its text.
    */
   heldBack: HeldProperties | null;
+  /**
+   * The session is refused: what a pane's last read of the item said it is, when that is not a
+   * Note; null otherwise. `saving.ts` says what a refused session is and what follows from it.
+   */
+  refused: NotANote | null;
 }
+
+/** What an item is when it is not a Note: no draft of such an item is saved. */
+export type NotANote = Exclude<ItemSummary['kind'], 'note'>;
 
 /**
  * How a session's save stands, as the person is told. "held-back": all that can be saved is

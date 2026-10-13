@@ -51,10 +51,38 @@
  *
  * A save that has been under way for 30 seconds is said to be still sending, and the person may
  * stop it (`stopSaving`): the request is aborted, and since it may have been applied, the session
- * is then as after any save with no answer.
+ * is then as after any save with no answer, but for one thing. After "Stop" nothing of the
+ * session is sent until the person acts (`stopped`). The person acting is: typing again (a change
+ * of the text, or of a property that goes into the draft: `editSession`), or pressing a control
+ * that saves (the failure notice's "Try again", "Snapshot" with the item ticked, "Keep mine": each
+ * sends a save, and a save that is sent ends the stop). Not the person acting: the autosave's
+ * timer (the change that waited is dropped), leaving the editor (another tab or item, the
+ * committed text, a closed tab, the editor moved to another pane), the page being hidden, and the
+ * page being about to leave. The last still asks before the page goes: the session is at risk.
  *
- * An item that a later read says is not a Note is refused (`refuseSaving`): nothing of its session
- * is sent from then on, its text stays in the session, and the page shows it read-only.
+ * A refused session. A session is refused while the last answer of `get_item` that a pane of its
+ * item read says the item is not a Note (it is a Source or a View): the service takes no draft of
+ * such an item. The pane tells the session at each read (`refuseSaving`, from `DocumentView`) and
+ * the session carries it (`refused`: what the item is, or null). This is the one place that says
+ * what follows; every function here and in `snapshot.ts` that sends or waits asks that field.
+ * - Nothing of it is sent. Every `save_draft` goes through `save` (the autosave's timer, leaving
+ *   the editor, a hidden page, a Snapshot's save, "Keep mine"), and `save` returns at once, with
+ *   no request, for a refused session. A request already under way when the refusal comes is let
+ *   to answer. The text and what was entered in the properties stay in the session.
+ * - No control that would send for it is drawn: in place of the editor and of the conflict notice
+ *   the pane shows what was typed, read-only (`KeptText`).
+ * - Nothing waits on it. `rebaseSession` ("Keep mine") rejects with `DraftNotKept('refused')`
+ *   instead of saving until the text is saved: a result its caller can tell from "saved".
+ *   `flushSession` settles at once, and its outcome is the session's state, as ever.
+ * - A discard is still sent: it is the way out, and the refusal ends with the session.
+ * - When a later read says the item is a Note, the refusal is lifted: the editor is drawn again
+ *   with the text the session kept, and the save it owes is sent a moment later, as after a
+ *   change. A session whose last save failed or was stopped is not sent by itself, here as
+ *   anywhere: its notice has the retry.
+ * Limits. The refusal is per item, whichever pane read it: a pane that reads the item at another
+ * revision, where it is a Note, lifts what another pane set. And with no pane of the item open
+ * nothing reads its kind for the session: a save sent then (the page is hidden) is the service's
+ * to refuse, and is shown as a failed save.
  */
 import { isCancelledError, type QueryClient } from '@tanstack/react-query';
 import {
@@ -62,7 +90,12 @@ import {
   openWorkspaceQueryKey,
 } from '../../api/generated/@tanstack/react-query.gen';
 import { discardDraft, saveDraft } from '../../api/generated/sdk.gen';
-import type { ItemDocument, Revision, Workspace } from '../../api/generated/types.gen';
+import type {
+  ItemDocument,
+  ItemSummary,
+  Revision,
+  Workspace,
+} from '../../api/generated/types.gen';
 import { zSaveDraftRequest } from '../../api/generated/zod.gen';
 import { REQUEST_TIMEOUT_MS, RequestStopped } from '../../app/api-client';
 import { classifyFailure } from '../errors/failure';
@@ -108,15 +141,16 @@ const changedMeanwhile = new Set<string>();
 const discardKeys = new Map<string, string>();
 /** What stops the save in flight, by session. */
 const stoppers = new Map<string, AbortController>();
-/** Items whose draft is not saved: a read says the item is not a Note, and the service refuses it. */
-const refused = new Set<string>();
 
 /** Why a draft could not be kept on a newer revision, when no request failed. */
 export class DraftNotKept extends Error {
-  /** This page holds no draft of the item (get_item carried none); or its text is too long to save. */
-  readonly reason: 'no-draft' | 'too-long';
+  /**
+   * This page holds no draft of the item (get_item carried none); its text is too long to save;
+   * or its session is refused (the item is not a Note), so nothing of it is saved.
+   */
+  readonly reason: 'no-draft' | 'too-long' | 'refused';
 
-  constructor(reason: 'no-draft' | 'too-long') {
+  constructor(reason: 'no-draft' | 'too-long' | 'refused') {
     super(`The draft was not kept: ${reason}`);
     this.name = 'DraftNotKept';
     this.reason = reason;
@@ -206,9 +240,11 @@ export function beginSession(
     saving: false,
     stillSending: false,
     failure: null,
+    stopped: false,
     attempt: null,
     tooLong: null,
     heldBack: null,
+    refused: null,
   });
 }
 
@@ -230,24 +266,48 @@ export function releaseEditor(workspaceId: string, itemId: string, pane: string)
 }
 
 /**
- * Save nothing of this item's session, or save again: the item is no longer a Note, so a draft of
- * it would be refused. The text stays in the session, and what was waiting to be sent is not.
+ * A pane read the item, and this is what the answer says it is. Anything but a Note refuses the
+ * item's session (see the header: nothing of it is sent, and nothing waits on it); a Note lifts
+ * the refusal, and the save the session owes is sent a moment later (the autosave the refusal
+ * held up). An item with no session has nothing to refuse.
  */
-export function refuseSaving(workspaceId: string, itemId: string, refuse: boolean) {
+export function refuseSaving(
+  client: QueryClient,
+  workspaceId: string,
+  itemId: string,
+  kind: ItemSummary['kind'],
+) {
   const key = sessionKey(workspaceId, itemId);
-  if (!refuse) {
-    refused.delete(key);
-    return;
-  }
-  refused.add(key);
-  cancelTimer(key);
-  changedMeanwhile.delete(key);
+  const session = sessions().sessions[key];
+  const refused = kind === 'note' ? null : kind;
+  if (session === undefined || session.refused === refused) return;
+  sessions().change(key, { refused });
+  // A save that failed is not sent again by itself: its notice, back with the editor, has the retry.
+  if (refused === null && session.failure === null) saveSoon(client, key);
 }
 
 function cancelTimer(key: string) {
   const timer = timers.get(key);
   if (timer !== undefined) clearTimeout(timer);
   timers.delete(key);
+}
+
+/** Save a session a moment from now, and at the latest so long after its first change not yet sent. */
+function saveSoon(client: QueryClient, key: string) {
+  cancelTimer(key);
+  const now = Date.now();
+  const since = unsavedSince.get(key) ?? now;
+  unsavedSince.set(key, since);
+  timers.set(
+    key,
+    setTimeout(
+      () => {
+        timers.delete(key);
+        void save(client, key);
+      },
+      Math.max(0, Math.min(AUTOSAVE_DELAY_MS, since + AUTOSAVE_MAX_WAIT_MS - now)),
+    ),
+  );
 }
 
 /**
@@ -270,27 +330,19 @@ export function editSession(
 ) {
   const key = sessionKey(workspaceId, itemId);
   if (sessions().sessions[key] === undefined) return;
-  sessions().change(key, change.properties === undefined ? change : { ...change, heldBack: null });
-  cancelTimer(key);
-  // A moment after this change, and at the latest so long after the first one not yet sent.
-  const now = Date.now();
-  const since = unsavedSince.get(key) ?? now;
-  unsavedSince.set(key, since);
-  timers.set(
-    key,
-    setTimeout(
-      () => {
-        timers.delete(key);
-        void save(client, key);
-      },
-      Math.max(0, Math.min(AUTOSAVE_DELAY_MS, since + AUTOSAVE_MAX_WAIT_MS - now)),
-    ),
-  );
+  // Typing again is the person acting: a save they stopped no longer holds anything back.
+  sessions().change(key, {
+    ...change,
+    ...(change.properties === undefined ? {} : { heldBack: null }),
+    stopped: false,
+  });
+  saveSoon(client, key);
 }
 
 /**
- * Save a session now if it holds content the service has not confirmed. Settles once nothing is in
- * flight for it; it never rejects: the outcome is the session's state.
+ * Save a session now if it holds content the service has not confirmed, because the person asked
+ * (a retry, a Snapshot). Settles once nothing is in flight for it; it never rejects: the outcome
+ * is the session's state.
  */
 export function flushSession(client: QueryClient, workspaceId: string, itemId: string) {
   const key = sessionKey(workspaceId, itemId);
@@ -298,10 +350,22 @@ export function flushSession(client: QueryClient, workspaceId: string, itemId: s
   return save(client, key);
 }
 
-/** Save every session that holds unconfirmed content. */
+/**
+ * Save a session now because its editor is left, or the page is hidden or about to go: nobody
+ * asked. So a session whose last save the person stopped is left as it is; any other is saved
+ * as `flushSession` saves it.
+ */
+export function leaveSession(client: QueryClient, workspaceId: string, itemId: string) {
+  if (sessions().sessions[sessionKey(workspaceId, itemId)]?.stopped === true) {
+    return Promise.resolve();
+  }
+  return flushSession(client, workspaceId, itemId);
+}
+
+/** The page is hidden or about to go: save every session, as when its editor is left. */
 export function flushAllSessions(client: QueryClient) {
   for (const session of Object.values(sessions().sessions)) {
-    void flushSession(client, session.workspaceId, session.itemId);
+    void leaveSession(client, session.workspaceId, session.itemId);
   }
 }
 
@@ -311,7 +375,8 @@ export function anySessionAtRisk(): boolean {
 }
 
 function save(client: QueryClient, key: string): Promise<void> {
-  if (refused.has(key)) return Promise.resolve();
+  // A refused session sends nothing, whoever asks; what it holds stays as it is.
+  if (sessions().sessions[key]?.refused != null) return Promise.resolve();
   const running = inFlight.get(key);
   if (running !== undefined) {
     changedMeanwhile.add(key);
@@ -363,7 +428,14 @@ async function send(client: QueryClient, key: string): Promise<void> {
     last !== null && last.baseRevision === now.baseRevision && sameText(last, text)
       ? last
       : { key: crypto.randomUUID(), baseRevision: now.baseRevision, ...text };
-  sessions().change(key, { saving: true, stillSending: false, attempt, tooLong: null });
+  // A save that is sent ends a stop: whoever sent it, the person asked for it.
+  sessions().change(key, {
+    saving: true,
+    stillSending: false,
+    stopped: false,
+    attempt,
+    tooLong: null,
+  });
   // A discard asked before this save and not answered would now remove another draft.
   discardKeys.delete(key);
   // The person may stop this save once it has been under way for a while (`stopSaving`).
@@ -412,9 +484,10 @@ async function send(client: QueryClient, key: string): Promise<void> {
 
 /**
  * Stop the save of an item that is in flight, at the person's word. The request is aborted; what
- * the service did with it is not known, so the session is "not saved" and a save is owed, sent by
- * the next change, by the notice's retry or when the editor is left. Nothing is sent by itself
- * right after: a change made during that save waits like any other.
+ * the service did with it is not known, so the session is "not saved" and a save is owed. It is
+ * sent when the person acts (the header says what that is): by the next change, by the notice's
+ * retry, by a Snapshot. Nothing is sent without them: the change that waited behind the stopped
+ * save is dropped, and leaving the editor or the page being hidden sends nothing (`leaveSession`).
  */
 export function stopSaving(workspaceId: string, itemId: string) {
   const key = sessionKey(workspaceId, itemId);
@@ -422,16 +495,20 @@ export function stopSaving(workspaceId: string, itemId: string) {
   if (stopper === undefined) return;
   cancelTimer(key);
   changedMeanwhile.delete(key);
+  sessions().change(key, { stopped: true });
   stopper.abort();
 }
 
 /**
- * Throw why the session's text is not saved, if it is not: what its save threw, or that it is too
- * long. A session that is saved, or that is not there, passes.
+ * Throw why the session's draft is not kept, if it is not: its session is refused, so nothing of
+ * it is saved; or its text is not saved, and then what its save threw, or that it is too long. A
+ * session that is saved and not refused, or that is not there, passes.
  */
 export function assertSaved(workspaceId: string, itemId: string) {
   const session = sessions().sessions[sessionKey(workspaceId, itemId)];
-  if (session === undefined || !needsSave(session)) return;
+  if (session === undefined) return;
+  if (session.refused !== null) throw new DraftNotKept('refused');
+  if (!needsSave(session)) return;
   throw session.failure ?? new DraftNotKept('too-long');
 }
 
@@ -442,6 +519,15 @@ export function assertSaved(workspaceId: string, itemId: string) {
  * typed while that save is in flight is saved after it, so this settles with the text on screen
  * saved. A draft already on that base, with that text, is not sent again. Rejects with what a
  * save threw, or with `DraftNotKept`.
+ *
+ * A refused session is not kept: this rejects with `DraftNotKept('refused')` at once, before it
+ * waits for anything or names the base. A session refused while this waits ends the wait the same
+ * way (`save` sends nothing for it, so asking again would never end); the base named by then
+ * stays named, and the save sent once the refusal is lifted carries it.
+ *
+ * Why each wait ends. A save in flight answers, times out (the client's bounded wait) or is
+ * stopped. Each turn of the loop either sends a request, which ends likewise, or leaves: the
+ * session is gone or refused, nothing is left to save, a save failed, or the text is too long.
  */
 export async function rebaseSession(
   client: QueryClient,
@@ -450,7 +536,9 @@ export async function rebaseSession(
   revision: Revision,
 ): Promise<void> {
   const key = sessionKey(workspaceId, itemId);
-  if (sessions().sessions[key] === undefined) throw new DraftNotKept('no-draft');
+  const session = sessions().sessions[key];
+  if (session === undefined) throw new DraftNotKept('no-draft');
+  if (session.refused !== null) throw new DraftNotKept('refused');
   cancelTimer(key);
   // A save in flight answers with the base it was sent on: the new base is named after it.
   await inFlight.get(key);
@@ -461,7 +549,8 @@ export async function rebaseSession(
     cancelTimer(key);
     await save(client, key);
     const now = sessions().sessions[key];
-    if (now === undefined || !needsSave(now) || now.failure !== null || now.tooLong !== null) break;
+    if (now === undefined || now.refused !== null) break;
+    if (!needsSave(now) || now.failure !== null || now.tooLong !== null) break;
   }
   assertSaved(workspaceId, itemId);
 }
@@ -590,7 +679,6 @@ export function endSession(workspaceId: string, itemId: string) {
   const key = sessionKey(workspaceId, itemId);
   cancelTimer(key);
   changedMeanwhile.delete(key);
-  refused.delete(key);
   sessions().remove(key);
 }
 
@@ -601,7 +689,6 @@ export function resetDraftSessions() {
   changedMeanwhile.clear();
   inFlight.clear();
   discardKeys.clear();
-  refused.clear();
   // A save still in flight is let go, not stopped: its answer finds no session.
   stoppers.clear();
   useDraftSessions.setState({ sessions: {}, conflicts: {}, said: {}, asked: {} });

@@ -12,10 +12,13 @@ import { itemOptions } from '../../src/features/documents/DocumentView';
 import { draftsOptions, rememberDraft } from '../../src/features/drafts/drafts-list';
 import {
   AUTOSAVE_DELAY_MS,
+  DraftNotKept,
   MAX_BODY_BYTES,
+  rebaseSession,
   resetDraftSessions,
   STILL_SENDING_AFTER_MS,
 } from '../../src/features/drafts/saving';
+import { sessionKey, useDraftSessions } from '../../src/features/drafts/sessions';
 import { fail, type Handler, type Json, mockApi, ok, type Reply } from './support/api';
 import { findTextBox, replaceText, textBox, textIn, typeInto } from './support/editor';
 import {
@@ -200,9 +203,13 @@ describe('who may edit, and where', () => {
   describe('an item whose kind is another at the next revision', () => {
     const NEWER = 'd'.repeat(40);
     const asSource = summary(NOTE, 'notes/meeting.md', 'Meeting notes', 'meeting-note', 'source');
+    const asView = summary(NOTE, 'notes/meeting.md', 'Meeting notes', 'meeting-note', 'view');
 
-    /** The note at the head shown; at the newer head the same item is a Source. */
-    function becomesSource() {
+    /**
+     * The note at the head shown; at the newer head the same item is `as` (a Source, unless the
+     * test says otherwise); at any other revision it is a Note.
+     */
+    function becomesSource(as = asSource, overrides: Record<string, Handler> = {}) {
       const held = { head: HEAD };
       const api = writable({
         '/api/workspaces/open-workspace': () => ok({ ...writableWorkspace, head: held.head }),
@@ -212,13 +219,62 @@ describe('who may edit, and where', () => {
               body.item_id !== NOTE
                 ? otherSummary
                 : JSON.stringify(body.at).includes(NEWER)
-                  ? asSource
+                  ? as
                   : noteSummary,
             ),
           ),
+        ...overrides,
       });
       return { api, held };
     }
+
+    /** Press Refresh once the workspace's head is `revision`, and let the item be read there. */
+    async function refreshTo(held: { head: string }, revision: string) {
+      held.head = revision;
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await eventually(() =>
+        expect(
+          screen.getByText(`Refreshed: now showing revision ${revision.slice(0, 10)}.`),
+        ).toBeDefined(),
+      );
+      await pass(500);
+    }
+
+    const keptText = () => screen.getByLabelText('Your text, read only');
+
+    /**
+     * The editor is open, " and more" was typed in it and waits for its autosave, and then a read
+     * says the item is `as`: the session is refused, and the kept text is on screen.
+     */
+    async function refused(as = asSource, overrides: Record<string, Handler> = {}) {
+      const made = becomesSource(as, overrides);
+      const view = await startEditing();
+      act(() => view.box.focus());
+      typeInto(view.box, ' and more');
+      await pass(100);
+      await refreshTo(made.held, NEWER);
+      const kept = await eventuallyGet(keptText);
+      return { ...made, ...view, kept };
+    }
+
+    /**
+     * A bound on a loop that never yields. A loop that asks a refused session again and again
+     * (`save` answers at once, with nothing sent) runs in microtasks, which no timer interrupts:
+     * the test's time limit would never fire and the runner would hang. Every turn of such a loop
+     * reads the sessions, so from here on the reads are counted, and past the bound a read throws.
+     */
+    function spinGuard(limit = 2_000) {
+      const read = useDraftSessions.getState;
+      let reads = 0;
+      const spy = vi.spyOn(useDraftSessions, 'getState').mockImplementation(() => {
+        reads += 1;
+        if (reads > limit) throw new Error('a loop is spinning on the session');
+        return read();
+      });
+      return { spun: () => reads > limit, release: () => spy.mockRestore() };
+    }
+
+    const session = () => useDraftSessions.getState().sessions[sessionKey(WS, NOTE)];
 
     it('stops offering "Edit" once a read says it is a Source, and focus on the switch goes to the page’s heading', async () => {
       const { held } = becomesSource();
@@ -232,7 +288,11 @@ describe('who may edit, and where', () => {
       await screen.findByText(/Source · type/);
       expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
       expect(edit.isConnected).toBe(false);
-      expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
+      // The page's heading, by its name: once the item's text is read at the new revision the
+      // reader shows the document's own level-one heading as well.
+      expect(document.activeElement).toBe(
+        screen.getByRole('heading', { level: 1, name: 'Workshop notes' }),
+      );
       expect(document.activeElement).not.toBe(document.body);
     });
 
@@ -267,36 +327,176 @@ describe('who may edit, and where', () => {
       expect(document.activeElement).toBe(edit);
     });
 
-    it('an open editor stops saving, says why in a line, and keeps the typed text read-only on screen', async () => {
-      const { held, api } = becomesSource();
-      const { box } = await startEditing();
-      act(() => box.focus());
-      typeInto(box, ' and more');
-      // A change still waiting for its autosave when the read says the item is a Source.
-      await pass(100);
-      held.head = NEWER;
-      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-      await eventually(() =>
+    // Whatever is not a Note is refused: a Source and a View alike.
+    it.each([
+      ['a Source', asSource, 'Source'],
+      ['a View', asView, 'View'],
+    ] as const)(
+      'an open editor of what is now %s stops saving, says why in a line, and keeps the typed text read-only on screen',
+      async (_what, as, word) => {
+        // A change still waiting for its autosave when the read says what the item is now.
+        const { api, kept } = await refused(as);
+        expect(kept).toHaveProperty('value', `${COMMITTED} and more`);
+        expect(kept).toHaveProperty('readOnly', true);
+        expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
         expect(
-          screen.getByText(`Refreshed: now showing revision ${NEWER.slice(0, 10)}.`),
-        ).toBeDefined(),
-      );
-      await pass(500);
-      const kept = await eventuallyGet(() => screen.getByLabelText('Your text, read only'));
-      expect(kept).toHaveProperty('value', `${COMMITTED} and more`);
-      expect(kept).toHaveProperty('readOnly', true);
-      expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull();
+          screen.getByText(
+            `This item is now a ${word}, which is not edited as a draft, so your text is no longer saved. It is kept here: copy what you need.`,
+          ),
+        ).toBeDefined();
+        // Focus that was in the editor goes to the kept text, not to the page body.
+        expect(document.activeElement).toBe(kept);
+        // Nothing is sent, not by the waiting autosave and not later.
+        await pass(AUTOSAVE_DELAY_MS * 15);
+        expect(api.callsTo(SAVE)).toHaveLength(0);
+        expect(screen.getByRole('tab', { name: 'Meeting notes (unsaved)' })).toBeDefined();
+        // Nor when the kept text is left for the committed text, where the pane says it too.
+        fireEvent.click(screen.getByRole('button', { name: 'Read the committed text' }));
+        await eventually(() =>
+          expect(
+            screen.getByText(
+              `You have unsaved changes to this item. Below is the committed text. This item is now a ${word}, so your draft of it is no longer saved.`,
+            ),
+          ).toBeDefined(),
+        );
+        await pass(AUTOSAVE_DELAY_MS * 15);
+        expect(api.callsTo(SAVE)).toHaveLength(0);
+      },
+      20_000,
+    );
+
+    // The third re-check's probe: a Snapshot's conflict open on an item that is then refused.
+    // "Keep mine" saves until the text is saved, and nothing of a refused session is saved.
+    const conflictOfNote = {
+      item_id: NOTE,
+      draft_base: HEAD,
+      current_revision: NEWER,
+      deleted: false,
+      changes: [],
+    };
+
+    it('offers no "Keep mine" and no "Take theirs" while it is refused: the conflict notice gives way to the kept text', async () => {
+      const { api, kept } = await refused();
+      act(() => useDraftSessions.getState().setConflicts(WS, 'Tidy', [conflictOfNote]));
+      await pass(0);
+      expect(screen.queryByRole('button', { name: 'Keep mine' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Take theirs' })).toBeNull();
       expect(
-        screen.getByText(
-          'This item is now a Source, which is not edited as a draft, so your text is no longer saved. It is kept here: copy what you need.',
-        ),
-      ).toBeDefined();
-      // Focus that was in the editor goes to the kept text, not to the page body.
-      expect(document.activeElement).toBe(kept);
-      // Nothing is sent, not by the waiting autosave and not later.
-      await pass(AUTOSAVE_DELAY_MS * 15);
+        screen.queryByRole('heading', { name: /changed since your draft was started/ }),
+      ).toBeNull();
+      expect(kept.isConnected).toBe(true);
+      await pass(3_000);
       expect(api.callsTo(SAVE)).toHaveLength(0);
-      expect(screen.getByRole('tab', { name: 'Meeting notes (unsaved)' })).toBeDefined();
+    }, 20_000);
+
+    it('ends "Keep mine" at once for a refused session, as not kept: nothing is sent and no base is named', async () => {
+      const { api, queryClient } = await refused();
+      const guard = spinGuard();
+      try {
+        const outcome = await rebaseSession(queryClient, WS, NOTE, NEWER).then(
+          () => 'kept',
+          (thrown: unknown) => thrown,
+        );
+        expect(outcome).toBeInstanceOf(DraftNotKept);
+        expect(outcome).toHaveProperty('reason', 'refused');
+        expect(guard.spun()).toBe(false);
+      } finally {
+        guard.release();
+      }
+      expect(api.callsTo(SAVE)).toHaveLength(0);
+      expect(session()?.baseRevision).toBe(HEAD);
+    }, 20_000);
+
+    it('ends a "Keep mine" that was waiting for a save when the refusal came, as not kept', async () => {
+      const answers: Array<() => void> = [];
+      const { api, held } = becomesSource(asSource, {
+        [SAVE]: (body) => new Promise<Reply>((resolve) => answers.push(() => resolve(saved(body)))),
+      });
+      const { box, queryClient } = await startEditing();
+      typeInto(box, ' and more');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+      // "Keep mine" waits for the save in flight; the item is read as a Source meanwhile.
+      let outcome: unknown = 'waiting';
+      void rebaseSession(queryClient, WS, NOTE, NEWER).then(
+        () => {
+          outcome = 'kept';
+        },
+        (thrown: unknown) => {
+          outcome = thrown;
+        },
+      );
+      await refreshTo(held, NEWER);
+      await eventuallyGet(keptText);
+      expect(outcome).toBe('waiting');
+      const guard = spinGuard();
+      try {
+        act(() => answers.at(0)?.());
+        await eventually(() => expect(outcome).not.toBe('waiting'));
+        expect(guard.spun()).toBe(false);
+      } finally {
+        guard.release();
+      }
+      expect(outcome).toBeInstanceOf(DraftNotKept);
+      expect(outcome).toHaveProperty('reason', 'refused');
+      // The save that was under way answered; nothing was sent after it.
+      expect(api.callsTo(SAVE)).toHaveLength(1);
+    }, 20_000);
+
+    describe('when a later read says it is a Note again', () => {
+      /** A head after the newer one, where the item is a Note once more. */
+      const AGAIN = 'f'.repeat(40);
+
+      it('lifts the refusal: the editor is back with the text and focus, the save owed is sent, and the next change is saved', async () => {
+        const { api, held, kept } = await refused();
+        expect(document.activeElement).toBe(kept);
+        expect(api.callsTo(SAVE)).toHaveLength(0);
+        await refreshTo(held, AGAIN);
+        const box = await eventuallyGet(() => textBox('Text of Meeting notes'));
+        expect(textIn(box)).toBe(`${COMMITTED} and more`);
+        expect(screen.queryByLabelText('Your text, read only')).toBeNull();
+        expect(screen.queryByText(/This item is now a Source/)).toBeNull();
+        // Focus that was in the kept text is in the text box, not on the page body.
+        await eventually(() => expect(document.activeElement).toBe(box));
+        // The save the refusal held up is sent as after a change, with nothing typed since.
+        await pass(AUTOSAVE_DELAY_MS);
+        await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
+        expect(api.callsTo(SAVE).at(0)?.body).toBe(`${COMMITTED} and more`);
+        await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+        typeInto(box, ' again');
+        await pass(AUTOSAVE_DELAY_MS);
+        await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+        expect(api.callsTo(SAVE).at(1)?.body).toBe(`${COMMITTED} and more again`);
+        expect(api.violations).toEqual([]);
+      }, 20_000);
+
+      it('does not send by itself a save that had failed before the refusal: its notice is back with the retry', async () => {
+        const made = becomesSource(asSource, { [SAVE]: () => fail(503, 'unavailable', 'busy') });
+        const { box } = await startEditing();
+        typeInto(box, ' and more');
+        await pass(AUTOSAVE_DELAY_MS);
+        await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+        await refreshTo(made.held, NEWER);
+        await eventuallyGet(keptText);
+        await refreshTo(made.held, AGAIN);
+        await eventuallyGet(() => textBox('Text of Meeting notes'));
+        expect(saveState()).toBe('Not saved. Your text is kept here.');
+        await pass(AUTOSAVE_DELAY_MS * 12);
+        expect(made.api.callsTo(SAVE)).toHaveLength(1);
+        // The person's own retry sends it.
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+        await eventually(() => expect(made.api.callsTo(SAVE)).toHaveLength(2));
+      }, 20_000);
+
+      it('draws the conflict notice again: the conflict stayed with the item', async () => {
+        const { held } = await refused();
+        act(() => useDraftSessions.getState().setConflicts(WS, 'Tidy', [conflictOfNote]));
+        await pass(0);
+        expect(screen.queryByRole('button', { name: 'Keep mine' })).toBeNull();
+        await refreshTo(held, AGAIN);
+        await eventuallyGet(() => screen.getByRole('button', { name: 'Keep mine' }));
+        expect(screen.getByRole('button', { name: 'Take theirs' })).toBeDefined();
+      }, 20_000);
     });
   });
 });
@@ -808,6 +1008,85 @@ describe('a save that takes long', () => {
     await pass(AUTOSAVE_DELAY_MS * 5);
     expect(api.callsTo(SAVE)).toHaveLength(1);
     expect(textIn(box)).toBe(`${LARGE} and more`);
+  });
+
+  // After "Stop" nothing is sent without the person. The autosave's timer is the test above;
+  // these are the other ways a save is sent with nobody asking, and then the person acting.
+  describe('after "Stop"', () => {
+    /** A large save was stopped; what the next `save_draft` answers is the test's to say. */
+    async function stopped(next: Handler = (body) => saved(body)) {
+      let first = true;
+      const made = await sending((body) => {
+        if (!first) return next(body);
+        first = false;
+        return new Promise<never>(() => {});
+      });
+      await pass(1);
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+      expect(made.api.callsTo(SAVE)).toHaveLength(1);
+      return made;
+    }
+
+    /** The page is hidden: another browser tab, a minimised window. */
+    function hidePage() {
+      const hidden = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+      document.dispatchEvent(new Event('visibilitychange'));
+      hidden.mockRestore();
+    }
+
+    it('sends nothing when the page is hidden', async () => {
+      const { api, box } = await stopped();
+      hidePage();
+      await pass(AUTOSAVE_DELAY_MS * 5);
+      expect(api.callsTo(SAVE)).toHaveLength(1);
+      expect(textIn(box)).toBe(LARGE);
+    });
+
+    it('sends nothing when the page is about to leave, and still asks before it does', async () => {
+      const { api } = await stopped();
+      const leaving = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(leaving);
+      expect(leaving.defaultPrevented).toBe(true);
+      await pass(AUTOSAVE_DELAY_MS * 5);
+      expect(api.callsTo(SAVE)).toHaveLength(1);
+    });
+
+    it('sends nothing when the editor is left, and keeps the text', async () => {
+      const { api } = await stopped();
+      fireEvent.click(screen.getByRole('button', { name: 'Read the committed text' }));
+      await eventually(() =>
+        expect(screen.queryByRole('textbox', { name: 'Text of Meeting notes' })).toBeNull(),
+      );
+      await pass(AUTOSAVE_DELAY_MS * 5);
+      expect(api.callsTo(SAVE)).toHaveLength(1);
+      fireEvent.click(screen.getByRole('button', { name: 'Edit your draft' }));
+      await eventually(() => textBox('Text of Meeting notes'));
+      expect(textIn(textBox('Text of Meeting notes'))).toBe(LARGE);
+      expect(saveState()).toBe('Not saved. Your text is kept here.');
+    });
+
+    it('is over once the person types again: a hidden page then saves at once', async () => {
+      const { api, box } = await stopped();
+      typeInto(box, ' and more');
+      hidePage();
+      // No wait for the autosave's moment: the page being hidden is the moment again.
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      expect(api.callsTo(SAVE).at(1)?.body).toBe(`${LARGE} and more`);
+    });
+
+    it('is over once the person tries again: a retry that fails is a failed save like any other, which a hidden page sends', async () => {
+      const { api } = await stopped(() => fail(503, 'unavailable', 'busy'));
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+      await eventually(() =>
+        expect(
+          screen.getByText('Saving this draft: The service is temporarily unavailable.'),
+        ).toBeDefined(),
+      );
+      hidePage();
+      await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(3));
+    });
   });
 
   it('repeats a stopped save under its key when the text is the same, and starts it as "Saving…"', async () => {

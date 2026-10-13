@@ -13,7 +13,8 @@
  * retry. "Stop" leaves when it is pressed or the save answers; focus on it goes to the text box.
  * Leaving the editor
  * (another tab, another item, reading the committed text, closing the tab) saves at once and keeps
- * the text in its session.
+ * the text in its session. After "Stop" it only keeps the text: nothing is sent until the person
+ * types again or presses a control that saves.
  *
  * Discarding asks first, in place: "Keep the draft" takes keyboard focus, and choosing it gives
  * focus back to "Discard draft". After a discard the pane reads the committed text again and the
@@ -27,7 +28,14 @@ import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
 import { MarkdownEditor } from './MarkdownEditor';
-import { discardSession, editSession, flushSession, MAX_BODY_BYTES, stopSaving } from './saving';
+import {
+  discardSession,
+  editSession,
+  flushSession,
+  leaveSession,
+  MAX_BODY_BYTES,
+  stopSaving,
+} from './saving';
 import { type DraftSession, saveStateOf } from './sessions';
 
 export interface DraftEditorProps {
@@ -76,9 +84,10 @@ export function DraftEditor({ session, title, onDiscarded }: DraftEditorProps) {
   const sectionRef = useRef<HTMLElement | null>(null);
   const textBox = () => sectionRef.current?.querySelector<HTMLElement>('[role="textbox"]');
 
-  // Leaving the editor saves at once; the text stays in its session whatever the outcome.
+  // Leaving the editor saves at once, unless the person stopped the last save and has not acted
+  // since; the text stays in its session whatever the outcome.
   useEffect(
-    () => () => void flushSession(client, workspaceId, itemId),
+    () => () => void leaveSession(client, workspaceId, itemId),
     [client, workspaceId, itemId],
   );
 
