@@ -565,9 +565,11 @@ export function DocumentView({
   const [, keptPartRef] = useWatchedPart<HTMLDivElement>(heldKept);
   // The conflict notice leaves when the session is refused (nothing of it may be saved, so "Keep
   // mine" is not offered), and when the conflict is resolved. Focus that was in it goes to the
-  // kept text when that is what took its place, else to the switch, which is there whenever the
-  // kept text is not: both need the pane to be editable, and a conflict is of a draft the service
-  // holds, so its session is never ended at the refusal.
+  // kept text when that is what took its place, else to the switch: a conflict is of a draft the
+  // service holds, so its session is never ended at the refusal. It leaves a third way, with the
+  // switch: the pane stops being editable (a tab that cites the head it was opened at, and the
+  // head moves). Neither the kept text nor the switch is on the page then, and focus goes to the
+  // page's heading.
   const heldNotice = useRef<HTMLElement | null>(null);
   const [, noticePartRef] = useWatchedPart<HTMLDivElement>(heldNotice);
   // The switch itself leaves when the pane stops being editable (a read says the item is not a
@@ -579,7 +581,7 @@ export function DocumentView({
     if (takeHeld(heldFocus)) (switchRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldSwitch)) (closeRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldEditor)) keptRef.current?.focus();
-    if (takeHeld(heldNotice)) (keptRef.current ?? switchRef.current)?.focus();
+    if (takeHeld(heldNotice)) (keptRef.current ?? switchRef.current ?? pageHeading())?.focus();
     if (takeHeld(heldKept) && editing && notANote === null) {
       switchRef.current?.focus();
       focusNext.current = 'text';

@@ -669,6 +669,38 @@ describe('who may edit, and where', () => {
       }, 30_000);
     });
 
+    // The fifth re-check's probe (item 1 of its last list). The notice leaves a third way, with no
+    // refusal: the pane stops being editable. A tab that cites the head it was opened at reads an
+    // older version once the head moves, so the notice and the switch leave together and no kept
+    // text takes their place. Focus that was in the notice then goes to the page's heading.
+    it('puts focus that was in the conflict notice on the page’s heading when the notice and the switch leave together', async () => {
+      const { api, held } = becomesSource();
+      const { box } = await startEditing(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
+      act(() => box.focus());
+      typeInto(box, ' and more');
+      await pass(AUTOSAVE_DELAY_MS);
+      await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+      act(() => useDraftSessions.getState().setConflicts(WS, 'Tidy', [conflictOfNote]));
+      const keep = await eventuallyGet(() => screen.getByRole('button', { name: 'Keep mine' }));
+      act(() => keep.focus());
+      expect(document.activeElement).toBe(keep);
+      // The item is a Note at the head after this one: nothing is refused. The tab still cites
+      // the head before, which is no longer the version shown.
+      await refreshTo(held, AGAIN);
+      await eventually(() => expect(keep.isConnected).toBe(false));
+      expect(screen.queryByLabelText('Your text, read only')).toBeNull();
+      expect(screen.queryByText(/This item is now a Source/)).toBeNull();
+      expect(
+        screen.queryByRole('button', {
+          name: /^(Edit|Edit here|Show your draft|Read the committed text)$/,
+        }),
+      ).toBeNull();
+      expect(document.activeElement).toBe(
+        screen.getByRole('heading', { level: 1, name: 'Workshop notes' }),
+      );
+      expect(api.callsTo(SAVE)).toHaveLength(1);
+    }, 20_000);
+
     describe('when a later read says it is a Note again', () => {
       it('lifts the refusal: the editor is back with the text and focus, the save owed is sent, and the next change is saved', async () => {
         const { api, held, kept } = await refused();
