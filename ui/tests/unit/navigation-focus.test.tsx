@@ -138,6 +138,24 @@ describe('a navigation that does not take focus anywhere', () => {
     expect(document.activeElement).toBe(document.body);
   });
 
+  it('leaves focus on the body when it was there before this navigation, though an earlier one began in the page', async () => {
+    mockApi(explorerHandlers({ [WORKSPACES]: listed }));
+    const { router } = renderAt('/');
+    const link = await screen.findByRole('link', { name: 'Workshop notes' });
+    // The first navigation begins with focus in the page and ends on the workspace's name.
+    act(() => link.focus());
+    await userEvent.keyboard('{Enter}');
+    await screen.findByRole('tree', { name: 'Folders' });
+    const name = pageHeadingNamed('Workshop notes');
+    await waitFor(() => expect(document.activeElement).toBe(name));
+    // Focus is on the body when the second navigation begins: what the first one saw is not kept.
+    act(() => name.blur());
+    expect(document.activeElement).toBe(document.body);
+    await act(() => router.navigate({ to: '/' }));
+    await screen.findByRole('link', { name: 'Workshop notes' });
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it('leaves focus on a tree entry that opens an item from the keyboard and stays on the page', async () => {
     mockApi(explorerHandlers());
     const { router } = renderAt(`/w/${WS}`);
