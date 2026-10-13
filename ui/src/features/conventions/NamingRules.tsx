@@ -210,10 +210,27 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
 
   // The saved rules the edits started from. While nothing is edited they follow the rules of the
   // version shown; once there are edits they stay, so other rules saved meanwhile are seen.
+  //
+  // Text of the person's that is not among the rules yet is an edit too: text that waits to be
+  // read or is being read, and text that cannot be read. It was typed over the rules shown then,
+  // so they stay what it started from, and when it is read the rules saved meanwhile are seen.
+  //
+  // The YAML text box takes its text once, when it mounts. While it holds nothing of the person's
+  // it follows the rules shown: when they change (a Refresh loaded other rules) it starts again
+  // from them, or an edit made next would be made in the older rules and saved over the newer.
   const atHead = saved.data;
   const [basis, setBasis] = useState<NamingRules | undefined>(undefined);
-  if (atHead !== undefined && !changed && (basis === undefined || !sameRules(basis, atHead))) {
+  /** Counts the times the YAML view started again from rules that changed with nothing edited. */
+  const [followed, setFollowed] = useState(0);
+  const heldUnread = reading.pending || unreadable;
+  if (
+    atHead !== undefined &&
+    !changed &&
+    !heldUnread &&
+    (basis === undefined || !sameRules(basis, atHead))
+  ) {
     setBasis(atHead);
+    if (basis !== undefined && edited === undefined && typed === null) setFollowed(followed + 1);
   }
   const replaced =
     changed && atHead !== undefined && basis !== undefined && !sameRules(basis, atHead);
@@ -607,7 +624,7 @@ export function NamingRulesPanel({ onClose, leaveGuard }: NamingRulesProps) {
                 rules.
               </p>
               <YamlEditor
-                key={dropped}
+                key={`${dropped} ${followed}`}
                 label="The naming rules as YAML"
                 initialText={typed?.text ?? writeYaml(value)}
                 describedBy={findingsId}

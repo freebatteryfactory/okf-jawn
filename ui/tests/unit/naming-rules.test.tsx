@@ -2159,3 +2159,128 @@ describe('a drag onto the naming rules', () => {
     expect(handed(box)).toEqual({ text: TAKEN, files: CANCELLED });
   });
 });
+
+describe('the YAML view of the rules when the version shown changes', () => {
+  const YAML = 'The naming rules as YAML';
+  const theirs: NamingRules = {
+    schema_version: 1,
+    rules: [{ ...rule, prefix: 'theirs-', separator: '_' }],
+  };
+  const savedNow = () =>
+    screen.queryByRole('textbox', { name: 'The rules as they are saved now (read-only)' });
+  const changedUnderneath = 'The saved rules are no longer the ones you started from.';
+  /** The rules open on their YAML view, with nothing edited. */
+  async function openYamlView(own: ReturnType<typeof service>) {
+    await openRules();
+    await userEvent.click(screen.getByRole('tab', { name: 'YAML' }));
+    const box = await findTextBox(YAML);
+    expect(textIn(box)).toContain('prefix: ""');
+    return { ...own, box };
+  }
+  /** Someone else saves other rules, and the person refreshes to the version that holds them. */
+  async function refreshToTheirs(own: ReturnType<typeof service>) {
+    const next = own.moveHead();
+    own.state.rules.set(next, theirs);
+    const refresh = await screen.findByRole('button', { name: /^Refresh/ });
+    await userEvent.click(refresh);
+    await waitFor(() =>
+      expect(screen.getByText(/Showing the workspace as of/).textContent).toContain('cccccccccc'),
+    );
+    await waitFor(() => expect(own.api.callsTo(RULES).length).toBeGreaterThan(1));
+    await turn();
+    return { next, refresh };
+  }
+
+  it('follows the rules shown while it holds no edit: after a Refresh the text is the newer rules, and an edit is an edit of those', async () => {
+    const own = service();
+    await openYamlView(own);
+    const { next, refresh } = await refreshToTheirs(own);
+    await waitFor(() =>
+      expect(textIn(screen.getByRole('textbox', { name: YAML }))).toContain('prefix: theirs-'),
+    );
+    const box = screen.getByRole('textbox', { name: YAML });
+    expect(textIn(box)).toContain('separator: _');
+    // The press was on Refresh, and focus is still there: the text box that went held none.
+    expect(document.activeElement).toBe(refresh);
+    // Nothing was edited, so nothing changed underneath anyone.
+    expect(panel().textContent).not.toContain(changedUnderneath);
+    expect(savedNow()).toBeNull();
+    // An edit made now is made in the newer rules, and what is saved keeps the rest of them.
+    await typeYaml(box, textIn(box).replace('prefix: theirs-', 'prefix: mine-'));
+    await userEvent.click(button('Save the rules'));
+    await waitFor(() => expect(own.api.callsTo(SET)).toHaveLength(1));
+    expect(own.api.callsTo(SET).at(0)).toMatchObject({ base_revision: next });
+    expect(own.api.callsTo(SET).at(0)?.rules).toEqual({
+      schema_version: 1,
+      rules: [{ ...rule, prefix: 'mine-', separator: '_' }],
+    });
+  });
+
+  it('keeps the text the person typed through a Refresh, and says the rules changed underneath', async () => {
+    const own = service();
+    const { box } = await openYamlView(own);
+    await typeYaml(box, textIn(box).replace(/prefix: .*/, 'prefix: mine-'));
+    await refreshToTheirs(own);
+    await waitFor(() => expect(savedNow()).not.toBeNull());
+    expect(box.isConnected).toBe(true);
+    expect(textIn(box)).toContain('prefix: mine-');
+    expect(textIn(box)).not.toContain('theirs-');
+    expect(panel().textContent).toContain(changedUnderneath);
+    expect(screen.queryByRole('button', { name: 'Save the rules' })).toBeNull();
+    expect(own.api.callsTo(SET)).toEqual([]);
+  });
+
+  it('keeps text typed a moment before the Refresh, not read yet; read, it is an edit of the rules the person started from', async () => {
+    const held = heldEngine();
+    setYamlEngine(held.engine);
+    const own = service();
+    const { box } = await openYamlView(own);
+    replaceText(box, textIn(box).replace(/prefix: .*/, 'prefix: mine-'));
+    act(() => {
+      fireEvent.blur(box);
+    });
+    act(() => held.readings.at(0)?.began());
+    await refreshToTheirs(own);
+    expect(box.isConnected).toBe(true);
+    expect(textIn(box)).toContain('prefix: mine-');
+    act(() => held.readings.at(0)?.done());
+    await turn();
+    setYamlEngine(inlineEngine);
+    // The text was typed over the rules of the version before: saving it is replacing theirs.
+    await waitFor(() => expect(savedNow()).not.toBeNull());
+    expect(panel().textContent).toContain(changedUnderneath);
+    expect(screen.queryByRole('button', { name: 'Save the rules' })).toBeNull();
+    expect(textIn(box)).toContain('prefix: mine-');
+  });
+
+  it('keeps the person’s own text when it says the very rules someone else saved meanwhile', async () => {
+    const own = service();
+    const { box } = await openYamlView(own);
+    const mine = `# my note
+${textIn(box)
+  .replace(/prefix: .*/, 'prefix: theirs-')
+  .replace(/separator: .*/, 'separator: _')}`;
+    await typeYaml(box, mine);
+    await refreshToTheirs(own);
+    // The same rules, so nothing changed underneath; the text is the person’s and stays as typed.
+    expect(box.isConnected).toBe(true);
+    expect(textIn(box)).toBe(mine);
+    expect(panel().textContent).not.toContain(changedUnderneath);
+    expect(savedNow()).toBeNull();
+  });
+
+  it('keeps text that cannot be read through a Refresh; repaired, it is an edit of the rules the person started from', async () => {
+    const own = service();
+    const { box } = await openYamlView(own);
+    const before = textIn(box);
+    await typeYaml(box, `${before}\n  broken: [`);
+    expect(await screen.findByText(/This YAML cannot be read/)).toBeTruthy();
+    await refreshToTheirs(own);
+    expect(box.isConnected).toBe(true);
+    expect(textIn(box)).toContain('broken: [');
+    await typeYaml(box, before.replace(/prefix: .*/, 'prefix: mine-'));
+    await waitFor(() => expect(savedNow()).not.toBeNull());
+    expect(panel().textContent).toContain(changedUnderneath);
+    expect(screen.queryByRole('button', { name: 'Save the rules' })).toBeNull();
+  });
+});
