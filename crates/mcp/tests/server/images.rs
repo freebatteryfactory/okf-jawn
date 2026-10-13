@@ -441,10 +441,16 @@ async fn a_fetch_dispatch_refuses_is_reported_never_bypassed() -> TestResult {
 }
 
 /// Read one image whose object is `bytes`, declared and served as `served`, within a 1024-byte
-/// budget (on a server whose bundle file is `name`), and check what becomes of it: an image block of exactly those bytes and that type
-/// when `shown`, and otherwise no block and the one line that says the content is not the type
+/// budget (on a server whose bundle file is `name`), and check what becomes of it: an image block of exactly those bytes and the
+/// canonical essence of that type (trimmed, lower case, no parameters) when `shown`, and otherwise no block and the one line that says the content is not the type
 /// it claims. Either way the structured content is the read's response and one fetch was made.
-async fn check_served(name: &str, served: &str, bytes: &[u8], shown: bool) -> TestResult {
+/// Returns the type the image block carries, empty when there is none.
+async fn check_served(
+    name: &str,
+    served: &str,
+    bytes: &[u8],
+    shown: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
     let case = format!("{bytes:02x?} served as {served}");
     let world = reader();
     let image = digest_of('c');
@@ -463,14 +469,16 @@ async fn check_served(name: &str, served: &str, bytes: &[u8], shown: bool) -> Te
     )?;
     let result = show(&world, name, image_read_input("multimodal", 1024, 1)).await?;
     let images = images_of(&result)?;
+    let mut shown_type = String::new();
     if shown {
         assert_eq!(images.len(), 1, "{case}");
         let block = some(images.first(), "the image")?;
         assert_eq!(
             (block.data.as_str(), block.mime_type.as_str()),
-            (data.as_str(), served),
+            (data.as_str(), essence_of(served).as_str()),
             "{case}"
         );
+        shown_type.clone_from(&block.mime_type);
         assert_eq!(text_of(&result)?, REPORT_MARKDOWN, "{case}");
     } else {
         assert_eq!(images.len(), 0, "{case}");
@@ -489,7 +497,17 @@ async fn check_served(name: &str, served: &str, bytes: &[u8], shown: bool) -> Te
         vec![object_request(WORKSPACE, &image, 1024)],
         "{case}"
     );
-    Ok(())
+    Ok(shown_type)
+}
+
+/// The essence of a media type as the tests state it: before any parameter, trimmed, lower case.
+fn essence_of(served: &str) -> String {
+    served
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// The fixtures' encoder is written apart from the server's reading of base64; it agrees with
@@ -583,16 +601,34 @@ async fn an_image_whose_bytes_do_not_begin_with_its_types_signature_is_described
 }
 
 /// The served type is read by its essence: spaces around it and a parameter after it do not
-/// stop a PNG's bytes from being shown as an image.
+/// stop a PNG's bytes from being shown as an image, and the image block names its type by that
+/// essence, exactly, not by the string as it was served.
 #[tokio::test]
 async fn a_served_type_with_spaces_and_a_parameter_is_read_by_its_essence() -> TestResult {
-    check_served(
+    let block_type = check_served(
         "images-type-spaces.html",
         " image/png ; charset=binary ",
         &PNG_SIGNATURE,
         true,
     )
-    .await
+    .await?;
+    assert_eq!(block_type, "image/png");
+    Ok(())
+}
+
+/// An upper-case served type gives a block of the lower-case canonical type.
+#[tokio::test]
+async fn an_image_block_names_its_type_in_lower_case() -> TestResult {
+    let cases: [(&str, &[u8], &str); 3] = [
+        ("IMAGE/JPEG", b"\xff\xd8\xff\xe0\x00\x10JFIF", "image/jpeg"),
+        ("Image/Gif; x=y", b"GIF89a\x01\x00\x01\x00", "image/gif"),
+        ("image/WebP", b"RIFF\x24\x00\x00\x00WEBP", "image/webp"),
+    ];
+    for (served, bytes, expected) in cases {
+        let block_type = check_served("images-type-case.html", served, bytes, true).await?;
+        assert_eq!(block_type, expected, "{served}");
+    }
+    Ok(())
 }
 
 /// Bytes that end before the signature does are described: one byte short for each type, and

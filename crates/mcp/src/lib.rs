@@ -33,8 +33,10 @@ pub enum ReadImage<'a> {
     Inline {
         /// The image's bytes in base64, exactly as `read_object` returned them.
         data_base64: String,
-        /// The raster MIME type the bytes were served with, one of the inline image types;
-        /// the server inlines an image only when its bytes begin with that type's signature.
+        /// The raster MIME type of the block: the canonical essence of the type the bytes were
+        /// served with (trimmed, lower case, no parameters), exactly one of `image/png`,
+        /// `image/jpeg`, `image/gif` and `image/webp`. The server inlines an image only when
+        /// its bytes begin with that type's signature.
         mime_type: String,
     },
     /// Not inlined: one line of the text block names the image and gives the reason.

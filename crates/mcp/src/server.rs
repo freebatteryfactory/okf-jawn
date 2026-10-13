@@ -273,8 +273,9 @@ impl McpServer {
     /// An image is inlined when its media type, as declared and as served, is an inline raster
     /// type (`INLINE_IMAGE_TYPES`), its fetch is complete (`has_more` false), it fits what
     /// is left of the image budget and its bytes begin with the signature of the type they
-    /// were served as. Bytes that are another type are described, not shown under the type
-    /// they claim and not sniffed to the type they might be. The image budget is the
+    /// were served as. The block names its type by the canonical essence of the served type,
+    /// never by the served string. Bytes that are another type are described, not shown under
+    /// the type they claim and not sniffed to the type they might be. The image budget is the
     /// read's own `budget` (its `max_bytes`, capped at `MAX_TEXT_BYTES`), counted again and
     /// separately from the text's: the text and the images may each use all of it. It counts
     /// image bytes, the decoded size of each inlined image, so the base64 on the wire is about
@@ -337,7 +338,7 @@ impl McpServer {
             .fetch_object(principal, read, media, left)
             .await
             .map_err(|refusal| NotInlined::Refused { code: refusal.code })?;
-        let Some(signature) = inline_signature(&block.media_type) else {
+        let Some((media_type, signature)) = inline_type(&block.media_type) else {
             return Err(NotInlined::NotInlineType {
                 media_type: block.media_type,
             });
@@ -357,7 +358,7 @@ impl McpServer {
         Ok((
             ReadImage::Inline {
                 data_base64: block.data_base64,
-                mime_type: block.media_type,
+                mime_type: media_type.to_owned(),
             },
             size,
         ))
@@ -607,12 +608,16 @@ fn read_budget(input: &Value) -> Option<usize> {
 
 /// Whether `media_type` is one of `INLINE_IMAGE_TYPES`, ignoring case and any parameters.
 fn is_inline_image_type(media_type: &str) -> bool {
-    inline_signature(media_type).is_some()
+    inline_type(media_type).is_some()
 }
 
-/// The signature check of the inline image type `media_type` names, ignoring case and any
-/// parameters; `None` when it names no type of `INLINE_IMAGE_TYPES`.
-fn inline_signature(media_type: &str) -> Option<Signature> {
+/// The inline image type `media_type` names, ignoring case, surrounding spaces and any
+/// parameters: its canonical essence (one of `INLINE_IMAGE_TYPES`, lower case, as listed) and
+/// its signature check; `None` when it names no listed type.
+///
+/// The one place both are chosen, so the type an image block carries and the check its bytes
+/// passed are of the same type by construction.
+fn inline_type(media_type: &str) -> Option<(&'static str, Signature)> {
     let essence = media_type
         .split_once(';')
         .map_or(media_type, |(essence, _)| essence)
@@ -620,7 +625,7 @@ fn inline_signature(media_type: &str) -> Option<Signature> {
     INLINE_IMAGE_TYPES
         .iter()
         .find(|(inline, _)| essence.eq_ignore_ascii_case(inline))
-        .map(|(_, signature)| *signature)
+        .map(|(inline, signature)| (*inline, *signature))
 }
 
 /// Whether `bytes` begin as a PNG file does.
