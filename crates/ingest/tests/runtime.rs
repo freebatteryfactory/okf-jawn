@@ -204,6 +204,22 @@ mod job_runtime {
     }
 
     #[tokio::test]
+    async fn a_claim_refused_for_a_recorded_purge_is_skipped_not_a_fault() -> TestResult {
+        let (records, handler, id) = setup(|_| Action::Complete)?;
+        records.purge_workspace_of(id)?;
+        let events = FakeEvents::default();
+        assert!(!run_one(records.as_ref(), &events, handler.as_ref(), id).await?);
+        // Nothing ran, nothing was failed or announced, and the job is left for the purge's
+        // caller to cancel.
+        assert_eq!(handler.attempts()?, Vec::<u32>::new());
+        let entry = records.entry(id)?;
+        assert_eq!(entry.job.state, JobState::Queued);
+        assert_eq!(entry.failures, Vec::<(String, bool)>::new());
+        assert_eq!(events.appended()?, Vec::new());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_handler_fault_is_recorded_as_a_retryable_failure_through_its_lease() -> TestResult {
         let (records, handler, id) = setup(|_| Action::Fail)?;
         let events = FakeEvents::default();

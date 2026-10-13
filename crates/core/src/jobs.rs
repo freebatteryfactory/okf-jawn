@@ -276,14 +276,20 @@ pub trait RecordStore: Send + Sync {
     /// Unique on `job.mutation_id`: a repeated id inserts nothing and returns the prior job,
     /// whatever state it has reached. The returned `Job::kind` is `job.spec.kind()`, and a
     /// tenant job's `Job::workspace_id` is absent. Refuses with `Internal` a specification that
-    /// does not fit the scope (`JobSpec::fits`).
+    /// does not fit the scope (`JobSpec::fits`). Refuses with `Conflict`, naming the purge, a
+    /// job of a workspace a purge is recorded for, a repeated id included (`Purger`).
     fn create_job<'a>(&'a self, scope: &'a JobScope, job: NewJob) -> PortFuture<'a, Job>;
     /// Read one durable job within its scope.
     fn get_job<'a>(&'a self, scope: &'a JobScope, job: JobId) -> PortFuture<'a, Job>;
     /// List durable jobs of one scope, newest first, with bounded pagination.
     fn list_jobs<'a>(&'a self, scope: &'a JobScope, page: Page)
     -> PortFuture<'a, ListJobsResponse>;
-    /// Claim runnable work under a compare-and-set lease; `None` when it is not runnable.
+    /// Claim runnable work under a compare-and-set lease; `None` when it is not runnable
+    /// (unknown, finished, or running under a live lease).
+    ///
+    /// Refuses with `Conflict`, naming the purge, a queued or running job of a workspace a
+    /// purge is recorded for, and leaves the job as it is for the purge's caller to cancel. A
+    /// worker treats that refusal as "skip this job", not as a fault (`Purger`).
     fn claim_job(&self, job: JobId) -> PortFuture<'_, Option<ClaimedJob>>;
     /// Record progress, 0 to 100, for the current claim, renew the lease to now plus the lease
     /// duration, and return the job as it now stands.
@@ -301,7 +307,8 @@ pub trait RecordStore: Send + Sync {
     /// Cancel pending or running work while retaining recorded state.
     ///
     /// Unique on `mutation_id`: a repeated id makes no second transition and returns the job
-    /// row as it stands.
+    /// row as it stands. Never refused because of a recorded purge: cancelling is the purge's
+    /// own drain.
     fn cancel_job<'a>(
         &'a self,
         scope: &'a JobScope,
@@ -311,7 +318,9 @@ pub trait RecordStore: Send + Sync {
     /// Queue a failed job again under the same durable identity.
     ///
     /// Unique on `mutation_id`: a repeated id does not queue the job a second time, even when
-    /// the job has run and failed again since, and returns the job row as it stands.
+    /// the job has run and failed again since, and returns the job row as it stands. Refuses
+    /// with `Conflict`, naming the purge, a job of a workspace a purge is recorded for, a
+    /// repeated id included (`Purger`).
     fn retry_job<'a>(
         &'a self,
         scope: &'a JobScope,
@@ -336,9 +345,11 @@ pub trait RecordStore: Send + Sync {
         scope: &'a JobScope,
         artifact: ArtifactId,
     ) -> PortFuture<'a, ArtifactRecord>;
-    /// Enumerate unfinished records across tenants for queue reconciliation on restart.
+    /// Enumerate unfinished records across tenants for queue reconciliation on restart. It may
+    /// list a job of a purged workspace that `claim_job` then refuses.
     fn pending_jobs(&self) -> PortFuture<'_, Vec<(JobScope, JobId)>>;
-    /// Release claims whose leases have expired so work can be reclaimed.
+    /// Release claims whose leases have expired so work can be reclaimed; a released job of a
+    /// purged workspace is not reclaimed (`claim_job` refuses it).
     fn expire_leases(&self) -> PortFuture<'_, u32>;
     /// Record a purge and, in the same transaction, its tenant job (`PurgeWorkspace` or
     /// `PurgeItem` from the target) under `mutation_id`.

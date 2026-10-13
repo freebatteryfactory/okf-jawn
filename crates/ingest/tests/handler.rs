@@ -18,6 +18,7 @@ mod job_handler {
 
     use okf_jawn_contract::access::AccessRoute;
     use okf_jawn_contract::common::PageRange;
+    use okf_jawn_contract::error::ErrorCode;
     use okf_jawn_contract::events::EventKind;
     use okf_jawn_contract::extraction::{
         ConversionOutcome, ConversionSettings, FailureReason, TextOrigin,
@@ -1503,6 +1504,32 @@ mod job_handler {
         // The valid upload was not consumed, and nothing was written.
         assert_eq!(world.uploads.consumed()?, Vec::new());
         assert!(world.versions.written()?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_import_refused_for_a_file_name_names_the_upload_ids_field() -> TestResult {
+        let world = world_with(Some(3), Vec::new())?;
+        let valid = upload(&world, 155, "valid.pdf", b"%PDF valid")?;
+        let escaping = upload(&world, 156, "../report.pdf", b"%PDF escaping")?;
+        let id = job(
+            &world,
+            154,
+            workspace_scope()?,
+            import_spec(vec![valid, escaping], false)?,
+        )?;
+        // A job's failure is recorded as a message only (`RecordStore::fail_job`), so the field
+        // is read where it exists: in the handler's own refusal, before the runtime records it.
+        let claimed = some(world.records.claim_job(id).await?, "the claim")?;
+        let refused = err_of(world.handler.handle(&claimed).await)?;
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert_eq!(refused.field.as_deref(), Some("/upload_ids"));
+        assert!(
+            refused.message.contains("gives no workspace path"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(world.uploads.consumed()?, Vec::new());
         Ok(())
     }
 
