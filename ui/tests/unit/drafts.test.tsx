@@ -26,8 +26,10 @@ import {
   OLD,
   OTHER,
   otherSummary,
+  readResponse,
   renderAt,
   SOURCE,
+  summary,
   WS,
   workspace,
   writableWorkspace,
@@ -133,6 +135,33 @@ describe('who may edit, and where', () => {
     expect(router.state.location.pathname).toBe(`/w/${WS}/i/${NOTE}`);
   });
 
+  // A Source's text is changed through corrections and a View has its own editor.
+  it.each([
+    ['a Source', 'source', 'Annual report'],
+    ['a View', 'view', 'Quarterly'],
+  ] as const)('offers no editing for %s, even one that has a draft', async (_what, kind, title) => {
+    const item = summary(SOURCE, 'things/it.md', title, 'thing', kind);
+    const api = writable({
+      [ITEM]: () =>
+        ok({
+          ...itemDocument(item),
+          draft: {
+            body: 'a draft made elsewhere',
+            properties: { type: 'thing', okf_jawn: { id: SOURCE } },
+            draft: draftOf(SOURCE, HEAD, LATER),
+          },
+        }),
+      '/api/reads/read-item': () => ok(readResponse(item, `# ${title}\n\nCommitted text`)),
+    });
+    renderAt(`/w/${WS}/i/${SOURCE}`);
+    await screen.findByText('Committed text');
+    await screen.findByRole('tab', { name: `${title} (draft)` });
+    expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: `Text of ${title}` })).toBeNull();
+    expect(screen.queryByText(/Editing starts from/)).toBeNull();
+    expect(api.callsTo(SAVE)).toHaveLength(0);
+  });
+
   it('lets a tab that cites the shown version be edited', async () => {
     writable();
     renderAt(`/w/${WS}/i/${NOTE}?rev=${HEAD}`);
@@ -165,6 +194,28 @@ describe('autosave', () => {
     await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at .+\.$/));
     expect(document.querySelector('.save-state time')?.getAttribute('datetime')).toBe(LATER);
     expect(api.violations).toEqual([]);
+  });
+
+  it('saves at the latest ten seconds after the first unsaved change, however fast the typing', async () => {
+    const api = writable();
+    const { box } = await startEditing();
+    // A key every half second: the one-second pause never comes.
+    for (let typed = 0; typed < 20; typed += 1) {
+      typeInto(box, 'a');
+      await pass(typed < 19 ? 500 : 499);
+    }
+    // 9,999 ms after the first change: nothing sent yet.
+    expect(api.callsTo(SAVE)).toHaveLength(0);
+    await pass(1);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    expect(api.callsTo(SAVE).at(0)?.body).toBe(`${COMMITTED}${'a'.repeat(20)}`);
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    // The next change starts its own wait: one second after it, not ten after the first.
+    typeInto(box, 'b');
+    await pass(AUTOSAVE_DELAY_MS - 1);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    await pass(1);
+    expect(api.callsTo(SAVE)).toHaveLength(2);
   });
 
   it('says "Saving…" while the save is in flight', async () => {
@@ -362,6 +413,82 @@ describe('a save that fails', () => {
   });
 });
 
+// A save that failed or timed out may have been applied: what the service holds is then unknown.
+describe('a save with no answer is not forgotten', () => {
+  it('saves the text again when it is put back, and is never called clean before that answers', async () => {
+    let holds: string | null = null;
+    let mode: 'lost' | 'held' | 'ok' = 'lost';
+    const answers: Array<() => void> = [];
+    const api = writable({
+      [SAVE]: (body) => {
+        // The service applies the save whether or not its answer arrives.
+        holds = String(body.body);
+        if (mode === 'lost') return new Promise<never>(() => {});
+        if (mode === 'ok') return saved(body);
+        return new Promise<Reply>((resolve) => answers.push(() => resolve(saved(body))));
+      },
+    });
+    const { box } = await startEditing();
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    await pass(REQUEST_TIMEOUT_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    expect(holds).toBe(`${COMMITTED} one`);
+
+    mode = 'held';
+    replaceText(box, COMMITTED);
+    // The text is what it was, and it is still not called clean: the service may hold " one".
+    expect(saveState()).toBe('Not saved. Your text is kept here.');
+    expect(screen.getByRole('tab', { name: 'Meeting notes (not saved)' })).toBeDefined();
+    await pass(AUTOSAVE_DELAY_MS);
+    expect(api.callsTo(SAVE)).toHaveLength(2);
+    expect(api.callsTo(SAVE).at(1)?.body).toBe(COMMITTED);
+    expect(saveState()).toBe('Saving…');
+    answers.at(0)?.();
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(holds).toBe(textIn(box));
+  });
+
+  it('saves the text again when the save in flight fails after the text was put back', async () => {
+    const answers: Array<(reply: Reply) => void> = [];
+    const api = writable({
+      [SAVE]: () => new Promise<Reply>((resolve) => answers.push(resolve)),
+    });
+    const { box } = await startEditing();
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    expect(api.callsTo(SAVE)).toHaveLength(1);
+    replaceText(box, COMMITTED);
+    await pass(AUTOSAVE_DELAY_MS);
+    answers.at(0)?.(fail(503, 'unavailable', 'the store is busy'));
+    // It failed, so it may have been applied: the text on screen is saved, not taken as clean.
+    await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(2));
+    expect(api.callsTo(SAVE).at(1)?.body).toBe(COMMITTED);
+    expect(saveState()).not.toBe('No changes to save.');
+    answers.at(1)?.(ok(draftOf(NOTE, HEAD, LATER)));
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+  });
+
+  it('keeps the failure through a text that is too long to send', async () => {
+    let failing = true;
+    const api = writable({
+      [SAVE]: (body) => (failing ? fail(503, 'unavailable', 'busy') : saved(body)),
+    });
+    const { box } = await startEditing();
+    typeInto(box, ' one');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved. Your text is kept here.'));
+    replaceText(box, 'x'.repeat(MAX_BODY_BYTES + 1));
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toBe('Not saved: the text is too long.'));
+    failing = false;
+    replaceText(box, COMMITTED);
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(api.callsTo(SAVE).at(-1)?.body).toBe(COMMITTED);
+  });
+});
+
 describe('a text too long to save', () => {
   it('sends a body of exactly the bound, and never one byte more', async () => {
     const api = writable();
@@ -546,6 +673,90 @@ describe('typed text is never lost silently', () => {
     document.dispatchEvent(new Event('visibilitychange'));
     await eventually(() => expect(api.callsTo(SAVE)).toHaveLength(1));
     vi.restoreAllMocks();
+  });
+});
+
+// An editor reads the text once, when it opens: two over one session would each write the other's
+// words away. So there is one editor per item on a page.
+describe('the same item in two panes', () => {
+  const boxes = () => screen.queryAllByRole('textbox', { name: 'Text of Meeting notes' });
+  const pane = (which: 1 | 2, focused: 1 | 2) =>
+    screen.getByRole('region', {
+      name: `Documents, pane ${which} of 2${which === focused ? ', focused' : ''}`,
+    });
+
+  /** The note edited in pane 1, then split to the right: pane 2 has focus. */
+  async function editedAndSplit() {
+    const api = writable();
+    const { box } = await startEditing();
+    typeInto(box, ' first words');
+    fireEvent.click(screen.getByRole('button', { name: 'Split right' }));
+    await eventually(() => pane(2, 2));
+    return { api, box };
+  }
+
+  it('shows the committed text in the second pane, says why, and keeps one editor', async () => {
+    const { api, box } = await editedAndSplit();
+    await eventually(() =>
+      expect(within(pane(2, 2)).getByText('Text of Meeting notes')).toBeDefined(),
+    );
+    expect(boxes()).toEqual([box]);
+    expect(
+      within(pane(2, 2)).getByText(
+        'This item is being edited in another pane. Below is the committed text.',
+      ),
+    ).toBeDefined();
+    expect(within(pane(2, 2)).getByRole('button', { name: 'Edit here' })).toBeDefined();
+    // The first pane's words are still the draft, and are saved.
+    typeInto(box, ' and more');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(api.callsTo(SAVE).at(-1)?.body).toBe(`${COMMITTED} first words and more`);
+    expect(document.querySelectorAll('.save-state')).toHaveLength(1);
+  });
+
+  it('"Edit here" moves the editor, with its text, its save state and keyboard focus', async () => {
+    const { api, box } = await editedAndSplit();
+    const here = within(pane(2, 2)).getByRole('button', { name: 'Edit here' });
+    act(() => here.focus());
+    fireEvent.click(here);
+    await eventually(() => expect(boxes()).toHaveLength(1));
+    const moved = boxes().at(0);
+    if (moved === undefined) throw new Error('no editor');
+    expect(moved).not.toBe(box);
+    expect(pane(2, 2).contains(moved)).toBe(true);
+    // The text typed in the other pane came with it, saved or not.
+    expect(textIn(moved)).toBe(`${COMMITTED} first words`);
+    await eventually(() => expect(document.activeElement).toBe(moved));
+    // The pane that had the editor reads the committed text and offers to take it back.
+    expect(within(pane(1, 2)).getByRole('button', { name: 'Edit here' })).toBeDefined();
+    expect(within(pane(1, 2)).getByText(/being edited in another pane/)).toBeDefined();
+    await eventually(() => expect(saveState()).toMatch(/^Saved as a draft at/));
+    expect(api.callsTo(SAVE).at(-1)?.body).toBe(`${COMMITTED} first words`);
+    typeInto(moved, ' then these');
+    await pass(AUTOSAVE_DELAY_MS);
+    await eventually(() =>
+      expect(api.callsTo(SAVE).at(-1)?.body).toBe(`${COMMITTED} first words then these`),
+    );
+  });
+
+  it('lets the other pane edit once the editing pane is closed', async () => {
+    const { box } = await editedAndSplit();
+    // Focus the first pane (the one editing) and close its tab: the pane goes.
+    act(() =>
+      within(pane(1, 2))
+        .getByRole('tab', { name: /Meeting notes/ })
+        .focus(),
+    );
+    await eventually(() => pane(1, 1));
+    fireEvent.click(within(pane(1, 1)).getByRole('button', { name: 'Close tab' }));
+    await eventually(() => expect(screen.getByRole('region', { name: 'Documents' })).toBeDefined());
+    await eventually(() => expect(boxes()).toHaveLength(1));
+    const left = boxes().at(0);
+    if (left === undefined) throw new Error('no editor');
+    expect(left).not.toBe(box);
+    expect(textIn(left)).toBe(`${COMMITTED} first words`);
+    expect(screen.queryByText(/being edited in another pane/)).toBeNull();
   });
 });
 

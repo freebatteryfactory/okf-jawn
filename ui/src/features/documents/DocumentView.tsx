@@ -11,9 +11,13 @@
  *
  * Editing happens in place of the reading: one button switches the pane between the committed
  * text (rendered, read through `read_item`) and the person's draft (`DraftEditor`, its text from
- * `get_item`). Two panes can show the two side by side, since any pane can be split. An item that
- * has a draft opens on the draft, marked as one. A draft is started only where the pane reads the
- * version the workspace shows and the person may write; a pane that reads another revision says
+ * `get_item`). There is one editor per item on a page: while one pane edits an item, another pane
+ * of the same item shows the committed text, says the item is being edited in the other pane, and
+ * offers "Edit here", which moves the editor, its text and keyboard focus to this pane. So the
+ * two can stand side by side, and two editors never write over one draft. An item that
+ * has a draft opens on the draft, marked as one. Editing is for Notes: a Source or a View is shown
+ * by the reader alone, with no "Edit". A draft is started only where the pane reads the version
+ * the workspace shows and the person may write; a pane of a Note that reads another revision says
  * so and offers that version. The switch is one element whatever it says, so it keeps keyboard
  * focus; "Edit" moves focus into the text box, and after a discard focus is on the switch.
  *
@@ -56,7 +60,7 @@ import { keyed } from '../../lib/keys';
 import { ConflictNotice } from '../drafts/ConflictNotice';
 import { DraftEditor } from '../drafts/DraftEditor';
 import { draftMarkOf } from '../drafts/marks';
-import { beginSession } from '../drafts/saving';
+import { beginSession, claimEditor, releaseEditor } from '../drafts/saving';
 import { saveStateOf, useConflict, useDraftSession } from '../drafts/sessions';
 import type { Snapshotted } from '../drafts/snapshot';
 import { FailureNotice } from '../errors/FailureNotice';
@@ -312,23 +316,45 @@ export function DocumentView({
 
   // Reading or editing. Until the person chooses, an item with a draft opens on the draft.
   const session = useDraftSession(workspaceId, itemId);
-  const editable = canWrite && revision === head;
+  // Editing is for Notes: a Source's text is changed through corrections and a View has its own
+  // editor, so neither is offered "Edit". Whether the item is a Note is known once `get_item` has
+  // answered, and stays known while the item is read again at another revision (an item's kind
+  // never changes), so the switch does not leave under keyboard focus. A session exists only for
+  // a Note.
+  const atShown = canWrite && revision === head;
+  const [seenAsNote, setSeenAsNote] = useState(false);
+  if (!seenAsNote && document?.summary.kind === 'note') setSeenAsNote(true);
+  const isNote = session !== undefined || seenAsNote;
+  const editable = atShown && isNote;
   const hasDraft = session !== undefined || (document?.draft ?? null) !== null;
   const [chosen, setChosen] = useState<'read' | 'edit' | null>(null);
   const wantsEdit = editable && (chosen ?? (hasDraft ? 'edit' : 'read')) === 'edit';
   // A draft the service holds is opened as it arrives. Without one, a session starts only when
   // the person presses "Edit": a discarded draft is not started again behind their back.
   const heldDraft = document?.draft ?? null;
+  // One editor per item on a page: this pane's own name, and whether another pane has the editor.
+  const pane = useId();
+  const editor = session?.editor ?? null;
+  const elsewhere = session !== undefined && editor !== null && editor !== pane;
   useEffect(() => {
     if (editable && session === undefined && document && heldDraft !== null) {
-      beginSession(workspaceId, revision, document);
+      beginSession(workspaceId, revision, document, pane);
     }
-  }, [editable, session, document, heldDraft, workspaceId, revision]);
-  const editing = wantsEdit && session !== undefined;
+  }, [editable, session, document, heldDraft, workspaceId, revision, pane]);
+  // A pane that wants the editor takes it when no pane has it (the one that had it was closed or
+  // went back to reading), and gives it up when it stops wanting it or goes.
+  const sessionOpen = session !== undefined;
+  useEffect(() => {
+    if (!sessionOpen) return;
+    if (wantsEdit && editor === null) claimEditor(workspaceId, itemId, pane);
+    else if (!wantsEdit && editor === pane) releaseEditor(workspaceId, itemId, pane);
+  }, [sessionOpen, wantsEdit, editor, workspaceId, itemId, pane]);
+  useEffect(() => () => releaseEditor(workspaceId, itemId, pane), [workspaceId, itemId, pane]);
+  const editing = wantsEdit && session !== undefined && editor === pane;
   // Whether this pane opens on a draft is known once `get_item` has answered. Until then the
   // committed text is neither read nor shown, so it never stands where the draft will.
   const undecided =
-    editable && chosen === null && session === undefined && document === undefined && !item.isError;
+    atShown && chosen === null && session === undefined && document === undefined && !item.isError;
   const request: ReadItemRequest = {
     workspace_id: workspaceId,
     item_id: itemId,
@@ -344,7 +370,7 @@ export function DocumentView({
     initialPageParam: { body: request },
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     // The editor shows the draft's own text; the committed text is read when it is shown.
-    enabled: !wantsEdit && !undecided && !gone,
+    enabled: !(wantsEdit && !elsewhere) && !undecided && !gone,
   });
 
   const pages = read.data?.pages ?? [];
@@ -411,10 +437,11 @@ export function DocumentView({
     if (editRequest?.workspaceId !== workspaceId || editRequest.itemId !== itemId) return;
     if (!editable || document === undefined) return;
     requestEdit(null);
-    beginSession(workspaceId, revision, document);
+    beginSession(workspaceId, revision, document, pane);
+    claimEditor(workspaceId, itemId, pane, true);
     focusNext.current = 'text';
     setChosen('edit');
-  }, [editRequest, requestEdit, workspaceId, itemId, editable, document, revision]);
+  }, [editRequest, requestEdit, workspaceId, itemId, editable, document, revision, pane]);
   // The item's own controls leave with a deleted item. When keyboard focus was in them (the
   // delete was confirmed here), it goes to the way out of the notice that takes their place.
   const heldFocus = useRef<HTMLElement | null>(null);
@@ -486,7 +513,8 @@ export function DocumentView({
           </button>
         </div>
       )}
-      {editable && deletedTitle === undefined && lastRead !== undefined && (
+      {/* Every kind of item can be moved, deleted and given a status; only a Note is edited. */}
+      {atShown && deletedTitle === undefined && lastRead !== undefined && (
         <div ref={actionsRef}>
           <ItemActions
             item={lastRead}
@@ -503,7 +531,7 @@ export function DocumentView({
           onReadLatest={onReadLatest}
         />
       )}
-      {canWrite && !editable && deletedTitle === undefined && (
+      {canWrite && !atShown && isNote && deletedTitle === undefined && (
         <p role="note" className="notice">
           {hasDraft ? 'You have a draft of this item. ' : ''}
           Editing starts from the version this workspace shows, and this tab reads another revision.{' '}
@@ -514,21 +542,31 @@ export function DocumentView({
       )}
       {editable && !gone && (
         <p className="document-actions">
-          {/* aria-disabled, not disabled, until the item has been read: it may hold focus. */}
+          {/* aria-disabled, not disabled, while the item is read again: it may hold focus. */}
           <button
             type="button"
             ref={switchRef}
-            aria-disabled={document === undefined}
+            aria-disabled={session === undefined && document === undefined}
             onClick={() => {
               if (editing) setChosen('read');
-              else if (document !== undefined) {
-                beginSession(workspaceId, revision, document);
+              else if (session !== undefined || document !== undefined) {
+                if (session === undefined && document !== undefined) {
+                  beginSession(workspaceId, revision, document, pane);
+                }
+                // "Edit here" moves the editor from the pane that has it to this one.
+                claimEditor(workspaceId, itemId, pane, true);
                 focusNext.current = 'text';
                 setChosen('edit');
               }
             }}
           >
-            {editing ? 'Read the committed text' : hasDraft ? 'Edit your draft' : 'Edit'}
+            {editing
+              ? 'Read the committed text'
+              : elsewhere
+                ? 'Edit here'
+                : hasDraft
+                  ? 'Edit your draft'
+                  : 'Edit'}
           </button>
         </p>
       )}
@@ -554,7 +592,10 @@ export function DocumentView({
       )}
       {editable && !editing && session !== undefined && (
         <p role="note" className="notice">
-          {DRAFT_STANDS[saveStateOf(session)]} Below is the committed text.
+          {elsewhere
+            ? 'This item is being edited in another pane.'
+            : DRAFT_STANDS[saveStateOf(session)]}{' '}
+          Below is the committed text.
         </p>
       )}
       {selection && !editing && (

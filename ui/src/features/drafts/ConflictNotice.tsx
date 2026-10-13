@@ -4,7 +4,8 @@
  *
  * The diff is the one the service sent with the conflict (`DraftConflictItem.changes`): for each
  * file of the item, the lines removed and added between the draft's base and the current
- * revision, with the unchanged lines around them. It is read-only text; added and removed lines
+ * revision, with the unchanged lines around them. At most 2,000 of its lines are put on the page
+ * and the rest are counted; a very long line is cut and says so. It is read-only text; added and removed lines
  * are `ins` and `del`, each also marked with a sign, so the difference does not rest on color.
  *
  * - "Keep mine" saves the draft again on the current revision (`save_draft` with `base_revision`
@@ -24,7 +25,7 @@ import { keyed } from '../../lib/keys';
 import { short } from '../documents/describe';
 import { FailureNotice } from '../errors/FailureNotice';
 import { useRetry } from '../errors/retry';
-import { readPatch } from './patch';
+import { MAX_DIFF_LINES, type PatchHunk, readPatch } from './patch';
 import { discardSession } from './saving';
 import {
   type ConflictItem,
@@ -65,8 +66,10 @@ function paths(change: FileChange): string {
   return to ?? from ?? 'this item';
 }
 
-function ChangedFile({ change }: { change: FileChange }) {
-  const hunks = readPatch(change.patch);
+/** The mark after a line that was cut, in words: it is read out as well as seen. */
+const CUT = ' … (a long line, cut here)';
+
+function ChangedFile({ change, hunks }: { change: FileChange; hunks: PatchHunk[] }) {
   return (
     <div className="changed-file">
       <p>
@@ -88,6 +91,7 @@ function ChangedFile({ change }: { change: FileChange }) {
                       <span className="sr-only">Added: </span>
                       <span aria-hidden="true">+ </span>
                       {line.text}
+                      {line.cut ? CUT : ''}
                       {'\n'}
                     </ins>
                   ) : line.kind === 'removed' ? (
@@ -95,12 +99,14 @@ function ChangedFile({ change }: { change: FileChange }) {
                       <span className="sr-only">Removed: </span>
                       <span aria-hidden="true">− </span>
                       {line.text}
+                      {line.cut ? CUT : ''}
                       {'\n'}
                     </del>
                   ) : (
                     <span key={lineKey}>
                       {'  '}
                       {line.text}
+                      {line.cut ? CUT : ''}
                       {'\n'}
                     </span>
                   ),
@@ -125,6 +131,16 @@ export function ConflictNotice({
   const client = useQueryClient();
   const heading = useId();
   const item = conflict.conflict;
+  // The diff on the page is bounded: so many lines over all of the item's files, the rest counted.
+  const files: Array<{ change: FileChange; hunks: PatchHunk[] }> = [];
+  let room = MAX_DIFF_LINES;
+  let more = 0;
+  for (const change of item.changes) {
+    const read = readPatch(change.patch, room);
+    files.push({ change, hunks: read.hunks });
+    room -= read.shown;
+    more += read.more;
+  }
   const keepRef = useRef<HTMLButtonElement | null>(null);
   const theirsRef = useRef<HTMLButtonElement | null>(null);
   const keepDraftRef = useRef<HTMLButtonElement | null>(null);
@@ -228,9 +244,17 @@ export function ConflictNotice({
       {item.changes.length === 0 ? (
         <p>The service listed no changed file.</p>
       ) : (
-        keyed(item.changes, (change) => JSON.stringify([change.old_path, change.new_path])).map(
-          ({ key, value: change }) => <ChangedFile key={key} change={change} />,
+        keyed(files, ({ change }) => JSON.stringify([change.old_path, change.new_path])).map(
+          ({ key, value: file }) => (
+            <ChangedFile key={key} change={file.change} hunks={file.hunks} />
+          ),
         )
+      )}
+      {more > 0 && (
+        <p className="meta">
+          and {more.toLocaleString('en')} more {more === 1 ? 'line' : 'lines'}: this change is too
+          long to show whole.
+        </p>
       )}
       {item.deleted ? (
         <p>

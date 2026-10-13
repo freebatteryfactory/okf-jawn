@@ -1,11 +1,14 @@
 /**
- * Autosave: a session's text goes to `save_draft` a moment after the last change, one request at a
- * time per item, carrying the revision the draft started from.
+ * Autosave: a session's text goes to `save_draft` a moment after the last change (one second) and
+ * at the latest ten seconds after the first change not yet sent, one request at a time per item,
+ * carrying the revision the draft started from.
  *
  * The saving runs here, not in the editor, so it goes on when the editor is unmounted. A change
  * made while a save is in flight is saved when that one settles. A failed save keeps the text in
  * the session and is tried again by the next change, by the person (the failure notice's retry) or
- * when the editor is left.
+ * when the editor is left. A save that failed or timed out may have been applied all the same, so
+ * until a save has answered the session is not saved, whatever its text: putting the text back to
+ * what was last confirmed still sends a save of that text.
  *
  * Idempotency: a request is repeated under the key it had while it says the same thing (the same
  * body, properties and base), so a save that timed out and is tried again cannot be applied twice;
@@ -40,7 +43,15 @@ export const AUTOSAVE_DELAY_MS = 1_000;
 /** The service's bound on a drafted body in UTF-8 bytes, as the generated request schema has it. */
 export const MAX_BODY_BYTES = zSaveDraftRequest.shape.body.maxLength ?? Number.POSITIVE_INFINITY;
 
+/**
+ * The longest a change waits to be sent, however fast the person goes on typing: someone who
+ * never pauses for `AUTOSAVE_DELAY_MS` is saved all the same.
+ */
+export const AUTOSAVE_MAX_WAIT_MS = 10_000;
+
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+/** When the first change not yet sent was made, by session. */
+const unsavedSince = new Map<string, number>();
 const inFlight = new Map<string, Promise<void>>();
 /** Sessions changed while their save was in flight: saved again when it settles. */
 const changedMeanwhile = new Set<string>();
@@ -51,7 +62,12 @@ const sessions = () => useDraftSessions.getState();
  * Start editing an item from what `get_item` answered at `revision`: the person's draft when it
  * carries one, otherwise the committed content. A session already there is left as it is.
  */
-export function beginSession(workspaceId: string, revision: Revision, document: ItemDocument) {
+export function beginSession(
+  workspaceId: string,
+  revision: Revision,
+  document: ItemDocument,
+  pane: string,
+) {
   const itemId = document.summary.id;
   if (sessions().sessions[sessionKey(workspaceId, itemId)] !== undefined) return;
   const committed: DraftText = { body: document.body, properties: document.properties };
@@ -61,6 +77,7 @@ export function beginSession(workspaceId: string, revision: Revision, document: 
   sessions().put({
     workspaceId,
     itemId,
+    editor: pane,
     baseRevision: draft === null ? revision : draft.draft.base_revision,
     ...text,
     committed,
@@ -70,6 +87,23 @@ export function beginSession(workspaceId: string, revision: Revision, document: 
     attempt: null,
     tooLong: null,
   });
+}
+
+/**
+ * Make `pane` the one whose editor holds the session's text. A session another pane edits is left
+ * to it unless `takeOver`: that is "Edit here", the person moving the editor to this pane.
+ */
+export function claimEditor(workspaceId: string, itemId: string, pane: string, takeOver = false) {
+  const key = sessionKey(workspaceId, itemId);
+  const session = sessions().sessions[key];
+  if (session === undefined || session.editor === pane) return;
+  if (session.editor === null || takeOver) sessions().change(key, { editor: pane });
+}
+
+/** `pane` no longer shows the session's editor (it reads, or it is gone): another may take it. */
+export function releaseEditor(workspaceId: string, itemId: string, pane: string) {
+  const key = sessionKey(workspaceId, itemId);
+  if (sessions().sessions[key]?.editor === pane) sessions().change(key, { editor: null });
 }
 
 function cancelTimer(key: string) {
@@ -89,12 +123,19 @@ export function editSession(
   if (sessions().sessions[key] === undefined) return;
   sessions().change(key, change);
   cancelTimer(key);
+  // A moment after this change, and at the latest so long after the first one not yet sent.
+  const now = Date.now();
+  const since = unsavedSince.get(key) ?? now;
+  unsavedSince.set(key, since);
   timers.set(
     key,
-    setTimeout(() => {
-      timers.delete(key);
-      void save(client, key);
-    }, AUTOSAVE_DELAY_MS),
+    setTimeout(
+      () => {
+        timers.delete(key);
+        void save(client, key);
+      },
+      Math.max(0, Math.min(AUTOSAVE_DELAY_MS, since + AUTOSAVE_MAX_WAIT_MS - now)),
+    ),
   );
 }
 
@@ -134,16 +175,19 @@ function save(client: QueryClient, key: string): Promise<void> {
 }
 
 async function send(client: QueryClient, key: string): Promise<void> {
+  // What was typed up to now goes with this save; a later change starts its own wait.
+  unsavedSince.delete(key);
   const session = sessions().sessions[key];
   if (session === undefined) return;
   if (!needsSave(session)) {
-    // Back at what the service holds: there is nothing left to save, or to have failed.
-    sessions().change(key, { failure: null, attempt: null, tooLong: null });
+    // What the service holds is known, and it is this text: there is nothing to save.
+    sessions().change(key, { tooLong: null });
     return;
   }
   const bytes = new TextEncoder().encode(session.body).length;
   if (bytes > MAX_BODY_BYTES) {
-    sessions().change(key, { tooLong: bytes, failure: null, attempt: null });
+    // A failure before this stays: only a save that answers says what the service holds.
+    sessions().change(key, { tooLong: bytes });
     return;
   }
   const text: DraftText = { body: session.body, properties: session.properties };
@@ -220,6 +264,7 @@ export function endSession(workspaceId: string, itemId: string) {
 /** Forget every session and timer: a fresh page, for tests. */
 export function resetDraftSessions() {
   for (const key of [...timers.keys()]) cancelTimer(key);
+  unsavedSince.clear();
   changedMeanwhile.clear();
   inFlight.clear();
   useDraftSessions.setState({ sessions: {}, conflicts: {}, said: {} });

@@ -16,6 +16,7 @@ import {
   REQUEST_TIMEOUT_MS,
   RequestTimedOut,
   sendRequest,
+  UPLOAD_BYTES_PER_SECOND,
 } from '../../src/app/api-client';
 import { createQueryClient } from '../../src/app/query-client';
 import { classifyFailure, messageFor, shouldRetry } from '../../src/features/errors/failure';
@@ -228,6 +229,56 @@ describe('the bounded wait', () => {
     expect(outcome.value).toBe(stream);
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS * 2);
     expect(signals.at(0)?.aborted).toBe(false);
+  });
+
+  describe('allows for what is sent', () => {
+    const post = (body: BodyInit, type: string) =>
+      sendRequest('/api/items/save-draft', {
+        method: 'POST',
+        body,
+        headers: { 'Content-Type': type },
+      });
+
+    it('waits one more second for each full 64 KiB of a JSON body, and no longer', async () => {
+      vi.useFakeTimers();
+      heldFetch();
+      const outcome = outcomeOf(post('x'.repeat(2 * UPLOAD_BYTES_PER_SECOND), 'application/json'));
+      await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1_999);
+      expect(outcome.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(outcome.error).toBeInstanceOf(RequestTimedOut);
+      expect(messageFor(classifyFailure(outcome.error)).advice).toBe(
+        'No answer came within 32 seconds. Try again.',
+      );
+    });
+
+    it('counts bytes, and gives a body under 64 KiB no allowance', async () => {
+      vi.useFakeTimers();
+      heldFetch();
+      // One byte short of 64 KiB: exactly the bounded wait.
+      const small = outcomeOf(post('x'.repeat(UPLOAD_BYTES_PER_SECOND - 1), 'application/json'));
+      // Half as many characters, two bytes each: 64 KiB, so one more second.
+      const wide = outcomeOf(post('é'.repeat(UPLOAD_BYTES_PER_SECOND / 2), 'application/json'));
+      await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
+      expect(small.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(small.error).toBeInstanceOf(RequestTimedOut);
+      expect(wide.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(wide.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(wide.error).toBeInstanceOf(RequestTimedOut);
+    });
+
+    it('gives a body that is not JSON no allowance', async () => {
+      vi.useFakeTimers();
+      heldFetch();
+      const outcome = outcomeOf(
+        post('x'.repeat(4 * UPLOAD_BYTES_PER_SECOND), 'application/octet-stream'),
+      );
+      await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS);
+      expect(outcome.error).toBeInstanceOf(RequestTimedOut);
+    });
   });
 
   it('passes on an answer that came in time, and stops its clock', async () => {

@@ -12,19 +12,26 @@
  * does hold, keys its schema does not describe are kept by the form library (it drops none
  * unless told to).
  *
+ * Opening the form is not an edit. A property the item does not hold is shown empty; a default its
+ * schema names is not written into the draft unless the person enters it. Only the properties the
+ * person changed in a field go from the form into the draft: a value the library puts into its
+ * own data (one the schema fixes with `const`) stays out until the person changes that field.
+ *
  * Invalid input is never put into the draft, so it is never sent: the form shows the error at the
  * field, keeps what was typed, and the draft keeps its last valid properties until the form is
  * valid again.
  *
  * Without a schema there is no form, and the properties are shown as they are: when the
- * workspace has no definition of the item's type, when the definition names no properties, or
- * when the types could not be read (shown in plain words, with its retry).
+ * workspace has no definition of the item's type, when the definition names no properties, when
+ * the types could not be read (shown in plain words, with its retry), or when the form library
+ * cannot draw the definition (it throws; `FormBoundary` catches it). In each case the properties
+ * still travel with every save.
  */
 import Form from '@rjsf/core';
 import type { RJSFSchema, UiSchema } from '@rjsf/utils';
 import { customizeValidator } from '@rjsf/validator-ajv8';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useRef, useState } from 'react';
+import { Component, type ReactNode, useRef, useState } from 'react';
 import { z } from 'zod';
 import { listTypesOptions } from '../../api/generated/@tanstack/react-query.gen';
 import { editSession } from '../drafts/saving';
@@ -45,6 +52,14 @@ const validator = customizeValidator<PropertyMap>();
 const zObject = z.record(z.string(), z.unknown());
 /** A schema that names properties: an object's. */
 const zNaming = z.object({ properties: zObject });
+/**
+ * The form fills in nothing by itself: a property the item does not hold is shown empty, whatever
+ * default its schema names, and an absent list or group is not made an empty one.
+ */
+const NO_DEFAULTS = {
+  emptyObjectFields: 'skipDefaults',
+  arrayMinItems: { populate: 'never' },
+} as const;
 /** No submit button: a change is saved with the draft, not submitted. */
 const NO_SUBMIT: UiSchema<PropertyMap> = { 'ui:submitButtonOptions': { norender: true } };
 
@@ -73,6 +88,57 @@ export function mergeProperties(
     if (!(key in next) && form[key] !== undefined) next[key] = form[key];
   }
   return next;
+}
+
+/**
+ * Whatever the form library throws while it draws a type's schema or UI schema stops here. The
+ * schema is the service's data, so the page must not fall to it: the caller shows the properties
+ * as they are instead. A new type gets a new boundary (its `key`).
+ */
+class FormBoundary extends Component<
+  { fallback: ReactNode; children: ReactNode },
+  { failed: boolean }
+> {
+  override state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  override render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+/** The form library's options that render a description or a help text as Markdown. */
+const MARKDOWN_OPTIONS: ReadonlySet<string> = new Set([
+  'enableMarkdownInDescription',
+  'enableMarkdownInHelp',
+]);
+
+/**
+ * A type's UI schema without the options that turn on Markdown, at every depth and in either
+ * spelling (`ui:enableMarkdownInDescription`, or the bare name under `ui:options` and
+ * `ui:globalOptions`). A description and a help text are then plain text: no image is fetched and
+ * no link is drawn because a schema said so. (The reader refuses images in documents the same way.)
+ * A property that is itself named like one of the two options loses its UI hints with them.
+ */
+export function plainText<T>(uiSchema: T): T;
+export function plainText(uiSchema: unknown): unknown {
+  if (Array.isArray(uiSchema)) return uiSchema.map((entry) => plainText(entry));
+  if (uiSchema === null || typeof uiSchema !== 'object') return uiSchema;
+  return Object.fromEntries(
+    Object.entries(uiSchema)
+      .filter(([key]) => !MARKDOWN_OPTIONS.has(key.replace(/^ui:/, '')))
+      .map(([key, value]) => [key, plainText(value)]),
+  );
+}
+
+/** The properties whose value differs between two states of the form's data. */
+export function changedKeys(before: PropertyMap, after: PropertyMap): string[] {
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(
+    (key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]),
+  );
 }
 
 export function PropertiesForm({ session, typeName }: PropertiesFormProps) {
@@ -117,13 +183,30 @@ export function PropertiesForm({ session, typeName }: PropertiesFormProps) {
           ones below are kept as they are.
         </p>
       ) : (
-        <TypedForm
+        <FormBoundary
           key={typeName}
-          session={session}
-          schema={schema.data}
-          uiSchema={uiSchema.success ? uiSchema.data : {}}
-          held={held}
-        />
+          fallback={
+            <>
+              <p role="note" className="notice">
+                The form of the type <span className="type-name">{typeName}</span> cannot be shown
+                here: its definition asks for something this workspace cannot draw. The properties
+                are kept as they are and are saved with the text.
+              </p>
+              <PropertyList
+                properties={Object.fromEntries(
+                  Object.entries(session.properties).filter(([key]) => held.includes(key)),
+                )}
+              />
+            </>
+          }
+        >
+          <TypedForm
+            session={session}
+            schema={schema.data}
+            uiSchema={uiSchema.success ? plainText(uiSchema.data) : {}}
+            held={held}
+          />
+        </FormBoundary>
       )}
       {Object.keys(others).length > 0 && (
         <>
@@ -151,6 +234,9 @@ function TypedForm({
   const [data, setData] = useState<PropertyMap>(() =>
     Object.fromEntries(Object.entries(session.properties).filter(([key]) => held.includes(key))),
   );
+  // The properties the person has changed in a field since the form opened: these, and no other,
+  // go from the form into the draft.
+  const entered = useRef(new Set<string>());
   const rules: RJSFSchema = schema;
   return (
     <Form<PropertyMap>
@@ -162,12 +248,17 @@ function TypedForm({
       liveValidate="onChange"
       showErrorList={false}
       noHtml5Validate
-      onChange={(event) => {
+      experimental_defaultFormStateBehavior={NO_DEFAULTS}
+      onChange={(event, id) => {
         const next = event.formData ?? {};
         setData(next);
+        // The library also reports what it made of the data itself (a value its schema fixes,
+        // when it mounts); that names no field. Only what a person entered in a field is an edit.
+        if (id === undefined) return;
+        for (const key of changedKeys(data, next)) entered.current.add(key);
         if (!validator.isValid(rules, next, rules)) return;
         editSession(client, session.workspaceId, session.itemId, {
-          properties: mergeProperties(session.properties, held, next),
+          properties: mergeProperties(session.properties, [...entered.current], next),
         });
       }}
     />
